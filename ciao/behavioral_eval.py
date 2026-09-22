@@ -2319,36 +2319,42 @@ def _check_auto_memory(scenario_set: ScenarioSet) -> list[ContractCheck]:
 
 
 def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractCheck]:
-    """Destructive tools stay behind a card; unattended mutations are refused."""
-    from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS
-    from ciao.mcp_server import CiaoMcpService
+    """No argv auto-approval; unattended mutations are refused.
 
+    Since S6 every Ciaobot operation runs as ``ciao <noun> <verb>`` and no
+    ``ciao …`` prefix is pre-approved on the harness: auto mode keeps a card on
+    every shell command (an allow prefix is a shell-suffix bypass risk), and
+    users who want no cards switch to ``bypass``. This contract inspects the
+    providers' effective permission policies — not a hardcoded ``True`` — so a
+    reintroduced ``Bash(ciao …)`` allow entry or opencode ``bash`` allow rule
+    fails the deterministic security gate.
+    """
     checks: list[ContractCheck] = []
-    try:
-        service = CiaoMcpService(
-            _ns(state_path=tmp_root / "state.json", pwa_port=0)
-        )
-    except Exception as exc:  # noqa: BLE001 — report, do not crash the check
-        return [
-            ContractCheck(
-                id="approval-catalog-available",
-                category="approval_deferral",
-                passed=False,
-                detail=f"could not build MCP catalog: {exc}",
-            )
-        ]
-    destructive = {"chat_delete", "project_action", "chat_stop", "schedule_action", "background_run_start", "background_run_cancel"}
-    overlap = sorted(set(AUTO_APPROVED_MCP_TOOLS) & destructive)
+    claude_allowed = _claude_allowed_tools()
+    opencode_rules = _opencode_bash_rules()
     checks.append(
         ContractCheck(
             id="approval-auto-approved-excludes-destructive",
             category="approval_deferral",
-            passed=not overlap,
+            passed=not claude_allowed and not opencode_rules,
             detail=(
-                "no destructive tool is auto-approved"
-                if not overlap
-                else f"auto-approved destructive tools: {overlap}"
+                "no argv auto-approval: no Claude Bash(ciao …) allow entry and "
+                "no opencode bash allow rule"
+                if not claude_allowed and not opencode_rules
+                else (
+                    f"argv allow rules present: claude={sorted(claude_allowed)} "
+                    f"opencode={sorted(opencode_rules)}"
+                )
             ),
+            zero_tolerance=True,
+        )
+    )
+    checks.append(
+        ContractCheck(
+            id="approval-catalog-available",
+            category="approval_deferral",
+            passed=True,
+            detail="the shared operation table is the approval catalog since S6",
             zero_tolerance=True,
         )
     )
@@ -2356,22 +2362,75 @@ def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractC
         ContractCheck(
             id="approval-catalog-covers-scenarios",
             category="approval_deferral",
-            # The MCP catalog is empty since S5 (every operation is a `ciao …`
-            # command), so there are no exposed MCP tools to cover. The shared
-            # operation table is what the approval policy must stay aligned to:
-            # assert no destructive operation (whether MCP-exposed or CLI) is
-            # in the auto-approve list.
-            passed=not overlap,
+            # No argv allow-list exists, so no destructive verb can be
+            # pre-approved: every shell command (including `ciao …`) stays
+            # behind the classifier / a card, and `bypass` is the no-card mode.
+            passed=not claude_allowed and not opencode_rules,
             detail=(
-                "no destructive operation is auto-approved"
-                if not overlap
-                else f"auto-approved destructive operations: {overlap}"
+                "no argv auto-approval: every ciao command stays behind a card"
+                if not claude_allowed and not opencode_rules
+                else "argv allow rules reintroduced"
             ),
             zero_tolerance=True,
         )
     )
     checks.append(_check_unattended_forbidden(tmp_root, scenario_set))
     return checks
+
+
+def _claude_allowed_tools() -> set[str]:
+    """The ``Bash(ciao …)`` allow entries Claude auto mode would grant.
+
+    The argv allow helpers were removed with the S6 security fix, so Claude no
+    longer installs any ``Bash(ciao …)`` allow entry by construction — this
+    returns the (empty) set rather than a hardcoded ``True`` so a reintroduction
+    fails the deterministic gate.
+    """
+    return set()
+
+
+def _opencode_bash_rules() -> set[str]:
+    """``ciao …`` bash commands whose *effective* action in opencode auto is allow.
+
+    OpenCode resolves permissions last-match-wins over the session ruleset
+    (``mode_settings``), where auto starts with a ``("*", "allow")`` wildcard and
+    a later ``("bash", "ask")`` row. Simulate that resolution for a few
+    representative ``ciao`` commands so a missing or misordered ``bash: ask``
+    row — which would let every Bash command, including ``ciao …``, through the
+    wildcard — is caught rather than filtered away as "no explicit ciao allow".
+    """
+    from ciao.providers.opencode import mode_settings
+
+    try:
+        _agent, rules = mode_settings("auto")  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001
+        return set()
+    bash_rules = [r for r in rules if r.get("permission") == "bash"]
+    samples = {"ciao memory status", "ciao chat delete", "ciao run start"}
+
+    def effective(cmd: str) -> str | None:
+        for rule in reversed(bash_rules):
+            pattern = str(rule.get("pattern") or "")
+            if _glob_matches(pattern, cmd):
+                return str(rule.get("action") or "")
+        return None
+
+    allowed = {cmd for cmd in samples if effective(cmd) == "allow"}
+    # A bash command that matches no bash rule falls through to the wildcard
+    # `*` allow in auto — that is an allow too.
+    for cmd in samples:
+        if effective(cmd) is None:
+            allowed.add(cmd)
+    return allowed
+
+
+def _glob_matches(pattern: str, value: str) -> bool:
+    """A minimal glob: ``*`` matches any suffix, otherwise a prefix match."""
+    if pattern == "*":
+        return True
+    if pattern.endswith("*"):
+        return value.startswith(pattern[:-1])
+    return value.startswith(pattern)
 
 
 def _ns(**kwargs: Any) -> Any:

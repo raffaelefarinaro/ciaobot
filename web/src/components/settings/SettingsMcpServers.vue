@@ -48,36 +48,24 @@
 
     <!-- List of MCP Servers (exact skill-list / skill-row UI) -->
     <div class="skill-list">
-      <!-- 1. Built-in Ciaobot FastMCP Server -->
-      <div
-        class="skill-row"
-        :class="{ expanded: isExpanded('ciaobot-fastmcp') }"
-        @click="toggleServer('ciaobot-fastmcp')"
-      >
+      <!-- 1. Agent CLI: Ciaobot's own control surface -->
+      <div class="skill-row" :class="{ expanded: isExpanded('agent-cli') }" @click="toggleServer('agent-cli')">
         <div class="skill-main">
           <div class="skill-title-row command-title-row">
-            <span class="skill-chevron">{{ isExpanded('ciaobot-fastmcp') ? '&#9662;' : '&#9656;' }}</span>
-            <span class="skill-name">ciaobot</span>
+            <span class="skill-chevron">{{ isExpanded('agent-cli') ? '&#9662;' : '&#9656;' }}</span>
+            <span class="skill-name">agent cli</span>
             <span class="skill-badges">
               <span :class="assetOriginClass('builtin')">{{ assetOriginLabel('builtin') }}</span>
-              <span class="badge" :class="fastMcpEnabled ? 'badge--success' : 'badge--muted'">
-                {{ fastMcpEnabled ? 'enabled' : 'disabled' }}
+              <span class="badge" :class="agentStatus?.ready ? 'badge--success' : 'badge--error'">
+                {{ agentStatus?.ready ? 'ready' : 'unavailable' }}
               </span>
             </span>
           </div>
-          <p class="skill-description">Vault, chats, projects, and schedules.</p>
-          <div v-if="isExpanded('ciaobot-fastmcp')" class="skill-detail" @click.stop>
-            <p class="skill-meta"><span class="skill-meta-label">Endpoint</span><code>http://127.0.0.1:8443/mcp/</code></p>
-            <div class="setting-row setting-row--inline setting-row--toggle" style="margin-top: 8px;">
-              <span class="routine-name">FastMCP Control Plane Active</span>
-              <label class="settings-checkbox-hit">
-                <input type="checkbox" class="settings-checkbox" v-model="fastMcpEnabled" @change="saveFastMcpToggle" />
-              </label>
-            </div>
-            <p class="skill-meta" style="margin-top: 8px;"><span class="skill-meta-label">Embedded Tools ({{ embeddedTools.length }})</span></p>
-            <div class="mcp-tag-grid mcp-tag-grid--wide">
-              <span v-for="tool in embeddedTools" :key="tool" class="mcp-tag mcp-tag--embedded">{{ tool }}</span>
-            </div>
+          <p class="skill-description">Ciaobot's own control surface: every operation runs as <code>ciao &lt;noun&gt; &lt;verb&gt;</code> in the agent shell.</p>
+          <div v-if="isExpanded('agent-cli')" class="skill-detail" @click.stop>
+            <p class="skill-meta"><span class="skill-meta-label">Operations</span><code>{{ agentStatus?.operations?.length ?? '—' }}</code></p>
+            <p class="skill-meta" style="margin-top: 8px;"><span class="skill-meta-label">Telemetry</span><code>{{ agentStatus?.telemetry_path || '—' }}</code></p>
+            <p class="skill-meta" style="margin-top: 8px;"><span class="skill-meta-label">Version</span><code>{{ agentStatus?.version || '—' }}</code></p>
           </div>
         </div>
       </div>
@@ -273,8 +261,7 @@ const emit = defineEmits<{ 'create-via-chat': [] }>()
 
 const {
   status,
-  embeddedTools,
-  fastMcpEnabled,
+  agentStatus,
   showAddServer,
   addingServer,
   addServerResult,
@@ -306,7 +293,6 @@ const {
   saveEnvKeys,
   saveServer,
   refreshServerTools,
-  saveFastMcpToggle,
   addCustomServer,
   deleteCustomServer,
 } = props.mcp

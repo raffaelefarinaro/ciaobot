@@ -12,7 +12,7 @@ from ciao.models import ResultEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import (
-    McpUnavailableError,
+    AgentSurfaceUnavailableError,
     ProjectChatManager,
     _StreamOutcome,
 )
@@ -244,70 +244,39 @@ def test_review_helper_never_auto_archives(
     archive_mock.assert_not_awaited()
 
 
-def test_build_agent_request_fails_without_an_mcp_service(tmp_path: Path) -> None:
-    # The MCP control plane is the only control surface: with no service there
-    # is nothing to degrade to, so the turn must fail loudly instead of
+def test_build_agent_request_fails_without_an_agent_surface(tmp_path: Path) -> None:
+    from ciao.agent_surface import AGENT_TOKEN_ENV
+
+    # The Ciaobot agent surface is the only control surface: with no service
+    # there is nothing to degrade to, so the turn must fail loudly instead of
     # dispatching an agent that cannot reach Ciaobot.
     manager = _make_manager(tmp_path)
     manager._mcp_service = None
     project = manager.create_project("Fallback", workspace="work")
     chat = manager.create_chat(project.project_id)
 
-    with pytest.raises(McpUnavailableError):
+    with pytest.raises(AgentSurfaceUnavailableError):
         manager.build_agent_request(chat, prompt="hi")
 
     transcript_request = manager.build_agent_request(
         chat, prompt="hi", require_mcp=False
     )
-    assert transcript_request.mcp_url == ""
-    assert transcript_request.mcp_token == ""
+    assert AGENT_TOKEN_ENV not in transcript_request.extra_env
 
 
-def test_build_agent_request_attaches_mcp_credentials(tmp_path: Path) -> None:
-    from ciao.agent_surface import AGENT_TOKEN_ENV
+def test_build_agent_request_attaches_the_agent_credentials(tmp_path: Path) -> None:
+    from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 
     manager = _make_manager(tmp_path)
     project = manager.create_project("Attached", workspace="work")
     chat = manager.create_chat(project.project_id)
 
     request = manager.build_agent_request(chat, prompt="hi")
-    # Default surface is MCP; the CLI token is injected on every surface so
-    # migrated operations stay reachable via `ciao` either way.
-    assert request.agent_surface == "mcp"
-    assert request.mcp_url == "http://127.0.0.1:8443/mcp/"
-    assert request.mcp_token == "tok-test"
+    # Every chat is CLI since S6: the token+URL reach the foreground shell so
+    # `ciao <noun> <verb>` can call the control plane.
+    assert request.extra_env[AGENT_URL_ENV] == "http://127.0.0.1:8443/agent/v1/"
     assert request.extra_env[AGENT_TOKEN_ENV] == "tok-test"
-
-
-def test_build_agent_request_cli_surface_swaps_mcp_for_the_agent_token(tmp_path: Path) -> None:
-    from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV, SURFACE_FILE_NAME
-
-    manager = _make_manager(tmp_path)
-    manager._mcp_service.agent_url = "http://127.0.0.1:8443/agent/v1/"  # type: ignore[union-attr]
-    project = manager.create_project("Surface", workspace="work")
-    cli_chat = manager.create_chat(project.project_id)
-    mcp_chat = manager.create_chat(project.project_id)
-    (tmp_path / ".runtime" / SURFACE_FILE_NAME).write_text(
-        json.dumps({cli_chat.chat_id: "cli", mcp_chat.chat_id: "mcp"}), encoding="utf-8"
-    )
-
-    cli_request = manager.build_agent_request(cli_chat, prompt="hi")
-    assert cli_request.agent_surface == "cli"
-    assert cli_request.mcp_url == "" and cli_request.mcp_token == ""
-    assert cli_request.extra_env[AGENT_TOKEN_ENV] == "tok-test"
-    assert cli_request.extra_env[AGENT_URL_ENV] == "http://127.0.0.1:8443/agent/v1/"
-    # Providers key process reuse on this: a rotated agent token must respawn
-    # the shell on the CLI surface exactly as a rotated MCP token does.
-    assert cli_request.control_token == "tok-test"
-
-    # MCP-pinned chats keep the MCP transport AND the CLI token, so a migrated
-    # operation (e.g. `ciao schedule …`) is reachable on both surfaces.
-    mcp_request = manager.build_agent_request(mcp_chat, prompt="hi")
-    assert mcp_request.agent_surface == "mcp"
-    assert mcp_request.mcp_url == "http://127.0.0.1:8443/mcp/"
-    assert mcp_request.mcp_token == "tok-test"
-    assert mcp_request.control_token == "tok-test"
-    assert mcp_request.extra_env[AGENT_TOKEN_ENV] == "tok-test"
+    assert request.control_token == "tok-test"
 
 
 @pytest.mark.asyncio

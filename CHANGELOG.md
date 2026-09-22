@@ -2,6 +2,8 @@
 
 ## v0.17.0 - 2026-09-18
 
+
+- **Agent surface is now CLI-only (S6 of the MCP-to-CLI migration).** Ciaobot's own control plane is `ciao <noun> <verb>` in the managed provider shell; the MCP adapter and `/mcp/` mount are removed. `McpSessionRegistry`/`McpPrincipal` become `AgentSessionRegistry`/`AgentPrincipal` (a one-release `McpPrincipal` alias is kept), `McpUnavailableError` becomes `AgentSurfaceUnavailableError`, and the Settings "ciaobot-fastmcp" row becomes an "Agent CLI" status panel fed by `GET /api/agent/status`. The D-13 argv allow/ask rules and the server-side control-plane floor are the permission model.
 ### Added
 - feat(security): deny the agent its own workspace credentials and runtime state (`f25482b2`)
 - feat(providers): reclaim a chat's provider once it has been idle (`bb42e7b9`)

@@ -52,10 +52,10 @@ function mountPanel(seed?: (mcp: McpServersController) => void) {
 }
 
 describe('SettingsMcpServers', () => {
-  it('lists the embedded server and every project server', () => {
+  it('lists the agent CLI row and every project server', () => {
     const { wrapper } = mountPanel()
     const names = wrapper.findAll('.skill-name').map(n => n.text())
-    expect(names).toEqual(['ciaobot', 'notion'])
+    expect(names).toEqual(['agent cli', 'notion'])
     expect(wrapper.find('#mcp-servers').exists()).toBe(true)
   })
 
@@ -111,13 +111,20 @@ describe('SettingsMcpServers', () => {
     expect(after[1].attributes('disabled')).toBeUndefined()
   })
 
-  it('renders the embedded tool list for the built-in FastMCP row', async () => {
-    const { wrapper } = mountPanel()
+  it('renders the agent CLI status fields when expanded', async () => {
+    const { wrapper, mcp } = mountPanel()
+    mcp.agentStatus.value = {
+      ready: true,
+      operations: ['context_get', 'vault_search'],
+      telemetry_path: '/ws/.runtime/mcp_tool_calls.jsonl',
+      version: '0.17.0',
+    }
     await wrapper.findAll('.skill-row')[0].trigger('click')
     await nextTick()
-    const tags = wrapper.findAll('.mcp-tag--embedded').map(t => t.text())
-    expect(tags).toContain('vault_search')
-    expect(wrapper.find('input.settings-checkbox').exists()).toBe(true)
+    expect(wrapper.text()).toContain('agent cli')
+    expect(wrapper.text()).toContain('ready')
+    expect(wrapper.text()).toContain('mcp_tool_calls.jsonl')
+    expect(wrapper.text()).toContain('0.17.0')
   })
 
   it('deletes through the controller', async () => {

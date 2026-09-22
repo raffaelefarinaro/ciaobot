@@ -249,13 +249,12 @@ a legacy install rather than removing it.
 
 **Ciaobot agent control plane:**
 
-- The embedded authenticated MCP endpoint and managed-process integration are mandatory and always on; there is no enable/disable switch and no alternative control surface. `CIAO_MCP_ENABLED` and `CIAO_CONTROL_SURFACE` were removed.
-- `CIAO_MCP_SESSION_TOKEN`: internal, short-lived bearer capability injected only into a Ciaobot-managed provider process. Ciaobot sets it automatically and excludes it from model-created shell commands; operators must not configure or persist it.
-- `CIAO_AGENT_TOKEN` / `CIAO_AGENT_URL`: internal. On a chat switched to the agent CLI surface (`.runtime/agent_surface.json`, the MCP-versus-CLI comparison in `ciao/agent_surface.py`), Ciaobot hands the same scoped short-lived token and the `POST /agent/v1/{op}` base URL to the managed provider's foreground shell so `ciao <noun> <verb>` commands can call the control plane. Background runs strip the token. Operators must not configure or persist either.
+- The CLI-first agent surface is the only control path and is always on; there is no enable/disable switch and no alternative surface. The former embedded MCP endpoint and `CIAO_MCP_ENABLED` / `CIAO_CONTROL_SURFACE` were removed in the S6 break; third-party project MCP servers (the agent's external tools) are still managed through Settings → Assets.
+- `CIAO_AGENT_TOKEN` / `CIAO_AGENT_URL`: internal. Ciaobot hands the scoped short-lived token and the `POST /agent/v1/{op}` base URL to the managed provider's foreground shell so `ciao <noun> <verb>` commands can call the control plane (D-01). Background runs strip the token. Operators must not configure or persist either.
 
-The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/mcp/`. Do not place a static token in `.mcp.json`: Ciaobot generates a scoped short-lived token and configures its managed provider process. See [docs/MCP.md](docs/MCP.md).
+The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/agent/v1/{op}`. Ciaobot generates a scoped short-lived token and configures its managed provider process. See [docs/AGENT_CLI.md](docs/AGENT_CLI.md).
 
-The embedded server pins the Python MCP SDK at `mcp>=1.29.0,<2.0`, bumped for the MCP spec release `2026-07-28`. v1.29.0 is a compatibility release that speaks both the prior wire format and `2026-07-28`; Ciaobot stays on the v1 SDK line and does not migrate to the `2.0.0` rewrite. The `2026-07-28` spec opens a 12-month deprecation window for Roots, Sampling, Logging, and the legacy HTTP+SSE transport. `ciao/mcp_server.py` already runs `stateless_http=True`, `json_response=True`, with no session id and no Roots/Sampling/Elicitation usage, so none of that deprecated surface is in play here.
+The agent control plane runs inside `ciao/mcp_server.py` (the shared operation table, bearer-token registry, and the envelope/plan-mode gate/telemetry) served by the `POST /agent/v1/{op}` route in `ciao/web/routes_agent.py`; it is not an MCP server, so the MCP SDK pin and the `2026-07-28` spec wire-format notes no longer apply.
 
 **Internal command markers:** `CIAO_COMMAND_BEGIN`, `CIAO_COMMAND_INSTRUCTIONS`, and `CIAO_COMMAND_END` are reserved transcript markers used when Ciaobot expands a Claude-style slash command for a managed provider. They are not environment variables and should not be configured.
 

@@ -109,6 +109,37 @@ def test_extract_file_touches_from_bash_creates() -> None:
     ) == [{"file_path": "memory-vault/notes/there.md", "action": "created"}]
 
 
+def test_extract_file_touches_from_cli_file_surface() -> None:
+    """The CLI surface's `ciao file surface <path>` surfaces as the pinned-panel
+    `surfaced` touch (the same signal the MCP file_surface tool carried)."""
+    from ciao.web.chat_broker import extract_file_touches
+
+    assert extract_file_touches(
+        "Bash", {"command": "ciao file surface out/report.md"}
+    ) == [{"file_path": "out/report.md", "action": "surfaced"}]
+    assert extract_file_touches(
+        "Bash", {"command": "; ciao file surface memory-vault/People/Sofia.md"}
+    ) == [{"file_path": "memory-vault/People/Sofia.md", "action": "surfaced"}]
+    # A newline is a real command boundary too: a later line surfacing a file
+    # is a genuine request, while `echo ciao file surface` stays a false hit.
+    assert extract_file_touches(
+        "Bash", {"command": "echo done\nciao file surface out/report.md"}
+    ) == [{"file_path": "out/report.md", "action": "surfaced"}]
+    # An explicit `ciao file surface` argument bypasses the shell heuristic, so
+    # valid viewable files (.htm etc.) the heuristic would drop still surface.
+    assert extract_file_touches(
+        "Bash", {"command": "ciao file surface report.htm"}
+    ) == [{"file_path": "report.htm", "action": "surfaced"}]
+    # `ciao` must sit at a real command position (start or after a separator),
+    # never mid-argument: a string that merely contains the words is not an
+    # explicit surfacing request and must not auto-pin the panel.
+    assert extract_file_touches("Bash", {"command": "echo ciao file surface out/report.md"}) == []
+    assert extract_file_touches("Bash", {"command": "file surface memory-vault/People/Sofia.md"}) == []
+    assert extract_file_touches("Bash", {"command": "echo file surface out/report.md"}) == []
+    # Other `ciao` commands are not surfacing.
+    assert extract_file_touches("Bash", {"command": "ciao vault search x"}) == []
+
+
 def test_event_to_json_prefers_precomputed_file_touches() -> None:
     payload = event_to_json(
         ToolUseEvent(

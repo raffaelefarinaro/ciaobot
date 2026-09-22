@@ -71,7 +71,7 @@ If you want to understand the extraction and memory pipeline in detail, point yo
 | Doc | What's in it |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, workspace layout, chat pipeline, memory, schedules, and providers. |
-| [docs/MCP.md](docs/MCP.md) | MCP architecture, security, tool catalog, and provider configuration. |
+| [docs/AGENT_CLI.md](docs/AGENT_CLI.md) | CLI-first agent surface: transport, security, operation catalog, and provider configuration. |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Git checkout, development workflow, testing, and change guidelines. |
 | [INTEGRATIONS.md](INTEGRATIONS.md) | Environment variables, OAuth, and integration configuration. |
 | [PWA_API.md](PWA_API.md) | API endpoints, authentication, state paths, and agent recipes. |

@@ -26,7 +26,7 @@ ciao/                          Python backend (Starlette).
   observability/               Hooks: PreToolUse keeps Claude Bash jobs in the active turn. Runtime/entity context is built once in the request capsule.
   schedules.py                 Cron-style schedule dispatch.
   agent_cli.py                 `ciao <noun> <verb>` agent commands (`memory`, `vault`, `file`, `chat`, `project`, `schedule`, `run start|status|cancel`, `gws status`, `workspace list`, `context`, `help`): argparse to `(operation, arguments)`, POST to `CIAO_AGENT_URL/<op>` with `CIAO_AGENT_TOKEN`, one JSON envelope on stdout, exit 0/1/2. `is_agent_invocation` decides which argv `ciao.cli.main` hands over before the operator parser is built (`ciao run` alone stays the server launcher, `ciao gws <profile> …` the passthrough).
-  agent_surface.py             Agent CLI transport behind `POST /agent/v1/{op}` (route in ciao/web/routes_agent.py): verifies the bearer token with the MCP session registry, then runs the same registered tool function as the MCP adapter inside the same auth context, so guards, envelope, validation and telemetry are shared; records `surface: "cli"`. Also the per-chat surface switch (`.runtime/agent_surface.json`) used by the MCP-versus-CLI comparison.
+  agent_surface.py             Agent CLI transport behind `POST /agent/v1/{op}` (route in ciao/web/routes_agent.py): verifies the bearer token with the agent session registry, then runs the shared operation function inside the same auth context, so guards, envelope, validation and telemetry are shared; records `surface: "cli"`.
   background.py                Background command runs: one command per run in a tracked subprocess (`create_subprocess_exec`, never a shell), output to a rotating `.runtime/background/<run_id>.log`, registry in `.runtime/background/state.json`. Backs the `background_run_*` MCP tools; completions wake the owning chat through `ProjectChatManager`.
   dag.py                       Tiny DAG runner (Node kinds: bash / prompt / gate / subagent / retention; edges: ok / fail / always). Subprocess nodes can merge per-node env overrides for routed models. Subagent nodes accept an opt-in `requires` post-condition list (file paths, optionally with a `contains` line regex): exit 0 without the required files is a node failure, not a silent success. Each node is timed via `job_runs.track_sync`, so Automation page shows per-node status. Used by skill evolution and workspace-owned DAG workflows.
   sessions.py                  Session state, auth, signed cookies, JSON-backed StateStore for `.runtime/state.json`.
@@ -49,10 +49,10 @@ ciao/                          Python backend (Starlette).
   control_plane.py             Provider-neutral, scope-enforcing application operations shared by MCP and PWA-owned managers. The rare-admin group (workspace/project/Google-Workspace/context operations: `workspaces_list`, `projects_list`, `project_get`, `project`, `project_action`, `gws_status`, `context_get`) is now CLI-only and surfaced to the agent as `ciao workspace list`, `ciao project …`, `ciao gws status`, and `ciao context get`.
   async_reads.py               Bounded off-loop execution for synchronous vault reads. `run_read(key, operation)` runs a read on a dedicated small `ThreadPoolExecutor` (default 4 workers) instead of the shared default one, and coalesces identical in-flight reads by key so N concurrent `vault_search` calls for the same workspace/query share one scan. Admission is also capped (`MAX_VAULT_READ_BACKLOG`, default 12): `ThreadPoolExecutor`'s queue is unbounded and a cancelled caller deliberately leaves its read running, so a burst of distinct keys or disconnected callers would otherwise pile up full-vault scans; over the cap a caller waits for a slot without blocking the loop, and same-key callers never consume a slot. The server registers `shutdown_vault_read_executor()` as a shutdown callback, so a restart discards the queued backlog (`cancel_futures=True`) instead of joining it. The worker owns its SQLite connection end to end (opened and closed there), so no connection crosses threads. `asyncio.to_thread` cannot be cancelled, so a cancelled awaiter only detaches: the worker runs to completion, stays joinable by a later caller under the same key, and its exception is always observed (`_observe_failure`) so a detached failure is never silent. Each caller awaits its own bridge future fed by a done-callback, never the shared future, so cancelling one waiter cannot cancel the work other same-key waiters depend on. `keyed_lock(key)` is a process-wide lock used to serialize the write phase of concurrent index passes against one SQLite database file (SQLite takes one file-level write lock), while the read-only search phase stays concurrent; the archive postprocess takes the same lock when it indexes a newly archived file. `reset_vault_read_executor()` is the test isolation hook.
   workspaces.py                Shared logical-workspace registry rules (validation, serialization, persistence) used by the PWA routes and the control-plane workspace tools.
-  mcp_server.py                Embedded authenticated Streamable HTTP MCP adapter, scoped token registry, and project `.mcp.json` discovery (env-key status + observed/probed tools for Settings). HTTP endpoints live in ciao/web/routes_mcp.py. The operations live in a module-level table (`OPERATIONS`, one entry per operation with name, `_READ`/`_WRITE`/`_DESTRUCTIVE` annotations, docstring, and the `(service, **kwargs)` function); `_register_tools` registers only the names in `MCP_EXPOSED_OPERATIONS`, a set that shrinks slice by slice as groups move to `ciao <noun> <verb>`, and the agent dispatcher (`ciao/agent_surface.py`) resolves the same table, so both surfaces share argument validation by construction. `tools/list` reports the whole catalog: every registered tool is listed with its schema, so a chat sees the control plane without a discovery round trip. A lazy variant (`tools_search`/`tools_call`, `CIAO_MCP_LAZY_TOOLS`) was removed — it saved ~9k tokens of schema per chat but models stopped reaching for the tools they could no longer see. Auto-approval is a static name allowlist (`AUTO_APPROVED_MCP_TOOLS`) that must mirror the operation table's `_READ`/`_WRITE` annotations: those tools are pre-approved, `_DESTRUCTIVE` ones still raise their own approval card.
+  mcp_server.py                Agent control-plane core: the shared operation table (`OPERATIONS`, one entry per operation with name, `_READ`/`_WRITE`/`_DESTRUCTIVE` annotations, docstring, and the `(service, **kwargs)` function), the `AgentSessionRegistry` bearer-token verifier, the `_invoke` envelope/plan-mode gate/telemetry, and project `.mcp.json` discovery (env-key status + observed/probed tools for Settings). The MCP adapter was removed in S6; the agent dispatcher (`ciao/agent_surface.py`) resolves the same table, so argument validation is shared by construction. There is no argv auto-approval: every `ciao …` shell command keeps a card in `auto` mode (an argv allow prefix is a shell-suffix bypass risk), and users switch to `bypass` for no cards.
   signals.py                   Restart / deploy signals.
   instance_lock.py             Process-lifetime lock for one backend per runtime directory (`.runtime/server.lock`).
-  execution_modes.py           Claude/opencode provider approval policies and Ciaobot's auto-approved MCP control plane. The CLI surface carries its own harness allow/ask prefix rules (`AGENT_CLI_ALLOW_PATTERNS` / `AGENT_CLI_ASK_PATTERNS`), keyed to `ciao <noun> <verb>` command lines: `ciao project list|get|create|update`, `ciao workspace list`, `ciao gws status`, and `ciao context …` are allowed, while `ciao project delete|complete` ask.
+  execution_modes.py           Claude/opencode provider approval policies and the CLI control-plane posture. Since S6 there is no argv allow/ask prefix list (`AGENT_CLI_ALLOW_PATTERNS` / `AGENT_CLI_ASK_PATTERNS` were removed with the argv auto-approval): every `ciao …` shell command keeps a card in `auto` mode (an argv allow prefix is a shell-suffix bypass risk), and users switch to `bypass` for no cards. The security floor stays server-side in the control plane (mode gates, `unattended_forbidden`, workspace confinement).
   tool_path.py                 Resolve external CLI tools against the user's real login-shell PATH (Homebrew, nvm, `~/.local/bin`). The terminal-PATH probe spawns an interactive login shell (~0.74s), so it is cached against a fingerprint of the files such a shell reads — the rc candidates plus `$ZDOTDIR`'s, `/etc/paths`, `/etc/paths.d/*` and `$SHELL` — rather than a TTL: the setup wizard polls every 2s and a saved rc file must still be picked up on the next poll. Concurrent probes share one spawn.
   git_proc.py                  Timeout-safe git subprocess spawning shared by `git_sync` and `local_session`: git runs in its own process group so a timeout kills the forked `ssh` too, and the child is reaped and its pipes closed (a bare `proc.kill()` leaked 2 fds per timeout — issue #470).
   git_sync.py                  Startup git pull / merge-before-push helpers.
@@ -131,7 +131,7 @@ ciao/                          Python backend (Starlette).
     routes_auth.py             Auth login/logout/check routes.
     routes_chat.py             Chat WebSocket + events routes.
     routes_node.py             Node/device route handlers (multi-device host/client, package status/update).
-    routes_agent.py            `POST /agent/v1/{op}` for the agent CLI (bearer-authenticated by the MCP registry, outside the PWA session cookie like `/mcp/`).
+    routes_agent.py            `POST /agent/v1/{op}` for the agent CLI (bearer-authenticated by the agent registry, outside the PWA session cookie) and `GET /api/agent/status`.
     routes_mcp.py              MCP Settings HTTP endpoints (status, usage, env keys, project servers, tool probe).
     routes_push.py             Web Push notification routes.
     routes_helpers.py          Shared route helpers (api_error envelope, workspace path resolution, git sync).
@@ -296,11 +296,12 @@ remote uploads use a temporary host source and persist only Markdown. Images
 and ordinary text retain their existing behavior, and conversion errors are
 per-file and non-fatal.
 
-The same server embeds a Streamable HTTP MCP endpoint at `/mcp/`.
-`CiaoControlPlane` wraps the existing project/chat, schedule,
+The control plane runs as the agent CLI surface. `CiaoControlPlane` wraps the
+existing project/chat, schedule,
 subagent, vault, memory, file-history, workspace-health, local-session, and
-lifecycle managers; `CiaoMcpService` only performs bearer authentication, tool
-registration, plan-mode mutation policy, stable error envelopes, and
+lifecycle managers; `CiaoMcpService` only performs bearer authentication,
+operation dispatch (via the `AgentDispatcher`), plan-mode mutation policy,
+stable error envelopes, and
 telemetry. Each managed provider process receives a short-lived capability
 carrying a chat/project/workspace/provider principal. What that principal
 enforces is workspace confinement plus chat attribution, not isolation between
@@ -317,14 +318,14 @@ defer until their caller chat drains. The native file tools are denied `.env`,
 `.runtime/` (by name, plus the resolved `CIAO_RUNTIME_ROOT` path) and
 `secrets/` on both providers
 (`ciao/execution_modes.py::credential_path_deny_rules`), because
-`PWA_AUTH_TOKEN` in `.env` buys strictly more than any scoped MCP token. The
+`PWA_AUTH_TOKEN` in `.env` buys strictly more than any scoped agent token. The
 `.env.example`-style templates are deliberately not denied, matching
-`git_sync._protected_path`. See `docs/MCP.md`.
+`git_sync._protected_path`. See `docs/AGENT_CLI.md`.
 
-The MCP control plane is mandatory and is the only agent-facing control
-surface: there is no CLI/skill/direct-file fallback and no per-chat or
+The agent CLI control plane is mandatory and is the only agent-facing control
+surface: there is no skill/direct-file fallback and no per-chat or
 per-server surface selector. `ProjectChatManager.build_agent_request` raises
-`McpUnavailableError` when the MCP service or the chat's project is missing,
+`AgentSurfaceUnavailableError` when the control plane or the chat's project is missing,
 and `_drive` turns that into a normal failed turn in the transcript, so a chat
 never runs an agent that silently cannot reach Ciaobot. First-run setup is the
 one state without a control plane (no workspace yet); a chat attempted there
@@ -583,5 +584,5 @@ Completed projects can be restored. The sidebar footer has an archive icon next 
 - `PWA_API.md`: API endpoints, auth flow, state paths.
 - `docs/MEMORY_EVAL.md`: deterministic retrieval eval and the sandboxed live-vault probe runbook.
 - `docs/BEHAVIORAL_EVAL.md`: versioned behavioral evaluations for prompts, providers, and guides (`ciao eval`); scenario catalog and baseline/candidate reports.
-- `docs/MCP.md`: agent control-plane security, tool catalog, provider process configuration, and numeric release evaluation.
+- `docs/AGENT_CLI.md`: agent control-plane trust model, transport, telemetry, and the D-05/D-13 permission model.
 - `web/README.md`: PWA frontend dev workflow, iOS Safari gotchas, design system tokens.

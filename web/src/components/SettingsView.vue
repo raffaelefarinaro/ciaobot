@@ -3547,6 +3547,7 @@ onMounted(async () => {
   fetchProviderKeys()
   mcp.fetchStatus()
   mcp.fetchUsage()
+  mcp.fetchAgentStatus()
   // Render from cache immediately, then pick up anything connected elsewhere.
   fetchWorkspaceModels().then(() => fetchWorkspaceModels(true))
   fetchGwsIntegration()

@@ -16,8 +16,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 - `GET /api/setup/list-dirs`, `POST /api/setup/mkdir`, and `GET /api/setup/inspect-folder` back the setup wizard. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost). The folder picker (`list-dirs`, `mkdir`) lists directories only and never reads file contents. `inspect-folder?path=<dir>` returns `{mode: "scratch"|"existing", vault_root, existing_workspaces, has_env}` so the wizard can hide the "First Workspace" text field when nested workspaces are already present.
 - State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host. Missing headers are accepted for non-browser clients.
 - HTTP responses include baseline security headers, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
-- The agent-facing `/mcp/` mount uses a separate scoped bearer capability issued to Ciaobot-managed provider processes; it does not accept the browser session cookie. `GET /api/mcp/status` exposes only readiness and catalog metadata, never a token.
-- `POST /agent/v1/{op}` is the agent CLI's loopback transport (`ciao <noun> <verb>` inside a managed provider shell, see `docs/ARCHITECTURE.md` → `agent_surface.py`). It takes the same scoped bearer capability as `/mcp/` in an `Authorization: Bearer` header, runs the same registered control-plane operation, and returns the same JSON envelope; it is not a browser or curl API and does not accept the session cookie.
+- `POST /agent/v1/{op}` is the agent CLI's loopback transport (`ciao <noun> <verb>` inside a managed provider shell, see `docs/ARCHITECTURE.md` → `agent_surface.py` and `docs/AGENT_CLI.md`). It takes a scoped bearer capability (`CIAO_AGENT_TOKEN`) in an `Authorization: Bearer` header, runs the registered control-plane operation, and returns the same JSON envelope; it is not a browser or curl API and does not accept the session cookie.
 
 ## Routes
 
@@ -102,8 +101,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/housekeeping/{action_id}/dismiss` | Record a "not now" for an ask-style action (e.g. the GitHub star nudge), re-run detection, and return the fresh action list; unknown id is 404 |
 | GET | `/api/models` | List configured models, plus `providers[]` (id, labels, capabilities) from the runtime-provider registry. `?refresh=1` bypasses the provider catalog caches |
 | GET, PATCH | `/api/status` | Read or update status |
-| GET | `/api/mcp/status` | Embedded Ciaobot MCP readiness, tool catalog, project MCP servers (env-key status + observed tools), and active-session counts (no credentials) |
-| GET | `/api/mcp/usage` | Embedded Ciaobot MCP per-tool call/error counters, plus a `window` object naming the aggregation window (lifetime totals vs. the retained detail records behind them) (no credentials) |
+| GET | `/api/mcp/status` | Project MCP server inventory (env-key status + observed tools) and active-session counts (no credentials); Ciaobot's own surface is reported by `/api/agent/status` |
+| GET | `/api/mcp/usage` | Agent surface per-operation call/error counters, plus a `window` object naming the aggregation window (lifetime totals vs. the retained detail records behind them) (no credentials) |
 | POST | `/api/mcp/env-keys` | Save project-MCP env secrets into the workspace `.env` (optionally bind new keys into a server via `server`); values never returned |
 | POST | `/api/mcp/servers` | Create a project MCP server in `.mcp.json` |
 | PATCH | `/api/mcp/servers/{name}` | Update a project MCP server connection (and optional env keys) |
@@ -123,6 +122,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/setup/inspect-folder` | Probe a candidate workspace folder for vault mode and any nested workspaces (bootstrap mode, localhost only) |
 | POST | `/api/setup/mkdir` | Create a folder from the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/stats` | Read CLI stats |
+| GET | `/api/agent/status` | Agent CLI surface status: `{ready, operations, telemetry_path, version}` for the Settings → Agent CLI panel |
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
 | DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |

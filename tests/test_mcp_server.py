@@ -15,8 +15,7 @@ from starlette.testclient import TestClient
 
 from ciao import mcp_server
 from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
-from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, auto_approved_mcp_tool_names
-from ciao.mcp_server import CiaoMcpService, McpSessionRegistry
+from ciao.mcp_server import CiaoMcpService, AgentSessionRegistry
 
 
 class _FakeControlPlane:
@@ -109,7 +108,7 @@ def _rpc(client: TestClient, token: str, method: str, params: dict, request_id: 
 
 
 def test_registry_issues_scoped_reusable_and_revocable_tokens() -> None:
-    registry = McpSessionRegistry(ttl_seconds=60)
+    registry = AgentSessionRegistry(ttl_seconds=60)
     token, principal = registry.issue(
         chat_id="chat-1",
         project_id="project-1",
@@ -132,7 +131,7 @@ def test_registry_issues_scoped_reusable_and_revocable_tokens() -> None:
 
 
 def test_registry_reissues_when_workspace_or_project_changes() -> None:
-    registry = McpSessionRegistry(ttl_seconds=60)
+    registry = AgentSessionRegistry(ttl_seconds=60)
     token, principal = registry.issue(
         chat_id="chat-1",
         project_id="project-1",
@@ -154,44 +153,6 @@ def test_registry_reissues_when_workspace_or_project_changes() -> None:
     assert registry.status()["active_sessions"] == 1
 
 
-def test_streamable_http_auth_and_structured_tool_result(tmp_path: Path) -> None:
-    service, _control_plane = _service(tmp_path)
-    token, _ = service.registry.issue(
-        chat_id="chat-1",
-        project_id="project-1",
-        workspace="personal",
-        provider="claude",
-    )
-    initialize = {
-        "protocolVersion": "2025-06-18",
-        "capabilities": {},
-        "clientInfo": {"name": "ciaobot-test", "version": "1"},
-    }
-
-    with _client(service) as client:
-        unauthorized = _rpc(client, "", "initialize", initialize)
-        assert unauthorized.status_code == 401
-
-        initialized = _rpc(client, token, "initialize", initialize)
-        assert initialized.status_code == 200
-        assert initialized.json()["result"]["serverInfo"]["name"] == "ciaobot"
-
-        # Since S5 the MCP catalog is empty; the hot-loop operations run only
-        # through the agent dispatcher. Assert the transport still serves the
-        # empty catalog and its structured tool call rejects the now-removed op.
-        called = _rpc(
-            client,
-            token,
-            "tools/call",
-            {"name": "memory_status", "arguments": {}},
-            request_id=2,
-        )
-
-    assert called.status_code == 200
-    result = called.json()["result"]
-    assert result["isError"] is True
-
-
 def test_hot_loop_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
     """S5 removed the hot-loop group from the MCP catalog but the dispatcher
     must still run them as `ciao memory …` / `ciao vault …` / `ciao file …`."""
@@ -199,10 +160,7 @@ def test_hot_loop_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
 
     hot_loop = {"memory_status", "memory_update", "vault_search", "vault_review", "file_surface"}
     service, _ = _service(tmp_path)
-    # None of the hot-loop group is an MCP tool any more…
-    listed = {tool.name for tool in asyncio.run(service.server.list_tools())}
-    assert not (hot_loop & listed)
-    # …but each is still a dispatcher operation the CLI routes to.
+    # Each is a dispatcher operation the CLI routes to.
     assert hot_loop <= set(service.operation_table)
 
 
@@ -1922,46 +1880,36 @@ def test_probe_stdio_server_returns_observed_tools_only(tmp_path: Path) -> None:
 
 
 def test_tools_list_reports_the_whole_catalog(tmp_path: Path) -> None:
-    """Every registered tool is listed with its schema.
+    """Every registered operation is present in the shared table.
 
     A lazy variant once listed only a core and deferred the rest to a
     tools_search / tools_call pair. It cut ~9k tokens of schema per chat but
     models stopped using tools they could no longer see, so the whole catalog
-    is listed again and there is no dispatcher to route around a tool's own
-    approval card and telemetry.
+    is listed again — now served by the agent dispatcher rather than the MCP
+    transport.
     """
     service, _control_plane = _service(tmp_path)
 
-    listed = {tool.name for tool in asyncio.run(service.server.list_tools())}
-
-    assert listed == service._tool_names
-    assert not listed & {"tools_search", "tools_call"}
-    assert set(service.status()["tools"]) == listed
-    assert service.status()["tool_count"] == len(listed)
+    assert set(service.operation_table) == {op.name for op in mcp_server.OPERATIONS}
+    assert set(service.status()["tools"]) == set()
+    assert service.status()["tool_count"] == 0
 
 
 def test_auto_approved_policy_matches_tool_annotations() -> None:
-    """The allowed_tools policy must track the annotations on the tools.
+    """The agent CLI ask/allow split must track the annotations on the operations.
 
-    ``AUTO_APPROVED_MCP_TOOLS`` bypasses the PermissionGate, so a new tool
-    silently inheriting either policy is the failure mode worth catching. The
-    contract: every ``_READ``/``_WRITE`` tool is auto-approved, every
-    ``_DESTRUCTIVE`` one still raises an approval card.
+    Every ``_READ``/``_WRITE`` operation is allow-class, every ``_DESTRUCTIVE``
+    one is ask-class. The argv split is enforced in ``ciao/behavioral_eval.py``
+    and ``tests/test_agent_surface.py``; this keeps the operation table itself
+    intact as the shared source.
     """
     declared = [(op.name, op.annotations) for op in mcp_server.OPERATIONS]
     assert declared, "no operations in the shared table"
 
-    expected = [
-        name for name, ann in declared
-        if ann == mcp_server._READ or ann == mcp_server._WRITE
-    ]
     destructive = {
         name for name, ann in declared if ann == mcp_server._DESTRUCTIVE
     }
-
-    assert list(AUTO_APPROVED_MCP_TOOLS) == expected
-    assert destructive.isdisjoint(AUTO_APPROVED_MCP_TOOLS)
-    assert auto_approved_mcp_tool_names()[0] == f"mcp__ciaobot__{expected[0]}"
+    assert destructive, "no _DESTRUCTIVE operations found"
 
 
 class _StreamPcm:
@@ -2111,7 +2059,7 @@ def test_issued_principals_are_always_the_chat_role(tmp_path: Path) -> None:
     role has to change this issuing path, instead of only adding a check that
     silently never fires.
     """
-    registry = McpSessionRegistry(ttl_seconds=300)
+    registry = AgentSessionRegistry(ttl_seconds=300)
 
     _token, principal = registry.issue(
         chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
@@ -2129,7 +2077,7 @@ def test_revoke_clears_the_reuse_key_so_the_next_issue_mints_a_fresh_token(
     still popped a differently-shaped key, the entry would survive revocation
     and hand a revoked token back to the next caller.
     """
-    registry = McpSessionRegistry(ttl_seconds=300)
+    registry = AgentSessionRegistry(ttl_seconds=300)
     token, _ = registry.issue(
         chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
     )
@@ -2151,7 +2099,7 @@ def test_revoke_clears_the_reuse_key_so_the_next_issue_mints_a_fresh_token(
 
 def test_same_chat_and_provider_still_reuses_one_token(tmp_path: Path) -> None:
     """Dropping role from the key must not break token reuse."""
-    registry = McpSessionRegistry(ttl_seconds=300)
+    registry = AgentSessionRegistry(ttl_seconds=300)
 
     first, _ = registry.issue(
         chat_id="chat-1", project_id="p", workspace="personal", provider="claude"

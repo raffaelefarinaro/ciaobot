@@ -136,15 +136,16 @@ def _isolate_proposal_outcomes(tmp_path: Path) -> None:
 
 
 def attach_stub_mcp(manager):
-    """Give a test-built ``ProjectChatManager`` a stub MCP control plane.
+    """Give a test-built ``ProjectChatManager`` a stub agent control plane.
 
-    The Ciaobot MCP server is mandatory: ``build_agent_request`` raises
-    ``McpUnavailableError`` without one, so any test that dispatches a turn
-    needs a service the way a running server always has one.
+    The Ciaobot agent surface is mandatory: ``build_agent_request`` raises
+    ``AgentSurfaceUnavailableError`` without one, so any test that dispatches a
+    turn needs a service the way a running server always has one.
     """
     manager._mcp_service = SimpleNamespace(
+        agent_url="http://127.0.0.1:8443/agent/v1/",
         credentials_for_chat=lambda chat, project: (
-            "http://127.0.0.1:8443/mcp/",
+            "http://127.0.0.1:8443/agent/v1/",
             "tok-test",
         )
     )

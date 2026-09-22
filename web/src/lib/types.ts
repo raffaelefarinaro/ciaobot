@@ -102,6 +102,14 @@ export interface McpStatus {
   last_error?: string
 }
 
+/** Status of the agent CLI surface (Settings → Agent CLI), from /api/agent/status. */
+export interface AgentCliStatus {
+  ready: boolean
+  operations: string[]
+  telemetry_path: string
+  version: string
+}
+
 export interface McpToolUsage {
   tool: string
   calls: number

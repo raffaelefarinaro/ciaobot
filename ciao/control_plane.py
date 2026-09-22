@@ -9,7 +9,9 @@ knowledge of ``.runtime`` JSON layouts.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
+import os
 import sqlite3
 import time
 import uuid
@@ -62,8 +64,33 @@ _SUGGESTION_SKIP_DIRS: frozenset[str] = frozenset(
     {".git", ".runtime", ".venv", ".mypy_cache", ".pytest_cache", "node_modules", "Logs", "__pycache__"}
 )
 
+
+def _suggestion_score(wanted_stem: str, stem: str) -> int:
+    """A higher-is-better similarity of ``stem`` to ``wanted_stem``.
+
+    Exact name wins, then substring containment either way, then edit-distance
+    similarity so a typo like ``reprot.md`` vs ``report.md`` outranks an
+    unrelated filename. Everything ranks (never ``None``) so the caller keeps a
+    full suggestion list; only the *ordering* separates a genuine match from
+    an unrelated fallback.
+    """
+    if not wanted_stem or not stem:
+        return -2000
+    if stem == wanted_stem:
+        return 1000
+    if wanted_stem in stem:
+        return 700 - (len(stem) - len(wanted_stem))
+    if stem in wanted_stem:
+        return 600 - (len(wanted_stem) - len(stem))
+    ratio = difflib.SequenceMatcher(None, wanted_stem, stem).ratio()
+    if ratio >= 0.8:
+        return int(500 * ratio)
+    # Unrelated fallback, ranked below any edit-similar or substring match but
+    # still present so a miss returns a full suggestion list.
+    return -1000 - (len(stem) or 1)
+
 @dataclass(frozen=True, slots=True)
-class McpPrincipal:
+class AgentPrincipal:
     """Identity and scope attached to one managed provider process."""
 
     token_id: str
@@ -85,7 +112,7 @@ class McpPrincipal:
         return asdict(self)
 
     @classmethod
-    def from_claims(cls, claims: dict[str, Any]) -> "McpPrincipal":
+    def from_claims(cls, claims: dict[str, Any]) -> "AgentPrincipal":
         """Rebuild a principal from token claims.
 
         Anything other than ``chat`` in the claim is normalised away rather
@@ -100,6 +127,13 @@ class McpPrincipal:
             workspace=str(claims.get("workspace") or ""),
             provider=str(claims.get("provider") or ""),
         )
+
+
+# One-release compatibility alias for the pre-S6 ``McpPrincipal`` name. No
+# external consumer is known (the MCP surface is gone), but keeping the alias
+# costs nothing and lets a downstream that imported it upgrade without a code
+# change.
+McpPrincipal = AgentPrincipal
 
 
 # Permission modes ordered weakest to strongest, so a child chat's requested
@@ -169,7 +203,7 @@ class CiaoControlPlane:
 
     def _defer_until_chat_idle(
         self,
-        principal: McpPrincipal,
+        principal: AgentPrincipal,
         action: str,
         operation: Callable[[], Any],
     ) -> dict[str, Any]:
@@ -213,7 +247,7 @@ class CiaoControlPlane:
 
     # ---- scope ---------------------------------------------------------
 
-    def _workspace(self, principal: McpPrincipal, requested: str = "") -> str:
+    def _workspace(self, principal: AgentPrincipal, requested: str = "") -> str:
         workspace = requested.strip() or principal.workspace
         if not workspace:
             raise ControlPlaneError("workspace_required", "No active workspace is available.")
@@ -226,14 +260,14 @@ class CiaoControlPlane:
             raise ControlPlaneError("workspace_not_found", f"Workspace '{workspace}' was not found.")
         return workspace
 
-    def _project(self, principal: McpPrincipal, project_id: str) -> Any:
+    def _project(self, principal: AgentPrincipal, project_id: str) -> Any:
         project = self.pcm.get_project(project_id)
         if project is None:
             raise ControlPlaneError("project_not_found", f"Project '{project_id}' was not found.")
         self._workspace(principal, project.workspace)
         return project
 
-    def _resolve_project_id(self, principal: McpPrincipal, ref: str) -> str:
+    def _resolve_project_id(self, principal: AgentPrincipal, ref: str) -> str:
         """Resolve a non-empty project id-or-case-insensitive-name to an exact id.
 
         Shared by any tool that accepts a project reference, so a caller never
@@ -256,7 +290,7 @@ class CiaoControlPlane:
             )
         raise ControlPlaneError("project_not_found", f"Project '{ref}' was not found.")
 
-    def _resolve_project(self, principal: McpPrincipal, ref: str | None) -> Any:
+    def _resolve_project(self, principal: AgentPrincipal, ref: str | None) -> Any:
         """Resolve a project by exact id, case-insensitive name, or the
         caller's current project when ``ref`` is omitted or self-referential."""
         value = (ref or "").strip()
@@ -269,7 +303,7 @@ class CiaoControlPlane:
             return self._project(principal, principal.project_id)
         return self._project(principal, self._resolve_project_id(principal, value))
 
-    def _resolve_chat_id(self, principal: McpPrincipal, ref: str | None) -> str:
+    def _resolve_chat_id(self, principal: AgentPrincipal, ref: str | None) -> str:
         """Resolve a chat ID, defaulting to principal.chat_id when ref is omitted,
         empty, or self-referential ('this', 'this chat', 'current', 'self')."""
         value = (ref or "").strip()
@@ -282,7 +316,7 @@ class CiaoControlPlane:
             return principal.chat_id
         return value
 
-    def _workspace_chats(self, principal: McpPrincipal) -> list[Any]:
+    def _workspace_chats(self, principal: AgentPrincipal) -> list[Any]:
         """Every chat whose owning project sits in the principal's workspace."""
         lister = getattr(self.pcm, "list_chats", None)
         if not callable(lister):
@@ -294,7 +328,7 @@ class CiaoControlPlane:
                 rows.append(chat)
         return rows
 
-    def _chat_by_title(self, principal: McpPrincipal, ref: str) -> Any | None:
+    def _chat_by_title(self, principal: AgentPrincipal, ref: str) -> Any | None:
         """Resolve an unambiguous active chat *title* inside this workspace.
 
         The id is what the surface documents, but an agent that has just read a
@@ -318,7 +352,7 @@ class CiaoControlPlane:
         return matches[0] if len(matches) == 1 else None
 
     def _resolve_project_in_workspace(
-        self, principal: McpPrincipal, ref: str, workspace: str
+        self, principal: AgentPrincipal, ref: str, workspace: str
     ) -> Any:
         """Resolve a project reference against one explicit workspace.
 
@@ -348,7 +382,7 @@ class CiaoControlPlane:
             )
         raise ControlPlaneError("project_not_found", f"Project '{ref}' was not found.")
 
-    def _chat_scope(self, principal: McpPrincipal, chat_id: str | None = None) -> tuple[Any, Any]:
+    def _chat_scope(self, principal: AgentPrincipal, chat_id: str | None = None) -> tuple[Any, Any]:
         """Resolve a chat plus the project that owns it, in one authorization pass.
 
         Callers that need the workspace should take the project from here rather
@@ -365,10 +399,10 @@ class CiaoControlPlane:
             raise ControlPlaneError("chat_not_found", f"Chat '{resolved_id}' was not found.")
         return chat, self._project(principal, chat.project_id)
 
-    def _chat(self, principal: McpPrincipal, chat_id: str | None = None) -> Any:
+    def _chat(self, principal: AgentPrincipal, chat_id: str | None = None) -> Any:
         return self._chat_scope(principal, chat_id)[0]
 
-    def _chat_id(self, principal: McpPrincipal, chat_id: str | None = None) -> str:
+    def _chat_id(self, principal: AgentPrincipal, chat_id: str | None = None) -> str:
         """Authorize a chat reference and return its real id.
 
         ``_chat`` resolves ``""``/``"this"``/``"self"`` internally but returns
@@ -377,11 +411,11 @@ class CiaoControlPlane:
         """
         return str(self._chat(principal, chat_id).chat_id)
 
-    def chat_mode(self, principal: McpPrincipal) -> str:
+    def chat_mode(self, principal: AgentPrincipal) -> str:
         chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
         return str(getattr(chat, "mode", "auto") or "auto")
 
-    def _child_mode(self, principal: McpPrincipal, requested: str | None) -> str:
+    def _child_mode(self, principal: AgentPrincipal, requested: str | None) -> str:
         """Hold an MCP-created child at or below its caller's permission ceiling.
 
         The child starts its first turn immediately, so accepting a *stronger*
@@ -416,7 +450,7 @@ class CiaoControlPlane:
         )
         return parent_mode
 
-    def _vault_root(self, principal: McpPrincipal) -> Path:
+    def _vault_root(self, principal: AgentPrincipal) -> Path:
         workspace = self._workspace(principal)
         resolver = getattr(self.pcm, "_workspace_vault_root", None)
         if callable(resolver):
@@ -437,7 +471,7 @@ class CiaoControlPlane:
 
     # ---- context/status -----------------------------------------------
 
-    def context_get(self, principal: McpPrincipal) -> dict[str, Any]:
+    def context_get(self, principal: AgentPrincipal) -> dict[str, Any]:
         chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
         project = self.pcm.get_project(principal.project_id) if principal.project_id else None
         return _ok({
@@ -448,7 +482,7 @@ class CiaoControlPlane:
             "role": principal.role,
         })
 
-    def system_status_get(self, principal: McpPrincipal) -> dict[str, Any]:
+    def system_status_get(self, principal: AgentPrincipal) -> dict[str, Any]:
         self._workspace(principal)
         return _ok({
             "version": __import__("ciao").__version__,
@@ -458,7 +492,7 @@ class CiaoControlPlane:
             "startup": self.startup_tracker.to_dict() if self.startup_tracker else None,
         })
 
-    def gws_status(self, principal: McpPrincipal) -> dict[str, Any]:
+    def gws_status(self, principal: AgentPrincipal) -> dict[str, Any]:
         """Report Google Workspace connection status for the active workspace.
 
         Resolves the workspace's linked ``gws_profile`` the same way the runtime
@@ -534,7 +568,7 @@ class CiaoControlPlane:
             }
         )
 
-    def memory_status(self, principal: McpPrincipal) -> dict[str, Any]:
+    def memory_status(self, principal: AgentPrincipal) -> dict[str, Any]:
         """Report native guide memory usage without copying its contents."""
         workspace = self._workspace(principal)
         guide = guide_path(self.config.agent_root(workspace))
@@ -546,7 +580,7 @@ class CiaoControlPlane:
 
     def memory_update(
         self,
-        principal: McpPrincipal,
+        principal: AgentPrincipal,
         region: str,
         *,
         action: Literal["add", "replace", "remove"],
@@ -601,7 +635,7 @@ class CiaoControlPlane:
 
     # ---- workspaces ----------------------------------------------------
 
-    def workspaces_list(self, principal: McpPrincipal) -> dict[str, Any]:
+    def workspaces_list(self, principal: AgentPrincipal) -> dict[str, Any]:
         """All configured logical workspaces, not just the active one."""
         from ciao.workspaces import workspace_to_dict
 
@@ -611,7 +645,7 @@ class CiaoControlPlane:
 
     # ---- vault ---------------------------------------------------------
 
-    def _entity_index_root(self, principal: McpPrincipal) -> Path:
+    def _entity_index_root(self, principal: AgentPrincipal) -> Path:
         """The vault whose INDEX.md covers this chat. See vault_index_refresh."""
         workspace = self._workspace(principal)
         if workspace:
@@ -621,7 +655,7 @@ class CiaoControlPlane:
                 pass
         return Path(self.config.vault_root)
 
-    def _index_stamp(self, principal: McpPrincipal) -> str:
+    def _index_stamp(self, principal: AgentPrincipal) -> str:
         """Workspace to stamp on scanned entries, or "" to infer from the path.
 
         Empty before the re-rooting: the shared vault holds every workspace, so
@@ -669,7 +703,7 @@ class CiaoControlPlane:
         base = self._search_key_base()
         return base / ".runtime"
 
-    async def vault_search(self, principal: McpPrincipal, query: str, limit: int = 10) -> dict[str, Any]:
+    async def vault_search(self, principal: AgentPrincipal, query: str, limit: int = 10) -> dict[str, Any]:
         """Search this workspace's notes, and only this workspace's notes.
 
         Keys are stored relative to the install root so two agent roots holding
@@ -722,7 +756,7 @@ class CiaoControlPlane:
         rows = await run_read(key, _search)
         return _ok(rows)
 
-    async def vault_index_refresh(self, principal: McpPrincipal) -> dict[str, Any]:
+    async def vault_index_refresh(self, principal: AgentPrincipal) -> dict[str, Any]:
         """Rebuild the entity index covering this chat, and its search index.
 
         The index root is ``agent_vault_root(workspace)``, which is correct in
@@ -772,7 +806,7 @@ class CiaoControlPlane:
 
     # ---- vault review --------------------------------------------------
 
-    def vault_review(self, principal: McpPrincipal, action: str = "list", *, path: str = "", candidate_id: str = "", disposition: str = "", confirm: str = "") -> dict[str, Any]:
+    def vault_review(self, principal: AgentPrincipal, action: str = "list", *, path: str = "", candidate_id: str = "", disposition: str = "", confirm: str = "") -> dict[str, Any]:
         """Inspect candidates or record an explicit, scoped note disposition.
 
         Destructive operations are intentionally separate from ``decide`` and
@@ -843,7 +877,7 @@ class CiaoControlPlane:
 
     # ---- projects/chats ------------------------------------------------
 
-    def projects_list(self, principal: McpPrincipal, include_completed: bool = False) -> dict[str, Any]:
+    def projects_list(self, principal: AgentPrincipal, include_completed: bool = False) -> dict[str, Any]:
         workspace = self._workspace(principal)
         data: dict[str, Any] = {
             "active": [item.to_dict() for item in self.pcm.list_projects(workspace)]
@@ -852,11 +886,11 @@ class CiaoControlPlane:
             data["completed"] = self.pcm.list_completed_projects(workspace)
         return _ok(data)
 
-    def project_get(self, principal: McpPrincipal, project_id: str = "") -> dict[str, Any]:
+    def project_get(self, principal: AgentPrincipal, project_id: str = "") -> dict[str, Any]:
         project = self._resolve_project(principal, project_id)
         return _ok(project.to_dict())
 
-    def project_create(self, principal: McpPrincipal, name: str, context: str = "") -> dict[str, Any]:
+    def project_create(self, principal: AgentPrincipal, name: str, context: str = "") -> dict[str, Any]:
         workspace = self._workspace(principal)
         clean_name = name.strip()
         if not clean_name:
@@ -865,7 +899,7 @@ class CiaoControlPlane:
 
     def project_update(
         self,
-        principal: McpPrincipal,
+        principal: AgentPrincipal,
         project_id: str = "",
         *,
         name: str | None = None,
@@ -880,7 +914,7 @@ class CiaoControlPlane:
             raise ControlPlaneError("project_not_found", f"Project '{project.project_id}' was not found.")
         return _ok(item.to_dict())
 
-    def project_complete(self, principal: McpPrincipal, project_id: str = "") -> dict[str, Any]:
+    def project_complete(self, principal: AgentPrincipal, project_id: str = "") -> dict[str, Any]:
         project = self._resolve_project(principal, project_id)
         pid = project.project_id
         current_chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
@@ -892,11 +926,11 @@ class CiaoControlPlane:
             )
         return _ok(self.pcm.complete_project(pid))
 
-    def project_restore(self, principal: McpPrincipal, stem: str) -> dict[str, Any]:
+    def project_restore(self, principal: AgentPrincipal, stem: str) -> dict[str, Any]:
         workspace = self._workspace(principal)
         return _ok(self.pcm.restore_project(workspace, stem))
 
-    def project_delete(self, principal: McpPrincipal, project_id: str = "") -> dict[str, Any]:
+    def project_delete(self, principal: AgentPrincipal, project_id: str = "") -> dict[str, Any]:
         project = self._resolve_project(principal, project_id)
         pid = project.project_id
         current_chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
@@ -911,7 +945,7 @@ class CiaoControlPlane:
             )
         return _ok({"deleted": self.pcm.delete_project(pid), "project_id": pid})
 
-    def chats_list(self, principal: McpPrincipal, project_id: str = "") -> dict[str, Any]:
+    def chats_list(self, principal: AgentPrincipal, project_id: str = "") -> dict[str, Any]:
         if project_id:
             # Accept a project name as well as an id (same resolver
             # `chat_create` uses), scoped to the principal's own workspace.
@@ -921,7 +955,7 @@ class CiaoControlPlane:
             chats = self._workspace_chats(principal)
         return _ok([self._chat_review_dict(chat) for chat in chats])
 
-    def chat_get(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
+    def chat_get(self, principal: AgentPrincipal, chat_id: str) -> dict[str, Any]:
         chat = self._chat(principal, chat_id)
         return _ok(self._chat_review_dict(chat))
 
@@ -946,7 +980,7 @@ class CiaoControlPlane:
 
     def chat_create(
         self,
-        principal: McpPrincipal,
+        principal: AgentPrincipal,
         project_id: str | None = None,
         *,
         title: str = "New Chat",
@@ -976,7 +1010,7 @@ class CiaoControlPlane:
 
     def chat_update(
         self,
-        principal: McpPrincipal,
+        principal: AgentPrincipal,
         chat_id: str,
         *,
         title: str | None = None,
@@ -1015,7 +1049,7 @@ class CiaoControlPlane:
             result["requested_mode"] = requested_mode
         return _ok(result)
 
-    def chat_send(self, principal: McpPrincipal, chat_id: str, prompt: str) -> dict[str, Any]:
+    def chat_send(self, principal: AgentPrincipal, chat_id: str, prompt: str) -> dict[str, Any]:
         chat = self._chat(principal, chat_id)
         chat_id = chat.chat_id
         if chat.archived:
@@ -1028,19 +1062,19 @@ class CiaoControlPlane:
         self.pcm.start_stream(chat_id, text)
         return _ok({"chat_id": chat_id, "status": "started"})
 
-    def chat_continue(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
+    def chat_continue(self, principal: AgentPrincipal, chat_id: str) -> dict[str, Any]:
         chat = self._chat(principal, chat_id)
         chat = self.pcm.continue_archived_chat(chat.chat_id)
         return _ok(chat.to_dict(local=True))
 
-    def chat_retry(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
+    def chat_retry(self, principal: AgentPrincipal, chat_id: str) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
         stream = self.pcm.try_chat_retry_now(chat_id)
         return _ok({"chat_id": chat_id, "status": "started" if stream else "not_pending"})
 
     def chat_retry_update(
         self,
-        principal: McpPrincipal,
+        principal: AgentPrincipal,
         chat_id: str,
         action: Literal["set", "stop", "try_now"],
         prompt: str = "",
@@ -1060,7 +1094,7 @@ class CiaoControlPlane:
             return self.chat_retry(principal, chat_id)
         raise ControlPlaneError("invalid_action", "action must be set, stop, or try_now.")
 
-    def chat_new_session(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
+    def chat_new_session(self, principal: AgentPrincipal, chat_id: str) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
         if chat_id == principal.chat_id:
             return self._defer_until_chat_idle(
@@ -1073,7 +1107,7 @@ class CiaoControlPlane:
 
     def chat_handover(
         self,
-        principal: McpPrincipal,
+        principal: AgentPrincipal,
         chat_id: str,
         *,
         provider: str,
@@ -1102,7 +1136,7 @@ class CiaoControlPlane:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
         return _ok(chat.to_dict(local=self.pcm.is_session_local(chat)))
 
-    async def chat_archive(self, principal: McpPrincipal, chat_id: str = "") -> dict[str, Any]:
+    async def chat_archive(self, principal: AgentPrincipal, chat_id: str = "") -> dict[str, Any]:
         target_id = chat_id.strip()
         if not target_id or target_id.lower() in {"this", "this chat", "current", "self"}:
             target_id = principal.chat_id
@@ -1127,7 +1161,7 @@ class CiaoControlPlane:
             return self._defer_until_chat_idle(principal, "chat_archive", _archive)
         return _ok(await _archive())
 
-    def chat_delete(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
+    def chat_delete(self, principal: AgentPrincipal, chat_id: str) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
         if chat_id == principal.chat_id:
             return self._defer_until_chat_idle(
@@ -1137,7 +1171,7 @@ class CiaoControlPlane:
             )
         return _ok({"chat_id": chat_id, "deleted": self.pcm.delete_chat(chat_id)})
 
-    async def chat_stop(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
+    async def chat_stop(self, principal: AgentPrincipal, chat_id: str) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
         if chat_id == principal.chat_id:
             raise ControlPlaneError(
@@ -1178,7 +1212,7 @@ class CiaoControlPlane:
             payload["last_lines"] = tail
         return payload
 
-    def _owned_run(self, principal: McpPrincipal, run_id: str) -> BackgroundRun:
+    def _owned_run(self, principal: AgentPrincipal, run_id: str) -> BackgroundRun:
         """Resolve a run the calling chat owns, or raise ``run_not_found``.
 
         A run belongs to exactly the chat that started it. A run owned by
@@ -1201,7 +1235,7 @@ class CiaoControlPlane:
 
     async def background_run_start(
         self,
-        principal: McpPrincipal,
+        principal: AgentPrincipal,
         *,
         cmd: Any,
         cwd: str = "",
@@ -1234,14 +1268,14 @@ class CiaoControlPlane:
         return _ok(self._background_payload(run))
 
     def background_run_status(
-        self, principal: McpPrincipal, run_id: str, lines: int = TAIL_LINES
+        self, principal: AgentPrincipal, run_id: str, lines: int = TAIL_LINES
     ) -> dict[str, Any]:
         run = self._owned_run(principal, run_id)
         tail = self._background_runner().tail(run.run_id, max(1, min(int(lines), 500)))
         return _ok(self._background_payload(run, tail=tail))
 
     async def background_run_cancel(
-        self, principal: McpPrincipal, run_id: str
+        self, principal: AgentPrincipal, run_id: str
     ) -> dict[str, Any]:
         run = self._owned_run(principal, run_id)
         try:
@@ -1267,7 +1301,7 @@ class CiaoControlPlane:
             data["project_name"] = getattr(project, "name", "") or ""
         return data
 
-    def schedules_list(self, principal: McpPrincipal) -> dict[str, Any]:
+    def schedules_list(self, principal: AgentPrincipal) -> dict[str, Any]:
         workspace = self._workspace(principal)
         rows = [
             self._schedule_payload(entry)
@@ -1276,7 +1310,7 @@ class CiaoControlPlane:
         ]
         return _ok(rows)
 
-    def schedule_preview(self, principal: McpPrincipal, **values: Any) -> dict[str, Any]:
+    def schedule_preview(self, principal: AgentPrincipal, **values: Any) -> dict[str, Any]:
         """Validate schedule fields and resolve workspace/project targets.
 
         ``project_id`` defaults to the caller's active project (same as
@@ -1384,7 +1418,7 @@ class CiaoControlPlane:
             raise ControlPlaneError("invalid_time", time_error)
         return _ok(self._schedule_payload(entry))
 
-    def schedule_create(self, principal: McpPrincipal, **values: Any) -> dict[str, Any]:
+    def schedule_create(self, principal: AgentPrincipal, **values: Any) -> dict[str, Any]:
         preview = self.schedule_preview(principal, **values)["data"]
         entry = self.schedules.create(
             daily_time_utc=preview["daily_time_utc"],
@@ -1414,7 +1448,7 @@ class CiaoControlPlane:
         publish_automations_changed(self.pcm)
         return _ok(self._schedule_payload(entry))
 
-    def _schedule(self, principal: McpPrincipal, schedule_id: str) -> ScheduleEntry:
+    def _schedule(self, principal: AgentPrincipal, schedule_id: str) -> ScheduleEntry:
         entry = next((item for item in self.schedules.list_entries() if item.schedule_id == schedule_id), None)
         if entry is None:
             raise ControlPlaneError("schedule_not_found", f"Schedule '{schedule_id}' was not found.")
@@ -1423,7 +1457,7 @@ class CiaoControlPlane:
         resolved: ScheduleEntry = entry
         return resolved
 
-    def schedule_update(self, principal: McpPrincipal, schedule_id: str, **changes: Any) -> dict[str, Any]:
+    def schedule_update(self, principal: AgentPrincipal, schedule_id: str, **changes: Any) -> dict[str, Any]:
         entry = self._schedule(principal, schedule_id)
         if entry.scope == "system" and any(key not in {"enabled", "workspace", "model", "provider", "archive_policy", "provider_model", "archivePolicy"} for key in changes):
             raise ControlPlaneError("system_schedule_read_only", "System schedules only allow enabled/workspace/model/provider/archive_policy changes.")
@@ -1602,13 +1636,13 @@ class CiaoControlPlane:
             raise ControlPlaneError(refusal[0], refusal[1])
         return result
 
-    async def schedule_run(self, principal: McpPrincipal, schedule_id: str) -> dict[str, Any]:
+    async def schedule_run(self, principal: AgentPrincipal, schedule_id: str) -> dict[str, Any]:
         self._schedule(principal, schedule_id)
         result = self._raise_if_run_refused(await self.schedules.dispatch_now(schedule_id))
         publish_automations_changed(self.pcm)
         return _ok(result)
 
-    def schedule_delete(self, principal: McpPrincipal, schedule_id: str) -> dict[str, Any]:
+    def schedule_delete(self, principal: AgentPrincipal, schedule_id: str) -> dict[str, Any]:
         entry = self._schedule(principal, schedule_id)
         if entry.scope == "system" or not entry.removable:
             raise ControlPlaneError("schedule_not_removable", "This schedule cannot be removed.")
@@ -1618,7 +1652,7 @@ class CiaoControlPlane:
 
     # ---- workspace files/assets ---------------------------------------
 
-    def workspace_file_read(self, principal: McpPrincipal, path: str) -> dict[str, Any]:
+    def workspace_file_read(self, principal: AgentPrincipal, path: str) -> dict[str, Any]:
         root = Path(self.config.workspace_root).resolve()
         target = self._safe_relative(root, path, must_exist=True)
         if not target.is_file() or target.stat().st_size > 2 * 1024 * 1024:
@@ -1629,7 +1663,7 @@ class CiaoControlPlane:
             raise ControlPlaneError("binary_file", "Binary files are not returned through MCP.") from exc
         return _ok({"path": target.relative_to(root).as_posix(), "content": content})
 
-    def workspace_file_write(self, principal: McpPrincipal, path: str, content: str) -> dict[str, Any]:
+    def workspace_file_write(self, principal: AgentPrincipal, path: str, content: str) -> dict[str, Any]:
         root = Path(self.config.workspace_root).resolve()
         target = self._safe_relative(root, path)
         if target.is_relative_to(Path(self.config.state_path).parent.resolve()):
@@ -1640,7 +1674,7 @@ class CiaoControlPlane:
         target.write_text(content, encoding="utf-8")
         return _ok({"path": target.relative_to(root).as_posix(), "size": len(content.encode('utf-8'))})
 
-    def file_surface(self, principal: McpPrincipal, path: str) -> dict[str, Any]:
+    def file_surface(self, principal: AgentPrincipal, path: str) -> dict[str, Any]:
         """Validate a workspace file exists so the PWA can open it in the pinned
         preview panel. The actual surfacing happens client-side, keyed off this
         tool call showing up in the turn's trace — see extract_file_touches in
@@ -1689,32 +1723,24 @@ class CiaoControlPlane:
         """
         wanted_stem = Path(requested).stem.lower()
         candidates: list[tuple[int, str]] = []
-        # The walk is bounded and lazy: `rglob` touches no filesystem until we
-        # iterate, so the `try` must wrap the iteration (and any OSError from
-        # `os.scandir` that pathlib does not swallow) to fall back gracefully
-        # instead of replacing the intended file_not_found with an unrelated
-        # error. Heavy and hidden subtrees (node_modules, .git, .runtime, Logs)
-        # are skipped to keep the scan bounded and the suggestions relevant.
+        # Walk with `os.walk` so heavy/hidden subtrees are pruned *before* they
+        # are descended into (``rglob`` would still traverse them), keeping the
+        # scan bounded on the event loop. Any OSError mid-walk degrades to the
+        # candidates collected so far rather than replacing the intended
+        # file_not_found with an unrelated error.
         try:
-            for candidate in root.rglob("*"):
-                if any(part in _SUGGESTION_SKIP_DIRS for part in candidate.parts):
-                    continue
-                if not candidate.is_file():
-                    continue
-                stem = candidate.stem.lower()
-                # Tiered by match kind, then by stem length so a shorter, closer
-                # name wins within a tier. A substring match (either direction)
-                # always outranks an unrelated name, which is the point of the
-                # suggestion.
-                if stem == wanted_stem:
-                    score = 0
-                elif wanted_stem and wanted_stem in stem:
-                    score = -1 - len(wanted_stem)
-                elif wanted_stem and stem in wanted_stem:
-                    score = -2 - len(stem)
-                else:
-                    score = -1000 - (len(stem) or 1)
-                candidates.append((score, candidate.relative_to(root).as_posix()))
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d not in _SUGGESTION_SKIP_DIRS and not d.startswith(".")
+                ]
+                for name in filenames:
+                    stem = os.path.splitext(name)[0].lower()
+                    score = _suggestion_score(wanted_stem, stem)
+                    if score is None:
+                        continue
+                    rel = os.path.relpath(os.path.join(dirpath, name), root)
+                    candidates.append((score, rel))
         except OSError:
             logger.debug("file_surface suggestions: workspace walk failed", exc_info=True)
         candidates.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
@@ -1766,7 +1792,7 @@ class CiaoControlPlane:
 
     # ---- adversarial review ---------------------------------------------
 
-    async def sync_skills(self, principal: McpPrincipal) -> dict[str, Any]:
+    async def sync_skills(self, principal: AgentPrincipal) -> dict[str, Any]:
         self._workspace(principal)
         from ciao.sync_skills import sync_workspace_skills
 

@@ -229,6 +229,6 @@ No scheduler or credential exists for it in `.github/workflows`, and a
 model-backed job would be both non-deterministic and cost-bearing. The
 deterministic contract checks are the merge gate; the model-backed comparison
 is run explicitly, or from a credentialed scheduled job with the ceiling
-above. This mirrors `docs/MCP.md`'s "Validation status", where a numeric
+above. This mirrors `docs/AGENT_CLI.md`'s "Validation status", where a numeric
 provider evaluation and its cost/credit gate are recorded rather than run on
 every PR.
