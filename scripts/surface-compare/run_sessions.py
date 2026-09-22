@@ -187,8 +187,10 @@ class Runner:
     def _ensure_project(self) -> str:
         for p in self.inst.get("/api/projects"):
             if p.get("name") == self.args.project_name and p.get("workspace") == self.args.workspace:
+                self._project_created_this_run = False
                 return p["project_id"]
         created = self.inst.post("/api/projects", {"name": self.args.project_name, "workspace": self.args.workspace, "context": "Temporary project for the MCP-versus-CLI surface comparison. Safe to delete."})
+        self._project_created_this_run = True
         return created["project_id"]
 
     def _create_chat(self, title: str, provider: str, model: str) -> str:
@@ -426,9 +428,9 @@ class Runner:
                     pass
             done = len(finished)
         probe_dir = self.workspace_root / "surface-compare"
-        if probe_dir.exists():
+        if probe_dir.exists() and not self.args.resume:
             raise SystemExit(f"{probe_dir} already exists; refusing to reuse a directory this run did not create")
-        probe_dir.mkdir()
+        probe_dir.mkdir(exist_ok=True)
         for repeat in range(self.args.repeats):
             for prompt in prompts:
                 for provider in providers:
@@ -446,7 +448,7 @@ class Runner:
             print(f"leaving {probe_dir}: unexpected files {sorted(p.name for p in leftovers)}", flush=True)
         else:
             shutil.rmtree(probe_dir, ignore_errors=True)
-        if self.args.delete_project:
+        if self.args.delete_project and self._project_created_this_run:
             self.inst.delete(f"/api/projects/{self.project_id}")
 
 

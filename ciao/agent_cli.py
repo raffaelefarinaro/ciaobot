@@ -170,7 +170,11 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--prompt", required=True)
     for verb in ("stop", "continue"):
         sub = chat.add_parser(verb)
-        sub.add_argument("--chat", default="", help="Defaults to the calling chat.")
+        # Target-only operations: stopping the calling chat hits
+        # ``self_stop_forbidden``, and continuing requires an *archived* chat,
+        # so the calling chat is never a valid default. Make the target
+        # explicit rather than advertising a default that can only error.
+        sub.add_argument("--chat", required=True)
 
     project = _verbs(nouns.add_parser("project", help="Projects in the active workspace."))
     plist = project.add_parser("list")
