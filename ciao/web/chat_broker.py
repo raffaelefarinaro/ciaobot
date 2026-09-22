@@ -146,8 +146,10 @@ _SHELL_HEREDOC_RE = re.compile(
 _SHELL_TOUCH_RE = re.compile(r"(?:^|[\s;|&])touch\s+([^\n;&|]+)")
 # The CLI surface's `ciao file surface <path>` is the same deliberate "show
 # this to the user" signal the MCP `mcp__ciaobot__file_surface` tool carried,
-# so it reuses the file-touch pipeline and auto-pins the panel (S5/S6).
-_CIAO_FILE_SURFACE_RE = re.compile(r"(?:^|[\s;|&])(?:ciao\s+)?file\s+surface\s+([^\n;&|]+)")
+# so it reuses the file-touch pipeline and auto-pins the panel (S5/S6). The
+# `ciao` prefix is required so `echo file surface out/report.md` (English text,
+# not an invocation) is not mistaken for a surfacing request.
+_CIAO_FILE_SURFACE_RE = re.compile(r"(?:^|[\s;|&])ciao\s+file\s+surface\s+([^\n;&|]+)")
 _SHELL_TEE_RE = re.compile(
     r"(?:^|[\s;|&])tee(\s+-a)?\s+['\"]?([^\s'\"<>&|;]+)['\"]?"
 )
