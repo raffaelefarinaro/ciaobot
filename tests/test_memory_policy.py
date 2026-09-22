@@ -224,8 +224,8 @@ def test_memory_design_drops_the_hard_cap_claim_and_states_advisory() -> None:
 def test_proposal_cli_exception_is_named_in_docs() -> None:
     """The MCP-only rule must name the supported proposal CLI exception."""
     architecture = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
-    mcp = (REPO / "docs" / "MCP.md").read_text(encoding="utf-8")
-    for doc, name in ((architecture, "ARCHITECTURE.md"), (mcp, "MCP.md")):
+    agent_cli = (REPO / "docs" / "AGENT_CLI.md").read_text(encoding="utf-8")
+    for doc, name in ((architecture, "ARCHITECTURE.md"), (agent_cli, "AGENT_CLI.md")):
         assert "ciao memory-proposal-add" in doc, name
         assert "ciao memory-proposals" in doc, name
         assert "ciao memory-proposal-dismiss" in doc, name

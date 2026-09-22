@@ -141,6 +141,11 @@ bounded memory (`ciao memory status|update`), vault (`ciao vault search`,
 (`ciao file surface`). Browser-session administration, login/OAuth secrets, and
 raw server deploy endpoints remain PWA/operator-only.
 
+The proposals queue is reviewed and dismissed through the PWA, with one
+deliberate CLI exception the nightly curation agent drives because one shell
+command beats a synchronous request per row: `ciao memory-proposal-add`,
+`ciao memory-proposals`, and `ciao memory-proposal-dismiss --text-file <file>`.
+
 ## Skills and system-prompt policy
 
 The CLI replaces the transport recipes, not behavioural knowledge. Ciaobot's
