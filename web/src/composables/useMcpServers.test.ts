@@ -264,6 +264,22 @@ describe('connection edits', () => {
     })
   })
 
+  it('keeps quotes embedded mid-argument whole', async () => {
+    // `--header="a b"` is one argument, not three: a token-level split still
+    // corrupted it after the whitespace split was fixed.
+    const { mcp, api } = make()
+    const srv = server({
+      name: 'local', transport: 'stdio', url: undefined, command: 'node',
+      args: ['server.js', '--header=Authorization: Bearer secret'],
+    })
+    expect(mcp.editDraft(srv).argsText).toBe('server.js "--header=Authorization: Bearer secret"')
+    api.patch.mockResolvedValueOnce(status() as never)
+    await mcp.saveServer(srv)
+    expect(api.patch).toHaveBeenCalledWith('/api/mcp/servers/local', {
+      command: 'node', args: ['server.js', '--header=Authorization: Bearer secret'], url: '',
+    })
+  })
+
   it('reports a failed connection save without clearing the row', async () => {
     const { mcp, api } = make()
     api.patch.mockRejectedValueOnce(new Error('bad url'))
