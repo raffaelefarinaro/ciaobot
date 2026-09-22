@@ -54,7 +54,6 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from ciao.curation_run import curation_in_progress
 from ciao.vault_links import MARKDOWN_LINK_RE, WIKILINK_RE
-from ciao.vault_lint import is_template_stem
 
 logger = logging.getLogger(__name__)
 
@@ -2542,6 +2541,21 @@ _ENTITY_SUBJECT_RE = re.compile(
 # Project folder names that are containers, not a project a fact belongs to.
 _ROUTING_SKIP_PROJECTS = frozenset({"general"})
 _NON_PROJECT_STEMS = frozenset({"readme", "index", "log"})
+
+
+def _is_scaffold(name: str) -> bool:
+    """An index, template or `_`-prefixed scaffold, not a project a fact belongs to.
+
+    Deliberately narrower than ``vault_lint.is_template_stem`` (a substring
+    test), which would also drop a real project named ``email-templates``.
+    """
+    lowered = name.lower()
+    return (
+        lowered in _ROUTING_SKIP_PROJECTS
+        or lowered in _NON_PROJECT_STEMS
+        or lowered.startswith(("_", "template"))
+        or lowered.endswith(("-template", "_template"))
+    )
 # Shorter names ("mo", "ux") match too much prose to count as a mention.
 _MIN_ENTITY_MENTION = 4
 _ISO_DATE_RE = re.compile(r"\b20\d\d-\d\d-\d\d\b")
@@ -2567,7 +2581,7 @@ def known_entities(vault_root: Path) -> tuple[dict[str, Path], dict[str, str]]:
             if not folder.is_dir():
                 continue
             for entry in folder.iterdir():
-                if not entry.is_dir() or entry.name.lower() in _ROUTING_SKIP_PROJECTS:
+                if not entry.is_dir() or _is_scaffold(entry.name):
                     continue
                 # README first, the order the app's own project-doc lookup
                 # uses (`project_chats._project_doc_file`), so a folder with
@@ -2582,16 +2596,7 @@ def known_entities(vault_root: Path) -> tuple[dict[str, Path], dict[str, str]]:
         projects_dir = vault_root / "projects"
         if projects_dir.is_dir():
             for doc in projects_dir.glob("*.md"):
-                stem = doc.stem.lower()
-                # An index or template beside the project folders is not a
-                # project a fact can belong to.
-                if (
-                    doc.is_file()
-                    and stem not in _ROUTING_SKIP_PROJECTS
-                    and stem not in _NON_PROJECT_STEMS
-                    and not stem.startswith("_")
-                    and not is_template_stem(stem)
-                ):
+                if doc.is_file() and not _is_scaffold(doc.stem):
                     projects.setdefault(entity_key(doc.stem), doc)
         people_dir = vault_root / _PEOPLE_DIR
         if people_dir.is_dir():
@@ -2651,9 +2656,9 @@ def _known_project_doc(payload: str, projects: dict[str, Path]) -> Path | None:
     if not payload.strip():
         return None
     raw = Path(payload.strip())
-    # A path names its project by folder ("projects/active/wedding/README.md"),
-    # so the folder is tried before a stem such as "README".
-    for candidate in (payload, raw.parent.name, raw.stem):
+    # A path names its project by folder ("projects/active/wedding/notes/x.md"),
+    # so every enclosing folder, innermost first, is tried before the stem.
+    for candidate in (payload, *(parent.name for parent in raw.parents), raw.stem):
         doc = projects.get(entity_key(candidate))
         if doc is not None:
             return doc
@@ -2688,6 +2693,12 @@ def _address_tagged(
     named = _known_project_doc(proposal.payload, projects)
     if named is not None and not _same_doc(named, own_doc):
         return replace(proposal, payload=str(named))
+    payload = proposal.payload.strip()
+    if payload and named is None and "/" not in payload and not payload.endswith(".md"):
+        # A named tag means "a different project"; one the roster cannot
+        # resolve belongs to a human, not to this chat's doc. A path is the
+        # older tag shape for this chat's own project and is handled below.
+        return replace(proposal, target="review", payload="")
     if own_doc is not None:
         # The chat's resolved canonical doc is authoritative over a path the
         # model invented; only a roster name can move a fact elsewhere. Only
@@ -2701,14 +2712,14 @@ def _address_tagged(
     return replace(proposal, target="review", payload="")
 
 
-def _same_doc(a: Path | str | None, b: Path | str | None) -> bool:
-    """Whether two doc paths name the same file, however each was spelled."""
-    if a is None or b is None:
+def _same_doc(a: Path | str, resolved: Path | None) -> bool:
+    """Whether *a* names the already-resolved doc, however *a* is spelled."""
+    if resolved is None:
         return False
     try:
-        return Path(a).resolve() == Path(b).resolve()
+        return Path(a).resolve() == resolved
     except OSError:
-        return Path(a) == Path(b)
+        return Path(a) == resolved
 
 
 def _route_to_known_entity(
@@ -2786,7 +2797,8 @@ def _session_vault_changes(insights_md: str) -> list[tuple[str, frozenset[int]]]
         # link before splitting on " - ", which a label may itself contain.
         link = MARKDOWN_LINK_RE.match(text.strip())
         if link:
-            path = unquote(link.group("angle") or link.group("bare") or "")
+            target = link.group("angle") or link.group("bare") or ""
+            path = unquote(re.split(r"[#?]", target, maxsplit=1)[0])
         else:
             path = re.split(r"\s+[-–—]\s", text, maxsplit=1)[0].strip().strip("`")
         if path and citations:
@@ -2900,7 +2912,7 @@ def proposals_from_archive(
 
         projects, people = known_entities(workspace_vault_root)
         own_doc = (
-            _resolve_doc_path(workspace_vault_root, project_doc_path)
+            _resolve_doc_path(workspace_vault_root, project_doc_path).resolve()
             if project_doc_path
             else None
         )
@@ -2918,18 +2930,14 @@ def proposals_from_archive(
             routed = _route_to_known_entity(addressed, projects, people)
             if routed is None:
                 return None
-            if routed.target == "review" and routed.source_section == "Decisions":
-                # Same rule as `propose_from_insights`, for the [project]
-                # decisions a General chat demoted to review above.
-                return None
             if (
-                project_fold_wrote
-                and addressed.target == "review"
-                and routed.target == "project"
-                and _same_doc(routed.payload, own_doc)
+                routed.target == "review"
+                and routed.source_section == "Decisions"
+                and not (p.target == "project" and p.payload)
             ):
-                # A review row matched to the chat's own project by name: the
-                # fold already read these insights into that doc.
+                # Same rule as `propose_from_insights`, for the bare [project]
+                # decisions a General chat demoted to review above. A named
+                # project the roster could not resolve stays for a human.
                 return None
             return routed
 

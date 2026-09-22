@@ -3150,3 +3150,65 @@ def test_vault_change_link_with_escaped_spaces_suppresses_the_restatement(tmp_pa
     )
 
     assert mp.proposals_from_archive(archive, vault) is None
+
+
+def test_review_row_naming_the_own_project_is_queued_not_dropped(tmp_path: Path) -> None:
+    """The fold reads decisions and status, not every review row."""
+    vault = _known_vault(tmp_path)
+    own = vault / "projects" / "active" / "ai-native-sdk" / "ai-native-sdk.md"
+    archive = _archive(
+        tmp_path,
+        "## New entities\n"
+        "- tool: skills.sh - install counter the ai-native-sdk work reports from. [idx=3] [review]\n",
+    )
+
+    out = mp.proposals_from_archive(
+        archive, vault, project_doc_path=str(own), project_fold_wrote=True
+    )
+
+    assert out is not None
+    assert [r["kind"] for r in mp.list_proposals(out)] == ["project"]
+
+
+def test_unknown_named_project_goes_to_review_not_the_own_doc(tmp_path: Path) -> None:
+    vault = _known_vault(tmp_path)
+    own = vault / "projects" / "active" / "ai-native-sdk" / "ai-native-sdk.md"
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose raised beds over pots for the garden. [idx=2] [project: garden-plan]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault, project_doc_path=str(own))
+
+    assert out is not None
+    assert [(r["kind"], r["target"]) for r in mp.list_proposals(out)] == [("review", "")]
+
+
+def test_scaffold_folders_and_deep_paths(tmp_path: Path) -> None:
+    vault = _known_vault(tmp_path)
+    scaffold = vault / "projects" / "active" / "_template" / "README.md"
+    scaffold.parent.mkdir(parents=True)
+    scaffold.write_text("# Template\n", encoding="utf-8")
+    real = vault / "projects" / "email-templates.md"
+    real.write_text("# Email templates\n", encoding="utf-8")
+
+    projects, _people = mp.known_entities(vault)
+
+    assert "template" not in projects
+    assert "email templates" in projects
+    doc = mp._known_project_doc("projects/active/ai-native-sdk/notes/budget.md", projects)
+    assert doc is not None and doc.parent.name == "ai-native-sdk"
+
+
+def test_vault_change_link_fragment_is_ignored(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose `People/Mo.md` as the standard coach note. [idx=3] [memory]\n"
+        "## Vault changes\n"
+        "- [Mo](./People/Mo.md#facts) - added role. [idx=3]\n",
+    )
+
+    assert mp.proposals_from_archive(archive, vault) is None
