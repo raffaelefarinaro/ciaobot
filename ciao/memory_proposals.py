@@ -9,7 +9,7 @@ This module turns those facts into *destination-addressed* proposals. Each
 bullet may carry a trailing destination tag written by the extraction model:
 
 * ``[memory]``   — cross-project preference/environment/lesson → the
-  ``ciao:memory`` region of the workspace ``CLAUDE.md``.
+  ``ciao:memory`` region of the workspace ``AGENTS.md``.
 * ``[profile]``  — identity/communication style → the ``ciao:profile`` region.
 * ``[project]``  — true only within this project → the project's canonical
   doc (folded at archive time by :mod:`ciao.project_doc_update`; queued with
@@ -34,7 +34,10 @@ queue file instead: ``<workspace-vault>/Workspace/Memory-Proposals.md``.
 Shape is not evidence. The guards above ask whether a fact *looks* like
 durable state; :func:`unsupported_region_facts` asks the separate question of
 whether any turn the user actually typed says so, which a fluent model
-satisfies on formatting alone otherwise.
+satisfies on formatting alone otherwise. The structured form of that question
+— the fact candidate v1 record, the normalized transcript it is checked
+against, and the verdict codes — lives in :mod:`ciao.fact_candidates`; this
+module owns the routing decision that follows from it.
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, date
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, NotRequired, TypedDict
 
 from ciao.curation_run import curation_in_progress
 
@@ -55,6 +58,113 @@ logger = logging.getLogger(__name__)
 _PROPOSALS_RELATIVE = "Workspace/Memory-Proposals.md"
 _LEARNINGS_RELATIVE = "Workspace/Learnings.md"
 _PEOPLE_DIR = "People"
+
+
+# ── Typed decision statuses ───────────────────────────────────────────────
+#
+# The reconcile path used to speak in bare strings and a bare ``None``, and
+# ``None`` carried two opposite meanings: "no reconcile was needed" and "the
+# reconcile could not decide". Downstream they read the same, so a failed call
+# took the plain append path and left an obsolete fact asserted beside its
+# replacement in always-loaded memory. Every state the path can be in is named
+# here instead, so the compiler — not a reader — checks that each one is
+# handled.
+
+
+ReconcileAction = Literal["add", "covered", "update", "defer"]
+"""What the write-time reconcile decided about one candidate fact.
+
+``add`` is new information (including the deterministic first entry into an
+empty region), ``covered`` an exact or semantic duplicate, ``update`` a
+validated supersession of exactly one existing entry, and ``defer`` every
+uncertain state: a failed or unparseable reconciliation, a stale snapshot, a
+row we could not read, and a fact the transcript does not support.
+"""
+
+
+class ReconcileDecision(TypedDict):
+    """One candidate fact's decision row.
+
+    ``index``/``text``/``old`` belong to ``update``: the 1-based entry to
+    replace, the merged replacement, and the entry that index named *in the
+    snapshot the model actually saw*, which the apply step re-checks against
+    the live region before writing.
+
+    ``reason`` and ``competing`` belong to ``defer``, and are the two things a
+    deferral has to carry to be resolvable rather than merely safe: why this
+    fact was not applied, and the region entries it may be in conflict with.
+    ``evidence`` also belongs to ``defer``: the fact-candidate verdict row
+    (:meth:`ciao.fact_candidates.Verdict.as_row`) behind an evidence refusal,
+    which names *which* check said no rather than only that something did.
+    """
+
+    action: ReconcileAction
+    index: NotRequired[int]
+    text: NotRequired[str]
+    old: NotRequired[str]
+    reason: NotRequired[str]
+    competing: NotRequired[list[str]]
+    evidence: NotRequired[dict[str, Any]]
+
+
+RegionDecisions = dict[str, ReconcileDecision]
+"""``_decision_key`` (region + promotable fact text) → that fact's decision."""
+
+
+PromotionOutcome = Literal[
+    "written", "duplicate", "conflict", "failed", "unshaped", "deferred"
+]
+"""What happened to one region-bound fact.
+
+``written`` and ``duplicate`` are settled — the fact is in the region either
+way and leaves the queue. ``conflict`` (the destination moved under a
+concurrent writer), ``failed`` (the write or its lock failed), ``unshaped``
+(not state-shaped text) and ``deferred`` (nothing about this fact could be
+trusted enough to write it unattended) all keep the fact queued.
+"""
+
+
+def _defer(
+    reason: str,
+    competing: list[str] | None = None,
+    *,
+    evidence: dict[str, Any] | None = None,
+) -> ReconcileDecision:
+    """A defer row carrying its reason and the entries it competes with.
+
+    Every deferral is built here so none of them can be emitted bare: a queued
+    fact with no reason is indistinguishable from an ordinary review row, and
+    without the competing snapshot neither a human nor a retry knows what it
+    was weighed against.
+
+    ``evidence`` attaches the fact-candidate verdict row behind an evidence
+    refusal, which carries the verdict code, the cited ids and the policy
+    version alongside the human-readable reason.
+    """
+    row: ReconcileDecision = {"action": "defer", "reason": reason}
+    if competing:
+        # Capped: the snapshot is diagnostic, and a whole region in a log line
+        # (or a run's extra) buries the reason it is attached to.
+        row["competing"] = [_one_line(entry) for entry in competing[:5]]
+    if evidence:
+        row["evidence"] = evidence
+    return row
+
+
+@dataclass(slots=True, frozen=True)
+class DeferredFact:
+    """One fact the apply step queued instead of writing, and why.
+
+    ``apply_proposals`` fills these into its optional ``deferrals``
+    out-parameter. The count alone (``stats["deferred"]``) says a reconcile
+    backend is down or a model is asserting uncited facts, but not which facts
+    or against what — which is the whole of what a human needs to resolve one.
+    """
+
+    text: str
+    region: str
+    reason: str
+    competing: tuple[str, ...] = ()
 
 
 # ── Destinations ──────────────────────────────────────────────────────────
@@ -264,14 +374,25 @@ def _default_destination(section: str, text: str) -> tuple[str, str]:
 
 
 def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
-    """Scan an insights markdown blob and emit destination-addressed proposals."""
+    """Scan an insights markdown blob and emit destination-addressed proposals.
+
+    The unreadable-output section is scanned alongside the routed ones. A
+    structured extraction renders every row it could not parse there as a
+    ``[review]`` bullet carrying the parse error
+    (:func:`ciao.fact_candidates.candidates_from_structured`); without this the
+    row would reach the archive and stop, which is the silent loss the review
+    destination exists to prevent. Nothing is auto-applied from it — ``review``
+    is queue-only — so the section can only ever add a question for a human.
+    """
+    from ciao.fact_candidates import UNREADABLE_SECTION
+
     if not insights_md.strip():
         return []
 
     sections = _split_sections(insights_md)
     proposals: list[MemoryProposal] = []
 
-    for heading in (*_BEHAVIORAL_SECTIONS, *_IDENTITY_SECTIONS):
+    for heading in (*_BEHAVIORAL_SECTIONS, *_IDENTITY_SECTIONS, UNREADABLE_SECTION):
         for item in sections.get(heading, []):
             kind, payload, citations, text = _peel_trailing_metadata(item)
             if not kind:
@@ -344,6 +465,32 @@ def _promotable_text(text: str) -> str | None:
     return text
 
 
+def _provenance_row(proposal: MemoryProposal) -> dict[str, Any]:
+    """The evidence chain stamped onto a region write's receipt.
+
+    Records where the fact came from and under which rules it was admitted:
+    the transcript turns it cited, the insights section it was extracted
+    from, its temporal bounds, and the extraction/policy versions in force.
+    A bullet that cited nothing is recorded as ``provenance: "unknown"``
+    rather than being given a plausible id — the receipt has to be able to say
+    "this archive never said where this came from", which is a different fact
+    from "it came from turn 3".
+    """
+    from ciao.fact_candidates import candidate_from_proposal
+
+    candidate = candidate_from_proposal(proposal)
+    return {
+        "schema": candidate.schema,
+        "source_message_ids": list(candidate.source_message_ids),
+        "provenance": candidate.provenance,
+        "section": candidate.section,
+        "as_of": candidate.as_of,
+        "expires": candidate.expires,
+        "extraction_version": candidate.extraction_version,
+        "policy_version": candidate.policy_version,
+    }
+
+
 def _log_consolidation(
     vault_root: Path, region: str, old_entry: str, *, label: str = "auto-reconcile"
 ) -> None:
@@ -375,22 +522,23 @@ def _promote_to_region(
     guide_path: Path,
     *,
     vault_root: Path | None = None,
-    decision: dict[str, Any] | None = None,
+    decision: ReconcileDecision | None = None,
     actor: str = "agent",
     source: str = "archive",
     workspace: str = "",
-) -> tuple[str, str | None]:
+    deferral_out: list[ReconcileDecision] | None = None,
+    receipt_out: dict[str, Any] | None = None,
+) -> tuple[PromotionOutcome, str | None]:
     """Write one region-bound proposal.
 
-    Returns ``(outcome, promotable_or_None)`` where outcome is ``"written"``,
-    ``"duplicate"`` (already remembered — dropped from both applied and
-    remaining), ``"conflict"`` (the destination changed under a concurrent
-    writer; nothing was written and the fact stays queued), ``"failed"`` (the
-    write itself failed, including a lock that could not be taken; stays
-    queued), ``"unshaped"`` (not state-shaped text; stays queued for the
-    curator to rephrase), or ``"deferred"`` (something about this fact could
-    not be trusted — an uncertain reconcile, or a citation no real user turn
-    backs; stays queued rather than being appended on the model's word).
+    Returns ``(outcome, promotable_or_None)``; see :data:`PromotionOutcome`
+    for what each status means and which of them leave the fact queued.
+
+    ``deferral_out``, when given, receives the defer row behind a ``deferred``
+    outcome — the one the caller handed in, or the one built here for a stale
+    or unusable update. Deferring is only half the fix; a caller that cannot
+    say why a fact was queued, or against which entries, has moved the problem
+    rather than solved it.
 
     Fail-safe by construction: the guide lock is *required*, not best-effort.
     An earlier version caught a lock failure and proceeded with ``lock=None``,
@@ -413,6 +561,16 @@ def _promote_to_region(
     the consolidations undo log first — ``{"action": "defer", "reason": ...}``
     routes the fact to the queue, and ``{"action": "add"}`` or ``None`` is the
     plain append path.
+
+    ``receipt_out`` is an optional caller-owned dict this fills with the
+    receipt ``commit_region_change`` recorded, when a write actually happened.
+    It is an out-parameter rather than a third return value on purpose: the
+    return tuple is unpacked by the archive-time apply loop and by a dozen
+    tests, and the only caller that needs the receipt is the PWA accept. The
+    decision ledger records the ORIGINAL bullet — that is what append-time
+    dedupe compares a re-extracted fact against — so an edited accept's ledger
+    row cannot be matched back to its receipt by text. This is how the row gets
+    the reference instead of guessing at it.
     """
     from ciao.memory_receipts import (
         RevisionConflict,
@@ -468,8 +626,8 @@ def _promote_to_region(
             )
             return "duplicate", promotable
 
-        decision = decision or {}
-        action = str(decision.get("action", "add"))
+        row: ReconcileDecision = decision or {"action": "add"}
+        action: ReconcileAction = row.get("action") or "add"
         if action == "defer":
             # Reconcile ran against a non-empty region and came back with
             # nothing usable for this fact, so nobody knows whether it
@@ -480,8 +638,10 @@ def _promote_to_region(
             logger.info(
                 "memory apply: deferring %r to the queue (%s)",
                 promotable[:80],
-                decision.get("reason") or "uncertain reconcile",
+                row.get("reason") or "uncertain reconcile",
             )
+            if deferral_out is not None:
+                deferral_out.append(row)
             return "deferred", promotable
         if action == "covered":
             logger.info(
@@ -520,10 +680,17 @@ def _promote_to_region(
                     "consolidations undo log)",
                     promotable[:80],
                 )
+                if deferral_out is not None:
+                    deferral_out.append(
+                        _defer(
+                            "no vault for the consolidations undo log",
+                            entries,
+                        )
+                    )
                 return "deferred", promotable
-            index = decision.get("index")
-            merged = str(decision.get("text", "")).strip()
-            plan_old = str(decision.get("old", ""))
+            index = row.get("index")
+            merged = str(row.get("text", "")).strip()
+            plan_old = str(row.get("old", ""))
             from ciao.memory_audit import find_event_shaped
 
             if (
@@ -557,7 +724,7 @@ def _promote_to_region(
                     f"{strip_learned_stamp(merged)} [{date.today().isoformat()}]"
                 )
                 _log_consolidation(vault_root, region, old)
-                commit_region_change(
+                receipt = commit_region_change(
                     guide_path,
                     region,
                     entries=updated,
@@ -571,7 +738,10 @@ def _promote_to_region(
                     destination=f"ciao:{region}",
                     removed_texts=[old],
                     kind="region_update",
+                    provenance=_provenance_row(proposal),
                 )
+                if receipt_out is not None:
+                    receipt_out.update(receipt)
                 logger.info(
                     "memory apply: reconciled update of entry %d in ciao:%s",
                     index,
@@ -584,19 +754,37 @@ def _promote_to_region(
             # leave the superseded entry and its replacement both live in the
             # region every session loads; neither is dropped, the fact goes to
             # the queue for a human to resolve against the current region.
-            logger.info(
-                "memory apply: deferring %r to the queue (unusable update of "
-                "entry %r in ciao:%s)",
-                promotable[:80],
-                decision.get("index"),
-                region,
+            stale = bool(
+                isinstance(index, int)
+                and 1 <= index <= len(entries)
+                and plan_old
+                and strip_learned_stamp(entries[index - 1])
+                != strip_learned_stamp(plan_old)
             )
+            reason = (
+                f"the entry this update named (ciao:{region} #{index}) changed "
+                "while the reconcile was running"
+                if stale
+                else f"unusable update of entry {index!r} in ciao:{region}"
+            )
+            logger.info(
+                "memory apply: deferring %r to the queue (%s)",
+                promotable[:80],
+                reason,
+            )
+            if deferral_out is not None:
+                competing = (
+                    [entries[index - 1]]
+                    if isinstance(index, int) and 1 <= index <= len(entries)
+                    else entries
+                )
+                deferral_out.append(_defer(reason, competing))
             return "deferred", promotable
         # The learned-at stamp is system time — when this fact entered the
         # region — read by the aging audit so unverified old facts surface
         # for re-verification instead of asserting themselves forever.
         stamped = f"{promotable} [{date.today().isoformat()}]"
-        commit_region_change(
+        receipt = commit_region_change(
             guide_path,
             region,
             entries=entries + [stamped],
@@ -609,7 +797,10 @@ def _promote_to_region(
             fact_text=promotable,
             destination=f"ciao:{region}",
             kind="region_apply",
+            provenance=_provenance_row(proposal),
         )
+        if receipt_out is not None:
+            receipt_out.update(receipt)
         return "written", promotable
     except RevisionConflict as exc:
         logger.info("memory apply: destination changed, fact stays queued (%s)", exc)
@@ -631,11 +822,13 @@ def accept_region_fact(
     target: str,
     text: str,
     vault_root: Path | None,
-    decision: dict[str, Any] | None = None,
+    decision: ReconcileDecision | None = None,
     actor: str = "operator",
     source: str = "pwa",
     workspace: str = "",
-) -> tuple[str, str | None]:
+    deferral_out: list[ReconcileDecision] | None = None,
+    receipt_out: dict[str, Any] | None = None,
+) -> tuple[PromotionOutcome, str | None]:
     """Write one approved region fact through the guarded path.
 
     The UI accept button used to call ``update_region(action="add")`` directly,
@@ -644,14 +837,22 @@ def accept_region_fact(
     stamp-stripped duplicate check, the learned-at stamp the aging audit reads,
     and the consolidations undo log.
 
-    Deliberately synchronous and model-free. Reconciliation belongs here in
-    principle — accepting an updated preference still appends beside the entry
-    it supersedes — but one ``run_oneshot`` per row on a click is a 120s timeout
-    each, and the batch endpoint accepts rows sequentially inside one request.
-    A caller that has already reconciled elsewhere may pass ``decision``; the
-    click path passes none.
+    Deliberately synchronous and model-free: one ``run_oneshot`` per row on a
+    click is a 120s timeout each, and the batch endpoint accepts rows
+    sequentially inside one request. Reconciliation is offered alongside it
+    rather than inside it — :func:`reconcile_region_fact` runs one fresh call
+    against the *current* region and hands the result in as ``decision``, which
+    is how a fact deferred at archive time gets resolved on a retry. A caller
+    that passes none takes the plain append path.
 
-    Returns ``_promote_to_region``'s ``(outcome, promotable)``.
+    Returns ``_promote_to_region``'s ``(outcome, promotable)``. Both
+    out-parameters are forwarded unchanged. ``deferral_out`` lets an
+    interactive accept report *why* its fact stayed queued and against which
+    entries — a review UI that can only say "refused" gives the person no way
+    to judge whether another retry is worth a second model call. Pass
+    ``receipt_out`` to also learn which receipt performed the write: the
+    caller records the decision under the bullet's ORIGINAL text, so an
+    accept of an edited wording has no way to find its own receipt again.
     """
     proposal = MemoryProposal(target=target, text=text, source_section="review")
     return _promote_to_region(
@@ -662,6 +863,8 @@ def accept_region_fact(
         actor=actor,
         source=source,
         workspace=workspace,
+        deferral_out=deferral_out,
+        receipt_out=receipt_out,
     )
 
 
@@ -671,6 +874,19 @@ def _safe_name(name: str) -> str:
     return cleaned[:80]
 
 
+def people_note_path(vault_root: Path, name: str) -> Path | None:
+    """Where a ``[people]`` accept would write, or None for an unusable name.
+
+    Public so the review queue can name the destination — and say whether the
+    note already exists — before the accept runs, without a second copy of the
+    filename rules :func:`write_people_note` applies.
+    """
+    stem = _safe_name(name)
+    if not stem:
+        return None
+    return vault_root / _PEOPLE_DIR / f"{stem}.md"
+
+
 def write_people_note(vault_root: Path, name: str, text: str) -> bool:
     """Create a stub person note. False when it already exists (needs a merge).
 
@@ -678,9 +894,9 @@ def write_people_note(vault_root: Path, name: str, text: str) -> bool:
     performs exactly this write.
     """
     stem = _safe_name(name)
-    if not stem:
+    path = people_note_path(vault_root, name)
+    if path is None:
         return False
-    path = vault_root / _PEOPLE_DIR / f"{stem}.md"
     if path.exists():
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -740,37 +956,42 @@ def format_learning_line(
     return line
 
 
-def append_learning(vault_root: Path, text: str, *, source: str = "") -> bool:
-    """File one learning under the Active section of Workspace/Learnings.md.
+_LEARNINGS_STUB = (
+    "---\n"
+    "tags: [ciao, learnings]\n"
+    "---\n"
+    "# Learnings\n\n"
+    "Reusable cross-project knowledge. Active entries are candidates "
+    "for promotion into canonical guidance once they recur (x3 or "
+    "more).\n"
+)
 
-    Structured entries carry a key, first-seen/last-seen dates, a recurrence
-    count, and source chat ids. Re-observing a learning (same normalized
-    statement) increments its count and refreshes last-seen instead of
-    appending a duplicate — recurrence is what the curation skill promotes on,
-    so it must be counted mechanically, not judged from prose. Legacy plain
-    bullets are left untouched; an exact legacy duplicate still short-circuits.
 
-    Public because accepting a ``[learnings]`` proposal from the review queue
-    performs exactly this write.
+def learnings_path(vault_root: Path) -> Path:
+    """Where a ``[learnings]`` accept writes."""
+    return vault_root / _LEARNINGS_RELATIVE
+
+
+def render_learning_append(
+    existing: str, text: str, *, source: str = "", today: str = ""
+) -> tuple[str, str]:
+    """The file ``append_learning`` would write, and which operation that is.
+
+    Returns ``(updated_text, operation)`` — ``"add"`` for a new Active entry,
+    ``"update"`` when an existing entry's recurrence count and last-seen date
+    are refreshed, and ``"none"`` when an exact legacy duplicate is already
+    there and nothing is written (``updated_text`` is then ``existing``).
+
+    Split out of :func:`append_learning` so the review queue can show the exact
+    replacement *before* the accept performs it. The write path goes through
+    this same function, so a preview and the accept it precedes cannot
+    disagree about what lands.
     """
-    path = vault_root / _LEARNINGS_RELATIVE
-    if path.exists():
-        existing = path.read_text(encoding="utf-8")
-    else:
-        existing = (
-            "---\n"
-            "tags: [ciao, learnings]\n"
-            "---\n"
-            "# Learnings\n\n"
-            "Reusable cross-project knowledge. Active entries are candidates "
-            "for promotion into canonical guidance once they recur (x3 or "
-            "more).\n"
-        )
     if f"- {_one_line(text)}" in existing:
         # Exact legacy duplicate: already recorded in the old plain shape.
-        return True
+        return existing, "none"
 
-    today = date.today().isoformat()
+    stamp = today or date.today().isoformat()
     normalized = _normalized_learning(text)
     lines = existing.split("\n")
     for index, line in enumerate(lines):
@@ -789,27 +1010,57 @@ def append_learning(vault_root: Path, text: str, *, source: str = "") -> bool:
         lines[index] = format_learning_line(
             match.group("text"),
             first_seen=match.group("first"),
-            last_seen=today,
+            last_seen=stamp,
             count=int(match.group("count")) + 1,
             sources=sources,
         )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(lines), encoding="utf-8")
-        return True
+        return "\n".join(lines), "update"
 
     entry = format_learning_line(
         text,
-        first_seen=today,
-        last_seen=today,
+        first_seen=stamp,
+        last_seen=stamp,
         count=1,
         sources=[source] if source else [],
     )
     marker = "\n## Active\n"
     if marker in existing:
         head, _, tail = existing.partition(marker)
-        updated = f"{head}{marker}{entry}\n{tail}"
-    else:
-        updated = existing.rstrip() + f"\n\n## Active\n\n{entry}\n"
+        return f"{head}{marker}{entry}\n{tail}", "add"
+    return existing.rstrip() + f"\n\n## Active\n\n{entry}\n", "add"
+
+
+def read_learnings(vault_root: Path) -> str:
+    """The current Learnings file, or the stub a first write would start from.
+
+    Existence, not a swallowed read error, decides: a file that is there but
+    unreadable must surface rather than be silently replaced by the stub,
+    which a following write would then persist over the real content.
+    """
+    path = learnings_path(vault_root)
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return _LEARNINGS_STUB
+
+
+def append_learning(vault_root: Path, text: str, *, source: str = "") -> bool:
+    """File one learning under the Active section of Workspace/Learnings.md.
+
+    Structured entries carry a key, first-seen/last-seen dates, a recurrence
+    count, and source chat ids. Re-observing a learning (same normalized
+    statement) increments its count and refreshes last-seen instead of
+    appending a duplicate — recurrence is what the curation skill promotes on,
+    so it must be counted mechanically, not judged from prose. Legacy plain
+    bullets are left untouched; an exact legacy duplicate still short-circuits.
+
+    Public because accepting a ``[learnings]`` proposal from the review queue
+    performs exactly this write.
+    """
+    path = learnings_path(vault_root)
+    existing = read_learnings(vault_root)
+    updated, operation = render_learning_append(existing, text, source=source)
+    if operation == "none":
+        return True
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(updated, encoding="utf-8")
     return True
@@ -820,12 +1071,13 @@ def apply_proposals(
     *,
     guide_path: Path | None = None,
     vault_root: Path | None = None,
-    region_decisions: dict[str, dict[str, Any]] | None = None,
+    region_decisions: RegionDecisions | None = None,
     learning_source: str = "",
     actor: str = "auto",
     source: str = "archive",
     workspace: str = "",
     stats: dict[str, int] | None = None,
+    deferrals: list[DeferredFact] | None = None,
 ) -> tuple[list[MemoryProposal], list[str]]:
     """Write every confidently-addressed proposal to its destination.
 
@@ -849,6 +1101,11 @@ def apply_proposals(
     trusted — an uncertain reconcile, or a citation the transcript does not
     support (:func:`unsupported_region_facts`). They are in ``remaining`` like
     any other queued row, which alone cannot say why.
+
+    ``deferrals``, when given, receives one :class:`DeferredFact` per such
+    fact: its reason and the region entries it competes with. The count says a
+    reconcile backend is down; only these say which facts are waiting and what
+    they are waiting on.
     """
     from ciao.memory_tool import resolve_region
 
@@ -886,6 +1143,7 @@ def apply_proposals(
                     decision = region_decisions.get(
                         _decision_key(resolve_region(proposal.target), promotable_key)
                     )
+                deferral_out: list[ReconcileDecision] = []
                 outcome, promotable = _promote_to_region(
                     proposal,
                     guide_path,
@@ -894,6 +1152,7 @@ def apply_proposals(
                     actor=actor,
                     source=source,
                     workspace=workspace,
+                    deferral_out=deferral_out,
                 )
                 if outcome == "written":
                     applied.append(promotable or proposal.text)
@@ -917,8 +1176,24 @@ def apply_proposals(
                     # standing rule, the fourth for a human to resolve against
                     # the region it may supersede. None of them is a decision
                     # yet, so none is recorded.
-                    if outcome == "deferred" and stats is not None:
-                        stats["deferred"] = stats.get("deferred", 0) + 1
+                    if outcome == "deferred":
+                        if stats is not None:
+                            stats["deferred"] = stats.get("deferred", 0) + 1
+                        if deferrals is not None:
+                            deferred_row = (
+                                deferral_out[0] if deferral_out else _defer("")
+                            )
+                            deferrals.append(
+                                DeferredFact(
+                                    text=promotable or proposal.text,
+                                    region=resolve_region(proposal.target),
+                                    reason=deferred_row.get("reason")
+                                    or "uncertain reconcile",
+                                    competing=tuple(
+                                        deferred_row.get("competing") or ()
+                                    ),
+                                )
+                            )
                     remaining.append(proposal)
             elif proposal.target == "people" and vault_root is not None:
                 name = proposal.payload or _safe_name(proposal.text.split("-")[0])
@@ -987,7 +1262,7 @@ def _decision_key(region: str, fact: str) -> str:
     return f"{region}\n{fact}"
 
 
-def _parse_reconcile_reply(raw: str, count: int) -> list[dict[str, Any]] | None:
+def _parse_reconcile_reply(raw: str, count: int) -> list[ReconcileDecision] | None:
     """Parse the model's JSON array; None when the shape is unusable.
 
     Per-row problems degrade that row to ``{"action": "defer"}`` — the
@@ -1007,26 +1282,25 @@ def _parse_reconcile_reply(raw: str, count: int) -> list[dict[str, Any]] | None:
         return None
     if not isinstance(data, list) or len(data) != count:
         return None
-    unreadable = {"action": "defer", "reason": "unreadable reconcile row"}
-    rows: list[dict[str, Any]] = []
+    rows: list[ReconcileDecision] = []
     for item in data:
         if not isinstance(item, dict):
-            rows.append(dict(unreadable))
+            rows.append(_defer("unreadable reconcile row"))
             continue
         action = str(item.get("action", "")).lower()
         if action == "update":
             index = item.get("index")
             merged = str(item.get("text", "")).strip()
             if isinstance(index, bool) or not isinstance(index, int) or not merged:
-                rows.append(
-                    {"action": "defer", "reason": "update row missing index or text"}
-                )
+                rows.append(_defer("update row missing index or text"))
                 continue
             rows.append({"action": "update", "index": index, "text": merged})
-        elif action in ("covered", "add"):
-            rows.append({"action": action})
+        elif action == "covered":
+            rows.append({"action": "covered"})
+        elif action == "add":
+            rows.append({"action": "add"})
         else:
-            rows.append(dict(unreadable))
+            rows.append(_defer("unreadable reconcile row"))
     return rows
 
 
@@ -1104,43 +1378,28 @@ def transcript_evidence(filtered_jsonl: str) -> TranscriptEvidence | None:
     and forbids ``[idx=N]``, and a legacy archive re-processed without its
     session blob has no indices either. Gating those on indices that were
     never meant to exist would queue every fact in them for no evidence gain.
+
+    The id/role view of the same normalization
+    :func:`ciao.fact_candidates.normalize_transcript` builds, kept as its own
+    narrow type because most callers only need "does this turn exist, and did
+    the user type it" and should not have to carry the turn bodies to ask.
     """
-    known: set[int] = set()
-    attended: set[int] = set()
-    for line in filtered_jsonl.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        idx = record.get("idx")
-        # `isinstance(True, int)` is True, so a bool `idx` would index turn 1.
-        if isinstance(idx, bool) or not isinstance(idx, int):
-            continue
-        known.add(idx)
-        # `unattended` marks a turn a schedule or routine fired. Both
-        # extraction prompts forbid extracting facts from one; this is where
-        # that instruction stops being advisory.
-        if record.get("type") == "user" and not record.get("unattended"):
-            attended.add(idx)
-    if not known:
+    from ciao.fact_candidates import normalize_transcript
+
+    transcript = normalize_transcript(filtered_jsonl)
+    if transcript is None:
         return None
-    return TranscriptEvidence(frozenset(known), frozenset(attended))
+    return TranscriptEvidence(transcript.known, transcript.attended_user)
 
 
 def _evidence_gap(citations: tuple[int, ...], evidence: TranscriptEvidence) -> str:
     """Why a bullet's citation fails to support it, or "" when it holds.
 
-    Three machine-checkable failures, each one an acceptance criterion of the
-    unverified-fact report: nothing cited at all, a citation naming a turn the
-    transcript does not contain (a fabricated id, or the ``[idx=0]`` the
-    prompt forbids), and a citation that lands only on assistant output or on
-    automation turns — the assistant's own suggestion quoted back as if the
-    user had stated it.
+    The id-only subset of :func:`ciao.fact_candidates.validate_candidate`,
+    kept for callers that hold citations without the fact they support:
+    nothing cited at all, a citation naming a turn the transcript does not
+    contain (a fabricated id, or the ``[idx=0]`` the prompt forbids), and a
+    citation that lands only on assistant output or on automation turns.
     """
     if not citations:
         return "bullet cites no source turn"
@@ -1156,16 +1415,24 @@ def unsupported_region_facts(
     archive_path: Path,
     *,
     filtered_jsonl: str,
-) -> dict[str, dict[str, Any]]:
+) -> RegionDecisions:
     """Defer rows for region facts the transcript does not actually support.
 
     Region promotion checked a fact's *shape* — durable-rule clause, not
     event-shaped — which a fluent model satisfies whether or not any turn said
-    the thing. This adds the missing half: the bullet must also cite a turn
-    that exists and that the user typed. Facts that fail take the ``"defer"``
-    route, so an unverifiable fact is handled exactly like an uncertain
-    reconcile — queued in ``Workspace/Memory-Proposals.md`` for a human, never
-    dropped and never written to always-loaded context on the model's word.
+    the thing. This adds the missing half, through the fact-candidate v1
+    evidence policy (:mod:`ciao.fact_candidates`): the bullet must cite a turn
+    that exists, that the user typed, that contains the claim in their own
+    words rather than in pasted or tool material, that asserts it rather than
+    negating it or offering it as an example, and that no later turn corrects.
+    Its destination must also be one this workspace actually routes to.
+
+    Facts that fail take the ``"defer"`` route, so an unverifiable fact is
+    handled exactly like an uncertain reconcile — queued in
+    ``Workspace/Memory-Proposals.md`` for a human, never dropped and never
+    written to always-loaded context on the model's word. Each row carries the
+    verdict code, the cited ids and the policy version, so the queue can say
+    *which* check refused the fact rather than only that something did.
 
     Keyed like :func:`plan_region_reconcile`'s rows so the caller can overlay
     these on top of a reconcile plan; an evidence failure must win over an
@@ -1177,10 +1444,15 @@ def unsupported_region_facts(
     written into an empty always-loaded region is the one nothing later
     contradicts.
     """
+    from ciao.fact_candidates import (
+        candidate_from_proposal,
+        normalize_transcript,
+        validate_candidate,
+    )
     from ciao.memory_tool import resolve_region
 
-    evidence = transcript_evidence(filtered_jsonl)
-    if evidence is None:
+    transcript = normalize_transcript(filtered_jsonl)
+    if transcript is None:
         return {}
     try:
         text = archive_path.read_text(encoding="utf-8")
@@ -1190,7 +1462,7 @@ def unsupported_region_facts(
     if not body:
         return {}
 
-    rows: dict[str, dict[str, Any]] = {}
+    rows: RegionDecisions = {}
     for proposal in propose_from_insights(body):
         if proposal.target not in ("memory", "profile"):
             continue
@@ -1199,22 +1471,28 @@ def unsupported_region_facts(
             # Already headed for the queue on shape grounds; a second reason
             # to queue it would change nothing.
             continue
-        gap = _evidence_gap(proposal.citations, evidence)
-        if not gap:
+        # The evidence is weighed against the text that would actually be
+        # written — the `Durable rule:` clause — not the narration around it.
+        verdict = validate_candidate(
+            candidate_from_proposal(proposal),
+            transcript,
+            claim_text=promotable,
+        )
+        if verdict.ok:
             continue
         try:
             region = resolve_region(proposal.target)
         except ValueError:
             continue
         logger.info(
-            "memory evidence: %r is unverified (%s); queuing for review",
+            "memory evidence: %r is unverified (%s: %s); queuing for review",
             promotable[:80],
-            gap,
+            verdict.code,
+            verdict.reason,
         )
-        rows[_decision_key(region, promotable)] = {
-            "action": "defer",
-            "reason": f"unverified: {gap}",
-        }
+        rows[_decision_key(region, promotable)] = _defer(
+            f"unverified: {verdict.reason}", evidence=verdict.as_row()
+        )
     return rows
 
 
@@ -1223,7 +1501,7 @@ def defer_region_facts(
     guide_path: Path,
     *,
     reason: str,
-) -> dict[str, dict[str, Any]] | None:
+) -> RegionDecisions | None:
     """Defer every fact :func:`plan_region_reconcile` would have compared.
 
     The planner swallows its own failures, but a raise that escapes it — or any
@@ -1236,17 +1514,15 @@ def defer_region_facts(
     caller back on the append path it is here to avoid.
     """
     try:
-        by_region, _entries = _reconcile_candidates(archive_path, guide_path)
+        by_region, entries_by_region = _reconcile_candidates(archive_path, guide_path)
     except Exception:  # noqa: BLE001 — a failed fallback must not resurface
         logger.info("memory reconcile: could not build deferral rows")
         return None
-    decisions: dict[str, dict[str, Any]] = {}
+    decisions: RegionDecisions = {}
     for region_name, candidates in by_region.items():
+        competing = entries_by_region.get(region_name, [])
         for fact in candidates:
-            decisions[_decision_key(region_name, fact)] = {
-                "action": "defer",
-                "reason": reason,
-            }
+            decisions[_decision_key(region_name, fact)] = _defer(reason, competing)
     return decisions or None
 
 
@@ -1257,7 +1533,7 @@ async def plan_region_reconcile(
     model: str,
     provider: str = "claude",
     cwd: Path | None = None,
-) -> dict[str, dict[str, Any]] | None:
+) -> RegionDecisions | None:
     """Decide ADD / UPDATE / COVERED for an archive's region-bound facts.
 
     The Mem0 pattern, done at write time where dedupe is cheap: before the
@@ -1281,7 +1557,7 @@ async def plan_region_reconcile(
     if not by_region:
         return None
 
-    decisions: dict[str, dict[str, Any]] = {}
+    decisions: RegionDecisions = {}
     for region_name, candidates in by_region.items():
         rows = await _reconcile_region(
             region_name,
@@ -1296,10 +1572,10 @@ async def plan_region_reconcile(
             # is the plain append path. These candidates were compared against
             # a non-empty region, so that is the one thing it must not mean.
             for fact in candidates:
-                decisions[_decision_key(region_name, fact)] = {
-                    "action": "defer",
-                    "reason": f"reconcile unavailable for ciao:{region_name}",
-                }
+                decisions[_decision_key(region_name, fact)] = _defer(
+                    f"reconcile unavailable for ciao:{region_name}",
+                    entries_by_region[region_name],
+                )
             continue
         for fact, row in zip(candidates, rows):
             decisions[_decision_key(region_name, fact)] = row
@@ -1315,7 +1591,8 @@ async def _reconcile_region(
     model: str,
     provider: str = "claude",
     cwd: Path | None = None,
-) -> list[dict[str, Any]] | None:
+    timeout_s: float = _RECONCILE_TIMEOUT_S,
+) -> list[ReconcileDecision] | None:
     """One reconcile call: decide ADD / UPDATE / COVERED per candidate.
 
     Returns one row per candidate in the given order, or None when the call
@@ -1345,7 +1622,7 @@ async def _reconcile_region(
             prompt,
             system_prompt=_RECONCILE_SYSTEM_PROMPT,
             model=model,
-            timeout_s=_RECONCILE_TIMEOUT_S,
+            timeout_s=timeout_s,
             provider=provider,
             cwd=cwd,
         )
@@ -1359,7 +1636,7 @@ async def _reconcile_region(
             region_name,
         )
         return None
-    out: list[dict[str, Any]] = []
+    out: list[ReconcileDecision] = []
     for row in rows:
         if row.get("action") == "update":
             index = row.get("index")
@@ -1368,15 +1645,93 @@ async def _reconcile_region(
                 # decision is junk — but it still says this fact supersedes
                 # something in the region, which is the one case a plain append
                 # must not take.
-                row = {
-                    "action": "defer",
-                    "reason": "update index outside the region snapshot",
+                out.append(
+                    _defer("update index outside the region snapshot", entries)
+                )
+                continue
+            out.append(
+                {
+                    "action": "update",
+                    "index": index,
+                    "text": row.get("text", ""),
+                    "old": entries[index - 1],
                 }
-            else:
-                row = dict(row)
-                row["old"] = entries[index - 1]
+            )
+            continue
+        if row.get("action") == "defer" and not row.get("competing"):
+            # A row the parser could not read still competes with the whole
+            # region it was weighed against; without that snapshot the queued
+            # fact says only "something went wrong".
+            out.append(_defer(row.get("reason") or "unreadable reconcile row", entries))
+            continue
         out.append(row)
     return out
+
+
+# The review path runs one call for one fact on a click, so it cannot wait the
+# archive path's two minutes: the operator is watching a spinner, and the whole
+# point of the retry is that they can take the deterministic append instead.
+_REVIEW_RECONCILE_TIMEOUT_S = 45.0
+
+
+async def reconcile_region_fact(
+    guide_path: Path,
+    target: str,
+    text: str,
+    *,
+    model: str,
+    provider: str = "claude",
+    cwd: Path | None = None,
+    timeout_s: float = _REVIEW_RECONCILE_TIMEOUT_S,
+) -> ReconcileDecision | None:
+    """Reconcile one queued fact against the region's *current* entries.
+
+    This is the retry half of the deferral: a fact queued because the
+    archive-time reconcile timed out, replied unusably, or named an entry that
+    had moved is not stuck there — a later attempt reads the region as it is
+    now and can come back with a usable ``add``/``covered``/``update``. The
+    decision is planned against the snapshot read here and applied by
+    :func:`_promote_to_region`, which re-reads under the guide lock and refuses
+    on any drift, so the retry can only ever land against a region that has not
+    changed since it was planned.
+
+    ``None`` means "no model call was needed": an empty region (the first entry
+    is a plain add), an exact duplicate (already remembered), or text the shape
+    guard will reject anyway. Those are the deterministic paths, and spending a
+    model call on them is the cost this deliberately avoids.
+
+    A call that fails or replies unusably comes back as a ``defer`` row with
+    its reason and the competing entries, exactly as at archive time: a retry
+    that cannot decide must not become a licence to append.
+    """
+    from ciao.memory_audit import strip_learned_stamp
+    from ciao.memory_tool import read_region, resolve_region
+
+    promotable = _promotable_text(text)
+    if promotable is None:
+        return None
+    try:
+        region = resolve_region(target)
+        entries, diags = read_region(guide_path, region)
+    except Exception:  # noqa: BLE001 — the apply step reports a bad region
+        return None
+    if diags or not entries:
+        return None
+    if promotable in {strip_learned_stamp(entry) for entry in entries}:
+        return None
+
+    rows = await _reconcile_region(
+        region,
+        entries,
+        [promotable],
+        model=model,
+        provider=provider,
+        cwd=cwd,
+        timeout_s=timeout_s,
+    )
+    if not rows:
+        return _defer(f"reconcile unavailable for ciao:{region}", entries)
+    return rows[0]
 
 
 # ── Persistence ───────────────────────────────────────────────────────────
@@ -1566,6 +1921,7 @@ def record_dismissal(
     destination: str = "",
     outcome: str = "",
     proposal_id: str = "",
+    receipt_id: str = "",
     once: bool = False,
 ) -> bool:
     """Record a decided proposal so the queue stops re-asking about it.
@@ -1598,6 +1954,7 @@ def record_dismissal(
         destination=destination,
         outcome=outcome,
         proposal_id=proposal_id,
+        receipt_id=receipt_id,
         once=once,
     )
 
@@ -1612,6 +1969,7 @@ def record_promotion(
     destination: str = "",
     outcome: str = "",
     proposal_id: str = "",
+    receipt_id: str = "",
     once: bool = False,
     history_only: bool = False,
 ) -> bool:
@@ -1634,6 +1992,7 @@ def record_promotion(
         destination=destination,
         outcome=outcome,
         proposal_id=proposal_id,
+        receipt_id=receipt_id,
         once=once,
         history_only=history_only,
     )
@@ -1650,6 +2009,7 @@ def _record_decision(
     destination: str = "",
     outcome: str = "",
     proposal_id: str = "",
+    receipt_id: str = "",
     once: bool = False,
     history_only: bool = False,
 ) -> bool:
@@ -1683,6 +2043,16 @@ def _record_decision(
         entry["outcome"] = outcome
     if proposal_id:
         entry["proposal_id"] = proposal_id
+    if receipt_id:
+        # The memory receipt (see :mod:`ciao.memory_receipts`) that performed
+        # this decision's write. ``text`` above stays the ORIGINAL bullet,
+        # because that is what append-time dedupe compares a re-extracted fact
+        # against; when the operator edited the wording before accepting, the
+        # receipt records the edited text and no text match can find it again.
+        # Recording the id is what lets History show that decision's change and
+        # offer an undo. Rows written before this existed carry no id and are
+        # joined heuristically instead.
+        entry["receipt_id"] = receipt_id
     if history_only:
         # Ledger-only row: it records that a pass ran and decided nothing new,
         # so the dedupe readers must not treat it as a decision. Without this
@@ -1830,7 +2200,9 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
 
     Normalizes both the current sidecar shape and the legacy ``.dismissed.log``
     text-only rows into one shape: ``{ts, action, via, kind, text, source,
-    destination, outcome, proposal_id, log, seq}``. This is the read side of the
+    destination, outcome, proposal_id, receipt_id, log, seq}``. ``receipt_id``
+    is empty for every row written before it was recorded, and for every
+    decision made outside the receipt protocol. This is the read side of the
     decision history the review page's History tab renders; :func:`record_dismissal`
     and :func:`record_promotion` are the write side.
 
@@ -1869,6 +2241,7 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
                     "destination": str(entry.get("destination", "")),
                     "outcome": str(entry.get("outcome", "")),
                     "proposal_id": str(entry.get("proposal_id", "")),
+                    "receipt_id": str(entry.get("receipt_id", "")),
                     "log": suffix,
                     "seq": seq,
                 }
@@ -1886,13 +2259,13 @@ _STUB_HEADER = (
     "timestamped. Confident facts are applied automatically at archive time; "
     "what lands here waited because the model was unsure or a write failed.\n\n"
     "Destinations: `[memory]` / `[profile]` are the bounded `ciao:memory` / "
-    "`ciao:profile` regions of the workspace `CLAUDE.md` (edit the region "
+    "`ciao:profile` regions of the workspace `AGENTS.md` (edit the region "
     "first, then dismiss with `ciao memory-proposal-dismiss --text-file <file> "
     "--promoted` so the outcome counts as a promotion); "
     "`[project <doc-path>]` folds into that canonical doc; `[people <Name>]` "
     "updates `People/<Name>.md`; `[learnings]` appends to "
     "`Workspace/Learnings.md`; `[review]` has no known destination yet — "
-    "decide what it is first. Standing directives stay in the CLAUDE.md body "
+    "decide what it is first. Standing directives stay in the AGENTS.md body "
     "outside the fenced regions.\n"
 )
 
@@ -2130,9 +2503,10 @@ def proposals_from_archive(
     stats: dict[str, int] | None = None,
     project_doc_path: str = "",
     project_fold_wrote: bool = False,
-    region_decisions: dict[str, dict[str, Any]] | None = None,
+    region_decisions: RegionDecisions | None = None,
     workspace: str = "",
     error_out: list[str] | None = None,
+    deferrals: list[DeferredFact] | None = None,
 ) -> Path | None:
     """Read an archived chat, route its insights, optionally auto-apply.
 
@@ -2158,6 +2532,10 @@ def proposals_from_archive(
     to the user, which the returned path alone cannot express. It stays an
     out-parameter so the return contract every existing caller relies on is
     unchanged.
+
+    ``deferrals``, when given, is filled with one :class:`DeferredFact` per
+    deferred region fact — its reason and the entries it competes with — so a
+    caller can report *what* is waiting, not only how much.
 
     ``error_out``, when given, records a reason for an internal failure (the
     archive was unreadable, or a write/dedupe step raised). ``None`` alone
@@ -2291,6 +2669,7 @@ def proposals_from_archive(
                 source="archive",
                 workspace=workspace,
                 stats=stats,
+                deferrals=deferrals,
             )
             if promoted:
                 if stats is not None:

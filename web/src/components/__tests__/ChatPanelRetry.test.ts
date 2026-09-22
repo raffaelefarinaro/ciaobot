@@ -265,28 +265,4 @@ describe('ChatPanel retry from error bubble', () => {
     expect(messages.style.overflowAnchor).toBe('none')
     wrapper.unmount()
   })
-
-  it('renders a re-entry summary as a tagged assistant bubble', async () => {
-    localStorage.setItem('ciao-reentry-summary-enabled', 'true')
-    const { wrapper, store } = await mountPanel()
-    store.messages['chat-1'] = [
-      { role: 'user', content: 'Earlier prompt', timestamp: '2026-08-08T15:50:00Z' },
-      { role: 'assistant', content: 'Earlier answer', timestamp: '2026-08-08T15:51:00Z' },
-    ]
-    store.reentrySummaries = {
-      'chat-1': '**Resume here**\n\n- Finish the handoff',
-    }
-    await flushPromises()
-
-    const summary = wrapper.find('.reentry-summary-message')
-    expect(summary.exists()).toBe(true)
-    expect(summary.classes()).toContain('assistant')
-    expect(summary.attributes('role')).toBe('status')
-    expect(summary.attributes('aria-label')).toBe('Apple Intelligence summary')
-    expect(summary.find('.reentry-summary-badge').text()).toBe('Summary')
-    expect(summary.find('.reentry-summary-source').text()).toBe('Apple Intelligence')
-    expect(summary.find('.message-content strong').text()).toBe('Resume here')
-    expect(wrapper.findAll('.message-wrap').at(-1)?.classes()).toContain('reentry-summary-wrap')
-    wrapper.unmount()
-  })
 })

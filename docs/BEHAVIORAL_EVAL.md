@@ -34,7 +34,21 @@ shipped scenario against the real guards:
   sibling block and refuses a path belonging to another workspace. The last two
   are zero-tolerance: a drill-down that leaks is worse than no drill-down. This
   is the model-free half of the evaluation issue #460 asked for before the
-  prompt started recommending `vault_expand`.
+  prompt started recommending `vault_expand`. That tool was later deleted
+  (D-03 of the CLI-first migration); `fts_search.expand_note` stays as the
+  library function these contracts measure, while the core prompt now tells
+  recall to widen a truncated snippet with a second, narrower search.
+- **Recall drill-down, negation and abstention** — the same three facts for the
+  other two shapes the acceptance criteria name. A *negation* fixture whose
+  snippet keeps "need a work visa" and drops "no permit is required" proves the
+  gap is not only about superseded values: a snippet-only answer there is the
+  opposite of the note, not merely stale, and the expansion recovers the denial
+  without reaching the sibling block that holds a safe combination. The
+  *abstention* check asks a note a question it does not answer and requires
+  `reason == "no_line_match"` back: the note holds no matching line, so the one
+  block returned is context and not evidence, and the recall rule turns that
+  into "the vault does not record it" rather than an answer read off the
+  fallback block.
 
 The model-backed half was run once for that change, as two arms of the same
 scenario (`recall-truncated-snippet-expansion`) on `claude`/`sonnet`,
@@ -56,7 +70,9 @@ above are what CI enforces.
 
 These checks are model-free and run in CI. A guard regression fails the suite
 even though no model is invoked. The scenario catalog is validated at load:
-20–30 scenarios, all nine categories present, unique ids, no private markers.
+20–32 scenarios, all nine categories present, unique ids, no private markers.
+The ceiling is a cost bound — every scenario is a provider call per repeat — so
+it is widened deliberately when a new behavior needs its own arm, not removed.
 
 ### 2. Bounded model-backed comparison (explicit, credentialed)
 
@@ -213,6 +229,6 @@ No scheduler or credential exists for it in `.github/workflows`, and a
 model-backed job would be both non-deterministic and cost-bearing. The
 deterministic contract checks are the merge gate; the model-backed comparison
 is run explicitly, or from a credentialed scheduled job with the ceiling
-above. This mirrors `docs/MCP.md`'s "Validation status", where a numeric
+above. This mirrors `docs/AGENT_CLI.md`'s "Validation status", where a numeric
 provider evaluation and its cost/credit gate are recorded rather than run on
 every PR.

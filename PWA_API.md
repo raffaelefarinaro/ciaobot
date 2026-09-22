@@ -16,7 +16,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 - `GET /api/setup/list-dirs`, `POST /api/setup/mkdir`, and `GET /api/setup/inspect-folder` back the setup wizard. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost). The folder picker (`list-dirs`, `mkdir`) lists directories only and never reads file contents. `inspect-folder?path=<dir>` returns `{mode: "scratch"|"existing", vault_root, existing_workspaces, has_env}` so the wizard can hide the "First Workspace" text field when nested workspaces are already present.
 - State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host. Missing headers are accepted for non-browser clients.
 - HTTP responses include baseline security headers, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
-- The agent-facing `/mcp/` mount uses a separate scoped bearer capability issued to Ciaobot-managed provider processes; it does not accept the browser session cookie. `GET /api/mcp/status` exposes only readiness and catalog metadata, never a token.
+- `POST /agent/v1/{op}` is the agent CLI's loopback transport (`ciao <noun> <verb>` inside a managed provider shell, see `docs/ARCHITECTURE.md` → `agent_surface.py` and `docs/AGENT_CLI.md`). It takes a scoped bearer capability (`CIAO_AGENT_TOKEN`) in an `Authorization: Bearer` header, runs the registered control-plane operation, and returns the same JSON envelope; it is not a browser or curl API and does not accept the session cookie.
 
 ## Routes
 
@@ -57,7 +57,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
 | GET | `/api/chats/{chat_id}/messages/part` | Fetch one full history row by absolute index (lazy expansion) |
 | GET | `/api/native/sessions` | List locally-running Claude Code CLI sessions for a workspace (handover warning) |
-| POST | `/api/chats/{chat_id}/reentry-summary` | Return an ephemeral Apple Intelligence orientation summary for a reopened chat |
 | GET | `/api/chats/{chat_id}/subagents` | Load subagent transcripts. `?agent_id=` narrows to one agent (bare or `agent-`-prefixed) and skips reading the siblings — what the read-only subagent view polls |
 | GET | `/api/subagents/running` | Live subagents per working chat (metadata only), for the sidebar's subagent rows |
 | POST | `/api/chats/{chat_id}/voice` | Upload voice for transcription |
@@ -102,8 +101,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/housekeeping/{action_id}/dismiss` | Record a "not now" for an ask-style action (e.g. the GitHub star nudge), re-run detection, and return the fresh action list; unknown id is 404 |
 | GET | `/api/models` | List configured models, plus `providers[]` (id, labels, capabilities) from the runtime-provider registry. `?refresh=1` bypasses the provider catalog caches |
 | GET, PATCH | `/api/status` | Read or update status |
-| GET | `/api/mcp/status` | Embedded Ciaobot MCP readiness, tool catalog, project MCP servers (env-key status + observed tools), and active-session counts (no credentials) |
-| GET | `/api/mcp/usage` | Embedded Ciaobot MCP per-tool call/error counters (no credentials) |
+| GET | `/api/mcp/status` | Project MCP server inventory (env-key status + observed tools) and active-session counts (no credentials); Ciaobot's own surface is reported by `/api/agent/status` |
+| GET | `/api/mcp/usage` | Agent surface per-operation call/error counters, plus a `window` object naming the aggregation window (lifetime totals vs. the retained detail records behind them) (no credentials) |
 | POST | `/api/mcp/env-keys` | Save project-MCP env secrets into the workspace `.env` (optionally bind new keys into a server via `server`); values never returned |
 | POST | `/api/mcp/servers` | Create a project MCP server in `.mcp.json` |
 | PATCH | `/api/mcp/servers/{name}` | Update a project MCP server connection (and optional env keys) |
@@ -123,6 +122,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/setup/inspect-folder` | Probe a candidate workspace folder for vault mode and any nested workspaces (bootstrap mode, localhost only) |
 | POST | `/api/setup/mkdir` | Create a folder from the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/stats` | Read CLI stats |
+| GET | `/api/agent/status` | Agent CLI surface status: `{ready, operations, telemetry_path, version}` for the Settings → Agent CLI panel |
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
 | DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
@@ -158,6 +158,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/node/peers` | Register or update node peer links |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
 | POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend (plus the desktop app in dev mode), and restart with latest code |
+| POST | `/api/admin/restart` | Drain active chat work and restart the installed engine without pulling or rebuilding code (authenticated) |
 | GET | `/api/admin/status` | Read admin/deploy status |
 | GET | `/api/admin/skills` | List skills labelled as custom or stock (merged across agent roots) |
 | POST | `/api/admin/skills/add` | Deprecated: returns 410, replaced by `/api/skills/import` |
@@ -188,6 +189,17 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 `healthy` means a reliable scan found no actionable items. `needs_attention` means a reliable scan found findings. `error` means one or more required inputs could not be inspected reliably; `total_issues` includes those scan errors, while `total_errors` counts them separately. Each section object contains its detailed counts, findings, and local errors. An unexpected handler failure returns HTTP 500 with `{"error":"failed to run AI OS audit"}`.
 
 ## Agent recipes
+
+### Restart an installed Linux server
+
+`POST /api/admin/restart` uses the backend's existing chat-drain lifecycle and
+does not run git, pip, npm, or desktop builds. Linux production Settings chooses
+this action when `/api/local/status` reports `restart_only: true`. Development
+deploys retain `/api/admin/deploy`.
+
+```sh
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/restart"
+```
 
 Concrete curl examples for the in-session agent acting on the local API. Auth once, reuse the cookie jar.
 
@@ -648,11 +660,13 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/handov
 **Proposal queue**
 
 Routes: `GET /api/proposals`, `GET /api/proposals/history`,
+`GET /api/proposals/{id}/preview`,
 `POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
 `POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`.
 
-Memory mutations also expose `GET /api/memory/receipts` and
-`POST /api/memory/receipts/{id}/undo` (see below).
+Memory mutations also expose `GET /api/memory/receipts`,
+`GET /api/memory/receipts/{id}` and `POST /api/memory/receipts/{id}/undo`
+(see below).
 
 `accept` PERFORMS the promotion for a `memory`/`profile` row: the entry is written
 into that workspace's bounded region (resolved through `agent_root`, so the right
@@ -675,18 +689,65 @@ nothing. Batch accept applies the same rule per row and reports `promoted` and
 # into the primary workspace's injected region).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
 
+# What accepting one row would write, WITHOUT writing it. Returns
+# {ok, preview} where preview is {id, kind, text, action, operation
+# (add|update|move|none), destination, destination_path, before, after,
+# revision, exact, can_accept, reason, truncated}. `before`/`after` are the
+# exact destination body the accept would replace, computed from the same
+# functions the accept calls - so a stamped learned-at date, a duplicate that
+# writes nothing, and a learning whose recurrence count is bumped instead of
+# appended all show as what they are. `exact: false` marks a kind whose result
+# cannot be known without writing (a `[project]` fold is decided by a model at
+# accept time). `?text=` previews an edited wording against the same current
+# destination. `revision` is the destination digest this preview was computed
+# against; hand it back on the accept below.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/preview"
+
 # Accept one row. Dispatches through the kind's own accept descriptor: memory/
 # profile/user are region edits (returns {action: edit_region, region,
 # leak_warning}), rehome is a file move (returns {action: move_file,
 # destination, justified}). The row is dismissed from the queue; promotion is
 # a separate explicit step, matching the MCP resolve path.
+#
+# Optional JSON body: {"expected_revision": "<preview revision>", "text":
+# "<edited wording>"}. A destination that changed since that revision is
+# refused with 409 {error, conflict: true, preview} carrying a REFRESHED
+# preview, and nothing is written - an accept can never land on top of an edit
+# nobody saw. `text` promotes an edited wording; the decision history still
+# records the bullet's original text, because that is what the dedupe readers
+# compare a re-extracted fact against. Both fields are optional, so a client
+# that shows no preview behaves exactly as before.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/accept"
+
+# Accept a region row, reconciling it against that region's CURRENT entries
+# first, so a fact that supersedes one already there replaces it (undo-logged)
+# instead of being appended beside it. This is the way out of an archive-time
+# deferral. Opt-in because it is one model call per row — the plain accept above
+# is a single synchronous write, and the batch endpoint deliberately never
+# reconciles (one timeout per row). `reconcile` accepts 1/true/yes.
+#
+# When the fresh reconcile cannot decide either, nothing is written, the bullet
+# stays queued, and the 409 is marked `deferred: true` with `reason` and the
+# `competing` region entries (capped at 5) it was weighed against — the one
+# refusal here that another retry can resolve on its own.
+#
+# It composes with the preview handshake above: the PWA sends the card's
+# `expected_revision` on a reconciling accept too, so the check still cannot
+# land on a destination nobody looked at.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/accept?reconcile=1"
 
 # Dismiss one row from the queue. No region/file is touched.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/dismiss"
 
 # Accept or dismiss a set atomically. Body: {"action":"accept|dismiss","ids":[...]}.
 # Every id must resolve or the whole batch is rejected (404) with no file change.
+# Optional "revisions": {"<id>": "<preview revision>"} applies the same
+# conflict guard per row: a row whose destination moved fails on its own with
+# {conflict: true} and stays queued, and the rest of the batch still runs.
+# The reply carries `results` (one entry per row, unchanged) and `summary`:
+# one entry per destination with {destination, action, total, ok, failed,
+# conflicts, duplicates, failed_ids[], errors[]}, so a fifty-row accept reads
+# as what changed and where without losing any per-row failure.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/batch" \
   -H 'content-type: application/json' \
   -d '{"action":"accept","ids":["<id1>","<id2>"]}'
@@ -707,6 +768,20 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # actually served and `at_max` says the request asked for more than the cap, so
 # a wider limit would return the same page - a client paging with "show more"
 # must stop on `at_max` rather than on `truncated`.
+#
+# Each served row also carries `source_path` (the archive transcript it came
+# from, when one still exists on disk) and, where the receipt protocol
+# performed the decision, `change`: {receipt_id, kind, status, destination,
+# undoable, changed, ts}. The decision ledger records the id of the receipt
+# that performed the write, so the join is exact even when the operator edited
+# the wording before accepting (the ledger keeps the ORIGINAL bullet as its
+# text, because append-time dedupe compares a re-extracted fact against it).
+# Rows written before the id was recorded are joined by matching the decision's
+# text against the receipt's - accepts against destination receipts, dismissals
+# against queue receipts, with no cross-fallback. A row with NO `change` key is
+# one the protocol never recorded - every decision made before receipts landed,
+# and every one made outside them - and must be rendered as "No change snapshot
+# available" rather than given an undo it cannot honour.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/history"
 
 # Managed memory mutations (receipts), newest first: every region write, queue
@@ -719,6 +794,16 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/hist
 # history-only (`undoable: false`) facts that must not each restore the file.
 # Optional query params: workspace, limit (default 200).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/memory/receipts"
+
+# One receipt with its before/after images and a line diff, which the list
+# above deliberately strips. Returns {id, workspace, kind, status, ts, actor,
+# source, destination, fact_text, undoable, has_snapshot, changed, error} and,
+# when `has_snapshot`, {before, after, diff[{op, text}], truncated,
+# diff_truncated}. `has_snapshot: false` carries a `reason` and is what the
+# History row renders as "No change snapshot available"; a row that is not
+# undoable carries a `reason` saying which case applies (part of a batch
+# transaction, not applied, itself an undo, or unsupported).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/memory/receipts/$RECEIPT_ID"
 
 # Undo one receipt. Refuses with 409 when the destination changed since the
 # operation (undo would otherwise delete an unrelated later fact), 400 when the
@@ -822,7 +907,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/vaul
 - `ChatInfo.pending_question` (string, in `to_dict()` so it rides every chat list / chat object): raw AskUserQuestion JSON (`{"questions": [...]}`) set when the model paused the chat on a question. When the headless CLI fires AskUserQuestion the server interrupts the live turn so the CLI cannot auto-answer it, persists this field, and clears it on the next user send. The PWA reads it on chat open to rebuild the interactive question picker after a reload. Empty string when no question is pending.
 - `ChatInfo.schedule_id` / `ChatInfo.schedule_title` (strings, in `to_dict()`): backlink to the schedule that created or drives the chat. Stamped in `prepare_schedule_chat` for both schedule branches (project-schedule new chat, fixed-chat reuse). Drives the automation banner in ChatPanel. Empty for interactive chats and for chats created before the field existed. See "Automation banner" above.
 - Schedule state: `.runtime/schedules.json`. Shape and field semantics in `ciao/schedules.py` (`ScheduleEntry`); the `schedule_create`/`schedule_update` MCP tools carry the field semantics in their own docstrings.
-- Automation state: `.runtime/schedules.json` (`ciao/schedules.py`, `ScheduleEntry`), every cadence in one store. A legacy `.runtime/loops.json` is imported once on startup as `frequency: "interval"` entries — the `loop-…` id is kept as the `schedule_id` so deep links still resolve — and renamed `loops.json.migrated`. Interval entries additionally carry `interval_minutes` and `last_status` (`""` | `running` | `ok` | `error` | `busy` | `missing-chat`); their `missed` is always false, since relative cadence has no expected slot to have missed.
+- Automation state: `.runtime/schedules.json` (`ciao/schedules.py`, `ScheduleEntry`), every cadence in one store. A legacy `.runtime/loops.json` is imported once on startup as `frequency: "interval"` entries — the `loop-…` id is kept as the `schedule_id` so deep links still resolve — and renamed `loops.json.migrated`. Interval entries additionally carry `interval_minutes`; their `missed` is always false, since relative cadence has no expected slot to have missed. `last_status` (`""` | `running` | `ok` | `error` | `busy` | `missing-chat` | `skipped`) is carried by every cadence: it is stamped `running` at dispatch and replaced by the run's outcome, which is what lets a wall-clock slot tell a completed run apart from one whose turn died mid-flight. A wall-clock entry whose run for the expected slot ended in `error` reports `missed: true` so it can be re-run from the UI (issue #486). `last_status` describes one dispatch, not the entry's whole history: `last_dispatch_id` (`<slot-day>#<token>`) names the dispatch it belongs to, so a run superseded by an overlapping one — a manual "Run now" started just before the cron slot — no longer writes its result over the current run's, while `last_completed_on` records the occurrence a completed run served so an already-done slot is never replayed because a later run for it failed (issue #490).
 - Uploaded media: under the configured runtime/media directory
 
 ## Naming

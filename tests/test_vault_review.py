@@ -1006,7 +1006,7 @@ def test_an_invalid_disposition_does_not_rewrite_the_queue(
     from types import SimpleNamespace
 
     from ciao.control_plane import CiaoControlPlane, ControlPlaneError
-    from ciao.mcp_server import McpPrincipal
+    from ciao.control_plane import McpPrincipal
 
     monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / ".ciao"))
     _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")

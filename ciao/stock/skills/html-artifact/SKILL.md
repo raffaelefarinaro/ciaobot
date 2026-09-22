@@ -7,7 +7,7 @@ description: Build a self-contained interactive HTML page (an artifact) that Cia
 
 An artifact is one self-contained `.html` file in the workspace. Ciaobot renders it in the pinned panel next to the chat, with a Preview/Code toggle, and the user can open it full-window in a real browser.
 
-Write the file, then call `file_surface` on it. Writing alone paints an inline card; only `file_surface` opens the panel.
+Write the file, then run `ciao file surface <path>` on it. Writing alone paints an inline card; only `ciao file surface` opens the panel.
 
 ## Use an artifact when
 
@@ -66,7 +66,7 @@ Static SVG diagrams follow the same rules plus the anti-machine-made ones above:
 
 ## Iterating
 
-Editing the file and calling `file_surface` again is enough; the panel reloads the frame when the turn ends. The user can comment on the rendered page (select text, or Alt+Click an element) and the comment rides on the next chat message. After a revision the frame reloads and old comment highlights are re-applied by quoted text where they still match; an Alt+Click comment on a textless node (an SVG shape, a chart bar) re-appears as an outline on that element. The user can also edit the source directly from the panel's Code view, and every write is snapshotted, so History and Diff work like any other file.
+Editing the file and running `ciao file surface` again is enough; the panel reloads the frame when the turn ends. The user can comment on the rendered page (select text, or Alt+Click an element) and the comment rides on the next chat message. After a revision the frame reloads and old comment highlights are re-applied by quoted text where they still match; an Alt+Click comment on a textless node (an SVG shape, a chart bar) re-appears as an outline on that element. The user can also edit the source directly from the panel's Code view, and every write is snapshotted, so History and Diff work like any other file.
 
 ## Checklist before surfacing
 
@@ -75,7 +75,7 @@ Editing the file and calling `file_surface` again is enough; the panel reloads t
 3. Viewport meta, dark-mode media query, works at 420px
 4. Under 2 MB
 5. Every number labelled
-6. `file_surface` called
+6. `ciao file surface` called
 
 ## More
 

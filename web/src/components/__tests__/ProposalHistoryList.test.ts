@@ -7,6 +7,7 @@ import { nextTick } from 'vue'
 import ProposalHistoryList from '../ProposalHistoryList.vue'
 import { useProposalsStore } from '../../stores/proposals'
 import { useProjectStore } from '../../stores/projects'
+import { useFileViewerStore } from '../../stores/fileViewer'
 import type { ProposalHistoryRow } from '../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
@@ -357,6 +358,213 @@ describe('ProposalHistoryList', () => {
     expect(wrapper.find('.ph-error').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('No decisions yet.')
     expect(wrapper.text()).not.toContain('No decisions match')
+    wrapper.unmount()
+  })
+})
+
+describe('ProposalHistoryList changes and undo', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    apiGet.mockReset()
+    apiPost.mockReset()
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  function mockHistory(rows: ProposalHistoryRow[], receipt?: Record<string, unknown>) {
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/memory/receipts/')) {
+        return receipt
+          ? Promise.resolve(receipt)
+          : Promise.reject(new Error('no receipt'))
+      }
+      return Promise.resolve({ rows, total: rows.length, truncated: false })
+    })
+  }
+
+  async function openChanges() {
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.ph-change-toggle').trigger('click')
+    await flushPromises()
+    return wrapper
+  }
+
+  it('says no snapshot is available for a decision the protocol never recorded', async () => {
+    // Legacy rows must stay readable AND must not claim an undo: the undo path
+    // would only refuse them, after the operator had been told it was possible.
+    mockHistory([historyRow()])
+    const wrapper = await openChanges()
+
+    expect(wrapper.find('.ph-change').text()).toContain('No change snapshot available')
+    expect(wrapper.text()).not.toContain('undo this change')
+    // Nothing is fetched for a row with no receipt to fetch.
+    expect(apiGet.mock.calls.filter(([u]) => String(u).startsWith('/api/memory/receipts'))).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('shows the before/after of a recorded change and offers undo', async () => {
+    mockHistory(
+      [historyRow({
+        change: {
+          receipt_id: 'mrcpt_1', kind: 'region_apply', status: 'applied',
+          destination: 'ciao:memory', undoable: true, changed: true, ts: '2026-09-01T09:59:00+00:00',
+        },
+      })],
+      {
+        id: 'mrcpt_1', workspace: 'personal', kind: 'region_apply', status: 'applied',
+        ts: '2026-09-01T09:59:00+00:00', actor: 'operator', source: 'pwa',
+        destination: 'ciao:memory', fact_text: 'Remember the thing',
+        undoable: true, has_snapshot: true, changed: true, error: '',
+        before: '- An older fact.', after: '- An older fact.\n- Remember the thing',
+        diff: [{ op: 'added', text: '- Remember the thing' }],
+      },
+    )
+    const wrapper = await openChanges()
+
+    expect(apiGet).toHaveBeenCalledWith('/api/memory/receipts/mrcpt_1?workspace=personal')
+    expect(wrapper.find('.ph-change-line--added').text()).toContain('Remember the thing')
+
+    apiPost.mockResolvedValue({ ok: true } as never)
+    await wrapper.findAll('.ph-change-actions button').find(b => b.text() === 'undo this change')!.trigger('click')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledWith('/api/memory/receipts/mrcpt_1/undo?workspace=personal')
+    wrapper.unmount()
+  })
+
+  it('keeps same-id receipts from two workspaces apart', async () => {
+    // Receipt ids are content-derived, so the same id can name different
+    // operations in different workspaces. The cache is keyed by workspace +
+    // id: without that, whichever workspace loaded first wins everywhere.
+    const change = {
+      receipt_id: 'mrcpt_same', kind: 'region_apply', status: 'applied',
+      destination: 'ciao:memory', undoable: true, changed: true, ts: '2026-09-01T09:59:00+00:00',
+    }
+    const rows = [
+      historyRow({ id: 'h1', workspace: 'personal', change }),
+      historyRow({ id: 'h2', workspace: 'work', change }),
+    ]
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/memory/receipts/')) {
+        const ws = url.includes('workspace=work') ? 'work' : 'personal'
+        const fact = ws === 'work' ? 'Work fact' : 'Personal fact'
+        return Promise.resolve({
+          id: 'mrcpt_same', workspace: ws, kind: 'region_apply', status: 'applied',
+          ts: '2026-09-01T09:59:00+00:00', actor: 'operator', source: 'pwa',
+          destination: 'ciao:memory', fact_text: fact,
+          undoable: true, has_snapshot: true, changed: true, error: '',
+          before: '- An older fact.', after: `- An older fact.\n- ${fact}`,
+          diff: [{ op: 'added', text: `- ${fact}` }],
+        })
+      }
+      return Promise.resolve({ rows, total: rows.length, truncated: false })
+    })
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+    // Personal first: loads and caches the receipt under that workspace.
+    useProjectStore().activeWorkspace = 'personal'
+    await nextTick()
+    await flushPromises()
+    await wrapper.findAll('.ph-change-toggle')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.ph-change').text()).toContain('Personal fact')
+
+    // Then work: the same receipt id must load that workspace's own detail,
+    // not the cached personal one.
+    useProjectStore().activeWorkspace = 'work'
+    await nextTick()
+    await flushPromises()
+    await wrapper.findAll('.ph-change-toggle')[0].trigger('click')
+    await flushPromises()
+    const workChange = wrapper.find('.ph-change')
+    expect(workChange.text()).toContain('Work fact')
+    expect(workChange.text()).not.toContain('Personal fact')
+    wrapper.unmount()
+  })
+
+  it('keeps the change on screen when an undo is refused', async () => {
+    // A refused undo is the common failure here. Replacing the diff with the
+    // refusal left the operator reading "undo would remove unrelated facts"
+    // with no sight of the change it was talking about.
+    mockHistory(
+      [historyRow({
+        change: {
+          receipt_id: 'mrcpt_3', kind: 'region_apply', status: 'applied',
+          destination: 'ciao:memory', undoable: true, changed: true, ts: '2026-09-01T09:59:00+00:00',
+        },
+      })],
+      {
+        id: 'mrcpt_3', workspace: 'personal', kind: 'region_apply', status: 'applied',
+        ts: '2026-09-01T09:59:00+00:00', actor: 'operator', source: 'pwa',
+        destination: 'ciao:memory', fact_text: 'Remember the thing',
+        undoable: true, has_snapshot: true, changed: true, error: '',
+        before: '- An older fact.', after: '- An older fact.\n- Remember the thing',
+        diff: [{ op: 'added', text: '- Remember the thing' }],
+      },
+    )
+    const wrapper = await openChanges()
+    apiPost.mockRejectedValue(new Error('the destination changed after this operation'))
+
+    await wrapper.findAll('.ph-change-actions button').find(b => b.text() === 'undo this change')!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.ph-change-error').text()).toContain('the destination changed')
+    expect(wrapper.find('.ph-change-line--added').text()).toContain('Remember the thing')
+    wrapper.unmount()
+  })
+
+  it('offers no undo for a receipt the protocol cannot reverse, and says why', async () => {
+    mockHistory(
+      [historyRow({
+        change: {
+          receipt_id: 'mrcpt_2', kind: 'queue_resolve', status: 'applied',
+          destination: '', undoable: false, changed: true, ts: '2026-09-01T09:59:00+00:00',
+        },
+      })],
+      {
+        id: 'mrcpt_2', workspace: 'personal', kind: 'queue_resolve', status: 'applied',
+        ts: '2026-09-01T09:59:00+00:00', actor: 'operator', source: 'pwa',
+        destination: '', fact_text: 'Remember the thing',
+        undoable: false, has_snapshot: true, changed: true, error: '',
+        reason: 'this row is part of a batch whose single transaction receipt carries the undo',
+        before: 'a', after: 'b',
+        diff: [{ op: 'removed', text: 'a' }, { op: 'added', text: 'b' }],
+      },
+    )
+    const wrapper = await openChanges()
+
+    expect(wrapper.text()).not.toContain('undo this change')
+    expect(wrapper.find('.ph-change').text()).toContain('part of a batch')
+    wrapper.unmount()
+  })
+
+  it('links to the archive a decision came from when one is still on disk', async () => {
+    mockHistory([historyRow({ source: 'chat-42-2026-09-01', source_path: '/logs/Chats/chat-42/claude/chat-42-2026-09-01.md' })])
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const link = wrapper.find('.ph-source-link')
+    expect(link.exists()).toBe(true)
+    const viewer = useFileViewerStore()
+    const open = vi.spyOn(viewer, 'open').mockResolvedValue(undefined as never)
+    await link.trigger('click')
+    expect(open).toHaveBeenCalledWith('/logs/Chats/chat-42/claude/chat-42-2026-09-01.md')
+    wrapper.unmount()
+  })
+
+  it('prints the source as plain text when the archive is gone', async () => {
+    mockHistory([historyRow({ source: 'chat-42-2026-09-01' })])
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.ph-source-link').exists()).toBe(false)
+    expect(wrapper.find('.ph-source-name').text()).toBe('chat-42-2026-09-01')
     wrapper.unmount()
   })
 })

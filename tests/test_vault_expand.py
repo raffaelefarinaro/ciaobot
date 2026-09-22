@@ -1,5 +1,10 @@
 """The scoped evidence drill-down for recall (issue #460).
 
+The `vault_expand` tool that exposed this to agents was deleted in the
+CLI-first migration (D-03); `fts_search.expand_note` remains as the library
+function the behavioural-eval recall contracts measure, and these tests pin its
+bounds.
+
 `vault_search` answers with `_public_snippet`: the FTS-highlighted lines only,
 inside SQLite's 32-token budget. That is a privacy property — it is what keeps
 an unrelated private line out of a recall answer — and the core prompt turns it
@@ -15,16 +20,13 @@ the full-note read the rule exists to prevent.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sqlite3
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from ciao import fts_search
-from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
 
 # One fixture note carrying every shape the drill-down has to get right:
 #
@@ -365,76 +367,118 @@ def test_expansion_falls_back_to_one_block_when_no_line_matches(
     assert "ac-live-7e2c9a441b" not in _text(result)
 
 
-# ── Control-plane surface ──────────────────────────────────────────────────
+# ── Negation, and the abstention branch ────────────────────────────────────
+#
+# The qualification fixture above covers one half of what the 32-token budget
+# cuts: a clause that replaces the value the snippet kept. A NEGATION is the
+# other half, and it is worse — the snippet-only answer is not stale, it is the
+# opposite of what the note records. The abstention case is the third leg the
+# drill-down has to get right: a note the query matches by topic while the fact
+# it asks for is simply absent, where widening must return a signal rather than
+# an unrelated block dressed up as evidence.
+
+ONBOARDING = """# Contractor onboarding
+
+## Visas
+
+Contractors from the EU need a work visa for the Zurich office.
+That stopped being true after the 2026-03 bilateral update: no permit is
+required for them any more.
+
+## Emergency
+
+Safe combination is 8891.
+"""
+
+NEGATION_QUERY = "work visa Zurich office contractors"
 
 
-def _plane(base: Path) -> CiaoControlPlane:
-    config = SimpleNamespace(
-        workspace_root=base,
-        vault_root=base / "personal" / "memory-vault",
-        state_path=base / ".runtime" / "state.json",
-        workspace=lambda name: SimpleNamespace(name=name),
+def _onboarding(tmp_path: Path) -> tuple[Path, Path, str]:
+    base = tmp_path / "install"
+    vault = base / "personal" / "memory-vault"
+    (vault / "projects").mkdir(parents=True, exist_ok=True)
+    (vault / "projects" / "Onboarding.md").write_text(ONBOARDING, encoding="utf-8")
+    return base, vault, os.path.join(
+        "personal", "memory-vault", "projects", "Onboarding.md"
     )
-    return CiaoControlPlane(
-        config,
-        project_chat_manager=SimpleNamespace(
-            _workspace_vault_root=lambda ws: base / ws / "memory-vault"
-        ),
-        schedule_manager=SimpleNamespace(),
+
+
+def test_snippet_drops_the_negation_that_reverses_the_answer(
+    tmp_path: Path,
+) -> None:
+    """The baseline for the negation shape, as for the qualification one."""
+    base, vault, _ = _onboarding(tmp_path)
+    conn = _indexed(base, vault)
+    rows = fts_search.search_vault(
+        conn, NEGATION_QUERY, path_prefix=fts_search.vault_key_prefix(vault, base)
     )
+    assert rows, "the fixture note must match the query"
+    snippet = rows[0]["snippet"]
+    assert "need a work visa" in snippet
+    assert "no permit" not in snippet
 
 
-def _principal(workspace: str = "personal") -> McpPrincipal:
-    return McpPrincipal(
-        token_id="t", chat_id="c", project_id="p", workspace=workspace, provider="claude"
+def test_expansion_recovers_the_negation(tmp_path: Path) -> None:
+    base, vault, key = _onboarding(tmp_path)
+    conn = _indexed(base, vault)
+    result = _expand(conn, base, vault, key, query=NEGATION_QUERY)
+    assert result is not None
+    body = _text(result)
+    assert "no permit" in body
+    assert "bilateral update" in body
+    # The denial arrives; the sibling block's safe combination does not.
+    assert "8891" not in body
+    assert [s["heading"] for s in result["sections"]] == ["Visas"]
+
+
+def test_expansion_signals_that_it_has_no_evidence_for_the_question(
+    tmp_path: Path,
+) -> None:
+    """An absent fact must come back as a signal, not as a confident paragraph.
+
+    `no_line_match` is the drill-down's abstention branch: the note holds no
+    line matching the query, so the single block returned is context rather than
+    evidence, and the recall rule says to abstain instead of answering from it.
+    """
+    base, vault = _vault(tmp_path)
+    conn = _indexed(base, vault)
+    result = _expand(
+        conn, base, vault, _key(), query="penalty percentage for late payment"
     )
-
-
-def test_control_plane_expand_returns_bounded_context(tmp_path: Path) -> None:
-    base, _vault_root = _vault(tmp_path)
-    plane = _plane(base)
-    rows = asyncio.run(plane.vault_search(_principal(), QUERY))["data"]
-    assert rows, "the search must find the note first"
-    result = asyncio.run(plane.vault_expand(_principal(), rows[0]["path"], QUERY))
-    body = "\n".join(s["text"] for s in result["data"]["sections"])
-    assert "180" in body
+    assert result is not None
+    assert result["reason"] == "no_line_match"
+    body = _text(result)
+    assert "penalty" not in body.casefold()
+    # The fallback is still one bounded block of the same note, not the note.
+    assert len(result["sections"]) == 1
     assert "ac-live-7e2c9a441b" not in body
+    assert "4417" not in body
 
 
-def test_control_plane_expand_rejects_a_foreign_path(tmp_path: Path) -> None:
-    base, _personal = _vault(tmp_path, "personal")
-    _vault(tmp_path, "work")
-    plane = _plane(base)
-    asyncio.run(plane.vault_search(_principal("work"), QUERY))
-    with pytest.raises(ControlPlaneError) as excinfo:
-        asyncio.run(plane.vault_expand(_principal("personal"), _key("work"), QUERY))
-    assert excinfo.value.code == "note_not_matched"
+def test_a_function_word_does_not_anchor_a_window(tmp_path: Path) -> None:
+    """A stopword is not evidence, and must not choose which block is widened.
 
+    `_expand_terms` feeds a substring test over the note's lines, so before the
+    stopword filter the word "for" in a natural-language query matched "Door
+    code for the studio is 4417" and returned the Access block to a caller
+    asking about billing. The widening has to be driven by the words that
+    carry the question, or it is neither purpose-driven nor bounded by it.
+    """
+    assert fts_search._expand_terms("penalty percentage for late payment") == [
+        "penalty",
+        "percentage",
+        "late",
+        "payment",
+    ]
+    assert fts_search._expand_terms("what is the door code") == ["door", "code"]
+    # A query of nothing but function words leaves no anchor at all.
+    assert fts_search._expand_terms("what about that") == []
 
-def test_control_plane_expand_requires_a_path(tmp_path: Path) -> None:
-    base, _vault_root = _vault(tmp_path)
-    plane = _plane(base)
-    with pytest.raises(ControlPlaneError) as excinfo:
-        asyncio.run(plane.vault_expand(_principal(), "  ", QUERY))
-    assert excinfo.value.code == "invalid_request"
-
-
-# ── Catalog and prompt wiring ──────────────────────────────────────────────
-
-
-def test_expand_is_an_auto_approved_read_tool() -> None:
-    from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS
-
-    assert "vault_expand" in AUTO_APPROVED_MCP_TOOLS
-
-
-def test_core_prompt_directs_recall_to_the_bounded_drill_down() -> None:
-    """The prompt must offer the drill-down *and* keep the rule it refines."""
-    from ciao.core_prompt import _system_instructions
-
-    text = _system_instructions()
-    assert "vault_expand" in text
-    assert "do not open a full vault note with a generic file-read tool" in text
+    base, vault = _vault(tmp_path)
+    conn = _indexed(base, vault)
+    result = _expand(conn, base, vault, _key(), query="the late payment terms")
+    assert result is not None
+    assert "4417" not in _text(result)
 
 
 # ── A note that stops being valid UTF-8 after it was indexed ───────────────
@@ -442,9 +486,9 @@ def test_core_prompt_directs_recall_to_the_bounded_drill_down() -> None:
 # The incremental pass logs a decode failure and KEEPS the note's existing FTS
 # row (ciao/fts_search.py::index_vault), so the key still resolves and the
 # lookup still reaches the file. The read is what fails, with a
-# UnicodeDecodeError — not an OSError. `vault_expand` is a read-only tool whose
-# contract is that it fails closed and answers `note_not_matched` for anything
-# it cannot serve, so an escaping decode error is a contract break.
+# UnicodeDecodeError — not an OSError. `expand_note` fails closed and returns
+# ``None`` for anything it cannot serve, so an escaping decode error is a
+# contract break.
 
 _INVALID_UTF8 = b"# Northwind retainer\n\nrate is \xff\xfe billed at 180\n"
 
@@ -472,21 +516,6 @@ def test_expansion_refuses_a_note_that_is_no_longer_valid_utf8(
     ).fetchone() is not None
 
     assert _expand(conn, base, vault, _key()) is None
-
-
-def test_control_plane_expand_answers_note_not_matched_for_undecodable_bytes(
-    tmp_path: Path,
-) -> None:
-    """The documented refusal, not an internal error."""
-    base, vault = _vault(tmp_path)
-    plane = _plane(base)
-    rows = asyncio.run(plane.vault_search(_principal(), QUERY))["data"]
-    assert rows, "the note must be indexed before it is corrupted"
-    _corrupt_after_indexing(vault)
-
-    with pytest.raises(ControlPlaneError) as excinfo:
-        asyncio.run(plane.vault_expand(_principal(), rows[0]["path"], QUERY))
-    assert excinfo.value.code == "note_not_matched"
 
 
 def test_force_reindexing_an_undecodable_note_is_skipped_not_fatal(

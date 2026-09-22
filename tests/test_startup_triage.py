@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,12 +52,41 @@ def _resolve(entry):
     return ("claude", "sonnet", "auto", "claude")
 
 
-def _issue_report(errors: int, failed: int) -> dict:
-    return {
-        "error_line_count": errors,
-        "failed_jobs": [{"job": f"job{i}"} for i in range(failed)],
-        "report_text": "report",
-    }
+def _record_failure(ended: datetime, job: str = "background_run") -> None:
+    job_runs.record_run(job_runs.JobRun(
+        job=job, label="Background command run",
+        started_at=ended.isoformat(), ended_at=ended.isoformat(),
+        status="error", error="one-off boom",
+    ))
+
+
+def _seed_issues(
+    config: SimpleNamespace, *, error_lines: int = 0, failures: int = 0
+) -> None:
+    """Put real runtime issues where ``build_issue_report`` looks for them.
+
+    These tests used to hand ``run_startup_triage`` a hand-rolled report dict
+    whose error count lived under ``error_line_count`` — a key
+    ``build_issue_report`` has never emitted (it emits ``error_log_lines``).
+    The fixture and the gate agreed with each other and both disagreed with
+    the producer, so the error-log half of the gate was dead in production
+    while the suite stayed green. Seeding the real error log and run records
+    and letting the real producer build the report exercises the contract
+    instead of restating it.
+    """
+    runtime = Path(config.state_path).parent
+    runtime.mkdir(parents=True, exist_ok=True)
+    if error_lines:
+        (runtime / "server_errors.log").write_text(
+            "".join(
+                f"2026-09-20 12:00:{i:02d} ERROR ciao.web: boom {i}\n"
+                for i in range(error_lines)
+            ),
+            encoding="utf-8",
+        )
+    now = datetime.now(UTC)
+    for i in range(failures):
+        _record_failure(now - timedelta(minutes=i + 1), job=f"job{i}")
 
 
 def test_cap_service_logs_keeps_recent_tail(tmp_path: Path) -> None:
@@ -79,10 +109,7 @@ def test_cap_service_logs_keeps_recent_tail(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_errors_means_no_chat(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "ciao.debug_report.build_issue_report", lambda root, **kw: _issue_report(0, 0)
-    )
+async def test_no_errors_means_no_chat(tmp_path: Path) -> None:
     pcm = FakePCM()
 
     assert await run_startup_triage(pcm, _config(tmp_path), _resolve) is False
@@ -90,12 +117,46 @@ async def test_no_errors_means_no_chat(tmp_path: Path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_errors_dispatch_triage_chat(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "ciao.debug_report.build_issue_report", lambda root, **kw: _issue_report(5, 2)
-    )
+async def test_error_log_alone_dispatches_triage_chat(tmp_path: Path, caplog) -> None:
+    """Error-log lines must trigger a triage even with no failed job run.
+
+    The gate read ``error_line_count``, which ``build_issue_report`` never
+    emits, so this half of it always evaluated falsy: a boot whose
+    ``server_errors.log`` held real tracebacks opened no triage chat unless a
+    background job happened to fail in the same window, and the log is only
+    cleared by a clean triage, so the errors accumulated forever.
+    """
     pcm = FakePCM()
     config = _config(tmp_path)
+    _seed_issues(config, error_lines=4)
+
+    with caplog.at_level(logging.INFO, logger="ciao.startup_triage"):
+        assert await run_startup_triage(pcm, config, _resolve) is True
+    assert len(pcm.dispatched) == 1
+    # The operator reads these counts; the gate no longer supplies them, so
+    # they are asserted separately from the dispatch decision.
+    assert "4 error line(s) and 0 failed job run(s)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_debug_log_alone_does_not_dispatch(tmp_path: Path) -> None:
+    """The verbose debug log is ambient output, not an issue."""
+    pcm = FakePCM()
+    config = _config(tmp_path)
+    runtime = Path(config.state_path).parent
+    (runtime / "server_debug.log").write_text(
+        "2026-09-20 12:00:00 DEBUG ciao.web: chatty\n", encoding="utf-8"
+    )
+
+    assert await run_startup_triage(pcm, config, _resolve) is False
+    assert pcm.dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_errors_dispatch_triage_chat(tmp_path: Path) -> None:
+    pcm = FakePCM()
+    config = _config(tmp_path)
+    _seed_issues(config, error_lines=5, failures=2)
 
     assert await run_startup_triage(pcm, config, _resolve) is True
 
@@ -115,12 +176,10 @@ async def test_errors_dispatch_triage_chat(tmp_path: Path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cooldown_blocks_repeat_triage(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "ciao.debug_report.build_issue_report", lambda root, **kw: _issue_report(1, 0)
-    )
+async def test_cooldown_blocks_repeat_triage(tmp_path: Path) -> None:
     pcm = FakePCM()
     config = _config(tmp_path)
+    _seed_issues(config, error_lines=1)
 
     assert await run_startup_triage(pcm, config, _resolve) is True
     assert await run_startup_triage(pcm, config, _resolve) is False
@@ -139,14 +198,6 @@ def _write_marker(config: SimpleNamespace, when: datetime) -> None:
     (config.state_path.parent / TRIAGE_MARKER_NAME).write_text(
         json.dumps({"last_dispatched_at": when.isoformat()}), encoding="utf-8"
     )
-
-
-def _record_failure(ended: datetime) -> None:
-    job_runs.record_run(job_runs.JobRun(
-        job="background_run", label="Background command run",
-        started_at=ended.isoformat(), ended_at=ended.isoformat(),
-        status="error", error="one-off boom",
-    ))
 
 
 @pytest.mark.asyncio

@@ -116,15 +116,10 @@ class AgentRequest:
     # Provider-native thinking/reasoning level (see THINKING_LEVELS).
     # Empty = provider default, nothing is forwarded.
     thinking_level: str = ""
-    # Ephemeral managed-process MCP credentials. The Ciaobot MCP control plane
-    # is the only agent-facing control surface, so a request always carries a
-    # url/token pair -- ``build_agent_request`` raises rather than dispatch a
-    # turn without one. They are deliberately kept out of ``extra_env`` so
-    # normal model-created shell commands never see the bearer token.
-    # Providers translate these fields into their native MCP configuration
-    # immediately before spawning the process.
-    mcp_url: str = ""
-    mcp_token: str = ""
+    # The bearer capability the turn hands the agent is carried in ``extra_env``
+    # as ``CIAO_AGENT_TOKEN`` (with ``CIAO_AGENT_URL`` as the loopback base);
+    # ``build_agent_request`` always injects both, because every chat is on the
+    # CLI surface since S6. See ``agent_control_token`` / ``provider_reuse_key``.
     # Stable routing context is committed to the chat registry only after the
     # provider reports a native session. Keeping these values on the request
     # lets a pre-session failure retry with the full capsule.
@@ -133,6 +128,33 @@ class AgentRequest:
     # Full stable context held aside for providers that have to replace a
     # missing/invalid resumed session after the request was built.
     stable_context_prefix: str = ""
+
+    @property
+    def control_token(self) -> str:
+        """See :func:`agent_control_token`."""
+        return agent_control_token(self)
+
+
+def agent_control_token(request: object) -> str:
+    """The bearer capability a turn hands the agent.
+
+    Since S6 every chat runs on the CLI surface, so the capability travels as
+    ``CIAO_AGENT_TOKEN`` in ``extra_env`` (the foreground shell's environment).
+    A plain function so provider tests' duck-typed request stubs keep working.
+    """
+    extra_env = getattr(request, "extra_env", None) or {}
+    return str(extra_env.get("CIAO_AGENT_TOKEN", "") or "")
+
+
+def provider_reuse_key(request: object) -> str:
+    """What must be unchanged for a managed provider process to be reused.
+
+    The control token is fixed when the managed provider process starts, so
+    providers key process reuse on this value: a rotated token (expiry,
+    ``new_session``, handover) must respawn the process. Empty when the turn
+    carries no capability at all.
+    """
+    return agent_control_token(request)
 
 
 @dataclass(slots=True)

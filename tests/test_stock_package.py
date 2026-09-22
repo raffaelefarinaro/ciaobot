@@ -40,8 +40,8 @@ def test_stock_package_contains_generic_agents_commands_and_schedules() -> None:
     assert {path.name for path in stock.joinpath("commands").iterdir() if path.name.endswith(".md")} == EXPECTED_COMMANDS
     assert stock.joinpath("skills").is_dir()
     assert not list(stock.joinpath("skills").glob("*.md"))
-    assert stock.joinpath("public", "CLAUDE.md").is_file()
-    assert stock.joinpath("workspace", "CLAUDE.md").is_file()
+    assert stock.joinpath("public", "AGENTS.md").is_file()
+    assert stock.joinpath("workspace", "AGENTS.md").is_file()
     assert stock.joinpath("workspace", "CIAO_CUSTOMIZATION.md").is_file()
     assert stock.joinpath("evals", "scenarios.json").is_file()
     assert stock.joinpath("deploy", "com.ciao.server.plist.tmpl").is_file()
@@ -165,7 +165,7 @@ def test_stock_memory_agent_role_matches_curator_contract() -> None:
 def test_stock_workspace_guide_carries_default_caps() -> None:
     """Seeded guides must carry the shipped default caps, not stale ones."""
     stock = resources.files("ciao.stock")
-    guide = stock.joinpath("workspace", "CLAUDE.md").read_text(encoding="utf-8")
+    guide = stock.joinpath("workspace", "AGENTS.md").read_text(encoding="utf-8")
 
     assert "<!-- ciao:memory:start cap=3000 -->" in guide
     assert "<!-- ciao:profile:start cap=1375 -->" in guide

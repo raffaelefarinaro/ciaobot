@@ -1118,7 +1118,7 @@ def test_build_cli_task_wake_prompt_names_command_and_tool() -> None:
     assert "Monitor" in prompt
     assert "adoption report 2026-08 DAG progress and failures" in prompt
     assert "command: tail -f /tmp/adoption_2026-08.log" in prompt
-    assert "background_run_start" in prompt
+    assert "ciao run start" in prompt
     assert "pgrep/ps" in prompt
 
 
@@ -1169,7 +1169,7 @@ async def test_watcher_wakes_chat_when_cli_owning_a_monitor_task_is_gone(
     assert count == 1
     assert "bl7dzu4ku" in prompt
     assert "Monitor" in prompt
-    assert "background_run_start" in prompt
+    assert "ciao run start" in prompt
     assert "tail -f /tmp/adoption_2026-08.log" in prompt
 
 

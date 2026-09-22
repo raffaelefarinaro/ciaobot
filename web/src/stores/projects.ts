@@ -1,13 +1,10 @@
 import { defineStore } from 'pinia'
 import { ref, computed, onScopeDispose, watch, toRaw } from 'vue'
 import { api } from '../lib/api'
-import { getPendingBucket, normalizePendingBuckets, setPendingBucket } from '../lib/pendingBuckets'
 import { buildFixPrompt } from '../lib/fixError'
-import { formatChatComments, formatFileComments, type ChatCommentAnchor } from '../lib/commentContext'
 import { isPlausibleFilePath } from '../lib/filePaths'
 import { useFileViewerStore } from './fileViewer'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
-import { readReentrySummaryEnabled } from '../composables/useReentrySummaryPreference'
 import {
   isRestartDrainMessage,
   reloadWhenServerReady,
@@ -39,41 +36,41 @@ import type {
   WorkspacesResponse,
 } from '../lib/types'
 import { bareAgentId, sameAgent } from '../lib/subagentIds'
+import {
+  chatWsReconnectDelayMs,
+  isHostConnectionUnavailableMessage,
+  shouldReconnectActiveChatOnStreamingStarted,
+} from '../lib/chatWs'
+import {
+  dropSupersededLiveTail,
+  historySignature,
+  isLiveTraceRow,
+  mergeMessageFields,
+  mergeMetadata,
+  normalizeMessages,
+  queuedTextAlreadyRendered,
+  toChatMessage,
+  toolIcon,
+  type ServerRow,
+} from '../lib/chatHistory'
+import {
+  parseCapabilityQuestion,
+  parseQuestions,
+  questionsSignature,
+  type ActiveQuestion,
+  type CapabilityQuestion,
+} from '../lib/chatQuestions'
+import { createChatAnnotations, type PreparedMessage } from './chatAnnotations'
 
-export function shouldReconnectActiveChatOnStreamingStarted(
-  socket: Pick<WebSocket, 'readyState'> | undefined,
-): boolean {
-  // CONNECTING=0, OPEN=1. Reconnecting in either state replays the broker
-  // buffer into a client that may already have consumed live deltas, which
-  // duplicates streamed text chunk by chunk.
-  return !socket || socket.readyState > 1
+// Moved to focused modules; re-exported so importers of this store keep
+// resolving them. `lib/chatWs.ts` owns the reconnect policy and
+// `lib/safeList.ts` the checked list write.
+export {
+  chatWsReconnectDelayMs,
+  isHostConnectionUnavailableMessage,
+  shouldReconnectActiveChatOnStreamingStarted,
 }
-
-/** Backoff for unexpected per-chat WS drops. `attempt` is 1-based. */
-export function chatWsReconnectDelayMs(attempt: number): number {
-  if (attempt <= 1) return 50
-  return Math.min(50 * 2 ** (attempt - 1), 2000)
-}
-
-/** Compatibility check for host proxies from before `host_unreachable` existed. */
-export function isHostConnectionUnavailableMessage(message: string): boolean {
-  return message.trim().toLowerCase().startsWith('host ws unreachable')
-}
-
-const PROTOTYPE_HAZARD_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
-
-/**
- * Checked element write for comment lists whose index comes from stored data.
- * Skips prototype-hazardous keys and out-of-range indices, and writes through
- * `splice` rather than property assignment, so even a guard bypass could not
- * turn the write into a `__proto__` assignment on the array or its prototype.
- */
-export function setListIndex<T>(list: T[], key: number | string, value: T): void {
-  if (typeof key === 'string' && PROTOTYPE_HAZARD_KEYS.has(key)) return
-  const index = typeof key === 'number' ? key : Number(key)
-  if (!Number.isInteger(index) || index < 0 || index >= list.length) return
-  list.splice(index, 1, value)
-}
+export { setListIndex } from '../lib/safeList'
 
 // Must match `_DEFAULT_CHAT_TITLE` on the server: `_is_empty_chat` uses it to
 // tell an abandoned draft from a chat the user deliberately named.
@@ -88,12 +85,6 @@ export const useProjectStore = defineStore('projects', () => {
   ])
   const activeWorkspace = ref<WorkspaceName>('personal')
   const activeChatId = ref<string | null>(null)
-  // Re-entry summaries are requested in the background whenever a non-empty
-  // chat is opened. They are deliberately ephemeral: the first new message
-  // clears the summary so it never becomes part of the conversation history.
-  const reentrySummaries = ref<Record<string, string>>({})
-  const reentrySummaryRequests = new Set<string>()
-  const reentrySummaryRevisions = ref<Record<string, number>>({})
   // False until the first fetchAll() resolves. Gates the home empty state so
   // a restored active chat does not flash a blank placeholder.
   const bootstrapped = ref(false)
@@ -132,75 +123,41 @@ export const useProjectStore = defineStore('projects', () => {
   // Per-chat epoch millis when the current turn started streaming. Powers the
   // live elapsed timer in the "Working..." trace meta. Cleared on result.
   const streamStartedAt = ref<Record<string, number>>({})
-  const pendingImagesByChat = ref<Record<string, string[]>>({})
-  const pendingImages = computed<string[]>({
-    get: () => getPendingBucket(pendingImagesByChat.value, activeChatId.value),
-    set: (entries) => {
-      if (!activeChatId.value) return
-      setPendingBucket(pendingImagesByChat.value, activeChatId.value, entries)
-      persistPendingImages()
-    },
-  })
-  // Pending in-file comments captured from the file viewer. Each entry is
-  // a (path, selected text, user note) triple plus an optional source line
-  // range (1-indexed, inclusive). Cleared on send (formatted into the
-  // outgoing message) or via removePendingComment / clear helpers.
-  type PendingComment = {
-    id: string
-    path: string
-    selection: string
-    comment: string
-    lineStart?: number | null
-    lineEnd?: number | null
-    colIndex?: number | null
-    colHeader?: string | null
-    // HTML artifact anchor (CSS selector + text offsets in the rendered page).
-    // Null for markdown/CSV comments; checked before lineStart.
-    artifactSelector?: string | null
-    artifactStartOffset?: number | null
-    artifactEndOffset?: number | null
-    artifactElementTag?: string | null
-    artifactWholeElement?: boolean
-    images?: string[]
-  }
-  const pendingCommentsByChat = ref<Record<string, PendingComment[]>>({})
-  const pendingComments = computed<PendingComment[]>({
-    get: () => getPendingBucket(pendingCommentsByChat.value, activeChatId.value),
-    set: (entries) => {
-      if (!activeChatId.value) return
-      setPendingBucket(pendingCommentsByChat.value, activeChatId.value, entries)
-      persistPendingComments()
-    },
-  })
-  // Durable file comments: persisted per file so they remain visible in the
-  // document viewer after being sent. Keyed by workspace-relative path.
-  type FileComment = PendingComment & { createdAt: string }
-  const fileComments = ref<Record<string, FileComment[]>>({})
-  // Chat comments: ephemeral references to text selected inside a chat bubble.
-  // Formatted as XML-tagged reference blocks (see lib/commentContext.ts).
-  type PendingChatComment = ChatCommentAnchor & {
-    id: string
-    selection: string
-    comment: string
-    images?: string[]
-  }
-  const pendingChatCommentsByChat = ref<Record<string, PendingChatComment[]>>({})
-  const pendingChatComments = computed<PendingChatComment[]>({
-    get: () => getPendingBucket(pendingChatCommentsByChat.value, activeChatId.value),
-    set: (entries) => {
-      if (!activeChatId.value) return
-      setPendingBucket(pendingChatCommentsByChat.value, activeChatId.value, entries)
-      persistPendingChatComments()
-    },
-  })
-  // Pinned file paths per chat/project. Dismissals are remembered per *path*,
-  // not per chat: a replayed `file_surface` event (WS reconnect replays the
-  // in-flight stream's buffer) must not reopen a file the user closed, but a
-  // later surface of a *different* file is a new deliverable and must still
-  // open. A chat-wide flag conflated the two and silently swallowed every
-  // subsequent surface request for the rest of the chat.
-  const pinnedFilePaths = ref<Record<string, string>>({})
-  const dismissedAutoPins = ref<Record<string, string[]>>({})
+  // Everything staged against the next message (pending images, pending file
+  // and chat comments), plus durable per-file comments, pinned files and
+  // auto-pin dismissals, lives in `stores/chatAnnotations.ts` together with the
+  // localStorage keys that back them. The refs below ARE that module's refs —
+  // it is a plain factory, not a second Pinia store — so the names this store
+  // returns behave exactly as when they were declared here.
+  const annotations = createChatAnnotations({ activeChatId })
+  const {
+    pendingImages,
+    pendingComments,
+    pendingChatComments,
+    fileComments,
+    addPendingImageRefs,
+    removePendingImage,
+    clearPendingImages,
+    addPendingComment,
+    removePendingComment,
+    clearPendingComments,
+    fileCommentsFor,
+    removeFileComment,
+    updateFileComment,
+    pinFile,
+    unpinFile,
+    pinnedFileFor,
+    addPendingChatComment,
+    removePendingChatComment,
+    clearPendingChatComments,
+    updatePendingChatComment,
+    addPendingChatCommentImage,
+    removePendingChatCommentImage,
+    addFileCommentImage,
+    removeFileCommentImage,
+    prepareMessage,
+    consumePreparedAttachments,
+  } = annotations
   // 'filecard' carries a file-write tool call (Write/Edit/MultiEdit/NotebookEdit).
   // It breaks contiguous 'tool' groups so the PWA can render a standalone
   // clickable card with a preview link instead of folding it into _activity.
@@ -257,6 +214,12 @@ export const useProjectStore = defineStore('projects', () => {
   // enter chat history: reconnect attempts can repeat indefinitely and would
   // otherwise create one error bubble (and one "Fix this error" action) each.
   const hostConnectionUnavailable = ref(false)
+  // How many ChatPanels are on screen. ChatPanel renders its own
+  // host-connection-card from the flag above, so the global banner uses this
+  // to avoid announcing the same outage twice. A count, not a boolean: the
+  // layout declares ChatPanel twice (mobile and desktop branches) and a
+  // chat switch mounts the new panel before the old one unmounts.
+  const chatPanelsMounted = ref(0)
   type QueuedMessage = { id: string; text: string; images?: string[] }
   function makeQueuedId(): string {
     if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -306,17 +269,6 @@ export const useProjectStore = defineStore('projects', () => {
   // the tool call with empty answers, so the PWA renders its own picker above
   // the composer. Cleared the next time the user sends a message (their reply
   // implicitly answers, regardless of whether they clicked an option).
-  type ActiveQuestionOption = { label: string; description?: string }
-  type ActiveQuestion = {
-    id: string
-    question: string
-    header: string
-    multiSelect: boolean
-    allowOther: boolean
-    isSecret: boolean
-    requestId: string
-    options: ActiveQuestionOption[]
-  }
   const activeQuestions = ref<Record<string, ActiveQuestion[]>>({})
 
   // Signatures of AskUserQuestion pickers the user has already answered or
@@ -331,17 +283,6 @@ export const useProjectStore = defineStore('projects', () => {
   // resolved signature lets `rebuildPendingQuestion` refuse the stale rebuild.
   const resolvedQuestions = ref<Record<string, Set<string>>>({})
 
-  // Stable identity for a picker, computable identically from the live
-  // `activeQuestions` entry (at resolve time) and from a rebuilt `pending_question`
-  // (at rebuild time). Some providers carry a `requestId`; Claude's
-  // picker has none, so fall back to the question content.
-  function questionsSignature(qs: ActiveQuestion[] | undefined): string {
-    if (!qs || !qs.length) return ''
-    const rid = qs[0]?.requestId
-    if (rid) return `rid:${rid}`
-    return `q:${qs.map(q => `${q.id}${q.question}`).join('')}`
-  }
-
   // Record the currently-active picker for `chatId` as resolved. Reads the live
   // `activeQuestions` entry, so it must run before that entry is deleted.
   function markResolvedQuestion(chatId: string) {
@@ -350,112 +291,9 @@ export const useProjectStore = defineStore('projects', () => {
     ;(resolvedQuestions.value[chatId] ||= new Set<string>()).add(sig)
   }
 
-  // Parse the AskUserQuestion tool_input JSON (`{"questions": [...]}`) into the
-  // picker's shape. Shared by the live `tool_use` handler and the reload-time
-  // rebuild from a chat's persisted `pending_question`. Returns [] on anything
-  // unparseable so callers can fall through to the generic trace path.
-  function parseQuestions(
-    toolInput: string | null | undefined,
-    requestId = '',
-  ): ActiveQuestion[] {
-    if (!toolInput) return []
-    try {
-      const parsed = JSON.parse(toolInput)
-      if (!Array.isArray(parsed?.questions)) return []
-      const resolvedRequestId = requestId || String(parsed?.request_id ?? '')
-      if (parsed.questions.length === 0) {
-        // Some provider turns emit the AskUserQuestion tool
-        // with an empty questions array. Do not silently demote that event to
-        // a trace row: surface a free-form response so the user can unblock
-        // the turn and the provider still receives the native request id.
-        return [{
-          id: '__freeform__',
-          question: 'The model needs your input. Enter a response to continue.',
-          header: 'Response',
-          multiSelect: false,
-          allowOther: true,
-          isSecret: false,
-          requestId: resolvedRequestId,
-          options: [],
-        }]
-      }
-      // Claude Code's documented AskUserQuestion shape uses
-      // `question`/`header`/`multiSelect`. Some providers (seen with
-      // MiniMax via the Claude path) emit an alternate shape with
-      // `text`/`type: single_select|multi_select` instead — accept both
-      // so the picker prompt is never blank when the model did ask.
-      return parsed.questions.map((q: Record<string, unknown>, index: number) => {
-        const type = String(q.type ?? '').toLowerCase()
-        return {
-          id: String(q.id ?? index),
-          question: String(q.question ?? q.text ?? ''),
-          header: String(q.header ?? q.title ?? ''),
-          multiSelect: Boolean(q.multiSelect) || type === 'multi_select',
-          allowOther: q.isOther === undefined
-            ? true
-            : Boolean(q.isOther) || !Array.isArray(q.options) || q.options.length === 0,
-          isSecret: Boolean(q.isSecret),
-          requestId: resolvedRequestId,
-          options: Array.isArray(q.options)
-            ? (q.options as Array<Record<string, unknown>>).map(o => ({
-                label: String(o.label ?? o.value ?? ''),
-                description: o.description ? String(o.description) : '',
-              }))
-            : [],
-        }
-      })
-    } catch {
-      return []
-    }
-  }
-
   // ── Image-capability questions ────────────────────────────────────────
-  // Rendered when the engine pre-flights an image turn and the selected
-  // model cannot see images; the user picks a vision-capable model (switch),
-  // opens the full model picker, or cancels. Answered with a
-  // `capability_response` client message. Unlike `activeQuestions` there is
-  // no persisted copy on the chat — the question lives only for the
-  // in-flight turn, so it is never rebuilt on reload.
-  type CapabilityCandidate = {
-    id: string
-    label: string
-    supports_vision?: boolean
-    disabled?: boolean
-  }
-  type CapabilityQuestion = {
-    request_id: string
-    missing: string
-    current_model: string
-    candidates: CapabilityCandidate[]
-    timeout_s: number
-    opened_at: number
-  }
+  // Shape and parsing live in `lib/chatQuestions.ts`; the live card is here.
   const activeCapabilityQuestions = ref<Record<string, CapabilityQuestion[]>>({})
-
-  function parseCapabilityQuestion(event: {
-    request_id: string
-    missing?: string
-    current_model?: string
-    candidates?: Array<Record<string, unknown>>
-    timeout_s?: number
-  }): CapabilityQuestion {
-    return {
-      request_id: event.request_id,
-      missing: String(event.missing ?? 'image_input'),
-      current_model: String(event.current_model ?? ''),
-      candidates: Array.isArray(event.candidates)
-        ? (event.candidates as Array<Record<string, unknown>>).map(c => ({
-            id: String(c.id ?? ''),
-            label: String(c.label ?? c.id ?? ''),
-            supports_vision:
-              c.supports_vision === undefined ? undefined : Boolean(c.supports_vision),
-            disabled: Boolean(c.disabled),
-          }))
-        : [],
-      timeout_s: Number(event.timeout_s ?? 30),
-      opened_at: Date.now(),
-    }
-  }
 
   // Restore the AskUserQuestion picker after a reload. The picker lives in
   // ephemeral `activeQuestions` (set only by the live stream), but the server
@@ -1236,123 +1074,6 @@ export const useProjectStore = defineStore('projects', () => {
     clearChatDraft(payload.originalChatId)
   }
 
-  // ── Persistence ─────────────────────────────────────────────────────
-
-  function stripLegacyContextPrefix(content: string): string {
-    const lines = content.split('\n')
-    let idx = 0
-    let seenContext = false
-
-    while (idx < lines.length) {
-      const line = lines[idx]
-      if (!line.trim()) {
-        if (seenContext) {
-          const remainder = lines.slice(idx + 1).join('\n').trim()
-          return remainder || content
-        }
-        idx += 1
-        continue
-      }
-      if (
-        line.startsWith('[CONTEXT: ') ||
-        line.startsWith('[Project context: ') ||
-        line.startsWith('[Project: "') ||
-        line.startsWith('[Chat: "')
-      ) {
-        seenContext = true
-        idx += 1
-        continue
-      }
-      if (line.startsWith('[PWA interface: ')) {
-        seenContext = true
-        idx += 1
-        while (idx < lines.length) {
-          if (lines[idx].endsWith('space.]')) {
-            idx += 1
-            break
-          }
-          idx += 1
-        }
-        continue
-      }
-      break
-    }
-
-    if (seenContext) {
-      while (idx < lines.length && !lines[idx].trim()) idx += 1
-      const remainder = lines.slice(idx).join('\n').trim()
-      return remainder || content
-    }
-
-    return content
-  }
-
-  // Mirror of ciao/web/routes_api.py:_IMAGE_MANIFEST_RE. `build_prompt()` in
-  // ciao/providers/base.py appends an "[INCOMING IMAGES]\n1. filename.png"
-  // manifest to the user's text before sending to the SDK. The SDK persists
-  // it in the session file, so it leaks into replayed history. The UI renders
-  // images separately from `msg.images`, so the manifest is redundant.
-  const IMAGE_MANIFEST_RE = /\n{0,2}\[INCOMING IMAGES\]\n(?:\d+\. [^\n]*(?:\n|$))+\s*$/
-
-  function stripImageManifest(content: string): string {
-    const stripped = content.replace(IMAGE_MANIFEST_RE, '')
-    return stripped || content
-  }
-
-  function sanitizeInjectedContext(content: string): string {
-    const beginMarker = '[CIAO_CONTEXT_BEGIN]\n'
-    const endMarker = '\n[CIAO_CONTEXT_END]\n\n'
-    if (content.startsWith(beginMarker)) {
-      const endIndex = content.indexOf(endMarker)
-      if (endIndex >= 0) {
-        const stripped = content.slice(endIndex + endMarker.length).trim()
-        return stripImageManifest(stripped).trim() || content
-      }
-    }
-    const legacy = stripImageManifest(stripLegacyContextPrefix(content))
-    return legacy.trim() || content
-  }
-
-  function normalizeMessages(chatMessages: ChatMessage[]): ChatMessage[] {
-    return chatMessages
-      .map((message) => {
-        let content = message.content || ''
-        if (message.role === 'user') content = sanitizeInjectedContext(content)
-        content = content.trim()
-        return { ...message, content }
-      })
-      .filter((message) => {
-        // Remove cached bubbles written by older clients. The live proxy event
-        // now drives one ephemeral connection card outside chat history.
-        if (
-          message.role === 'system'
-          && isHostConnectionUnavailableMessage(
-            message.content.replace(/^Error:\s*/i, ''),
-          )
-        ) return false
-        if (message.tool_name === '_activity') return Boolean(message.content)
-        if (message.tool_name === '_filecard') {
-          return Boolean(message.file_path) && isPlausibleFilePath(message.file_path || '')
-        }
-        if (message.role === 'system') return Boolean(message.content)
-        return Boolean(message.content)
-      })
-  }
-
-  function userMessageIncludesQueuedText(content: string, queuedText: string): boolean {
-    const queued = queuedText.trim()
-    if (!queued) return false
-    const rendered = content.trim()
-    if (rendered === queued) return true
-    return rendered.split(/\n{2,}/).some(part => part.trim() === queued)
-  }
-
-  function queuedTextAlreadyRendered(chatMessages: ChatMessage[], queuedText: string): boolean {
-    return chatMessages.some(
-      m => m.role === 'user' && userMessageIncludesQueuedText(m.content, queuedText),
-    )
-  }
-
   function reconcileQueuedWithMessages(chatId: string) {
     const list = queuedMessages.value[chatId]
     if (!list?.length) return
@@ -1362,104 +1083,7 @@ export const useProjectStore = defineStore('projects', () => {
     else delete queuedMessages.value[chatId]
   }
 
-  function historySignature(chatMessages: ChatMessage[]): string {
-    return JSON.stringify(
-      chatMessages
-        .filter(m => m.tool_name !== '_thinking')
-        .map((message) => ({
-          role: message.role,
-          content: message.content,
-          tool_name: message.tool_name || '',
-          is_error: Boolean(message.is_error),
-          phase: message.phase || '',
-        }))
-    )
-  }
-
-  // The server rebuilds /api/chats/:id/messages from the raw SDK session
-  // file, which preserves role/content/tools but NOT the ResultEvent
-  // metadata (usage, effective_model, is_error). When loadMessages adopts
-  // the server version, overlay that metadata from matching local
-  // messages so post-reconcile the context % (context_pct lives inside
-  // usage) doesn't evaporate.
-  function mergeMessageFields(sMsg: ChatMessage, lMsg: ChatMessage): ChatMessage {
-    const merged: ChatMessage = { ...sMsg }
-    if (lMsg.usage && !sMsg.usage) merged.usage = lMsg.usage
-    if (lMsg.quota && !sMsg.quota) merged.quota = lMsg.quota
-    if (lMsg.effective_model && !sMsg.effective_model) merged.effective_model = lMsg.effective_model
-    if (lMsg.is_error !== undefined && sMsg.is_error === undefined) merged.is_error = lMsg.is_error
-    if (lMsg.turn_index != null && sMsg.turn_index == null) merged.turn_index = lMsg.turn_index
-    if (lMsg.duration_ms != null && sMsg.duration_ms == null) merged.duration_ms = lMsg.duration_ms
-    // Loop/schedule marker observed live but missing on the server row (older
-    // servers, or a row built before the turn was recorded) — keep the ↻.
-    if (lMsg.unattended && !sMsg.unattended) merged.unattended = lMsg.unattended
-    if (!merged.timestamp && lMsg.timestamp) merged.timestamp = lMsg.timestamp
-    return merged
-  }
-
-  function groupIntoTurns(msgsList: ChatMessage[]): { user: ChatMessage | null; responses: ChatMessage[] }[] {
-    const turns: { user: ChatMessage | null; responses: ChatMessage[] }[] = []
-    let currentTurn: { user: ChatMessage | null; responses: ChatMessage[] } = { user: null, responses: [] }
-    for (const m of msgsList) {
-      if (m.role === 'user') {
-        if (currentTurn.user || currentTurn.responses.length) {
-          turns.push(currentTurn)
-        }
-        currentTurn = { user: m, responses: [] }
-      } else {
-        currentTurn.responses.push(m)
-      }
-    }
-    if (currentTurn.user || currentTurn.responses.length) {
-      turns.push(currentTurn)
-    }
-    return turns
-  }
-
-  function mergeMetadata(server: ChatMessage[], local: ChatMessage[]): ChatMessage[] {
-    const serverTurns = groupIntoTurns(server)
-    const localTurns = groupIntoTurns(local)
-    const mergedMessages: ChatMessage[] = []
-
-    for (let i = 0; i < serverTurns.length; i++) {
-      const sTurn = serverTurns[i]
-      const lTurn = localTurns[i]
-      const matches = lTurn && (
-        (!sTurn.user && !lTurn.user) ||
-        (sTurn.user && lTurn.user && sTurn.user.content === lTurn.user.content)
-      )
-
-      if (!matches) {
-        if (sTurn.user) mergedMessages.push(sTurn.user)
-        mergedMessages.push(...sTurn.responses)
-      } else {
-        if (sTurn.user && lTurn.user) {
-          mergedMessages.push(mergeMessageFields(sTurn.user, lTurn.user))
-        }
-
-        const mergedResponses: ChatMessage[] = []
-        const sAssistantMsgs = sTurn.responses.filter(m => m.role === 'assistant' && !m.tool_name)
-        let sAsstIdx = 0
-
-        for (const lMsg of lTurn.responses) {
-          if (lMsg.role === 'assistant' && !lMsg.tool_name) {
-            const sMsg = sAssistantMsgs[sAsstIdx]
-            if (sMsg) {
-              mergedResponses.push(mergeMessageFields(sMsg, lMsg))
-              sAsstIdx++
-            }
-          } else {
-            mergedResponses.push(lMsg)
-          }
-        }
-        for (let j = sAsstIdx; j < sAssistantMsgs.length; j++) {
-          mergedResponses.push(sAssistantMsgs[j])
-        }
-        mergedMessages.push(...mergedResponses)
-      }
-    }
-    return mergedMessages
-  }
+  // ── Persistence ─────────────────────────────────────────────────────
 
   function restoreMessages() {
     // One-time cleanup: drop any legacy cached messages so stale/inconsistent
@@ -1480,18 +1104,10 @@ export const useProjectStore = defineStore('projects', () => {
       if (ws) activeWorkspace.value = ws
       const cid = localStorage.getItem('ciao-active-chat')
       if (cid) activeChatId.value = cid
-      const fc = localStorage.getItem('ciao-file-comments')
-      if (fc) fileComments.value = JSON.parse(fc)
-      const pf = localStorage.getItem('ciao-pinned-files')
-      if (pf) pinnedFilePaths.value = JSON.parse(pf)
-      const pd = localStorage.getItem('ciao-dismissed-auto-pins')
-      if (pd) dismissedAutoPins.value = normalizeDismissedAutoPins(JSON.parse(pd))
-      const pi = localStorage.getItem('ciao-pending-images')
-      if (pi) pendingImagesByChat.value = normalizePendingBuckets<string>(JSON.parse(pi), activeChatId.value)
-      const pc = localStorage.getItem('ciao-pending-comments')
-      if (pc) pendingCommentsByChat.value = normalizePendingBuckets<PendingComment>(JSON.parse(pc), activeChatId.value)
-      const pcc = localStorage.getItem('ciao-pending-chat-comments')
-      if (pcc) pendingChatCommentsByChat.value = normalizePendingBuckets<PendingChatComment>(JSON.parse(pcc), activeChatId.value)
+      // Comments, pins and staged images: same reads, same order, still
+      // inside this try — a malformed value aborts the rest of the restore
+      // exactly as it did when the reads were inline.
+      annotations.restoreFromStorage()
       const ssa = localStorage.getItem('ciao-stream-started-at')
       if (ssa) streamStartedAt.value = JSON.parse(ssa)
       const ua = localStorage.getItem('ciao-unacked-sends')
@@ -1525,62 +1141,11 @@ export const useProjectStore = defineStore('projects', () => {
     } catch { /* ignore */ }
   }
 
-  function persistFileComments() {
-    try {
-      localStorage.setItem('ciao-file-comments', JSON.stringify(fileComments.value))
-    } catch { /* ignore */ }
-  }
-
-  function persistPinnedFiles() {
-    try {
-      localStorage.setItem('ciao-pinned-files', JSON.stringify(pinnedFilePaths.value))
-    } catch { /* ignore */ }
-  }
-
-  // Older builds stored `{ [chatId]: true }`, a chat-wide block. Drop those
-  // rather than translating them: the flag they encoded ("never surface here
-  // again") is the bug this shape replaces, and the file it referred to is not
-  // recoverable from it.
-  function normalizeDismissedAutoPins(raw: unknown): Record<string, string[]> {
-    if (!raw || typeof raw !== 'object') return {}
-    const out: Record<string, string[]> = {}
-    for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
-      if (!Array.isArray(value)) continue
-      const paths = value.filter((p): p is string => typeof p === 'string' && !!p)
-      if (paths.length) out[id] = paths
-    }
-    return out
-  }
-
-  function persistDismissedAutoPins() {
-    try {
-      localStorage.setItem('ciao-dismissed-auto-pins', JSON.stringify(dismissedAutoPins.value))
-    } catch { /* ignore */ }
-  }
-
   function persistState() {
     try {
       localStorage.setItem('ciao-active-workspace', activeWorkspace.value)
       if (activeChatId.value) localStorage.setItem('ciao-active-chat', activeChatId.value)
       else localStorage.removeItem('ciao-active-chat')
-    } catch { /* ignore */ }
-  }
-
-  function persistPendingImages() {
-    try {
-      localStorage.setItem('ciao-pending-images', JSON.stringify(pendingImagesByChat.value))
-    } catch { /* ignore */ }
-  }
-
-  function persistPendingComments() {
-    try {
-      localStorage.setItem('ciao-pending-comments', JSON.stringify(pendingCommentsByChat.value))
-    } catch { /* ignore */ }
-  }
-
-  function persistPendingChatComments() {
-    try {
-      localStorage.setItem('ciao-pending-chat-comments', JSON.stringify(pendingChatCommentsByChat.value))
     } catch { /* ignore */ }
   }
 
@@ -1848,7 +1413,6 @@ export const useProjectStore = defineStore('projects', () => {
         void (async () => {
           await loadMessages(bootChatId, { waitForSettledReply: true })
           connectWs(bootChatId)
-          requestReentrySummaryIfUseful(bootChatId)
         })()
       }
       // Open the cross-chat awareness socket once per app session.
@@ -2410,9 +1974,6 @@ export const useProjectStore = defineStore('projects', () => {
     clearChatDraft(chatId)
     chats.value = chats.value.filter(c => c.chat_id !== chatId)
     delete messages.value[chatId]
-    delete reentrySummaries.value[chatId]
-    delete reentrySummaryRevisions.value[chatId]
-    reentrySummaryRequests.delete(chatId)
     persistMessages()
     if (options?.selectNext !== false && activeChatId.value === chatId) {
       await transitionToFirstChat()
@@ -2441,9 +2002,7 @@ export const useProjectStore = defineStore('projects', () => {
     // Staged attachments are unsent content just as much as typed text, and
     // the server cannot see them either: it would agree the chat is empty and
     // delete the pasted screenshot with it.
-    if (getPendingBucket(pendingImagesByChat.value, chatId).length) return false
-    if (getPendingBucket(pendingCommentsByChat.value, chatId).length) return false
-    if (getPendingBucket(pendingChatCommentsByChat.value, chatId).length) return false
+    if (annotations.hasStagedAttachments(chatId)) return false
     const loaded = messages.value[chatId]
     if (!loaded) return false
     return !loaded.some(message => message.role === 'user')
@@ -2502,11 +2061,6 @@ export const useProjectStore = defineStore('projects', () => {
       }
       return
     }
-    // Warm the persistent per-chat summary cache while the user is away.
-    // The request is intentionally detached so closing the chat stays
-    // immediate; switchChat still requests it as a fallback if this call
-    // has not finished by the time the user returns.
-    void requestReentrySummary(chatId)
     disconnectWs(chatId)
     await leaveChatView(wasActive)
   }
@@ -2517,59 +2071,6 @@ export const useProjectStore = defineStore('projects', () => {
     persistState()
     const { router } = await import('../router')
     await router.push('/')
-  }
-
-  function clearReentrySummary(chatId: string): void {
-    delete reentrySummaries.value[chatId]
-    reentrySummaryRevisions.value[chatId] = (reentrySummaryRevisions.value[chatId] || 0) + 1
-  }
-
-  async function requestReentrySummary(chatId: string): Promise<void> {
-    if (reentrySummaryRequests.has(chatId)) return
-    reentrySummaryRequests.add(chatId)
-    const revision = reentrySummaryRevisions.value[chatId] || 0
-    try {
-      const result = await api.post<{ summary?: string }>(`/api/chats/${chatId}/reentry-summary`, {})
-      const summary = typeof result?.summary === 'string' ? result.summary.trim() : ''
-      if (
-        summary
-        && revision === (reentrySummaryRevisions.value[chatId] || 0)
-        && chats.value.some(chat => chat.chat_id === chatId)
-      ) {
-        reentrySummaries.value[chatId] = summary
-      }
-    } catch {
-      // Apple Intelligence is optional. A failed/unavailable summary should
-      // never interfere with opening or using the chat.
-    } finally {
-      reentrySummaryRequests.delete(chatId)
-    }
-  }
-
-  function requestReentrySummaryIfUseful(chatId: string): void {
-    if (!readReentrySummaryEnabled()) return
-    const chat = chats.value.find(c => c.chat_id === chatId)
-    if (!chat || chat.archived) return
-    // session_id covers chats whose history is still being hydrated; the
-    // message check covers providers/fixtures that do not expose one.
-    const hasHistory = Boolean(chat.session_id) || (messages.value[chatId] || []).some(
-      message => message.role === 'user' || message.role === 'assistant',
-    )
-    if (hasHistory && !reentrySummaries.value[chatId]) {
-      void requestReentrySummary(chatId)
-    }
-  }
-
-  // Toggling the preference off also evicts any cached summaries so the
-  // bubble disappears immediately rather than lingering for the rest of
-  // the session. Toggling on does nothing — the next chat open will fetch
-  // its own summary, no warm-up needed.
-  function setReentrySummaryEnabled(enabled: boolean): void {
-    if (!enabled) {
-      for (const chatId of Object.keys(reentrySummaries.value)) {
-        clearReentrySummary(chatId)
-      }
-    }
   }
 
   async function archiveChat(chatId: string) {
@@ -2791,143 +2292,6 @@ export const useProjectStore = defineStore('projects', () => {
         messageLoadGenerations.delete(chatId)
       }
     }
-  }
-
-  type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string }
-  const toChatMessage = (m: ServerRow) => ({
-    role: m.role as 'user' | 'assistant' | 'system',
-    content: m.content,
-    // sent_at is the persisted send-time (user) or completion-time
-    // (assistant) recorded at the orchestration layer. Empty string for
-    // pre-feature chats — the renderer treats it as "no time".
-    timestamp: m.sent_at || '',
-    tool_name: m.tool_name,
-    images: m.images,
-    // Preserve server-assigned turn_index so user_echo replays (from WS
-    // reconnect mid-turn or right after) can dedup against hydrated
-    // history. Dropping this caused duplicate user bubbles: the dedup at
-    // the user_echo handler matches by turn_index first, and when every
-    // hydrated bubble has turn_index: undefined, the replayed echo falls
-    // through to msgs.push and renders a second copy of the same turn.
-    turn_index: m.turn_index,
-    duration_ms: m.duration_ms,
-    is_error: m.is_error,
-    // Loop/schedule tick marker (↻). The backend records it per turn at
-    // send time; without mapping it here a reload made automated turns
-    // read as user-authored.
-    unattended: m.unattended || undefined,
-    // _filecard fields. Empty/undefined for non-file rows.
-    file_path: m.file_path,
-    action: m.action,
-    tool: m.tool,
-    phase: m.phase,
-    // Envelope annotations (absolute index + lazy marker). Undefined on
-    // legacy flat responses.
-    i: m.i,
-    lazy: m.lazy,
-    full_length: m.full_length,
-    // Turn footer facts. The provider session file carries none of these, so
-    // the server stitches them on from the durable transcript
-    // (`_overlay_transcript_metadata`). Dropping them here left every
-    // hydrated turn's footer with only the time and duration — no model, no
-    // context %.
-    usage: m.usage,
-    quota: m.quota,
-    effective_model: m.effective_model,
-  })
-
-  /** True for a trace row the client renders from streaming events. */
-  function isLiveTraceRow(m: ChatMessage): boolean {
-    if (m.role === 'assistant') return true
-    return m.role === 'system' && (
-      m.tool_name === '_activity'
-      || m.tool_name === '_thinking'
-      || m.tool_name === '_filecard'
-    )
-  }
-
-  /**
-   * Drop the client's own rendering of a turn the window has now delivered.
-   *
-   * The live tail and the server's rows are the same turn in two different
-   * shapes: the client streams the trace and then adds ONE merged answer
-   * bubble, while the server replays the provider's own text parts as separate
-   * rows with the tool groups between them. `sameRow` matches on exact content,
-   * so it can pair neither the merged bubble (no server row holds that text)
-   * nor a part the provider re-joined differently — and both copies survived,
-   * rendering the reply once whole and then again in pieces.
-   *
-   * The server's copy is authoritative once the turn has settled, which is what
-   * an appended assistant row carrying a completion `timestamp` says (only the
-   * turn-final row gets one, from `_overlay_assistant_timings`). Until then the
-   * live tail is all the user has, so it stays.
-   *
-   * Only trace rows go. An un-indexed plain system row is a client-side notice
-   * — the failed-send warning `recoverUnackedSend` pushes — with no server
-   * counterpart to replace it, and an un-indexed user bubble is handled by the
-   * optimistic-bubble pruning instead.
-   */
-  function dropSupersededLiveTail(
-    merged: ChatMessage[], tailStart: number, firstAppendPos: number,
-  ): ChatMessage[] {
-    if (firstAppendPos <= tailStart) return merged
-    const settled = merged.slice(firstAppendPos).some(
-      m => m.role === 'assistant' && !m.is_error && Boolean(m.timestamp),
-    )
-    if (!settled) return merged
-    // A fast follow-up can already be streaming after the settled turn. Keep
-    // that second turn's trace; only the live rows before its user bubble are
-    // superseded by the newly appended server rows.
-    const userPositions = merged
-      .map((row, pos) => row.role === 'user' && pos >= tailStart ? pos : -1)
-      .filter(pos => pos >= 0)
-    const supersededEnd = userPositions.length > 1
-      ? userPositions[1]
-      : userPositions.length === 1 && typeof merged[userPositions[0]].i === 'number'
-        ? userPositions[0]
-        : firstAppendPos
-    // A server row carries the turn's usage only once `record_turn` has run;
-    // for the turn that just streamed it may still be missing. Carry the live
-    // values (and the model that answered) onto the server row that closes the
-    // turn, or the footer would lose the turn's cost on that reconcile.
-    const carried: Partial<ChatMessage> = {}
-    const kept: ChatMessage[] = []
-    for (let p = 0; p < merged.length; p++) {
-      const row = merged[p]
-      const superseded = p >= tailStart
-        && p < supersededEnd
-        && typeof row.i !== 'number'
-        && isLiveTraceRow(row)
-      if (!superseded) {
-        kept.push(row)
-        continue
-      }
-      if (row.usage) carried.usage = row.usage
-      if (row.effective_model) carried.effective_model = row.effective_model
-      if (row.quota) carried.quota = row.quota
-    }
-    if (kept.length === merged.length) return merged
-    if (Object.keys(carried).length) {
-      const limit = supersededEnd === firstAppendPos ? merged.length : supersededEnd
-      let target: number | undefined
-      for (let p = limit - 1; p >= firstAppendPos; p--) {
-        const row = merged[p]
-        if (row.role === 'assistant' && typeof row.i === 'number') {
-          target = row.i
-          break
-        }
-      }
-      for (let p = kept.length - 1; p >= 0; p--) {
-        const row = kept[p]
-        if (row.role !== 'assistant' || (target !== undefined && row.i !== target)) continue
-        // Fill only the facts the row is actually missing. A plain spread let
-        // an explicitly-undefined key on the server row shadow the carried
-        // value and lose the turn's cost again.
-        kept[p] = mergeMessageFields(row, carried as ChatMessage)
-        break
-      }
-    }
-    return kept
   }
 
   async function loadMessagesFromServer(chatId: string) {
@@ -3216,7 +2580,6 @@ export const useProjectStore = defineStore('projects', () => {
       }
 
       let normalizedLocal = normalizeMessages(messages.value[chatId] || [])
-      const historyChanged = historySignature(normalizedServer) !== historySignature(normalizedLocal)
 
       // Heal orphaned optimistic user bubbles. A send queued behind a still
       // streaming turn can leave a turn_index-less copy that the live echo
@@ -3267,7 +2630,6 @@ export const useProjectStore = defineStore('projects', () => {
         messages.value[chatId] = normalizedLocal
         persistMessages()
       }
-      if (historyChanged) clearReentrySummary(chatId)
       if (
         streaming.value[chatId]
         && !projectStreaming.value[chatId]
@@ -3429,6 +2791,13 @@ export const useProjectStore = defineStore('projects', () => {
         return
       }
     }
+    // Retries exhausted with the transcript still ending in a user row or bare
+    // tool activity. That is exactly what a stopped turn looks like when it
+    // produced no reply, and the loop used to just give up -- leaving the
+    // spinner running over a turn the server had already finished, until the
+    // next send silently replaced it. The server says this chat is idle, so
+    // the turn is over whatever the last row is.
+    if (!projectStreaming.value[chatId]) clearStreamingState(chatId)
     void loadSubagents(chatId)
   }
 
@@ -3605,7 +2974,6 @@ export const useProjectStore = defineStore('projects', () => {
     if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
     void loadSubagents(chatId)
     connectWs(chatId)
-    requestReentrySummaryIfUseful(chatId)
   }
 
   async function switchWorkspace(ws: WorkspaceName, options?: { transition?: boolean }) {
@@ -3952,6 +3320,10 @@ export const useProjectStore = defineStore('projects', () => {
   // identically on every attempt, so a fixed 2s retry becomes a request
   // storm that fills the server log.
   let eventsWsFailureStreak = 0
+  // Separate from the handshake streak above: a client-mode proxy accepts
+  // the browser socket and only then discovers the host is down, so those
+  // retries must not feed the >=5 auth probe. Reset by the first real frame.
+  let eventsHostRetryAttempts = 0
 
   function connectEventsWs() {
     if (eventsSocket.value && eventsSocket.value.readyState <= WebSocket.OPEN) return
@@ -3960,6 +3332,12 @@ export const useProjectStore = defineStore('projects', () => {
     eventsSocket.value = ws
     lastEventsFrameAt = nowMs()
     let opened = false
+    // Set when the local proxy told us the host is down on THIS socket. The
+    // proxy accepts the browser's connection before it tries the host, so
+    // `opened` is true even for a dead host -- without this flag the close
+    // handler below would take the 50ms "healthy blip" path and reconnect
+    // twenty times a second for as long as the host stays away.
+    let hostUnreachable = false
 
     ws.onopen = () => {
       if (toRaw(eventsSocket.value) !== ws) return
@@ -3974,6 +3352,19 @@ export const useProjectStore = defineStore('projects', () => {
       lastEventsFrameAt = nowMs()
       let msg: EventsWsMessage
       try { msg = JSON.parse(ev.data) } catch { return }
+      if (msg.type === 'host_unreachable') {
+        // In client mode this is the only connection-loss signal that exists
+        // outside a chat: the per-chat socket is open only while a chat is on
+        // screen, so the home screen used to look perfectly healthy while the
+        // host was unreachable.
+        hostUnreachable = true
+        hostConnectionUnavailable.value = true
+        return
+      }
+      // Any other frame -- the keepalive included -- travelled through the
+      // proxy from the host, which proves the host is back.
+      hostConnectionUnavailable.value = false
+      eventsHostRetryAttempts = 0
       if (msg.type === 'keepalive') return
       handleEventsMessage(msg)
     }
@@ -3986,6 +3377,17 @@ export const useProjectStore = defineStore('projects', () => {
       if (!isCurrent) return
 
       if (opened) {
+        if (hostUnreachable) {
+          // Retry on the chat socket's backoff curve (50ms -> 2s cap) so a
+          // host that comes back is noticed within a couple of seconds
+          // without hammering it while it is down.
+          eventsHostRetryAttempts += 1
+          const hostDelay = chatWsReconnectDelayMs(eventsHostRetryAttempts)
+          setTimeout(() => {
+            if (!eventsSocket.value) connectEventsWs()
+          }, hostDelay)
+          return
+        }
         eventsWsFailureStreak = 0
         // A previously-live awareness socket should come back immediately so
         // chat_streaming_done / result_ready are not delayed after a blip.
@@ -4378,72 +3780,6 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Send messages ───────────────────────────────────────────────────
 
-  // Render pending comments as XML-tagged reference blocks (see
-  // lib/commentContext.ts for the format and rationale). The model gets an
-  // unambiguous boundary around the file/line anchor, the verbatim selection,
-  // and the user's note; the same tags are whitelisted in the renderer and
-  // styled as quote cards so they read cleanly in the chat bubble too.
-  function formatPendingComments(comments = pendingComments.value): string {
-    return formatFileComments(comments)
-  }
-
-  function formatPendingChatComments(comments = pendingChatComments.value): string {
-    return formatChatComments(comments)
-  }
-
-  type PreparedMessage = {
-    composed: string
-    imageRefs?: string[]
-    fileComments: PendingComment[]
-    chatComments: PendingChatComment[]
-  }
-
-  function prepareMessage(chatId: string, text: string): PreparedMessage {
-    const chatImages = getPendingBucket(pendingImagesByChat.value, chatId)
-    const fileComments = getPendingBucket(pendingCommentsByChat.value, chatId)
-    const chatComments = getPendingBucket(pendingChatCommentsByChat.value, chatId)
-    // Collect images from pendingImages plus any images attached to comments.
-    const allImages = new Set<string>(chatImages)
-    for (const c of fileComments) {
-      if (c.images) c.images.forEach(img => allImages.add(img))
-    }
-    for (const c of chatComments) {
-      if (c.images) c.images.forEach(img => allImages.add(img))
-    }
-    const imageRefs = allImages.size > 0 ? Array.from(allImages) : undefined
-    const fileBlock = formatPendingComments(fileComments)
-    const chatBlock = formatPendingChatComments(chatComments)
-    const hasTyped = text.trim().length > 0
-    // Reference blocks (quoted text + note) go FIRST, then the typed prompt,
-    // so the model reads the material being discussed before the instruction
-    // (Anthropic: placing the query at the end of the input improves quality).
-    let composed = ''
-    if (fileBlock) composed += fileBlock
-    if (chatBlock) composed += (composed ? '\n' : '') + chatBlock
-    if (hasTyped) composed += (composed ? '\n\n' : '') + text.trim()
-    return { composed, imageRefs, fileComments, chatComments }
-  }
-
-  function consumePreparedAttachments(chatId: string, message: PreparedMessage) {
-    setPendingBucket<string>(pendingImagesByChat.value, chatId, [])
-    persistPendingImages()
-    // Remove sent file comments from the durable store so they don't linger
-    // in the viewer after the message has been dispatched.
-    for (const c of message.fileComments) {
-      const list = fileComments.value[c.path]
-      if (list) {
-        const next = list.filter(x => x.id !== c.id)
-        if (next.length) fileComments.value[c.path] = next
-        else delete fileComments.value[c.path]
-      }
-    }
-    persistFileComments()
-    setPendingBucket<PendingComment>(pendingCommentsByChat.value, chatId, [])
-    setPendingBucket<PendingChatComment>(pendingChatCommentsByChat.value, chatId, [])
-    persistPendingComments()
-    persistPendingChatComments()
-  }
-
   // Deferred-send retry limit. When the chat WS is down, sendMessage defers
   // the actual WS send by 500ms and retries. Without a cap this loops forever
   // when the server is unreachable, keeping the composer frozen and never
@@ -4553,9 +3889,6 @@ export const useProjectStore = defineStore('projects', () => {
     onSent?: () => void,
     _deferredAttempt = 0,
   ): boolean {
-    // A re-entry summary is a transient orientation aid, not a new chat
-    // message. The first send is the user's signal that it has done its job.
-    clearReentrySummary(chatId)
     // Any send implicitly answers (or dismisses) a pending AskUserQuestion
     // picker — the model already got an empty tool result and is reading
     // this turn for the actual answer. Clear the local chat's persisted
@@ -4913,13 +4246,6 @@ export const useProjectStore = defineStore('projects', () => {
     return refs
   }
 
-  function addPendingImageRefs(chatId: string, refs: string[]): void {
-    if (!refs.length) return
-    const existing = getPendingBucket(pendingImagesByChat.value, chatId)
-    setPendingBucket(pendingImagesByChat.value, chatId, [...existing, ...refs])
-    persistPendingImages()
-  }
-
   async function uploadImageRefs(chatId: string, files: File[]): Promise<string[]> {
     const form = new FormData()
     for (const f of files) {
@@ -4933,229 +4259,6 @@ export const useProjectStore = defineStore('projects', () => {
     if (!res.ok) throw new Error('Image upload failed')
     const results: { ref?: string; error?: string }[] = await res.json()
     return results.filter(r => r.ref).map(r => r.ref!)
-  }
-
-  function removePendingImage(index: number) {
-    if (!activeChatId.value) return
-    const next = pendingImages.value.filter((_, i) => i !== index)
-    setPendingBucket(pendingImagesByChat.value, activeChatId.value, next)
-    persistPendingImages()
-  }
-
-  function clearPendingImages() {
-    if (!activeChatId.value) return
-    setPendingBucket<string>(pendingImagesByChat.value, activeChatId.value, [])
-    persistPendingImages()
-  }
-
-  // ── Pending file comments ──────────────────────────────────────────
-  // Captured by the markdown viewer when the user highlights text and adds a
-  // note. Sent on the next message in the active chat. UUID generation falls
-  // back to a Math.random id if crypto.randomUUID is unavailable (older WebView).
-  function addPendingComment(c: {
-    path: string
-    selection: string
-    comment: string
-    lineStart?: number | null
-    lineEnd?: number | null
-    colIndex?: number | null
-    colHeader?: string | null
-    artifactSelector?: string | null
-    artifactStartOffset?: number | null
-    artifactEndOffset?: number | null
-    artifactElementTag?: string | null
-    artifactWholeElement?: boolean
-    images?: string[]
-  }): string {
-    const id = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
-      ? (crypto as { randomUUID: () => string }).randomUUID()
-      : `c_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-    const entry: PendingComment = {
-      id,
-      path: c.path,
-      selection: c.selection,
-      comment: c.comment,
-      lineStart: c.lineStart ?? null,
-      lineEnd: c.lineEnd ?? c.lineStart ?? null,
-      colIndex: c.colIndex ?? null,
-      colHeader: c.colHeader ?? null,
-      artifactSelector: c.artifactSelector ?? null,
-      artifactStartOffset: c.artifactStartOffset ?? null,
-      artifactEndOffset: c.artifactEndOffset ?? null,
-      artifactElementTag: c.artifactElementTag ?? null,
-      artifactWholeElement: c.artifactWholeElement ?? false,
-      images: c.images,
-    }
-    if (activeChatId.value) {
-      const existing = getPendingBucket(pendingCommentsByChat.value, activeChatId.value)
-      setPendingBucket(pendingCommentsByChat.value, activeChatId.value, [...existing, entry])
-      persistPendingComments()
-    }
-    // Also persist into the durable per-file store so the comment stays visible
-    // in the document viewer after it is sent.
-    const list = fileComments.value[c.path] || []
-    if (!list.some(x => x.id === id)) {
-      fileComments.value[c.path] = [...list, { ...entry, createdAt: new Date().toISOString() }]
-      persistFileComments()
-    }
-    return id
-  }
-  function removePendingComment(id: string): void {
-    pendingComments.value = pendingComments.value.filter(c => c.id !== id)
-    persistPendingComments()
-  }
-  function clearPendingComments(): void {
-    pendingComments.value = []
-    persistPendingComments()
-  }
-
-  // ── Durable file comments ──────────────────────────────────────────
-  function fileCommentsFor(path: string): FileComment[] {
-    return fileComments.value[path] || []
-  }
-  function removeFileComment(path: string, id: string): void {
-    const list = fileComments.value[path]
-    if (!list) return
-    const next = list.filter(c => c.id !== id)
-    if (next.length) fileComments.value[path] = next
-    else delete fileComments.value[path]
-    // Also drop from pending if it hasn't been sent yet.
-    pendingComments.value = pendingComments.value.filter(c => c.id !== id)
-    persistFileComments()
-    persistPendingComments()
-  }
-
-  function updateFileComment(path: string, id: string, comment: string): void {
-    const list = fileComments.value[path]
-    if (!list) return
-    const next = list.map(c => c.id === id ? { ...c, comment } : c)
-    fileComments.value[path] = next
-    // Also update pending if it hasn't been sent yet.
-    pendingComments.value = pendingComments.value.map(c =>
-      c.id === id ? { ...c, comment } : c
-    )
-    persistFileComments()
-    persistPendingComments()
-  }
-
-  // ── Pinned file viewer (per chat/project) ──────────────────────────
-  function pinFile(id: string, path: string): void {
-    pinnedFilePaths.value = { ...pinnedFilePaths.value, [id]: path }
-    // Pinning a file the user had closed clears that path's dismissal, so a
-    // later surface of it is allowed to reopen it again.
-    const dismissed = dismissedAutoPins.value[id]
-    if (dismissed?.includes(path)) {
-      const remaining = dismissed.filter(p => p !== path)
-      const nextDismissed = { ...dismissedAutoPins.value }
-      if (remaining.length) nextDismissed[id] = remaining
-      else delete nextDismissed[id]
-      dismissedAutoPins.value = nextDismissed
-      persistDismissedAutoPins()
-    }
-    persistPinnedFiles()
-  }
-  function unpinFile(id: string): void {
-    const next = { ...pinnedFilePaths.value }
-    const closedPath = next[id]
-    delete next[id]
-    pinnedFilePaths.value = next
-    if (closedPath) {
-      const dismissed = dismissedAutoPins.value[id] || []
-      if (!dismissed.includes(closedPath)) {
-        dismissedAutoPins.value = {
-          ...dismissedAutoPins.value,
-          [id]: [...dismissed, closedPath],
-        }
-        persistDismissedAutoPins()
-      }
-    }
-    persistPinnedFiles()
-  }
-  function pinnedFileFor(id: string): string | undefined {
-    return pinnedFilePaths.value[id]
-  }
-
-  // ── Pending chat comments ─────────────────────────────────────────
-  function addPendingChatComment(c: Omit<PendingChatComment, 'id'>): string {
-    const id = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
-      ? (crypto as { randomUUID: () => string }).randomUUID()
-      : `cc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-    if (activeChatId.value) {
-      const existing = getPendingBucket(pendingChatCommentsByChat.value, activeChatId.value)
-      setPendingBucket(pendingChatCommentsByChat.value, activeChatId.value, [
-        ...existing,
-        { id, ...c },
-      ])
-      persistPendingChatComments()
-    }
-    return id
-  }
-  function removePendingChatComment(id: string): void {
-    pendingChatComments.value = pendingChatComments.value.filter(c => c.id !== id)
-    persistPendingChatComments()
-  }
-  function clearPendingChatComments(): void {
-    pendingChatComments.value = []
-    persistPendingChatComments()
-  }
-  function updatePendingChatComment(id: string, comment: string): void {
-    const idx = pendingChatComments.value.findIndex(c => c.id === id)
-    if (idx === -1) return
-    setListIndex(pendingChatComments.value, idx, { ...pendingChatComments.value[idx], comment })
-    persistPendingChatComments()
-  }
-  function addPendingChatCommentImage(id: string, imageRef: string): void {
-    const idx = pendingChatComments.value.findIndex(c => c.id === id)
-    if (idx === -1) return
-    const existing = pendingChatComments.value[idx].images || []
-    if (!existing.includes(imageRef)) {
-      setListIndex(pendingChatComments.value, idx, { ...pendingChatComments.value[idx], images: [...existing, imageRef] })
-      persistPendingChatComments()
-    }
-  }
-  function removePendingChatCommentImage(id: string, imageRef: string): void {
-    const idx = pendingChatComments.value.findIndex(c => c.id === id)
-    if (idx === -1) return
-    const existing = pendingChatComments.value[idx].images || []
-    const next = existing.filter(img => img !== imageRef)
-    setListIndex(pendingChatComments.value, idx, { ...pendingChatComments.value[idx], images: next.length ? next : undefined })
-    persistPendingChatComments()
-  }
-  function addFileCommentImage(path: string, id: string, imageRef: string): void {
-    const list = fileComments.value[path]
-    if (!list) return
-    const idx = list.findIndex(c => c.id === id)
-    if (idx === -1) return
-    const existing = list[idx].images || []
-    if (!existing.includes(imageRef)) {
-      const next = [...list]
-      next[idx] = { ...next[idx], images: [...existing, imageRef] }
-      fileComments.value[path] = next
-      // Sync to pending if it exists there
-      const pIdx = pendingComments.value.findIndex(c => c.id === id)
-      if (pIdx !== -1) {
-        setListIndex(pendingComments.value, pIdx, { ...pendingComments.value[pIdx], images: [...existing, imageRef] })
-        persistPendingComments()
-      }
-      persistFileComments()
-    }
-  }
-  function removeFileCommentImage(path: string, id: string, imageRef: string): void {
-    const list = fileComments.value[path]
-    if (!list) return
-    const idx = list.findIndex(c => c.id === id)
-    if (idx === -1) return
-    const existing = list[idx].images || []
-    const nextImages = existing.filter(img => img !== imageRef)
-    const next = [...list]
-    next[idx] = { ...next[idx], images: nextImages.length ? nextImages : undefined }
-    fileComments.value[path] = next
-    const pIdx = pendingComments.value.findIndex(c => c.id === id)
-    if (pIdx !== -1) {
-      setListIndex(pendingComments.value, pIdx, { ...pendingComments.value[pIdx], images: nextImages.length ? nextImages : undefined })
-      persistPendingComments()
-    }
-    persistFileComments()
   }
 
   // ── Event handling ──────────────────────────────────────────────────
@@ -5274,7 +4377,7 @@ export const useProjectStore = defineStore('projects', () => {
       if (touch?.action !== 'surfaced') continue
       const raw = touch.file_path
       if (!raw || !isPlausibleFilePath(raw)) continue
-      if (dismissedAutoPins.value[chatId]?.includes(raw)) return
+      if (annotations.isAutoPinDismissed(chatId, raw)) return
       if (pinnedFileFor(chatId) === raw) return
       if (window.innerWidth <= 768) {
         _openSurfacedInViewer(raw, chatId)
@@ -5320,19 +4423,6 @@ export const useProjectStore = defineStore('projects', () => {
 
   function handleEvent(chatId: string, event: WsEvent) {
     const msgs = messages.value[chatId] || []
-
-    // A summary belongs only to the moment the user re-enters a quiet chat.
-    // `queued` always represents new user activity (a new prompt is now
-    // waiting), so it always invalidates the summary.
-    //
-    // `user_echo` and `result` are handled inside their switch cases below:
-    // the broker replays them on every WS reconnect, and a no-op replay
-    // (turn already rendered, or no final text on a result) must NOT clear
-    // the summary. The user opens a chat, scrolls to re-orient, and the
-    // summary disappearing on a broker replay is the wrong behavior.
-    if (event.type === 'queued') {
-      clearReentrySummary(chatId)
-    }
 
     // Any event that implies an in-flight stream flips the flag, so a resumed
     // stream (WS reconnect with buffered-event replay from the server broker)
@@ -5383,10 +4473,6 @@ export const useProjectStore = defineStore('projects', () => {
             // do reflect the implied streaming state.
             if (event.unattended) existingWithTurn.unattended = true
             if (!streaming.value[chatId]) streaming.value[chatId] = true
-            // This is a broker replay, not a new send: leave the re-entry
-            // summary alone. The whole reason a user re-enters a chat is
-            // orientation, and the summary must survive the WS-resume echo
-            // storm until the user actually types or sends.
             break
           }
           // Look for an optimistic user message with matching content but no
@@ -5446,10 +4532,6 @@ export const useProjectStore = defineStore('projects', () => {
         messages.value[chatId] = normalizeMessages([...msgs])
         // Flushed turn = we're streaming again. Make sure the flag reflects it.
         if (!streaming.value[chatId]) streaming.value[chatId] = true
-        // Brand-new echo (not a replay) is the user actually starting a turn.
-        // Clear the summary here so it disappears when the user sends, not on
-        // an unrelated broker replay.
-        clearReentrySummary(chatId)
         break
       }
 
@@ -5583,8 +4665,8 @@ export const useProjectStore = defineStore('projects', () => {
         if (event.parent_tool_use_id) break
 
         const line = event.tool_input
-          ? `${_toolIcon(event.tool_name)} ${event.tool_name} ${event.tool_input}`
-          : `${_toolIcon(event.tool_name)} ${event.tool_name}`
+          ? `${toolIcon(event.tool_name)} ${event.tool_name} ${event.tool_input}`
+          : `${toolIcon(event.tool_name)} ${event.tool_name}`
 
         _pushToolLine(chatId, line)
         break
@@ -5645,7 +4727,6 @@ export const useProjectStore = defineStore('projects', () => {
         if (isCompacting) {
           _pushStatusLine(chatId, message)
         } else if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isTelemetry) {
-          clearReentrySummary(chatId)
           msgs.push({
             role: 'system',
             content: message,
@@ -5767,12 +4848,6 @@ export const useProjectStore = defineStore('projects', () => {
           const chat = chats.value.find(c => c.chat_id === chatId)
           if (chat) chat.session_id = event.session_id
         }
-        // Clear the re-entry summary only when the result represents a turn
-        // that just finished while the user was watching. If `streaming` was
-        // already false, this is a broker replay for a turn the user has
-        // already been reading and the summary still applies. The summary
-        // also clears at user send (sendMessage / fresh user_echo).
-        const wasStreaming = streaming.value[chatId] === true
         if (text.trim() || event.is_error) {
           msgs.push({
             role: 'assistant',
@@ -5787,7 +4862,12 @@ export const useProjectStore = defineStore('projects', () => {
           })
           const isActive = activeChatId.value === chatId &&
             (typeof document === 'undefined' || document.visibilityState === 'visible')
-          if (!isActive) {
+          // A turn the user stopped is not an answer. Its partial text still
+          // renders so the transcript matches what they watched arrive, but
+          // badging it would put an unread marker on the half sentence they
+          // just cancelled -- on their other devices too, since every client
+          // receives this frame.
+          if (!isActive && !event.stopped) {
             unread.value[chatId] = 1
             persistUnread()
           }
@@ -5805,14 +4885,6 @@ export const useProjectStore = defineStore('projects', () => {
         // so a late click can't race a brand-new turn.
         delete pendingPermissions.value[chatId]
         persistMessages()
-        if (wasStreaming) {
-          // The result closed a turn that was actually in flight on this
-          // client. The re-entry summary no longer reflects the chat
-          // state, so drop it. Skipped on a broker replay (wasStreaming
-          // false) so a scroll-induced resume doesn't dismiss the summary
-          // for a turn the user is still re-reading.
-          clearReentrySummary(chatId)
-        }
         // Reconcile with the authoritative SDK session. Handles the reconnect
         // case where /messages already had this turn (dedups) and the race
         // where the SDK session file lags the result event (retries until the
@@ -5933,33 +5005,15 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  function _toolIcon(name: string): string {
-    const icons: Record<string, string> = {
-      Read: '\u{1F4D6}',     // 📖
-      Edit: '\u270F\uFE0F',   // ✏️
-      Write: '\u{1F4DD}',    // 📝
-      Bash: '$',
-      Grep: '\u{1F50D}',     // 🔍
-      Glob: '\u{1F4C2}',     // 📂
-      Agent: '\u{1F916}',    // 🤖
-      Skill: '\u26A1',       // ⚡
-      WebSearch: '\u{1F310}', // 🌐
-      WebFetch: '\u{1F310}',  // 🌐
-      TaskCreate: '\u2611\uFE0F', // ☑️
-      TaskUpdate: '\u2611\uFE0F', // ☑️
-    }
-    return icons[name] || '\u2699\uFE0F' // ⚙️
-  }
-
   restoreState()
   restoreUnread()
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase, reentrySummaries,
+    projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, backgroundRuns, runningSubagents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
-    serverRestarting, serverRestartMessage, hostConnectionUnavailable,
+    serverRestarting, serverRestartMessage, hostConnectionUnavailable, chatPanelsMounted,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
@@ -5973,7 +5027,7 @@ export const useProjectStore = defineStore('projects', () => {
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     generalProject,
-    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, requestReentrySummary, requestReentrySummaryIfUseful, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow, retryInsights,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
@@ -5985,7 +5039,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
-    loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setReentrySummaryEnabled, setSubagentViewActive,
+    loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
     canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,
     connectWs, disconnectWs, connectEventsWs,
     beginServerRestart, restoreState,

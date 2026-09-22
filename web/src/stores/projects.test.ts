@@ -942,6 +942,84 @@ describe('deferred send visibility and re-send de-duplication', () => {
   })
 })
 
+describe('stopped turns', () => {
+  test('clears the spinner when the reply never lands and the server is idle', async () => {
+    // A stopped turn can leave the transcript ending on the user's own row.
+    // reconcileAfterResult used to run out its retry budget and simply give
+    // up, so the composer kept spinning over a turn the server had already
+    // finished -- until the next send replaced it, which is how the user
+    // first noticed the turn had in fact stopped.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-stopped'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [{ role: 'user', content: 'do the thing', timestamp: '' }]
+      apiGet.mockImplementation(async (url: string) => {
+        if (url.includes('/messages')) {
+          return [{ role: 'user', content: 'do the thing', timestamp: '' }]
+        }
+        return []
+      })
+
+      store.connectEventsWs()
+      const events = fakeSockets[fakeSockets.length - 1]
+      events.onmessage?.({
+        data: JSON.stringify({
+          type: 'chat_streaming_done',
+          chat_id: chatId,
+          project_id: 'p1',
+          is_error: false,
+        }),
+      })
+
+      // Past the whole retry ladder (0/300/700/1500/3000/5000ms).
+      await vi.advanceTimersByTimeAsync(12000)
+      expect(store.streaming[chatId]).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('keeps the spinner while the server still reports the chat streaming', async () => {
+    // The backstop must not fire on a slow turn: the server is the authority
+    // on whether work is still running.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-slow'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.projectStreaming[chatId] = true
+      store.messages[chatId] = [{ role: 'user', content: 'still working', timestamp: '' }]
+      apiGet.mockImplementation(async (url: string) => {
+        if (url.includes('/messages')) {
+          return [{ role: 'user', content: 'still working', timestamp: '' }]
+        }
+        return []
+      })
+
+      store.connectEventsWs()
+      const events = fakeSockets[fakeSockets.length - 1]
+      events.onmessage?.({
+        data: JSON.stringify({
+          type: 'chat_result_ready',
+          chat_id: chatId,
+          project_id: 'p1',
+          title: 't',
+          snippet: '',
+        }),
+      })
+
+      await vi.advanceTimersByTimeAsync(12000)
+      expect(store.streaming[chatId]).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('client host connection failures', () => {
   test('recognizes the legacy proxy error', () => {
     expect(isHostConnectionUnavailableMessage(
@@ -998,6 +1076,100 @@ describe('client host connection failures', () => {
     await store.syncLatest()
 
     expect(store.hostConnectionUnavailable).toBe(false)
+  })
+
+  test('a stopped turn renders its partial text without badging the chat', () => {
+    // Every connected client gets this frame, so a backgrounded tab or a second
+    // device would otherwise show an unread marker for the half sentence the
+    // user just cancelled.
+    const store = useProjectStore()
+    const chatId = 'c-stopped-unread'
+    store.activeChatId = 'some-other-chat'
+    store.messages[chatId] = []
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'Let me check the',
+        is_error: false,
+        stopped: true,
+        effective_model: 'opus',
+        usage: {},
+        session_id: 's1',
+      }),
+    })
+
+    expect(store.messages[chatId].at(-1)?.content).toBe('Let me check the')
+    expect(store.unread[chatId]).toBeUndefined()
+  })
+
+  test('an ordinary result still badges a chat the user is not watching', () => {
+    const store = useProjectStore()
+    const chatId = 'c-normal-unread'
+    store.activeChatId = 'some-other-chat'
+    store.messages[chatId] = []
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'Here is the answer.',
+        is_error: false,
+        effective_model: 'opus',
+        usage: {},
+        session_id: 's1',
+      }),
+    })
+
+    expect(store.unread[chatId]).toBe(1)
+  })
+
+  test('the awareness socket raises the banner with no chat open', () => {
+    // The per-chat socket only exists while a chat is on screen, so on the
+    // home screen nothing used to notice the host was gone -- the app looked
+    // perfectly healthy. /ws/events is proxied too and carries the same frame.
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    expect(events.url).toContain('/ws/events')
+
+    events.onmessage?.({ data: JSON.stringify({ type: 'host_unreachable' }) })
+    expect(store.hostConnectionUnavailable).toBe(true)
+
+    // A keepalive forwarded from the host proves it is back.
+    events.onmessage?.({ data: JSON.stringify({ type: 'keepalive' }) })
+    expect(store.hostConnectionUnavailable).toBe(false)
+  })
+
+  test('a host-unreachable awareness socket backs off instead of respinning', async () => {
+    // The proxy accepts the browser socket before it tries the host, so the
+    // close looks like a healthy blip and took the 50ms path -- twenty
+    // reconnects a second for as long as the host stayed away.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      store.connectEventsWs()
+      const events = fakeSockets[fakeSockets.length - 1]
+      const countBefore = fakeSockets.length
+
+      events.onmessage?.({ data: JSON.stringify({ type: 'host_unreachable' }) })
+      events.close()
+
+      // First retry is still prompt, then the delay grows.
+      await vi.advanceTimersByTimeAsync(60)
+      expect(fakeSockets.length).toBe(countBefore + 1)
+
+      const retry = fakeSockets[fakeSockets.length - 1]
+      retry.onmessage?.({ data: JSON.stringify({ type: 'host_unreachable' }) })
+      retry.close()
+      await vi.advanceTimersByTimeAsync(60)
+      expect(fakeSockets.length).toBe(countBefore + 1)
+      await vi.advanceTimersByTimeAsync(100)
+      expect(fakeSockets.length).toBe(countBefore + 2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test('treats the legacy generic event as the same single connection state', () => {
@@ -1273,7 +1445,7 @@ describe('pinned file dismissal', () => {
   })
 })
 
-describe('chat closing and re-entry orientation', () => {
+describe('chat closing', () => {
   test('deletes an unused draft chat instead of leaving it in the sidebar', async () => {
     const store = useProjectStore()
     const chatId = 'chat-unused-draft'
@@ -1596,270 +1768,6 @@ describe('chat closing and re-entry orientation', () => {
 
     expect(routerPush).not.toHaveBeenCalledWith('/')
     router.currentRoute.value.path = '/'
-  })
-
-  test('starts the summary when a completed chat closes and reuses it on reopen', async () => {
-    const store = useProjectStore()
-    const chatId = 'chat-reentry'
-    store.chats = [{
-      chat_id: chatId,
-      project_id: 'p1',
-      title: 'A completed chat',
-      model: 'sonnet',
-      provider: 'claude',
-      mode: 'auto',
-      session_id: 'session-1',
-      created_at: '',
-      archived: false,
-    }]
-    store.messages[chatId] = [{ role: 'user', content: 'Continue this later', timestamp: '' }]
-    store.activeChatId = chatId
-    localStorageData['ciao-reentry-summary-enabled'] = 'true'
-    apiGet.mockResolvedValue([])
-    apiPost.mockImplementation((path: string) => {
-      if (path.endsWith('/reentry-summary')) return Promise.resolve({ summary: '• Continue the open task' })
-      return Promise.resolve({})
-    })
-
-    await store.closeChat()
-    expect(apiDel).not.toHaveBeenCalled()
-    await vi.waitFor(() => expect(store.reentrySummaries[chatId]).toBe('• Continue the open task'))
-    const summaryCalls = apiPost.mock.calls.filter(([path]) => path.endsWith('/reentry-summary')).length
-    // The mock chat's last message is an unanswered user turn and apiGet
-    // always resolves empty, so it never looks settled -- switchChat's
-    // waitForSettledReply retries run their full real-time budget. Fake
-    // timers stand in for that wait so the test doesn't.
-    vi.useFakeTimers()
-    try {
-      const switching = store.switchChat(chatId)
-      await vi.advanceTimersByTimeAsync(6000)
-      await switching
-    } finally {
-      vi.useRealTimers()
-    }
-    await vi.waitFor(() => expect(store.reentrySummaries[chatId]).toBe('• Continue the open task'))
-    expect(apiPost.mock.calls.filter(([path]) => path.endsWith('/reentry-summary')).length).toBe(summaryCalls)
-  })
-
-  test('requests a summary when selecting any existing chat, without an explicit close', async () => {
-    const store = useProjectStore()
-    const firstChatId = 'chat-first'
-    const secondChatId = 'chat-second'
-    store.chats = [firstChatId, secondChatId].map(chat_id => ({
-      chat_id,
-      project_id: 'p1',
-      title: chat_id,
-      model: 'sonnet',
-      provider: 'claude' as const,
-      mode: 'auto',
-      session_id: `${chat_id}-session`,
-      created_at: '',
-      archived: false,
-    }))
-    localStorageData['ciao-reentry-summary-enabled'] = 'true'
-    apiGet.mockResolvedValue([])
-    apiPost.mockImplementation((path: string) => {
-      if (path.endsWith('/reentry-summary')) {
-        return Promise.resolve({ summary: `• Summary for ${path.includes(firstChatId) ? 'first' : 'second'}` })
-      }
-      return Promise.resolve({})
-    })
-
-    await store.switchChat(firstChatId)
-    await vi.waitFor(() => expect(store.reentrySummaries[firstChatId]).toBe('• Summary for first'))
-
-    await store.switchChat(secondChatId)
-    await vi.waitFor(() => expect(store.reentrySummaries[secondChatId]).toBe('• Summary for second'))
-  })
-})
-
-describe('re-entry summary invalidation', () => {
-  test('clears the summary when a new user message arrives over the chat socket', () => {
-    const store = useProjectStore()
-    const chatId = 'chat-summary-user'
-    store.reentrySummaries[chatId] = 'Old orientation'
-    store.connectWs(chatId)
-
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({
-        type: 'user_echo',
-        text: 'A new prompt',
-        turn_index: 4,
-      }),
-    })
-
-    expect(store.reentrySummaries[chatId]).toBeUndefined()
-  })
-
-  test('clears the summary when a new assistant result arrives', () => {
-    const store = useProjectStore()
-    const chatId = 'chat-summary-result'
-    store.reentrySummaries[chatId] = 'Old orientation'
-    store.connectWs(chatId)
-    // Mark the chat as streaming so the result is treated as a real turn
-    // completion rather than a broker replay on WS resume.
-    store.streaming[chatId] = true
-
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({
-        type: 'result',
-        text: 'The new answer',
-        is_error: false,
-        effective_model: 'claude-test',
-        usage: {},
-        session_id: 'session-1',
-      }),
-    })
-
-    expect(store.reentrySummaries[chatId]).toBeUndefined()
-  })
-
-  test('keeps the summary when a result is replayed after the turn has already settled', () => {
-    // A WS reconnect replays the broker's buffered events. A result for a
-    // turn that already settled on this client must NOT clear the re-entry
-    // summary — otherwise scrolling after a resume would dismiss the
-    // orientation note.
-    const store = useProjectStore()
-    const chatId = 'chat-summary-result-replay'
-    store.reentrySummaries[chatId] = 'Old orientation'
-    store.connectWs(chatId)
-    // streaming stays false (default) — the turn already settled.
-
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({
-        type: 'result',
-        text: 'The new answer',
-        is_error: false,
-        effective_model: 'claude-test',
-        usage: {},
-        session_id: 'session-1',
-      }),
-    })
-
-    expect(store.reentrySummaries[chatId]).toBe('Old orientation')
-  })
-
-  test('keeps the summary when a user_echo is replayed for an already-rendered turn', () => {
-    const store = useProjectStore()
-    const chatId = 'chat-summary-echo-replay'
-    store.reentrySummaries[chatId] = 'Old orientation'
-    store.connectWs(chatId)
-    // The transcript already has a user message with the same turn_index
-    // that the echo is replaying. The summary must survive this echo so
-    // that scrolling (which can trigger a WS resume and a buffered echo
-    // replay) doesn't dismiss the orientation note.
-    store.messages[chatId] = [{
-      role: 'user',
-      content: 'Earlier prompt',
-      timestamp: '2026-08-13T10:00:00Z',
-      turn_index: 4,
-    }]
-
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({
-        type: 'user_echo',
-        text: 'Earlier prompt',
-        turn_index: 4,
-      }),
-    })
-
-    expect(store.reentrySummaries[chatId]).toBe('Old orientation')
-  })
-
-  test('does not restore a stale summary after a new message arrives', async () => {
-    const store = useProjectStore()
-    const chatId = 'chat-summary-race'
-    store.chats = [{
-      chat_id: chatId,
-      project_id: 'p1',
-      title: 'Summary race',
-      model: 'sonnet',
-      provider: 'claude',
-      mode: 'auto',
-      session_id: 'session-1',
-      created_at: '',
-      archived: false,
-    }]
-
-    let resolveSummary!: (value: { summary: string }) => void
-    apiPost.mockReturnValue(new Promise(resolve => { resolveSummary = resolve }))
-    const request = store.requestReentrySummary(chatId)
-
-    store.connectWs(chatId)
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({
-        type: 'user_echo',
-        text: 'A newer prompt',
-        turn_index: 5,
-      }),
-    })
-    resolveSummary({ summary: 'Stale orientation' })
-    await request
-
-    expect(store.reentrySummaries[chatId]).toBeUndefined()
-  })
-
-  test('does not request a summary when the user has disabled the preference', () => {
-    const store = useProjectStore()
-    const chatId = 'chat-summary-disabled'
-    store.chats = [{
-      chat_id: chatId,
-      project_id: 'p1',
-      title: 'Disabled',
-      model: 'sonnet',
-      provider: 'claude',
-      mode: 'auto',
-      session_id: 'session-1',
-      created_at: '',
-      archived: false,
-    }]
-    localStorageData['ciao-reentry-summary-enabled'] = 'false'
-
-    store.requestReentrySummaryIfUseful(chatId)
-
-    const calls = apiPost.mock.calls.filter(([path]) => path.endsWith('/reentry-summary'))
-    expect(calls).toHaveLength(0)
-  })
-
-  test('does not request a summary by default, before any preference is written', () => {
-    const store = useProjectStore()
-    const chatId = 'chat-summary-default'
-    store.chats = [{
-      chat_id: chatId,
-      project_id: 'p1',
-      title: 'Default',
-      model: 'sonnet',
-      provider: 'claude',
-      mode: 'auto',
-      session_id: 'session-1',
-      created_at: '',
-      archived: false,
-    }]
-    delete localStorageData['ciao-reentry-summary-enabled']
-
-    store.requestReentrySummaryIfUseful(chatId)
-
-    const calls = apiPost.mock.calls.filter(([path]) => path.endsWith('/reentry-summary'))
-    expect(calls).toHaveLength(0)
-  })
-
-  test('disabling the preference evicts any cached summaries', () => {
-    const store = useProjectStore()
-    store.reentrySummaries['a'] = 'First'
-    store.reentrySummaries['b'] = 'Second'
-
-    store.setReentrySummaryEnabled(false)
-
-    expect(store.reentrySummaries).toEqual({})
-  })
-
-  test('enabling the preference leaves cached summaries alone', () => {
-    const store = useProjectStore()
-    store.reentrySummaries['a'] = 'First'
-
-    store.setReentrySummaryEnabled(true)
-
-    expect(store.reentrySummaries['a']).toBe('First')
   })
 })
 

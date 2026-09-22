@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,8 +15,7 @@ from starlette.testclient import TestClient
 
 from ciao import mcp_server
 from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
-from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, auto_approved_mcp_tool_names
-from ciao.mcp_server import CiaoMcpService, McpSessionRegistry
+from ciao.mcp_server import CiaoMcpService, AgentSessionRegistry
 
 
 class _FakeControlPlane:
@@ -42,6 +40,14 @@ class _FakeControlPlane:
 
     def system_status_get(self, _principal) -> dict:
         return {"ok": True, "data": {"server": "ok"}}
+
+    def memory_status(self, _principal) -> dict:
+        return {"ok": True, "data": {"region": "memory", "used_chars": 12, "char_limit": 2200}}
+
+    def memory_update(self, _principal, region, *, action, entry, match="") -> dict:
+        self.memory_updates = getattr(self, "memory_updates", [])
+        self.memory_updates.append({"region": region, "action": action, "entry": entry, "match": match})
+        return {"ok": True, "data": {"region": region, "action": action, "entry": entry, "over_cap": False}}
 
     def schedule_create(self, _principal, **values) -> dict:
         self.create_calls += 1
@@ -102,7 +108,7 @@ def _rpc(client: TestClient, token: str, method: str, params: dict, request_id: 
 
 
 def test_registry_issues_scoped_reusable_and_revocable_tokens() -> None:
-    registry = McpSessionRegistry(ttl_seconds=60)
+    registry = AgentSessionRegistry(ttl_seconds=60)
     token, principal = registry.issue(
         chat_id="chat-1",
         project_id="project-1",
@@ -125,7 +131,7 @@ def test_registry_issues_scoped_reusable_and_revocable_tokens() -> None:
 
 
 def test_registry_reissues_when_workspace_or_project_changes() -> None:
-    registry = McpSessionRegistry(ttl_seconds=60)
+    registry = AgentSessionRegistry(ttl_seconds=60)
     token, principal = registry.issue(
         chat_id="chat-1",
         project_id="project-1",
@@ -147,75 +153,28 @@ def test_registry_reissues_when_workspace_or_project_changes() -> None:
     assert registry.status()["active_sessions"] == 1
 
 
-def test_streamable_http_auth_and_structured_tool_result(tmp_path: Path) -> None:
-    service, _control_plane = _service(tmp_path)
-    token, _ = service.registry.issue(
-        chat_id="chat-1",
-        project_id="project-1",
-        workspace="personal",
-        provider="claude",
-    )
-    initialize = {
-        "protocolVersion": "2025-06-18",
-        "capabilities": {},
-        "clientInfo": {"name": "ciaobot-test", "version": "1"},
-    }
+def test_hot_loop_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
+    """S5 removed the hot-loop group from the MCP catalog but the dispatcher
+    must still run them as `ciao memory …` / `ciao vault …` / `ciao file …`."""
+    from ciao import mcp_server
 
-    with _client(service) as client:
-        unauthorized = _rpc(client, "", "initialize", initialize)
-        assert unauthorized.status_code == 401
-
-        initialized = _rpc(client, token, "initialize", initialize)
-        assert initialized.status_code == 200
-        assert initialized.json()["result"]["serverInfo"]["name"] == "ciaobot"
-
-        called = _rpc(
-            client,
-            token,
-            "tools/call",
-            {"name": "context_get", "arguments": {}},
-            request_id=2,
-        )
-
-    assert called.status_code == 200
-    result = called.json()["result"]
-    assert result["isError"] is False
-    # system_status_get is folded into context_get under the "system" key.
-    assert result["structuredContent"] == {
-        "ok": True,
-        "data": {
-            "chat_id": "chat-1",
-            "workspace": "personal",
-            "system": {"server": "ok"},
-        },
-    }
-    telemetry = service._telemetry_path.read_text(encoding="utf-8").splitlines()
-    record = json.loads(telemetry[-1])
-    assert record["tool"] == "context_get"
-    assert record["chat_id"] == "chat-1"
-    assert record["provider"] == "claude"
-    assert record["status"] == "ok"
+    hot_loop = {"memory_status", "memory_update", "vault_search", "vault_review", "file_surface"}
+    service, _ = _service(tmp_path)
+    # Each is a dispatcher operation the CLI routes to.
+    assert hot_loop <= set(service.operation_table)
 
 
 def test_plan_mode_rejects_mutation_before_control_plane_call(tmp_path: Path) -> None:
     service, control_plane = _service(tmp_path, mode="plan")
-    token, _ = service.registry.issue(
-        chat_id="chat-1",
-        project_id="project-1",
-        workspace="personal",
-        provider="opencode",
+
+    result = _dispatcher_call(
+        service,
+        "memory_update",
+        {"region": "memory", "action": "add", "entry": "x"},
     )
 
-    with _client(service) as client:
-        called = _rpc(
-            client,
-            token,
-            "tools/call",
-            {"name": "schedule", "arguments": {"action": "create", "prompt": "do a thing"}},
-        )
-
-    assert called.status_code == 200
-    payload = called.json()["result"]["structuredContent"]
+    assert result["status"] == 422
+    payload = result["envelope"]
     assert payload["ok"] is False
     assert payload["error"]["code"] == "plan_mode_read_only"
     assert control_plane.create_calls == 0
@@ -252,20 +211,6 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
     service, _control_plane = _service(tmp_path)
     names = set(service.status()["tools"])
 
-    assert {
-        "context_get",
-        "memory_status",
-        "memory_update",
-        "vault_search",
-        "project",
-        "project_action",
-        "workspace_create",
-        "chat_create",
-        "schedule",
-        "schedule_action",
-        "chat_handover",
-    } <= names
-
     # The retired loop tools are gone for good; interval cadence lives on the
     # unified `schedule` tool.
     assert not ({"loops_list", "loop", "loop_action"} & names)
@@ -292,11 +237,55 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
             "project_complete",
             "project_restore",
             "project_delete",
+            # Migrated to `ciao <noun> <verb>` in S2 (rare admin group): still
+            # control-plane operations, just no longer MCP tools.
+            "context_get",
+            "project",
+            "project_action",
+            "projects_list",
+            "project_get",
+            "workspaces_list",
+            "gws_status",
+            # Migrated to `ciao chat …` in S3 (chat lifecycle group): still
+            # control-plane operations, just no longer MCP tools.
+            "chats_list",
+            "chat_get",
+            "chat_create",
+            "chat_update",
+            "chat_send",
+            "chat_continue",
+            "chat_retry",
+            "chat_handover",
+            "chat_archive",
+            "chat_delete",
+            "chat_stop",
+            # Migrated to `ciao run …` / `ciao schedule …` in S4 (background
+            # runs and schedules): still control-plane operations, just no
+            # longer MCP tools.
+            "background_run_start",
+            "background_run_status",
+            "background_run_cancel",
+            "schedules_list",
+            "schedule",
+            "schedule_action",
+            # Migrated to `ciao memory …` / `ciao vault …` / `ciao file …` in
+            # S5 (hot loop): still control-plane operations, just no longer MCP
+            # tools. The MCP catalog is now empty.
+            "memory_status",
+            "memory_update",
+            "vault_search",
+            "vault_review",
+            "file_surface",
             # Moved to PWA Settings / skill / native Glob.
             "workspace_update",
             "workspace_delete",
             "project_files_list",
             "adversarial_review",
+            # Deleted rather than migrated to the CLI (D-03): never called,
+            # and the PWA owns both (POST /api/workspaces, /api/chats/{id}/fork).
+            "vault_expand",
+            "workspace_create",
+            "chat_fork",
         }
         & names
     )
@@ -328,8 +317,9 @@ def test_usage_aggregates_telemetry_by_tool(tmp_path: Path) -> None:
     assert by_tool["memory_read"]["providers"] == ["claude", "opencode"]
     assert by_tool["memory_read"]["last_used"] == "2026-07-19T11:00:00Z"
     assert by_tool["vault_search"]["errors"] == 1
-    # Registered-but-never-called tools appear with zero counts.
-    assert by_tool["chat_create"]["calls"] == 0
+    # S5 emptied the MCP catalog, so there are no registered-but-never-called
+    # tools to appear with zero counts; the table reflects only telemetry.
+    assert "memory_status" not in by_tool
     # Sorted by call count descending, so the busiest tool is first.
     assert usage["tools"][0]["tool"] == "memory_read"
 
@@ -427,7 +417,7 @@ def test_usage_reuses_its_aggregate_until_the_log_changes(
 
     def counting_fold(tools, line):
         folded.append(line)
-        real_fold(tools, line)
+        return real_fold(tools, line)
 
     monkeypatch.setattr(mcp_server, "_fold_telemetry_line", counting_fold)
 
@@ -455,33 +445,188 @@ def test_usage_ignores_telemetry_lines_that_are_not_objects(tmp_path: Path) -> N
     assert usage["total_calls"] == 1
 
 
-def test_schedule_handler_does_not_forward_closed_over_service(tmp_path: Path) -> None:
+def test_usage_window_says_when_nothing_has_been_trimmed(tmp_path: Path) -> None:
+    service, _control_plane = _service(tmp_path)
+    _emit(service, 3)
+
+    window = service.usage()["window"]
+
+    assert window["scope"] == "lifetime"
+    assert window["retained_records"] == 3
+    assert window["rolled_up_calls"] == 0
+    assert window["rotated_at"] == ""
+    assert window["max_records"] == mcp_server.TELEMETRY_KEEP_LINES
+    assert "All 3 recorded calls" in window["label"]
+
+
+def test_usage_window_states_the_detail_window_after_a_trim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _control_plane = _service(tmp_path)
+    _bound_telemetry(monkeypatch, keep=5)
+
+    _emit(service, 40)
+
+    usage = service.usage()
+    window = usage["window"]
+    retained = [
+        json.loads(line)
+        for line in service._telemetry_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    # Totals stay lifetime; only the detailed records are windowed, and the
+    # label has to say which part of the count is backed by which.
+    assert usage["total_calls"] == 40
+    assert window["scope"] == "lifetime"
+    assert window["retained_records"] == len(retained)
+    assert window["rolled_up_calls"] == 40 - len(retained)
+    assert window["retained_since"] == min(record["timestamp"] for record in retained)
+    assert window["rotated_at"]
+    assert "older calls are counted from the rolled-up totals only" in window["label"]
+    assert str(window["rolled_up_calls"]) in window["label"]
+
+
+def test_usage_window_survives_a_restart_after_a_trim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _control_plane = _service(tmp_path)
+    _bound_telemetry(monkeypatch, keep=5)
+    _emit(service, 40)
+    before = service.usage()["window"]
+
+    restarted, _plane = _service(tmp_path)
+    after = restarted.usage()["window"]
+
+    assert after["rolled_up_calls"] == before["rolled_up_calls"]
+    assert after["rotated_at"] == before["rotated_at"]
+    assert after["retained_records"] == before["retained_records"]
+    assert after["label"] == before["label"]
+
+
+def test_usage_over_a_large_log_stays_cheap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _control_plane = _service(tmp_path)
+    service._telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+    with service._telemetry_path.open("w", encoding="utf-8") as handle:
+        for index in range(mcp_server.TELEMETRY_KEEP_LINES):
+            handle.write(
+                json.dumps(
+                    {
+                        "tool": "memory_read",
+                        "status": "ok",
+                        "duration_ms": 5,
+                        "provider": "claude",
+                        "timestamp": f"2026-07-19T10:00:{index % 60:02d}Z",
+                    }
+                )
+                + "\n"
+            )
+
+    started = time.perf_counter()
+    first = service.usage()
+    cold_seconds = time.perf_counter() - started
+
+    folded: list[str] = []
+    real_fold = mcp_server._fold_telemetry_line
+
+    def counting_fold(tools, line):
+        folded.append(line)
+        return real_fold(tools, line)
+
+    monkeypatch.setattr(mcp_server, "_fold_telemetry_line", counting_fold)
+    warm = service.usage()
+
+    assert first["total_calls"] == mcp_server.TELEMETRY_KEEP_LINES
+    assert warm["total_calls"] == first["total_calls"]
+    # A full-window parse is the worst case the endpoint can face, because
+    # the size guard caps the log at this many records. Generous bound: the
+    # point is that it is bounded work, not a microbenchmark.
+    assert cold_seconds < 2.0
+    # Polling the endpoint again parses nothing at all.
+    assert folded == []
+
+
+def test_tool_arguments_never_reach_the_telemetry_log(tmp_path: Path) -> None:
     service, control_plane = _service(tmp_path)
-    token, _ = service.registry.issue(
-        chat_id="chat-1",
-        project_id="project-1",
-        workspace="personal",
-        provider="opencode",
+    secret = "sk-live-NOTAREALSECRET-452"
+
+    result = _dispatcher_call(
+        service,
+        "memory_update",
+        {"region": "memory", "action": "add", "entry": f"rotate {secret} tonight"},
     )
 
-    with _client(service) as client:
-        called = _rpc(
-            client,
-            token,
-            "tools/call",
-            {
-                "name": "schedule",
-                "arguments": {
-                    "action": "preview",
-                    "prompt": "test",
-                    "frequency": "manual",
-                    "timezone": "UTC",
-                    "project_id": "project-1",
-                },
-            },
-        )
+    assert result["envelope"]["ok"] is True
+    assert control_plane.create_calls == 0
+    log = service._telemetry_path.read_text(encoding="utf-8")
+    assert secret not in log
+    assert "prompt" not in log
+    record = json.loads(log.splitlines()[-1])
+    assert record["tool"] == "memory_update"
+    assert set(record) == {
+        "timestamp",
+        "surface",
+        "tool",
+        "token_id",
+        "chat_id",
+        "provider",
+        "status",
+        "error_code",
+        "duration_ms",
+    }
 
-    assert called.json()["result"]["structuredContent"]["ok"] is True
+
+def test_tool_call_survives_a_telemetry_write_failure(tmp_path: Path) -> None:
+    service, _control_plane = _service(tmp_path)
+    # A directory where the log belongs makes every append raise OSError,
+    # which stands in for a full disk or a read-only runtime directory.
+    service._telemetry_path.mkdir(parents=True, exist_ok=True)
+
+    result = _dispatcher_call(service, "memory_status", {})
+
+    assert result["envelope"]["ok"] is True
+    # The reader tolerates it too, rather than turning it into a failed poll.
+    assert service.usage()["total_calls"] == 0
+
+
+def test_telemetry_write_tolerates_an_unserialisable_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _control_plane = _service(tmp_path)
+
+    def exploding_dumps(*_args: Any, **_kwargs: Any) -> str:
+        raise TypeError("not serialisable")
+
+    monkeypatch.setattr(mcp_server.json, "dumps", exploding_dumps)
+
+    # No exception escapes: telemetry is best-effort, the caller is not.
+    service._record_tool_call(
+        name="memory_read",
+        principal=_chat_create_principal(),
+        status="ok",
+        error_code="",
+        duration_ms=3,
+    )
+
+
+def test_schedule_handler_does_not_forward_closed_over_service(tmp_path: Path) -> None:
+    service, control_plane = _service(tmp_path)
+
+    result = _dispatcher_call(
+        service,
+        "schedule",
+        {
+            "action": "preview",
+            "prompt": "test",
+            "frequency": "manual",
+            "timezone": "UTC",
+            "project_id": "project-1",
+        },
+    )
+
+    assert result["envelope"]["ok"] is True
     assert control_plane.schedule_values is not None
     assert "self" not in control_plane.schedule_values
 
@@ -496,18 +641,21 @@ def _schedule_token(service: CiaoMcpService) -> str:
     return token
 
 
-def _call(service: CiaoMcpService, name: str, arguments: dict) -> dict:
-    """Call one tool over the real MCP transport and return its JSON-RPC result.
+def _dispatcher_call(service: CiaoMcpService, name: str, arguments: dict) -> dict:
+    """Call one operation through the agent dispatcher (the CLI surface).
 
-    Tool-level raises (bad `action`, missing id) come back as `isError` with no
-    structuredContent, so tests read the whole result rather than just the
-    payload.
+    ``ciao schedule …`` / ``ciao run …`` post to ``POST /agent/v1/{op}``,
+    which runs the same shared operation table the MCP adapter used to serve.
+    These tests were ported from the MCP transport when the background-run and
+    schedule groups left MCP in S4; they now assert the dispatcher envelope and
+    its telemetry rather than a JSON-RPC ``tools/call`` result.
     """
-    token = _schedule_token(service)
-    with _client(service) as client:
-        called = _rpc(client, token, "tools/call", {"name": name, "arguments": arguments})
-    result: dict = called.json()["result"]
-    return result
+    from ciao.agent_surface import AgentDispatcher
+
+    status, envelope = asyncio.run(
+        AgentDispatcher(service).dispatch(_schedule_token(service), name, arguments)
+    )
+    return {"status": status, "envelope": envelope}
 
 
 def test_schedule_update_forwards_values_that_equal_the_create_defaults(
@@ -522,7 +670,7 @@ def test_schedule_update_forwards_values_that_equal_the_create_defaults(
     """
     service, control_plane = _service(tmp_path)
 
-    result = _call(
+    result = _dispatcher_call(
         service,
         "schedule",
         {
@@ -535,7 +683,7 @@ def test_schedule_update_forwards_values_that_equal_the_create_defaults(
         },
     )
 
-    assert result["structuredContent"]["ok"] is True
+    assert result["envelope"]["ok"] is True
     # Exactly the fields the caller passed — no omitted field is invented.
     assert control_plane.schedule_updates == [
         (
@@ -555,10 +703,11 @@ def test_schedule_update_refuses_a_payload_with_nothing_to_change(tmp_path: Path
     above stayed invisible."""
     service, control_plane = _service(tmp_path)
 
-    result = _call(service, "schedule", {"action": "update", "schedule_id": "sched-1"})
+    result = _dispatcher_call(service, "schedule", {"action": "update", "schedule_id": "sched-1"})
 
-    assert result["isError"] is True
-    assert "at least one field" in result["content"][0]["text"]
+    assert result["status"] == 400
+    assert result["envelope"]["ok"] is False
+    assert "at least one field" in result["envelope"]["error"]["message"]
     assert control_plane.schedule_updates == []
 
 
@@ -566,9 +715,9 @@ def test_schedule_create_still_applies_the_documented_defaults(tmp_path: Path) -
     """The signature defaults moved to None, so create has to materialize them."""
     service, control_plane = _service(tmp_path)
 
-    result = _call(service, "schedule", {"action": "create", "prompt": "do a thing"})
+    result = _dispatcher_call(service, "schedule", {"action": "create", "prompt": "do a thing"})
 
-    assert result["structuredContent"]["ok"] is True
+    assert result["envelope"]["ok"] is True
     assert control_plane.schedule_create_values is not None
     assert control_plane.schedule_create_values["daily_time"] == "09:00"
     assert control_plane.schedule_create_values["timezone"] == "UTC"
@@ -586,13 +735,14 @@ def test_update_refuses_to_clear_a_prompt(tmp_path: Path) -> None:
     prompt would keep firing on nothing."""
     service, control_plane = _service(tmp_path)
 
-    result = _call(
+    result = _dispatcher_call(
         service,
         "schedule",
         {"action": "update", "schedule_id": "sched-1", "prompt": ""},
     )
 
-    assert result["isError"] is True
+    assert result["status"] == 400
+    assert result["envelope"]["ok"] is False
     assert control_plane.schedule_updates == []
 
 
@@ -1228,7 +1378,7 @@ async def test_chat_archive_defaults_to_caller_chat() -> None:
         project_chat_manager=fake_pcm,
         schedule_manager=SimpleNamespace(),
     )
-    control_plane._chat = lambda p, cid: SimpleNamespace(project_id="p1")
+    control_plane._chat = lambda p, cid: SimpleNamespace(chat_id=cid, project_id="p1")
     control_plane._project = lambda p, pid: SimpleNamespace(name="Project")
     principal = McpPrincipal(
         token_id="t1",
@@ -1622,43 +1772,6 @@ def test_gws_status_reports_stale_reading_as_not_connected(tmp_path: Path) -> No
     assert data["connected"] is False
 
 
-def test_workspace_create_registers_and_persists(tmp_path: Path) -> None:
-    plane, config, refreshes = _workspace_control_plane(tmp_path)
-    principal = _chat_create_principal()
-
-    result = plane.workspace_create(
-        principal,
-        name="research",
-        default_provider="opencode",
-        gws_profile="work",
-        disallowed_tools=["Bash"],
-        color="cyan",
-    )
-
-    assert result["ok"] is True
-    assert result["data"]["name"] == "research"
-    assert result["data"]["default_provider"] == "opencode"
-    assert result["data"]["disallowed_tools"] == ["Bash"]
-    assert result["data"]["color"] == "cyan"
-    assert refreshes == ["refresh"]
-    assert config.workspace("research") is not None
-    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
-    assert {item["name"] for item in stored} == {"personal", "work", "research"}
-
-
-def test_workspace_create_rejects_conflicts_and_bad_provider(tmp_path: Path) -> None:
-    plane, config, _refreshes = _workspace_control_plane(tmp_path)
-    principal = _chat_create_principal()
-
-    with pytest.raises(ValueError, match="conflicts with existing workspace"):
-        plane.workspace_create(principal, name="Personal")
-
-    with pytest.raises(ValueError, match="default_provider must be one of"):
-        plane.workspace_create(principal, name="research", default_provider="ollama")
-
-    assert config.workspace("research") is None
-
-
 def test_collect_env_refs_from_headers_and_env_block() -> None:
     from ciao.mcp_server import _collect_env_refs
 
@@ -1767,46 +1880,36 @@ def test_probe_stdio_server_returns_observed_tools_only(tmp_path: Path) -> None:
 
 
 def test_tools_list_reports_the_whole_catalog(tmp_path: Path) -> None:
-    """Every registered tool is listed with its schema.
+    """Every registered operation is present in the shared table.
 
     A lazy variant once listed only a core and deferred the rest to a
     tools_search / tools_call pair. It cut ~9k tokens of schema per chat but
     models stopped using tools they could no longer see, so the whole catalog
-    is listed again and there is no dispatcher to route around a tool's own
-    approval card and telemetry.
+    is listed again — now served by the agent dispatcher rather than the MCP
+    transport.
     """
     service, _control_plane = _service(tmp_path)
 
-    listed = {tool.name for tool in asyncio.run(service.server.list_tools())}
-
-    assert listed == service._tool_names
-    assert not listed & {"tools_search", "tools_call"}
-    assert set(service.status()["tools"]) == listed
-    assert service.status()["tool_count"] == len(listed)
+    assert set(service.operation_table) == {op.name for op in mcp_server.OPERATIONS}
+    assert set(service.status()["tools"]) == set()
+    assert service.status()["tool_count"] == 0
 
 
 def test_auto_approved_policy_matches_tool_annotations() -> None:
-    """The allowed_tools policy must track the annotations on the tools.
+    """The agent CLI ask/allow split must track the annotations on the operations.
 
-    ``AUTO_APPROVED_MCP_TOOLS`` bypasses the PermissionGate, so a new tool
-    silently inheriting either policy is the failure mode worth catching. The
-    contract: every ``_READ``/``_WRITE`` tool is auto-approved, every
-    ``_DESTRUCTIVE`` one still raises an approval card.
+    Every ``_READ``/``_WRITE`` operation is allow-class, every ``_DESTRUCTIVE``
+    one is ask-class. The argv split is enforced in ``ciao/behavioral_eval.py``
+    and ``tests/test_agent_surface.py``; this keeps the operation table itself
+    intact as the shared source.
     """
-    source = Path(mcp_server.__file__).read_text(encoding="utf-8")
-    # Matches both single-line decorators and multi-line ones that pass
-    # further keywords (structured_output=, description=) after annotations.
-    declared = re.findall(
-        r'@tool\(\s*name="([a-z_]+)",\s*annotations=(_[A-Z]+)', source
-    )
-    assert declared, "no annotated @tool declarations found in ciao/mcp_server.py"
+    declared = [(op.name, op.annotations) for op in mcp_server.OPERATIONS]
+    assert declared, "no operations in the shared table"
 
-    expected = [name for name, ann in declared if ann in {"_READ", "_WRITE"}]
-    destructive = {name for name, ann in declared if ann == "_DESTRUCTIVE"}
-
-    assert list(AUTO_APPROVED_MCP_TOOLS) == expected
-    assert destructive.isdisjoint(AUTO_APPROVED_MCP_TOOLS)
-    assert auto_approved_mcp_tool_names()[0] == f"mcp__ciaobot__{expected[0]}"
+    destructive = {
+        name for name, ann in declared if ann == mcp_server._DESTRUCTIVE
+    }
+    assert destructive, "no _DESTRUCTIVE operations found"
 
 
 class _StreamPcm:
@@ -1828,7 +1931,13 @@ def _file_surface_plane(
 ) -> CiaoControlPlane:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
-    config = SimpleNamespace(workspace_root=workspace)
+    # `file_surface` roots at the principal's agent root (the workspace
+    # boundary), so the fixture names one the way a rerooted install does.
+    config = SimpleNamespace(
+        workspace_root=workspace,
+        workspace=lambda name: object() if name == "personal" else None,
+        agent_root=lambda name: workspace,
+    )
     return CiaoControlPlane(
         config,
         project_chat_manager=_StreamPcm(stream),
@@ -1893,6 +2002,39 @@ def test_file_surface_returns_honest_signal_fields(tmp_path: Path) -> None:
     assert result["data"] == {"path": "note.md", "viewers": 1, "stream_state": "active"}
 
 
+def test_file_surface_suggests_nearest_paths_on_a_miss(tmp_path: Path) -> None:
+    """Q-08: a `file_not_found` miss carries up to three nearest paths.
+
+    The caller can offer a concrete correction instead of guessing, so the
+    18–32% `file_not_found` rate is not a dead end on either surface.
+    """
+    plane = _file_surface_plane(tmp_path, stream=None, connection_tracker=None)
+    root = plane.config.workspace_root
+    (root / "reports").mkdir(parents=True)
+    (root / "logs").mkdir(parents=True)
+    (root / "reports" / "october-final.md").write_text("b", encoding="utf-8")
+    (root / "reports" / "october-summary.md").write_text("e", encoding="utf-8")
+    (root / "logs" / "notes.md").write_text("c", encoding="utf-8")
+    (root / "logs" / "other.txt").write_text("d", encoding="utf-8")
+
+    principal = McpPrincipal(
+        token_id="t",
+        chat_id="chat-1",
+        project_id="p",
+        workspace="personal",
+        provider="opencode",
+    )
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.file_surface(principal, "reports/october.md")
+    assert excinfo.value.code == "file_not_found"
+    suggestions = excinfo.value.payload().get("suggestions")
+    # Up to three, ranked by basename similarity: the two october files first.
+    assert isinstance(suggestions, list) and len(suggestions) == 3
+    assert suggestions[0] == "reports/october-final.md"
+    assert "reports/october-summary.md" in suggestions
+    assert "logs/other.txt" not in suggestions
+
+
 def test_forged_role_claim_is_normalised_to_chat() -> None:
     """A token claim cannot smuggle in a privileged-looking role.
 
@@ -1923,7 +2065,7 @@ def test_issued_principals_are_always_the_chat_role(tmp_path: Path) -> None:
     role has to change this issuing path, instead of only adding a check that
     silently never fires.
     """
-    registry = McpSessionRegistry(ttl_seconds=300)
+    registry = AgentSessionRegistry(ttl_seconds=300)
 
     _token, principal = registry.issue(
         chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
@@ -1941,7 +2083,7 @@ def test_revoke_clears_the_reuse_key_so_the_next_issue_mints_a_fresh_token(
     still popped a differently-shaped key, the entry would survive revocation
     and hand a revoked token back to the next caller.
     """
-    registry = McpSessionRegistry(ttl_seconds=300)
+    registry = AgentSessionRegistry(ttl_seconds=300)
     token, _ = registry.issue(
         chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
     )
@@ -1963,7 +2105,7 @@ def test_revoke_clears_the_reuse_key_so_the_next_issue_mints_a_fresh_token(
 
 def test_same_chat_and_provider_still_reuses_one_token(tmp_path: Path) -> None:
     """Dropping role from the key must not break token reuse."""
-    registry = McpSessionRegistry(ttl_seconds=300)
+    registry = AgentSessionRegistry(ttl_seconds=300)
 
     first, _ = registry.issue(
         chat_id="chat-1", project_id="p", workspace="personal", provider="claude"

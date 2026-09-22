@@ -1,0 +1,139 @@
+// Parsing for the two question cards the chat can show: the provider's
+// AskUserQuestion picker and the engine's image-capability prompt. Pure
+// transforms over raw event payloads — the live state (`activeQuestions`,
+// `activeCapabilityQuestions`, `resolvedQuestions`) stays in
+// `stores/projects.ts`, which owns when a card appears and when it is cleared.
+
+export type ActiveQuestionOption = { label: string; description?: string }
+
+export type ActiveQuestion = {
+  id: string
+  question: string
+  header: string
+  multiSelect: boolean
+  allowOther: boolean
+  isSecret: boolean
+  requestId: string
+  options: ActiveQuestionOption[]
+}
+
+// Rendered when the engine pre-flights an image turn and the selected
+// model cannot see images; the user picks a vision-capable model (switch),
+// opens the full model picker, or cancels. Answered with a
+// `capability_response` client message. Unlike `activeQuestions` there is
+// no persisted copy on the chat — the question lives only for the
+// in-flight turn, so it is never rebuilt on reload.
+export type CapabilityCandidate = {
+  id: string
+  label: string
+  supports_vision?: boolean
+  disabled?: boolean
+}
+
+export type CapabilityQuestion = {
+  request_id: string
+  missing: string
+  current_model: string
+  candidates: CapabilityCandidate[]
+  timeout_s: number
+  opened_at: number
+}
+
+/**
+ * Stable identity for a picker, computable identically from the live
+ * `activeQuestions` entry (at resolve time) and from a rebuilt `pending_question`
+ * (at rebuild time). Some providers carry a `requestId`; Claude's
+ * picker has none, so fall back to the question content.
+ */
+export function questionsSignature(qs: ActiveQuestion[] | undefined): string {
+  if (!qs || !qs.length) return ''
+  const rid = qs[0]?.requestId
+  if (rid) return `rid:${rid}`
+  return `q:${qs.map(q => `${q.id}${q.question}`).join('')}`
+}
+
+/**
+ * Parse the AskUserQuestion tool_input JSON (`{"questions": [...]}`) into the
+ * picker's shape. Shared by the live `tool_use` handler and the reload-time
+ * rebuild from a chat's persisted `pending_question`. Returns [] on anything
+ * unparseable so callers can fall through to the generic trace path.
+ */
+export function parseQuestions(
+  toolInput: string | null | undefined,
+  requestId = '',
+): ActiveQuestion[] {
+  if (!toolInput) return []
+  try {
+    const parsed = JSON.parse(toolInput)
+    if (!Array.isArray(parsed?.questions)) return []
+    const resolvedRequestId = requestId || String(parsed?.request_id ?? '')
+    if (parsed.questions.length === 0) {
+      // Some provider turns emit the AskUserQuestion tool
+      // with an empty questions array. Do not silently demote that event to
+      // a trace row: surface a free-form response so the user can unblock
+      // the turn and the provider still receives the native request id.
+      return [{
+        id: '__freeform__',
+        question: 'The model needs your input. Enter a response to continue.',
+        header: 'Response',
+        multiSelect: false,
+        allowOther: true,
+        isSecret: false,
+        requestId: resolvedRequestId,
+        options: [],
+      }]
+    }
+    // Claude Code's documented AskUserQuestion shape uses
+    // `question`/`header`/`multiSelect`. Some providers (seen with
+    // MiniMax via the Claude path) emit an alternate shape with
+    // `text`/`type: single_select|multi_select` instead — accept both
+    // so the picker prompt is never blank when the model did ask.
+    return parsed.questions.map((q: Record<string, unknown>, index: number) => {
+      const type = String(q.type ?? '').toLowerCase()
+      return {
+        id: String(q.id ?? index),
+        question: String(q.question ?? q.text ?? ''),
+        header: String(q.header ?? q.title ?? ''),
+        multiSelect: Boolean(q.multiSelect) || type === 'multi_select',
+        allowOther: q.isOther === undefined
+          ? true
+          : Boolean(q.isOther) || !Array.isArray(q.options) || q.options.length === 0,
+        isSecret: Boolean(q.isSecret),
+        requestId: resolvedRequestId,
+        options: Array.isArray(q.options)
+          ? (q.options as Array<Record<string, unknown>>).map(o => ({
+              label: String(o.label ?? o.value ?? ''),
+              description: o.description ? String(o.description) : '',
+            }))
+          : [],
+      }
+    })
+  } catch {
+    return []
+  }
+}
+
+export function parseCapabilityQuestion(event: {
+  request_id: string
+  missing?: string
+  current_model?: string
+  candidates?: Array<Record<string, unknown>>
+  timeout_s?: number
+}): CapabilityQuestion {
+  return {
+    request_id: event.request_id,
+    missing: String(event.missing ?? 'image_input'),
+    current_model: String(event.current_model ?? ''),
+    candidates: Array.isArray(event.candidates)
+      ? (event.candidates as Array<Record<string, unknown>>).map(c => ({
+          id: String(c.id ?? ''),
+          label: String(c.label ?? c.id ?? ''),
+          supports_vision:
+            c.supports_vision === undefined ? undefined : Boolean(c.supports_vision),
+          disabled: Boolean(c.disabled),
+        }))
+      : [],
+    timeout_s: Number(event.timeout_s ?? 30),
+    opened_at: Date.now(),
+  }
+}

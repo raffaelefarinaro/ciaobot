@@ -144,6 +144,14 @@ _SHELL_HEREDOC_RE = re.compile(
     r"(?:^|[\s;|&])(?:\w+)?\s*(>>?)\s*['\"]?([^\s'\"<>&|;]+)['\"]?\s*<<"
 )
 _SHELL_TOUCH_RE = re.compile(r"(?:^|[\s;|&])touch\s+([^\n;&|]+)")
+# The CLI surface's `ciao file surface <path>` is the same deliberate "show
+# this to the user" signal the MCP `mcp__ciaobot__file_surface` tool carried,
+# so it reuses the file-touch pipeline and auto-pins the panel (S5/S6). `ciao`
+# must sit at a real command position — start of the shell input or after a
+# command separator (; | & or a newline) — never mid-argument, so `echo ciao
+# file surface out/report.md` (a string that merely contains the words) is not
+# mistaken for an explicit surfacing request.
+_CIAO_FILE_SURFACE_RE = re.compile(r"(?:^|[;&|\n]\s*)ciao\s+file\s+surface\s+([^\n;&|]+)")
 _SHELL_TEE_RE = re.compile(
     r"(?:^|[\s;|&])tee(\s+-a)?\s+['\"]?([^\s'\"<>&|;]+)['\"]?"
 )
@@ -245,6 +253,24 @@ def _paths_from_shell_command(command: str) -> list[dict]:
             continue
         if len(tokens) >= 2:
             add(tokens[-1], "created")
+    for match in _CIAO_FILE_SURFACE_RE.finditer(command):
+        try:
+            tokens = shlex.split(match.group(1))
+        except ValueError:
+            continue
+        for token in tokens:
+            if token.startswith("-") or token in {"--json", "--"}:
+                continue
+            # An explicit `ciao file surface <path>` is a deliberate surfacing
+            # request, not a shell redirect: accept the argument as-is, without
+            # the `_looks_like_shell_path` heuristic that suppresses redirect
+            # false positives (and would drop valid viewable files like .htm
+            # the PWA HTML viewer recognizes).
+            path = token.strip().strip("'\"")
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            results.append({"file_path": path, "action": "surfaced"})
     return results
 
 

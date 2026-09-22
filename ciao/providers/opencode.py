@@ -52,6 +52,7 @@ from ciao.models import (
     ThinkingEvent,
     TokenUsageEvent,
     ToolUseEvent,
+    provider_reuse_key,
 )
 from ciao.providers.base import (
     ActiveHandle,
@@ -62,9 +63,6 @@ from ciao.providers.base import (
     prepend_stable_context,
 )
 from ciao.execution_modes import (
-    AUTO_APPROVED_MCP_TOOLS,
-    CONTROL_PLANE_PREAPPROVED_MODES,
-    MCP_SERVER_NAME,
     opencode_credential_deny_rules,
 )
 from ciao.providers._sse import SSEDecoder
@@ -190,19 +188,6 @@ _MODE_AGENTS: dict[str, str] = {
 # reviewer plugin. Every other mode keeps its own ruleset.
 _READ_ONLY_TOOLS = ("read", "glob", "grep", "list")
 
-# Ciaobot's control-plane mutations that must keep prompting even in the
-# permissive auto default. Mirrors the ``_DESTRUCTIVE`` annotation on the MCP
-# tools in ``ciao/mcp_server.py``: deletes, lifecycle teardown, and arbitrary
-# command starts. Everything else on the control plane is allow-listed.
-_DESTRUCTIVE_MCP_TOOLS = (
-    "chat_delete",
-    "project_action",
-    "chat_stop",
-    "schedule_action",
-    "background_run_start",
-    "background_run_cancel",
-)
-
 # Permission changes cannot be patched onto an existing opencode session.
 # Keep the replacement-session handover bounded so a long-running chat does
 # not turn one mode switch into an unbounded prompt.
@@ -218,18 +203,16 @@ def _rules(*entries: tuple[str, str]) -> list[dict[str, str]]:
 
 
 def _permissive_auto_rules() -> list[dict[str, str]]:
-    """The auto-mode ruleset: allow routine work, ask for shell + destructive MCP.
+    """The auto-mode ruleset: allow routine work, ask for shell.
 
     A leading wildcard ``allow`` lets almost every tool run without an
     approval card. ``bash`` stays ``ask`` so each shell command is reviewed —
     by the operator (a Ciaobot approval card) or, when the user opts into the
-    ``opencode-auto-permissions`` plugin, by its reviewer model. The
-    destructive control-plane tools stay ``ask`` unconditionally.
+    ``opencode-auto-permissions`` plugin, by its reviewer model.
     """
     return _rules(
         ("*", "allow"),
         ("bash", "ask"),
-        *((f"{MCP_SERVER_NAME}_{tool}", "ask") for tool in _DESTRUCTIVE_MCP_TOOLS),
     )
 
 
@@ -554,26 +537,6 @@ def _token_usage_events(tokens: object) -> list[StreamEvent]:
     return [TokenUsageEvent(type="token_usage", input_tokens=read_in, output_tokens=read_out)]
 
 
-def control_plane_permission_rules() -> list[dict[str, str]]:
-    """Allow rules for the auto-approved half of Ciaobot's own MCP tools.
-
-    Ciaobot's control plane is not a third-party tool the operator should have
-    to approve call by call: reading a project's files or listing chats is the
-    app doing its own bookkeeping. Claude gets this through
-    ``options.allowed_tools``; opencode needs it as session permission rules,
-    or every ``ciaobot_*`` call raises a card even in auto mode.
-
-    Enumerated rather than globbed on purpose. ``ciaobot_*`` would also allow
-    the destructive tools deliberately kept out of AUTO_APPROVED_MCP_TOOLS —
-    chat_delete, project_action, chat_stop, background_run_start — which must
-    keep prompting. opencode names an MCP tool ``<server>_<tool>``.
-    """
-    return [
-        {"permission": f"{MCP_SERVER_NAME}_{tool}", "pattern": "*", "action": "allow"}
-        for tool in AUTO_APPROVED_MCP_TOOLS
-    ]
-
-
 def mode_settings(
     mode: BridgeMode,
     *,
@@ -589,17 +552,17 @@ def mode_settings(
     ``runtime_root`` is the resolved runtime directory, when the caller can
     reach it, so the credential denies cover a relocated
     ``CIAO_RUNTIME_ROOT`` and not only the default ``.runtime`` name.
+
+    Since S6 every chat is on the CLI surface. Auto mode does not pre-approve
+    any ``ciao …`` argv prefix: an allow rule is a prefix a shell suffix
+    (``ciao help >/dev/null; <cmd>``) could ride past, so bash stays ``ask``
+    and every shell command, including ``ciao …``, keeps a card. Users who want
+    no cards switch to ``bypass``.
     """
     key = mode if mode in _MODE_AGENTS else "normal"
     if not tools_enabled:
         return _MODE_AGENTS[key], _rules(("*", "deny"))
     rules = [dict(rule) for rule in _MODE_PERMISSIONS[key]]
-    # Scoped to the modes whose contract allows acting without asking — the
-    # same carve-out as the Claude provider. The rationale (why `plan` and
-    # `normal` are excluded, and why `schedule` in particular is an
-    # escalation) lives beside the shared constant in ciao/execution_modes.py.
-    if key in CONTROL_PLANE_PREAPPROVED_MODES:
-        rules.extend(control_plane_permission_rules())
     # Last, and for every mode including `bypass`: resolution is
     # last-match-wins, and this is the one carve-out no mode may buy its way
     # out of. See `opencode_credential_deny_rules`.
@@ -907,7 +870,7 @@ class OpencodeProvider(BaseSDKProvider):
         """opencode has no between-turns event source to drain."""
         return False
 
-    def _chat_system_instructions(self, request: AgentRequest) -> str:
+    def _chat_system_instructions(self) -> str:
         """Return the compact core for normal chats, never bounded memory."""
         payload = system_prompt_payload("") or {}
         return str(payload.get("append") or "")
@@ -937,7 +900,7 @@ class OpencodeProvider(BaseSDKProvider):
         re-pointed at a new token.
         """
         if self._client is not None and self._process is not None:
-            if self._process.returncode is None and request.mcp_token == self._mcp_token:
+            if self._process.returncode is None and provider_reuse_key(request) == self._mcp_token:
                 return self._client
             await self.disconnect()
 
@@ -982,13 +945,7 @@ class OpencodeProvider(BaseSDKProvider):
             **(request.extra_env or {}),
             "OPENCODE_SERVER_PASSWORD": self._password,
         }
-        # The control-plane token is registered as a literal Authorization
-        # header below. Never put it in the server environment: opencode passes
-        # that environment to model-launched shell commands, where `env` (or a
-        # malicious workspace script) could steal the token and call `/mcp`
-        # without going through provider permission prompts.
-        env.pop("CIAO_MCP_SESSION_TOKEN", None)
-        self._mcp_token = request.mcp_token
+        self._mcp_token = provider_reuse_key(request)
 
         # Say it now, while the environment we are about to hand over is in
         # hand: an unresolved placeholder becomes an empty credential and only
@@ -1018,7 +975,6 @@ class OpencodeProvider(BaseSDKProvider):
         try:
             await self._await_health()
             await self._verify_contract()
-            await self._register_control_plane(request)
         except BaseException:
             # A server we could not validate is a server nobody will ever
             # shut down; reap it here rather than leaking it for the life of
@@ -1114,54 +1070,6 @@ class OpencodeProvider(BaseSDKProvider):
                 "this opencode build is missing operations Ciaobot needs: "
                 + ", ".join(missing)
             )
-
-    async def _register_control_plane(self, request: AgentRequest) -> None:
-        """Attach Ciaobot's own MCP server to this chat's opencode process.
-
-        Claude gets this through ``options.mcp_servers``. opencode takes it over
-        the running
-        server's API, which is what makes the per-chat process worth having:
-        the token is scoped to this chat and never written to
-        ``opencode.json``, where it would be workspace-wide and on disk.
-
-        The token goes in the header literally: opencode's ``{env:VAR}``
-        interpolation is a config-*file* feature and is not applied to configs
-        registered through the API (verified — the placeholder was sent
-        through verbatim, which the control plane would reject as a bad
-        token). The call is loopback and password-authenticated, and the token
-        stays in the server's memory: ``_start_server_once`` deliberately pops
-        ``CIAO_MCP_SESSION_TOKEN`` from the child environment, because opencode
-        hands that environment to model-launched shell commands. Unlike
-        ``opencode.json`` it never reaches disk either.
-        """
-        client = self._client
-        if client is None or not request.mcp_url or not request.mcp_token:
-            return
-        config: dict[str, Any] = {
-            "type": "remote",
-            "url": request.mcp_url,
-            "enabled": True,
-            "headers": {"Authorization": f"Bearer {request.mcp_token}"},
-        }
-        # Nothing here is interpolated (see above), so a placeholder that slipped
-        # in would be sent verbatim and rejected as a bad token. Fail with the
-        # cause rather than a downstream 401.
-        placeholders = unresolved_placeholders(config)
-        if placeholders:
-            raise RuntimeError(
-                "refusing to register the Ciaobot MCP server with unresolved "
-                f"placeholders {', '.join(placeholders)}: opencode does not "
-                "interpolate configs registered over the API"
-            )
-        try:
-            response = await client.post(
-                "/mcp", json={"name": MCP_SERVER_NAME, "config": config}
-            )
-        except httpx.HTTPError as exc:
-            raise RuntimeError(f"could not attach the Ciaobot MCP server: {exc}") from exc
-        if response.status_code >= 400:
-            detail = _sanitize_error(response.text)
-            raise RuntimeError(f"opencode refused the Ciaobot MCP server: {detail}")
 
     async def disconnect(self) -> None:
         """Tear down the server, denying anything still awaiting a reply."""
@@ -1899,7 +1807,7 @@ class OpencodeProvider(BaseSDKProvider):
         if request.thinking_level:
             body["variant"] = request.thinking_level
         if self._developer_instructions is None:
-            instructions = self._chat_system_instructions(request)
+            instructions = self._chat_system_instructions()
             runtime = ""
         else:
             instructions = self._developer_instructions

@@ -263,8 +263,8 @@ describe('SchedulePanel property cards', () => {
 
   it('shows a status row for a wall-clock entry whose last dispatch failed', async () => {
     // A dispatch failure stamps last_status on the row (issue #407). The
-    // missed-run check only trips at the next occurrence + 5 minutes; without
-    // this row the failure sat in the job log with nothing visible anywhere.
+    // missed badge says a slot went unserved; this row says why, and without
+    // it the failure sat in the job log with nothing visible anywhere.
     const wrapper = await mountPanel(makeSchedule({
       frequency: 'daily',
       daily_time_utc: '08:00',

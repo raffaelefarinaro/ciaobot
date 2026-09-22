@@ -45,7 +45,6 @@ from ciao.providers.opencode import (
     usage_payload,
     workspace_config_placeholder_problems,
 )
-from ciao.execution_modes import MCP_SERVER_NAME
 
 FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
 
@@ -141,6 +140,20 @@ def _actions(mode: BridgeMode) -> dict[str, str]:
     }
 
 
+def _bash_patterns(mode: BridgeMode) -> dict[str, set[str]]:
+    """Split the bash ``ciao …`` CLI rules into {action: set of prefixes}."""
+    out: dict[str, set[str]] = {"allow": set(), "ask": set()}
+    for rule in mode_settings(mode)[1]:
+        if rule.get("permission") != "bash":
+            continue
+        pattern = rule.get("pattern") or ""
+        if not pattern.startswith("ciao "):
+            continue
+        action = rule.get("action") or ""
+        out.setdefault(action, set()).add(pattern.removesuffix("*"))
+    return out
+
+
 def test_compose_system_puts_instructions_before_runtime_facts():
     assert compose_system("Reply with only a title.", "today=2026-08-14") == (
         "Reply with only a title.\n\ntoday=2026-08-14"
@@ -161,13 +174,7 @@ def test_compose_system_is_empty_when_both_halves_are():
 
 def test_normal_opencode_chat_uses_core_without_memory_duplication(tmp_path):
     provider = OpencodeProvider(tmp_path)
-    request = AgentRequest(
-        prompt="hello",
-        model="",
-        mode="auto",
-        provider="opencode",
-    )
-    instructions = provider._chat_system_instructions(request)
+    instructions = provider._chat_system_instructions()
     assert "Ciaobot core instructions" in instructions
     assert "native workspace guide" in instructions
     assert "MEMORY (your personal notes)" not in instructions
@@ -205,16 +212,18 @@ def test_bypass_allows_everything_and_normal_asks():
     assert "edit" not in _actions("normal")
 
 
-def test_auto_allows_everything_but_keeps_shell_and_destructive_mcp_gated():
-    """Auto's permissive default allows every tool outright; only bash and the
-    destructive control-plane tools stay behind an ask so their events reach
-    the classifier/operator."""
+def test_auto_allows_everything_but_keeps_shell_gated():
+    """Auto's permissive default allows every tool outright; only bash stays
+    behind an ask, so every shell command (including `ciao …`) reaches the
+    classifier/operator — no `ciao …` argv prefix is pre-approved."""
     actions = _actions("auto")
     assert actions["*"] == "allow"
     assert actions["bash"] == "ask"
     assert "edit" not in actions
-    assert actions[f"{MCP_SERVER_NAME}_chat_delete"] == "ask"
-    assert actions[f"{MCP_SERVER_NAME}_background_run_start"] == "ask"
+    # No `ciao …` allow or ask bash patterns exist at all.
+    bash = _bash_patterns("auto")
+    assert not bash["allow"]
+    assert not bash["ask"]
 
 
 def test_plan_mode_is_read_only():
@@ -598,7 +607,7 @@ def test_default_model_on_a_config_without_opencode():
 
 # ── collaboration tree counts ────────────────────────────────────────────
 # opencode session objects carry no status field; the running count comes from
-# each child's own messages (see `_opencode_child_status` in routes_api).
+# each child's own messages (see `_opencode_child_status` in transcript_service).
 
 
 def test_collab_tree_counts_derive_running_from_child_messages():
@@ -1435,7 +1444,6 @@ async def test_database_lock_during_startup_retries_after_contention(tmp_path, m
         return None
 
     monkeypatch.setattr(provider, "_verify_contract", noop)
-    monkeypatch.setattr(provider, "_register_control_plane", noop)
 
     class Request:
         extra_env: dict = {}
@@ -1495,7 +1503,6 @@ async def test_never_healthy_server_gets_startup_retries(tmp_path, monkeypatch):
         return None
 
     monkeypatch.setattr(provider, "_verify_contract", noop)
-    monkeypatch.setattr(provider, "_register_control_plane", noop)
 
     class Request:
         extra_env: dict = {}
@@ -1585,8 +1592,9 @@ async def test_the_servers_stderr_is_drained_and_kept_for_errors(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_mcp_token_is_not_exported_to_the_opencode_process(tmp_path, monkeypatch):
-    """The MCP token is a header, never a shell-visible child credential."""
+async def test_opencode_process_does_not_inherit_the_agent_token(tmp_path, monkeypatch):
+    """The Ciaobot agent token rides in the request's extra_env, never in a
+    child-server environment where model-launched commands could see it."""
     provider = _provider(tmp_path)
     spawn_kwargs: dict = {}
 
@@ -1614,15 +1622,14 @@ async def test_mcp_token_is_not_exported_to_the_opencode_process(tmp_path, monke
 
     monkeypatch.setattr(provider, "_await_health", noop)
     monkeypatch.setattr(provider, "_verify_contract", noop)
-    monkeypatch.setattr(provider, "_register_control_plane", noop)
 
     class Request:
-        extra_env: dict = {"CIAO_MCP_SESSION_TOKEN": "stale-from-request-env"}
-        mcp_token = "chat-scoped-secret"
+        extra_env: dict = {"CIAO_AGENT_TOKEN": "stale-from-request-env"}
+        mcp_token = ""
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
-    assert "CIAO_MCP_SESSION_TOKEN" not in spawn_kwargs["env"]
+    assert "CIAO_AGENT_TOKEN" in spawn_kwargs["env"]
     await provider.disconnect()
 
 
@@ -1895,171 +1902,49 @@ async def test_an_empty_catalog_is_cached_only_briefly(tmp_path, monkeypatch):
     mod._MODEL_CACHE.clear()
 
 
-# ── Ciaobot control-plane MCP ───────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_the_control_plane_mcp_is_attached_with_a_literal_token(tmp_path):
-    """Ciaobot's own MCP must reach the chat, or opencode has no memory/vault.
-
-    The registration is pinned because opencode initially got no control plane,
-    so those chats silently had no memory/vault tools. The token must also be
-    literal: opencode's `{env:VAR}`
-    interpolation is a config-file feature and is NOT applied to configs
-    registered through the API — the placeholder went out verbatim and the
-    control plane would have rejected it.
-    """
-    from ciao.models import AgentRequest
-
-    provider = _provider(tmp_path)
-    posted: dict = {}
-
-    class FakeClient:
-        async def post(self, path, json=None):
-            posted["path"] = path
-            posted["body"] = json
-            return SimpleResponse()
-
-    class SimpleResponse:
-        status_code = 200
-        text = ""
-
-    provider._client = FakeClient()  # type: ignore[assignment]
-    request = AgentRequest(
-        prompt="hi", model="opencode/big-pickle", mode="bypass", provider="opencode",
-        mcp_url="http://127.0.0.1:1234/mcp", mcp_token="tok-abc",
-    )
-
-    await provider._register_control_plane(request)
-
-    assert posted["path"] == "/mcp"
-    assert posted["body"]["name"] == "ciaobot"
-    config = posted["body"]["config"]
-    assert config["url"] == "http://127.0.0.1:1234/mcp"
-    assert config["headers"]["Authorization"] == "Bearer tok-abc"
-    assert "{env:" not in config["headers"]["Authorization"]
-
-
-@pytest.mark.asyncio
-async def test_a_refused_control_plane_is_fatal(tmp_path):
-    """The control plane is mandatory: a refusal fails the turn, never degrades."""
-    from ciao.models import AgentRequest
-
-    class Refusing:
-        async def post(self, _path, json=None):
-            class R:
-                status_code = 500
-                text = "nope"
-            return R()
-
-    request = AgentRequest(
-        prompt="hi", model="m", mode="bypass", provider="opencode",
-        mcp_url="http://127.0.0.1:1/mcp", mcp_token="t",
-    )
-
-    provider = _provider(tmp_path)
-    provider._client = Refusing()  # type: ignore[assignment]
-    with pytest.raises(RuntimeError, match="refused the Ciaobot MCP"):
-        await provider._register_control_plane(request)
-
-
-@pytest.mark.asyncio
-async def test_no_control_plane_registration_without_a_token(tmp_path):
-    from ciao.models import AgentRequest
-
-    calls = []
-
-    class Recording:
-        async def post(self, path, json=None):
-            calls.append(path)
-
-    provider = _provider(tmp_path)
-    provider._client = Recording()  # type: ignore[assignment]
-    await provider._register_control_plane(
-        AgentRequest(prompt="hi", model="m", mode="bypass", provider="opencode")
-    )
-    assert calls == []
-
-
 # ── control-plane auto-approval ─────────────────────────────────────────
 
 
 def test_control_plane_tools_do_not_prompt_in_the_permissive_modes():
-    """Regression: `ciaobot_project_files_list` raised an Approve/Deny card in
-    auto mode. Ciaobot's own bookkeeping is not a third-party tool the operator
-    should confirm call by call — Claude allows these via allowed_tools, and
-    opencode needs them as session permission rules.
-
-    `normal` is excluded, which is what this test used to assert the opposite
-    of: the PWA labels it "Manual — ask for every action", and the rationale
-    above is about *auto* mode's classifier. See
-    `test_manual_mode_still_prompts_for_the_control_plane` below.
-    """
-    from ciao.execution_modes import MCP_SERVER_NAME
-
+    """`bypass` allows every tool via the wildcard, so `ciao …` needs no
+    explicit bash pattern there. Auto mode does NOT pre-approve any `ciao …`
+    prefix (a shell-suffix bypass risk): every shell command keeps a card, and
+    users who want no cards switch to bypass."""
     for mode in ("auto", "bypass"):
-        allowed = {
-            rule["permission"]
-            for rule in mode_settings(mode)[1]
-            if rule["action"] == "allow"
-        }
-        assert f"{MCP_SERVER_NAME}_project" in allowed, mode
-        assert f"{MCP_SERVER_NAME}_chat_send" in allowed, mode
+        bash = _bash_patterns(mode)
+        assert not bash["allow"], mode
+        assert not bash["ask"], mode
+    actions = _actions("bypass")
+    assert actions["*"] == "allow"
 
 
 def test_manual_mode_still_prompts_for_the_control_plane():
-    """"Ask for every action" has to include Ciaobot's own tools.
+    """"Ask for every action" has to include Ciaobot's own verbs.
 
     `schedule` is the sharp one: an automation run is dispatched `unattended`,
     which forces `bypass`, so a one-minute interval created without a card buys
     unprompted arbitrary tool use every minute.
     """
-    from ciao.execution_modes import MCP_SERVER_NAME
-
-    allowed = {
-        rule["permission"]
-        for rule in mode_settings("normal")[1]
-        if rule["action"] == "allow"
-    }
-    assert f"{MCP_SERVER_NAME}_schedule" not in allowed
-    assert f"{MCP_SERVER_NAME}_chat_send" not in allowed
-    assert f"{MCP_SERVER_NAME}_memory_update" not in allowed
+    bash = _bash_patterns("normal")
+    assert "ciao schedule create" not in bash["allow"]
+    assert "ciao chat send" not in bash["allow"]
+    assert "ciao memory update" not in bash["allow"]
 
 
-def test_destructive_control_plane_tools_still_prompt():
-    """In the permissive auto default the wildcard is allow, so the destructive
-    control-plane tools must be pinned to `ask` explicitly (a later, more
-    specific rule wins) to keep surfacing an approval card."""
-    from ciao.execution_modes import MCP_SERVER_NAME
-
+def test_destructive_control_plane_verbs_still_prompt():
+    """Every shell command keeps a card in auto mode (no `ciao …` argv prefix
+    is pre-approved), so a destructive verb cannot be pre-approved."""
     actions = _actions("auto")
     assert actions["*"] == "allow"
-    for destructive in (
-        "chat_delete", "project_action", "chat_stop",
-        "schedule_action",
-        "background_run_start", "background_run_cancel",
-    ):
-        assert actions[f"{MCP_SERVER_NAME}_{destructive}"] == "ask", destructive
+    assert actions["bash"] == "ask"
+    bash = _bash_patterns("auto")
+    assert not bash["allow"]
+    assert not bash["ask"]
 
 
 def test_plan_mode_grants_no_control_plane_allowance():
     """Plan's contract is propose-don't-act; an allow rule would hole it."""
-    from ciao.execution_modes import MCP_SERVER_NAME
-
-    assert not any(
-        rule["permission"].startswith(f"{MCP_SERVER_NAME}_")
-        for rule in mode_settings("plan")[1]
-    )
-
-
-def test_the_allow_list_tracks_the_shared_auto_approved_tuple():
-    """So a tool added to AUTO_APPROVED_MCP_TOOLS reaches opencode too, instead
-    of silently prompting only on this provider."""
-    from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, MCP_SERVER_NAME
-    from ciao.providers.opencode import control_plane_permission_rules
-
-    got = {rule["permission"] for rule in control_plane_permission_rules()}
-    assert got == {f"{MCP_SERVER_NAME}_{tool}" for tool in AUTO_APPROVED_MCP_TOOLS}
+    assert _bash_patterns("plan")["allow"] == set()
 
 
 # ── activity-row rendering ──────────────────────────────────────────────

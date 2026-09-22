@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 import ciao.voice as voice
@@ -121,6 +123,9 @@ async def test_transcribe_voice_is_free(tmp_path, monkeypatch):
         async def transcribe(self, path):
             return "transcribed text"
 
+        async def correct(self, text):
+            return "repaired text"
+
     monkeypatch.setattr(voice, "AppleDictationTranscriber", FakeTranscriber)
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -140,4 +145,57 @@ async def test_transcribe_voice_is_free(tmp_path, monkeypatch):
     audio.touch()
 
     text, cost = await pcm.transcribe_voice(audio)
-    assert (text, cost) == ("transcribed text", 0.0)
+    assert (text, cost) == ("repaired text", 0.0)
+
+
+def test_correct_fails_open_when_model_unavailable(monkeypatch):
+    # The constructor gate is a different test (above); these pin `correct`,
+    # so they run wherever the suite runs — including Linux and app-less CI.
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: True)
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: False)
+
+    async def should_not_call(*a, **k):
+        raise AssertionError("must not call the model when Apple is unavailable")
+
+    monkeypatch.setattr(native_sidecar, "respond", should_not_call)
+    trans = voice.AppleDictationTranscriber("en-US")
+    assert asyncio.run(trans.correct("the original words")) == "the original words"
+
+
+def test_correct_fails_open_on_model_error(monkeypatch):
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: True)
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
+
+    async def fail(*a, **k):
+        raise native_sidecar.SidecarError("model unavailable")
+
+    monkeypatch.setattr(native_sidecar, "respond", fail)
+    trans = voice.AppleDictationTranscriber("en-US")
+    assert asyncio.run(trans.correct("raw dictation")) == "raw dictation"
+
+
+def test_correct_returns_repaired_text(monkeypatch):
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: True)
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
+
+    async def fake_respond(prompt, **kw):
+        return "Fixed punctuation here."
+
+    monkeypatch.setattr(native_sidecar, "respond", fake_respond)
+    trans = voice.AppleDictationTranscriber("en-US")
+    assert asyncio.run(trans.correct("no punctuation here")) == "Fixed punctuation here."
+
+
+def test_correct_keeps_the_whole_transcript_when_fitting_drops_content(monkeypatch):
+    """A correction computed over the fitted suffix must not replace the full
+    transcript: long recordings would silently lose everything before it."""
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: True)
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
+
+    async def should_not_call(*a, **k):
+        raise AssertionError("must not correct a transcript the fit truncated")
+
+    monkeypatch.setattr(native_sidecar, "respond", should_not_call)
+    trans = voice.AppleDictationTranscriber("en-US")
+    long_text = "word " * 10000
+    assert asyncio.run(trans.correct(long_text)) == long_text

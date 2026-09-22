@@ -29,7 +29,10 @@ PUBLIC_EXPORT_ALLOWLIST: tuple[str, ...] = (
 )
 
 PUBLIC_EXPORT_OVERLAYS: dict[str, str] = {
-    "ciao/stock/public/CLAUDE.md": "CLAUDE.md",
+    # The exported repo's own contributor guide. AGENTS.md, like every other
+    # guide Ciaobot writes: both providers discover it natively and Claude Code
+    # only falls back to it when no CLAUDE.md is present.
+    "ciao/stock/public/AGENTS.md": "AGENTS.md",
 }
 
 _FORBIDDEN_PATH_PREFIXES: tuple[str, ...] = (

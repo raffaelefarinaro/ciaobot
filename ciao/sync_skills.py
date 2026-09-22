@@ -14,6 +14,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
+from ciao.workspace_guide import GUIDE_NAME, guide_path
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,11 @@ def _iter_entries(path: Path) -> list[Path]:
     return sorted(path.iterdir(), key=lambda entry: entry.name)
 
 
+#: Stock skills held back from workspace sync until their surface is the
+#: default (see ``ciao/agent_surface.py`` and the MCP-to-CLI plan, slice S5).
+TRANSITIONAL_SKILLS: frozenset[str] = frozenset({"ciao-cli"})
+
+
 def _install_stock_skills(
     workspace: Path,
     *,
@@ -220,6 +226,14 @@ def _install_stock_skills(
         # value rather than recomputed here, so callers who already know the
         # workspace's effective profile do not read it twice.
         if entry.name.startswith("gws-") and gws_profile == "":
+            continue
+        if entry.name in TRANSITIONAL_SKILLS:
+            # Skills for a surface that is not yet the default. `ciao-cli`
+            # tells the model to run `ciao …`; in an MCP-surface chat those
+            # commands answer `no_agent_session`, so the skill would steer the
+            # model into a dead end. The CLI surface reaches the reference
+            # through `ciao help` and the CLI core prompt until the switch
+            # (plan S5), when this set empties.
             continue
         target = claude_skills / entry.name
         if target.is_symlink():
@@ -978,34 +992,34 @@ def _canonical_agent_sources(workspace: Path) -> list[Path]:
     return result
 
 
-def _ensure_linked_workspace_guides(workspace: Path) -> None:
-    """Expose one workspace guide through both CLI-native filenames.
+def _ensure_workspace_guide(workspace: Path) -> None:
+    """Seed the workspace guide when the workspace has none.
 
-    ``CLAUDE.md`` is the canonical editable file and ``AGENTS.md`` is a
-    relative symlink to it. Existing user-authored AGENTS.md files (including
-    custom symlinks) are preserved; only a missing file or Ciaobot's packaged
-    stock copy is linked.
+    ``AGENTS.md`` is the guide and both providers discover it natively. It used
+    to be a symlink at a canonical ``CLAUDE.md``, because Claude Code read only
+    that name; 2.1.277 reads ``AGENTS.md`` whenever no ``CLAUDE.md`` is present
+    (ciao/workspace_guide.py), so there is one file and no link.
+
+    Only ever *seeds*: a workspace that already has a guide — under either name
+    — is left alone. The guide carries the bounded memory regions, so writing
+    over one would discard everything the agent has remembered. Renaming a
+    legacy ``CLAUDE.md`` is the migration's job, not this function's.
     """
-    claude_guide = workspace / "CLAUDE.md"
-    agents_guide = workspace / "AGENTS.md"
     try:
         from importlib import resources
 
-        stock_workspace = resources.files("ciao.stock").joinpath("workspace")
-        stock_agents = stock_workspace.joinpath("AGENTS.md")
-        stock_claude = stock_workspace.joinpath("CLAUDE.md")
-
-        if agents_guide.is_symlink():
+        if guide_path(workspace).is_file():
             return
-        if agents_guide.exists():
-            if agents_guide.read_bytes() != stock_agents.read_bytes():
+        agents_guide = workspace / GUIDE_NAME
+        if agents_guide.is_symlink():
+            # A dangling link (its CLAUDE.md target was migrated or removed).
+            if agents_guide.exists():
                 return
             agents_guide.unlink()
 
-        if not claude_guide.exists():
-            with resources.as_file(stock_claude) as source:
-                shutil.copy2(source, claude_guide)
-        agents_guide.symlink_to(claude_guide.name)
+        stock_workspace = resources.files("ciao.stock").joinpath("workspace")
+        with resources.as_file(stock_workspace.joinpath(GUIDE_NAME)) as source:
+            shutil.copy2(source, agents_guide)
     except (ModuleNotFoundError, FileNotFoundError, OSError):
         return
 
@@ -1235,7 +1249,7 @@ def sync_workspace_skills(
     workspace_name: str | None = None,
 ) -> SyncSkillsResult:
     root = Path(workspace).expanduser().resolve()
-    _ensure_linked_workspace_guides(root)
+    _ensure_workspace_guide(root)
     try:
         from ciao import job_runs
         from ciao.memory_tool import (
@@ -1245,7 +1259,7 @@ def sync_workspace_skills(
             migrate_region_caps,
         )
 
-        guide = root / "CLAUDE.md"
+        guide = guide_path(root)
         # The legacy fold-in can only ever succeed once, so only pay for it
         # (and record a job run) while the old files are actually there.
         legacy_dir = default_memory_dir()

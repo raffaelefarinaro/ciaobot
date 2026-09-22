@@ -200,9 +200,8 @@ def _write_healthy_audit_workspace(root: Path) -> None:
     from ciao.memory_tool import ensure_regions
 
     root.mkdir(parents=True)
-    (root / "CLAUDE.md").write_text("- Use rtk for shell commands.\n", encoding="utf-8")
-    ensure_regions(root / "CLAUDE.md")
-    (root / "AGENTS.md").symlink_to("CLAUDE.md")
+    (root / "AGENTS.md").write_text("- Use rtk for shell commands.\n", encoding="utf-8")
+    ensure_regions(root / "AGENTS.md")
     (root / "memory-vault").mkdir()
     (root / ".runtime").mkdir()
 
@@ -460,10 +459,12 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     # setup seeds through _seed_stock_commands, so each stock copy carries the
     # sibling marker (with the sha256 of the written bytes) from the start.
     assert (root / "commands" / "remember.md.ciao-stock-command").is_file()
-    assert (root / "CLAUDE.md").is_file()
-    assert (root / "AGENTS.md").is_symlink()
-    assert (root / "AGENTS.md").readlink() == Path("CLAUDE.md")
-    assert (root / "AGENTS.md").resolve() == (root / "CLAUDE.md").resolve()
+    assert (root / "AGENTS.md").is_file()
+    # One real guide and no CLAUDE.md: Claude Code reads AGENTS.md natively
+    # since 2.1.277, but only when no CLAUDE.md is present.
+    assert not (root / "AGENTS.md").is_symlink()
+    assert not (root / "CLAUDE.md").exists()
+    assert "ciao:memory:start" in (root / "AGENTS.md").read_text(encoding="utf-8")
     customization = root / "CIAO_CUSTOMIZATION.md"
     assert customization.is_file()
     assert "disallowed_tools" in customization.read_text(encoding="utf-8")
@@ -473,7 +474,7 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert (root / "subagents").is_dir()
     assert (root / "commands").is_dir()
     # Nothing agent-shaped is left at the install root for the migration to move.
-    assert not (workspace / "CLAUDE.md").exists()
+    assert not (workspace / "AGENTS.md").exists()
     assert not (workspace / "subagents").exists()
     assert (root / "memory-vault" / "MEMORY.md").is_file()
     assert not (workspace / "memory-vault").exists()
@@ -677,6 +678,7 @@ def _launchd_setup_argv(workspace: Path, launch_agents: Path) -> list[str]:
 def test_setup_quiets_only_the_expected_launchd_unload_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
     calls: list[tuple[list[str], dict[str, object]]] = []
     real_run = subprocess.run
 
@@ -708,6 +710,7 @@ def test_setup_preserves_load_failure_status_and_stderr(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
     calls: list[tuple[list[str], dict[str, object]]] = []
     real_run = subprocess.run
 

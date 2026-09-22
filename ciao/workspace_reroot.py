@@ -37,6 +37,13 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from ciao.workspace_guide import (
+    GUIDE_NAME,
+    LEGACY_GUIDE_NAME,
+    guide_path,
+    legacy_guide_path,
+    migrate_root,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -495,7 +502,7 @@ def apply(
 
     # Read the shared guide before it moves. The split is computed here so a
     # failure to parse it refuses the run rather than leaving roots half-guided.
-    shared_guide = install_root / "CLAUDE.md"
+    shared_guide = guide_path(install_root)
     split: GuideSplit | None = None
     if shared_guide.is_file():
         try:
@@ -1355,9 +1362,9 @@ def clear_stranded_sessions(runtime_root: Path, chat_ids: list[str]) -> int:
 # The shared guide and its native alias both move to the primary root, so history
 # follows and the primary's regions are byte-identical to what its sessions read
 # today. They must not be left behind: providers walk UP from cwd for a guide, so
-# a surviving `<install>/CLAUDE.md` would re-inject the primary's memory regions
+# a surviving `<install>/AGENTS.md` would re-inject the primary's memory regions
 # into every root and undo the split it just performed.
-_GUIDE_NAMES = ("CLAUDE.md", "AGENTS.md")
+_GUIDE_NAMES = (GUIDE_NAME, LEGACY_GUIDE_NAME)
 
 _QUEUE_RELATIVE = "Workspace/Memory-Proposals.md"
 
@@ -1413,10 +1420,13 @@ def write_guide_split(
             continue
         root = install_root / name
         root.mkdir(parents=True, exist_ok=True)
-        guide = root / "CLAUDE.md"
+        guide = root / GUIDE_NAME
         if not guide.exists():
             guide.write_text(text, encoding="utf-8")
-            created.append(f"{name}/CLAUDE.md")
+            # Record what was actually written: undo removes created files by
+            # this path, so a stale name here leaves the guide behind and the
+            # install no longer round-trips.
+            created.append(f"{name}/{GUIDE_NAME}")
 
         proposals = split.queued_proposals.get(name) or []
         destination = vault_destinations.get(name)
@@ -1437,7 +1447,7 @@ def write_guide_split(
                 }
             )
         written = append_proposals(
-            proposals, install_root / destination, source_path=Path("CLAUDE.md")
+            proposals, install_root / destination, source_path=Path(GUIDE_NAME)
         )
         if written is not None and not stashed_holds(stashed, destination):
             created.append(f"{destination}/{_QUEUE_RELATIVE}")
@@ -1460,7 +1470,7 @@ def guide_split_pending(root: Path) -> bool:
     is false for every root and the bootstrap proceeds normally.
     """
     root = Path(root)
-    return not (root / "CLAUDE.md").is_file() and (root.parent / "CLAUDE.md").is_file()
+    return not guide_path(root).is_file() and guide_path(root.parent).is_file()
 
 
 def bootstrap_root(root: Path, shared: Path) -> tuple[list[str], list[str]]:
@@ -1478,7 +1488,7 @@ def bootstrap_root(root: Path, shared: Path) -> tuple[list[str], list[str]]:
     receipt would bury the reverse map in noise.
     """
     from ciao.sync_skills import (  # noqa: PLC0415
-        _ensure_linked_workspace_guides,
+        _ensure_workspace_guide,
         _install_stock_agents,
         _install_stock_skills,
         _mirror_dir_symlinks,
@@ -1500,7 +1510,7 @@ def bootstrap_root(root: Path, shared: Path) -> tuple[list[str], list[str]]:
     # Skills and agents are always safe to install; a guide is not. See
     # `guide_split_pending`.
     if not guide_split_pending(root):
-        _ensure_linked_workspace_guides(root)
+        _ensure_workspace_guide(root)
     _install_stock_skills(root)
     _rebuild_custom_skill_links(root)
     mirror_shared_skill_sources(root, shared)
@@ -2357,7 +2367,7 @@ def _repair_one_root(
     vault_name: str = VAULT_DIR_NAME,
 ) -> None:
     """Reconcile one agent root. Every branch is safe to run twice."""
-    from ciao.sync_skills import _ensure_linked_workspace_guides  # noqa: PLC0415
+    from ciao.sync_skills import _ensure_workspace_guide  # noqa: PLC0415
 
     if not root.is_dir():
         root.mkdir(parents=True, exist_ok=True)
@@ -2385,13 +2395,12 @@ def _repair_one_root(
             )
         )
 
-    guide = root / "CLAUDE.md"
-    agents = root / "AGENTS.md"
-    shared_guide = root.parent / "CLAUDE.md"
+    guide = guide_path(root)
+    shared_guide = guide_path(root.parent)
     if guide_split_pending(root):
         # Refuse to seed a stock guide over an unsplit one. This root has no
         # guide and the install root still holds the pre-migration one, so
-        # `_ensure_linked_workspace_guides` would copy the ~2 KB packaged stock
+        # `_ensure_workspace_guide` would copy the ~2 KB packaged stock
         # guide with EMPTY memory regions while the user's real guide sits
         # orphaned at a path no session's cwd reads. That turns a missing step
         # into silent loss of every remembered fact, so it is reported instead.
@@ -2410,18 +2419,26 @@ def _repair_one_root(
             )
         )
     else:
-        linked = agents.is_symlink() and (root / os.readlink(agents)).resolve() == guide.resolve()
-        if not linked:
-            _ensure_linked_workspace_guides(root)
-            if agents.is_symlink() or agents.exists():
+        # There is one guide and no link to maintain. What repair still owns is
+        # the legacy name: a surviving CLAUDE.md means Claude Code reads it
+        # instead of AGENTS.md, so the rename has not taken effect here.
+        legacy = legacy_guide_path(root)
+        if legacy.exists() or legacy.is_symlink():
+            action = migrate_root(root)
+            # "failed" means the legacy guide is still sitting there; reporting
+            # that as a completed repair would claim a drift was fixed when it
+            # was not. Matches repair_workspace_health's own guard.
+            if action in ("relinked", "renamed", "merged"):
                 record(
                     RepairItem(
                         workspace=name,
-                        drift="agents_unlinked",
-                        detail=f"{agents} did not resolve to {guide}",
-                        action="re-linked AGENTS.md to this root's CLAUDE.md",
+                        drift="legacy_guide",
+                        detail=f"{legacy} still present beside {guide}",
+                        action=f"renamed the legacy guide onto {GUIDE_NAME} ({action})",
                     )
                 )
+        elif not guide.is_file():
+            _ensure_workspace_guide(root)
 
     # Read the drift BEFORE mirroring, or the report always comes back empty and
     # a genuine repair looks like a no-op.

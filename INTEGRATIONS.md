@@ -44,7 +44,7 @@ own OpenAPI document at `/doc`, so a logged-in but incompatible build is
 reported as needing an update rather than half-working.
 
 Workspace assets need almost no projection: opencode discovers
-`.claude/skills/`, `.agents/skills/`, `AGENTS.md`, and `CLAUDE.md` natively, so
+`.claude/skills/`, `.agents/skills/`, and `AGENTS.md` natively, so
 `ciao sync-skills` only generates `.opencode/agents/` (canonical subagents),
 `.opencode/commands/` (canonical commands), and the `mcp` object in
 `opencode.json`. Generated files carry a Ciaobot marker and only marked files
@@ -190,7 +190,8 @@ setting.
 
 ### Python 3 + `google-cloud-bigquery`
 
-Required by `bigquery-data` skill (`memory-vault/work/automations/bigquery/runner.py`).
+Optional dependency for workspace-owned BigQuery workflows. No BigQuery skill is
+packaged in this repository.
 
 ```bash
 pip install google-cloud-bigquery
@@ -200,7 +201,8 @@ Auth: set `GOOGLE_APPLICATION_CREDENTIALS` in `.env` (base64-encoded service acc
 
 ### `curl` + `jq`
 
-Required by `zendesk-assistant` (direct REST API calls). Usually pre-installed.
+Optional dependency for workspace-owned Zendesk workflows (direct REST API
+calls). Usually pre-installed.
 
 ## MCP Connectors (via claude.ai)
 
@@ -235,18 +237,24 @@ Copy `.env.example` to `.env` and fill in the app-level settings first:
 
 **Required for a configured workspace:** `PWA_AUTH_TOKEN` — the dashboard password. Password protection is on by default; see `PWA_AUTH_REQUIRED` below for the opt-out. `CIAO_PUSH_CONTACT` is optional: leave it empty to run without Web Push notifications until you set a contact in Settings.
 
-`ciao setup` writes the initial `.env` into the selected workspace, seeds stock agents, commands, schedules, agent-readable workspace docs (`CLAUDE.md`, `AGENTS.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciaobot.app`. The app shortcut opens `http://localhost:<port>/?setup=<token>`; the server redeems `.runtime/setup-token` once on localhost, sets the signed session cookie, then deletes the token. By default setup prints the launchd load command without starting the service; use `--load-launchd` to run `launchctl`. `ciao auth <claude|opencode>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code and opencode readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` and `password` are required; `provider` becomes the first logical workspace default; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent and `Ciaobot.app` shortcut, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
+`ciao setup` writes the initial `.env` into the selected workspace, seeds stock agents, commands, schedules, agent-readable workspace docs (`AGENTS.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciaobot.app`. The app shortcut opens `http://localhost:<port>/?setup=<token>`; the server redeems `.runtime/setup-token` once on localhost, sets the signed session cookie, then deletes the token. By default setup prints the launchd load command without starting the service; use `--load-launchd` to run `launchctl`. `ciao auth <claude|opencode>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code and opencode readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` and `password` are required; `provider` becomes the first logical workspace default; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent and `Ciaobot.app` shortcut, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
 
-**Runtime:** `CIAO_WORKSPACE`, `CIAO_PORT`
+**Runtime:** `CIAO_WORKSPACE`, `PWA_PORT`. `CIAO_PORT` does not control the
+port the server binds; it is a legacy fallback used to *locate* a running
+server when the workspace `.env` does not define `PWA_PORT` — read by CLI
+commands, by the desktop shell (`desktop/src-tauri/src/runtime.rs`) and by
+the macOS service manager (`ciao/macos_service.py`), each of which falls
+back to it from the LaunchAgent or process environment. Leave it in place on
+a legacy install rather than removing it.
 
 **Ciaobot agent control plane:**
 
-- The embedded authenticated MCP endpoint and managed-process integration are mandatory and always on; there is no enable/disable switch and no alternative control surface. `CIAO_MCP_ENABLED` and `CIAO_CONTROL_SURFACE` were removed.
-- `CIAO_MCP_SESSION_TOKEN`: internal, short-lived bearer capability injected only into a Ciaobot-managed provider process. Ciaobot sets it automatically and excludes it from model-created shell commands; operators must not configure or persist it.
+- The CLI-first agent surface is the only control path and is always on; there is no enable/disable switch and no alternative surface. The former embedded MCP endpoint and `CIAO_MCP_ENABLED` / `CIAO_CONTROL_SURFACE` were removed in the S6 break; third-party project MCP servers (the agent's external tools) are still managed through Settings → Assets.
+- `CIAO_AGENT_TOKEN` / `CIAO_AGENT_URL`: internal. Ciaobot hands the scoped short-lived token and the `POST /agent/v1/{op}` base URL to the managed provider's foreground shell so `ciao <noun> <verb>` commands can call the control plane (D-01). Background runs strip the token. Operators must not configure or persist either.
 
-The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/mcp/`. Do not place a static token in `.mcp.json`: Ciaobot generates a scoped short-lived token and configures its managed provider process. See [docs/MCP.md](docs/MCP.md).
+The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/agent/v1/{op}`. Ciaobot generates a scoped short-lived token and configures its managed provider process. See [docs/AGENT_CLI.md](docs/AGENT_CLI.md).
 
-The embedded server pins the Python MCP SDK at `mcp>=1.29.0,<2.0`, bumped for the MCP spec release `2026-07-28`. v1.29.0 is a compatibility release that speaks both the prior wire format and `2026-07-28`; Ciaobot stays on the v1 SDK line and does not migrate to the `2.0.0` rewrite. The `2026-07-28` spec opens a 12-month deprecation window for Roots, Sampling, Logging, and the legacy HTTP+SSE transport. `ciao/mcp_server.py` already runs `stateless_http=True`, `json_response=True`, with no session id and no Roots/Sampling/Elicitation usage, so none of that deprecated surface is in play here.
+The agent control plane runs inside `ciao/mcp_server.py` (the shared operation table, bearer-token registry, and the envelope/plan-mode gate/telemetry) served by the `POST /agent/v1/{op}` route in `ciao/web/routes_agent.py`; it is not an MCP server, so the MCP SDK pin and the `2026-07-28` spec wire-format notes no longer apply.
 
 **Internal command markers:** `CIAO_COMMAND_BEGIN`, `CIAO_COMMAND_INSTRUCTIONS`, and `CIAO_COMMAND_END` are reserved transcript markers used when Ciaobot expands a Claude-style slash command for a managed provider. They are not environment variables and should not be configured.
 
@@ -300,7 +308,9 @@ read; leftover values are ignored rather than erroring.
 
 ## Skill-owned reference data
 
-The Jira project table, Airtable base/table IDs, and similar skill-specific reference data live next to the skill that uses them, not here. See `skills/jira-tickets/SKILL.md`, `skills/airtable-feedback/SKILL.md`, `skills/airtable-opportunities/SKILL.md`, `skills/airtable-projects/SKILL.md`.
+Jira project tables, Airtable base/table IDs, and similar skill-specific
+reference data belong next to the workspace skill that uses them, not in this
+repository-wide document.
 
 ## Ciaobot Server Operation
 
@@ -333,6 +343,17 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 
 ### Optional env vars
 
+Linux hosts can run the Python backend and PWA under systemd. `ciao setup`
+initializes their workspace without launchd; `ciao linux-service --workspace
+/srv/ciaobot --user ciaobot --home /var/lib/ciaobot --python
+/opt/ciaobot/venv/bin/python` prints a unit for explicit administrator installation.
+The service reads `.env` through Ciaobot's dotenv loader, not systemd's different
+EnvironmentFile syntax. Keep provider credentials in the service account's home.
+Linux production Settings uses `/api/admin/restart` for a draining restart,
+without a git checkout, package reinstall, or desktop build.
+See [Linux hosting](docs/LINUX.md) for provisioning, HTTPS, updates, and recovery.
+Apple-native voice and Apple Intelligence are unavailable on Linux hosts.
+
 - `CLAUDE_EXECUTION_MODE` / `CLAUDE_PERMISSION_MODE`: **removed 2026-08-21 and no longer read.** Execution mode is fixed at `auto` for every provider (Claude Code and opencode). Auto lets safe reads and edits run silently and asks before destructive operations. An install that still sets one gets a `legacy-env-ignored` operator tile, because a setting that is silently ignored reads as a setting that is in effect.
 - `PWA_AUTH_REQUIRED`: password protection for the PWA dashboard. **Enabled by default** — an unset value protects the dashboard whenever `PWA_AUTH_TOKEN` is present (without a token there is no password a human could type, so protection stays off until one is set in Settings). Set it to `false` to run unprotected on a machine nobody else can reach; that is the only way to turn protection off, since Settings can only change the password. `ciao setup` writes the value explicitly (`--no-auth` writes `false`).
 - `CIAO_ALLOWED_ORIGINS`: comma-separated extra hostnames/origins accepted for state-changing HTTP and WebSocket handshakes when the app is reached under a host it doesn't bind to (reverse proxy, tunnel, or host alias). Without it, such setups get their `/ws/*` upgrades rejected (403) and live updates stall. A proxy-supplied `X-Forwarded-Host` is honored automatically. Example: `app.example.com,ciao.tailnet.ts.net`.
@@ -341,7 +362,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_VAULT_MODE`: onboarding mode for vault folders. Either `scratch` (initialize the current vault layout) or `existing` (preserve the selected notes folder and start an initial inventory/curation chat; clear material may be reorganized, ambiguous material is left in place).
 - `CIAO_BOOTSTRAP_WORKSPACE`: temp workspace root used when `PWA_AUTH_TOKEN` is absent. Defaults to `~/.ciao/bootstrap`; Ciaobot persists the generated bootstrap auth token under its `.runtime/` so first-run setup survives a restart.
 - `CIAO_NO_BROWSER`: set to any value to stop a first-run `ciao run` from auto-opening the setup wizard in the default browser (the wizard URL is still printed). Auto-open already only happens on interactive terminals, never under launchd or CI.
-- `CIAO_WORKSPACE`: filesystem workspace root for operational state, `.runtime/`, `.env`, `.claude/`, `.agents/skills/`, `CLAUDE.md`, and `AGENTS.md`. Default `.`.
+- `CIAO_WORKSPACE`: filesystem workspace root for operational state, `.runtime/`, `.env`, canonical `skills/`, `subagents/`, and `commands/`, the generated `.claude/` catalog, and `AGENTS.md`. Default `.`. `.agents/skills/` remains a legacy native-discovery path and is not generated by sync.
 - `CIAO_OPENCODE_BIN`: optional absolute path to the opencode CLI. Normally unnecessary because Ciaobot checks the login-shell PATH.
 - `CIAO_VAULT_ROOT`: durable memory/vault root. Default `<CIAO_WORKSPACE>/memory-vault`. Set this to an external notes folder when operational state should stay out of synced notes.
 - `CIAO_WORKSPACES`: JSON workspace registry. Preferred shape is a list of objects with `name`, `vault_root`, `default_provider`, `disallowed_tools`, and `gws_profile`. `vault_root` is relative to `CIAO_WORKSPACE` unless absolute. It is an internal/setup migration field: fresh setup and ordinary PWA workspace creation derive `<CIAO_VAULT_ROOT>/<name>`, while existing-folder setup preserves the selected root until a model-guided migration updates the registry. Later Settings updates preserve the stored path. If unset, Ciaobot reads `.runtime/workspaces.json`; if that is also missing, Ciaobot bootstraps one registry entry per directory in the vault that looks like a workspace (a folder containing `People/`, `Projects/`, `journal/` or a `MEMORY.md`), falling back to a single `personal` workspace when none do. It used to manufacture `personal` and `work` unconditionally, which left an install unable to re-root: a registered workspace with no vault directory refuses the plan. Schedules assigned to a workspace inherit its current `default_provider` on every run unless an explicit override is stored; the model comes from that provider's operator default (Settings → Models) — a workspace no longer pins one, and a `default_model` key in the registry is ignored. Example: `[{"name":"default","vault_root":"memory-vault/default","default_provider":"claude","gws_profile":"personal"}]`.
@@ -356,13 +377,15 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_INSIGHTS_DISABLED`: set to `true`/`yes`/`on` to disable post-archive session insights extraction. Default is enabled (false). When enabled, after a chat is archived, raw JSONL is filtered and run through a model to extract errors, dead ends, new entities, decisions, and reusable code, then appended as a `## Session insights` section to the archive markdown.
 - `CIAO_INSIGHTS_MODEL`: model ID for insights extraction. Default `sonnet` — a tier alias, resolved by whichever provider runs the routine. Set it to `apple` (or choose Apple in Settings) to use the on-device Foundation Model; if Apple Intelligence is unavailable, Ciaobot falls back to the configured automatic model.
 - `CIAO_INSIGHTS_BACKFILL_ON_STARTUP`: set to `true`/`yes`/`on` to asynchronously scan for and backfill missing session insights on server startup. Default is disabled (false). Helps regenerate missing insights if the model call failed during chat archive due to budget or network issues.
+- `CIAO_INSIGHTS_STRUCTURED`: set to `true`/`yes`/`on` to ask the insights model for fact candidate v1 rows as JSON instead of Markdown. Default disabled, so the archive's auto-save behaviour is unchanged until you opt in. The rows are parsed and validated locally (`ciao/fact_candidates.py`) and the archive's `## Session insights` section is rendered back from the validated records, so every downstream consumer sees the same section either way. A row the parser cannot read becomes a `[review]` bullet carrying its parse error rather than being dropped; a response that is unreadable as a whole fails the insights stage (retryable) rather than saving an empty section.
+- `CIAO_INSIGHTS_STRUCTURED_PROVIDERS`: comma-separated runtimes allowed to run structured extraction. Default `claude`. Structured output is a model capability that varies by provider and by whichever upstream an opencode profile points at, so anything outside this list — along with the Apple on-device model and the text-mode retry path, which has no transcript indices to cite — transparently falls back to the Markdown extraction contract instead of failing the archive. The fallback reason is recorded on the Session insights job run.
 - `CIAO_INSIGHTS_TIMEOUT_S`: per-call timeout (seconds) for the insights and text-fallback model calls. Default `600`. The insights model is operator-selectable, and a slow local or cloud GGUF can take 214–253s end to end; the previous flat 120s budget turned tail latency into a `TimeoutError` and failed the job. Lower it if you route insights at a fast model and want to fail sooner.
 - `CIAO_INSIGHTS_MAX_INPUT_CHARS`: ceiling (characters) on the filtered transcript sent to the insights model. Default `320000`, roughly 90k tokens, which leaves headroom for the system prompt inside a 128k-token context window. Oldest transcript lines are dropped first so the newest turns and their `[idx=N]` citations survive; the trim is logged. Raise it for a large-context model, lower it if you still see `400 Message too long`. An oversized-input rejection is not retried, since the identical payload would fail again.
 - `CIAO_INSIGHTS_BACKFILL_MAX`: most archives a single backfill run will process when the caller supplies no explicit limit — which is what both the startup job and the Settings → Automations button do. Default `200`. One archive is one model call, so on an aged vault an uncapped run from a single click is hours of work and a large bill; when the cap trims a run, the job record carries `capped_at` and `remaining_after_cap` rather than implying it finished everything. `scripts/backfill_insights.py --limit 0` still opts into a genuinely unbounded pass.
 - `CIAO_TRAJECTORIES_DISABLED`: set to `true`/`yes`/`on` to disable structured trajectory capture after a chat is archived (skills loaded, tools used, errors, decisions). Default enabled. Trajectories are written to `~/.ciao/trajectories/YYYY-MM/<session-id>.json` and mined by the weekly skill-evolution pass.
 - `CIAO_REVIEW_MODELS`: comma-separated list of model IDs for the `adversarial_review` MCP tool (`ciao.critique`). Overrides the default panel. An entry may name the provider that runs it: `opencode:<tier>` routes to that provider's app-server, and a bare tier alias runs through Claude Code. The default panel lists one voice per signed-in vendor. Runtime-overridable from the PWA (Settings → Models, persisted in `.runtime/app_settings.json` under `critique_models`).
 - `CIAO_ADVERSARIAL_MODELS`: legacy alias for `CIAO_REVIEW_MODELS`.
-- `CIAO_MEMORY_CHAR_LIMIT`: advisory cap (chars) on the `ciao:memory` region in the workspace `CLAUDE.md`. Default `3000`. Nothing refuses a write at edit time — `memory_update` writes over the cap and reports `over_cap` with `used_chars` — and `os_audit` plus nightly memory curation report and consolidate when over cap. It was enforced as a hard refusal until 2026-08-20, which made accepting a queued proposal impossible once the region filled up, without shrinking the region.
+- `CIAO_MEMORY_CHAR_LIMIT`: advisory cap (chars) on the `ciao:memory` region in the workspace `AGENTS.md`. Default `3000`. Nothing refuses a write at edit time — `memory_update` writes over the cap and reports `over_cap` with `used_chars` — and `os_audit` plus nightly memory curation report and consolidate when over cap. It was enforced as a hard refusal until 2026-08-20, which made accepting a queued proposal impossible once the region filled up, without shrinking the region.
 - `CIAO_USER_CHAR_LIMIT`: advisory cap (chars) on the `ciao:profile` region. Default `1375`. Same advisory flow as `CIAO_MEMORY_CHAR_LIMIT`.
 - `VOCAB_PROMOTION_THRESHOLD`: the usage threshold (a minimum of 2) above which a non-canonical `type:` or a tag becomes a candidate for the canonical/established set in the workspace-hygiene vocabulary proposals. Default `5`, matching the established-tag tier boundary. Raising it delays promotions and merges; it is shared by the proposal audit (`ciao/vocabulary_proposals.py`) and the generated `VOCABULARY.md` tiers (`ciao/vault_index.py`). Not a `CIAO_*` variable, so it is not covered by the env-var documentation test; it is documented here for operator discoverability.
 - `CLAUDE_DEFAULT_MODEL_PERSONAL` / `CLAUDE_DEFAULT_MODEL_WORK` / `CIAO_DISALLOWED_TOOLS_PERSONAL` / `CIAO_DISALLOWED_TOOLS_WORK`: **removed 2026-08-20 and no longer read.** They configured the two hardcoded `personal`/`work` entries of the bootstrap registry, which now derives its workspaces from the vault instead, so they could not describe a workspace named anything else. Put `disallowed_tools` on the workspace in `.runtime/workspaces.json` (or `CIAO_WORKSPACES`), which works for any name; the default model is now a per-provider operator setting (Settings → Models), not a per-workspace one. An install that still sets one gets a `legacy-env-ignored` operator tile, because a setting that is silently ignored reads as a setting that is in effect.

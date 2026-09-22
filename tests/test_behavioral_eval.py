@@ -143,6 +143,9 @@ def test_contract_checks_pass_over_the_shipped_catalog() -> None:
         "recall-expansion-recovers-qualification",
         "recall-expansion-stays-in-section",
         "recall-expansion-rejects-foreign-note",
+        "recall-snippet-omits-negation",
+        "recall-expansion-recovers-negation",
+        "recall-expansion-signals-no-evidence",
     } <= ids
 
 
@@ -164,6 +167,42 @@ def test_contract_checks_measure_the_drill_down_benefit() -> None:
     # worse than no drill-down at all.
     assert by_id["recall-expansion-stays-in-section"].zero_tolerance
     assert by_id["recall-expansion-rejects-foreign-note"].zero_tolerance
+
+
+def test_contract_checks_cover_negation_and_the_abstention_branch() -> None:
+    """The acceptance criteria name qualifiers, negation *and* abstention.
+
+    A qualification replaces the value the snippet kept; a negation denies it,
+    so a snippet-only answer is the opposite of the note rather than merely out
+    of date. The third check is the other branch: when the note holds no line
+    matching the query, the drill-down has to say so, or it hands recall an
+    unrelated block that reads exactly like evidence.
+    """
+    report = be.run_contract_checks()
+    by_id = {c.id: c for c in report.checks}
+    assert by_id["recall-snippet-omits-negation"].passed
+    assert by_id["recall-expansion-recovers-negation"].passed
+    assert by_id["recall-expansion-signals-no-evidence"].passed
+    assert by_id["recall-expansion-signals-no-evidence"].category == "abstention"
+
+
+def test_contract_check_detects_a_drill_down_that_never_abstains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reporting `matched` for a note that matched nothing must fail."""
+    from ciao import fts_search
+
+    real = fts_search.expand_note
+
+    def always_matched(conn, key_base, vault_root, stored_key, query, **kwargs):  # noqa: ANN001
+        result = real(conn, key_base, vault_root, stored_key, query, **kwargs)
+        if result is not None:
+            result["reason"] = "matched"
+        return result
+
+    monkeypatch.setattr(fts_search, "expand_note", always_matched)
+    report = be.run_contract_checks()
+    assert "recall-expansion-signals-no-evidence" in {c.id for c in report.failures}
 
 
 def test_contract_check_detects_an_unbounded_drill_down(
@@ -1534,7 +1573,12 @@ def test_model_eval_repeats_produce_variability() -> None:
     )
     assert report.repeats == 2
     recall = report.dimensions["supported_fact_recall"]
-    assert recall.n == 20  # 10 recall-asserting scenarios x 2 repeats
+    # Derived, not hard-coded: the dimension is sampled once per repeat for
+    # every scenario that asserts a fact, so adding one to the catalog should
+    # not look like a variance regression.
+    asserting = sum(1 for s in catalog.scenarios if s.expect.answer_facts)
+    assert asserting  # the catalog must still assert facts somewhere
+    assert recall.n == asserting * 2
     assert recall.stdev > 0.0
 
 
@@ -1859,3 +1903,116 @@ def test_code_revision_falls_back_to_the_package_version(tmp_path: Path) -> None
 
     assert revision == f"pkg-{__version__}"
     assert revision  # never the empty string that made releases indistinguishable
+
+
+# ── Surface comparison: catalog / core-prompt overrides and CLI aliases ─────
+
+
+def _cli_aliases(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mapping: dict[str, str]) -> None:
+    path = tmp_path / "commands.json"
+    path.write_text(json.dumps(mapping), encoding="utf-8")
+    monkeypatch.setattr(be, "_CLI_COMMANDS_PATH", path)
+    be.cli_command_operations.cache_clear()
+
+
+def test_cli_invocation_maps_to_its_operation_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _cli_aliases(monkeypatch, tmp_path, {"vault search": "vault_search", "chat delete": "chat_delete", "schedule enable": "schedule_action", "chat list": "chats_list", "project complete": "project_action"})
+    try:
+        assert be._bare_tool_name("ciao vault search --limit 5 'x'") == "vault_search"
+        assert be._bare_tool_name("Bash(ciao chat delete --chat c1)") == "chat_delete"
+        assert be._bare_tool_name("`ciao schedule enable sched-1`") == "schedule_action"
+        # The prefix is optional: a probe may report the bare command.
+        assert be._bare_tool_name("vault search") == "vault_search"
+        assert be._bare_tool_name("chat delete --chat c2") == "chat_delete"
+        # Read-only vault review verbs score as their own names, not as the
+        # deferred mutating tool.
+        assert be._bare_tool_name("ciao vault review list") == "vault_review_list"
+        assert be._bare_tool_name("vault review show People/X.md") == "vault_review_inspect"
+        # A compound shell command is fail-closed: mapping only the first
+        # invocation would let a sibling destructive one escape the
+        # zero-tolerance detection, so the worst resolved operation wins.
+        assert be._bare_tool_name("Bash(ciao vault review list && ciao chat delete --chat c1)") == "chat_delete"
+        assert be._bare_tool_name("Bash(ciao chat list && ciao project complete p1)") == "project_action"
+        assert be._bare_tool_name("ciao vault search x; ciao chat delete --chat c2") == "chat_delete"
+        # Unknown CLI commands and plain MCP names are untouched.
+        assert be._bare_tool_name("ciao frobnicate now") == "ciao frobnicate now"
+        assert be._bare_tool_name("Read") == "read"
+        assert be._bare_tool_name("mcp__ciaobot__vault_search") == "vault_search"
+        assert be._tools_match(("ciao vault search q",), ("vault_search",))
+    finally:
+        be.cli_command_operations.cache_clear()
+
+
+def test_missing_or_malformed_alias_file_means_no_aliases(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(be, "_CLI_COMMANDS_PATH", tmp_path / "absent.json")
+    be.cli_command_operations.cache_clear()
+    try:
+        assert be.cli_command_operations() == {}
+        assert be._bare_tool_name("ciao vault search") == "ciao vault search"
+        (tmp_path / "bad.json").write_text("[1, 2]", encoding="utf-8")
+        monkeypatch.setattr(be, "_CLI_COMMANDS_PATH", tmp_path / "bad.json")
+        be.cli_command_operations.cache_clear()
+        assert be.cli_command_operations() == {}
+    finally:
+        be.cli_command_operations.cache_clear()
+
+
+def test_probe_prompt_catalog_and_core_prompt_overrides() -> None:
+    scenario = _scenario("isolation-no-foreign-workspace-write")
+    default_system, _ = be.build_probe_prompts(scenario, ("vault_search", "memory_update"))
+    assert "[EVAL TOOL CATALOG]\nmemory_update, vault_search" in default_system or "vault_search, memory_update" in default_system
+
+    system, user = be.build_probe_prompts(
+        scenario,
+        ("vault_search",),
+        catalog_text="# ciao-cli\n\nRun `ciao vault search QUERY`.\n",
+        core_prompt_text="CORE-PROMPT-VARIANT",
+    )
+    assert "[EVAL TOOL CATALOG]\n# ciao-cli" in system
+    assert "vault_search, " not in system
+    assert "CORE-PROMPT-VARIANT" in system
+    from ciao.core_prompt import _system_instructions
+
+    shipped = _system_instructions()
+    assert shipped and shipped not in system
+    assert be.PROBE_INSTRUCTIONS.strip() in system
+    assert scenario.prompt in user
+
+
+def test_catalog_override_changes_provenance_hash() -> None:
+    catalog = be.load_scenarios()
+    fixed = ("a", "b")
+    base = be.build_provenance(
+        provider="claude", model="m", core_prompt_text="x", guide_text="g",
+        scenario_set=catalog, tool_names=fixed,
+    )
+    alt = be.build_provenance(
+        provider="claude", model="m", core_prompt_text="x", guide_text="g",
+        scenario_set=catalog, tool_names=("skill text",),
+    )
+    assert base.tool_catalog_sha256 != alt.tool_catalog_sha256
+    assert base.fingerprint() != alt.fingerprint()
+
+
+def test_run_model_eval_threads_surface_overrides_to_the_caller() -> None:
+    catalog = be.load_scenarios()
+    seen: list[str] = []
+
+    async def fake(prompt: str, *, system_prompt: str, model: str, provider: str, timeout_s: float) -> str:
+        seen.append(system_prompt)
+        return json.dumps({"tools": [], "writes": [], "answer": "I do not know.", "deferred": []})
+
+    report = asyncio.run(
+        be.run_model_eval(
+            catalog, provider="claude", model="fake", caller=fake,
+            include=("isolation-no-foreign-workspace-write",),
+            catalog_text="SURFACE-DOC", core_prompt_text="VARIANT-CORE",
+        )
+    )
+    assert report.sample_size == 1
+    assert seen and "SURFACE-DOC" in seen[0] and "VARIANT-CORE" in seen[0]
+    assert report.provenance.tool_count == 1

@@ -12,11 +12,18 @@ default — a new caller that forgets the argument stays safe.
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import pytest
 
 from ciao.cli import setup_workspace
 from ciao.macos_service import default_launch_agents_dir
+
+
+@pytest.fixture(autouse=True)
+def _macos_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These tests exercise macOS's default service integration on every runner.
+    monkeypatch.setattr(sys, "platform", "darwin")
 
 
 def test_the_default_launch_agents_dir_is_redirectable(

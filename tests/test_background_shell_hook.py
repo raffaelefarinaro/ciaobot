@@ -7,7 +7,7 @@ until a real tool result exists. Detached launches (``nohup … &``, a bare
 trailing ``&``, ``setsid``/``disown``) and the CLI's built-in ``Monitor``
 tool are denied outright: they die with the CLI subprocess and never deliver
 a completion to the chat. Both denials point at the managed
-``background_run_start`` MCP tool.
+``ciao run start -- …`` command.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ async def test_nohup_bash_is_denied_with_background_run_guidance() -> None:
 
     specific = out["hookSpecificOutput"]
     assert specific["permissionDecision"] == "deny"
-    assert "background_run_start" in specific["permissionDecisionReason"]
+    assert "ciao run start" in specific["permissionDecisionReason"]
 
 
 @pytest.mark.asyncio
@@ -105,7 +105,7 @@ async def test_trailing_ampersand_is_denied() -> None:
 
     specific = out["hookSpecificOutput"]
     assert specific["permissionDecision"] == "deny"
-    assert "background_run_start" in specific["permissionDecisionReason"]
+    assert "ciao run start" in specific["permissionDecisionReason"]
 
 
 @pytest.mark.asyncio
@@ -128,7 +128,7 @@ async def test_command_substitution_detached_launches_are_denied(command: str) -
 
     specific = out["hookSpecificOutput"]
     assert specific["permissionDecision"] == "deny"
-    assert "background_run_start" in specific["permissionDecisionReason"]
+    assert "ciao run start" in specific["permissionDecisionReason"]
 
 
 @pytest.mark.asyncio
@@ -194,7 +194,7 @@ async def test_midline_ampersand_jobs_are_denied(command: str) -> None:
 
     specific = out["hookSpecificOutput"]
     assert specific["permissionDecision"] == "deny"
-    assert "background_run_start" in specific["permissionDecisionReason"]
+    assert "ciao run start" in specific["permissionDecisionReason"]
 
 
 @pytest.mark.asyncio
@@ -264,7 +264,7 @@ async def test_nested_shell_detached_commands_are_denied(command: str) -> None:
 
     specific = out["hookSpecificOutput"]
     assert specific["permissionDecision"] == "deny"
-    assert "background_run_start" in specific["permissionDecisionReason"]
+    assert "ciao run start" in specific["permissionDecisionReason"]
 
 
 @pytest.mark.asyncio
@@ -309,7 +309,7 @@ async def test_detached_jobs_are_denied(command: str) -> None:
 
     specific = out["hookSpecificOutput"]
     assert specific["permissionDecision"] == "deny"
-    assert "background_run_start" in specific["permissionDecisionReason"]
+    assert "ciao run start" in specific["permissionDecisionReason"]
 
 
 @pytest.mark.asyncio

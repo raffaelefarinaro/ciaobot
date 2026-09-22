@@ -7,18 +7,12 @@ from pathlib import Path
 import pytest
 from unittest.mock import AsyncMock
 
-from ciao import native_sidecar
 from ciao.config import CiaoConfig
 from ciao.models import ResultEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
-from ciao.web.chat_broker import ChatStream
-from ciao.web.chat_service import (
-    _cap_reentry_summary,
-    _reentry_transcript_text,
-)
 from ciao.web.project_chats import (
-    McpUnavailableError,
+    AgentSurfaceUnavailableError,
     ProjectChatManager,
     _StreamOutcome,
 )
@@ -250,33 +244,39 @@ def test_review_helper_never_auto_archives(
     archive_mock.assert_not_awaited()
 
 
-def test_build_agent_request_fails_without_an_mcp_service(tmp_path: Path) -> None:
-    # The MCP control plane is the only control surface: with no service there
-    # is nothing to degrade to, so the turn must fail loudly instead of
+def test_build_agent_request_fails_without_an_agent_surface(tmp_path: Path) -> None:
+    from ciao.agent_surface import AGENT_TOKEN_ENV
+
+    # The Ciaobot agent surface is the only control surface: with no service
+    # there is nothing to degrade to, so the turn must fail loudly instead of
     # dispatching an agent that cannot reach Ciaobot.
     manager = _make_manager(tmp_path)
     manager._mcp_service = None
     project = manager.create_project("Fallback", workspace="work")
     chat = manager.create_chat(project.project_id)
 
-    with pytest.raises(McpUnavailableError):
+    with pytest.raises(AgentSurfaceUnavailableError):
         manager.build_agent_request(chat, prompt="hi")
 
     transcript_request = manager.build_agent_request(
         chat, prompt="hi", require_mcp=False
     )
-    assert transcript_request.mcp_url == ""
-    assert transcript_request.mcp_token == ""
+    assert AGENT_TOKEN_ENV not in transcript_request.extra_env
 
 
-def test_build_agent_request_attaches_mcp_credentials(tmp_path: Path) -> None:
+def test_build_agent_request_attaches_the_agent_credentials(tmp_path: Path) -> None:
+    from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
+
     manager = _make_manager(tmp_path)
     project = manager.create_project("Attached", workspace="work")
     chat = manager.create_chat(project.project_id)
 
     request = manager.build_agent_request(chat, prompt="hi")
-    assert request.mcp_url == "http://127.0.0.1:8443/mcp/"
-    assert request.mcp_token == "tok-test"
+    # Every chat is CLI since S6: the token+URL reach the foreground shell so
+    # `ciao <noun> <verb>` can call the control plane.
+    assert request.extra_env[AGENT_URL_ENV] == "http://127.0.0.1:8443/agent/v1/"
+    assert request.extra_env[AGENT_TOKEN_ENV] == "tok-test"
+    assert request.control_token == "tok-test"
 
 
 @pytest.mark.asyncio
@@ -347,161 +347,3 @@ async def test_opencode_effective_model_is_persisted_for_model_less_chat(
 
     assert chat.model == "opencode/big-pickle"
     assert _persisted_chats(tmp_path)[chat.chat_id]["model"] == "opencode/big-pickle"
-
-
-def test_reentry_summary_is_cached_bounded_and_invalidated_by_queue(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("Summary cache", workspace="personal")
-    chat = manager.create_chat(project.project_id, title="Summary cache chat")
-    chat.session_id = "session-summary"
-    manager._save()
-
-    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
-    monkeypatch.setattr(
-        manager._transcripts,
-        "current_filtered_jsonl",
-        lambda *_args: '{"type":"user","content":"keep working"}',
-    )
-    calls = 0
-
-    async def fake_respond(*_args, **_kwargs) -> str:
-        nonlocal calls
-        calls += 1
-        return "\n".join(
-            f"- point {index} " + ("x" * 130)
-            for index in range(6)
-        )
-
-    monkeypatch.setattr(native_sidecar, "respond", fake_respond)
-
-    first = asyncio.run(manager.generate_reentry_summary(chat.chat_id))
-    second = asyncio.run(manager.generate_reentry_summary(chat.chat_id))
-
-    assert first == second
-    assert calls == 1
-    assert len(first) <= 600
-    assert len(first.splitlines()) <= 4
-
-    reloaded = _make_manager(tmp_path).get_chat(chat.chat_id)
-    assert reloaded is not None
-    assert reloaded.reentry_summary == first
-
-    stream = ChatStream(prompt_text="new message")
-    manager._broker.register(chat.chat_id, stream)
-    assert manager.queue_message(chat.chat_id, "new message") is True
-    assert chat.reentry_summary == ""
-    manager._broker.clear(chat.chat_id, stream)
-
-    after_message = _make_manager(tmp_path).get_chat(chat.chat_id)
-    assert after_message is not None
-    assert after_message.reentry_summary == ""
-
-
-def test_reentry_summary_humanizes_fenced_json_and_repairs_cached_bullets() -> None:
-    generated = """```json
-{
-  "repo_source": "insights.py",
-  "crash_timeline": "checked around crash time",
-  "next_step": "review the failing path"
-}
-```"""
-
-    normalized = _cap_reentry_summary(generated)
-    assert normalized == (
-        "• Repo source: insights.py\n"
-        "• Crash timeline: checked around crash time\n"
-        "• Next step: review the failing path"
-    )
-    assert "```" not in normalized
-    assert "{" not in normalized
-
-    cached = "\n".join(f"• {line}" for line in generated.splitlines())
-    assert _cap_reentry_summary(cached) == normalized
-
-
-def test_reentry_summary_drops_unparseable_json_instead_of_bulleting_it() -> None:
-    # Apple mirrors the shape of what it is handed and answered with a JSON
-    # envelope of its own, cut off mid-object. Every line is structure, so the
-    # note has nothing to say and must not render.
-    truncated = """{
-  "type": "event",
-  "event_id": "e5a77d9b",
-  "description": {"""
-
-    assert _cap_reentry_summary(truncated) == ""
-    # And the same residue already cached from an earlier run stays gone.
-    assert _cap_reentry_summary("\n".join(f"• {line}" for line in truncated.splitlines())) == ""
-
-
-def test_reentry_summary_drops_metadata_only_json_envelope() -> None:
-    envelope = '{"type": "event", "event_id": "e5a77d9b", "session": "abc"}'
-
-    assert _cap_reentry_summary(envelope) == ""
-
-
-def test_reentry_summary_keeps_real_fields_beside_metadata_keys() -> None:
-    mixed = '{"type": "event", "next_step": "review the failing path"}'
-
-    assert _cap_reentry_summary(mixed) == "• Next step: review the failing path"
-
-
-def test_reentry_transcript_text_flattens_records_to_prose() -> None:
-    filtered = "\n".join(
-        [
-            json.dumps(
-                {"idx": 0, "type": "user", "content": [{"type": "text", "text": "fix the crash"}]}
-            ),
-            json.dumps(
-                {
-                    "idx": 1,
-                    "type": "assistant",
-                    "content": [
-                        {"type": "tool_use", "name": "Read", "input": {"file": "x.py"}},
-                        {"type": "text", "text": "Found it in insights.py"},
-                    ],
-                }
-            ),
-            "not json at all",
-        ]
-    )
-
-    assert _reentry_transcript_text(filtered) == (
-        "User: fix the crash\nAssistant: Found it in insights.py"
-    )
-    assert "tool_use" not in _reentry_transcript_text(filtered)
-
-
-def test_reentry_summary_regenerates_when_cached_value_is_residue(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("Residue", workspace="personal")
-    chat = manager.create_chat(project.project_id, title="Residue chat")
-    chat.reentry_summary = '• {\n• "type": "event",\n• "event_id": "e5a77d9b",'
-    manager._save()
-
-    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
-    monkeypatch.setattr(
-        manager._transcripts,
-        "current_filtered_jsonl",
-        lambda *_args: json.dumps(
-            {"type": "user", "content": [{"type": "text", "text": "keep working"}]}
-        ),
-    )
-
-    seen: list[str] = []
-
-    async def fake_respond(prompt: str, **_kwargs) -> str:
-        seen.append(prompt)
-        return "Picked up the crash fix"
-
-    monkeypatch.setattr(native_sidecar, "respond", fake_respond)
-
-    assert asyncio.run(manager.generate_reentry_summary(chat.chat_id)) == (
-        "• Picked up the crash fix"
-    )
-    # The model is handed prose, not the JSON records that triggered the echo.
-    assert "User: keep working" in seen[0]
-    assert '"content"' not in seen[0]

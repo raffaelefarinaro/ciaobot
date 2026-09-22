@@ -7,8 +7,8 @@ Three SDK features worth knowing when you touch this file:
   rate-limited.
 - ``hooks={"PreToolUse": ...}``: keeps Claude Bash jobs in the active turn
   and denies detached shell invocations (``nohup … &``) and ``Monitor`` so
-  long-running work goes through the managed ``background_run_start`` MCP
-  tool. Workspace/project/date/entity context is already supplied by the
+  long-running work goes through the managed ``ciao run start -- …``
+  command. Workspace/project/date/entity context is already supplied by the
   shared request capsule, so Claude does not receive a duplicate
   UserPromptSubmit injection.
 - ``setting_sources=["user", "project", "local"]``: makes the CLI auto-discover
@@ -66,10 +66,9 @@ from ciao.models import (
     ThinkingEvent,
     TokenUsageEvent,
     ToolUseEvent,
+    provider_reuse_key,
 )
 from ciao.execution_modes import (
-    CONTROL_PLANE_PREAPPROVED_MODES,
-    auto_approved_mcp_tool_names,
     harness_skill_overrides,
 )
 from ciao.core_prompt import system_prompt_payload
@@ -484,11 +483,12 @@ class ClaudeProvider(BaseSDKProvider):
         if (
             self._client is not None
             and self._connected
-            and request.mcp_token != self._mcp_token
+            and provider_reuse_key(request) != self._mcp_token
         ):
-            # MCP configuration is fixed when the managed CLI process starts.
-            # Reconnect when a chat switches surfaces or receives a refreshed
-            # ephemeral token; model/mode alone can still change in place.
+            # MCP configuration and the shell environment are fixed when the
+            # managed CLI process starts. Reconnect when a chat switches
+            # surfaces or receives a refreshed ephemeral token (on either
+            # surface); model/mode alone can still change in place.
             await self.disconnect()
         if (
             self._client is not None
@@ -592,38 +592,13 @@ class ClaudeProvider(BaseSDKProvider):
         if system_prompt is not None:
             # system_prompt_payload builds a SystemPromptPreset-shaped dict.
             options.system_prompt = cast(SystemPromptPreset, system_prompt)
-        if request.mcp_url and request.mcp_token:
-            options.mcp_servers = {
-                "ciaobot": {
-                    "type": "http",
-                    "url": request.mcp_url,
-                    "headers": {"Authorization": f"Bearer {request.mcp_token}"},
-                }
-            }
-            # Deliberately NOT setting ``strict_mcp_config`` here. Strict mode
-            # restricts the CLI to *only* the servers in ``mcp_servers`` (just
-            # ciaobot) and ignores every other MCP source — which includes the
-            # account's claude.ai connector MCPs (``mcp__claude_ai_*``). Those
-            # are fetched from the claude.ai login, not declared in
-            # ``mcp_servers``, so strict mode silently suppressed all of them.
-            # Connectors are always allowed (Ciaobot no longer ships an opinion
-            # on them); they must stay loaded so they remain reachable. The
-            # The ciaobot server is still injected above; a chat whose
-            # control plane is unavailable never reaches this point, because
-            # ProjectChatManager refuses to build the request at all.
-
-            # Pre-approve the non-destructive half of our own control plane.
-            # Auto mode's classifier escalates every MCP tool that isn't
-            # readOnlyHint, so "create the automation you just asked me for" raised
-            # an Approve/Deny card. These names bypass the PermissionGate;
-            # destructive tools (delete/stop/lifecycle) are absent from the
-            # policy and still prompt. Scoped to the modes whose contract
-            # allows acting without asking — the rationale (why `plan` and
-            # `normal` are excluded, and why `schedule` in particular is an
-            # escalation) lives beside the shared constant in
-            # ciao/execution_modes.py.
-            if request.mode in CONTROL_PLANE_PREAPPROVED_MODES:
-                options.allowed_tools = auto_approved_mcp_tool_names()
+        # Every chat is on the CLI surface since S6: there is no Ciaobot MCP
+        # server to attach, and the control-plane capability is carried by
+        # `ciao <noun> <verb>` in the shell (CIAO_AGENT_TOKEN/URL in env). No
+        # `ciao …` argv prefix is pre-approved: an allow rule is a prefix that a
+        # shell suffix (``ciao help >/dev/null; <cmd>``) could ride past, and
+        # auto mode must keep a card on shell commands. Users who want no cards
+        # switch to `bypass` mode.
         if system_cli:
             options.cli_path = system_cli
         if resume_session:
@@ -648,7 +623,7 @@ class ClaudeProvider(BaseSDKProvider):
             options.session_id = str(uuid.uuid4())
 
         self._client = ClaudeSDKClient(options=options)
-        self._mcp_token = request.mcp_token
+        self._mcp_token = provider_reuse_key(request)
         self._remember_settings(request)
         return self._client
 

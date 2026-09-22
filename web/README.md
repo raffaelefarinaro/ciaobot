@@ -30,8 +30,12 @@ web/
     router.ts             routes: /login, /device, /, /chat/:id, /project/:id, /schedules, /memory, /settings, /settings/:tab
                           (/device is device-scoped and unguarded: it must load when a client's host is down)
     components/           one Vue SFC per feature pane (including CommandPaletteModal.vue and FileViewerModal.vue)
-    stores/               Pinia stores (auth, projects, tasks, fileViewer)
-    composables/          reactive logic shared between components (useHoverPinPopover)
+    components/settings/  panels split out of SettingsView.vue, plus the scoped CSS they share with it
+    stores/               Pinia stores (auth, projects, tasks, fileViewer), and store
+                          modules (chatAnnotations) — see the ownership boundary below
+    composables/          reactive logic shared between components, and behaviour lifted
+                          out of oversized panes (useHoverPinPopover, useChatComposer,
+                          useMcpServers)
     lib/                  pure helpers (api, time, safeMarkdown, etc.) — no Vue imports
 ```
 
@@ -102,6 +106,95 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 - Markdown rendering goes through `lib/safeMarkdown.ts` (DOMPurify + marked + highlight.js). Never `v-html` raw user content.
 - Chat Markdown tables use the renderer's `.markdown-table-scroll` region so compact tables shrink-wrap and wide tables scroll independently at narrow widths. Keep the region keyboard focusable and preserve readable key columns.
 - DOM manipulation that needs to bypass Vue's scoped attribute (e.g. inline highlight spans inserted into rendered markdown) uses `:deep(...)` in the scoped stylesheet.
+- **`ChatPanel.vue` ownership boundary.** The panel is being split in
+  behaviour-preserving steps; put new work on the right side of the line.
+  `composables/useChatComposer.ts` owns the composer — the draft and its
+  synchronous persistence, prompt-history recall, textarea auto-sizing, caret
+  insertion, and every attachment path (paste, drop, the native desktop drop
+  grant, the image picker). It deliberately imports no store and registers no
+  lifecycle hook: ids arrive as getters, the store arrives as the
+  `ComposerAttachmentStore` interface, and `fetch` is injectable, so
+  `composables/useChatComposer.test.ts` exercises all of it without mounting
+  anything. `ChatTurnActivity.vue` owns the rendering of one completed turn's
+  `Activity` disclosure and owns no state — open/closed, the thinking
+  preference and the markdown renderer are props, and every action is an emit.
+  `ChatPanel` keeps the send path, the slash-command and @-mention pickers,
+  the trace open/closed map, the memoised markdown cache, scroll anchoring and
+  the live streaming trace. Trace CSS lives in `components/chatTrace.css` and
+  is pulled into both components with `<style scoped src>`; scoped rules in a
+  parent do not reach a child's subtree, so moving markup into a component
+  without moving its styles silently unstyles it.
+- **Transcript render cost.** The dominant superlinear term in transcript
+  rendering is gone, and `lib/renderScaling.test.ts` keeps it gone by counting
+  work rather than timing it: `knownPathRulesBuildCount()` says how often the
+  rules were actually computed, and rendering a 200-message transcript must
+  compute them exactly once. A duration would depend on the machine and on
+  what else the suite is running; this number does not. **A smaller
+  superlinear term remains and is not guarded:** `knownPathMatches` still
+  scans every rule for every text span, so cost still carries an
+  O(paths x spans) factor and the path list still grows with the transcript.
+  Removing it needs a real algorithm change — a trie, or one alternation
+  regex — not another cache, so it was left out rather than half-done. The
+  trap this section guards is `lib/filePaths.ts`: `renderMarkdown` linkifies known file paths, and
+  the known-path list grows with the transcript. Rules derived from that list
+  are memoised on the array's identity and built once per `linkifyHtml` call
+  rather than once per text span — before #501 a 5x longer transcript cost ~85x
+  the time. Two consequences for anyone touching that file: hand
+  `buildKnownPathRules` a **new** array when the path set changes (mutating one
+  in place is the shape the identity cache cannot see — `ChatPanel`'s
+  `knownFilePaths` computed already does this), and keep rule-building out of
+  any per-span or per-message loop.
+- **`stores/projects.ts` ownership boundary.** The store is being split in
+  behaviour-preserving steps; put new work on the right side of the line.
+  `stores/chatAnnotations.ts` owns everything the user stages against the *next*
+  message plus the notes and pins anchored to a file: the per-chat pending-image,
+  pending-file-comment and pending-chat-comment buckets, the durable per-file
+  comment store, pinned paths, auto-pin dismissals, and the six `localStorage`
+  keys behind them (`ciao-pending-images`, `ciao-pending-comments`,
+  `ciao-pending-chat-comments`, `ciao-file-comments`, `ciao-pinned-files`,
+  `ciao-dismissed-auto-pins`). It also composes an outgoing message from that
+  material (`prepareMessage`) and clears it once sent
+  (`consumePreparedAttachments`) — the send itself stays in the store. It is a
+  plain `create*` factory, **not** a second Pinia store: `useProjectStore` calls
+  it once in its setup and spreads the result, so the refs it hands over are the
+  same refs it mutates and `store.pendingComments` behaves exactly as before. A
+  second `defineStore` would have put a proxy and a second `$state` in between.
+  `stores/chatAnnotations.test.ts` drives it with a bare `ref` for the active
+  chat — no Pinia, no mount.
+  Pure logic the store hands over whole lives in `lib/`, Vue-free and directly
+  testable: `lib/chatHistory.ts` (history normalising, server-row mapping, turn
+  grouping, metadata merge, superseded live-tail pruning, tool icons),
+  `lib/chatQuestions.ts` (AskUserQuestion and capability-question parsing plus
+  the picker signature), `lib/chatWs.ts` (per-chat reconnect policy) and
+  `lib/safeList.ts`. The four names that used to be exported from
+  `stores/projects.ts` itself — `shouldReconnectActiveChatOnStreamingStarted`,
+  `chatWsReconnectDelayMs`, `isHostConnectionUnavailableMessage` and
+  `setListIndex` — are re-exported from there, so importers do not move.
+  The store keeps chats, projects and workspaces, message history and its
+  reconciliation, every socket (per-chat and `/ws/events`) with its event
+  handlers, unread and attention counts, the send path with its queue, deferred
+  and unacked sends, the streaming timeline, toasts and package status.
+- **`SettingsView.vue` ownership boundary.** Settings is being split the same
+  way, one tab at a time, into `components/settings/`. The MCP tab is the first
+  one out. `composables/useMcpServers.ts` owns the MCP state and every
+  `/api/mcp/*` call — the status, the per-server edit drafts, the expansion
+  map, the secret inputs, the tool probes and the add form. It imports no
+  store, no router and no lifecycle hook: the API client, `notifySaved`,
+  `notifyFailed` and the delete confirmation all arrive as options, so
+  `composables/useMcpServers.test.ts` drives all of it without mounting
+  anything. `components/settings/SettingsMcpServers.vue` owns only the markup;
+  it takes the controller as one prop and emits `create-via-chat` for the one
+  action it cannot do itself (creating a chat and navigating).
+  `SettingsView` keeps the tab routing, the project store and the router, and
+  keeps deciding *when* MCP data loads — `fetchStatus()`/`fetchUsage()` still
+  run from its `onMounted` for every tab. `/api/mcp/usage` is fetched even
+  though no template renders it: the operator reads that endpoint by hand to
+  decide which MCP tools to prune. Do not drop the call.
+  Shared settings styling lives in `components/settings/settingsPanels.css`,
+  loaded by both sides with `<style scoped src>` — a parent's scoped rules
+  never reach a child, and the alternative is silently unstyled markup. New
+  panels split out of Settings reuse that sheet rather than copying rules.
+  Asset origin badges come from `lib/assetOrigin.ts`, which stays Vue-free.
 - Completed chat traces stay collapsed as one compact `Activity` row. Touched-file chips sit below the final answer under `Outputs` (including files created via `Write` or common Bash redirects/`touch`/`cp`); interrupted turns keep their file chips inside `Activity` so unfinished work remains visible. Newly created files are labelled `new` on the chip.
 - Conversation forks are initiated from the final assistant reply action group (Copy/Read aloud/Fork). The PWA sends the selected message slice up to that reply and redirects to the newly created chat, focusing the composer.
 - New PWA actions (state-changing routes) must be documented in `../PWA_API.md` → Agent recipes, or whitelisted in `../tests/test_pwa_api_docs.py`.

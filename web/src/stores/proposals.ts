@@ -5,9 +5,13 @@ import type {
   ProposalsResponse,
   ProposalRow,
   ProposalBatchResponse,
+  ProposalBatchSummary,
   ProposalDismissOlderResponse,
   ProposalHistoryResponse,
   ProposalHistoryRow,
+  ProposalPreview,
+  ProposalPreviewResponse,
+  MemoryReceiptDetail,
 } from '../lib/types'
 
 /**
@@ -54,6 +58,162 @@ export const useProposalsStore = defineStore('proposals', () => {
       else next.delete(id)
     }
     busyIds.value = next
+  }
+
+  // -- Accept previews -------------------------------------------------------
+  //
+  // A queued bullet says what was noticed, not what accepting it writes: the
+  // promotion reconciles against whatever the destination holds now. The
+  // server computes that replacement (`GET /api/proposals/{id}/preview`) and
+  // pins the destination revision it was computed against; that revision goes
+  // back with the accept so a destination which moved in between is refused
+  // rather than overwritten. Keeping the previews here (not in the panel) is
+  // what lets the batch bar send revisions for rows whose cards were opened.
+  const previews = ref<Record<string, ProposalPreview>>({})
+  const previewLoading = ref<Set<string>>(new Set())
+  const previewErrors = ref<Record<string, string>>({})
+  /** Rows whose last accept was refused because the destination had moved.
+   * Cleared when the refreshed preview is confirmed or the card is closed. */
+  const conflictIds = ref<Set<string>>(new Set())
+  /** Per-destination roll-up of the last batch, for the panel's summary line. */
+  const lastBatchSummary = ref<ProposalBatchSummary[]>([])
+
+  function isPreviewLoading(id: string): boolean {
+    return previewLoading.value.has(id)
+  }
+
+  function setPreviewLoading(id: string, on: boolean) {
+    const next = new Set(previewLoading.value)
+    if (on) next.add(id)
+    else next.delete(id)
+    previewLoading.value = next
+  }
+
+  /** Load (or reload) what accepting one row would write.
+   *
+   * `text` previews an edited wording against the same current destination,
+   * which is what the card's "edit suggestion" sends on every change. A failed
+   * load leaves no preview, and the card says so rather than showing a stale
+   * one as if it were current.
+   */
+  async function loadPreview(id: string, text = ''): Promise<ProposalPreview | null> {
+    setPreviewLoading(id, true)
+    const next = { ...previewErrors.value }
+    delete next[id]
+    previewErrors.value = next
+    try {
+      const query = text ? `?text=${encodeURIComponent(text)}` : ''
+      const reply = await api.get<ProposalPreviewResponse>(
+        `/api/proposals/${id}/preview${query}`,
+      )
+      const preview = reply?.preview ?? null
+      if (preview) previews.value = { ...previews.value, [id]: preview }
+      return preview
+    } catch (e) {
+      previewErrors.value = {
+        ...previewErrors.value,
+        [id]: e instanceof Error ? e.message : 'Could not read the destination',
+      }
+      const without = { ...previews.value }
+      delete without[id]
+      previews.value = without
+      return null
+    } finally {
+      setPreviewLoading(id, false)
+    }
+  }
+
+  function dropPreview(id: string) {
+    if (id in previews.value) {
+      const next = { ...previews.value }
+      delete next[id]
+      previews.value = next
+    }
+    if (id in previewErrors.value) {
+      const next = { ...previewErrors.value }
+      delete next[id]
+      previewErrors.value = next
+    }
+    if (conflictIds.value.has(id)) {
+      const next = new Set(conflictIds.value)
+      next.delete(id)
+      conflictIds.value = next
+    }
+  }
+
+  // -- Change receipts (History) ---------------------------------------------
+  //
+  // History rows carry a `change` pointer when the receipt protocol performed
+  // the decision; the images themselves are fetched per row, on expand, since
+  // a page of 200 decisions would otherwise ship 200 before/after bodies
+  // nobody opened.
+  const receipts = ref<Record<string, MemoryReceiptDetail>>({})
+  const receiptErrors = ref<Record<string, string>>({})
+  const receiptLoading = ref<Set<string>>(new Set())
+
+  /** Receipt ids are content-derived (`mrcpt_<sha>`), so the same id can name
+   * different operations in different workspaces. Every cache slot below is
+   * keyed by workspace + id, never by id alone. */
+  function receiptKey(id: string, workspace = ''): string {
+    return `${workspace}${id}`
+  }
+
+  function isReceiptLoading(id: string, workspace = ''): boolean {
+    return receiptLoading.value.has(receiptKey(id, workspace))
+  }
+
+  async function loadReceipt(id: string, workspace = ''): Promise<MemoryReceiptDetail | null> {
+    const key = receiptKey(id, workspace)
+    if (receipts.value[key]) return receipts.value[key]
+    const busySet = new Set(receiptLoading.value)
+    busySet.add(key)
+    receiptLoading.value = busySet
+    try {
+      const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+      const detail = await api.get<MemoryReceiptDetail>(`/api/memory/receipts/${id}${query}`)
+      if (detail) receipts.value = { ...receipts.value, [key]: detail }
+      return detail ?? null
+    } catch (e) {
+      receiptErrors.value = {
+        ...receiptErrors.value,
+        [key]: e instanceof Error ? e.message : 'Could not read the change',
+      }
+      return null
+    } finally {
+      const next = new Set(receiptLoading.value)
+      next.delete(key)
+      receiptLoading.value = next
+    }
+  }
+
+  /** Reverse one receipt. The server refuses (409) when the destination moved
+   * since the operation, because restoring the before image would delete an
+   * unrelated later fact; that refusal is surfaced verbatim rather than
+   * retried. */
+  async function undoReceipt(id: string, workspace = ''): Promise<{ ok: boolean; error?: string }> {
+    setBusy(id, true)
+    const key = receiptKey(id, workspace)
+    const next = { ...receiptErrors.value }
+    delete next[key]
+    receiptErrors.value = next
+    try {
+      const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+      await api.post(`/api/memory/receipts/${id}/undo${query}`)
+      // The change is reversed, so the cached image describes an operation that
+      // no longer holds; History refetches and the row re-reads it.
+      const without = { ...receipts.value }
+      delete without[key]
+      receipts.value = without
+      invalidateHistory()
+      await fetch({ force: true })
+      return { ok: true }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Undo failed'
+      receiptErrors.value = { ...receiptErrors.value, [key]: msg }
+      return { ok: false, error: msg }
+    } finally {
+      setBusy(id, false)
+    }
   }
 
   // Review-view filter and selection state. It lives here, not in the panel,
@@ -219,22 +379,61 @@ export const useProposalsStore = defineStore('proposals', () => {
    * answer, and the picker used to throw the answer away: every candidate button
    * called accept with no destination, so the server had nothing to move into.
    */
-  async function act(id: string, action: 'accept' | 'dismiss', workspace = ''): Promise<{ ok: boolean; error?: string }> {
+  async function act(
+    id: string,
+    action: 'accept' | 'dismiss',
+    workspace = '',
+    opts?: { expectedRevision?: string; text?: string; reconcile?: boolean },
+  ): Promise<{ ok: boolean; error?: string; conflict?: boolean; payload?: unknown }> {
     setBusy(id, true)
     error.value = ''
     try {
-      const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
-      await api.post<ProposalBatchResponse>(`/api/proposals/${id}/${action}${query}`)
+      const params = new URLSearchParams()
+      if (workspace) params.set('workspace', workspace)
+      // Opt-in per click: the server spends one model call reconciling the fact
+      // against the region, so a plain accept stays one synchronous write and
+      // only a row that was asked to be checked pays for it.
+      if (opts?.reconcile) params.set('reconcile', '1')
+      const queryString = params.toString()
+      const query = queryString ? `?${queryString}` : ''
+      const body: Record<string, string> = {}
+      // Only sent when a preview was actually shown. Without it the server
+      // keeps its pre-preview behaviour, which is what the batch bar and any
+      // older client rely on.
+      if (opts?.expectedRevision) body.expected_revision = opts.expectedRevision
+      if (opts?.text) body.text = opts.text
+      await api.post<ProposalBatchResponse>(`/api/proposals/${id}/${action}${query}`, body)
       await fetch({ force: true })
       invalidateHistory()
       return { ok: true }
     } catch (e) {
+      const conflict = adoptConflict(id, e)
+      const payload = (e as { payload?: unknown } | null)?.payload
+      const deferred = Boolean((payload as { deferred?: boolean } | undefined)?.deferred)
       const msg = e instanceof Error ? e.message : 'Action failed'
-      error.value = msg
-      return { ok: false, error: msg }
+      // A conflict is not an action failure: the card is already re-rendering
+      // with the refreshed preview, and a toast on top of it would say the
+      // same thing twice in two places. Nor is a deferral: the caller renders
+      // it on the row, with the entries it was weighed against and a retry, and
+      // a toast would take all three away the moment they became relevant.
+      if (!conflict && !deferred) error.value = msg
+      return { ok: false, error: msg, conflict, payload }
     } finally {
       setBusy(id, false)
     }
+  }
+
+  /** Take the refreshed preview a 409 carries, so the card can re-render.
+   *
+   * The whole point of the conflict response is that the operator sees the
+   * destination as it is NOW without a second round trip; dropping the payload
+   * and refetching would reintroduce the gap the handshake closes. */
+  function adoptConflict(id: string, e: unknown): boolean {
+    const payload = (e as { payload?: { conflict?: boolean; preview?: ProposalPreview } })?.payload
+    if (!payload?.conflict) return false
+    if (payload.preview) previews.value = { ...previews.value, [id]: payload.preview }
+    conflictIds.value = new Set(conflictIds.value).add(id)
+    return true
   }
 
   /** `workspace` names the destination for re-home rows in the selection. */
@@ -242,11 +441,33 @@ export const useProposalsStore = defineStore('proposals', () => {
     if (!ids.length) return
     setBusyMany(ids, true)
     error.value = ''
+    lastBatchSummary.value = []
     try {
-      await api.post<ProposalBatchResponse>('/api/proposals/batch', {
+      // Revisions only for rows whose preview this session actually loaded.
+      // A row accepted straight from the list sends none and keeps the
+      // unguarded behaviour, rather than being blocked on a card nobody opened.
+      const revisions: Record<string, string> = {}
+      for (const id of ids) {
+        const revision = previews.value[id]?.revision
+        if (revision) revisions[id] = revision
+      }
+      const reply = await api.post<ProposalBatchResponse>('/api/proposals/batch', {
         action, ids, ...(workspace ? { workspace } : {}),
+        ...(Object.keys(revisions).length ? { revisions } : {}),
       })
+      lastBatchSummary.value = reply?.summary ?? []
+      const conflicted = (reply?.results ?? []).filter(r => r.conflict).map(r => r.id)
+      if (conflicted.length) conflictIds.value = new Set([...conflictIds.value, ...conflicted])
+      // Previews of rows that are gone would otherwise be handed to the next
+      // batch as revisions for ids the server no longer knows — but a
+      // conflicted row is still queued, and dropping its preview here would
+      // also clear its conflict flag (see dropPreview) and leave the next
+      // bulk accept with no revision: the guarded write would silently
+      // downgrade to unguarded on exactly the rows known to have moved.
+      // Those rows stay, and are re-previewed below onto fresh state.
+      for (const id of ids) if (!conflicted.includes(id)) dropPreview(id)
       await fetch({ force: true })
+      for (const id of conflicted) await loadPreview(id)
       invalidateHistory()
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Batch action failed'
@@ -393,6 +614,8 @@ export const useProposalsStore = defineStore('proposals', () => {
 
   return {
     rows, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, loadError, fetch, ensureLoaded, act, batch, dismissOlderThan,
+    previews, previewErrors, isPreviewLoading, loadPreview, dropPreview, conflictIds, lastBatchSummary,
+    receipts, receiptErrors, receiptKey, isReceiptLoading, loadReceipt, undoReceipt,
     kindFilter, search, selected,
     scopedRows, visibleRows, kindCounts, resetFilters,
     view, historyRows, historyLoading, historyLoaded, historyTruncated, historyLimit,

@@ -1,0 +1,441 @@
+/*
+ * Shared scoped styles for the Settings panes.
+ *
+ * Scoped CSS does not cross a component boundary: a rule in SettingsView's
+ * own `<style scoped>` never reaches markup that now lives in a child SFC.
+ * Every rule a Settings child panel needs lives here instead, and both
+ * SettingsView.vue and the child pull it in with `<style scoped src>` so each
+ * gets its own scope attribute over one copy of the source.
+ *
+ * Rules are in their original SettingsView order, so relative cascade order
+ * between them is unchanged. SettingsView loads this block before its own
+ * `<style scoped>`, which keeps every rule that used to follow one of these
+ * still following it.
+ */
+
+.card {
+  width: min(100%, 1040px);
+  margin: 0 auto;
+  gap: var(--space-4);
+  border-color: var(--border);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
+.section-title {
+  letter-spacing: 0.08em;
+}
+
+.settings-card-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+/* No divider when the header is the only element in the card (nothing below
+   it to separate). v-if="false" siblings render as comment nodes, which
+   :last-child ignores, so this also covers cards whose body is conditional. */
+.settings-card-header:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.settings-card-header--split {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.settings-card-header--split > div {
+  min-width: 0;
+}
+
+.settings-card-header .hint {
+  margin: var(--space-2) 0 0;
+  max-width: 76ch;
+}
+
+.settings-card-header-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+}
+
+.hint--compact {
+  margin: 0;
+}
+
+.action-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.action-row > button {
+  flex: 1 1 0;
+}
+
+.settings-actions {
+  justify-content: flex-end;
+  margin-top: var(--space-2);
+}
+
+.settings-actions > button {
+  flex: 0 0 auto;
+  min-width: 150px;
+}
+
+.action-result {
+  font-size: var(--text-sm);
+  color: var(--fg2);
+  padding: 4px 0;
+}
+
+.action-result.--error {
+  color: var(--error);
+}
+
+.routine-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  max-width: 62ch;
+}
+
+.routine-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--fg);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.routine-select,
+.routine-input {
+  max-width: none;
+  min-width: 0;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  /* 44px min tap target height on mobile is handled by padding + font */
+  min-height: 38px;
+}
+
+.routine-input::placeholder {
+  color: var(--fg3);
+}
+
+.routine-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%23888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 12px 12px;
+}
+
+.routine-select::-ms-expand {
+  display: none;
+}
+
+.setting-row,
+.credential-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border);
+}
+
+.setting-row--inline {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.setting-row-main {
+  min-width: 0;
+}
+
+.setting-row-main--inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  width: 100%;
+}
+
+.credential-row .routine-input {
+  max-width: none;
+  min-width: 0;
+  width: 100%;
+}
+
+.settings-checkbox {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.settings-checkbox-hit {
+  width: var(--touch);
+  height: var(--touch);
+  flex: 0 0 var(--touch);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+@container (max-width: 720px) {
+  .settings-card-header--split,
+  .setting-row--inline:not(.setting-row--toggle),
+  .setting-row-main--inline {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .settings-card-header-actions {
+    justify-content: stretch;
+  }
+  .settings-card-header-actions .btn-small {
+    flex: 1 1 auto;
+  }
+  .settings-actions > button {
+    flex: 1 1 auto;
+  }
+  .routine-select,
+  .routine-input {
+    max-width: none;
+    min-height: 44px;
+  }
+}
+
+.skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: var(--space-3);
+}
+
+.settings-form-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+}
+
+.asset-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.asset-actions .btn-small {
+  flex: 0 0 auto;
+}
+
+.settings-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.settings-field--wide {
+  grid-column: 1 / -1;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.settings-field > .ws-label,
+.settings-label-row {
+  min-height: 20px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.settings-field .routine-input {
+  max-width: none;
+  min-width: 0;
+  width: 100%;
+}
+
+@container (max-width: 720px) {
+  .settings-field-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.skill-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  cursor: pointer;
+}
+
+.skill-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.skill-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.skill-name {
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-description,
+.skill-source {
+  margin: 4px 0 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+}
+
+.skill-description {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.skill-row.expanded .skill-description {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+
+.skill-chevron {
+  font-size: var(--text-xs);
+  color: var(--fg2);
+  flex-shrink: 0;
+}
+
+.skill-detail {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.skill-meta {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--fg2);
+  margin: 0;
+}
+
+.skill-meta-label {
+  display: inline-block;
+  min-width: 84px;
+  color: var(--fg2);
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.command-title-row {
+  flex-wrap: wrap;
+}
+
+.skill-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+
+.command-source {
+  flex: 0 0 auto;
+  text-transform: capitalize;
+}
+
+.ws-label {
+  font-size: var(--text-sm);
+  color: var(--fg2);
+}
+
+.mcp-env-block,
+.mcp-tools-block {
+  margin-top: 10px;
+}
+
+.mcp-env-row {
+  margin-top: 8px;
+}
+
+.mcp-edit-grid {
+  margin-top: 8px;
+}
+
+.mcp-tag-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mcp-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono, monospace);
+}
+
+.mcp-tag--embedded {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.mcp-tag-grid--wide {
+  gap: 8px;
+}

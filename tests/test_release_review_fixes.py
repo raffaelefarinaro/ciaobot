@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from ciao.web.routes_api import _overlay_transcript_metadata
+from ciao.web.transcript_service import _overlay_transcript_metadata
 
 
 # ── Metadata overlay: pair from the newest turn, not the oldest ──────────

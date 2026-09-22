@@ -1,0 +1,59 @@
+[
+  {
+    "key": "P1_remember",
+    "text": "Remember this for the future: my preferred espresso grind setting is 7 on the Niche Zero.",
+    "expects": [
+      "memory_update"
+    ],
+    "check": "memory_contains:Niche Zero"
+  },
+  {
+    "key": "P2_recall_person",
+    "text": "What do we know about Mira Vance? Where does she live now?",
+    "expects": [
+      "vault_search"
+    ],
+    "check": "answer_contains:Lisbon"
+  },
+  {
+    "key": "P3_surface_file",
+    "text": "Write a three-line summary of who Tomas Ferreira is into the file surface-compare/{run}.md in this workspace, then show that file beside the chat.",
+    "expects": [
+      "file_surface"
+    ],
+    "check": "file_surfaced:surface-compare/{run}.md"
+  },
+  {
+    "key": "P4_schedule",
+    "text": "Create a weekly schedule for Mondays at 09:00 Europe/Lisbon titled 'Surface probe {run}' whose prompt is 'Say hello.' Do not ask for confirmation, just create it.",
+    "expects": [
+      "schedule"
+    ],
+    "check": "schedule_exists:Surface probe {run}"
+  },
+  {
+    "key": "P5_archive_chat",
+    "text": "List the chats in this project and archive the one titled 'Surface probe target {run}'.",
+    "expects": [
+      "chats_list",
+      "chat_archive"
+    ],
+    "check": "chat_archived:Surface probe target {run}"
+  },
+  {
+    "key": "P6_supersession",
+    "text": "Does Mira Vance still live in Porto? Answer from my notes.",
+    "expects": [
+      "vault_search"
+    ],
+    "check": "answer_contains:Lisbon"
+  },
+  {
+    "key": "P7_memory_consolidate",
+    "text": "Check how full my agent memory is and, if there are duplicate or overlapping entries, consolidate them. Report what you changed.",
+    "expects": [
+      "memory_status"
+    ],
+    "check": "op_seen:memory_status"
+  }
+]

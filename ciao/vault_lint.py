@@ -670,14 +670,23 @@ def run_validation(vault_root: Path, *, install_root: Path | None = None) -> dic
             if target in incoming_links:
                 incoming_links[target].append(rel_str)
 
-    # Check links from workspace memory roots. Any directly nested MEMORY.md in
-    # the already discovered/read records counts, so alternate workspace names
-    # retain the same behavior without a second fallible root traversal.
+    # Check links from workspace memory roots. A MEMORY.md at the vault root
+    # or directly inside a workspace directory counts, taken from the already
+    # discovered/read records so alternate workspace names retain the same
+    # behavior without a second fallible root traversal.
+    #
+    # Both depths, because `relative` is computed against whatever vault root
+    # the caller passed. A shared vault holding workspace directories puts it
+    # at `<workspace>/MEMORY.md` (two parts), but the per-workspace re-root
+    # gives each workspace its own vault, and linting that one directly puts
+    # it at `MEMORY.md` (one part). Accepting only two parts meant a
+    # root-level MEMORY.md was never a memory root, so linking a note from it
+    # could never clear that note's orphan warning.
     memory_roots = sorted(
         (
             file
             for file in vault_files
-            if len(file.relative.parts) == 2
+            if len(file.relative.parts) <= 2
             and file.relative.name == "MEMORY.md"
         ),
         key=lambda file: file.relative.as_posix(),

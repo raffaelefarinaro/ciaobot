@@ -59,78 +59,14 @@ def harness_skill_overrides() -> dict[str, str]:
 
 
 # ── Ciaobot control-plane approval policy ────────────────────────────────
-# Auto mode's SDK classifier escalates every MCP tool that isn't marked
-# ``readOnlyHint`` to a manual approval card. For a third-party server that's
-# the right default; for Ciaobot's own control plane it isn't. Each tool below
-# is the programmatic twin of a button in the PWA, is bearer-token scoped to
-# this instance, and lands in a UI where its effect is visible and reversible.
-# Prompting "Approve use of mcp__ciaobot__schedule?" one line after the user
-# asked for an automation is friction with no safety value, so these names are
-# handed to ``ClaudeAgentOptions.allowed_tools`` and never reach the
-# PermissionGate.
-#
-# The cut is the ``_DESTRUCTIVE`` annotation in ``ciao/mcp_server.py``: deletes
-# and lifecycle actions (``chat_delete``, ``project_delete``, ``chat_stop``,
-# ``schedule_action``, ``project_complete``), plus
-# ``background_run_start`` / ``background_run_cancel``, which execute and kill
-# real commands, are deliberately absent and still raise a card.
-# ``tests/test_mcp_server.py``
-# cross-checks this tuple against the annotations declared on the tools, so a
-# new tool fails the suite until its policy is decided here.
-MCP_SERVER_NAME = "ciaobot"
-
-AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
-    "context_get",
-    "memory_status",
-    "memory_update",
-    "vault_search",
-    # The scoped evidence drill-down. Read-only and strictly narrower than the
-    # file read it replaces: it can only widen context inside a note this
-    # workspace's own search already matched.
-    "vault_expand",
-    "gws_status",
-    "projects_list",
-    "project_get",
-    "project",
-    "workspaces_list",
-    "workspace_create",
-    "chats_list",
-    "chat_get",
-    "chat_create",
-    "chat_update",
-    "chat_send",
-    "chat_continue",
-    "chat_retry",
-    "chat_handover",
-    "chat_fork",
-    "chat_archive",
-    # Only the read half of the background_run trio. Starting and cancelling a
-    # command are ``_DESTRUCTIVE`` and still raise an approval card: an
-    # auto-approved arbitrary-command tool would bypass the very classifier a
-    # plain Bash call has to pass.
-    "background_run_status",
-    "schedules_list",
-    "schedule",
-    "file_surface",
-)
-
-
-def auto_approved_mcp_tool_names(server: str = MCP_SERVER_NAME) -> list[str]:
-    """Fully-qualified SDK tool names for the auto-approved control plane."""
-    return [f"mcp__{server}__{name}" for name in AUTO_APPROVED_MCP_TOOLS]
-
-
-# The modes whose contract allows acting without asking, and therefore the only
-# modes where the AUTO_APPROVED_MCP_TOOLS list applies. `plan` is "propose,
-# don't act" — an allow rule would punch a hole in it. `normal` is what the PWA
-# labels "Manual — ask for every action", and pre-approving the list quietly
-# broke that promise: no card for `memory_update`, `chat_send` or `schedule` —
-# and `schedule` is an escalation, not just a write, because an automation run
-# is dispatched `unattended`, which forces `bypass`. A one-minute interval
-# created without a card buys unprompted arbitrary tool use every minute — the
-# exact thing the operator chose Manual mode to prevent. Shared here so the
-# Claude and opencode providers cannot drift apart on the carve-out.
-CONTROL_PLANE_PREAPPROVED_MODES: frozenset[str] = frozenset({"auto", "bypass"})
+# Since S6 every Ciaobot operation runs as `ciao <noun> <verb>` through the
+# harness's own shell tool. The per-tool MCP annotations that used to feed a
+# static allow-list are gone. No `ciao …` argv prefix is pre-approved: an
+# allow rule is a prefix that a shell suffix (``ciao help >/dev/null; <cmd>``)
+# could ride past, so auto mode keeps a card on every shell command and users
+# who want no cards switch to `bypass`. The security floor stays server-side in
+# the control plane (mode gates, ``unattended_forbidden``, workspace
+# confinement).
 
 
 # ── Credential and runtime-state path denies ─────────────────────────────

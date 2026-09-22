@@ -97,7 +97,7 @@ Act on these sections:
 
 `Workspace/Learnings.md` entries are structured: `- [key] [first-seen → last-seen] (xN) statement — sources: chat-a, chat-b`. The engine increments the count when the same statement recurs; your job is judgment:
 
-- **Promote** an entry at x3 or more into canonical guidance (the CLAUDE.md body or the relevant skill/doc), citing its sources, then move it under `## Promoted / Resolved` with the destination named.
+- **Promote** an entry at x3 or more into canonical guidance (the AGENTS.md body or the relevant skill/doc), citing its sources, then move it under `## Promoted / Resolved` with the destination named.
 - **Merge** entries that are semantically the same learning written differently: keep one, sum the counts, union the sources.
 - **Prune** x1 entries older than 30 days with no reuse value. Move anything pruned or resolved to `Workspace/Learnings-Archive.md` (create with `search: false` frontmatter) rather than deleting.
 
@@ -118,15 +118,28 @@ Those two keys are what lets `curation-end` stamp `last_full_pass`. Record neith
 
 Install-wide runtime failures remain visible through startup triage and Settings → Automation; pending upgrade work appears in housekeeping. Do not duplicate those global checks in every workspace.
 
-## 7. Rotate the logs
+## 7. Review the workspace guide body
+
+On a full pass, review the guide file's body (AGENTS.md), outside the fenced `ciao:memory` and `ciao:profile` regions, for the things `memory-audit` cannot judge on shape alone. This is the workspace's standing contract with every session, so a wrong claim there is asserted before the operator has said a word.
+
+- **Misplacement.** Apply the three tests before any entry that reads like a fact or an instruction: Is it a thing or an instruction? An entity (a person, a system, an automation, a tool) belongs on a vault page, not in the guide body. Does a vault page already say it? Search before keeping it. Where would it actually fire? A gotcha that only matters inside one workflow belongs in that workflow's skill, not in the guide. Move entity and gotcha facts out of the body to their vault page or skill; keep only standing instructions that must load every turn.
+- **State vs event.** A current value (price, status, owner, deadline, role, config setting, file location) is state: replace it in place with a fresh date, never append a second line. A thing that happened (a decision, a delivery, a correction) is an event: move it to the journal, `log.md`, or `Workspace/Learnings.md`, never keep it as an ever-loaded instruction.
+- **Duplicates the core prompt or a tool's own docs.** When a guide section only restates something the Ciaobot core prompt or an MCP/tool's own instructions already carry, remove it rather than keep it for redundancy. The guide is for the workspace-specific delta. Two recurring shapes: a section that restates the core operating contract ("use Ciaobot's typed tools, do not create provider-native recurring automations"), and an MCP section that argues behavior already guaranteed by the connector's own system prompt (connectors can flap, OAuth cannot re-consent unattended). Verify the other source actually carries it before deleting (the core prompt's defuddle rule and the `web-research` skill both cover URL reading; an agent's `.claude/agents/*.md` are real files, not symlinks like skills).
+- **Promote.** A learning that recurs (x3+) in `Workspace/Learnings.md` belongs here as a standing instruction, citing its sources.
+- **Drift and bloat.** Cut stale paths, superseded rules, and anything a more specific file (a skill, a project doc, the daily journal) already covers more precisely. Tighten verbose wording without losing a durable fact. Flag, do not silently rewrite, anything whose correct home is genuinely ambiguous: append a `[review]` question to `Workspace/Memory-Proposals.md` exactly as pass 2 does, so the operator decides.
+- **Record it.** Every body edit is a guide change, so the guide lock applies: hold it before writing and release after, exactly like a region write. When a removal needs judgment you cannot make confidently, queue it for the operator rather than dropping it.
+
+Record the pass only when the review was actually completed: `ciao curation-progress --holder <lease.holder> --key guide:guide-body`. This key is not one of the two required hygiene keys, so an over-budget run that never reached the guide must not report it as done.
+
+## 8. Rotate the logs
 
 When `Workspace/Curation-Log.md` or `Workspace/Weekly-Review-Log.md` exceeds ~64KB, move its body to a dated archive (`Curation-Log-YYYY-MM.md`) with `search: false` frontmatter and start the live file fresh with a pointer to the archive.
 
-## 8. Skill proposals
+## 9. Skill proposals
 
 Review `Workspace/Skill-Proposals/`. A proposal already implemented, or one you decide is not worth building, is a resolved decision: remove it with `ciao skill-proposal-remove <name>` (or `python3 -m ciao.cli skill-proposal-remove <name>`) naming the proposal file or a unique substring. Only remove a proposal after its change is actually in place or decided against. Leave proposals that belong in a bounded region queued.
 
-## 9. Report
+## 10. Report
 
 Two audiences, two registers.
 

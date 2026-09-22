@@ -114,6 +114,55 @@ class AppleDictationTranscriber:
             raise ValueError("Voice transcription returned empty text")
         return text
 
+    async def correct(self, text: str) -> str:
+        """Repair dictation output with the on-device model, fail-open.
+
+        Apple's dictation decodes speech but leaves run-on sentences, dropped
+        punctuation, capitalization, and homophone slips ("their" for "there",
+        technical terms, names). This pass tightens only the surface form with
+        the on-device language model, so the pipeline stays fully local and free.
+
+        It is deliberately *repair-only*: the instruction forbids adding,
+        removing, or paraphrasing meaning. Returns the raw transcript unchanged
+        when the model is unavailable or the call fails, so a correction can
+        never lose what dictation already produced.
+        """
+        if not native_sidecar.apple_model_available():
+            return text
+        if not text.strip():
+            return text
+        try:
+            fitted, _dropped = native_sidecar.fit_apple_input(text)
+            if fitted != text:
+                # The correction would replace the whole transcript with a
+                # corrected newest suffix: keep the raw text instead of
+                # silently losing everything the fit dropped.
+                return text
+            corrected = await native_sidecar.respond(
+                fitted,
+                instructions=_DICTATION_CORRECTION_PROMPT,
+                timeout=native_sidecar.RESPOND_TIMEOUT_S,
+            )
+            corrected = corrected.strip()
+            return corrected or text
+        except native_sidecar.SidecarError:
+            # Correction is a quality pass, never a gate: keep the raw text.
+            return text
+
+
+_DICTATION_CORRECTION_PROMPT = """\
+You are repairing the punctuation and wording of a transcript produced by
+voice dictation.
+
+Repair ONLY the surface form: add sentence-ending punctuation, fix capitalization,
+and correct obvious homophone or spelling slips that dictation commonly makes.
+
+Do NOT add, remove, paraphrase, or reorder the speaker's words. Do NOT invent
+content. Do NOT restructure sentences. If the input has no punctuation, keep
+that natural spoken style — just fix obvious errors.
+
+Return the repaired transcript and nothing else."""
+
 
 # ── Speech synthesis (speak) ─────────────────────────────────────────────
 

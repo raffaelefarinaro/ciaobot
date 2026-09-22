@@ -50,6 +50,7 @@ const emit = defineEmits<{
 const open = ref(false)
 const query = ref('')
 const popoverRef = ref<HTMLElement | null>(null)
+const rootRef = ref<HTMLElement | null>(null)
 const triggerRef = ref<HTMLElement | null>(null)
 const searchRef = ref<HTMLInputElement | null>(null)
 const listRef = ref<HTMLElement | null>(null)
@@ -242,6 +243,99 @@ function focusAdjacentItem(direction: 1 | -1) {
   items[nextIndex]?.focus()
 }
 
+// Viewport-anchored placement. The popover used to be absolutely positioned
+// inside the trigger, which put it inside whatever scroll container held the
+// selector -- `.chat-panel` has `overflow: hidden`, so in a split view the menu
+// was sliced off at the pane's edge, mid-word. Fixed positioning takes the
+// viewport as the containing block, so no ancestor can clip it, and the
+// coordinates below are clamped so it can never land off-screen either.
+const POPOVER_GAP = 4
+const POPOVER_MARGIN = 8
+const popoverStyle = ref<Record<string, string>>({})
+const popoverPlaced = ref(false)
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), Math.max(min, max))
+}
+
+function updatePopoverPosition() {
+  const host = rootRef.value
+  const pop = popoverRef.value
+  if (!host || !pop) {
+    // Never leave the menu invisible because we could not measure it.
+    popoverPlaced.value = true
+    return
+  }
+  const rect = host.getBoundingClientRect()
+  const width = pop.offsetWidth
+  const height = pop.offsetHeight
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+
+  // `-end` keeps the menu's right edge on the trigger's, as the old
+  // `right: 0` did; `-start` aligns the left edges.
+  const alignEnd = props.placement.endsWith('-end')
+  const left = clamp(
+    alignEnd ? rect.right - width : rect.left,
+    POPOVER_MARGIN,
+    vw - width - POPOVER_MARGIN,
+  )
+
+  const prefersTop = props.placement.startsWith('top')
+  const below = rect.bottom + POPOVER_GAP
+  const above = rect.top - height - POPOVER_GAP
+  let top = prefersTop ? above : below
+  // Flip to the other side only when the preferred one overflows and the
+  // other one fits, so a menu taller than the viewport still opens downward
+  // and scrolls rather than flipping into an equally bad position.
+  if (!prefersTop && below + height > vh - POPOVER_MARGIN && above >= POPOVER_MARGIN) {
+    top = above
+  } else if (prefersTop && above < POPOVER_MARGIN && below + height <= vh - POPOVER_MARGIN) {
+    top = below
+  }
+  // Clamp only while the trigger is still on screen. A fixed popover does not
+  // scroll away with its trigger the way the old absolute one did, so clamping
+  // unconditionally left the menu pinned to the viewport edge — detached from
+  // the control that opened it and floating over unrelated content — as soon
+  // as the user scrolled the pane it lives in (Settings, Schedules). Off
+  // screen it now follows the trigger out of view instead.
+  const triggerOnScreen = rect.bottom > 0 && rect.top < vh
+  if (triggerOnScreen) {
+    top = clamp(top, POPOVER_MARGIN, vh - height - POPOVER_MARGIN)
+  }
+
+  popoverStyle.value = { top: `${top}px`, left: `${left}px` }
+  popoverPlaced.value = true
+}
+
+function schedulePopoverPosition() {
+  nextTick(() => updatePopoverPosition())
+}
+
+// `capture` so the popover follows a trigger inside any scrolling ancestor,
+// not just the page.
+function onViewportChange() {
+  updatePopoverPosition()
+}
+
+watch(popoverVisible, (visible) => {
+  if (visible) {
+    schedulePopoverPosition()
+    window.addEventListener('scroll', onViewportChange, true)
+    window.addEventListener('resize', onViewportChange)
+  } else {
+    popoverPlaced.value = false
+    window.removeEventListener('scroll', onViewportChange, true)
+    window.removeEventListener('resize', onViewportChange)
+  }
+}, { immediate: true })
+
+// A filtered list changes the popover's height, which moves a flipped or
+// clamped menu.
+watch(filteredSections, () => {
+  if (popoverVisible.value) schedulePopoverPosition()
+})
+
 function onClickOutside(event: MouseEvent) {
   const target = event.target as Node
   if (
@@ -283,11 +377,14 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('mousedown', onClickOutside)
+  window.removeEventListener('scroll', onViewportChange, true)
+  window.removeEventListener('resize', onViewportChange)
 })
 </script>
 
 <template>
   <div
+    ref="rootRef"
     class="model-selector"
     :class="{
       'model-selector--open': popoverVisible,
@@ -313,7 +410,8 @@ onBeforeUnmount(() => {
       v-if="popoverVisible"
       ref="popoverRef"
       class="model-selector__popover"
-      :class="`model-selector__popover--${placement}`"
+      :class="[`model-selector__popover--${placement}`, { 'model-selector__popover--placed': popoverPlaced }]"
+      :style="popoverStyle"
       role="listbox"
       :aria-multiselectable="multiple"
     >
@@ -460,7 +558,12 @@ onBeforeUnmount(() => {
 }
 
 .model-selector__popover {
-  position: absolute;
+  position: fixed;
+  /* Coordinates arrive from updatePopoverPosition(); until they do the menu
+     stays invisible rather than flashing at the top-left of the viewport. */
+  top: 0;
+  left: 0;
+  opacity: 0;
   /* Sit above header controls (archive button, etc.) so the open menu is a
      clean overlay instead of tangling with the icons next to the trigger. */
   z-index: 300;
@@ -475,24 +578,8 @@ onBeforeUnmount(() => {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 
-.model-selector__popover--bottom-start {
-  top: calc(100% + 4px);
-  left: 0;
-}
-
-.model-selector__popover--bottom-end {
-  top: calc(100% + 4px);
-  right: 0;
-}
-
-.model-selector__popover--top-start {
-  bottom: calc(100% + 4px);
-  left: 0;
-}
-
-.model-selector__popover--top-end {
-  bottom: calc(100% + 4px);
-  right: 0;
+.model-selector__popover--placed {
+  opacity: 1;
 }
 
 .model-selector__search-wrap {

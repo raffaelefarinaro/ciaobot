@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
 /**
- * The workspace guide card reads `<workspace>/CLAUDE.md`.
+ * The workspace guide card reads `<workspace>/AGENTS.md`.
  *
- * A bare `CLAUDE.md` would let /api/workspace-file's fuzzy lookup resolve to
+ * A bare `AGENTS.md` would let /api/workspace-file's fuzzy lookup resolve to
  * whichever workspace sorts first, so the card — and its Open/Discuss actions —
  * could expose another workspace's instructions.
  *
@@ -83,47 +83,94 @@ describe('ProjectSidebar workspace guide card', () => {
   })
 
   it('asks for the active workspace guide before any bare basename', async () => {
+    const fetchMock = stubWorkspaceFile({ 'work/AGENTS.md': guideFile('A note') })
+    const wrapper = await mountSidebar()
+
+    expect(guidePaths(fetchMock)[0]).toBe('work/AGENTS.md')
+    expect(guidePaths(fetchMock)).not.toContain('AGENTS.md')
+    expect(wrapper.find('.guide-card-title').text()).toContain('work/AGENTS.md')
+  })
+
+  it('still finds a pre-migration CLAUDE.md, after AGENTS.md', async () => {
     const fetchMock = stubWorkspaceFile({ 'work/CLAUDE.md': guideFile('A note') })
     const wrapper = await mountSidebar()
 
-    expect(guidePaths(fetchMock)[0]).toBe('work/CLAUDE.md')
-    expect(guidePaths(fetchMock)).not.toContain('CLAUDE.md')
+    // AGENTS.md is asked for first and 404s; the legacy name still resolves,
+    // so an install that has not run the guide migration keeps its card.
+    expect(guidePaths(fetchMock).slice(0, 2)).toEqual(['work/AGENTS.md', 'work/CLAUDE.md'])
     expect(wrapper.find('.guide-card-title').text()).toContain('work/CLAUDE.md')
+  })
+
+  it('keeps probing when a candidate fails with something other than 404', async () => {
+    // Regression: any non-404 used to break the loop, so a transient 503 on
+    // the first name (the engine restarting) blanked the card even though the
+    // next name would have served it.
+    const fetchMock = stubWorkspaceFile({ 'work/CLAUDE.md': guideFile('A note') })
+    const original = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input).includes(encodeURIComponent('work/AGENTS.md'))) {
+        return { ok: false, status: 503, text: async () => '' } as unknown as Response
+      }
+      return original(input)
+    })
+    const wrapper = await mountSidebar()
+
+    expect(wrapper.find('.guide-card-title').text()).toContain('work/CLAUDE.md')
+    expect(wrapper.text()).not.toContain('HTTP 503')
   })
 
   it('re-fetches under the new workspace when the active one changes', async () => {
     const fetchMock = stubWorkspaceFile({
-      'work/CLAUDE.md': guideFile('Work note'),
-      'personal/CLAUDE.md': guideFile('Personal note'),
+      'work/AGENTS.md': guideFile('Work note'),
+      'personal/AGENTS.md': guideFile('Personal note'),
     })
     const wrapper = await mountSidebar()
     const store = useProjectStore()
     store.activeWorkspace = 'personal'
     await flushPromises()
 
-    expect(guidePaths(fetchMock)).toContain('personal/CLAUDE.md')
-    expect(wrapper.find('.guide-card-title').text()).toContain('personal/CLAUDE.md')
+    expect(guidePaths(fetchMock)).toContain('personal/AGENTS.md')
+    expect(wrapper.find('.guide-card-title').text()).toContain('personal/AGENTS.md')
   })
 
   it('falls back to the bare basename only when the qualified path is missing', async () => {
-    const fetchMock = stubWorkspaceFile({ 'CLAUDE.md': guideFile('Root note') })
+    const fetchMock = stubWorkspaceFile({ 'AGENTS.md': guideFile('Root note') })
     const wrapper = await mountSidebar()
 
-    expect(guidePaths(fetchMock).slice(0, 2)).toEqual(['work/CLAUDE.md', 'work/AGENTS.md'])
-    expect(wrapper.find('.guide-card-title').text()).toContain('CLAUDE.md')
+    expect(guidePaths(fetchMock).slice(0, 2)).toEqual(['work/AGENTS.md', 'work/CLAUDE.md'])
+    expect(wrapper.find('.guide-card-title').text()).toContain('AGENTS.md')
   })
 
   it('counts an impossible calendar date as malformed, not valid', async () => {
-    stubWorkspaceFile({ 'work/CLAUDE.md': guideFile('Expires soon [expires: 2026-02-30]') })
+    stubWorkspaceFile({ 'work/AGENTS.md': guideFile('Expires soon [expires: 2026-02-30]') })
     const wrapper = await mountSidebar()
 
     expect(wrapper.find('.guide-card-regions').text()).toContain('1 malformed tag')
   })
 
   it('accepts a real calendar date', async () => {
-    stubWorkspaceFile({ 'work/CLAUDE.md': guideFile('Expires soon [expires: 2026-02-28]') })
+    stubWorkspaceFile({ 'work/AGENTS.md': guideFile('Expires soon [expires: 2026-02-28]') })
     const wrapper = await mountSidebar()
 
     expect(wrapper.find('.guide-card-regions').text()).not.toContain('malformed')
+  })
+
+  it('never falls back to another workspace\'s guide after an error', async () => {
+    // Regression: a bare basename fuzzy-resolves to the primary root, so
+    // continuing past a transient error on the qualified probes could render
+    // `work/AGENTS.md` as `personal`'s guide, with Open/Discuss acting on it.
+    const fetchMock = stubWorkspaceFile({ 'AGENTS.md': guideFile("another workspace") })
+    const original = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes(encodeURIComponent('work/'))) {
+        return { ok: false, status: 503, text: async () => '' } as unknown as Response
+      }
+      return original(input)
+    })
+    const wrapper = await mountSidebar()
+
+    expect(wrapper.text()).not.toContain('another workspace')
+    expect(guidePaths(fetchMock)).not.toContain('AGENTS.md')
   })
 })

@@ -92,15 +92,18 @@ _FORBIDDEN_ENV_KEYS = frozenset({
     "DYLD_INSERT_LIBRARIES",
     "DYLD_LIBRARY_PATH",
     "DYLD_FRAMEWORK_PATH",
-    "CIAO_MCP_SESSION_TOKEN",
+    "CIAO_AGENT_TOKEN",
 })
 
 # Stripped from the inherited environment before the child sees it. Same
 # reasoning as above, plus the PWA's own operator credentials: a background
 # command is model-authored, and nothing about "run this script" needs the
-# keys that authenticate the server itself.
+# keys that authenticate the server itself. ``CIAO_AGENT_TOKEN`` is the
+# foreground chat capability; a background run must not call back into the
+# agent surface with the caller's authority, outliving the turn that was
+# approved (D-01).
 _STRIPPED_ENV_KEYS = frozenset({
-    "CIAO_MCP_SESSION_TOKEN",
+    "CIAO_AGENT_TOKEN",
     "PWA_AUTH_TOKEN",
 })
 

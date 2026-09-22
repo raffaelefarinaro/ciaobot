@@ -38,6 +38,8 @@ from ciao.vault_lint import (
     _markdown_source_paths,
     run_validation as run_vault_validation,
 )
+from ciao.workspace_guide import GUIDE_NAME
+from ciao.workspace_guide import guide_path as workspace_guide_path
 
 logger = logging.getLogger(__name__)
 
@@ -111,16 +113,18 @@ def audit_setup(
         checks.append({"name": name, "status": "ok", "path": str(path)})
 
     if workspace_dir.is_dir():
-        for filename in ("CLAUDE.md", "AGENTS.md"):
-            path = workspace_dir / filename
-            if not path.is_file():
-                issues.append(
-                    _diagnostic(
-                        "missing_instruction_file",
-                        path,
-                        f"{filename} is missing",
-                    )
+        # One guide, AGENTS.md. Requiring a CLAUDE.md beside it would report a
+        # correctly-migrated workspace as broken — the whole point of the
+        # rename is that the second file is gone (ciao/workspace_guide.py).
+        guide = workspace_guide_path(workspace_dir)
+        if not guide.is_file():
+            issues.append(
+                _diagnostic(
+                    "missing_instruction_file",
+                    workspace_dir / GUIDE_NAME,
+                    f"{GUIDE_NAME} is missing",
                 )
+            )
 
     return {
         "workspace_root": str(workspace_dir),
@@ -235,6 +239,17 @@ def _rule_signature(rule: str) -> tuple[str, str]:
     without_modal = _RULE_LEADING_MODAL_RE.sub("", rule.strip())
     signature = re.sub(r"[^a-z0-9]+", " ", without_modal.lower()).strip()
     return signature, polarity
+
+
+def _strip_rule_bullet(entry: str) -> str:
+    """A rule's text, with a leading "- " removed if it has one.
+
+    Region entries are stored without a bullet and body lines always have one,
+    so both sides have to reduce to the same text before their signatures are
+    compared.
+    """
+    match = _RULE_BULLET_RE.match(entry)
+    return (match.group(1) if match else entry).strip()
 
 
 def _guide_rules(text: str) -> list[str]:
@@ -359,10 +374,13 @@ def audit_rules(
             )
             return None
 
-    # 1. Guide bodies (CLAUDE.md, and AGENTS.md when it is a distinct file
-    # rather than a symlink/alias of CLAUDE.md), excluding region bodies.
-    guide_path = workspace_dir / "CLAUDE.md"
-    for label, path in (("CLAUDE.md", guide_path), ("AGENTS.md", workspace_dir / "AGENTS.md")):
+    # 1. The guide body, excluding region bodies. One file now: AGENTS.md,
+    # or a legacy CLAUDE.md on an install that has not run the guide
+    # migration. There is no longer a second, separate guide to scan — the
+    # AGENTS.md/CLAUDE.md pair was a symlink, so scanning both double-counted
+    # every rule in it.
+    guide_file = workspace_guide_path(workspace_dir)
+    for label, path in ((guide_file.name, guide_file),):
         text = read_source_text(label, path)
         if text is not None:
             add_occurrences(
@@ -370,9 +388,24 @@ def audit_rules(
             )
 
     # 2. Each bounded-memory region as its own source.
+    #
+    # Normalised the same way the body above is, so the same sentence in both
+    # produces the same signature. A region entry is stored without a bullet,
+    # while `_guide_rules` strips one off every body line, so comparing them
+    # raw never matched. That went unnoticed while CLAUDE.md and AGENTS.md
+    # were separate sources: they were both body-normalised, so the pair
+    # carried overlap detection between themselves. With one guide the body
+    # and the regions are the only sources left that can overlap.
+    #
+    # Strip an optional bullet rather than requiring one — `_guide_rules`
+    # itself cannot be reused here for exactly that reason.
     for region in REGIONS:
-        entries, _diags = read_region(guide_path, region)
-        rules = [entry for entry in entries if len(entry) > 15]
+        entries, _diags = read_region(guide_file, region)
+        rules = [
+            stripped
+            for entry in entries
+            if len(stripped := _strip_rule_bullet(entry)) > 15
+        ]
         add_occurrences(f"ciao:{region}", rules, overlap_eligible=True)
 
     # 3. Workspace MEMORY.md files. These are large and noisy, so they only
@@ -489,10 +522,10 @@ def _memory_guide_specs(config: Any, workspace_dir: Path | None) -> list[tuple[s
     """
     if config is not None and getattr(config, "workspaces", None):
         return [
-            (name, Path(config.agent_root(name)) / "CLAUDE.md")
+            (name, workspace_guide_path(config.agent_root(name)))
             for name in config.workspaces
         ]
-    return [("", (workspace_dir or Path.cwd()) / "CLAUDE.md")]
+    return [("", workspace_guide_path(workspace_dir or Path.cwd()))]
 
 
 def audit_memory(
@@ -514,9 +547,9 @@ def audit_memory(
     longer exist, and one subject carrying two competing values.
 
     Bounded memory lives in the ``ciao:memory``/``ciao:profile`` fenced
-    regions inside ``guide_path`` (the workspace ``CLAUDE.md``).
+    regions inside ``guide_path`` (the workspace ``AGENTS.md``).
     """
-    guide = guide_path or (Path.cwd() / "CLAUDE.md")
+    guide = guide_path or workspace_guide_path(Path.cwd())
     workspace = workspace_dir or guide.parent
     current = today or datetime.date.today()
     region_limits = {"memory": memory_char_limit, "profile": user_char_limit}
@@ -1401,7 +1434,7 @@ def run_os_audit(
             (name, guide)
             for name, guide in _memory_guide_specs(config, root)
             if not workspace_name or name == workspace_name
-        ] or [(workspace_name, root / "CLAUDE.md")]
+        ] or [(workspace_name, workspace_guide_path(root))]
         guides = [
             _scan_memory_guide(
                 guide,

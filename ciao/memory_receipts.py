@@ -1,6 +1,6 @@
 """Recoverable receipts for managed memory mutations.
 
-Bounded memory is stored as fenced regions inside a workspace ``CLAUDE.md``
+Bounded memory is stored as fenced regions inside a workspace ``AGENTS.md``
 (``ciao/memory_tool.py``) and the review queue is a Markdown file
 (``ciao/memory_proposals.py``). Neither is a database: a single managed
 operation can touch the guide, the queue and the decision sidecar, and a crash
@@ -59,6 +59,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from ciao.workspace_guide import guide_path
 
 logger = logging.getLogger(__name__)
 
@@ -551,8 +552,17 @@ def commit_region_change(
     destination: str = "",
     removed_texts: list[str] | None = None,
     kind: str = "region_apply",
+    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Replace one region's body through the receipt protocol.
+
+    ``provenance``, when given, is the fact's evidence chain as
+    :mod:`ciao.fact_candidates` records it — the transcript message ids it was
+    extracted from, plus the extraction and policy versions that admitted it.
+    Stored verbatim on the receipt so a saved fact can be traced back to the
+    turn that established it and to the rules in force when it was written;
+    an explicit user correction is only auditable if the entry it replaced and
+    the entry that replaced it each name their own source turn.
 
     The caller normally already holds the guide lock (``lock``), because it had
     to read the region to compute the merge. When ``lock`` is None this function
@@ -632,6 +642,7 @@ def commit_region_change(
             "fact_text": fact_text,
             "destination": destination,
             "removed_texts": list(removed_texts or []),
+            "provenance": dict(provenance or {}),
         }
         if before_text == after_text:
             # Nothing to write: a no-op still gets a receipt so a caller can
@@ -1719,7 +1730,7 @@ def receipt_journal_candidates(config: Any) -> list[Path]:
         roots = []
     for root, _name in roots:
         try:
-            fallback = journal_path(None, Path(root) / "CLAUDE.md")
+            fallback = journal_path(None, guide_path(root))
         except MemoryReceiptError:
             continue
         key = str(fallback)

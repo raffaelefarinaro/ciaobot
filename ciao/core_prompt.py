@@ -1,7 +1,7 @@
 """Render the Ciaobot core into provider system prompts.
 
 Used by Claude and OpenCode at session start. Native provider guide
-loaders read ``CLAUDE.md``/``AGENTS.md`` separately, bounded memory included,
+loaders read ``AGENTS.md`` separately, bounded memory included,
 so nothing here renders the regions. The returned block is appended to Claude
 Code's default system prompt via the SDK's ``SystemPromptPreset`` ``append``
 field, and is passed as developer instructions to the other providers.
@@ -21,14 +21,15 @@ logger = logging.getLogger(__name__)
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "system_prompt.md"
 
 
-@functools.lru_cache(maxsize=1)
+@functools.lru_cache(maxsize=2)
 def _system_instructions() -> str:
-    """Load and cache the Ciaobot system-instructions markdown.
+    """Load the Ciaobot system-instructions markdown.
 
     The text lives in ``system_prompt.md`` next to this module so a human can
-    read and edit it as plain markdown instead of a Python string literal. Any
-    read error logs and returns ``""`` so a missing or malformed file never
-    kills a chat.
+    read and edit it as plain markdown instead of a Python string literal.
+    There is a single prompt for every agent surface: the tool guidance names
+    ``ciao`` commands, never MCP tools. Any read error logs and returns ``""``
+    so a missing or malformed file never kills a chat.
     """
     try:
         return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()

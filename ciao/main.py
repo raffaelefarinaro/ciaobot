@@ -17,7 +17,12 @@ from typing import Callable, Literal
 from ciao.config import CiaoConfig
 from ciao.git_sync import sync_workspace
 from ciao.models import ChatContext
-from ciao.schedules import ScheduleManager, ScheduleStore, migrate_loops
+from ciao.schedules import (
+    ScheduleManager,
+    ScheduleStore,
+    dispatch_is_current,
+    migrate_loops,
+)
 from ciao.sessions import StateStore
 from ciao.signals import RestartRequested
 from ciao.transcripts import TranscriptStore
@@ -402,6 +407,23 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             tracker.fail("sync_workspace", "git sync failed")
             logger.exception("Workspace sync failed")
 
+    # Rename each root's legacy CLAUDE.md onto AGENTS.md, once. Both providers
+    # discover AGENTS.md natively now, but Claude Code only falls back to it
+    # when no CLAUDE.md is present, so the old name has to go for the new one
+    # to take effect (ciao/workspace_guide.py). It runs before the re-root so
+    # the guide has its final name when the re-root moves and splits it, and it
+    # never raises — a guide it cannot move is still read through the legacy
+    # fallback in `guide_path`.
+    try:
+        from ciao.workspace_guide import migrate_if_needed as migrate_guides
+
+        guide_moves = await asyncio.to_thread(migrate_guides, config)
+        moved = {r: a for r, a in guide_moves.items() if a not in ("noop", "failed")}
+        if moved:
+            logger.info("workspace guide migrated in %d root(s)", len(moved))
+    except Exception:  # noqa: BLE001 — never block startup on the guide rename
+        logger.exception("workspace guide migration failed")
+
     # Re-root the install, once, before anything reads the vault. After the git
     # sync so the clean-tree gate judges the real tree; before the index refresh
     # so the indexes are rebuilt for the layout that now exists; and before the
@@ -570,8 +592,14 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             # interval), and did so *before* `_run_interval`'s own re-read, so
             # that function's documented "the user's edit survives" guarantee
             # was reading an already-clobbered row.
+            #
+            # And only while the row still names this dispatch: a superseded
+            # run writing its own (older) chat here would re-point the
+            # "last run" link away from the run the entry now describes.
             latest = schedule_store.get(entry.schedule_id)
-            if latest is not None:
+            if latest is not None and dispatch_is_current(
+                latest, getattr(entry, "last_dispatch_id", "") or ""
+            ):
                 latest.last_run_chat_id = result["chat_id"]
                 schedule_store.replace(latest)
         return result
@@ -912,7 +940,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         # Fire each schedule once when its latest expected occurrence was missed
         # (for example while the server was down). This does not replay every
         # skipped interval. Runs asynchronously so it doesn't block uvicorn from
-        # serving requests.
+        # serving requests. On a client node it is a no-op that returns no
+        # schedule ids (the host owns automatic runs), so the count below is
+        # only ever logged for a host.
         #
         # Right after a first-time setup the onboarding chat should be the only
         # new conversation: within the post-setup grace window, system routines
