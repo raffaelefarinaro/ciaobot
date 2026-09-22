@@ -1,7 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, reactive, ref, watch } from 'vue'
 import { api } from '../lib/api'
-import { analyzeVault, type Cluster } from '../lib/vaultAnalysis'
 import { formatAgeDays } from '../lib/relativeTime'
 import { useProjectStore } from './projects'
 
@@ -55,35 +54,6 @@ export const MEMORY_TYPE_META: Record<string, { label: string; color: string }> 
   document: { label: 'Documents', color: '#c99b6a' },
   hub: { label: 'Workspace hubs', color: '#ffffff' },
   'skill-proposal': { label: 'Skill proposals', color: '#576079' },
-}
-
-/**
- * Cluster colours. Four hues and no more, plus a neutral for the overflow.
- *
- * A graph canvas is an all-pairs surface — any cluster can end up touching any
- * other — so the palette has to stay legible for *every* pair, not just
- * neighbouring ones in a legend. Running the eight-hue reference categorical
- * palette through the validator under `--pairs all` fails (worst pair CVD
- * dE 1.6); a brute-force search over its slots found four to be the largest
- * subset that clears every gate in both themes. The two residual WARNs (dark
- * CVD dE 6.9, light contrast on yellow/magenta) are both relieved by direct
- * labels — the sidebar legend names every coloured cluster, and hovering a
- * node names it — so the colour never has to carry identification alone.
- *
- * Slots are assigned by cluster size and never cycled: a fifth cluster takes
- * the neutral, it does not get an invented hue.
- */
-export const CLUSTER_PALETTE = {
-  dark: ['#3987e5', '#c98500', '#d55181', '#008300'],
-  light: ['#2a78d6', '#eda100', '#e87ba4', '#008300'],
-}
-export const CLUSTER_OTHER_COLOR = { dark: '#6b7280', light: '#8e90a8' }
-export const COLORED_CLUSTERS = CLUSTER_PALETTE.dark.length
-
-export function clusterColorFor(slot: number | undefined, light = false): string {
-  const theme = light ? 'light' : 'dark'
-  if (slot === undefined || slot < 0 || slot >= COLORED_CLUSTERS) return CLUSTER_OTHER_COLOR[theme]
-  return CLUSTER_PALETTE[theme][slot]
 }
 
 function personSubtype(tags: string[]): string {
@@ -150,8 +120,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     get: () => orphanFilter.value === 'hide',
     set: (v: boolean) => { orphanFilter.value = v ? 'hide' : 'all' },
   })
-  /** 'category' is the note's own type; 'cluster' is detected community. */
-  const colorMode = ref<'category' | 'cluster'>('category')
   /**
    * Which surface the memory page shows. The switcher itself lives in the
    * sidebar next to the workspace toggle, so this state is shared between
@@ -218,24 +186,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       .sort((a, b) => b.count - a.count)
   })
 
-  /**
-   * Community detection and betweenness over the FULL graph, not the filtered
-   * view: cluster colours and "bridge note" rankings must not change when a
-   * category is toggled off, or the encoding would be describing the filter
-   * rather than the vault. Recomputes only when the graph data itself changes.
-   */
-  const analysis = computed(() => analyzeVault(nodes.value, edges.value))
-  const clusters = computed<Cluster[]>(() => analysis.value.clusters)
-  const clusterById = computed(() => new Map(clusters.value.map(c => [c.id, c])))
-  function clusterOf(id: string): Cluster | null {
-    const cid = analysis.value.communityOf.get(id)
-    return cid === undefined ? null : clusterById.value.get(cid) || null
-  }
-  /** Slot drives the colour; undefined means "not in a real cluster". */
-  function clusterSlotOf(id: string): number | undefined {
-    return clusterOf(id)?.slot
-  }
-
   function passesFilters(n: MemoryGraphNode): boolean {
     if (!activeCats.has(catKeyFor(n))) return false
     if (search.value.trim() && !matchesSearch(n, search.value)) return false
@@ -274,21 +224,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       .filter(n => n.stale && activeCats.has(catKeyFor(n)))
       .sort((a, b) => (b.ageDays ?? 0) - (a.ageDays ?? 0)),
   )
-  /**
-   * High betweenness with modest degree = a note that sits *between* clusters
-   * rather than at the centre of one. Those are the notes whose deletion would
-   * actually fragment the vault, which a degree ranking never surfaces.
-   */
-  const bridgeNotes = computed(() => {
-    const scores = analysis.value.betweenness
-    return [...visibleNodes.value]
-      .filter(n => n.degree > 1 && (scores.get(n.id) || 0) > 0)
-      .sort((a, b) => (scores.get(b.id) || 0) - (scores.get(a.id) || 0))
-      .slice(0, 6)
-  })
-  function betweennessOf(id: string): number {
-    return analysis.value.betweenness.get(id) || 0
-  }
   /** Entry points for the local view, most recently written first. */
   const recentNotes = computed(() => [...nodes.value].sort((a, b) => b.mtime - a.mtime).slice(0, 6))
   const selectedNode = computed(() => (selectedId.value ? nodesById.value.get(selectedId.value) || null : null))
@@ -501,9 +436,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   const projectStore = useProjectStore()
   watch(() => projectStore.activeWorkspace, (ws) => { void ensureGraph(ws) })
 
-  function setColorMode(mode: 'category' | 'cluster') {
-    colorMode.value = mode
-  }
   function toggleHideOrphans() {
     orphanFilter.value = orphanFilter.value === 'hide' ? 'all' : 'hide'
   }
@@ -512,20 +444,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   }
   function setOrphanFilter(v: 'all' | 'hide' | 'only') {
     orphanFilter.value = v
-  }
-  /** Show only one cluster, the cluster-space equivalent of "only" on a category. */
-  function isolateCluster(clusterId: number) {
-    const cluster = clusterById.value.get(clusterId)
-    if (!cluster) return
-    search.value = ''
-    activeCats.clear()
-    for (const id of cluster.memberIds) {
-      const node = nodesById.value.get(id)
-      if (node) activeCats.add(catKeyFor(node))
-    }
-    // Category filters cannot express "these exact notes", so isolating a
-    // cluster centres it via focus rather than pretending to filter to it.
-    requestFocus(cluster.memberIds[0])
   }
   function toggleCategory(key: string) {
     if (activeCats.has(key)) activeCats.delete(key)
@@ -678,13 +596,12 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   return {
     nodes, edges, loading, loadError, search, activeCats, selectedId, pathStart, pathEnd, focusSignal,
     pendingFocus,
-    hideOrphans, orphanFilter, colorMode, view, mapView, reviewTab, retirementTab,
+    hideOrphans, orphanFilter, view, mapView, reviewTab, retirementTab,
     nodesById, adjacency, categoryList, visibleNodes, visibleIds, visibleEdgeCount, orphanCount,
     mostConnected, selectedNode, pathIds, pathHint,
-    clusters, clusterById, orphanNotes, bridgeNotes, recentNotes, staleNotes, ageLabelOf,
-    clusterOf, clusterSlotOf, betweennessOf,
+    orphanNotes, recentNotes, staleNotes, ageLabelOf,
     neighborsOf, loadGraph, toggleCategory, isolateCategory, resetCategories,
-    setColorMode, toggleHideOrphans, toggleOnlyOrphans, setOrphanFilter, isolateCluster,
+    toggleHideOrphans, toggleOnlyOrphans, setOrphanFilter,
     selectNode, requestFocus, requestFocusOnOpen, consumePendingFocus, resolveNodeId,
     resetPath, choosePathEndpoint, handleNodeClick, deleteNote,
     graphIsWarm, markGraphWarm, ensureGraph,

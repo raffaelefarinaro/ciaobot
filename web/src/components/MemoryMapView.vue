@@ -72,27 +72,6 @@
             >List</button>
           </div>
 
-          <!-- Colour-by is a canvas property: the list paints one dot per row
-               from the same palette but never a cluster hull, so the control
-               has nothing to say there. The orphan filters below scope the set
-               of notes itself, so they belong to both views. -->
-          <div v-if="mm.view === 'graph'" class="mm-seg mm-seg--sm" role="group" aria-label="Colour by">
-            <button
-              type="button"
-              :class="{ active: mm.colorMode === 'category' }"
-              :aria-pressed="mm.colorMode === 'category'"
-              title="Colour notes by their type"
-              @click="mm.setColorMode('category')"
-            >Type</button>
-            <button
-              type="button"
-              :class="{ active: mm.colorMode === 'cluster' }"
-              :aria-pressed="mm.colorMode === 'cluster'"
-              title="Colour notes by detected cluster"
-              @click="mm.setColorMode('cluster')"
-            >Clusters</button>
-          </div>
-
           <button
             type="button"
             class="mm-toggle"
@@ -427,7 +406,7 @@ import { router } from '../router'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import {
-  useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, clusterColorFor,
+  useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor,
   type MemoryGraphNode,
 } from '../stores/memoryMap'
 import { askConfirm } from '../lib/confirm'
@@ -566,7 +545,6 @@ function refreshThemeColors() {
   themeColors.staleRing = light ? 'rgba(196,110,0,0.9)' : 'rgba(255,152,0,0.85)'
 }
 function colorForNode(n: MemoryGraphNode): string {
-  if (mm.colorMode === 'cluster') return clusterColorFor(mm.clusterSlotOf(n.id), themeColors.light)
   return categoryColorFor(catKeyFor(n))
 }
 
@@ -922,8 +900,6 @@ watch(() => mm.visibleIds, () => {
 // change doesn't need physics, just one more frame; waking the existing loop
 // is simpler than adding a second, physics-free redraw path.
 watch(() => [mm.selectedId, mm.pathStart, mm.pathEnd], () => wakeSimulation())
-// Colour mode changes nothing about positions, so it needs a paint, not physics.
-watch(() => mm.colorMode, () => requestRedraw())
 // Hiding orphans or showing only orphans changes *which* nodes exist in the
 // layout, so the graph has to be re-framed as well as re-settled — otherwise
 // filtering leaves the camera zoomed into empty space.
@@ -1083,7 +1059,7 @@ function draw() {
     // everywhere except the surface people actually look at. An amber ring
     // (the same token the "Needs review" list uses for its dot) puts "these
     // facts are unverified" on the map itself, without spending a hue that
-    // the category and cluster palettes need for identity.
+    // the category palette needs for identity.
     if (n.stale && !dim) {
       ctx!.beginPath()
       ctx!.arc(sx, sy, r + 2.5 * dpr, 0, Math.PI * 2)
