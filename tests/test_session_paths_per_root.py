@@ -184,9 +184,11 @@ def test_local_session_jsonl_paths_keeps_every_cross_cwd_match(
     # freshness comes from the per-slug stat, not the cache age.
     transcripts._global_session_scan_cache = None
     paths = transcript_service._local_session_jsonl_paths(session, root)
-    assert paths == [preferred, elsewhere, third]
 
-    # Order: preferred (workspace root) first, then cross-cwd matches.
+    # Order: preferred (workspace root) first, then cross-cwd matches. The
+    # tail order is readdir order, which differs per filesystem (APFS vs
+    # ext4/tmpfs), so only the head is pinned — pinning the tail flaked on
+    # Linux CI while passing on every Mac.
     assert paths[0] == preferred
     assert set(paths[1:]) == {elsewhere, third}
 

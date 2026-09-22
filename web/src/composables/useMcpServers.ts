@@ -206,7 +206,7 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
         transport: srv.transport || (srv.url ? 'http' : 'stdio'),
         url: srv.url || '',
         command: srv.command || '',
-        argsText: (srv.args || []).join(' '),
+        argsText: joinArgs(srv.args || []),
       }
     }
   }
@@ -224,7 +224,7 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
 
   function editDirty(srv: McpProjectServer): boolean {
     const draft = editDraft(srv)
-    const args = (srv.args || []).join(' ')
+    const args = joinArgs(srv.args || [])
     if ((draft.transport || srv.transport) === 'http') {
       return draft.url.trim() !== (srv.url || '').trim()
     }
@@ -270,7 +270,23 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
   }
 
   function splitArgs(text: string): string[] {
-    return text.trim().split(/\s+/).filter(Boolean)
+    // Shell-style: `"a b"` stays one argument. Splitting on every whitespace
+    // boundary turned one quoted argument into several (keeping the quote
+    // characters) and wrote the corrupted array to `.mcp.json` on save, so
+    // the server subsequently failed or received different values.
+    const out: string[] = []
+    const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g
+    let match: RegExpExecArray | null
+    while ((match = re.exec(text)) !== null) {
+      if (match[1] !== undefined) out.push(match[1].replace(/\\(.)/g, '$1'))
+      else out.push(match[2] ?? match[3])
+    }
+    return out
+  }
+
+  /** Inverse of `splitArgs` for display: quote what a re-split must keep whole. */
+  function joinArgs(args: string[]): string {
+    return args.map((a) => (/[\s"']/.test(a) ? JSON.stringify(a) : a)).join(' ')
   }
 
   function adoptDraftFrom(res: McpStatus, name: string): void {
@@ -280,7 +296,7 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
         transport: updated.transport || (updated.url ? 'http' : 'stdio'),
         url: updated.url || '',
         command: updated.command || '',
-        argsText: (updated.args || []).join(' '),
+        argsText: joinArgs(updated.args || []),
       }
     }
   }
