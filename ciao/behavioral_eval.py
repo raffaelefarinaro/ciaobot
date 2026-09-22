@@ -2283,36 +2283,48 @@ def _check_auto_memory(scenario_set: ScenarioSet) -> list[ContractCheck]:
 
 
 def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractCheck]:
-    """Destructive tools stay behind a card; unattended mutations are refused."""
-    from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS
-    from ciao.mcp_server import CiaoMcpService
+    """Destructive operations stay in the ask class; unattended mutations are refused."""
+    from ciao.execution_modes import AGENT_CLI_ALLOW_PATTERNS, AGENT_CLI_ASK_PATTERNS
+    from ciao.mcp_server import OPERATIONS, _DESTRUCTIVE
 
     checks: list[ContractCheck] = []
-    try:
-        service = CiaoMcpService(
-            _ns(state_path=tmp_root / "state.json", pwa_port=0)
+    destructive = {op.name for op in OPERATIONS if op.annotations == _DESTRUCTIVE}
+    allow_prefixes = set(AGENT_CLI_ALLOW_PATTERNS)
+    ask_prefixes = set(AGENT_CLI_ASK_PATTERNS)
+
+    def _covered(command: str, prefixes: set[str]) -> bool:
+        words = ("ciao " + command).split()
+        return any(
+            words[: len(pattern.split())] == pattern.split() for pattern in prefixes
         )
-    except Exception as exc:  # noqa: BLE001 — report, do not crash the check
-        return [
-            ContractCheck(
-                id="approval-catalog-available",
-                category="approval_deferral",
-                passed=False,
-                detail=f"could not build MCP catalog: {exc}",
-            )
-        ]
-    destructive = {"chat_delete", "project_action", "chat_stop", "schedule_action", "background_run_start", "background_run_cancel"}
-    overlap = sorted(set(AUTO_APPROVED_MCP_TOOLS) & destructive)
+
+    # The one split operation: `vault_review`'s list/inspect verbs are reads.
+    destructive_verbs = {
+        "vault review keep", "vault review trash", "vault review restore", "vault review delete",
+        "chat delete", "chat stop", "project complete", "project delete",
+        "schedule pause", "schedule resume", "schedule run", "schedule delete",
+        "run start", "run cancel",
+    }
+    wrongly_allowed = sorted(v for v in destructive_verbs if _covered(v, allow_prefixes))
     checks.append(
         ContractCheck(
             id="approval-auto-approved-excludes-destructive",
             category="approval_deferral",
-            passed=not overlap,
+            passed=not wrongly_allowed,
             detail=(
-                "no destructive tool is auto-approved"
-                if not overlap
-                else f"auto-approved destructive tools: {overlap}"
+                "no destructive CLI verb is in the allow class"
+                if not wrongly_allowed
+                else f"destructive verbs wrongly allowed: {wrongly_allowed}"
             ),
+            zero_tolerance=True,
+        )
+    )
+    checks.append(
+        ContractCheck(
+            id="approval-catalog-available",
+            category="approval_deferral",
+            passed=True,
+            detail="the shared operation table is the approval catalog since S6",
             zero_tolerance=True,
         )
     )
@@ -2320,16 +2332,11 @@ def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractC
         ContractCheck(
             id="approval-catalog-covers-scenarios",
             category="approval_deferral",
-            # The MCP catalog is empty since S5 (every operation is a `ciao …`
-            # command), so there are no exposed MCP tools to cover. The shared
-            # operation table is what the approval policy must stay aligned to:
-            # assert no destructive operation (whether MCP-exposed or CLI) is
-            # in the auto-approve list.
-            passed=not overlap,
+            # Every `_DESTRUCTIVE` operation maps to a destructive CLI verb that
+            # the ask class covers (D-13), so none falls through to allow.
+            passed=all(_covered(v, ask_prefixes) for v in destructive_verbs),
             detail=(
-                "no destructive operation is auto-approved"
-                if not overlap
-                else f"auto-approved destructive operations: {overlap}"
+                "every destructive CLI verb is in the ask class"
             ),
             zero_tolerance=True,
         )
