@@ -132,7 +132,12 @@ class AppleDictationTranscriber:
         if not text.strip():
             return text
         try:
-            fitted, _ = native_sidecar.fit_apple_input(text)
+            fitted, _dropped = native_sidecar.fit_apple_input(text)
+            if fitted != text:
+                # The correction would replace the whole transcript with a
+                # corrected newest suffix: keep the raw text instead of
+                # silently losing everything the fit dropped.
+                return text
             corrected = await native_sidecar.respond(
                 fitted,
                 instructions=_DICTATION_CORRECTION_PROMPT,

@@ -184,3 +184,18 @@ def test_correct_returns_repaired_text(monkeypatch):
     monkeypatch.setattr(native_sidecar, "respond", fake_respond)
     trans = voice.AppleDictationTranscriber("en-US")
     assert asyncio.run(trans.correct("no punctuation here")) == "Fixed punctuation here."
+
+
+def test_correct_keeps_the_whole_transcript_when_fitting_drops_content(monkeypatch):
+    """A correction computed over the fitted suffix must not replace the full
+    transcript: long recordings would silently lose everything before it."""
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: True)
+    monkeypatch.setattr(native_sidecar, "apple_model_available", lambda: True)
+
+    async def should_not_call(*a, **k):
+        raise AssertionError("must not correct a transcript the fit truncated")
+
+    monkeypatch.setattr(native_sidecar, "respond", should_not_call)
+    trans = voice.AppleDictationTranscriber("en-US")
+    long_text = "word " * 10000
+    assert asyncio.run(trans.correct(long_text)) == long_text
