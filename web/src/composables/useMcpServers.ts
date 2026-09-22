@@ -311,7 +311,9 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
 
   /** Inverse of `splitArgs` for display: quote what a re-split must keep whole. */
   function joinArgs(args: string[]): string {
-    return args.map((a) => (/[\s"']/.test(a) ? JSON.stringify(a) : a)).join(' ')
+    return args
+      .map((a) => (a === '' ? '""' : /[\s"']/.test(a) ? JSON.stringify(a) : a))
+      .join(' ')
   }
 
   function adoptDraftFrom(res: McpStatus, name: string): void {

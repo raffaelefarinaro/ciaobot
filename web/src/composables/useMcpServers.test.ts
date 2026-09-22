@@ -280,6 +280,22 @@ describe('connection edits', () => {
     })
   })
 
+  it('round-trips an empty positional argument', async () => {
+    // `[""]` displayed as no text re-parsed as absent: a later save after
+    // editing any other field silently changed the server argv.
+    const { mcp, api } = make()
+    const srv = server({
+      name: 'local', transport: 'stdio', url: undefined, command: 'node',
+      args: ['server.js', ''],
+    })
+    expect(mcp.editDraft(srv).argsText).toBe('server.js ""')
+    api.patch.mockResolvedValueOnce(status() as never)
+    await mcp.saveServer(srv)
+    expect(api.patch).toHaveBeenCalledWith('/api/mcp/servers/local', {
+      command: 'node', args: ['server.js', ''], url: '',
+    })
+  })
+
   it('reports a failed connection save without clearing the row', async () => {
     const { mcp, api } = make()
     api.patch.mockRejectedValueOnce(new Error('bad url'))

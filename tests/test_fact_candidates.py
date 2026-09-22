@@ -115,6 +115,30 @@ CORPUS: tuple[Case, ...] = (
         why="a faithful negative fact from a negative turn still holds",
     ),
     Case(
+        name="negated claim on positive evidence",
+        text="Does not deploy on Thursdays.",
+        ids=(1,),
+        expect=fc.NEGATED_EVIDENCE,
+        why="the mirror of the negation case: the cited turn asserts exactly "
+        "what the candidate denies, and only the other direction was checked",
+    ),
+    Case(
+        name="stale figure on the correcting turn",
+        text="Contractor day rate is 950 EUR.",
+        ids=(6,),
+        expect=fc.EVIDENCE_MISMATCH,
+        why="the terms overlap but the figure does not: turn 6 says 1100, "
+        "and a mismatched number must not pass the gate into durable state",
+    ),
+    Case(
+        name="cited correction is still a correction",
+        text="Contractor day rate is 950 EUR.",
+        ids=(1, 6),
+        expect=fc.SUPERSEDED,
+        why="the scan starts after the turn that supplied the evidence, not "
+        "after the largest cited id, so a cited correction is not skipped",
+    ),
+    Case(
         name="hypothetical example",
         text="Uses Redis as a queue.",
         ids=(4,),

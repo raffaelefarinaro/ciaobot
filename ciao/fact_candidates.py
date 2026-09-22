@@ -395,6 +395,7 @@ will with would you your always never also just really very please thanks
 # join the token: "Thursdays." and "Thursdays" would stem differently and a
 # faithful rephrasing of the user's sentence would read as unsupported.
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+(?:[.'+-][A-Za-z0-9_]+)*")
+_NUMBER_RE = re.compile(r"\d[\d.,]*")
 _SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]?")
 
 # Negation markers. `n't` covers don't/doesn't/isn't/won't/didn't in one, and
@@ -535,6 +536,11 @@ def _supports(claim: frozenset[str], shared: int) -> bool:
     if not claim:
         return False
     return shared >= (1 if len(claim) <= 2 else 2)
+
+
+def _numbers(text: str) -> set[str]:
+    """Digit runs with separators stripped, so 1,100 meets 1100."""
+    return {re.sub(r"[.,]", "", match) for match in _NUMBER_RE.findall(text)}
 
 
 def _normalize_quote(text: str) -> str:
@@ -759,7 +765,43 @@ def validate_candidate(
             attended=True,
         )
 
-    superseding = _superseding_turn(transcript, claim, max(ids))
+    if _is_negative(claim_text or candidate.text) and not _is_negative(best_sentence):
+        # The mirror image: a negative claim citing positive evidence. Only
+        # the first direction was checked, so "does not use X" citing "I
+        # use X" read as supported and the exact opposite fact was
+        # promotable into bounded memory.
+        return Verdict(
+            ok=False,
+            code=NEGATED_EVIDENCE,
+            reason=(
+                f"idx={best_turn.idx} asserts what the candidate denies"
+            ),
+            source_message_ids=ids,
+            attended=True,
+        )
+
+    claim_numbers = _numbers(claim_text or candidate.text)
+    if claim_numbers and not claim_numbers <= _numbers(best_sentence):
+        # Terms overlap but the figures do not: "950 EUR" is supported by a
+        # turn saying "1100 EUR" under the two-term bar, and a stale or
+        # fabricated number would pass the gate into durable state. A
+        # refusal here queues the row for a human rather than dropping it,
+        # so a paraphrased count ("two" for "2") costs review, not loss.
+        missing = sorted(claim_numbers - _numbers(best_sentence))[0]
+        return Verdict(
+            ok=False,
+            code=EVIDENCE_MISMATCH,
+            reason=(
+                f"idx={best_turn.idx} does not carry the claimed figure {missing}"
+            ),
+            source_message_ids=ids,
+            attended=True,
+        )
+
+    # After the turn that supplied the evidence, not after the largest cited
+    # id: a candidate citing both the original and its correction used to
+    # start past both and pass the stale fact.
+    superseding = _superseding_turn(transcript, claim, best_turn.idx)
     if superseding is not None:
         return Verdict(
             ok=False,
