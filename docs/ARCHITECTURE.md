@@ -25,6 +25,8 @@ ciao/                          Python backend (Starlette).
   context/                     Provider-neutral per-turn context capsule (workspace, project, vault hints).
   observability/               Hooks: PreToolUse keeps Claude Bash jobs in the active turn. Runtime/entity context is built once in the request capsule.
   schedules.py                 Cron-style schedule dispatch.
+  agent_cli.py                 `ciao <noun> <verb>` agent commands (`memory`, `vault`, `file`, `chat`, `project`, `schedule`, `run start|status|cancel`, `gws status`, `workspace list`, `context`, `help`): argparse to `(operation, arguments)`, POST to `CIAO_AGENT_URL/<op>` with `CIAO_AGENT_TOKEN`, one JSON envelope on stdout, exit 0/1/2. `is_agent_invocation` decides which argv `ciao.cli.main` hands over before the operator parser is built (`ciao run` alone stays the server launcher, `ciao gws <profile> …` the passthrough).
+  agent_surface.py             Agent CLI transport behind `POST /agent/v1/{op}` (route in ciao/web/routes_agent.py): verifies the bearer token with the MCP session registry, then runs the same registered tool function as the MCP adapter inside the same auth context, so guards, envelope, validation and telemetry are shared; records `surface: "cli"`. Also the per-chat surface switch (`.runtime/agent_surface.json`) used by the MCP-versus-CLI comparison.
   background.py                Background command runs: one command per run in a tracked subprocess (`create_subprocess_exec`, never a shell), output to a rotating `.runtime/background/<run_id>.log`, registry in `.runtime/background/state.json`. Backs the `background_run_*` MCP tools; completions wake the owning chat through `ProjectChatManager`.
   dag.py                       Tiny DAG runner (Node kinds: bash / prompt / gate / subagent / retention; edges: ok / fail / always). Subprocess nodes can merge per-node env overrides for routed models. Subagent nodes accept an opt-in `requires` post-condition list (file paths, optionally with a `contains` line regex): exit 0 without the required files is a node failure, not a silent success. Each node is timed via `job_runs.track_sync`, so Automation page shows per-node status. Used by skill evolution and workspace-owned DAG workflows.
   sessions.py                  Session state, auth, signed cookies, JSON-backed StateStore for `.runtime/state.json`.
@@ -129,6 +131,7 @@ ciao/                          Python backend (Starlette).
     routes_auth.py             Auth login/logout/check routes.
     routes_chat.py             Chat WebSocket + events routes.
     routes_node.py             Node/device route handlers (multi-device host/client, package status/update).
+    routes_agent.py            `POST /agent/v1/{op}` for the agent CLI (bearer-authenticated by the MCP registry, outside the PWA session cookie like `/mcp/`).
     routes_mcp.py              MCP Settings HTTP endpoints (status, usage, env keys, project servers, tool probe).
     routes_push.py             Web Push notification routes.
     routes_helpers.py          Shared route helpers (api_error envelope, workspace path resolution, git sync).

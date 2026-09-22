@@ -21,19 +21,25 @@ logger = logging.getLogger(__name__)
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "system_prompt.md"
 
 
-@functools.lru_cache(maxsize=1)
-def _system_instructions() -> str:
-    """Load and cache the Ciaobot system-instructions markdown.
+_SYSTEM_PROMPT_CLI_PATH = _SYSTEM_PROMPT_PATH.with_name("system_prompt.cli.md")
+
+
+@functools.lru_cache(maxsize=2)
+def _system_instructions(surface: str = "mcp") -> str:
+    """Load the Ciaobot system-instructions markdown for one agent surface.
 
     The text lives in ``system_prompt.md`` next to this module so a human can
-    read and edit it as plain markdown instead of a Python string literal. Any
-    read error logs and returns ``""`` so a missing or malformed file never
-    kills a chat.
+    read and edit it as plain markdown instead of a Python string literal.
+    ``surface="cli"`` loads ``system_prompt.cli.md``, the variant whose tool
+    guidance names ``ciao`` commands instead of MCP tools (the CLI-first
+    comparison, ``ciao/agent_surface.py``). Any read error logs and returns
+    ``""`` so a missing or malformed file never kills a chat.
     """
+    path = _SYSTEM_PROMPT_CLI_PATH if surface == "cli" else _SYSTEM_PROMPT_PATH
     try:
-        return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
+        return path.read_text(encoding="utf-8").strip()
     except Exception:  # noqa: BLE001
-        logger.exception("core_prompt: failed to load %s", _SYSTEM_PROMPT_PATH)
+        logger.exception("core_prompt: failed to load %s", path)
         return ""
 
 
@@ -41,6 +47,7 @@ def system_prompt_payload(
     memory_block: str,
     *,
     base_system_prompt: dict | None = None,
+    surface: str = "mcp",
 ) -> dict | None:
     """Build a ``SystemPromptPreset`` dict that appends Ciaobot instructions and ``memory_block``.
 
@@ -57,7 +64,7 @@ def system_prompt_payload(
     if existing_append:
         parts.append(existing_append)
     parts.append("[SYSTEM EXPERTISE: Ciaobot core]")
-    parts.append(_system_instructions())
+    parts.append(_system_instructions(surface))
     if memory_block:
         parts.append(memory_block.strip())
 

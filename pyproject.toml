@@ -66,7 +66,7 @@ include = ["ciao*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-"ciao" = ["system_prompt.md"]
+"ciao" = ["system_prompt.md", "system_prompt.cli.md"]
 "ciao.web" = ["static/**/*"]
 "ciao.stock" = [
   "agents/*.md",

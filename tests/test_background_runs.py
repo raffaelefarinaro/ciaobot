@@ -168,7 +168,7 @@ def test_missing_executable_fails_at_validation_not_in_the_log(tmp_path: Path) -
 
 
 def test_env_rejects_loader_hooks_and_the_session_token() -> None:
-    for key in ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "CIAO_MCP_SESSION_TOKEN"):
+    for key in ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "CIAO_MCP_SESSION_TOKEN", "CIAO_AGENT_TOKEN"):
         with pytest.raises(BackgroundRunError) as excinfo:
             build_env({key: "x"}, run_id="bg-1", workspace="work")
         assert excinfo.value.code == "env_forbidden", key
@@ -187,6 +187,7 @@ def test_env_strips_server_secrets_from_the_inherited_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CIAO_MCP_SESSION_TOKEN", "super-secret")
+    monkeypatch.setenv("CIAO_AGENT_TOKEN", "agent-secret")
     monkeypatch.setenv("PWA_AUTH_TOKEN", "also-secret")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "provider-secret")
     monkeypatch.setenv("NOTION_TOKEN", "mcp-secret")
@@ -196,6 +197,7 @@ def test_env_strips_server_secrets_from_the_inherited_environment(
     env = build_env({"EXTRA": "1"}, run_id="bg-7", workspace="work")
 
     assert "CIAO_MCP_SESSION_TOKEN" not in env
+    assert "CIAO_AGENT_TOKEN" not in env
     assert "PWA_AUTH_TOKEN" not in env
     assert "ANTHROPIC_API_KEY" not in env
     assert "NOTION_TOKEN" not in env
