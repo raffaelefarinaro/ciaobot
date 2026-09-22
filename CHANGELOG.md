@@ -130,6 +130,7 @@
 - fix(release-gate): no write-through on external guide links, quote-aware MCP args, order-tolerant slug test (`46fce8e0`)
 - fix(pwa): tokenize mid-argument quotes in MCP server args (`8b7cab8d`)
 - fix(release-gate): skip correction when the fit truncates, merge non-alias agent links (`968cd614`)
+- fix(release-gate): two-way polarity, figure agreement, cited corrections, empty argv (`2ebcd62f`)
 
 ### Maintenance
 - docs: correct skill-sync targets, runtime port and skill-owned data (`41098c41`)
