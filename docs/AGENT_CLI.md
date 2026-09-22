@@ -84,28 +84,21 @@ flowchart LR
   keeps reporting lifetime totals. `GET /api/mcp/usage` states the split rather
   than leaving it implied. Telemetry is best-effort in both directions.
 
-## Permission model (D-05 / D-13)
+## Permission model
 
-On the CLI surface every control-plane call is the harness's own shell tool, so
-the per-tool annotations that used to feed a static allow-list are gone. The
-allow/ask split is now a command-line prefix rule:
+There is **no argv auto-approval** in `auto` mode. A `ciao …` shell command is
+just another Bash invocation, so `auto` keeps a card on every shell command —
+Claude routes it through its classifier and opencode keeps its generic
+`bash: ask`. This is deliberate: an argv prefix allow-rule is a security hazard,
+because a prompt-injected model could start a Bash input with an allowlisted
+prefix (`ciao help >/dev/null; <cmd>`) and the shell suffix would run without a
+card. There is no `AGENT_CLI_ALLOW_PATTERNS` / `AGENT_CLI_ASK_PATTERNS` and no
+`Bash(ciao …)` allow-list on either provider.
 
-- `AGENT_CLI_ALLOW_PATTERNS` / `AGENT_CLI_ASK_PATTERNS` in
-  `ciao/execution_modes.py` map each `ciao <noun> <verb>` command to one class.
-  The ask class is every command whose operation carries the `_DESTRUCTIVE`
-  annotation (`chat delete/stop`, `project complete/delete`,
-  `schedule pause/resume/run/delete`, `run start/cancel`) plus the deciding half
-  of `vault review` (keep/trash/restore/delete).
-- Claude appends `Bash(<pattern>:*)` entries to `options.allowed_tools` for
-  auto/bypass chats. opencode emits matching `bash` pattern `allow`/`ask` rows
-  in auto mode (`mode_settings`).
-- **These are UX, not the security boundary.** An argv prefix is bypassable
-  (`sh -c`, a Python subprocess). The floor stays server-side in the control
-  plane (mode gates, `unattended_forbidden`, workspace confinement). What the
-  rules buy is that a cooperative agent doing routine work does not raise a
-  card, and that a destructive verb still does. `ciao eval contracts` and
-  `tests/test_agent_surface.py` assert every documented command falls in exactly
-  one class and that no destructive verb is in the allow class.
+Users who want no cards switch to `bypass`, which grants the full `allow`
+wildcard. The server-side floor (mode gates, `unattended_forbidden`, workspace
+confinement) remains the real security boundary, independent of the harness
+permission rows.
 
 ## Managed provider configuration
 
@@ -161,5 +154,5 @@ The default — and now only — control surface is `cli` for both supported
 providers. The MCP-versus-CLI comparison (the S0.5 spike of the migration plan)
 measured real-session parity (completion 86%/100% per provider on both
 surfaces, zero fallbacks) and drove the D-11 name resolution, D-12 command
-table in the core prompt, and D-13 argv rules that make the CLI surface
-practical in auto mode. The MCP surface itself was removed in S6.
+table in the core prompt, and the CLI permission posture that make the CLI
+surface usable.

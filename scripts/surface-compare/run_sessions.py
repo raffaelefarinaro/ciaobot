@@ -1,17 +1,24 @@
-"""S0.5 stage 2: real chat sessions, MCP surface vs CLI surface, on a live instance.
+"""S0.5 stage 2 runner: real chat sessions on a live instance, CLI surface.
 
-For every (repeat, prompt, provider, surface) it creates a fresh chat in a
-dedicated project, marks the chat's surface in ``.runtime/agent_surface.json``,
-sends the prompt over REST, auto-approves any approval card (counting it),
-waits for the turn to settle, then scores completion from real workspace state
-and pulls the chat's control-plane telemetry. Everything it creates is deleted
-afterwards and the memory file is restored from a snapshot taken before the run.
+The MCP-vs-CLI comparison (S0.5) ran on a dev-build spike with a per-chat
+surface switch and is complete. Since S6 every chat is on the CLI surface and
+the ``mcp`` arm no longer exists, so this runner only drives ``cli`` sessions:
+requesting the ``mcp`` surface is rejected rather than silently running the
+same CLI path and mislabelling it as an A/B comparison.
+
+For every (repeat, prompt, provider) it creates a fresh chat in a dedicated
+project, sends the prompt over REST, auto-approves any approval card (counting
+it), waits for the turn to settle, then scores completion from real workspace
+state and pulls the chat's control-plane telemetry. Everything it creates is
+deleted afterwards and the memory file is restored from a snapshot taken
+before the run.
 
 Usage (from the worktree, against the installed dev build):
 
   PYTHONPATH=. ~/repos/ciaobot/.venv/bin/python scripts/surface-compare/run_sessions.py \
       --workspace-root ~/repos/ciao/personal --runtime ~/repos/ciao/.runtime \
       --env-file ~/repos/ciao/.env --prompts-file ~/private/surface-prompts.json --repeats 5 \
+      --surfaces cli \
       --out ~/orca/workspaces/ciaobot/plans/evidence/surface-compare/sessions
 """
 from __future__ import annotations
@@ -178,7 +185,6 @@ class Runner:
         self.schedules_file = self.runtime / "schedules.json"
         self.telemetry = self.runtime / "mcp_tool_calls.jsonl"
         self.agent_tools = self.runtime / "agent_tool_calls.jsonl"
-        self.surface_file = self.runtime / "agent_surface.json"
         self.out = Path(args.out).expanduser(); self.out.mkdir(parents=True, exist_ok=True)
         self.log = (self.out / "sessions.jsonl").open("a", encoding="utf-8")
         self.project_id = self._ensure_project()
@@ -197,17 +203,6 @@ class Runner:
         chat = self.inst.post(f"/api/projects/{self.project_id}/chats", {"title": title, "provider": provider, "model": model, "mode": self.args.mode})
         return chat["chat_id"]
 
-    def _set_surface(self, chat_id: str, surface: str | None) -> None:
-        try:
-            data = json.loads(self.surface_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            data = {}
-        if surface is None:
-            data.pop(chat_id, None)
-        else:
-            data[chat_id] = surface
-        self.surface_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-
     # ── one run ─────────────────────────────────────────────────────────
     async def run_one(self, repeat: int, prompt: Prompt, provider: str, surface: str) -> RunRecord:
         model = self.args.claude_model if provider == "claude" else self.args.opencode_model
@@ -225,7 +220,6 @@ class Runner:
 
         chat_id = self._create_chat(f"[surface-compare] {run}", provider, model)
         rec.chat_id = chat_id
-        self._set_surface(chat_id, surface)
         rec.started_at = time.time()
         try:
             self.inst.post(f"/api/chats/{chat_id}/prompt", {"prompt": text})
@@ -309,7 +303,6 @@ class Runner:
             self.inst.delete(f"/api/chats/{chat_id}")
             if target_chat:
                 self.inst.delete(f"/api/chats/{target_chat}")
-            self._set_surface(chat_id, None)
         except Exception as exc:  # noqa: BLE001
             rec.error = (rec.error + f" | cleanup: {exc}")[:500]
 
@@ -414,6 +407,12 @@ class Runner:
     async def run_matrix(self) -> None:
         providers = [p for p in self.args.providers.split(",") if p]
         surfaces = [s for s in self.args.surfaces.split(",") if s]
+        # Since S6 the MCP surface is gone: every chat is CLI and telemetry
+        # always reports surface "cli". Running the "mcp" arm would execute the
+        # same CLI path and mislabel it as a distinct surface, corrupting the
+        # comparison, so reject it rather than silently producing bad data.
+        if "mcp" in surfaces:
+            raise SystemExit("the 'mcp' surface no longer exists since S6; use --surfaces cli")
         all_prompts = load_prompts(Path(self.args.prompts_file).expanduser())
         prompts = [p for p in all_prompts if not self.args.prompts or p.key in self.args.prompts.split(",")]
         total = self.args.repeats * len(prompts) * len(providers) * len(surfaces)
@@ -461,7 +460,7 @@ def main() -> int:
     ap.add_argument("--workspace", default="personal")
     ap.add_argument("--project-name", default="Surface compare")
     ap.add_argument("--providers", default="claude,opencode")
-    ap.add_argument("--surfaces", default="mcp,cli")
+    ap.add_argument("--surfaces", default="cli", help="CLI-only since S6; 'mcp' is rejected (no longer a distinct surface).")
     ap.add_argument("--prompts-file", required=True, help="Local JSON prompt set; see prompts.example.json. Never commit a real one.")
     ap.add_argument("--prompts", default="", help="Comma-separated prompt keys to run (default: all in the file).")
     ap.add_argument("--repeats", type=int, default=5)

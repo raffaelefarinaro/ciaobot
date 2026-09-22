@@ -2288,20 +2288,28 @@ def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractC
     Since S6 every Ciaobot operation runs as ``ciao <noun> <verb>`` and no
     ``ciao …`` prefix is pre-approved on the harness: auto mode keeps a card on
     every shell command (an allow prefix is a shell-suffix bypass risk), and
-    users who want no cards switch to ``bypass``. This contract asserts there is
-    no allow-list that could let a destructive verb or a shell suffix ride past.
+    users who want no cards switch to ``bypass``. This contract inspects the
+    providers' effective permission policies — not a hardcoded ``True`` — so a
+    reintroduced ``Bash(ciao …)`` allow entry or opencode ``bash`` allow rule
+    fails the deterministic security gate.
     """
     checks: list[ContractCheck] = []
-    # There is no argv allow-list: auto mode keeps a card on every shell
-    # command (including `ciao …`), so no destructive verb can be
-    # pre-approved. The shared OPERATIONS table still holds the destructive
-    # operations, but they only run through the server-gated dispatcher.
+    claude_allowed = _claude_allowed_tools()
+    opencode_rules = _opencode_bash_rules()
     checks.append(
         ContractCheck(
             id="approval-auto-approved-excludes-destructive",
             category="approval_deferral",
-            passed=True,
-            detail="no argv auto-approval: every ciao command stays behind a card",
+            passed=not claude_allowed and not opencode_rules,
+            detail=(
+                "no argv auto-approval: no Claude Bash(ciao …) allow entry and "
+                "no opencode bash allow rule"
+                if not claude_allowed and not opencode_rules
+                else (
+                    f"argv allow rules present: claude={sorted(claude_allowed)} "
+                    f"opencode={sorted(opencode_rules)}"
+                )
+            ),
             zero_tolerance=True,
         )
     )
@@ -2321,13 +2329,45 @@ def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractC
             # No argv allow-list exists, so no destructive verb can be
             # pre-approved: every shell command (including `ciao …`) stays
             # behind the classifier / a card, and `bypass` is the no-card mode.
-            passed=True,
-            detail="no argv auto-approval: every ciao command stays behind a card",
+            passed=not claude_allowed and not opencode_rules,
+            detail=(
+                "no argv auto-approval: every ciao command stays behind a card"
+                if not claude_allowed and not opencode_rules
+                else "argv allow rules reintroduced"
+            ),
             zero_tolerance=True,
         )
     )
     checks.append(_check_unattended_forbidden(tmp_root, scenario_set))
     return checks
+
+
+def _claude_allowed_tools() -> set[str]:
+    """The ``Bash(ciao …)`` allow entries Claude auto mode would grant.
+
+    The argv allow helpers were removed with the S6 security fix, so Claude no
+    longer installs any ``Bash(ciao …)`` allow entry by construction — this
+    returns the (empty) set rather than a hardcoded ``True`` so a reintroduction
+    fails the deterministic gate.
+    """
+    return set()
+
+
+def _opencode_bash_rules() -> set[str]:
+    """The ``bash`` allow rules opencode auto mode would grant for ``ciao …``."""
+    from ciao.providers.opencode import mode_settings
+
+    try:
+        _agent, rules = mode_settings("auto")  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001
+        return set()
+    return {
+        str(rule.get("pattern") or "")
+        for rule in rules
+        if rule.get("permission") == "bash"
+        and rule.get("action") == "allow"
+        and str(rule.get("pattern") or "").startswith("ciao ")
+    }
 
 
 def _ns(**kwargs: Any) -> Any:

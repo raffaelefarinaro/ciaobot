@@ -117,8 +117,13 @@ def test_extract_file_touches_from_cli_file_surface() -> None:
     assert extract_file_touches(
         "Bash", {"command": "ciao file surface out/report.md"}
     ) == [{"file_path": "out/report.md", "action": "surfaced"}]
-    # The `ciao` prefix is required: English text or a bare `file surface`
-    # mention must not be mistaken for an explicit surfacing request.
+    assert extract_file_touches(
+        "Bash", {"command": "; ciao file surface memory-vault/People/Sofia.md"}
+    ) == [{"file_path": "memory-vault/People/Sofia.md", "action": "surfaced"}]
+    # `ciao` must sit at a real command position (start or after a separator),
+    # never mid-argument: a string that merely contains the words is not an
+    # explicit surfacing request and must not auto-pin the panel.
+    assert extract_file_touches("Bash", {"command": "echo ciao file surface out/report.md"}) == []
     assert extract_file_touches("Bash", {"command": "file surface memory-vault/People/Sofia.md"}) == []
     assert extract_file_touches("Bash", {"command": "echo file surface out/report.md"}) == []
     # Other `ciao` commands are not surfacing.

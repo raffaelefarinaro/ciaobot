@@ -422,15 +422,23 @@ Canonical example: `ciao/skill_evolution.py:_process_skill_dag`. Use a DAG when 
 
 Sidebar subagent rows are fed by `GET /api/subagents/running` (dispatch metadata only, active chats only) and the store's poll, which replaces the whole map so a finished agent's row disappears. Only agents the parent session can name get a row — background dispatches, plus opencode children; a foreground Task is recorded in the parent JSONL by its own completion, so it is never running by the time it is nameable. Their read-only view is `SubagentChatView.vue` on `/chat/:chatId/subagent/:agentId`, fed by `GET /api/chats/{id}/subagents`. Claude agent ids arrive bare from the parent JSONL and `agent-`-prefixed from the local transcript fallback, so both surfaces normalise before comparing or routing. Cover changes in `tests/test_running_subagents.py` and `web/src/components/__tests__/ProjectSidebar.test.ts`.
 
-## MCP control plane
+## Agent control plane (CLI-first since S6)
 
 `ciao/control_plane.py` is the provider-neutral application boundary;
-`ciao/mcp_server.py` is only its authenticated MCP adapter. Add business rules
-to managers/control-plane methods, not tool handlers. Every tool must declare
-read/write/destructive annotations, return a stable envelope, enforce scoped
-workspace/project/chat access, and have focused protocol plus domain tests.
-Self-affecting operations must defer until the caller chat drains. Provider
-tokens must never enter the model's shell environment or telemetry arguments.
+`ciao/mcp_server.py` holds the shared operation table, the bearer-token
+registry, and the envelope/plan-mode gate/telemetry that the dispatcher
+(`ciao/agent_surface.py`) runs. Add business rules to managers/control-plane
+methods, not shell handlers. Every operation carries a stable envelope, enforces
+scoped workspace/project/chat access, and has focused domain tests.
+Self-affecting operations must defer until the caller chat drains.
+
+Since S6 the agent runs every operation as `ciao <noun> <verb>` in the managed
+provider's shell. `ProjectChatManager.build_agent_request` deliberately injects
+`CIAO_AGENT_TOKEN` (and `CIAO_AGENT_URL`) into that **foreground** shell — this
+is the point of the CLI surface (D-01), not a leak. `ciao/background.py` strips
+`CIAO_AGENT_TOKEN` (and `PWA_AUTH_TOKEN`) from every background child so a
+detached command cannot call back with the caller's authority. Keep that split
+when changing token delivery; do not add the token to telemetry arguments.
 
 See `docs/AGENT_CLI.md` for the catalog and provider configuration.
 
