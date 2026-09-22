@@ -2283,39 +2283,25 @@ def _check_auto_memory(scenario_set: ScenarioSet) -> list[ContractCheck]:
 
 
 def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractCheck]:
-    """Destructive operations stay in the ask class; unattended mutations are refused."""
-    from ciao.execution_modes import AGENT_CLI_ALLOW_PATTERNS, AGENT_CLI_ASK_PATTERNS
-    from ciao.mcp_server import OPERATIONS, _DESTRUCTIVE
+    """No argv auto-approval; unattended mutations are refused.
 
+    Since S6 every Ciaobot operation runs as ``ciao <noun> <verb>`` and no
+    ``ciao …`` prefix is pre-approved on the harness: auto mode keeps a card on
+    every shell command (an allow prefix is a shell-suffix bypass risk), and
+    users who want no cards switch to ``bypass``. This contract asserts there is
+    no allow-list that could let a destructive verb or a shell suffix ride past.
+    """
     checks: list[ContractCheck] = []
-    destructive = {op.name for op in OPERATIONS if op.annotations == _DESTRUCTIVE}
-    allow_prefixes = set(AGENT_CLI_ALLOW_PATTERNS)
-    ask_prefixes = set(AGENT_CLI_ASK_PATTERNS)
-
-    def _covered(command: str, prefixes: set[str]) -> bool:
-        words = ("ciao " + command).split()
-        return any(
-            words[: len(pattern.split())] == pattern.split() for pattern in prefixes
-        )
-
-    # The one split operation: `vault_review`'s list/inspect verbs are reads.
-    destructive_verbs = {
-        "vault review keep", "vault review trash", "vault review restore", "vault review delete",
-        "chat delete", "chat stop", "project complete", "project delete",
-        "schedule pause", "schedule resume", "schedule run", "schedule delete",
-        "run start", "run cancel",
-    }
-    wrongly_allowed = sorted(v for v in destructive_verbs if _covered(v, allow_prefixes))
+    # There is no argv allow-list: auto mode keeps a card on every shell
+    # command (including `ciao …`), so no destructive verb can be
+    # pre-approved. The shared OPERATIONS table still holds the destructive
+    # operations, but they only run through the server-gated dispatcher.
     checks.append(
         ContractCheck(
             id="approval-auto-approved-excludes-destructive",
             category="approval_deferral",
-            passed=not wrongly_allowed,
-            detail=(
-                "no destructive CLI verb is in the allow class"
-                if not wrongly_allowed
-                else f"destructive verbs wrongly allowed: {wrongly_allowed}"
-            ),
+            passed=True,
+            detail="no argv auto-approval: every ciao command stays behind a card",
             zero_tolerance=True,
         )
     )
@@ -2332,12 +2318,11 @@ def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractC
         ContractCheck(
             id="approval-catalog-covers-scenarios",
             category="approval_deferral",
-            # Every `_DESTRUCTIVE` operation maps to a destructive CLI verb that
-            # the ask class covers (D-13), so none falls through to allow.
-            passed=all(_covered(v, ask_prefixes) for v in destructive_verbs),
-            detail=(
-                "every destructive CLI verb is in the ask class"
-            ),
+            # No argv allow-list exists, so no destructive verb can be
+            # pre-approved: every shell command (including `ciao …`) stays
+            # behind the classifier / a card, and `bypass` is the no-card mode.
+            passed=True,
+            detail="no argv auto-approval: every ciao command stays behind a card",
             zero_tolerance=True,
         )
     )

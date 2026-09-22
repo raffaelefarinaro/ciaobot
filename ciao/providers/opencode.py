@@ -63,7 +63,6 @@ from ciao.providers.base import (
     prepend_stable_context,
 )
 from ciao.execution_modes import (
-    agent_cli_permission_rules,
     opencode_credential_deny_rules,
 )
 from ciao.providers._sse import SSEDecoder
@@ -554,19 +553,16 @@ def mode_settings(
     reach it, so the credential denies cover a relocated
     ``CIAO_RUNTIME_ROOT`` and not only the default ``.runtime`` name.
 
-    Since S6 every chat is on the CLI surface, so auto mode gets ``bash``
-    pattern rules for the ``ciao`` commands (D-13) — the allow/ask split that
-    replaces the per-tool MCP annotations.
+    Since S6 every chat is on the CLI surface. Auto mode does not pre-approve
+    any ``ciao …`` argv prefix: an allow rule is a prefix a shell suffix
+    (``ciao help >/dev/null; <cmd>``) could ride past, so bash stays ``ask``
+    and every shell command, including ``ciao …``, keeps a card. Users who want
+    no cards switch to ``bypass``.
     """
     key = mode if mode in _MODE_AGENTS else "normal"
     if not tools_enabled:
         return _MODE_AGENTS[key], _rules(("*", "deny"))
     rules = [dict(rule) for rule in _MODE_PERMISSIONS[key]]
-    # Only `auto`. `plan` and `normal` ask on purpose, and `bypass` already
-    # allows everything — appending an `ask` row there would *narrow* it, since
-    # resolution is last-match-wins.
-    if key == "auto":
-        rules.extend(agent_cli_permission_rules())
     # Last, and for every mode including `bypass`: resolution is
     # last-match-wins, and this is the one carve-out no mode may buy its way
     # out of. See `opencode_credential_deny_rules`.

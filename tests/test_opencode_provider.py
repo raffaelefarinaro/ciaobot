@@ -212,19 +212,18 @@ def test_bypass_allows_everything_and_normal_asks():
     assert "edit" not in _actions("normal")
 
 
-def test_auto_allows_everything_but_keeps_shell_and_destructive_verbs_gated():
-    """Auto's permissive default allows every tool outright; only bash and the
-    destructive CLI verbs stay behind an ask so their events reach the
-    classifier/operator."""
+def test_auto_allows_everything_but_keeps_shell_gated():
+    """Auto's permissive default allows every tool outright; only bash stays
+    behind an ask, so every shell command (including `ciao …`) reaches the
+    classifier/operator — no `ciao …` argv prefix is pre-approved."""
     actions = _actions("auto")
     assert actions["*"] == "allow"
     assert actions["bash"] == "ask"
     assert "edit" not in actions
-    # The destructive CLI verbs are ask rows, not MCP tool names.
+    # No `ciao …` allow or ask bash patterns exist at all.
     bash = _bash_patterns("auto")
-    assert "ciao chat delete" in bash["ask"]
-    assert "ciao run start" in bash["ask"]
-    assert "ciao memory status" in bash["allow"]
+    assert not bash["allow"]
+    assert not bash["ask"]
 
 
 def test_plan_mode_is_read_only():
@@ -1907,23 +1906,14 @@ async def test_an_empty_catalog_is_cached_only_briefly(tmp_path, monkeypatch):
 
 
 def test_control_plane_tools_do_not_prompt_in_the_permissive_modes():
-    """Regression: the control plane raised an Approve/Deny card in auto mode.
-    Ciaobot's own bookkeeping is not a third-party tool the operator should
-    confirm call by call. Since S6 the control plane is the `ciao` CLI in the
-    shell, so auto mode allow-lists the non-destructive verbs via bash patterns.
-
-    `normal` is excluded, which is what this test used to assert the opposite
-    of: the PWA labels it "Manual — ask for every action", and the rationale
-    above is about *auto* mode's classifier. See
-    `test_manual_mode_still_prompts_for_the_control_plane` below.
-    """
-    for mode in ("auto",):
+    """`bypass` allows every tool via the wildcard, so `ciao …` needs no
+    explicit bash pattern there. Auto mode does NOT pre-approve any `ciao …`
+    prefix (a shell-suffix bypass risk): every shell command keeps a card, and
+    users who want no cards switch to bypass."""
+    for mode in ("auto", "bypass"):
         bash = _bash_patterns(mode)
-        assert "ciao project create" in bash["allow"], mode
-        assert "ciao chat send" in bash["allow"], mode
-        assert "ciao chat list" in bash["allow"], mode
-    # `bypass` allows everything via the wildcard, so the ciao verbs need no
-    # explicit bash pattern there.
+        assert not bash["allow"], mode
+        assert not bash["ask"], mode
     actions = _actions("bypass")
     assert actions["*"] == "allow"
 
@@ -1942,15 +1932,14 @@ def test_manual_mode_still_prompts_for_the_control_plane():
 
 
 def test_destructive_control_plane_verbs_still_prompt():
-    """In the permissive auto default the wildcard is allow, so the destructive
-    CLI verbs must be pinned to `ask` explicitly (a later, more specific rule
-    wins) to keep surfacing an approval card."""
+    """Every shell command keeps a card in auto mode (no `ciao …` argv prefix
+    is pre-approved), so a destructive verb cannot be pre-approved."""
     actions = _actions("auto")
     assert actions["*"] == "allow"
+    assert actions["bash"] == "ask"
     bash = _bash_patterns("auto")
-    assert "ciao chat delete" in bash["ask"]
-    assert "ciao run start" in bash["ask"]
-    assert "ciao vault review keep" in bash["ask"]
+    assert not bash["allow"]
+    assert not bash["ask"]
 
 
 def test_plan_mode_grants_no_control_plane_allowance():

@@ -76,13 +76,11 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
     # prompt), not a second memory block or a provider-specific recipe.
     assert "Prefer the managed Ciaobot MCP tools" not in options.system_prompt["append"]
     assert "ciao vault search" in options.system_prompt["append"]
-    # Ciaobot's own non-destructive control plane is pre-approved so Auto
-    # mode's classifier stops raising an Approve/Deny card for "create the
-    # automation you just asked for". Destructive verbs stay off the allowlist.
-    assert "Bash(ciao schedule create:*)" in options.allowed_tools
-    assert "Bash(ciao chat delete:*)" not in options.allowed_tools
-    assert "Bash(ciao run start:*)" not in options.allowed_tools
-    assert "mcp__ciaobot__" not in " ".join(options.allowed_tools)
+    # No `ciao …` argv prefix is pre-approved (an allow prefix is a shell-suffix
+    # bypass risk); auto mode keeps a card on every shell command, and users who
+    # want no cards switch to bypass.
+    assert not [e for e in (options.allowed_tools or []) if e.startswith("Bash(ciao ")]
+    assert "mcp__ciaobot__" not in " ".join(options.allowed_tools or [])
     # The bundled schedule/loop skills are removed from the model's context
     # (not merely denied): a denied-but-listed skill still gets picked, which
     # is how "create a loop" ended up as a cloud-routine Skill call.
@@ -953,17 +951,15 @@ def test_opencode_manual_and_plan_modes_add_no_allow_rules(mode: str) -> None:
     assert "ciao memory update" not in bash_patterns
 
 
-def test_opencode_auto_mode_still_pre_approves_the_control_plane() -> None:
-    """Auto's contract is "allow safe work", which is what the list is for."""
+def test_opencode_auto_mode_keeps_every_ciao_command_gated() -> None:
+    """Auto mode pre-approves no `ciao …` argv prefix (a shell-suffix bypass
+    risk); every shell command, including `ciao …`, keeps a card."""
     from ciao.providers.opencode import mode_settings
 
     _agent, rules = mode_settings("auto")
-    bash_allow = " ".join(
-        r.get("pattern", "") for r in rules
-        if r.get("permission") == "bash" and r.get("action") == "allow"
-    )
-    assert "ciao schedule create" in bash_allow
-    assert "ciao chat delete" not in bash_allow
+    bash = [r for r in rules if r.get("permission") == "bash"]
+    assert not any(r.get("pattern", "").startswith("ciao ") for r in bash)
+    assert bash[0] == {"permission": "bash", "pattern": "*", "action": "ask"}
 
 
 @pytest.mark.asyncio

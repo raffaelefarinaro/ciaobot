@@ -574,72 +574,33 @@ def test_chat_archive_archives_the_chat_a_title_resolved_to(tmp_path: Path) -> N
     assert archived == ["chat-1"]
 
 
-# ── D-13: the harness rules that replace the per-tool annotations ─────────
+# ── Approval policy: no argv auto-approval ────────────────────────────────
+# Since S6 every Ciaobot operation runs as `ciao <noun> <verb>` and no `ciao …`
+# prefix is pre-approved (an allow prefix is a shell-suffix bypass risk). Auto
+# mode keeps a card on every shell command; users who want no cards switch to
+# `bypass`. These tests assert there is no argv allow-list to regress into.
 
 
 def _commands() -> dict[str, str]:
     return json.loads((Path(agent_cli._SKILL_PATH).parent / "commands.json").read_text(encoding="utf-8"))
 
 
-def _matching_patterns(command: str) -> list[tuple[str, str]]:
-    """Every (class, pattern) whose prefix covers ``ciao <command>``."""
-    from ciao.execution_modes import AGENT_CLI_ALLOW_PATTERNS, AGENT_CLI_ASK_PATTERNS
+def test_no_argv_allow_or_ask_patterns_remain() -> None:
+    """The argv allow/ask machinery is gone; there is nothing to enumerate."""
+    import ciao.execution_modes as em
 
-    words = ("ciao " + command).split()
-    return [
-        (label, pattern)
-        for label, patterns in (("allow", AGENT_CLI_ALLOW_PATTERNS), ("ask", AGENT_CLI_ASK_PATTERNS))
-        for pattern in patterns
-        if words[: len(pattern.split())] == pattern.split()
-    ]
-
-
-def test_every_cli_command_falls_in_exactly_one_pattern_class() -> None:
-    from ciao.execution_modes import AGENT_CLI_ALLOW_PATTERNS, AGENT_CLI_ASK_PATTERNS
-
-    used: set[str] = set()
-    for command in _commands():
-        matches = _matching_patterns(command)
-        assert len(matches) == 1, f"{command}: {matches}"
-        used.add(matches[0][1])
-    # No dead pattern either. `ciao help` is the one entry with no operation
-    # behind it: it prints the bundled skill document locally.
-    unused = (set(AGENT_CLI_ALLOW_PATTERNS) | set(AGENT_CLI_ASK_PATTERNS)) - used
-    assert unused == {"ciao help"}
-
-
-def test_every_destructive_operation_is_in_the_ask_class() -> None:
-    """The cut is the `_DESTRUCTIVE` annotation, read from the operation table."""
-    from ciao import mcp_server
-
-    destructive = {
-        op.name for op in mcp_server.OPERATIONS if op.annotations == mcp_server._DESTRUCTIVE
-    }
-    assert destructive, "no _DESTRUCTIVE operations found"
-
-    for command, operation in _commands().items():
-        label = _matching_patterns(command)[0][0]
-        if operation in destructive:
-            # `vault_review` is the one split operation: its list/inspect verbs
-            # are reads, the deciding verbs are not.
-            expected = "allow" if command in {"vault review list", "vault review show"} else "ask"
-        else:
-            expected = "allow"
-        assert label == expected, f"{command} ({operation})"
-    # The operations the plan names, spelled out so a rename cannot silently
-    # move one out of the ask class.
-    assert {command for command in _commands() if _matching_patterns(command)[0][0] == "ask"} == {
-        "vault review keep", "vault review trash", "vault review restore", "vault review delete",
-        "chat delete", "chat stop", "project complete", "project delete",
-        "schedule pause", "schedule resume", "schedule run", "schedule delete",
-        "run start", "run cancel",
-    }
+    assert not hasattr(em, "AGENT_CLI_ALLOW_PATTERNS")
+    assert not hasattr(em, "AGENT_CLI_ASK_PATTERNS")
+    assert not hasattr(em, "agent_cli_allowed_tool_rules")
+    assert not hasattr(em, "agent_cli_permission_rules")
 
 
 @pytest.mark.asyncio
-async def test_claude_cli_surface_pre_approves_ciao_commands_not_mcp_tools(
+async def test_claude_cli_surface_does_not_pre_approve_ciao_commands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """No `ciao …` argv prefix is pre-approved (an allow prefix is a shell-suffix
+    bypass risk); auto mode keeps a card on every shell command."""
     from ciao.models import AgentRequest
     from ciao.providers.claude import ClaudeProvider
 
@@ -659,30 +620,21 @@ async def test_claude_cli_surface_pre_approves_ciao_commands_not_mcp_tools(
     await provider._ensure_connected(
         AgentRequest(prompt="t", model="sonnet", mode="auto", provider="claude")
     )
-    allowed = captured["options"].allowed_tools
-    assert "Bash(ciao memory status:*)" in allowed
-    # A bare `ciao memory` prefix would also cover the operator's
-    # `ciao memory-proposal-add`, a queue write.
-    assert not [entry for entry in allowed if entry.startswith("Bash(ciao memory:")]
-    assert "Bash(ciao vault review keep:*)" not in allowed  # destructive: still a card
+    allowed = captured["options"].allowed_tools or []
+    assert not [entry for entry in allowed if entry.startswith("Bash(ciao ")]
     assert not [entry for entry in allowed if entry.startswith("mcp__ciaobot__")]
     assert not captured["options"].mcp_servers  # no MCP server is attached
 
 
-@pytest.mark.asyncio
-async def test_opencode_cli_auto_rules_follow_the_generic_bash_ask() -> None:
-    """Last-match-wins: a rule that must win goes after the one it overrides."""
-    from ciao.execution_modes import AGENT_CLI_ALLOW_PATTERNS, AGENT_CLI_ASK_PATTERNS
+def test_opencode_cli_auto_mode_keeps_bash_ask_for_ciao_commands() -> None:
+    """Auto mode emits only the generic `bash: ask` — no `ciao …` allow row —
+    so every shell command, including `ciao …`, keeps a card."""
     from ciao.providers.opencode import mode_settings
 
     _agent, rules = mode_settings("auto")
     bash = [rule for rule in rules if rule["permission"] == "bash"]
     assert bash[0] == {"permission": "bash", "pattern": "*", "action": "ask"}
-    assert bash[1:] == [
-        {"permission": "bash", "pattern": f"{pattern}*", "action": action}
-        for action, patterns in (("allow", AGENT_CLI_ALLOW_PATTERNS), ("ask", AGENT_CLI_ASK_PATTERNS))
-        for pattern in patterns
-    ]
+    assert not any(rule.get("pattern", "").startswith("ciao ") for rule in bash)
     # The credential denies still come last, after everything.
     assert rules[-1]["action"] == "deny"
 

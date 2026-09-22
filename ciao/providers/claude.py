@@ -69,8 +69,6 @@ from ciao.models import (
     provider_reuse_key,
 )
 from ciao.execution_modes import (
-    CONTROL_PLANE_PREAPPROVED_MODES,
-    agent_cli_allowed_tool_rules,
     harness_skill_overrides,
 )
 from ciao.core_prompt import system_prompt_payload
@@ -596,16 +594,11 @@ class ClaudeProvider(BaseSDKProvider):
             options.system_prompt = cast(SystemPromptPreset, system_prompt)
         # Every chat is on the CLI surface since S6: there is no Ciaobot MCP
         # server to attach, and the control-plane capability is carried by
-        # `ciao <noun> <verb>` in the shell (CIAO_AGENT_TOKEN/URL in env). The
-        # auto-mode classifier escalates every shell command that isn't
-        # pre-approved, so the non-destructive half of the CLI is allow-listed
-        # via `Bash(ciao …:*)` prefix rules. The destructive verbs are
-        # deliberately absent and still reach the classifier, which is what
-        # raises the card (the SDK has no "ask" list). Scoped to the modes
-        # whose contract allows acting without asking — the rationale lives
-        # beside the shared constant in ciao/execution_modes.py.
-        if request.mode in CONTROL_PLANE_PREAPPROVED_MODES:
-            options.allowed_tools = agent_cli_allowed_tool_rules()
+        # `ciao <noun> <verb>` in the shell (CIAO_AGENT_TOKEN/URL in env). No
+        # `ciao …` argv prefix is pre-approved: an allow rule is a prefix that a
+        # shell suffix (``ciao help >/dev/null; <cmd>``) could ride past, and
+        # auto mode must keep a card on shell commands. Users who want no cards
+        # switch to `bypass` mode.
         if system_cli:
             options.cli_path = system_cli
         if resume_session:
