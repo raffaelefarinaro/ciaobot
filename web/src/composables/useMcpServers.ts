@@ -270,17 +270,42 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
   }
 
   function splitArgs(text: string): string[] {
-    // Shell-style: `"a b"` stays one argument. Splitting on every whitespace
-    // boundary turned one quoted argument into several (keeping the quote
-    // characters) and wrote the corrupted array to `.mcp.json` on save, so
-    // the server subsequently failed or received different values.
+    // Shell-style: quotes hold whitespace inside an argument wherever they
+    // open — `"a b"`, `'a b'`, and `--header="a b"` each stay one argument.
+    // Splitting on every whitespace boundary turned one quoted argument into
+    // several (keeping the quote characters) and wrote the corrupted array
+    // to `.mcp.json` on save, so the server subsequently failed or received
+    // different values. An unterminated quote runs to the end of the line
+    // rather than dropping the argument.
     const out: string[] = []
-    const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g
-    let match: RegExpExecArray | null
-    while ((match = re.exec(text)) !== null) {
-      if (match[1] !== undefined) out.push(match[1].replace(/\\(.)/g, '$1'))
-      else out.push(match[2] ?? match[3])
+    let current = ''
+    let quote: string | null = null
+    let inToken = false
+    const flush = () => {
+      if (inToken) {
+        out.push(current)
+        current = ''
+        inToken = false
+      }
     }
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i]
+      if (quote !== null) {
+        if (ch === quote) quote = null
+        else if (ch === '\\' && quote === '"' && i + 1 < text.length) current += text[++i]
+        else current += ch
+        inToken = true
+      } else if (ch === '"' || ch === "'") {
+        quote = ch
+        inToken = true
+      } else if (/\s/.test(ch)) {
+        flush()
+      } else {
+        current += ch
+        inToken = true
+      }
+    }
+    flush()
     return out
   }
 
