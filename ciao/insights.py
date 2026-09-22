@@ -221,6 +221,10 @@ def _note_excerpt(path: Path) -> str:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
+    # FRONTMATTER_RE wants LF endings and a newline after the closing fence.
+    text = text.replace("\r\n", "\n")
+    if not text.endswith("\n"):
+        text += "\n"
     description = str(_parse_frontmatter(text).get("description") or "").strip()
     match = FRONTMATTER_RE.match(text)
     body = FENCED_CODE_RE.sub("", text[match.end():] if match else text)
@@ -253,17 +257,23 @@ def _entity_notes_block(
     """
     from ciao.memory_proposals import entity_mention_counts, project_name
 
-    notes: dict[str, tuple[str, Path]] = {}
+    # A person and a project may share a name; a mention of it shows both.
+    notes: dict[str, list[tuple[str, Path]]] = {}
     for key, doc in projects.items():
-        notes[key] = (f"[project: {project_name(doc)}]", doc)
+        notes.setdefault(key, []).append((f"[project: {project_name(doc)}]", doc))
     for key, stem in people.items():
-        notes.setdefault(key, (f"[people: {stem}]", vault_root / "People" / f"{stem}.md"))
+        notes.setdefault(key, []).append(
+            (f"[people: {stem}]", vault_root / "People" / f"{stem}.md")
+        )
     counts = entity_mention_counts(transcript, notes)
-    ranked = sorted(counts, key=lambda key: -counts[key])
+    ranked = [
+        note
+        for key in sorted(counts, key=lambda key: -counts[key])
+        for note in notes[key]
+    ]
     sections: list[str] = []
     total = 0
-    for key in ranked[:_ENTITY_NOTES_MAX]:
-        tag, path = notes[key]
+    for tag, path in ranked[:_ENTITY_NOTES_MAX]:
         excerpt = _note_excerpt(path)
         if not excerpt:
             continue
@@ -1334,14 +1344,15 @@ async def run_archive_pipeline(
                     # Off the loop: a vault walk, note reads and a scan of the whole
                     # transcript would otherwise stall every chat on this server.
                     context_block = await asyncio.to_thread(
-                        _known_context_block,
-                        guide_path,
-                        proposal_vault_root,
-                        transcript=(
-                            filtered_jsonl
-                            if not text_mode
-                            else _archive_body_for_mentions(archive_path)
-                        ),
+                        lambda: _known_context_block(
+                            guide_path,
+                            proposal_vault_root,
+                            transcript=(
+                                filtered_jsonl
+                                if not text_mode
+                                else _archive_body_for_mentions(archive_path)
+                            ),
+                        )
                     )
                     # Structured extraction is opt-in *and* capability-gated.
                     # Off, or refused by the gate, the Markdown contract runs

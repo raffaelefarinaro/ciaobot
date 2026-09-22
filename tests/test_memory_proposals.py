@@ -3084,3 +3084,69 @@ def test_user_correction_is_never_suppressed_as_a_session_write(tmp_path: Path) 
 
     assert out is not None
     assert any("scripts/test.sh" in r["text"] for r in mp.list_proposals(out))
+
+
+def test_named_own_project_tag_is_queued_when_the_fold_wrote(tmp_path: Path) -> None:
+    """The fold skips named tags, so a named tag for the own doc must not be dropped."""
+    vault = _known_vault(tmp_path)
+    own = vault / "projects" / "active" / "ai-native-sdk" / "ai-native-sdk.md"
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose skills-only listings over MCP everywhere. [idx=2] [project: ai-native-sdk]\n"
+        "- Chose weekly releases for this repo because review load. [idx=1] [project]\n",
+    )
+
+    out = mp.proposals_from_archive(
+        archive, vault, project_doc_path=str(own), project_fold_wrote=True
+    )
+
+    assert out is not None
+    rows = mp.list_proposals(out)
+    # The bare [project] was the fold's; the named one was skipped by it.
+    assert [r["text"][:20] for r in rows] == ["Chose skills-only li"]
+    assert rows[0]["kind"] == "project"
+
+
+def test_unknown_project_name_in_a_folded_project_chat_is_not_dropped(tmp_path: Path) -> None:
+    vault = _known_vault(tmp_path)
+    own = vault / "projects" / "active" / "ai-native-sdk" / "ai-native-sdk.md"
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose raised beds over pots for the garden. [idx=2] [project: garden-plan]\n",
+    )
+
+    out = mp.proposals_from_archive(
+        archive, vault, project_doc_path=str(own), project_fold_wrote=True
+    )
+
+    assert out is not None
+    assert len(mp.list_proposals(out)) == 1
+
+
+def test_an_index_beside_the_project_folders_is_not_a_project(tmp_path: Path) -> None:
+    vault = _known_vault(tmp_path)
+    (vault / "projects" / "README.md").write_text("# Projects index\n", encoding="utf-8")
+    (vault / "projects" / "project-template.md").write_text("# Template\n", encoding="utf-8")
+
+    projects, _people = mp.known_entities(vault)
+
+    assert "readme" not in projects
+    assert "project template" not in projects
+    # A path payload resolves by its folder, never by a "README" stem.
+    doc = mp._known_project_doc("projects/active/ai-native-sdk/README.md", projects)
+    assert doc is not None and doc.parent.name == "ai-native-sdk"
+
+
+def test_vault_change_link_with_escaped_spaces_suppresses_the_restatement(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose `People/Mo Salah.md` as the standard coach note. [idx=5] [memory]\n"
+        "## Vault changes\n"
+        "- [Mo - coach](./People/Mo%20Salah.md) - updated. [idx=5]\n",
+    )
+
+    assert mp.proposals_from_archive(archive, vault) is None

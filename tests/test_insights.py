@@ -2137,3 +2137,25 @@ def test_extraction_prompts_offer_named_project_destinations() -> None:
     for prompt in (insights._INSIGHTS_RULES, insights._TEXT_MODE_SYSTEM_PROMPT):
         assert "[project: <name>]" in prompt
         assert "Known notes" in prompt
+
+
+def test_note_excerpt_reads_crlf_frontmatter(tmp_path: Path) -> None:
+    note = tmp_path / "Mo.md"
+    note.write_bytes(b"---\r\ndescription: Coach.\r\ntype: person\r\n---\r\n# Mo\r\n\r\n- Trains Tuesdays.")
+
+    excerpt = insights._note_excerpt(note)
+
+    assert excerpt.splitlines() == ["description: Coach.", "- Trains Tuesdays."]
+
+
+def test_person_and_project_sharing_a_name_are_both_excerpted(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    doc = vault / "projects" / "active" / "atlas" / "README.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("# Atlas\n\n- The mapping project.\n", encoding="utf-8")
+    (vault / "People").mkdir()
+    (vault / "People" / "Atlas.md").write_text("# Atlas\n\n- A colleague.\n", encoding="utf-8")
+
+    block = insights._known_context_block(None, vault, transcript="Talked to Atlas about atlas.")
+
+    assert "[project: atlas]" in block and "[people: Atlas]" in block

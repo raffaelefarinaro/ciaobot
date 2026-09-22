@@ -46,12 +46,15 @@ import json
 import logging
 import re
 from collections.abc import Iterable
+from urllib.parse import unquote
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, date
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
 
 from ciao.curation_run import curation_in_progress
+from ciao.vault_links import MARKDOWN_LINK_RE, WIKILINK_RE
+from ciao.vault_lint import is_template_stem
 
 logger = logging.getLogger(__name__)
 
@@ -2538,6 +2541,7 @@ _ENTITY_SUBJECT_RE = re.compile(
 )
 # Project folder names that are containers, not a project a fact belongs to.
 _ROUTING_SKIP_PROJECTS = frozenset({"general"})
+_NON_PROJECT_STEMS = frozenset({"readme", "index", "log"})
 # Shorter names ("mo", "ux") match too much prose to count as a mention.
 _MIN_ENTITY_MENTION = 4
 _ISO_DATE_RE = re.compile(r"\b20\d\d-\d\d-\d\d\b")
@@ -2578,7 +2582,16 @@ def known_entities(vault_root: Path) -> tuple[dict[str, Path], dict[str, str]]:
         projects_dir = vault_root / "projects"
         if projects_dir.is_dir():
             for doc in projects_dir.glob("*.md"):
-                if doc.is_file() and doc.stem.lower() not in _ROUTING_SKIP_PROJECTS:
+                stem = doc.stem.lower()
+                # An index or template beside the project folders is not a
+                # project a fact can belong to.
+                if (
+                    doc.is_file()
+                    and stem not in _ROUTING_SKIP_PROJECTS
+                    and stem not in _NON_PROJECT_STEMS
+                    and not stem.startswith("_")
+                    and not is_template_stem(stem)
+                ):
                     projects.setdefault(entity_key(doc.stem), doc)
         people_dir = vault_root / _PEOPLE_DIR
         if people_dir.is_dir():
@@ -2602,11 +2615,13 @@ def entity_mention_counts(text: str, keys: Iterable[str]) -> dict[str, int]:
     once however many entities the vault has; the longest name wins where
     names overlap, so "finn cummins" is not also a mention of "finn".
     """
-    forms: dict[str, list[str]] = {}
+    # Keys are `entity_key`-normalized (no hyphens), so a spelling names
+    # exactly one key.
+    forms: dict[str, str] = {}
     for key in keys:
         for form in {key, key.replace(" ", "-")}:
             if len(form) >= _MIN_ENTITY_MENTION:
-                forms.setdefault(form, []).append(key)
+                forms[form] = key
     if not forms or not text:
         return {}
     pattern = re.compile(
@@ -2616,15 +2631,13 @@ def entity_mention_counts(text: str, keys: Iterable[str]) -> dict[str, int]:
     )
     counts: dict[str, int] = {}
     for match in pattern.finditer(text.lower()):
-        for key in forms[match.group(1)]:
-            counts[key] = counts.get(key, 0) + 1
+        key = forms[match.group(1)]
+        counts[key] = counts.get(key, 0) + 1
     return counts
 
 
 def _unwrap_links(text: str) -> str:
     """Markdown links and wikilinks replaced by the words they display."""
-    from ciao.vault_links import MARKDOWN_LINK_RE, WIKILINK_RE
-
     text = MARKDOWN_LINK_RE.sub(lambda m: m.group("label"), text)
     return WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), text)
 
@@ -2638,7 +2651,9 @@ def _known_project_doc(payload: str, projects: dict[str, Path]) -> Path | None:
     if not payload.strip():
         return None
     raw = Path(payload.strip())
-    for candidate in (payload, raw.stem, raw.parent.name):
+    # A path names its project by folder ("projects/active/wedding/README.md"),
+    # so the folder is tried before a stem such as "README".
+    for candidate in (payload, raw.parent.name, raw.stem):
         doc = projects.get(entity_key(candidate))
         if doc is not None:
             return doc
@@ -2671,15 +2686,29 @@ def _address_tagged(
     if proposal.target != "project":
         return proposal
     named = _known_project_doc(proposal.payload, projects)
-    if named is not None and named != own_doc:
+    if named is not None and not _same_doc(named, own_doc):
         return replace(proposal, payload=str(named))
     if own_doc is not None:
         # The chat's resolved canonical doc is authoritative over a path the
-        # model invented; only a roster name can move a fact elsewhere.
-        return None if fold_wrote else replace(proposal, payload=own_doc_path or str(own_doc))
+        # model invented; only a roster name can move a fact elsewhere. Only
+        # a bare [project] was the fold's to consume: the fold prompt skips
+        # every named tag, so dropping one here would lose it.
+        if fold_wrote and not proposal.payload:
+            return None
+        return replace(proposal, payload=own_doc_path or str(own_doc))
     # A General chat has no project document to own a project-scoped fact.
     # Keep the claim reviewable, never an unroutable project row.
     return replace(proposal, target="review", payload="")
+
+
+def _same_doc(a: Path | str | None, b: Path | str | None) -> bool:
+    """Whether two doc paths name the same file, however each was spelled."""
+    if a is None or b is None:
+        return False
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return Path(a) == Path(b)
 
 
 def _route_to_known_entity(
@@ -2751,15 +2780,15 @@ def _session_vault_changes(insights_md: str) -> list[tuple[str, frozenset[int]]]
     out: list[tuple[str, frozenset[int]]] = []
     for item in _split_sections(insights_md).get("Vault changes", []):
         _kind, _payload, citations, text = _peel_trailing_metadata(item)
-        path = re.split(r"\s+[-–—]\s", text, maxsplit=1)[0].strip().strip("`")
         # The citation rule asks for vault paths as relative Markdown links,
-        # so "[Mo](./People/Mo.md) - ..." names People/Mo.md — and a name with
-        # spaces is written `[Mo](<./People/Mo Salah.md>)`.
-        from ciao.vault_links import MARKDOWN_LINK_RE
-
-        link = MARKDOWN_LINK_RE.fullmatch(path)
+        # so "[Mo](./People/Mo.md) - ..." names People/Mo.md; a name with
+        # spaces is `[Mo](<./People/Mo Salah.md>)` or `%20`-escaped. Match the
+        # link before splitting on " - ", which a label may itself contain.
+        link = MARKDOWN_LINK_RE.match(text.strip())
         if link:
-            path = link.group("angle") or link.group("bare") or path
+            path = unquote(link.group("angle") or link.group("bare") or "")
+        else:
+            path = re.split(r"\s+[-–—]\s", text, maxsplit=1)[0].strip().strip("`")
         if path and citations:
             out.append((path, frozenset(citations)))
     return out
@@ -2884,11 +2913,9 @@ def proposals_from_archive(
                 own_doc_path=project_doc_path,
                 fold_wrote=project_fold_wrote,
             )
-            routed = (
-                _route_to_known_entity(addressed, projects, people)
-                if addressed is not None
-                else None
-            )
+            if addressed is None:
+                return None
+            routed = _route_to_known_entity(addressed, projects, people)
             if routed is None:
                 return None
             if routed.target == "review" and routed.source_section == "Decisions":
@@ -2897,11 +2924,12 @@ def proposals_from_archive(
                 return None
             if (
                 project_fold_wrote
-                and own_doc is not None
+                and addressed.target == "review"
                 and routed.target == "project"
-                and Path(routed.payload) == own_doc
+                and _same_doc(routed.payload, own_doc)
             ):
-                # The fold already read these insights into the chat's own doc.
+                # A review row matched to the chat's own project by name: the
+                # fold already read these insights into that doc.
                 return None
             return routed
 
