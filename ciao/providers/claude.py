@@ -1318,9 +1318,21 @@ class ClaudeProvider(BaseSDKProvider):
 
     @staticmethod
     def _extract_effective_model(msg: ResultMessage) -> str:
+        """Name the model that did the turn's work.
+
+        ``model_usage`` also lists the helper calls the CLI makes on its small
+        fast model, in no guaranteed order, so the entry with the most output
+        tokens is the one the user chose — not whichever comes first.
+        """
         model_usage = msg.model_usage
         if isinstance(model_usage, dict):
-            for key, value in model_usage.items():
+
+            def _output_tokens(item: tuple[Any, Any]) -> int:
+                value = item[1]
+                tokens = value.get("outputTokens") if isinstance(value, dict) else None
+                return tokens if isinstance(tokens, int) else 0
+
+            for key, value in sorted(model_usage.items(), key=_output_tokens, reverse=True):
                 if isinstance(value, dict):
                     for candidate in (
                         value.get("canonicalModel"),

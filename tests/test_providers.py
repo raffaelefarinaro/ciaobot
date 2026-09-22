@@ -1034,3 +1034,20 @@ async def test_drain_keeps_connection_on_message_parse_error(
     assert events == []
     assert provider.cli_connected is True
     assert provider._client is not None
+
+
+def test_extract_effective_model_prefers_the_model_that_did_the_work() -> None:
+    # The CLI's helper calls on its small model can be listed first.
+    msg = SimpleNamespace(
+        model_usage={
+            "claude-haiku-4-5-20251001": {"inputTokens": 900, "outputTokens": 40},
+            "claude-opus-5-5": {"inputTokens": 2, "outputTokens": 533},
+        }
+    )
+    assert ClaudeProvider._extract_effective_model(msg) == "claude-opus-5-5"
+
+
+def test_extract_effective_model_keeps_first_entry_without_token_counts() -> None:
+    msg = SimpleNamespace(model_usage={"claude-sonnet-5": {}, "claude-haiku-4-5": {}})
+    assert ClaudeProvider._extract_effective_model(msg) == "claude-sonnet-5"
+    assert ClaudeProvider._extract_effective_model(SimpleNamespace(model_usage=None)) == ""
