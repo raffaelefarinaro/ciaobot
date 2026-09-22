@@ -494,6 +494,10 @@ def test_a_legacy_symlink_to_an_external_guide_is_not_discarded(
     guide = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "Team instructions" in guide, "the loaded instructions must survive"
     assert (tmp_path / "shared.md").is_file(), "the external file is not ours to delete"
+    assert (tmp_path / "shared.md").read_text(encoding="utf-8") == "# Team instructions\n", (
+        "the merge must materialize locally, never write through the link "
+        "into a guide other roots share"
+    )
     assert not (tmp_path / "CLAUDE.md").exists()
 
 
