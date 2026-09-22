@@ -2089,3 +2089,47 @@ def test_structured_extraction_treats_an_empty_array_as_no_signal(
     assert run["status"] == "skipped"
     assert run["error"] is None
     assert run["extra"]["skip_reason"] == "no durable signal in this session"
+
+
+def test_known_context_excerpts_notes_the_transcript_mentions(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    doc = vault / "projects" / "active" / "wedding" / "wedding.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(
+        "---\ndescription: Civil wedding and party in September.\n---\n# Wedding\n\n"
+        "- Party at La Montagnola on Sept 11.\n",
+        encoding="utf-8",
+    )
+    other = vault / "projects" / "active" / "upwordo" / "upwordo.md"
+    other.parent.mkdir(parents=True)
+    other.write_text("# Upwordo\n\n- German microstories app.\n", encoding="utf-8")
+    (vault / "People").mkdir()
+    (vault / "People" / "Finn-Cummins.md").write_text("# Finn\n\n- Anthropic GTM.\n", encoding="utf-8")
+
+    block = insights._known_context_block(
+        None, vault, transcript="We planned the wedding with Finn Cummins today."
+    )
+
+    assert "Known projects:" in block
+    assert "[project: wedding]" in block
+    assert "description: Civil wedding and party in September." in block
+    assert "Party at La Montagnola" in block
+    assert "[people: Finn-Cummins]" in block
+    # Not mentioned, so not excerpted (it is still on the roster).
+    assert "[project: upwordo]" not in block
+    assert "German microstories" not in block
+
+
+def test_known_context_without_transcript_has_no_note_excerpts(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    doc = vault / "projects" / "active" / "wedding" / "wedding.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("# Wedding\n\n- Party.\n", encoding="utf-8")
+
+    assert "Known notes" not in insights._known_context_block(None, vault)
+
+
+def test_extraction_prompts_offer_named_project_destinations() -> None:
+    for prompt in (insights._INSIGHTS_RULES, insights._TEXT_MODE_SYSTEM_PROMPT):
+        assert "[project: <name>]" in prompt
+        assert "Known notes" in prompt

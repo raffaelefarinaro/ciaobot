@@ -55,7 +55,8 @@ def test_propose_pulls_corrections_and_decisions() -> None:
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
     texts = [p.text for p in proposals]
     assert any("no em dashes" in t for t in texts)
-    assert any("Chose OpenRouter over Anthropic" in t for t in texts)
+    # An untagged decision has no destination; it is a one-off, not queued.
+    assert not any("Chose OpenRouter over Anthropic" in t for t in texts)
 
 
 def test_propose_routes_user_self_to_profile_region() -> None:
@@ -289,10 +290,9 @@ def test_promote_writes_corrections_and_keeps_the_rest(tmp_path: Path) -> None:
     assert all("User said" not in entry for entry in mem_entries)
     profile_entries, _diags = mt.read_region(guide, "profile")
     assert any("User Example" in entry for entry in profile_entries)
-    # Untagged decisions and non-operator entities are unsure by default and
-    # stay reviewable.
+    # Non-operator entities are unsure by default and stay reviewable.
     remaining_texts = [p.text for p in remaining]
-    assert any("Chose OpenRouter over Anthropic" in t for t in remaining_texts)
+    assert any("Smart Label Capture" in t for t in remaining_texts)
     assert all("no em dashes" not in t for t in remaining_texts)
 
 
@@ -423,7 +423,7 @@ def test_proposals_from_archive_auto_promotes_corrections(tmp_path: Path) -> Non
     assert out is not None
     proposals_text = out.read_text(encoding="utf-8")
     assert "no em dashes" not in proposals_text
-    assert "Chose OpenRouter over Anthropic" in proposals_text
+    assert "Smart Label Capture" in proposals_text
 
 
 def test_extract_ignores_quoted_marker_mid_transcript(tmp_path: Path) -> None:
@@ -437,7 +437,7 @@ def test_extract_ignores_quoted_marker_mid_transcript(tmp_path: Path) -> None:
     archive.write_text(
         "# chat\n\n## Turn 1\n\nquoting a prior archive:\n\n"
         "## Session insights\n\n## Decisions\n"
-        "- Chose already-reviewed thing over alternative because reviewed. [idx=1]\n\n"
+        "- Chose already-reviewed thing over alternative because reviewed. [idx=1] [learnings]\n\n"
         "## Turn 2\n\nmore discussion.\n",
         encoding="utf-8",
     )
@@ -453,10 +453,10 @@ def test_extract_prefers_appended_section_over_quoted_marker(tmp_path: Path) -> 
     archive.write_text(
         "# chat\n\n## Turn 1\n\nquoting a prior archive:\n\n"
         "## Session insights\n\n## Decisions\n"
-        "- Chose already-reviewed thing over alternative because reviewed. [idx=1]\n\n"
+        "- Chose already-reviewed thing over alternative because reviewed. [idx=1] [learnings]\n\n"
         "## Turn 2\n\nmore discussion.\n\n"
         "<!-- ciao:session-insights -->\n## Session insights\n\n## Decisions\n"
-        "- Chose the fresh decision over the alternative because it is new. [idx=7]\n",
+        "- Chose the fresh decision over the alternative because it is new. [idx=7] [learnings]\n",
         encoding="utf-8",
     )
 
@@ -577,7 +577,8 @@ def test_tagged_bullets_route_to_their_destination() -> None:
     )
     proposals = mp.propose_from_insights(insights)
     by_target = {p.target: p for p in proposals}
-    assert set(by_target) == {"memory", "people", "project", "review"}
+    # A decision the model could not place is dropped, not queued as review.
+    assert set(by_target) == {"memory", "people", "project"}
     assert by_target["people"].payload == "Mo Salah"
     # The tag is stripped from the queued text.
     assert "[people" not in by_target["people"].text
@@ -587,10 +588,10 @@ def test_tagged_bullets_route_to_their_destination() -> None:
 def test_untagged_non_operator_entity_defaults_to_review() -> None:
     """A missing tag is uncertainty: only the old confident paths keep targets."""
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
-    decision = next(p for p in proposals if "OpenRouter" in p.text)
+    decision = next((p for p in proposals if "OpenRouter" in p.text), None)
     manager = next(p for p in proposals if "Manager Example" in p.text)
     product = next(p for p in proposals if "Smart Label Capture" in p.text)
-    assert decision.target == "review"
+    assert decision is None
     assert manager.target == "people"
     assert manager.payload == "Manager Example"
     assert product.target == "review"
@@ -758,8 +759,10 @@ def test_project_fact_from_general_chat_is_review_not_project_specific(
     archive = tmp_path / "chat.md"
     archive.write_text(
         "# chat\n\nturns.\n\n## Session insights\n"
+        "## New entities\n"
+        "- service: Payments - moves to Postgres for concurrency. [idx=1] [project]\n"
         "## Decisions\n"
-        "- Chose Postgres over SQLite because concurrency. [idx=1] [project]\n",
+        "- Chose Postgres over SQLite because concurrency. [idx=2] [project]\n",
         encoding="utf-8",
     )
 
@@ -767,9 +770,12 @@ def test_project_fact_from_general_chat_is_review_not_project_specific(
 
     assert out is not None
     rows = mp.list_proposals(out)
+    # The entity fact stays reviewable; the decision had nowhere to go and a
+    # decision with no destination is not queued.
     assert len(rows) == 1
     assert rows[0]["kind"] == "review"
     assert rows[0]["target"] == ""
+    assert "Payments" in rows[0]["text"]
 
 
 def test_project_fact_uses_canonical_doc_even_when_model_supplies_a_path(
@@ -2781,3 +2787,228 @@ def test_transcript_evidence_ignores_records_without_a_usable_index() -> None:
     assert evidence is not None
     assert evidence.known == frozenset({4})
     assert evidence.attended_user == frozenset({4})
+
+
+# ── Queue quality: changelog decisions, known entities, session writes ─────
+
+
+def _known_vault(tmp_path: Path) -> Path:
+    vault = tmp_path / "vault"
+    doc = vault / "projects" / "active" / "ai-native-sdk" / "ai-native-sdk.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("# ai-native-sdk\n", encoding="utf-8")
+    general = vault / "projects" / "active" / "general" / "README.md"
+    general.parent.mkdir(parents=True)
+    general.write_text("# General\n", encoding="utf-8")
+    people = vault / "People"
+    people.mkdir()
+    (people / "Finn-Cummins.md").write_text("# Finn Cummins\n", encoding="utf-8")
+    return vault
+
+
+def _archive(tmp_path: Path, insights: str) -> Path:
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        f"# chat\n\nturns.\n\n## Session insights\n{insights}", encoding="utf-8"
+    )
+    return archive
+
+
+def test_changelog_decisions_are_not_proposed() -> None:
+    insights = (
+        "## Decisions\n"
+        "- Added regression test `an_empty_drop_writes_no_grant`; suite passes. [idx=1] [memory]\n"
+        "- Deleted the ESL check-in schedule `sched-05cfc427`. [idx=2] [memory]\n"
+        "- Retired the Slidev workflow; `scandit-slides` remains the deck skill going forward. [idx=3] [memory]\n"
+        "- Chose pnpm over npm in every repo because lockfile speed. [idx=4] [memory]\n"
+    )
+    texts = [p.text for p in mp.propose_from_insights(insights)]
+    assert not any("regression test" in t for t in texts)
+    assert not any("ESL" in t for t in texts)
+    # A past-tense lead that also states what holds from now on is state.
+    assert any("Slidev" in t for t in texts)
+    assert any("pnpm" in t for t in texts)
+
+
+def test_general_chat_project_fact_routes_to_known_project_doc(tmp_path: Path) -> None:
+    vault = _known_vault(tmp_path)
+    archive = _archive(
+        tmp_path,
+        "## New entities\n"
+        "- Project: ai-native-sdk / Scandit SDK Claude plugin - confirmed live in the "
+        "official marketplace as of 2026-09-03. [idx=9] [project]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+    rows = mp.list_proposals(out)
+    assert [r["kind"] for r in rows] == ["project"]
+    assert rows[0]["target"].endswith("projects/active/ai-native-sdk/ai-native-sdk.md")
+
+
+def test_known_person_subject_routes_to_their_note(tmp_path: Path) -> None:
+    vault = _known_vault(tmp_path)
+    archive = _archive(
+        tmp_path,
+        "## New entities\n"
+        "- Anthropic person: Finn Cummins (finn@example.com) - moved to partnerships "
+        "on 2026-09-20. [idx=1] [review]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+    rows = mp.list_proposals(out)
+    assert [(r["kind"], r["target"]) for r in rows] == [("people", "Finn-Cummins")]
+
+
+def test_known_entity_redescription_is_dropped(tmp_path: Path) -> None:
+    """The prompt says a roster entity is never new; an undated restatement is noise."""
+    vault = _known_vault(tmp_path)
+    archive = _archive(
+        tmp_path,
+        "## New entities\n"
+        "- person: Finn Cummins - Anthropic GTM contact. [idx=1] [review]\n"
+        "- project: [ai-native-sdk](./projects/active/ai-native-sdk/ai-native-sdk.md) - "
+        "the AI-native SDK workstream. [idx=2] [project]\n",
+    )
+
+    assert mp.proposals_from_archive(archive, vault) is None
+
+
+def test_fact_naming_two_known_projects_stays_review(tmp_path: Path) -> None:
+    vault = _known_vault(tmp_path)
+    other = vault / "projects" / "active" / "samsung-oem" / "README.md"
+    other.parent.mkdir(parents=True)
+    other.write_text("# Samsung\n", encoding="utf-8")
+    archive = _archive(
+        tmp_path,
+        "## New entities\n"
+        "- tool: shared eval harness - used by ai-native-sdk and samsung-oem. [idx=1] [review]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+    assert [r["kind"] for r in mp.list_proposals(out)] == ["review"]
+
+
+def test_fact_the_session_already_wrote_is_suppressed(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    guide = write_guide(tmp_path / "AGENTS.md")
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose to create a standing `/styleit` command (`work/commands/styleit.md`) "
+        "as the standard way to polish drafts. [idx=21,23,26] [memory]\n"
+        "## Vault changes\n"
+        "- work/commands/styleit.md - new command created. [idx=21]\n"
+        "- work/AGENTS.md - added `/styleit` to the command list. [idx=26]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault, guide_path=guide)
+
+    assert out is None
+    assert "styleit" not in "\n".join(mt.read_region(guide, "memory")[0])
+
+
+def test_session_write_suppression_needs_a_shared_citation(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose `work/commands/styleit.md` as the standard polish step. [idx=40] [memory]\n"
+        "## Vault changes\n"
+        "- work/commands/styleit.md - new command created. [idx=21]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+    assert any("styleit" in r["text"] for r in mp.list_proposals(out))
+
+
+def test_journal_write_does_not_suppress_the_fact(tmp_path: Path) -> None:
+    """A fact that only reached a daily note still deserves its own home."""
+    vault = tmp_path / "vault"
+    archive = _archive(
+        tmp_path,
+        "## User corrections\n"
+        "- Prefers `journal/daily/2026-09-22.md` entries in bullet form. "
+        "Durable rule: write daily entries as bullets. [idx=5] [memory]\n"
+        "## Vault changes\n"
+        "- journal/daily/2026-09-22.md - logged the day. [idx=5]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+    assert len(mp.list_proposals(out)) == 1
+
+
+def test_named_known_project_routes_from_a_general_chat(tmp_path: Path) -> None:
+    vault = _known_vault(tmp_path)
+    archive = _archive(
+        tmp_path,
+        "## Open loops\n## Decisions\n"
+        "- Chose skills-only listings over MCP for every directory. [idx=3] "
+        "[project: ai-native-sdk]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+    rows = mp.list_proposals(out)
+    assert [r["kind"] for r in rows] == ["project"]
+    assert rows[0]["target"].endswith("ai-native-sdk/ai-native-sdk.md")
+
+
+def test_named_other_project_survives_the_own_doc_fold(tmp_path: Path) -> None:
+    """The fold consumed this chat's own project facts, not another project's."""
+    vault = _known_vault(tmp_path)
+    own = vault / "projects" / "active" / "general" / "README.md"
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose weekly releases for this repo because review load. [idx=1] [project]\n"
+        "- Chose skills-only listings over MCP everywhere. [idx=2] [project: ai-native-sdk]\n",
+    )
+
+    out = mp.proposals_from_archive(
+        archive, vault, project_doc_path=str(own), project_fold_wrote=True
+    )
+
+    assert out is not None
+    rows = mp.list_proposals(out)
+    assert [r["text"][:20] for r in rows] == ["Chose skills-only li"]
+
+
+def test_people_payload_resolves_to_the_existing_note_stem(tmp_path: Path) -> None:
+    vault = _known_vault(tmp_path)
+    archive = _archive(
+        tmp_path,
+        "## New entities\n"
+        "- person: Finn Cummins - moved to partnerships on 2026-09-20. [idx=1] "
+        "[people: Finn Cummins]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+    assert [(r["kind"], r["target"]) for r in mp.list_proposals(out)] == [
+        ("people", "Finn-Cummins")
+    ]
+
+
+def test_session_write_suppression_matches_the_name_the_file_defines(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    archive = _archive(
+        tmp_path,
+        "## New entities\n"
+        "- Command: `/styleit` - rewrites drafts to the Writing style rules. [idx=21] [learnings]\n"
+        "## Vault changes\n"
+        "- work/commands/styleit.md - new command created. [idx=21]\n",
+    )
+
+    assert mp.proposals_from_archive(archive, vault) is None
