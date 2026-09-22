@@ -335,6 +335,11 @@ def _generate_candidates(
         path = str(entry.path)
         if any(part.casefold() == "workspace" for part in Path(path).parts):
             continue
+        # A completed project is a closed record, not a live note: nothing
+        # links to it by design, and `Still true` would stamp `updated: today`
+        # onto a `Closed …` file. Same class of exemption as templates below.
+        if any(part.casefold() == "completed" for part in Path(path).parts):
+            continue
         # A template is not a stale note: it has no facts to verify and nothing
         # links to it by design, so every rule here fires on one. The linter
         # already exempts them from duplicate detection for the same reason.
