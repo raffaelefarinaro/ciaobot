@@ -446,20 +446,26 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # visit serves a populated list instead of blocking on the probe.
         warm_claude_discovery_cache(getattr(config, "workspace_root", None))
 
-        yield
-        for callback in getattr(_app.state, "shutdown_callbacks", ()):
-            # One failing callback must not skip the ones after it, nor the
-            # client pool below. Shutdown is the last chance to terminate
-            # provider subprocesses and background runs; leaking them
-            # because an earlier hook raised is how a restart ends up with
-            # orphan processes.
-            try:
-                await callback()
-            except Exception:
-                logger.exception("Shutdown callback failed")
-        # Release the client-mode keep-alive pool. A no-op on a host node,
-        # which never opens it.
-        await close_shared_client()
+        try:
+            yield
+        finally:
+            # Shutdown runs even if the lifespan exits by raising or
+            # cancellation (not just a normal shutdown message), so provider
+            # subprocesses and background runs are not leaked across an
+            # abnormal restart.
+            for callback in getattr(_app.state, "shutdown_callbacks", ()):
+                # One failing callback must not skip the ones after it, nor the
+                # client pool below. Shutdown is the last chance to terminate
+                # provider subprocesses and background runs; leaking them
+                # because an earlier hook raised is how a restart ends up with
+                # orphan processes.
+                try:
+                    await callback()
+                except Exception:
+                    logger.exception("Shutdown callback failed")
+            # Release the client-mode keep-alive pool. A no-op on a host node,
+            # which never opens it.
+            await close_shared_client()
 
     lifespan = _lifespan
 

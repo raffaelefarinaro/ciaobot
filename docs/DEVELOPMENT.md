@@ -432,7 +432,7 @@ workspace/project/chat access, and have focused protocol plus domain tests.
 Self-affecting operations must defer until the caller chat drains. Provider
 tokens must never enter the model's shell environment or telemetry arguments.
 
-See `docs/MCP.md` for the catalog and provider configuration.
+See `docs/AGENT_CLI.md` for the catalog and provider configuration.
 
 ### Off-loop vault reads
 
