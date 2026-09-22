@@ -136,9 +136,46 @@ def test_identical_copies_need_no_backup(tmp_path: Path) -> None:
     (tmp_path / "AGENTS.md").write_text(REGIONS, encoding="utf-8")
 
     assert wg.migrate_root(tmp_path) == "renamed"
-
     assert not (tmp_path / "AGENTS.md.bak").exists()
     assert _remembered((tmp_path / "AGENTS.md").read_text(encoding="utf-8"))
+
+
+def test_merge_keeps_live_agents_regions_over_an_empty_legacy(tmp_path: Path) -> None:
+    """A seeded, region-empty CLAUDE.md beside a region-carrying AGENTS.md.
+
+    The legacy-wins direction would park the live memory in a backup nobody
+    reads (observed live: 25 entries unloaded across two workspaces). The
+    side with entries wins instead: the regions stay in the guide, the
+    legacy body is folded in, and the backup holds the folded side.
+    """
+    (tmp_path / "CLAUDE.md").write_text("# Seeded guide\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text(REGIONS, encoding="utf-8")
+
+    assert wg.migrate_root(tmp_path) == "merged"
+
+    merged = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert _remembered(merged), "live regions must stay in the guide"
+    assert "Seeded guide" in merged, "the legacy body is folded, not dropped"
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert (tmp_path / "CLAUDE.md.bak").read_text(encoding="utf-8") == "# Seeded guide\n"
+    assert not (tmp_path / "AGENTS.md.bak").exists()
+
+
+def test_merge_of_two_live_guides_still_parks_the_agents_side(tmp_path: Path) -> None:
+    """Both sides carry entries: a genuine conflict, and the documented
+    legacy-wins direction applies — the agents regions land in the backup
+    with a pointer, exactly as before."""
+    legacy_regions = REGIONS.replace("ships on Fridays", "legacy fact")
+    (tmp_path / "CLAUDE.md").write_text(legacy_regions, encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text(REGIONS, encoding="utf-8")
+
+    assert wg.migrate_root(tmp_path) == "merged"
+
+    merged = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "legacy fact" in merged
+    assert "ships on Fridays" not in merged
+    assert "AGENTS.md.bak" in merged
+    assert _remembered((tmp_path / "AGENTS.md.bak").read_text(encoding="utf-8"))
 
 
 def test_migrating_twice_changes_nothing(tmp_path: Path) -> None:

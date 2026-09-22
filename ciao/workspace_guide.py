@@ -232,7 +232,7 @@ def _write_backup(path: Path, text: str) -> bool:
     return True
 
 
-def _merge_bodies(agents_text: str, legacy_text: str) -> str:
+def _merge_bodies(agents_text: str, legacy_text: str, *, incoming_name: str = GUIDE_NAME) -> str:
     """Fold `agents_text`'s unique **body** lines under `legacy_text`.
 
     Only reached when both files are real and differ, which means the user
@@ -248,8 +248,13 @@ def _merge_bodies(agents_text: str, legacy_text: str) -> str:
     duplicate line — leaving an unterminated region that later writes refuse.
 
     Nothing is lost by stripping: the incoming file is copied verbatim to
-    ``AGENTS.md.bak`` before any of this, regions included, and the merged
+    ``<incoming>.bak`` before any of this, regions included, and the merged
     guide points at it.
+
+    `incoming_name` names the folded side for the pointer note. It is
+    ``AGENTS.md`` in the usual direction; the caller passes the legacy name
+    when the live memory sits on the agents side and the legacy body is what
+    gets folded (see the direction choice in :func:`migrate_root`).
     """
     from ciao.memory_tool import strip_region_blocks
 
@@ -262,9 +267,9 @@ def _merge_bodies(agents_text: str, legacy_text: str) -> str:
         if line.strip() and line.strip() not in existing
     ]
     backup_note = (
-        f"\n\nThe previous `{GUIDE_NAME}` was folded in here. Its bounded "
+        f"\n\nThe previous `{incoming_name}` was folded in here. Its bounded "
         f"memory regions were **not** merged — they are kept verbatim in "
-        f"`{GUIDE_NAME}.bak`.\n"
+        f"`{incoming_name}.bak`.\n"
     )
     if not unique:
         # Identical bodies differing only inside the regions: there is nothing
@@ -274,7 +279,7 @@ def _merge_bodies(agents_text: str, legacy_text: str) -> str:
         return legacy_text.rstrip() + backup_note
     return (
         legacy_text.rstrip()
-        + f"\n\n## Merged from {GUIDE_NAME}\n\n"
+        + f"\n\n## Merged from {incoming_name}\n\n"
         + "\n".join(unique)
         + backup_note
     )
@@ -365,12 +370,56 @@ def migrate_root(root: Path | str) -> str:
             _rename(base, legacy, agents, also_tracked=agents_tracked)
             return "renamed"
 
-        # The backup is the only copy of what the merge does not fold in, so
-        # a refusal to write it stops the merge rather than proceeding without
-        # it. The guide stays readable under its old name either way.
-        if not _write_backup(base / f"{GUIDE_NAME}.bak", agents_text):
-            return "failed"
-        merged = _merge_bodies(agents_text, legacy_text)
+        # Which side holds the live memory? The merge below keeps ONE side's
+        # regions and parks the other's in a backup nobody reads, so keeping
+        # the wrong side unloads the always-loaded memory the engine actually
+        # serves. Observed live: a seeded, region-empty CLAUDE.md outranked a
+        # region-carrying AGENTS.md and parked 25 entries in .bak files. The
+        # side with entries wins; a side with none yields. Both sides live is
+        # a genuine conflict and keeps the legacy-wins direction below.
+        from ciao.memory_tool import REGIONS, _REGION_META, _find_marker_spans
+
+        def _regions_live(text: str) -> bool:
+            """Whether any bounded region in `text` holds entries.
+
+            A block with only its heading is the seeded empty shape, not
+            memory; anything else between the markers is. A malformed block
+            (no markers) reads as empty rather than fatal — the merge below
+            carries the whole body either way.
+            """
+            for region in REGIONS:
+                starts, ends = _find_marker_spans(text, region)
+                if not starts or not ends:
+                    continue
+                inner = text[starts[0].end() : ends[0].start()]
+                heading = _REGION_META[region]["heading"]
+                if any(
+                    line.strip() and line.strip() != heading
+                    for line in inner.splitlines()
+                ):
+                    return True
+            return False
+
+        if (
+            _regions_live(agents_text)
+            and not _regions_live(legacy_text)
+            and not legacy_is_link
+        ):
+            # Fold the legacy body into the live agents file: same file
+            # dance as below, with the text roles swapped. The backup holds
+            # the folded side, so it names the legacy file this time.
+            if not _write_backup(base / f"{LEGACY_GUIDE_NAME}.bak", legacy_text):
+                return "failed"
+            merged = _merge_bodies(
+                legacy_text, agents_text, incoming_name=LEGACY_GUIDE_NAME
+            )
+        else:
+            # The backup is the only copy of what the merge does not fold in, so
+            # a refusal to write it stops the merge rather than proceeding without
+            # it. The guide stays readable under its old name either way.
+            if not _write_backup(base / f"{GUIDE_NAME}.bak", agents_text):
+                return "failed"
+            merged = _merge_bodies(agents_text, legacy_text)
         if legacy_is_link:
             # A symlink at the legacy name points at a guide this root does
             # not own (an alias of AGENTS.md returned above). Replacing the
