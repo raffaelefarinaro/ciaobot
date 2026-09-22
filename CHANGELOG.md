@@ -128,6 +128,7 @@
 - fix(workspace): keep the live side's regions when merging guides (`24fdca78`)
 - fix(tests): mock the dictation gate in the correct() fail-open tests (`e22882ef`)
 - fix(release-gate): no write-through on external guide links, quote-aware MCP args, order-tolerant slug test (`46fce8e0`)
+- fix(pwa): tokenize mid-argument quotes in MCP server args (`8b7cab8d`)
 
 ### Maintenance
 - docs: correct skill-sync targets, runtime port and skill-owned data (`41098c41`)
