@@ -146,7 +146,7 @@ self-actions, and telemetry remain enforced.
 
 ## Tool catalog
 
-The catalog contains 32 explicit tools. The MCP `tools/list` response is the
+The catalog contains 29 explicit tools. The MCP `tools/list` response is the
 live list, so clients do not need to infer it from documentation. The catalog
 holds *capabilities* — orchestration and search that a shell can't cheaply
 replicate. Plain plumbing that the managed Claude Code/opencode session can do
@@ -155,9 +155,8 @@ with its own shell and filesystem is not duplicated as an MCP tool:
 - **Bounded memory** → The native source remains the `ciao:memory` / `ciao:profile` regions in `CLAUDE.md`. Use `memory_status` for usage and `memory_update` for a typed bounded edit (the region cap is advisory — the write goes through and reports `over_cap`). Review, accept, and dismiss the proposals queue through the PWA; the one deliberate CLI exception is `ciao memory-proposal-add` / `ciao memory-proposals` / `ciao memory-proposal-dismiss`, which the nightly curation agent drives because one shell command beats a synchronous MCP round-trip per row.
 - **Vault maintenance** → `ciao index` (index refresh) and `ciao lint`.
   `vault_search` stays — it wraps a maintained FTS5 index a file tool can't
-  replicate — and `vault_expand` with it: recall is forbidden a full-note
-  read, so the bounded drill-down is the only way to widen a truncated
-  snippet, and a file tool cannot enforce that bound.
+  replicate. Recall is forbidden a full-note read, so a truncated snippet is
+  widened by searching again with a narrower query, not by a note reader.
 - **Workspace file** read/write and **file history/snapshots** → the model's
   native Read/Write/Glob tools and the workspace git repo.
 - **Workspace config** (update/delete) → the PWA Settings UI
@@ -190,11 +189,11 @@ skill surface (admin or redundant with native tools).
 |---|---|
 | Context | `context_get` (includes `system` status) |
 | Bounded memory | `memory_status`, `memory_update` (cap is advisory; proposals are reviewed in the PWA, or via the curation agent's CLI exception: `ciao memory-proposal-add`, `ciao memory-proposals`, `ciao memory-proposal-dismiss`) |
-| Vault | `vault_search`, `vault_expand` (bounded extra context from a note `vault_search` already matched), `vault_review` (list/inspect, or an attended trash/restore/purge decision) |
+| Vault | `vault_search`, `vault_review` (list/inspect, or an attended trash/restore/purge decision) |
 | Google Workspace | `gws_status` (read-only connection/token health) |
 | Projects | `projects_list`, `project_get`, `project` (create/update/restore), `project_action` (complete/delete) |
-| Workspaces | `workspaces_list`, `workspace_create` (update/delete via PWA Settings) |
-| Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_stop` |
+| Workspaces | `workspaces_list` (create/update/delete via the PWA) |
+| Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_handover`, `chat_archive`, `chat_delete`, `chat_stop` (fork via the PWA) |
 | Background runs | `background_run_start`, `background_run_status`, `background_run_cancel` |
 | Schedules | `schedules_list`, `schedule` (preview/create/update), `schedule_action` (pause/resume/run/delete) |
 | Workspace files | `file_surface` |
@@ -202,20 +201,15 @@ skill surface (admin or redundant with native tools).
 `vault_search` does an incremental FTS index pass plus the query. That work runs
 in a bounded off-loop worker (`ciao/async_reads.py`), so a large-vault scan does
 not stall the event loop that serves other MCP calls and `/ws/chat` keepalives.
-`vault_expand` runs the same pass before it answers, which is what makes the
-search result path a safe reference: there is no expiring handle, so an edited
-note is answered at its current revision and a removed one is refused. Its
-`path` must be a key the index currently holds under this workspace's prefix,
-so it can only widen a note this principal's own search could have returned,
-and what comes back is the markdown block around each matched line — capped in
-windows, lines and characters — never the note. `reason` says whether that
-reply is evidence: `matched` for the blocks around the lines the query matched,
-`no_line_match` when the note holds no such line and the single block returned
-is context only, which the recall rule reads as an instruction to abstain.
-Function words are excluded from the line match, so a query phrased as a
-sentence cannot anchor a window on whatever block happens to contain "for".
 Identical concurrent searches coalesce into one scan, and each worker owns its
 SQLite connection for its whole lifetime.
+
+`vault_expand`, `workspace_create` and `chat_fork` were removed from the
+catalog (D-03 of the CLI-first migration): none was called once in 1,697
+recorded calls, workspace creation is admin territory the PWA already owns
+(`POST /api/workspaces`), and forking is a PWA action
+(`POST /api/chats/{id}/fork`). A truncated snippet is widened by a second,
+narrower `vault_search`, not by a drill-down tool.
 
 **Sub-day recurrence** is `schedule` with `frequency="interval"` and
 `interval_minutes`. Combined with `chat_id` it keeps one conversation going and

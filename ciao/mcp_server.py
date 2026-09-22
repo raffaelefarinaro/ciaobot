@@ -28,7 +28,6 @@ from ciao.control_plane import (
     CiaoControlPlane,
     ControlPlaneError,
     McpPrincipal,
-    _UNSET,
 )
 from ciao.web.routes_mcp import (
     _observed_project_mcp_tools,
@@ -1194,36 +1193,6 @@ class CiaoMcpService:
             """Full-text search the active workspace vault."""
             return await self._invoke("vault_search", lambda cp, p: cp.vault_search(p, query, limit))
 
-        @tool(name="vault_expand", annotations=_READ, structured_output=True)
-        async def vault_expand(
-            path: str, query: str = "", windows: int = 3
-        ) -> dict[str, Any]:
-            """Return bounded extra context from ONE note ``vault_search``
-            already matched.
-
-            Use it when a snippet is cut short and the answer depends on what
-            it omits — a qualification, a negation, or which value is current.
-            ``path`` must be a path a ``vault_search`` result carried; ``query``
-            is the same query, and decides which lines are expanded around.
-
-            The reply is the markdown section around each matched line, capped
-            in windows, lines and characters — not the note. It cannot reach a
-            different note, another workspace, or a transcript: anything that
-            is not a current search result of this workspace is refused. It is
-            not a substitute for a file read, and it is the only permitted way
-            to widen the evidence for a pure recall question.
-
-            ``reason`` says whether the reply is evidence. ``matched`` means the
-            sections are the blocks around the lines your query matched;
-            ``no_line_match`` means the note holds no such line, and the single
-            block returned is context rather than evidence — abstain instead of
-            answering from it. ``truncated`` marks a reply the bounds cut short.
-            """
-            return await self._invoke(
-                "vault_expand",
-                lambda cp, p: cp.vault_expand(p, path, query, windows),
-            )
-
         @tool(name="vault_review", annotations=_DESTRUCTIVE, structured_output=True)
         async def vault_review(
             action: str = "list", path: str = "", candidate_id: str = "",
@@ -1360,38 +1329,6 @@ class CiaoMcpService:
             defaults — not just the active one."""
             return await self._invoke("workspaces_list", lambda cp, p: cp.workspaces_list(p))
 
-        @tool(name="workspace_create", annotations=_WRITE, structured_output=True)
-        async def workspace_create(
-            name: str,
-            default_provider: str = "claude",
-            gws_profile: str = "",
-            disallowed_tools: Any = _UNSET,
-            color: str = "",
-        ) -> dict[str, Any]:
-            """Create a new logical workspace.
-
-            Args:
-                name: Letters, numbers, dashes, or underscores. The vault
-                    folder is the standard one under the vault root.
-                default_provider: claude or opencode.
-                gws_profile: Linked Google Workspace profile, or empty.
-                disallowed_tools: Extra tools to deny in this workspace;
-                    null resets the workspace-specific list to inherited defaults.
-                color: Workspace accent (pink, cyan, amber, emerald, violet).
-            """
-            return await self._invoke(
-                "workspace_create",
-                lambda cp, p: cp.workspace_create(
-                    p,
-                    name=name,
-                    default_provider=default_provider,
-                    gws_profile=gws_profile,
-                    disallowed_tools=disallowed_tools,
-                    color=color,
-                ),
-                mutating=True,
-            )
-
         # workspace_update / workspace_delete moved to the PWA Settings UI
         # (PATCH/DELETE /api/workspaces/{name}). Workspace config (provider
         # keys, env vars, model defaults) is admin territory, not a
@@ -1519,21 +1456,6 @@ class CiaoMcpService:
                 )
 
             return await self._invoke("chat_handover", _op, mutating=True)
-
-        @tool(name="chat_fork", annotations=_WRITE, structured_output=True)
-        async def chat_fork(
-            chat_id: str = "",
-            messages: list[dict[str, Any]] | None = None,
-            turn_index: int = 0,
-        ) -> dict[str, Any]:
-            """Create an independent chat from visible history through one turn."""
-            return await self._invoke(
-                "chat_fork",
-                lambda cp, p: cp.chat_fork(
-                    p, chat_id, messages=messages or [], turn_index=turn_index
-                ),
-                mutating=True,
-            )
 
         @tool(name="chat_archive", annotations=_WRITE, structured_output=True)
         async def chat_archive(chat_id: str = "") -> dict[str, Any]:

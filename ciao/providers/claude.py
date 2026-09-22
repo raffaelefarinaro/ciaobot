@@ -70,6 +70,7 @@ from ciao.models import (
 )
 from ciao.execution_modes import (
     CONTROL_PLANE_PREAPPROVED_MODES,
+    agent_cli_allowed_tool_rules,
     auto_approved_mcp_tool_names,
     harness_skill_overrides,
 )
@@ -626,6 +627,18 @@ class ClaudeProvider(BaseSDKProvider):
             # ciao/execution_modes.py.
             if request.mode in CONTROL_PLANE_PREAPPROVED_MODES:
                 options.allowed_tools = auto_approved_mcp_tool_names()
+        elif (
+            request.agent_surface == "cli"
+            and request.mode in CONTROL_PLANE_PREAPPROVED_MODES
+        ):
+            # The same carve-out, one surface down. A CLI-surface chat gets no
+            # MCP server at all, so the pre-approval has to name shell commands
+            # instead of tool names: `Bash(ciao memory:*)` and friends. The
+            # destructive verbs are deliberately absent and still reach the
+            # classifier, which is what raises the card (the SDK has no "ask"
+            # list). Never the `mcp__ciaobot__*` names here — there is nothing
+            # for them to match.
+            options.allowed_tools = agent_cli_allowed_tool_rules()
         if system_cli:
             options.cli_path = system_cli
         if resume_session:

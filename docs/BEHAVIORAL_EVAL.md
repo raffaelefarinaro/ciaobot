@@ -34,7 +34,10 @@ shipped scenario against the real guards:
   sibling block and refuses a path belonging to another workspace. The last two
   are zero-tolerance: a drill-down that leaks is worse than no drill-down. This
   is the model-free half of the evaluation issue #460 asked for before the
-  prompt started recommending `vault_expand`.
+  prompt started recommending `vault_expand`. That tool was later deleted
+  (D-03 of the CLI-first migration); `fts_search.expand_note` stays as the
+  library function these contracts measure, while the core prompt now tells
+  recall to widen a truncated snippet with a second, narrower search.
 - **Recall drill-down, negation and abstention** — the same three facts for the
   other two shapes the acceptance criteria name. A *negation* fixture whose
   snippet keeps "need a work visa" and drops "no permit is required" proves the

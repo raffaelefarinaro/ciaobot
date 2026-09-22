@@ -1,5 +1,10 @@
 """The scoped evidence drill-down for recall (issue #460).
 
+The `vault_expand` tool that exposed this to agents was deleted in the
+CLI-first migration (D-03); `fts_search.expand_note` remains as the library
+function the behavioural-eval recall contracts measure, and these tests pin its
+bounds.
+
 `vault_search` answers with `_public_snippet`: the FTS-highlighted lines only,
 inside SQLite's 32-token budget. That is a privacy property — it is what keeps
 an unrelated private line out of a recall answer — and the core prompt turns it
@@ -15,16 +20,13 @@ the full-note read the rule exists to prevent.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sqlite3
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from ciao import fts_search
-from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
 
 # One fixture note carrying every shape the drill-down has to get right:
 #
@@ -365,60 +367,6 @@ def test_expansion_falls_back_to_one_block_when_no_line_matches(
     assert "ac-live-7e2c9a441b" not in _text(result)
 
 
-# ── Control-plane surface ──────────────────────────────────────────────────
-
-
-def _plane(base: Path) -> CiaoControlPlane:
-    config = SimpleNamespace(
-        workspace_root=base,
-        vault_root=base / "personal" / "memory-vault",
-        state_path=base / ".runtime" / "state.json",
-        workspace=lambda name: SimpleNamespace(name=name),
-    )
-    return CiaoControlPlane(
-        config,
-        project_chat_manager=SimpleNamespace(
-            _workspace_vault_root=lambda ws: base / ws / "memory-vault"
-        ),
-        schedule_manager=SimpleNamespace(),
-    )
-
-
-def _principal(workspace: str = "personal") -> McpPrincipal:
-    return McpPrincipal(
-        token_id="t", chat_id="c", project_id="p", workspace=workspace, provider="claude"
-    )
-
-
-def test_control_plane_expand_returns_bounded_context(tmp_path: Path) -> None:
-    base, _vault_root = _vault(tmp_path)
-    plane = _plane(base)
-    rows = asyncio.run(plane.vault_search(_principal(), QUERY))["data"]
-    assert rows, "the search must find the note first"
-    result = asyncio.run(plane.vault_expand(_principal(), rows[0]["path"], QUERY))
-    body = "\n".join(s["text"] for s in result["data"]["sections"])
-    assert "180" in body
-    assert "ac-live-7e2c9a441b" not in body
-
-
-def test_control_plane_expand_rejects_a_foreign_path(tmp_path: Path) -> None:
-    base, _personal = _vault(tmp_path, "personal")
-    _vault(tmp_path, "work")
-    plane = _plane(base)
-    asyncio.run(plane.vault_search(_principal("work"), QUERY))
-    with pytest.raises(ControlPlaneError) as excinfo:
-        asyncio.run(plane.vault_expand(_principal("personal"), _key("work"), QUERY))
-    assert excinfo.value.code == "note_not_matched"
-
-
-def test_control_plane_expand_requires_a_path(tmp_path: Path) -> None:
-    base, _vault_root = _vault(tmp_path)
-    plane = _plane(base)
-    with pytest.raises(ControlPlaneError) as excinfo:
-        asyncio.run(plane.vault_expand(_principal(), "  ", QUERY))
-    assert excinfo.value.code == "invalid_request"
-
-
 # ── Negation, and the abstention branch ────────────────────────────────────
 #
 # The qualification fixture above covers one half of what the 32-token budget
@@ -533,32 +481,14 @@ def test_a_function_word_does_not_anchor_a_window(tmp_path: Path) -> None:
     assert "4417" not in _text(result)
 
 
-# ── Catalog and prompt wiring ──────────────────────────────────────────────
-
-
-def test_expand_is_an_auto_approved_read_tool() -> None:
-    from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS
-
-    assert "vault_expand" in AUTO_APPROVED_MCP_TOOLS
-
-
-def test_core_prompt_directs_recall_to_the_bounded_drill_down() -> None:
-    """The prompt must offer the drill-down *and* keep the rule it refines."""
-    from ciao.core_prompt import _system_instructions
-
-    text = _system_instructions()
-    assert "vault_expand" in text
-    assert "do not open a full vault note with a generic file-read tool" in text
-
-
 # ── A note that stops being valid UTF-8 after it was indexed ───────────────
 #
 # The incremental pass logs a decode failure and KEEPS the note's existing FTS
 # row (ciao/fts_search.py::index_vault), so the key still resolves and the
 # lookup still reaches the file. The read is what fails, with a
-# UnicodeDecodeError — not an OSError. `vault_expand` is a read-only tool whose
-# contract is that it fails closed and answers `note_not_matched` for anything
-# it cannot serve, so an escaping decode error is a contract break.
+# UnicodeDecodeError — not an OSError. `expand_note` fails closed and returns
+# ``None`` for anything it cannot serve, so an escaping decode error is a
+# contract break.
 
 _INVALID_UTF8 = b"# Northwind retainer\n\nrate is \xff\xfe billed at 180\n"
 
@@ -586,21 +516,6 @@ def test_expansion_refuses_a_note_that_is_no_longer_valid_utf8(
     ).fetchone() is not None
 
     assert _expand(conn, base, vault, _key()) is None
-
-
-def test_control_plane_expand_answers_note_not_matched_for_undecodable_bytes(
-    tmp_path: Path,
-) -> None:
-    """The documented refusal, not an internal error."""
-    base, vault = _vault(tmp_path)
-    plane = _plane(base)
-    rows = asyncio.run(plane.vault_search(_principal(), QUERY))["data"]
-    assert rows, "the note must be indexed before it is corrupted"
-    _corrupt_after_indexing(vault)
-
-    with pytest.raises(ControlPlaneError) as excinfo:
-        asyncio.run(plane.vault_expand(_principal(), rows[0]["path"], QUERY))
-    assert excinfo.value.code == "note_not_matched"
 
 
 def test_force_reindexing_an_undecodable_note_is_skipped_not_fatal(

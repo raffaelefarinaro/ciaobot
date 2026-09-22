@@ -259,7 +259,6 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
         "vault_search",
         "project",
         "project_action",
-        "workspace_create",
         "chat_create",
         "schedule",
         "schedule_action",
@@ -297,6 +296,11 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
             "workspace_delete",
             "project_files_list",
             "adversarial_review",
+            # Deleted rather than migrated to the CLI (D-03): never called,
+            # and the PWA owns both (POST /api/workspaces, /api/chats/{id}/fork).
+            "vault_expand",
+            "workspace_create",
+            "chat_fork",
         }
         & names
     )
@@ -1413,7 +1417,7 @@ async def test_chat_archive_defaults_to_caller_chat() -> None:
         project_chat_manager=fake_pcm,
         schedule_manager=SimpleNamespace(),
     )
-    control_plane._chat = lambda p, cid: SimpleNamespace(project_id="p1")
+    control_plane._chat = lambda p, cid: SimpleNamespace(chat_id=cid, project_id="p1")
     control_plane._project = lambda p, pid: SimpleNamespace(name="Project")
     principal = McpPrincipal(
         token_id="t1",
@@ -1805,43 +1809,6 @@ def test_gws_status_reports_stale_reading_as_not_connected(tmp_path: Path) -> No
     assert data["token_valid"] is True
     assert data["stale"] is True
     assert data["connected"] is False
-
-
-def test_workspace_create_registers_and_persists(tmp_path: Path) -> None:
-    plane, config, refreshes = _workspace_control_plane(tmp_path)
-    principal = _chat_create_principal()
-
-    result = plane.workspace_create(
-        principal,
-        name="research",
-        default_provider="opencode",
-        gws_profile="work",
-        disallowed_tools=["Bash"],
-        color="cyan",
-    )
-
-    assert result["ok"] is True
-    assert result["data"]["name"] == "research"
-    assert result["data"]["default_provider"] == "opencode"
-    assert result["data"]["disallowed_tools"] == ["Bash"]
-    assert result["data"]["color"] == "cyan"
-    assert refreshes == ["refresh"]
-    assert config.workspace("research") is not None
-    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
-    assert {item["name"] for item in stored} == {"personal", "work", "research"}
-
-
-def test_workspace_create_rejects_conflicts_and_bad_provider(tmp_path: Path) -> None:
-    plane, config, _refreshes = _workspace_control_plane(tmp_path)
-    principal = _chat_create_principal()
-
-    with pytest.raises(ValueError, match="conflicts with existing workspace"):
-        plane.workspace_create(principal, name="Personal")
-
-    with pytest.raises(ValueError, match="default_provider must be one of"):
-        plane.workspace_create(principal, name="research", default_provider="ollama")
-
-    assert config.workspace("research") is None
 
 
 def test_collect_env_refs_from_headers_and_env_block() -> None:

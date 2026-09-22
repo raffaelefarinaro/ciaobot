@@ -66,6 +66,7 @@ from ciao.execution_modes import (
     AUTO_APPROVED_MCP_TOOLS,
     CONTROL_PLANE_PREAPPROVED_MODES,
     MCP_SERVER_NAME,
+    agent_cli_permission_rules,
     opencode_credential_deny_rules,
 )
 from ciao.providers._sse import SSEDecoder
@@ -580,6 +581,7 @@ def mode_settings(
     *,
     tools_enabled: bool = True,
     runtime_root: object = None,
+    agent_surface: str = "mcp",
 ) -> tuple[str, list[dict[str, str]]]:
     """Map a Ciaobot mode onto an opencode (agent, permission ruleset).
 
@@ -590,11 +592,20 @@ def mode_settings(
     ``runtime_root`` is the resolved runtime directory, when the caller can
     reach it, so the credential denies cover a relocated
     ``CIAO_RUNTIME_ROOT`` and not only the default ``.runtime`` name.
+
+    ``agent_surface`` is the chat's control-plane surface. On ``"cli"`` there
+    are no MCP tool names to allow, so auto mode gets ``bash`` pattern rules
+    for the ``ciao`` commands instead (D-13).
     """
     key = mode if mode in _MODE_AGENTS else "normal"
     if not tools_enabled:
         return _MODE_AGENTS[key], _rules(("*", "deny"))
     rules = [dict(rule) for rule in _MODE_PERMISSIONS[key]]
+    # Only `auto`. `plan` and `normal` ask on purpose, and `bypass` already
+    # allows everything — appending an `ask` row there would *narrow* it, since
+    # resolution is last-match-wins.
+    if key == "auto" and agent_surface == "cli":
+        rules.extend(agent_cli_permission_rules())
     # Scoped to the modes whose contract allows acting without asking — the
     # same carve-out as the Claude provider. The rationale (why `plan` and
     # `normal` are excluded, and why `schedule` in particular is an
@@ -1242,6 +1253,7 @@ class OpencodeProvider(BaseSDKProvider):
             request.mode,
             tools_enabled=self._tools_enabled,
             runtime_root=self._runtime_root(),
+            agent_surface=request.agent_surface,
         )
         provider_id, model_id = split_model(request.model)
         if model_id and not provider_id:
