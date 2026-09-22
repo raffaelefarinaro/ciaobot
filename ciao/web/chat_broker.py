@@ -261,7 +261,16 @@ def _paths_from_shell_command(command: str) -> list[dict]:
         for token in tokens:
             if token.startswith("-") or token in {"--json", "--"}:
                 continue
-            add(token, "surfaced")
+            # An explicit `ciao file surface <path>` is a deliberate surfacing
+            # request, not a shell redirect: accept the argument as-is, without
+            # the `_looks_like_shell_path` heuristic that suppresses redirect
+            # false positives (and would drop valid viewable files like .htm
+            # the PWA HTML viewer recognizes).
+            path = token.strip().strip("'\"")
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            results.append({"file_path": path, "action": "surfaced"})
     return results
 
 
