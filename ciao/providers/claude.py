@@ -7,8 +7,8 @@ Three SDK features worth knowing when you touch this file:
   rate-limited.
 - ``hooks={"PreToolUse": ...}``: keeps Claude Bash jobs in the active turn
   and denies detached shell invocations (``nohup … &``) and ``Monitor`` so
-  long-running work goes through the managed ``background_run_start`` MCP
-  tool. Workspace/project/date/entity context is already supplied by the
+  long-running work goes through the managed ``ciao run start -- …``
+  command. Workspace/project/date/entity context is already supplied by the
   shared request capsule, so Claude does not receive a duplicate
   UserPromptSubmit injection.
 - ``setting_sources=["user", "project", "local"]``: makes the CLI auto-discover
@@ -527,7 +527,7 @@ class ClaudeProvider(BaseSDKProvider):
         logger.info("Using Claude Code CLI: %s", system_cli)
 
 
-        system_prompt = system_prompt_payload("", surface=request.agent_surface)
+        system_prompt = system_prompt_payload("")
 
         options = ClaudeAgentOptions(
             model=requested_model,

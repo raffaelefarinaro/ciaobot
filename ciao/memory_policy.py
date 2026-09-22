@@ -18,9 +18,10 @@ apart again. It is deliberately behavior-free: the pipeline in
 Two rules the matrix encodes and the whole surface must respect:
 
 * **Cap semantics are ADVISORY everywhere.** Nothing refuses a write at edit
-  time. ``memory_update`` writes over the cap and reports ``over_cap`` with
-  ``used_chars`` and ``char_limit``; ``os_audit`` and nightly curation report
-  and consolidate when over cap. No shipped instruction may claim a hard cap.
+  time. ``ciao memory update`` writes over the cap and reports ``over_cap``
+  with ``used_chars`` and ``char_limit``; ``os_audit`` and nightly curation
+  report and consolidate when over cap. No shipped instruction may claim a hard
+  cap.
 * **Unattended runs defer approval-requiring work.** They do not ask (nobody
   is watching) and they must not seek an alternate route around the absent
   reviewer; the run reports the deferred item in its final output instead.
@@ -135,7 +136,7 @@ CONTEXT_POLICIES: tuple[MemoryWritePolicy, ...] = (
         key="direct_edit",
         summary=(
             "A human edits the workspace guide with Edit, or a provider issues a "
-            "typed memory_update. This is human-controlled maintenance; the cap is "
+            "ciao memory update. This is human-controlled maintenance; the cap is "
             "advisory and an over-cap write reports over_cap."
         ),
         writes_regions=True,
@@ -184,7 +185,7 @@ UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
     ),
     DeferredAction(
         "Trash, restore, or permanently delete a vault note",
-        "vault_review mutations require an attended turn (unattended_forbidden).",
+        "ciao vault review mutations require an attended turn (unattended_forbidden).",
     ),
     DeferredAction(
         "Write memory or a project doc in another workspace",

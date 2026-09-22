@@ -118,7 +118,9 @@ class AgentRequest:
     thinking_level: str = ""
     # Which agent surface this turn runs on: ``"mcp"`` attaches the Ciaobot MCP
     # server; ``"cli"`` attaches none and hands the shell ``CIAO_AGENT_TOKEN``
-    # instead (``ciao/agent_surface.py``). Selects the core prompt variant too.
+    # instead (``ciao/agent_surface.py``). The core prompt no longer varies by
+    # surface (there is one ``system_prompt.md``), but providers still branch on
+    # this for the harness permission rules (D-13) and the token-injection path.
     agent_surface: str = "mcp"
     # Ephemeral managed-process MCP credentials. The Ciaobot MCP control plane
     # is the only agent-facing control surface, so a request always carries a

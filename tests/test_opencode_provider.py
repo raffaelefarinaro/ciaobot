@@ -161,13 +161,7 @@ def test_compose_system_is_empty_when_both_halves_are():
 
 def test_normal_opencode_chat_uses_core_without_memory_duplication(tmp_path):
     provider = OpencodeProvider(tmp_path)
-    request = AgentRequest(
-        prompt="hello",
-        model="",
-        mode="auto",
-        provider="opencode",
-    )
-    instructions = provider._chat_system_instructions(request)
+    instructions = provider._chat_system_instructions()
     assert "Ciaobot core instructions" in instructions
     assert "native workspace guide" in instructions
     assert "MEMORY (your personal notes)" not in instructions
@@ -213,8 +207,7 @@ def test_auto_allows_everything_but_keeps_shell_and_destructive_mcp_gated():
     assert actions["*"] == "allow"
     assert actions["bash"] == "ask"
     assert "edit" not in actions
-    assert actions[f"{MCP_SERVER_NAME}_schedule_action"] == "ask"
-    assert actions[f"{MCP_SERVER_NAME}_background_run_start"] == "ask"
+    assert actions[f"{MCP_SERVER_NAME}_vault_review"] == "ask"
 
 
 def test_plan_mode_is_read_only():
@@ -2034,11 +2027,7 @@ def test_destructive_control_plane_tools_still_prompt():
 
     actions = _actions("auto")
     assert actions["*"] == "allow"
-    for destructive in (
-        "project_action", "schedule_action",
-        "background_run_start", "background_run_cancel",
-    ):
-        assert actions[f"{MCP_SERVER_NAME}_{destructive}"] == "ask", destructive
+    assert actions[f"{MCP_SERVER_NAME}_vault_review"] == "ask"
 
 
 def test_plan_mode_grants_no_control_plane_allowance():

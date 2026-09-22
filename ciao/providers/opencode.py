@@ -195,16 +195,14 @@ _READ_ONLY_TOOLS = ("read", "glob", "grep", "list")
 # Ciaobot's control-plane mutations that must keep prompting even in the
 # permissive auto default. Mirrors the ``_DESTRUCTIVE`` annotation on the MCP
 # tools in ``ciao/mcp_server.py`` for the groups still exposed as MCP tools:
-# the rare-admin and chat groups moved to the CLI (S2/S3), where their
-# destructive verbs are handled by the argv ask patterns in
-# ``ciao/execution_modes.py`` (``AGENT_CLI_ASK_PATTERNS``). What remains is
-# the schedule lifecycle, the background-run start/cancel pair, and
-# ``project_action``. Everything else on the control plane is allow-listed.
+# the rare-admin, chat and background/schedule groups moved to the CLI
+# (S2/S3/S4), where their destructive verbs are handled by the argv ask
+# patterns in ``ciao/execution_modes.py`` (``AGENT_CLI_ASK_PATTERNS``). What
+# remains MCP-exposed and ``_DESTRUCTIVE`` is ``vault_review``; the auto
+# wildcard above would otherwise allow-list it, so it stays ``ask``. Everything
+# else on the control plane is allow-listed.
 _DESTRUCTIVE_MCP_TOOLS = (
-    "project_action",
-    "schedule_action",
-    "background_run_start",
-    "background_run_cancel",
+    "vault_review",
 )
 
 # Permission changes cannot be patched onto an existing opencode session.
@@ -569,8 +567,8 @@ def control_plane_permission_rules() -> list[dict[str, str]]:
 
     Enumerated rather than globbed on purpose. ``ciaobot_*`` would also allow
     the destructive tools deliberately kept out of AUTO_APPROVED_MCP_TOOLS —
-    chat_delete, project_action, chat_stop, background_run_start — which must
-    keep prompting. opencode names an MCP tool ``<server>_<tool>``.
+    project_action — which must keep prompting. opencode names an MCP tool
+    ``<server>_<tool>``.
     """
     return [
         {"permission": f"{MCP_SERVER_NAME}_{tool}", "pattern": "*", "action": "allow"}
@@ -921,9 +919,9 @@ class OpencodeProvider(BaseSDKProvider):
         """opencode has no between-turns event source to drain."""
         return False
 
-    def _chat_system_instructions(self, request: AgentRequest) -> str:
+    def _chat_system_instructions(self) -> str:
         """Return the compact core for normal chats, never bounded memory."""
-        payload = system_prompt_payload("", surface=request.agent_surface) or {}
+        payload = system_prompt_payload("") or {}
         return str(payload.get("append") or "")
 
     def _runtime_root(self) -> str:
@@ -1914,7 +1912,7 @@ class OpencodeProvider(BaseSDKProvider):
         if request.thinking_level:
             body["variant"] = request.thinking_level
         if self._developer_instructions is None:
-            instructions = self._chat_system_instructions(request)
+            instructions = self._chat_system_instructions()
             runtime = ""
         else:
             instructions = self._developer_instructions

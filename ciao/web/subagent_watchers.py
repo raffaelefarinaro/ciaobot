@@ -666,7 +666,7 @@ class SubagentWatchers:
             "the command was writing, and inspect the process (pgrep/ps) "
             "rather than assuming it finished or that the last lines tell the "
             "whole story. For future long-running commands use the "
-            "`background_run_start` MCP tool, which survives CLI restarts and "
-            "wakes this chat with the exit code, log tail and log path."
+            "`ciao run start -- <cmd>` command, which survives CLI restarts "
+            "and wakes this chat with the exit code, log tail and log path."
         )
         return "\n".join(lines)

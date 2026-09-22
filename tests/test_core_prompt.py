@@ -85,16 +85,15 @@ def test_system_prompt_includes_native_memory_and_vault_routing() -> None:
     append = payload["append"]
     assert "ciao:memory" in append
     assert "ciao:profile" in append
-    assert "vault_search" in append
+    assert "ciao vault search" in append
     assert "private working evidence" in append
     assert "internal sentinels" in append
-    assert "memory_update" in append
-    assert "ciao memory" not in append
-    assert "ciao vault-search" not in append
+    assert "ciao memory update" in append
+    assert "memory_update" not in append
 
 
 def test_the_core_prompt_carries_no_cli_recipes() -> None:
-    """The core is transport-agnostic: the MCP control plane is the only surface."""
+    """The core is the single CLI-first prompt: only `ciao <noun> <verb>`."""
     payload = mi.system_prompt_payload("memory block")
     assert payload is not None
 
@@ -105,8 +104,8 @@ def test_the_core_prompt_carries_no_cli_recipes() -> None:
     assert "ciao vault-lint" not in append
     assert "ciao sync-skills" not in append
 
-    assert "Prefer the managed Ciaobot MCP tools" in append
-    assert "memory_update" in append
+    assert "Prefer the managed Ciaobot MCP tools" not in append
+    assert "ciao vault search" in append
 
 
 def test_system_prompt_payload_appends_to_claude_code_preset() -> None:

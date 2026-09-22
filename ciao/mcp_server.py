@@ -391,22 +391,9 @@ class Operation:
 
 
 #: Operations still exposed as MCP tools. Shrinks slice by slice as groups
-#: migrate to ``ciao <noun> <verb>``; deleted outright in S6.
-MCP_EXPOSED_OPERATIONS: frozenset[str] = frozenset(
-    {
-        "memory_status",
-        "memory_update",
-        "vault_search",
-        "vault_review",
-        "background_run_start",
-        "background_run_status",
-        "background_run_cancel",
-        "schedules_list",
-        "schedule",
-        "schedule_action",
-        "file_surface",
-    }
-)
+#: migrate to ``ciao <noun> <verb>``; deleted outright in S6. Empty since S5:
+#: every operation runs through the agent dispatcher as a ``ciao …`` command.
+MCP_EXPOSED_OPERATIONS: frozenset[str] = frozenset()
 
 
 async def _op_context_get(service: CiaoMcpService) -> dict[str, Any]:
@@ -1049,10 +1036,12 @@ class CiaoMcpService:
         self.server = FastMCP(
             "ciaobot",
             instructions=(
-                "Use these tools for Ciaobot memory, vault, projects, chats, "
-                "schedules, files, and application state. Prefer them "
-                "over curl, the ciao CLI, or direct .runtime edits. All paths "
-                "are relative to the active workspace or vault."
+                "Every Ciaobot operation is a `ciao <noun> <verb>` command "
+                "(memory, vault, projects, chats, schedules, background runs, "
+                "files; see the ciao-cli skill). This MCP server registers no "
+                "Ciaobot operations; use the ciao CLI rather than curl or "
+                "direct .runtime edits. All paths are relative to the active "
+                "workspace or vault."
             ),
             host="127.0.0.1",
             streamable_http_path="/",
