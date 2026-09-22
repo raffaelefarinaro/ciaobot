@@ -2354,20 +2354,47 @@ def _claude_allowed_tools() -> set[str]:
 
 
 def _opencode_bash_rules() -> set[str]:
-    """The ``bash`` allow rules opencode auto mode would grant for ``ciao …``."""
+    """``ciao …`` bash commands whose *effective* action in opencode auto is allow.
+
+    OpenCode resolves permissions last-match-wins over the session ruleset
+    (``mode_settings``), where auto starts with a ``("*", "allow")`` wildcard and
+    a later ``("bash", "ask")`` row. Simulate that resolution for a few
+    representative ``ciao`` commands so a missing or misordered ``bash: ask``
+    row — which would let every Bash command, including ``ciao …``, through the
+    wildcard — is caught rather than filtered away as "no explicit ciao allow".
+    """
     from ciao.providers.opencode import mode_settings
 
     try:
         _agent, rules = mode_settings("auto")  # type: ignore[arg-type]
     except Exception:  # noqa: BLE001
         return set()
-    return {
-        str(rule.get("pattern") or "")
-        for rule in rules
-        if rule.get("permission") == "bash"
-        and rule.get("action") == "allow"
-        and str(rule.get("pattern") or "").startswith("ciao ")
-    }
+    bash_rules = [r for r in rules if r.get("permission") == "bash"]
+    samples = {"ciao memory status", "ciao chat delete", "ciao run start"}
+
+    def effective(cmd: str) -> str | None:
+        for rule in reversed(bash_rules):
+            pattern = str(rule.get("pattern") or "")
+            if _glob_matches(pattern, cmd):
+                return str(rule.get("action") or "")
+        return None
+
+    allowed = {cmd for cmd in samples if effective(cmd) == "allow"}
+    # A bash command that matches no bash rule falls through to the wildcard
+    # `*` allow in auto — that is an allow too.
+    for cmd in samples:
+        if effective(cmd) is None:
+            allowed.add(cmd)
+    return allowed
+
+
+def _glob_matches(pattern: str, value: str) -> bool:
+    """A minimal glob: ``*`` matches any suffix, otherwise a prefix match."""
+    if pattern == "*":
+        return True
+    if pattern.endswith("*"):
+        return value.startswith(pattern[:-1])
+    return value.startswith(pattern)
 
 
 def _ns(**kwargs: Any) -> Any:

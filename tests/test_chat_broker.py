@@ -120,6 +120,11 @@ def test_extract_file_touches_from_cli_file_surface() -> None:
     assert extract_file_touches(
         "Bash", {"command": "; ciao file surface memory-vault/People/Sofia.md"}
     ) == [{"file_path": "memory-vault/People/Sofia.md", "action": "surfaced"}]
+    # A newline is a real command boundary too: a later line surfacing a file
+    # is a genuine request, while `echo ciao file surface` stays a false hit.
+    assert extract_file_touches(
+        "Bash", {"command": "echo done\nciao file surface out/report.md"}
+    ) == [{"file_path": "out/report.md", "action": "surfaced"}]
     # An explicit `ciao file surface` argument bypasses the shell heuristic, so
     # valid viewable files (.htm etc.) the heuristic would drop still surface.
     assert extract_file_touches(

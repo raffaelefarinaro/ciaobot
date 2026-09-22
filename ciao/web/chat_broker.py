@@ -148,10 +148,10 @@ _SHELL_TOUCH_RE = re.compile(r"(?:^|[\s;|&])touch\s+([^\n;&|]+)")
 # this to the user" signal the MCP `mcp__ciaobot__file_surface` tool carried,
 # so it reuses the file-touch pipeline and auto-pins the panel (S5/S6). `ciao`
 # must sit at a real command position — start of the shell input or after a
-# command separator (; | &) — never mid-argument, so `echo ciao file surface
-# out/report.md` (a string that merely contains the words) is not mistaken for
-# an explicit surfacing request.
-_CIAO_FILE_SURFACE_RE = re.compile(r"(?:^|[;&|]\s*)ciao\s+file\s+surface\s+([^\n;&|]+)")
+# command separator (; | & or a newline) — never mid-argument, so `echo ciao
+# file surface out/report.md` (a string that merely contains the words) is not
+# mistaken for an explicit surfacing request.
+_CIAO_FILE_SURFACE_RE = re.compile(r"(?:^|[;&|\n]\s*)ciao\s+file\s+surface\s+([^\n;&|]+)")
 _SHELL_TEE_RE = re.compile(
     r"(?:^|[\s;|&])tee(\s+-a)?\s+['\"]?([^\s'\"<>&|;]+)['\"]?"
 )
