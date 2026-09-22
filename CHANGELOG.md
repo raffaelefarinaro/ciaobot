@@ -126,6 +126,7 @@
 - fix(agent-surface): recognize newline-separated surface commands and evaluate opencode's effective bash action (`aa9f0c86`)
 - fix(release-gate): scope file_surface, gate agent route to loopback, harden preview/guide/proposal paths (`baf8b9e8`)
 - fix(workspace): keep the live side's regions when merging guides (`24fdca78`)
+- fix(tests): mock the dictation gate in the correct() fail-open tests (`e22882ef`)
 
 ### Maintenance
 - docs: correct skill-sync targets, runtime port and skill-owned data (`41098c41`)
