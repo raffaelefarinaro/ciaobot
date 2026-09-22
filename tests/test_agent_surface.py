@@ -154,6 +154,24 @@ def test_rare_admin_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
     assert removed <= set(service.operation_table)
 
 
+def test_chat_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
+    """S3 removed the chat-lifecycle group from the MCP catalog but the
+    dispatcher must still run them as `ciao chat …` commands."""
+    from ciao import mcp_server
+
+    chat_group = {
+        "chats_list", "chat_get", "chat_create", "chat_update", "chat_send",
+        "chat_continue", "chat_retry", "chat_handover", "chat_archive",
+        "chat_delete", "chat_stop",
+    }
+    service, _ = _service(tmp_path)
+    # None of the chat group is an MCP tool any more…
+    listed = {tool.name for tool in asyncio.run(service.server.list_tools())}
+    assert not (chat_group & listed)
+    # …but each is still a dispatcher operation the CLI routes to.
+    assert chat_group <= set(service.operation_table)
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
@@ -168,6 +186,10 @@ def test_rare_admin_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
         (["vault", "review", "keep", "--candidate", "c1"], ("vault_review", {"action": "decide", "candidate_id": "c1", "disposition": "keep"})),
         (["file", "surface", "out/report.md"], ("file_surface", {"path": "out/report.md"})),
         (["chat", "list", "--project", "p1"], ("chats_list", {"project_id": "p1"})),
+        (["chat", "get", "--chat", "c2"], ("chat_get", {"chat_id": "c2"})),
+        (["chat", "create", "--title", "New", "--prompt", "hi"], ("chat_create", {"title": "New", "prompt": "hi"})),
+        (["chat", "send", "--chat", "c5", "--prompt", "run"], ("chat_send", {"chat_id": "c5", "prompt": "run"})),
+        (["chat", "stop", "--chat", "c7"], ("chat_stop", {"chat_id": "c7"})),
         (["chat", "archive"], ("chat_archive", {"chat_id": ""})),
         (["chat", "delete", "--chat", "c9"], ("chat_delete", {"chat_id": "c9"})),
         (["schedule", "list"], ("schedules_list", {})),

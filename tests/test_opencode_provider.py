@@ -213,7 +213,7 @@ def test_auto_allows_everything_but_keeps_shell_and_destructive_mcp_gated():
     assert actions["*"] == "allow"
     assert actions["bash"] == "ask"
     assert "edit" not in actions
-    assert actions[f"{MCP_SERVER_NAME}_chat_delete"] == "ask"
+    assert actions[f"{MCP_SERVER_NAME}_schedule_action"] == "ask"
     assert actions[f"{MCP_SERVER_NAME}_background_run_start"] == "ask"
 
 
@@ -2035,8 +2035,7 @@ def test_destructive_control_plane_tools_still_prompt():
     actions = _actions("auto")
     assert actions["*"] == "allow"
     for destructive in (
-        "chat_delete", "project_action", "chat_stop",
-        "schedule_action",
+        "project_action", "schedule_action",
         "background_run_start", "background_run_cancel",
     ):
         assert actions[f"{MCP_SERVER_NAME}_{destructive}"] == "ask", destructive
