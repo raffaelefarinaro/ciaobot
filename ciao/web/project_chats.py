@@ -5473,12 +5473,19 @@ class ProjectChatManager:
             agent_surface = surface_for_chat(
                 Path(self._config.state_path).parent, chat.chat_id
             )
+            # The CLI token+URL reach the foreground shell on *both* surfaces
+            # (not only when agent_surface == "cli"): slices migrate whole
+            # groups off the MCP catalog as they move to the CLI, so a chat
+            # whose surface is MCP or unpinned must still be able to run the
+            # migrated operations via `ciao <noun> <verb>` — otherwise a group
+            # is unreachable on both surfaces. The argv allow-rules, which are
+            # bypassable through shell operators, stay gated to chats explicitly
+            # pinned to "cli" (never the default).
+            extra_env[AGENT_URL_ENV] = agent_url
+            extra_env[AGENT_TOKEN_ENV] = mcp_token
             if agent_surface == "cli":
-                # CLI surface: no MCP server for this chat. The same scoped
-                # token reaches the foreground shell as the agent CLI's bearer
-                # capability; background runs strip it (ciao/background.py).
-                extra_env[AGENT_URL_ENV] = agent_url
-                extra_env[AGENT_TOKEN_ENV] = mcp_token
+                # CLI-surface chat: no MCP server; the token already above is
+                # its capability. Background runs strip it (ciao/background.py).
                 mcp_url, mcp_token = "", ""
 
         return AgentRequest(

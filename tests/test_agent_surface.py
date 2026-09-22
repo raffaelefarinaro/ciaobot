@@ -101,13 +101,32 @@ def test_mcp_surface_telemetry_is_still_tagged_mcp(tmp_path: Path) -> None:
     token = _token(service)
     with _mcp_client(service) as client:
         _rpc(client, token, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}})
-        _rpc(client, token, "tools/call", {"name": "context_get", "arguments": {}}, request_id=2)
+        _rpc(client, token, "tools/call", {"name": "memory_status", "arguments": {}}, request_id=2)
     record = json.loads(service._telemetry_path.read_text(encoding="utf-8").splitlines()[-1])
     assert record["surface"] == "mcp"
+    assert record["tool"] == "memory_status"
+
+
+def test_mcp_and_dispatcher_serve_identical_argument_schemas(tmp_path: Path) -> None:
+    """Both surfaces validate arguments through the same operation table.
+
+    The MCP adapter and the dispatcher build their :class:`Tool` from the same
+    module-level ``OPERATIONS`` entry via ``Tool.from_function``, so a bad
+    flag must be rejected identically on either surface. This is the invariant
+    the operation-table refactor exists to guarantee.
+    """
+    from ciao import mcp_server
+
+    service, _ = _service(tmp_path)
+    for name in mcp_server.MCP_EXPOSED_OPERATIONS:
+        mcp_tool = service.server._tool_manager.get_tool(name)
+        assert mcp_tool is not None, name
+        cli_tool = service.tool_for(mcp_server.OPERATIONS_BY_NAME[name])
+        assert cli_tool.parameters == mcp_tool.parameters, name
 
 
 def test_surface_for_chat_reads_the_runtime_file(tmp_path: Path) -> None:
-    assert surface_for_chat(tmp_path, "chat-1") == "mcp"
+    assert surface_for_chat(tmp_path, "chat-1") == "mcp"  # default is MCP (argv rules stay opt-in)
     (tmp_path / "agent_surface.json").write_text(json.dumps({"chat-1": "cli", "chat-2": "bogus"}), encoding="utf-8")
     assert surface_for_chat(tmp_path, "chat-1") == "cli"
     assert surface_for_chat(tmp_path, "chat-2") == "mcp"
@@ -116,6 +135,23 @@ def test_surface_for_chat_reads_the_runtime_file(tmp_path: Path) -> None:
     assert surface_for_chat(tmp_path, "anything") == "mcp"  # no wildcard on purpose
     (tmp_path / "agent_surface.json").write_text("not json", encoding="utf-8")
     assert surface_for_chat(tmp_path, "chat-1") == "mcp"
+
+
+def test_rare_admin_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
+    """S2 removed the rare-admin group from the MCP catalog but the dispatcher
+    must still run them as `ciao <noun> <verb>` commands."""
+    from ciao import mcp_server
+
+    removed = {
+        "context_get", "gws_status", "projects_list", "project_get",
+        "project", "project_action", "workspaces_list",
+    }
+    service, _ = _service(tmp_path)
+    # None of the removed group is an MCP tool any more…
+    listed = {tool.name for tool in asyncio.run(service.server.list_tools())}
+    assert not (removed & listed)
+    # …but each is still a dispatcher operation the CLI routes to.
+    assert removed <= set(service.operation_table)
 
 
 @pytest.mark.parametrize(
@@ -592,15 +628,13 @@ def test_every_cli_command_falls_in_exactly_one_pattern_class() -> None:
 
 
 def test_every_destructive_operation_is_in_the_ask_class() -> None:
-    """The cut is the `_DESTRUCTIVE` annotation, read from the MCP tool source."""
-    import re
-
+    """The cut is the `_DESTRUCTIVE` annotation, read from the operation table."""
     from ciao import mcp_server
 
-    source = Path(mcp_server.__file__).read_text(encoding="utf-8")
-    declared = dict(re.findall(r'@tool\(\s*name="([a-z_]+)",\s*annotations=(_[A-Z]+)', source))
-    destructive = {name for name, ann in declared.items() if ann == "_DESTRUCTIVE"}
-    assert destructive, "no _DESTRUCTIVE tools found"
+    destructive = {
+        op.name for op in mcp_server.OPERATIONS if op.annotations == mcp_server._DESTRUCTIVE
+    }
+    assert destructive, "no _DESTRUCTIVE operations found"
 
     for command, operation in _commands().items():
         label = _matching_patterns(command)[0][0]
