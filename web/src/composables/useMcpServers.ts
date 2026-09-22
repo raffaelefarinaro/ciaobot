@@ -1,6 +1,6 @@
 import { computed, ref, type ComputedRef, type Ref } from 'vue'
 import { errorMessage } from '../lib/errorMessage'
-import type { McpEnvKey, McpProjectServer, McpStatus, McpUsage } from '../lib/types'
+import type { AgentCliStatus, McpEnvKey, McpProjectServer, McpStatus, McpUsage } from '../lib/types'
 
 /**
  * MCP server configuration for the Settings → MCP tab.
@@ -70,6 +70,7 @@ export interface McpServersController {
   usage: Ref<McpUsage | null>
   usageLoaded: Ref<boolean>
   usageError: Ref<string>
+  agentStatus: Ref<AgentCliStatus | null>
   embeddedTools: ComputedRef<string[]>
   fastMcpEnabled: Ref<boolean>
   showAddServer: Ref<boolean>
@@ -94,6 +95,7 @@ export interface McpServersController {
   toolsError: Ref<Record<string, string>>
   fetchStatus(): Promise<void>
   fetchUsage(): Promise<void>
+  fetchAgentStatus(): Promise<void>
   toggleAddServer(): void
   isExpanded(name: string): boolean
   toggleServer(name: string): void
@@ -117,6 +119,7 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
   const usage = ref<McpUsage | null>(null)
   const usageLoaded = ref(false)
   const usageError = ref('')
+  const agentStatus = ref<AgentCliStatus | null>(null)
 
   const showAddServer = ref(false)
   const addingServer = ref(false)
@@ -177,6 +180,14 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
         : message || 'Could not load MCP tool usage.'
     } finally {
       usageLoaded.value = true
+    }
+  }
+
+  async function fetchAgentStatus(): Promise<void> {
+    try {
+      agentStatus.value = await api.get<AgentCliStatus>('/api/agent/status')
+    } catch {
+      agentStatus.value = null
     }
   }
 
@@ -429,6 +440,7 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
     usage,
     usageLoaded,
     usageError,
+    agentStatus,
     embeddedTools,
     fastMcpEnabled,
     showAddServer,
@@ -453,6 +465,7 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
     toolsError,
     fetchStatus,
     fetchUsage,
+    fetchAgentStatus,
     toggleAddServer,
     isExpanded,
     toggleServer,

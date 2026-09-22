@@ -80,6 +80,29 @@ describe('status and usage', () => {
     mcp.status.value = status({ tools: ['only_this'] })
     expect(mcp.embeddedTools.value).toEqual(['only_this'])
   })
+
+  it('loads the agent CLI status from /api/agent/status', async () => {
+    const { mcp, api } = make()
+    api.get.mockResolvedValueOnce({
+      ready: true,
+      operations: ['context_get', 'memory_status', 'vault_search'],
+      telemetry_path: '/tmp/.runtime/mcp_tool_calls.jsonl',
+      version: '0.17.0',
+    } as never)
+    await mcp.fetchAgentStatus()
+    expect(api.get).toHaveBeenCalledWith('/api/agent/status')
+    expect(mcp.agentStatus.value?.ready).toBe(true)
+    expect(mcp.agentStatus.value?.operations).toContain('vault_search')
+    expect(mcp.agentStatus.value?.telemetry_path).toContain('mcp_tool_calls.jsonl')
+  })
+
+  it('clears the agent CLI status when the request fails', async () => {
+    const { mcp, api } = make()
+    mcp.agentStatus.value = { ready: true, operations: [], telemetry_path: '', version: '' }
+    api.get.mockRejectedValueOnce(new Error('offline'))
+    await mcp.fetchAgentStatus()
+    expect(mcp.agentStatus.value).toBeNull()
+  })
 })
 
 describe('expansion and edit drafts', () => {
