@@ -48,29 +48,7 @@
 
     <!-- List of MCP Servers (exact skill-list / skill-row UI) -->
     <div class="skill-list">
-      <!-- 1. Agent CLI: Ciaobot's own control surface -->
-      <div class="skill-row" :class="{ expanded: isExpanded('agent-cli') }" @click="toggleServer('agent-cli')">
-        <div class="skill-main">
-          <div class="skill-title-row command-title-row">
-            <span class="skill-chevron">{{ isExpanded('agent-cli') ? '&#9662;' : '&#9656;' }}</span>
-            <span class="skill-name">agent cli</span>
-            <span class="skill-badges">
-              <span :class="assetOriginClass('builtin')">{{ assetOriginLabel('builtin') }}</span>
-              <span class="badge" :class="agentStatus?.ready ? 'badge--success' : 'badge--error'">
-                {{ agentStatus?.ready ? 'ready' : 'unavailable' }}
-              </span>
-            </span>
-          </div>
-          <p class="skill-description">Ciaobot's own control surface: every operation runs as <code>ciao &lt;noun&gt; &lt;verb&gt;</code> in the agent shell.</p>
-          <div v-if="isExpanded('agent-cli')" class="skill-detail" @click.stop>
-            <p class="skill-meta"><span class="skill-meta-label">Operations</span><code>{{ agentStatus?.operations?.length ?? '—' }}</code></p>
-            <p class="skill-meta" style="margin-top: 8px;"><span class="skill-meta-label">Telemetry</span><code>{{ agentStatus?.telemetry_path || '—' }}</code></p>
-            <p class="skill-meta" style="margin-top: 8px;"><span class="skill-meta-label">Version</span><code>{{ agentStatus?.version || '—' }}</code></p>
-          </div>
-        </div>
-      </div>
-
-      <!-- 2. Custom & Project .mcp.json Servers -->
+      <!-- Custom & Project .mcp.json Servers -->
       <template v-if="status?.project_servers && status.project_servers.length">
         <div
           v-for="srv in status.project_servers"
@@ -261,7 +239,6 @@ const emit = defineEmits<{ 'create-via-chat': [] }>()
 
 const {
   status,
-  agentStatus,
   showAddServer,
   addingServer,
   addServerResult,

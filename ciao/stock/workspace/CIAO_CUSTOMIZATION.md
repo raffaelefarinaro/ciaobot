@@ -6,7 +6,7 @@ This document is for agents and operators working inside an installed Ciaobot wo
 
 - `CIAO_CUSTOMIZATION.md`: this guide.
 - `.env`: server config, provider keys, model lists, OAuth-related paths, push contact, and runtime paths.
-- `.runtime/workspaces.json`: logical workspaces when `CIAO_WORKSPACES` is not set in `.env`.
+- `.runtime/workspaces.json`: the logical workspace registry, managed from Settings → Workspaces.
 - `.claude/agents/`: project agents available to Claude-backed chats.
 - `.claude/commands/`: slash commands available to Claude-backed chats.
 - `.claude/skills/`: skills available to Claude-backed chats.
@@ -23,7 +23,7 @@ Ciaobot has two workspace concepts:
 - `CIAO_WORKSPACE`: the filesystem root for this local Ciaobot instance. It contains `.env`, `.runtime/`, `.claude/`, and usually `memory-vault/`.
 - Logical workspaces: named chat spaces such as `default`, `personal`, `work`, or `client-a`. These appear in the PWA sidebar and route projects, chats, vault roots, model defaults, and integration profiles.
 
-Logical workspaces are configured with `CIAO_WORKSPACES` in `.env` or `.runtime/workspaces.json`.
+Logical workspaces are managed from Settings → Workspaces and stored in `.runtime/workspaces.json`, the only source of the workspace list. `.env` does not configure them: the retired `CIAO_WORKSPACES` variable is ignored (a server start imports it into the registry once, then warns until it is removed from `.env`).
 
 Example `.runtime/workspaces.json`:
 
@@ -65,7 +65,6 @@ Useful `.env` settings:
   `opus,sonnet,haiku,fable`. Leave it unset unless you want to expose full
   Anthropic model ids or change the default tier (the first entry): pinning
   it freezes the picker, so a tier added in a later release stays hidden.
-- `CIAO_WORKSPACES`: preferred multi-workspace registry. Use `default_provider` per workspace.
 
 Each provider has its own default model, thinking level, and permission mode
 for new chats, all set on the chat providers card in Settings → Models &
@@ -155,7 +154,6 @@ Safe workspace-level changes:
 Changes that usually need restart:
 
 - Provider keys.
-- `CIAO_WORKSPACES`.
 - Model list env vars.
 - `CIAO_WORKSPACE`, `CIAO_VAULT_ROOT`, and runtime path changes.
 

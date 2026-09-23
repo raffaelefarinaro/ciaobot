@@ -724,9 +724,6 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
             "PWA_AUTH_TOKEN": "test-token",
             "CIAO_WORKSPACE": str(ws),
             "CIAO_VAULT_ROOT": ".",
-            "CIAO_WORKSPACES": json.dumps(
-                [{"name": "journal", "vault_root": "."}]
-            ),
             "CIAO_RUNTIME_ROOT": str(ws / ".runtime"),
             "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
         }
