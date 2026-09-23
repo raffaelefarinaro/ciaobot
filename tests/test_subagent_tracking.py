@@ -587,6 +587,250 @@ def test_second_notification_after_a_closed_one_reopens_the_window(
     assert state.notification_pending is True
 
 
+def test_notification_answered_after_user_record_prose(tmp_path: Path) -> None:
+    """The CLI resumed the parent itself and it already wrote the report."""
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        {
+            "type": "user",
+            "message": {"role": "user", "content": _notification("abc123")},
+        },
+        _assistant_text("All agents finished. Here is the report."),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_answered is True
+    assert state.notification_pending is False
+
+
+def test_notification_answered_false_for_tool_use_only_assistant(
+    tmp_path: Path,
+) -> None:
+    """A tool-use-only assistant record is not prose and did not report."""
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        {
+            "type": "user",
+            "message": {"role": "user", "content": _notification("abc123")},
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_2",
+                        "name": "Read",
+                        "input": {"file_path": "x"},
+                    }
+                ],
+            },
+        },
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_answered is False
+
+
+def test_notification_answered_false_for_thinking_only_assistant(
+    tmp_path: Path,
+) -> None:
+    """A thinking-only assistant record carries no prose."""
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        {
+            "type": "user",
+            "message": {"role": "user", "content": _notification("abc123")},
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "still working"}],
+            },
+        },
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_answered is False
+
+
+def test_notification_answered_resets_on_the_next_notification(
+    tmp_path: Path,
+) -> None:
+    """Two agents: notif A → prose → notif B (no reply) is not answered."""
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        _assistant_dispatch("toolu_2", "Check"),
+        _dispatch_result("toolu_2", "def456"),
+        {
+            "type": "user",
+            "message": {"role": "user", "content": _notification("abc123")},
+        },
+        _assistant_text("First agent is done."),
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": _notification("def456"),
+        },
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_answered is False
+
+
+def test_notification_answered_through_queue_operation(tmp_path: Path) -> None:
+    """enqueue → dequeue → user record → prose marks answered."""
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": _notification("abc123"),
+        },
+        {"type": "queue-operation", "operation": "dequeue"},
+        {
+            "type": "user",
+            "message": {"role": "user", "content": _notification("abc123")},
+        },
+        _assistant_text("All agents finished. Here is the report."),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_answered is True
+
+
+def test_notification_answered_requires_every_agent_reply(tmp_path: Path) -> None:
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research A"),
+        _dispatch_result("toolu_1", "abc123"),
+        _assistant_dispatch("toolu_2", "Research B"),
+        _dispatch_result("toolu_2", "def456"),
+        {"type": "queue-operation", "operation": "enqueue", "content": _notification("abc123")},
+        {"type": "queue-operation", "operation": "enqueue", "content": _notification("def456")},
+        {"type": "queue-operation", "operation": "dequeue"},
+        {"type": "user", "message": {"role": "user", "content": _notification("abc123")}},
+        {"type": "queue-operation", "operation": "dequeue"},
+        {"type": "user", "message": {"role": "user", "content": _notification("def456")}},
+        _assistant_text("Agent A is ready; checking the other."),
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_read", "name": "Read", "input": {}}
+                ],
+            },
+        },
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_answered is False
+    assert state.notification_pending is False
+
+
+def test_notification_answered_credits_a_terminal_report_after_tool_use(
+    tmp_path: Path,
+) -> None:
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research A"),
+        _dispatch_result("toolu_1", "abc123"),
+        _assistant_dispatch("toolu_2", "Research B"),
+        _dispatch_result("toolu_2", "def456"),
+        {"type": "queue-operation", "operation": "enqueue", "content": _notification("abc123")},
+        {"type": "queue-operation", "operation": "enqueue", "content": _notification("def456")},
+        {"type": "queue-operation", "operation": "dequeue"},
+        {"type": "user", "message": {"role": "user", "content": _notification("abc123")}},
+        {"type": "queue-operation", "operation": "dequeue"},
+        {"type": "user", "message": {"role": "user", "content": _notification("def456")}},
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_read", "name": "Read", "input": {}}
+                ],
+            },
+        },
+        _assistant_text("Both agents are ready. Here is the consolidated report."),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_answered is True
+
+
+def test_notification_answered_does_not_survive_a_new_agent_cohort(
+    tmp_path: Path,
+) -> None:
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research A"),
+        _dispatch_result("toolu_1", "abc123"),
+        _user_text(_notification("abc123")),
+        _assistant_text("Agent A's report."),
+        _user_text("start the next check"),
+        _assistant_dispatch("toolu_2", "Research B"),
+        _dispatch_result("toolu_2", "def456"),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_answered is False
+
+
+def test_notification_answered_ignores_cli_task_notifications(tmp_path: Path) -> None:
+    records = [
+        _user_text("watch the adoption report"),
+        _monitor_dispatch("toolu_02", "adoption report"),
+        _task_result("toolu_02", "bl7dzu4ku"),
+        _user_text(_notification("bl7dzu4ku")),
+        _assistant_text("Monitor exited successfully."),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_answered is False
+
+
+def test_notification_answered_requires_terminal_prose(tmp_path: Path) -> None:
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        _user_text(_notification("abc123")),
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "I will read the report next."},
+                    {"type": "tool_use", "id": "toolu_read", "name": "Read", "input": {}},
+                ],
+            },
+        },
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_answered is False
+
+    records.append(_assistant_text("Here is the complete report."))
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_answered is True
+
+
+def test_notification_answered_false_without_notifications(tmp_path: Path) -> None:
+    """Prose before any notification is just ordinary chatter."""
+    records = [
+        _user_text("go"),
+        _assistant_text("Working on it."),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.notification_answered is False
+
+
 def test_monitor_dispatch_is_tracked_as_running_task(tmp_path: Path) -> None:
     description = "adoption report 2026-08 DAG progress and failures"
     records = [

@@ -16,11 +16,7 @@
         <a href="./">Home</a>
         <a href="guide.html">Get started</a>
         <a href="features.html">Features</a>
-        <a href="builtin.html">Built in</a>
         <a href="memory.html" aria-current="page">Memory</a>
-        <a href="models.html">AI models</a>
-        <a href="remote.html">Anywhere</a>
-        <a href="configure.html">Configure</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
     </div>
@@ -30,7 +26,7 @@
     <section>
       <p class="eyebrow">Your second brain</p>
       <h1>How memory works</h1>
-      <p class="lead">No magic and no hidden database. Ciaobot's memory is a folder of text notes plus a few simple rules about when to write and when to look. This page walks through them in the order they happen.</p>
+      <p class="lead">No magic and no hidden database. Ciaobot's memory is a folder of text notes plus a few simple rules about when to write and when to look.</p>
     </section>
 
     <section>
@@ -61,16 +57,16 @@
 
     <section>
       <h2>1. What it always knows</h2>
-      <p>Every workspace has a short <strong>core memory</strong> with two parts: <em>about you</em> (where you live, how you like answers) and <em>agent memory</em> (rules and facts that matter in every chat). It's small on purpose, about a page, and it lives in a plain file called <code>AGENTS.md</code> in your workspace folder. Claude Code and opencode both read that file at the start of every chat.</p>
+      <p>Every workspace has a short <strong>core memory</strong> with two parts: <em>about you</em> (where you live, how you like answers) and <em>agent memory</em> (rules and facts that matter in every chat). It's small on purpose, about a page, and it lives in a plain file called <code>AGENTS.md</code> in your workspace folder.</p>
       <p>On top of that, each message carries a small, invisible header: the workspace, the project, <strong>the project's description</strong> and today's date. If you mention someone or something Ciaobot has a note about, it adds a pointer to that note too, so the assistant knows where to look.</p>
       <p>That's all that's loaded automatically. Everything else is looked up only when it's needed, which keeps chats fast and focused.</p>
-      <div class="note">Facts can carry an expiry date ("the budget is €20k until the wedding"). Once the date passes, Ciaobot removes the fact before the next message, so stale facts don't linger.</div>
+      <div class="note">Facts can carry an expiry date ("Villa Rosa holds our date until 1 May"). Once the date passes, Ciaobot removes the fact before the next message, so stale facts don't linger.</div>
     </section>
 
     <section>
       <h2>2. How it finds things again</h2>
-      <p>Everything else lives in your <strong>notes folder</strong>: one note per project, per person, per place, plus a learnings list. When a question needs background ("which venues are we still considering?"), the assistant searches that folder, reads the matching snippets, and tries a couple of different wordings before it says it doesn't know.</p>
-      <p>The search is a simple full-text index on your own computer (SQLite), not a black-box "semantic" database. It only searches the current workspace, so work notes never show up in a personal chat.</p>
+      <p>Everything else lives in your <strong>notes folder</strong>: one note per project, per person, per place, plus a learnings list. When a question needs background ("which venues are we still considering?"), the assistant searches that folder, reads the matching snippets.</p>
+      <p>It's a plain full-text search on your own computer, and it only looks in the current workspace, so work notes never show up in a personal chat.</p>
       <figure>
         <a href="assets/img/memory-map.webp"><img src="assets/img/memory-map.webp" alt="The Memory map: notes for projects, people and places connected by lines" loading="lazy" width="1600" height="1000"></a>
         <figcaption>The Memory view shows the notes folder as a map. Lines are links between notes.</figcaption>
@@ -86,20 +82,12 @@
           <p>A readable copy of the chat is saved in your folder, so nothing is lost even if nothing is filed.</p>
         </li>
         <li>
-          <h3>Pick out what's worth keeping</h3>
-          <p>One AI pass reads the chat together with what Ciaobot already knows, and lists only what's new: decisions, corrections you made, new people, open to-dos. Each item has to point to the message it came from and say where it belongs: about you, a project, a person, or a lesson for next time.</p>
-        </li>
-        <li>
-          <h3>Update the project note</h3>
-          <p>Decisions and open to-dos are written into the project's note. As a safety net, a rewrite that would lose the note's header or delete more than half of it is refused.</p>
-        </li>
-        <li>
-          <h3>Check before touching the core memory</h3>
-          <p>A fact only goes into core memory automatically if <strong>you</strong> said it. Ciaobot checks the quote really is in one of your messages, that you didn't say it hypothetically or take it back later, and that it doesn't just repeat something it already knows. If it updates an older fact, the old wording is kept in a log.</p>
+          <h3>Pick out what's new</h3>
+          <p>One AI pass reads the chat next to what Ciaobot already knows and lists only what's new: decisions, corrections, new people, open to-dos. Each item must point to the message it came from.</p>
         </li>
         <li>
           <h3>File it, or ask you</h3>
-          <p>New people get their own note, lessons go to the learnings list, and anything that fails a check, conflicts with what's there, or simply isn't certain becomes a <strong>suggestion</strong> for you to review.</p>
+          <p>Decisions go into the project note, new people get their own note, lessons go to the learnings list. A fact about you goes into core memory only if <strong>you</strong> actually said it; anything uncertain becomes a <strong>suggestion</strong> for you to review.</p>
         </li>
       </ol>
       <p>Small talk, one-off details, and anything the assistant said on its own (rather than you) are left out. What stays is the kind of thing a good assistant would write down: <em>"prefers morning meetings"</em>, <em>"venue shortlist: Villa Rosa and Casa Blu"</em>, <em>"Marco is the best man"</em>.</p>
@@ -113,17 +101,16 @@
           <tbody>
             <tr><td>About you, true everywhere</td><td>Core memory, <em>about you</em></td><td>"Lives in Milan, vegetarian"</td></tr>
             <tr><td>A rule for every chat</td><td>Core memory, <em>agent memory</em></td><td>"Keep answers short; use tables for plans"</td></tr>
-            <tr><td>About one project</td><td>That project's note</td><td>"Wedding budget capped at €20k"</td></tr>
+            <tr><td>About one project</td><td>That project's note</td><td>"Wedding budget capped at €22k"</td></tr>
             <tr><td>About a person</td><td>A note for that person</td><td>"Marco: best man, allergic to nuts"</td></tr>
             <tr><td>A lesson for next time</td><td>The learnings list</td><td>"The school's calendar only accepts a work email"</td></tr>
             <tr><td>Anything uncertain</td><td>Your suggestions queue</td><td>"Allergic to penicillin?"</td></tr>
           </tbody>
         </table>
       </div>
-      <p>A lesson that comes up repeatedly gets a counter; lessons seen three times are promoted, and one-off ones that never come back are archived after a month.</p>
     </section>
 
-    <section>
+    <section id="control">
       <h2>You stay in control</h2>
       <h3>Suggestions wait for you</h3>
       <p>Each suggestion says where it would go. <strong>Review</strong> shows exactly how the note would change before you accept it, <strong>dismiss</strong> drops it, <strong>talk about it</strong> opens a chat to discuss it.</p>
@@ -132,7 +119,7 @@
         <figcaption>Memory → Review. Nothing about you lands in core memory without evidence or your OK.</figcaption>
       </figure>
       <h3>Every change can be undone</h3>
-      <p>Each automatic change to core memory and each decision on a suggestion leaves a receipt with the before and after. The <strong>History</strong> tab lists them with an <strong>Undo</strong> button. Undo refuses if the note has changed since, so it never overwrites your newer edits.</p>
+      <p>Each automatic change to core memory and each decision on a suggestion leaves a receipt with the before and after. The <strong>History</strong> tab lists them with an <strong>Undo</strong> button.</p>
       <h3>Tell it directly</h3>
       <div class="prompt">Remember that I'm allergic to penicillin.</div>
       <div class="prompt">Forget what I said about the Casa Blu venue, we dropped it.</div>
@@ -141,7 +128,7 @@
 
     <section>
       <h2>The nightly tidy-up</h2>
-      <p>Once a night, per workspace, a routine called <strong>Workspace care</strong> goes through the queue and the notes. It files the suggestions that belong to people, projects and learnings; merges duplicates in core memory when it's getting full; and flags notes that are getting old so they can be re-checked. Once a week it also rebuilds the index and fixes broken links.</p>
+      <p>Once a night, per workspace, a routine called <strong>Workspace care</strong> goes through the queue and the notes. It files the suggestions that belong to people, projects and learnings; merges duplicates in core memory when it's getting full; and flags notes that are getting old so they can be re-checked.</p>
       <p>What it <strong>never</strong> does:</p>
       <ul>
         <li>add a new fact about you to core memory (those wait for you);</li>
@@ -153,17 +140,9 @@
 
     <section>
       <h2>Projects you've finished</h2>
-      <p>When you <strong>Complete</strong> a project, its folder moves from <em>active</em> to <em>completed</em> and it leaves the sidebar. The notes stay searchable and Ciaobot still knows the project exists, so "what did we decide about the movers last year?" still works. Restoring the project moves it back.</p>
+      <p>A <strong>completed</strong> project leaves the sidebar, but its notes stay searchable, so "what did we decide about the movers last year?" still works.</p>
     </section>
 
-    <section>
-      <h2>On a Mac: Apple Intelligence can help</h2>
-      <p>On macOS 26 with Apple Intelligence switched on, Ciaobot can use Apple's on-device model for memory work, for free and without anything leaving your Mac:</p>
-      <ul>
-        <li>when Ciaobot catches up on old chats that were never processed, the on-device model first answers a quick yes/no, "is there anything worth remembering here?", so a cloud model is only used where it matters;</li>
-        <li>you can pick <em>Apple Intelligence</em> as the model that extracts memories (Settings → Models). It's smaller than a cloud model, so it reads a shorter slice of long chats, and project notes are still updated with a cloud model.</li>
-      </ul>
-    </section>
 
     <section>
       <h2>It's just text files</h2>

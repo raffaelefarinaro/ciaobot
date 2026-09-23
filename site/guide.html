@@ -16,11 +16,7 @@
         <a href="./">Home</a>
         <a href="guide.html" aria-current="page">Get started</a>
         <a href="features.html">Features</a>
-        <a href="builtin.html">Built in</a>
         <a href="memory.html">Memory</a>
-        <a href="models.html">AI models</a>
-        <a href="remote.html">Anywhere</a>
-        <a href="configure.html">Configure</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
     </div>
@@ -105,7 +101,7 @@ opencode auth login</code></pre>
       <ol class="steps">
         <li>
           <h3>Start a new chat in the right project</h3>
-          <p>Use <strong>+ new</strong> on the home screen. The small arrow next to it lets you choose the project. You can also press <kbd>Option</kbd>+<kbd>N</kbd> in the browser or <kbd>⌘</kbd>+<kbd>T</kbd> in the app.</p>
+          <p>Use <strong>+ new</strong> on the home screen. The small arrow next to it lets you choose the project. Or press <kbd>⌘</kbd>+<kbd>T</kbd>.</p>
         </li>
         <li>
           <h3>Do one task</h3>
@@ -113,7 +109,7 @@ opencode auth login</code></pre>
         </li>
         <li>
           <h3>Archive it as soon as the task is done</h3>
-          <p>Use the archive button in the chat header, press <kbd>Option</kbd>+<kbd>⌫</kbd> in the browser (<kbd>⌘</kbd>+<kbd>⌫</kbd> in the app), or just type "archive this chat".</p>
+          <p>Use the archive button in the chat header, press <kbd>⌘</kbd>+<kbd>⌫</kbd>, or just type "archive this chat".</p>
           <figure>
             <video src="assets/img/archive.mp4" poster="assets/img/archive-poster.webp" autoplay muted loop playsinline aria-label="Sending a follow-up, reading the answer, then archiving the chat"></video>
             <figcaption>Archiving a finished chat. It moves to <em>tidying up</em> while Ciaobot reads it back and files what's worth keeping.</figcaption>
@@ -121,12 +117,13 @@ opencode auth login</code></pre>
         </li>
         <li>
           <h3>Glance at suggestions now and then</h3>
-          <p>Things Ciaobot can back up with what you said are filed automatically. Things it isn't sure about show up as suggestions for you to accept, edit or dismiss. <a href="memory.html">More on memory →</a></p>
+          <p>Anything Ciaobot isn't sure about waits for your OK. <a href="memory.html#control">More on memory →</a></p>
         </li>
       </ol>
-      <div class="callout">
-        <p><strong>Why not keep one chat going?</strong> AI models get measurably worse as a conversation grows: details from the start get missed and unrelated topics bleed into each other. Researchers call this <a href="https://research.trychroma.com/context-rot">context rot</a>, and Anthropic's guide to <a href="https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents">context engineering</a> explains why a short, focused context works better. A long chat is also slower and more expensive, and Ciaobot only learns from it once you archive it. Short chats keep your assistant sharp and up to date.</p>
-      </div>
+      <details class="example">
+        <summary>Why not keep one chat going?</summary>
+        <div class="example-body"><p>AI models get measurably worse as a conversation grows: details from the start get missed and unrelated topics bleed into each other. Researchers call this <a href="https://research.trychroma.com/context-rot">context rot</a>, and Anthropic's guide to <a href="https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents">context engineering</a> explains why a short, focused context works better. A long chat is also slower and more expensive, and Ciaobot only learns from it once you archive it. Short chats keep your assistant sharp and up to date.</p></div>
+      </details>
       <p>Need to pick up an archived chat later? Open it and choose <strong>Continue in new chat</strong>.</p>
     </section>
 
@@ -137,20 +134,26 @@ opencode auth login</code></pre>
       <div class="prompt">Every weekday at 8am, look at my calendar and tell me what's coming up today.</div>
       <div class="prompt">Every Sunday evening, give me ten new Spanish words based on what I practised this week.</div>
       <p>Ciaobot shows you a draft (when it runs, and in which project) and asks before creating it. Each run leaves its result in a chat. You can see and pause everything on the <strong>Automations</strong> page.</p>
+      <p>That's the whole routine. For everything else, <a href="features.html">see what it can do →</a> or just ask it "what can you do?"</p>
       <figure>
         <a href="assets/img/automations.webp"><img src="assets/img/automations.webp" alt="The Automations page listing custom and system routines with their next runs" loading="lazy" width="1600" height="1000"></a>
         <figcaption>The Automations page lists every recurring task with its next run, including the nightly memory tidy-up.</figcaption>
       </figure>
     </section>
 
-    <section>
-      <h2>A few more things worth knowing</h2>
-      <div class="grid">
-        <a class="card card-link" href="features.html#google"><h3>Connect Google</h3><p>In <strong>Settings → Workspaces</strong>, connect a Google account per workspace, for example a personal one and a work one.</p></a>
-        <a class="card card-link" href="features.html#documents"><h3>Work on documents</h3><p>When Ciaobot writes a note or table, it opens beside the chat. Highlight any passage and comment on it.</p></a>
-        <div class="card"><h3>Try a different direction</h3><p><strong>Fork conversation from here</strong> on any answer starts a new chat from that point, leaving the original untouched.</p></div>
-        <div class="card"><h3>Ask it about itself</h3><p>"What can you do?" or "How do schedules work?" It knows its own features and can take you on a tour.</p></div>
-      </div>
+
+    <section id="faq">
+      <h2>Questions</h2>
+      <h3>What does it cost?</h3>
+      <p>Ciaobot is free and open source. You pay only for the AI you already use: a Claude subscription, an API key, or nothing at all with a local model. Voice features on a Mac are free.</p>
+      <h3>What leaves my computer?</h3>
+      <p>The messages you send, plus the context each chat needs, go to the AI provider you chose. Your notes, memory and chat history stay in your folder. With a local model through opencode, nothing leaves at all.</p>
+      <h3>Does it work offline?</h3>
+      <p>With a local model (for example <a href="https://ollama.com">Ollama</a>) through opencode, yes. Google, web search and cloud models need a connection, of course.</p>
+      <h3>Something's wrong. Where do I look?</h3>
+      <p>Ask Ciaobot first ("why did my morning agenda not run?"); it can read its own logs and diagnose most problems. It can also <a href="./#together">report the bug on GitHub</a> for you.</p>
+      <h3>How do I update or uninstall?</h3>
+      <p>When a new version is out, the menu bar icon shows <em>Update to …</em>. To remove the app, run <code>ciao desktop uninstall</code> in the Terminal; your notes folder is kept.</p>
     </section>
 
     <nav class="next-page" aria-label="Next pages">
