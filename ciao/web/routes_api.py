@@ -5104,8 +5104,8 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             },
             status_code=400,
         )
-    # Optional: an empty push contact leaves Web Push disabled until the
-    # operator configures one in Settings.
+    # Optional: an empty push contact makes Web Push use the localhost
+    # placeholder subject (ciao.main.DEFAULT_PUSH_SUBJECT).
     push_contact = str(body.get("push_contact", "")).strip()
     try:
         port = int(body.get("port") or config.pwa_port)

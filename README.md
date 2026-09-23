@@ -31,6 +31,14 @@ Ciaobot keeps provider credentials in the provider's own CLI. It supplies the in
 
 Contributors running from a git checkout can follow [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
+### Uninstall
+
+```bash
+ciao desktop uninstall
+```
+
+This removes `Ciaobot.app` (from `~/Applications`, or `/Applications` for older installs; pass `--app-dir` to point elsewhere), its LaunchAgents, and the `~/.local/bin/ciao` shim the installer wrote. Your workspace folder and its notes are kept.
+
 ## How it works
 
 The basic model is **workspace → project → chat**:
