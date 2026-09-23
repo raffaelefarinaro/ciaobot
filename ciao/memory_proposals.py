@@ -2842,7 +2842,7 @@ def _written_this_session(
 
     Precision-first, three signals together: the bullet cites a turn that a
     vault change also cites, it names that changed file in backticks, and the
-    file as it is now contains another term the bullet puts in backticks —
+    same file as it is now contains another term the bullet puts in backticks —
     so an unrelated edit to a file the fact merely mentions ("`scripts/test.sh`
     is the entry point" alongside a new flag in it) is not taken as the fact
     being saved. A file named for what it defines (`/styleit` for
@@ -2872,16 +2872,17 @@ def _written_this_session(
             for p in _EPISODIC_PREFIXES
         )
     ]
-    texts = {path: _changed_file_text(path, vault_root) for path, _ in co_cited}
-    corpus = "\n".join(text for text in texts.values() if text)
     for path, norm in co_cited:
-        if texts[path] is None:
+        text = _changed_file_text(path, vault_root)
+        if text is None:
             continue
         named = {
             tok for tok in tokens
             if tok == norm or norm.endswith("/" + tok) or tok.endswith("/" + norm)
         }
-        if named and any(tok in corpus for tok in tokens - named):
+        # The evidence must be in the file the fact names, not in some other
+        # file the same turn happened to edit.
+        if named and any(tok in text for tok in tokens - named):
             return True
         # The name the file defines: `/styleit` for `commands/styleit.md`.
         stem = Path(norm).stem

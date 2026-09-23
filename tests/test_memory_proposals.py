@@ -3285,3 +3285,23 @@ def test_open_loop_for_another_named_project_is_routed(tmp_path: Path) -> None:
     rows = mp.list_proposals(out)
     assert [r["kind"] for r in rows] == ["project"]
     assert rows[0]["target"].endswith("ai-native-sdk/ai-native-sdk.md")
+
+
+def test_session_write_evidence_must_be_in_the_named_file(tmp_path: Path) -> None:
+    """A term found in another file edited in the same turn proves nothing."""
+    vault = tmp_path / "vault"
+    _changed_file(tmp_path, "scripts/test.sh", "echo hi\n")
+    _changed_file(tmp_path, "README.md", "Run pytest to test.\n")
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose `scripts/test.sh` wrapping `pytest` as the standard runner. [idx=4] [memory]\n"
+        "## Vault changes\n"
+        "- scripts/test.sh - reformatted. [idx=4]\n"
+        "- README.md - mentions pytest. [idx=4]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+    assert len(mp.list_proposals(out)) == 1
