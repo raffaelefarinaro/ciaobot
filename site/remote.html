@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Use It Anywhere · Ciaobot</title>
+  <meta name="description" content="Run Ciaobot on one computer and use it from your phone, tablet or another computer over Tailscale.">
+  <link rel="icon" href="assets/img/favicon.png">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="./"><img src="assets/img/logo.png" alt="">Ciaobot</a>
+      <nav class="site-nav" aria-label="Main">
+        <a href="./">Home</a>
+        <a href="guide.html">Get started</a>
+        <a href="features.html">Features</a>
+        <a href="builtin.html">Built in</a>
+        <a href="memory.html">Memory</a>
+        <a href="models.html">AI models</a>
+        <a href="remote.html" aria-current="page">Anywhere</a>
+        <a href="configure.html">Configure</a>
+        <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="narrow">
+    <section>
+      <p class="eyebrow">Advanced</p>
+      <h1>Use it from anywhere</h1>
+      <p class="lead">Run Ciaobot on one computer, the <strong>host</strong>, and use it from your phone, tablet or laptop. The host can be your Mac at home or a small rented server. Your notes, memory and AI sessions stay on the host; the other devices are just windows onto it.</p>
+    </section>
+
+    <section>
+      <svg class="diagram" viewBox="0 0 720 240" role="img" aria-labelledby="net-title net-desc">
+        <title id="net-title">One host, many devices</title>
+        <desc id="net-desc">A host computer at home runs Ciaobot and keeps all data. A phone, a tablet and a laptop connect to it through a private Tailscale network.</desc>
+        <rect class="box-accent" x="250" y="20" width="220" height="90" rx="14"/>
+        <text x="360" y="56" text-anchor="middle" font-weight="700" font-size="17">Host</text>
+        <text class="muted" x="360" y="80" text-anchor="middle" font-size="13">a Mac at home or a server</text>
+        <text class="muted" x="360" y="98" text-anchor="middle" font-size="13">notes · memory · automations</text>
+        <rect class="box-secondary" x="200" y="130" width="320" height="30" rx="15"/>
+        <text x="360" y="150" text-anchor="middle" font-size="14" font-weight="600">Tailscale: your private network</text>
+        <rect class="box" x="30" y="180" width="170" height="50" rx="12"/>
+        <text x="115" y="211" text-anchor="middle" font-size="15">📱 Phone</text>
+        <rect class="box" x="275" y="180" width="170" height="50" rx="12"/>
+        <text x="360" y="211" text-anchor="middle" font-size="15">📲 Tablet</text>
+        <rect class="box" x="520" y="180" width="170" height="50" rx="12"/>
+        <text x="605" y="211" text-anchor="middle" font-size="15">💻 Laptop</text>
+        <path class="line" d="M360 110 V130"/>
+        <path class="line" d="M115 180 V160 H200"/>
+        <path class="line" d="M360 160 V180"/>
+        <path class="line" d="M605 180 V160 H520"/>
+      </svg>
+      <p>A good host is a computer that is usually on: a Mac mini at home, a desktop, or a <a href="#vps">small Linux server in the cloud</a>. Scheduled tasks run on the host, so it needs to be awake for them to fire on time.</p>
+      <div class="grid">
+        <div class="card"><h3>💻 A Mac at home</h3><p>The one-line install, the menu bar app, and on-device dictation, read-aloud and Apple Intelligence. Needs to stay awake for schedules.</p></div>
+        <div class="card"><h3>☁️ A VPS in the cloud</h3><p>Always on and reachable from anywhere, for a few euros a month. Everything except the Mac-only voice features. <a href="#vps">How →</a></p></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Step 1: connect your devices with Tailscale</h2>
+      <p><a href="https://tailscale.com/">Tailscale</a> is a free app that links your devices into a private network. They can reach each other from anywhere, but nobody else on the internet can see them. No router settings needed.</p>
+      <ol class="steps">
+        <li>
+          <h3>Install Tailscale on the host</h3>
+          <p>Download it from <a href="https://tailscale.com/download">tailscale.com/download</a> and sign in.</p>
+        </li>
+        <li>
+          <h3>Install it on every other device</h3>
+          <p>On your phone, tablet and laptop, install Tailscale and sign in with the <strong>same account</strong>.</p>
+        </li>
+        <li>
+          <h3>Find the host's address</h3>
+          <p>In Ciaobot on the host, open <strong>Settings → Home</strong>. The <em>this device</em> section lists the addresses where Ciaobot can be reached, each with a <strong>Copy</strong> and a <strong>QR</strong> button. The Tailscale address starts with <code>100.</code>, for example <code>http://100.101.102.103:8443</code>.</p>
+          <figure>
+            <a href="assets/img/device.webp"><img src="assets/img/device.webp" width="1600" height="1000" alt="The this-device panel in Settings, showing the host role and its addresses" loading="lazy"></a>
+            <figcaption>Settings → Home → this device. The host lists its addresses; scan the QR code with your phone.</figcaption>
+          </figure>
+        </li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>Step 2a: use it from a phone, tablet or any browser</h2>
+      <p>Nothing to install besides Tailscale. Open the host's address in the browser (or scan the QR code), log in with your Ciaobot password, and you're in, with all your workspaces, chats and memory.</p>
+      <p><strong>Make it feel like an app:</strong> on iPhone or iPad, tap <em>Share → Add to Home Screen</em>; on Android, use <em>Install app</em> in the browser menu. Dictation works from the phone too, as long as the host is a Mac with the desktop app.</p>
+      <div class="note">
+        <p><strong>Optional: a secure https address.</strong> Browsers enable some app features (installing to the home screen, notifications) only over <code>https</code>. Tailscale can provide one. On the host, run:</p>
+        <pre><code>tailscale serve --bg 8443</code></pre>
+        <p>Then use the <code>https://&lt;host-name&gt;.&lt;your-tailnet&gt;.ts.net</code> address it prints. The first time, Tailscale may ask you to enable HTTPS for your network in its admin page.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Step 2b: use it from a second Mac</h2>
+      <p>If Ciaobot is also installed on your laptop, you can switch that laptop to <strong>client</strong> mode. It then shows the host's workspaces, chats and settings, with the menu bar and keyboard shortcuts of the desktop app.</p>
+      <ol class="steps">
+        <li>
+          <h3>Make sure the host has a password</h3>
+          <p>You set one during setup. You can change it in <strong>Settings → Home</strong> on the host.</p>
+        </li>
+        <li>
+          <h3>On the laptop, choose Connect as client</h3>
+          <p>Open <strong>Settings → Home → this device</strong> and click <strong>Connect as client…</strong>. Enter the host's Tailscale address (for example <code>http://100.101.102.103:8443</code>) and the host's password, then click <strong>Connect</strong>.</p>
+        </li>
+        <li>
+          <h3>That's it</h3>
+          <p>The laptop pauses its own automations and everything runs on the host. A banner shows that you're connected as a client.</p>
+        </li>
+      </ol>
+      <p><strong>To switch back</strong>, open <em>this device</em> again and click <strong>Disconnect</strong>. The host sends over its latest changes and the laptop becomes a host again. If the host is off or unreachable, <strong>Force disconnect</strong> switches back without waiting for it.</p>
+    </section>
+
+    <section>
+      <h2>Keep it private</h2>
+      <ul>
+        <li>Always set a strong dashboard password. It protects Ciaobot on every network it's reachable from, and repeated wrong passwords are slowed down.</li>
+        <li>Use Tailscale (or another private network) rather than opening port <code>8443</code> on your router to the whole internet.</li>
+        <li>If you want Ciaobot reachable <em>only</em> through <code>tailscale serve</code>, add <code>PWA_HOST=127.0.0.1</code> to the <code>.env</code> file in your Ciaobot folder and restart it.</li>
+      </ul>
+    </section>
+
+    <section id="vps">
+      <h2>Run it on a server (VPS)</h2>
+      <p>A <strong>VPS</strong> (virtual private server) is a small computer you rent in a data centre. It's always on, so your automations run on time and Ciaobot is reachable from every device, wherever you are, even with your laptop closed. Any provider that offers <strong>Ubuntu 24.04</strong> works; for example a <a href="https://www.hostinger.com/vps-hosting">Hostinger VPS</a>. A small plan is fine for one person.</p>
+      <ol class="steps">
+        <li>
+          <h3>Rent the server</h3>
+          <p>Choose Ubuntu 24.04 as the operating system and note the server's address and the login the provider gives you.</p>
+        </li>
+        <li>
+          <h3>Put it on your private network</h3>
+          <p>Install <a href="https://tailscale.com/download/linux">Tailscale</a> on the server and sign in with the same account as your other devices. From now on you reach it by its private Tailscale name, and it doesn't need to be open to the internet.</p>
+        </li>
+        <li>
+          <h3>Install Ciaobot and an AI tool</h3>
+          <p>The server install is a few terminal commands: create a dedicated user, install Ciaobot, then sign in to Claude Code or opencode as that user. <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">docs/LINUX.md</a> lists every command, including running Ciaobot as a background service that starts on boot.</p>
+          <div class="note">Not comfortable in a terminal? Open a chat with Claude Code or opencode on your laptop, give it the link to <code>docs/LINUX.md</code> and your server's address, and let it walk you through (or do) the setup.</div>
+        </li>
+        <li>
+          <h3>Open it from anywhere</h3>
+          <p>Turn on a private https address with <a href="https://tailscale.com/kb/1312/serve">Tailscale Serve</a> and open it on your phone, tablet or laptop. Log in with your Ciaobot password and add it to the home screen.</p>
+        </li>
+      </ol>
+      <p><strong>What's different on a server:</strong> dictation, read-aloud and Apple Intelligence need a Mac host, and updates are installed by you rather than with one click. Everything else (workspaces, memory, automations, Google Workspace, documents, every AI model) works the same.</p>
+    </section>
+
+    <nav class="next-page" aria-label="Next pages">
+      <a class="btn" href="models.html">← AI models</a>
+      <a class="btn btn-primary" href="configure.html">Configure →</a>
+    </nav>
+  </main>
+
+  <footer class="site-footer">
+    <div class="inner">
+      <span>Ciaobot is open source.</span>
+      <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
+    </div>
+  </footer>
+  <script src="assets/site.js" defer></script>
+</body>
+</html>

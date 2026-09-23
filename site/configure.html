@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Configure Ciaobot</title>
+  <meta name="description" content="A tour of Ciaobot's settings: AI tools and models, permissions, workspaces, the assistant's instructions, notifications, backups, updates and uninstalling.">
+  <link rel="icon" href="assets/img/favicon.png">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="./"><img src="assets/img/logo.png" alt="">Ciaobot</a>
+      <nav class="site-nav" aria-label="Main">
+        <a href="./">Home</a>
+        <a href="guide.html">Get started</a>
+        <a href="features.html">Features</a>
+        <a href="builtin.html">Built in</a>
+        <a href="memory.html">Memory</a>
+        <a href="models.html">AI models</a>
+        <a href="remote.html">Anywhere</a>
+        <a href="configure.html" aria-current="page">Configure</a>
+        <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="narrow">
+    <section>
+      <p class="eyebrow">Configure</p>
+      <h1>Make Ciaobot yours</h1>
+      <p class="lead">The defaults work out of the box. When you want to change something, this page shows where it lives. Almost everything is in <strong>Settings</strong> (the sliders icon at the top of the sidebar), and you can always ask in a chat instead: "switch my work workspace to opencode".</p>
+      <ul class="toc" aria-label="On this page">
+        <li><a href="#tour">Settings at a glance</a></li>
+        <li><a href="#models">AI tools and models</a></li>
+        <li><a href="#permissions">Permissions</a></li>
+        <li><a href="#instructions">The assistant's instructions</a></li>
+        <li><a href="#workspaces">Workspaces</a></li>
+        <li><a href="#existing">Existing notes</a></li>
+        <li><a href="#notifications">Notifications</a></li>
+        <li><a href="#backup">Backups</a></li>
+        <li><a href="#updates">Updates</a></li>
+        <li><a href="#advanced">Advanced</a></li>
+        <li><a href="#uninstall">Uninstall</a></li>
+        <li><a href="#faq">FAQ</a></li>
+      </ul>
+    </section>
+
+    <section id="tour">
+      <h2>Settings at a glance</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Tab</th><th>What you set there</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Home</strong></td><td>Dashboard password, this device and its addresses, keyboard shortcuts, theme and font size, updates, workspace health check.</td></tr>
+            <tr><td><strong>Models &amp; providers</strong></td><td>Connect Claude Code and opencode, default model, thinking level and permission mode per tool, the models used for memory and second opinions, and voice.</td></tr>
+            <tr><td><strong>Workspaces</strong></td><td>Add or remove workspaces, their colour, which AI tool each uses, and which Google account it's linked to.</td></tr>
+            <tr><td><strong>Skills, Subagents, Commands, MCP</strong></td><td>What's built in and what you've added. <a href="builtin.html">What's built in →</a></td></tr>
+            <tr><td><strong>Automations</strong></td><td>Everything Ciaobot does in the background (naming chats, extracting memory, the nightly tidy-up), when each last ran and whether it needs attention.</td></tr>
+            <tr><td><strong>Notifications</strong></td><td>Turn on notifications for this browser or phone.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <figure>
+        <a href="assets/img/settings-home.webp"><img src="assets/img/settings-home.webp" alt="Settings, Home tab: app actions, keyboard shortcuts and the dashboard password" loading="lazy" width="1600" height="1000"></a>
+        <figcaption>Settings → Home. The keyboard shortcut list lives here too.</figcaption>
+      </figure>
+    </section>
+
+    <section id="models">
+      <h2>AI tools and models</h2>
+      <p>Each AI tool has a card showing whether it's connected and which account it uses, with <strong>Reconnect</strong>, <strong>Verify</strong> and <strong>Log out</strong>. On the card you choose:</p>
+      <ul>
+        <li><strong>Default model</strong> for new chats (you can still change it per chat from the chat header);</li>
+        <li><strong>Thinking</strong>: how hard the model thinks before answering. More is slower and more thorough;</li>
+        <li><strong>Permission mode</strong>: see <a href="#permissions">below</a>.</li>
+      </ul>
+      <p>Below that, <strong>background models</strong> pick which model extracts memories when you archive a chat and which models make up the <code>/critique</code> panel. Put a cheaper or local model here to save on background work. The <strong>voice</strong> section sets dictation and read-aloud on a Mac.</p>
+      <div class="note">All of this is on one tab, <strong>Settings → Models &amp; providers</strong>. Versions before the merge split it across two tabs, <strong>Providers</strong> and <strong>Models</strong>. The long list of what each tool brings (its MCP servers, skills and plugins) is folded away under <em>What this CLI brings</em>.</div>
+      <p><a href="models.html">How Claude Code and opencode work with Ciaobot →</a></p>
+    </section>
+
+    <section id="permissions">
+      <h2>Permissions: what the assistant may do on its own</h2>
+      <p>The assistant runs on your computer and can read files, run commands and change things. The permission mode decides when it has to ask you first:</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Mode</th><th>What happens</th><th>Good for</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Auto</strong> (default)</td><td>Safe work goes ahead; anything risky stops and asks. Changes to Ciaobot itself (creating schedules, moving chats) always ask.</td><td>Everyday use</td></tr>
+            <tr><td><strong>Manual</strong></td><td>Asks before every action.</td><td>Getting to know it, or sensitive workspaces</td></tr>
+            <tr><td><strong>Bypass</strong></td><td>Allows everything without asking.</td><td>Only a machine and folder you're happy for it to change freely</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>When it needs you, a card appears above the message box showing what it wants to do and why, with <strong>Deny</strong> and <strong>Approve</strong> (keys <kbd>1</kbd> and <kbd>2</kbd>). You also get a notification if you're away. The mode is set per AI tool and applies to new chats.</p>
+      <div class="note"><strong>Automations run unattended</strong>, so there's nobody to click Approve: scheduled runs are allowed to act without asking. Word scheduled tasks as clearly as you'd brief a person, and keep risky actions (sending email, deleting things) behind a question in the prompt.</div>
+    </section>
+
+    <section id="instructions">
+      <h2>The assistant's instructions</h2>
+      <p>Each workspace has a plain text guide, <code>AGENTS.md</code>, that the assistant reads at the start of every chat. The top part is yours: write how you want it to behave, and it applies to every chat in that workspace.</p>
+      <div class="prompt">Always answer in Italian unless I write in English.</div>
+      <div class="prompt">Keep answers short. Use tables for plans and comparisons.</div>
+      <div class="prompt">Never send an email without showing me the draft first.</div>
+      <p>At the bottom are the two core-memory sections (<em>agent memory</em> and <em>about you</em>). Ciaobot manages those itself, so leave them to it.</p>
+      <p><strong>How:</strong> open the brain icon (Memory). The workspace guide card at the top shows how full the core memory is; <strong>Open</strong> previews the guide, and <strong>Discuss</strong> opens a chat with the guide pinned beside it, where you can ask for changes or edit it. You can also just say "add to my instructions: …".</p>
+      <figure>
+        <a href="assets/img/agents-md.webp"><img src="assets/img/agents-md.webp" alt="The workspace guide AGENTS.md opened from the Memory view" loading="lazy" width="1600" height="1000"></a>
+        <figcaption>The workspace guide. Your own instructions sit above the managed memory sections.</figcaption>
+      </figure>
+    </section>
+
+    <section id="workspaces">
+      <h2>Workspaces</h2>
+      <p><strong>Settings → Workspaces → + Add workspace</strong> asks for a name, a colour, which AI tool it uses by default and, optionally, a Google account. Changes apply immediately. The number keys <kbd>1</kbd>–<kbd>9</kbd> follow the order in the sidebar.</p>
+      <p>The same tab holds the <strong>Google Workspace</strong> card: install Google's <code>gws</code> tool (the <em>Install in Chat</em> button walks you through it), add one or more Google accounts, then pick one in each workspace's <em>Google profile</em> field.</p>
+      <figure>
+        <a href="assets/img/settings-workspaces.webp"><img src="assets/img/settings-workspaces.webp" alt="Settings, Workspaces tab with the personal and work workspaces and the Google Workspace card" loading="lazy" width="1600" height="1000"></a>
+      </figure>
+      <div class="note"><strong>Deleting a workspace doesn't delete its notes.</strong> Its projects and notes move into your main workspace. The main workspace, and the last one left, can't be deleted.</div>
+    </section>
+
+    <section id="existing">
+      <h2>Bringing notes you already have</h2>
+      <p>In the setup wizard, point Ciaobot at a folder that already has notes, for example your <a href="https://obsidian.md">Obsidian</a> vault. Ciaobot uses it in place and opens a <em>Connect Existing Vault</em> chat:</p>
+      <ul>
+        <li>it looks through the folder and keeps every file; nothing is deleted or overwritten;</li>
+        <li>it files only the notes it can clearly place (projects, people), asks you two or three questions about yourself, and builds its search index;</li>
+        <li>if your notes use <code>[[wiki-links]]</code>, a card offers to convert them to regular links so the Memory map can show them. The conversion can be undone.</li>
+      </ul>
+    </section>
+
+    <section id="notifications">
+      <h2>Notifications</h2>
+      <ul>
+        <li><strong>Mac app:</strong> notifications come from the menu bar app. Switch them on or off under the menu bar icon → Advanced → Native Notifications.</li>
+        <li><strong>Phone or another browser:</strong> Settings → Notifications → <em>Enable on this device</em>. Browsers only allow this on a secure (https) address, so set up <a href="remote.html">Tailscale Serve</a> first. On iPhone and iPad, add Ciaobot to the home screen first.</li>
+      </ul>
+      <p>You're notified when a chat replies while you're elsewhere, and when the assistant is waiting for your approval.</p>
+    </section>
+
+    <section id="backup">
+      <h2>Backups</h2>
+      <p>Your workspace is an ordinary folder of text files, and setup turns it into a <a href="https://git-scm.com/">git</a> repository, so every change can be versioned. Two easy options:</p>
+      <ul>
+        <li><strong>Any backup tool:</strong> Time Machine or your usual backup already covers it; it's just a folder.</li>
+        <li><strong>A private git remote:</strong> create a <em>private</em> repository (for example on GitHub) and connect it once: <code>git remote add origin &lt;url&gt;</code> in the workspace folder. From then on <strong>Settings → Home → Sync with Remote</strong> commits your changes and pushes them there, and Ciaobot keeps the branch pushed in the background. It checks for secrets before pushing and stops if it finds any.</li>
+      </ul>
+      <p>Without a remote, nothing leaves your computer.</p>
+    </section>
+
+    <section id="updates">
+      <h2>Updates</h2>
+      <ul>
+        <li><strong>Mac:</strong> when a new version is out, the menu bar icon shows <em>Update to …</em>. Click it; updates are signed and checked before they install. Re-running the one-line installer works too.</li>
+        <li><strong>Linux server:</strong> updates are pulled and installed by you; see <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">docs/LINUX.md</a>.</li>
+      </ul>
+      <p>What's new in each version is on the <a href="https://github.com/raffaelefarinaro/ciaobot/releases">releases page</a>.</p>
+    </section>
+
+    <section id="advanced">
+      <h2>Advanced: the <code>.env</code> file</h2>
+      <p>A few server settings live in a <code>.env</code> file in your workspace folder. It's read when Ciaobot starts, so restart after editing it (menu bar → Restart).</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Setting</th><th>Default</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>PWA_PORT</code></td><td>8443</td><td>The port Ciaobot listens on.</td></tr>
+            <tr><td><code>PWA_HOST</code></td><td>0.0.0.0</td><td>Set to <code>127.0.0.1</code> to allow only this machine (and <code>tailscale serve</code>).</td></tr>
+            <tr><td><code>CIAO_ALLOWED_ORIGINS</code></td><td>(none)</td><td>Extra addresses allowed to open Ciaobot, e.g. a domain behind a reverse proxy.</td></tr>
+            <tr><td><code>CIAO_INSIGHTS_MODEL</code></td><td>(workspace default)</td><td>Model used to extract memories, if you want to force one.</td></tr>
+            <tr><td><code>CIAO_MEMORY_CHAR_LIMIT</code><br><code>CIAO_USER_CHAR_LIMIT</code></td><td>3000 / 1375</td><td>Target size of the two core-memory sections, in characters.</td></tr>
+            <tr><td><code>CIAO_TRANSCRIPTION_LOCALE</code></td><td>(system)</td><td>Language for dictation, e.g. <code>it-IT</code>.</td></tr>
+            <tr><td><code>CIAO_AUTO_SYNC_ON_START</code></td><td>false</td><td>Commit and sync with your git remote every time Ciaobot starts.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The dashboard password is changed in Settings → Home, not here. For every file Ciaobot keeps in your workspace, see <code>CIAO_CUSTOMIZATION.md</code> in the same folder.</p>
+    </section>
+
+    <section id="uninstall">
+      <h2>Uninstall</h2>
+      <p>In the Terminal, run:</p>
+      <pre><code>ciao desktop uninstall</code></pre>
+      <p>This removes the Ciaobot app, its background service and the <code>ciao</code> command. <strong>Your workspace folder with all your notes and memory is kept</strong>: delete it yourself if you want it gone, or keep it and open it in any notes app.</p>
+    </section>
+
+    <section id="faq">
+      <h2>FAQ</h2>
+      <h3>What does it cost?</h3>
+      <p>Ciaobot is free and open source. You pay only for the AI you already use: a Claude subscription, an API key, or nothing at all with a local model. Voice features on a Mac are free.</p>
+      <h3>What leaves my computer?</h3>
+      <p>The messages you send, plus the context each chat needs, go to the AI provider you chose. Your notes, memory and chat history stay in your folder. With a local model through opencode, nothing leaves at all.</p>
+      <h3>Does it work offline?</h3>
+      <p>With a local model (for example <a href="https://ollama.com">Ollama</a>) through opencode, yes. Google, web search and cloud models need a connection, of course.</p>
+      <h3>Mac or server?</h3>
+      <p>A Mac gives you the app, the menu bar and on-device voice. A server is always on and reachable from anywhere. You can start on the Mac and move later: it's the same folder. <a href="remote.html">Compare →</a></p>
+      <h3>Something's wrong. Where do I look?</h3>
+      <p>Ask Ciaobot first ("why did my morning agenda not run?"); it can read its own logs and diagnose most problems. Settings → Home → Workspace health checks the common ones, and <a href="https://github.com/raffaelefarinaro/ciaobot/issues">GitHub issues</a> is the place to report a bug.</p>
+    </section>
+
+    <nav class="next-page" aria-label="Next pages">
+      <a class="btn" href="remote.html">← Use it anywhere</a>
+      <a class="btn btn-primary" href="guide.html">Get started →</a>
+    </nav>
+  </main>
+
+  <footer class="site-footer">
+    <div class="inner">
+      <span>Ciaobot is open source.</span>
+      <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
+    </div>
+  </footer>
+  <script src="assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>What's Built In · Ciaobot</title>
+  <meta name="description" content="The subagents, skills, commands and command-line tool that ship with Ciaobot, and how to add your own MCP servers, skills and subagents.">
+  <link rel="icon" href="assets/img/favicon.png">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="./"><img src="assets/img/logo.png" alt="">Ciaobot</a>
+      <nav class="site-nav" aria-label="Main">
+        <a href="./">Home</a>
+        <a href="guide.html">Get started</a>
+        <a href="features.html">Features</a>
+        <a href="builtin.html" aria-current="page">Built in</a>
+        <a href="memory.html">Memory</a>
+        <a href="models.html">AI models</a>
+        <a href="remote.html">Anywhere</a>
+        <a href="configure.html">Configure</a>
+        <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="narrow">
+    <section>
+      <p class="eyebrow">Under the hood</p>
+      <h1>What's built in, and how to add more</h1>
+      <p class="lead">Ciaobot comes with its own helpers: subagents for focused jobs, skills that teach it how to do things, a few slash commands, and a command-line tool it uses to run the app. You can add as many of your own as you like.</p>
+      <ul class="toc" aria-label="On this page">
+        <li><a href="#cli">The ciao tool</a></li>
+        <li><a href="#subagents">Subagents</a></li>
+        <li><a href="#skills">Skills</a></li>
+        <li><a href="#commands">Commands</a></li>
+        <li><a href="#extend">Add your own</a></li>
+        <li><a href="#which">Which one when?</a></li>
+      </ul>
+    </section>
+
+    <section id="cli">
+      <h2>The <code>ciao</code> tool: how the assistant runs the app</h2>
+      <p>Ciaobot includes a command-line tool, <code>ciao</code>, that the AI uses to act on the app itself: search memory, update a note, create a project, move or archive a chat, schedule a task, start a background job, check the Google connection, show you a file.</p>
+      <p>This is why <strong>anything you can click, you can also ask for</strong>. When you say "every Friday at 6, remind me to plan my workouts", the assistant runs something like <code>ciao schedule create …</code>, shows you the draft, and waits for your OK. Each chat talks to the app with its own short-lived, scoped key, so a chat can only act where you're working.</p>
+      <pre><code>ciao vault search "venue shortlist"
+ciao project list
+ciao schedule preview …
+ciao chat archive &lt;chat-id&gt;</code></pre>
+      <p>You never need to type these yourself; they're listed so you know what the assistant can do.</p>
+    </section>
+
+    <section id="subagents">
+      <h2>Subagents <span class="tag">3 included</span></h2>
+      <p>A subagent is a helper the main chat hands a self-contained job to. It works in its own separate context and reports back a summary, so your chat stays short and on topic. While one works, it appears under its chat in the sidebar.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Subagent</th><th>What it's for</th></tr></thead>
+          <tbody>
+            <tr><td><code>secretary</code></td><td>Calendar, email, reminders, scheduling and light admin.</td></tr>
+            <tr><td><code>researcher</code></td><td>Looks up current information on the web and summarises it with sources.</td></tr>
+            <tr><td><code>memory</code></td><td>Careful edits to your notes: updating a person or project note, working through memory suggestions.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <figure>
+        <a href="assets/img/subagents.webp"><img src="assets/img/subagents.webp" alt="Settings, Subagents tab: a custom inbox-sweeper subagent above the built-in memory, researcher and secretary subagents" loading="lazy" width="1600" height="1000"></a>
+        <figcaption>Settings → Subagents. Your own (Custom) sit above the three that ship with Ciaobot (Built-in).</figcaption>
+      </figure>
+    </section>
+
+    <section id="skills">
+      <h2>Skills <span class="tag">10 + Google</span></h2>
+      <p>A skill is a short instruction file that teaches the assistant how to do one kind of task well. Only its one-line description is always visible; the full instructions load when a task calls for them. Skills follow the open <a href="https://agentskills.io">Agent Skills</a> format, so they work in both Claude Code and opencode.</p>
+      <figure>
+        <a href="assets/img/skills.webp"><img src="assets/img/skills.webp" alt="Settings, Skills tab listing the stock skills that ship with Ciaobot, with Add via chat and Add skill buttons" loading="lazy" width="1600" height="1000"></a>
+        <figcaption>Settings → Skills. Your own skills are listed above the ones that ship with Ciaobot.</figcaption>
+      </figure>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Skill</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>ciao-capabilities</code></td><td>Knows every Ciaobot feature, answers "can you…?" and gives tours.</td></tr>
+            <tr><td><code>ciao-cli</code></td><td>How to use the <code>ciao</code> tool to change the app's state.</td></tr>
+            <tr><td><code>web-research</code></td><td>Reliable web lookups that check the sources.</td></tr>
+            <tr><td><code>html-artifact</code></td><td>Builds interactive pages (dashboards, charts, comparisons) shown beside the chat.</td></tr>
+            <tr><td><code>visual-plan</code></td><td>Turns bigger work into a reviewable plan, with an optional visual companion.</td></tr>
+            <tr><td><code>workspace-authoring</code></td><td>Writes and maintains longer working documents in your notes.</td></tr>
+            <tr><td><code>convert-documents-to-markdown</code></td><td>Reads Word, PowerPoint, Excel, PDF and more by converting them to text.</td></tr>
+            <tr><td><code>memory-curation</code></td><td>The nightly memory tidy-up procedure.</td></tr>
+            <tr><td><code>sop-authoring</code></td><td>Helps you write clean skills and step-by-step procedures of your own.</td></tr>
+            <tr><td><code>ciao-support</code></td><td>Diagnoses problems with Ciaobot and helps report them.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>When a workspace is linked to a Google account, Ciaobot also installs the Google skills:</p>
+      <ul class="pill-list" aria-label="Google Workspace skills">
+        <li>gmail</li><li>gmail-read</li><li>gmail-triage</li><li>gmail-reply</li><li>gmail-send</li><li>gmail-forward</li><li>gmail-watch</li>
+        <li>calendar</li><li>calendar-agenda</li><li>calendar-insert</li><li>drive</li><li>drive-upload</li><li>docs</li><li>docs-write</li>
+        <li>sheets</li><li>sheets-read</li><li>sheets-append</li><li>slides</li><li>tasks</li><li>forms</li>
+      </ul>
+    </section>
+
+    <section id="commands">
+      <h2>Slash commands <span class="tag">3 included</span></h2>
+      <p>Type <code>/</code> in the message box to pick one.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>/remember</code></td><td>Saves a fact as a memory suggestion for you to confirm.</td></tr>
+            <tr><td><code>/critique</code></td><td>Asks a panel of other AI models to review a plan or answer, then sums up their verdicts.</td></tr>
+            <tr><td><code>/interrogation</code></td><td>Interviews you about a vague project or person and turns the answers into a useful note.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Your own commands work the same way: a name, a short description and the prompt they send. Handy for anything you type often, like <code>/weekly-status</code> or <code>/trip-brief Lisbon</code>.</p>
+      <figure>
+        <a href="assets/img/commands.webp"><img src="assets/img/commands.webp" alt="Settings, Commands tab: built-in critique, interrogation and remember commands plus two custom commands" loading="lazy" width="1600" height="1000"></a>
+        <figcaption>Settings → Commands, with two custom commands next to the built-in ones.</figcaption>
+      </figure>
+    </section>
+
+    <section id="extend">
+      <h2>Add your own</h2>
+      <p>There are three ways to give Ciaobot new abilities, and the easiest is always the same: <strong>ask Ciaobot to make it</strong>. The MCP and Skills settings even have an <em>Add via chat</em> button that opens a chat for exactly that.</p>
+
+      <h3>🔌 MCP servers: connect other apps</h3>
+      <p>The <a href="https://modelcontextprotocol.io/">Model Context Protocol</a> is the standard way to plug an outside service (Notion, Linear, GitHub, your home automation) into an AI assistant as a set of tools.</p>
+      <p><strong>Settings → MCP → + New MCP server</strong>: give it a name and either a web address or a command to run. Tokens are stored in your workspace's private settings file, never in the server list.</p>
+      <figure>
+        <a href="assets/img/mcp.webp"><img src="assets/img/mcp.webp" alt="Settings, MCP tab with Add via chat and New MCP server buttons and the built-in agent cli server" loading="lazy" width="1600" height="1000"></a>
+      </figure>
+      <div class="prompt">Connect my Linear workspace as an MCP server.</div>
+
+      <h3>🧠 Skills: teach it how you like things done</h3>
+      <p><strong>Settings → Skills → + Add skill</strong> takes a zipped skill folder, or put a folder with a <code>SKILL.md</code> file in your workspace's <code>skills/</code> folder. <a href="https://docs.claude.com/en/docs/claude-code/skills">How skills work (Claude Code)</a> · <a href="https://opencode.ai/docs/skills/">in opencode</a>.</p>
+      <div class="prompt">Make a skill for my weekly status update: five bullets, risks last, sent to leadership by 10 on Monday.</div>
+
+      <h3>🤖 Subagents: helpers for bigger jobs</h3>
+      <p><strong>Settings → Subagents → + New subagent</strong>: a name, a description of when to use it, and its instructions. Ciaobot saves it once and makes it available to both Claude Code and opencode. <a href="https://docs.claude.com/en/docs/claude-code/sub-agents">About subagents (Claude Code)</a> · <a href="https://opencode.ai/docs/agents/">in opencode</a>.</p>
+      <div class="prompt">Create a subagent that sweeps my inbox every morning and only reports what needs a reply.</div>
+
+      <h3>Already set up in Claude Code or opencode?</h3>
+      <p>You keep it. Skills, plugins, subagents and MCP servers you've installed in Claude Code or opencode are also available when that tool runs a Ciaobot chat. <a href="models.html#inherit">More →</a></p>
+    </section>
+
+    <section id="which">
+      <h2>Which one when?</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>If you want to…</th><th>Use</th><th>Example</th></tr></thead>
+          <tbody>
+            <tr><td>Reach an app or service Ciaobot can't see yet</td><td>MCP server</td><td>Read and update your Notion pages</td></tr>
+            <tr><td>Stop repeating how a task should be done</td><td>Skill</td><td>"How I write the weekly status update"</td></tr>
+            <tr><td>Hand off a self-contained job and get back a summary</td><td>Subagent</td><td>Research five venues and compare them</td></tr>
+            <tr><td>Do the same task on a timetable</td><td><a href="features.html#automations">Automation</a></td><td>Every Monday at 8, draft the status update</td></tr>
+            <tr><td>Save a fact about you or a project</td><td>Just say it</td><td>"Remember that the budget is now €22k"</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>A good sign you need a skill: you've explained the same thing in three chats. A good sign you need a subagent: a job would flood your chat with pages of search results or emails. A good sign you need an automation: you've asked for the same thing two weeks running.</p>
+    </section>
+
+    <nav class="next-page" aria-label="Next pages">
+      <a class="btn" href="features.html">← Features</a>
+      <a class="btn btn-primary" href="memory.html">How memory works →</a>
+    </nav>
+  </main>
+
+  <footer class="site-footer">
+    <div class="inner">
+      <span>Ciaobot is open source.</span>
+      <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
+    </div>
+  </footer>
+  <script src="assets/site.js" defer></script>
+</body>
+</html>
