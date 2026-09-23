@@ -440,7 +440,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         from ciao.setup_status import warm_claude_discovery_cache
 
         # `claude mcp list` health-checks every connector and can take ~12s;
-        # warm the discovery cache at startup so the first Settings -> Providers
+        # warm the discovery cache at startup so the first Settings -> Models & providers
         # visit serves a populated list instead of blocking on the probe.
         warm_claude_discovery_cache(getattr(config, "workspace_root", None))
 

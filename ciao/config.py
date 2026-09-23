@@ -501,7 +501,7 @@ class CiaoConfig:
     )
     claude_mode: BridgeMode = "auto"
     # Per-provider default execution (permission) mode for new chats, set from
-    # the PWA Settings → Providers tab (runtime settings store). A missing
+    # the PWA Settings → Models & providers tab (runtime settings store). A missing
     # entry uses ``claude_mode`` for every provider.
     provider_default_modes: dict[str, str] = field(default_factory=dict)
     # Per-provider default model for new chats, set from the PWA Settings →
@@ -1110,7 +1110,7 @@ class CiaoConfig:
     def default_mode_for_provider(self, provider: str) -> BridgeMode:
         """The default execution (permission) mode for new chats on ``provider``.
 
-        An operator pin (Settings → Providers → permission mode) wins;
+        An operator pin (Settings → Models & providers → permission mode) wins;
         otherwise every provider falls back to ``claude_mode`` (auto).
         ``manual`` maps to the BridgeMode ``normal`` — ask for every
         action; ``bypass`` allows everything; ``auto`` runs the permissive

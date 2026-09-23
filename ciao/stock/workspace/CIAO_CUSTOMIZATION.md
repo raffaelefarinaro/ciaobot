@@ -67,9 +67,9 @@ Useful `.env` settings:
   it freezes the picker, so a tier added in a later release stays hidden.
 - `CIAO_WORKSPACES`: preferred multi-workspace registry. Use `default_provider` per workspace.
 
-Each provider has its own default model and thinking level for new chats, set in
-Settings → Models, and its own default permission mode, set in
-Settings → Providers. A Claude model alias
+Each provider has its own default model, thinking level, and permission mode
+for new chats, all set on the chat providers card in Settings → Models &
+providers. A Claude model alias
 (`haiku`, `sonnet`, `opus`, `fable`) is a real Claude model id; opencode resolves its
 own defaults from the signed-in account's catalog. The permission mode chooses
 how much a chat may do without asking: manual (ask for every action), auto
@@ -81,9 +81,9 @@ Provider keys live in `.env` or the provider's own OAuth store. Do not put keys 
 
 Common keys:
 
-- Claude Code authentication is owned by the Claude CLI; use Settings → Providers to connect or verify it.
+- Claude Code authentication is owned by the Claude CLI; use Settings → Models & providers to connect or verify it.
 - Voice transcription and read-aloud use the host Mac's on-device Apple frameworks; no voice API key is required.
-- Provider authentication is owned by the provider CLIs; use `ciao auth <provider>` or Settings → Providers. There are no model API keys to set.
+- Provider authentication is owned by the provider CLIs; use `ciao auth <provider>` or Settings → Models & providers. There are no model API keys to set.
 
 Agents may check whether a key is set, but must not print the value.
 

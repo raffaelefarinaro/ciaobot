@@ -1355,7 +1355,7 @@ def test_discover_claude_system_skills_merges_standalone_skills(
     """Standalone ~/.claude/skills entries show up alongside enabled plugins.
 
     `claude plugin list` only knows about plugins, so a user with a hand-installed
-    skill directory would otherwise never see it on the Providers tab.
+    skill directory would otherwise never see it on the Models & providers tab.
     """
     from ciao import setup_status
 
@@ -1447,7 +1447,7 @@ def test_discover_claude_system_skills_falls_back_when_cli_fails(
 
 # ── Claude MCP discovery cache ──────────────────────────────────────────
 # `claude mcp list` measures ~12s on a real install and sits on the
-# Settings -> Providers load path, so the cache decides whether that tab is
+# Settings -> Models & providers load path, so the cache decides whether that tab is
 # usable. A plain TTL made every visit past the window pay it again.
 
 

@@ -258,7 +258,7 @@ The agent control plane runs inside `ciao/mcp_server.py` (the shared operation t
 
 **Internal command markers:** `CIAO_COMMAND_BEGIN`, `CIAO_COMMAND_INSTRUCTIONS`, and `CIAO_COMMAND_END` are reserved transcript markers used when Ciaobot expands a Claude-style slash command for a managed provider. They are not environment variables and should not be configured.
 
-**Optional direct-service keys:** none. Every provider owns its own authentication through its own CLI (`ciao auth <provider>`), so Settings → Providers has no API-key fields; Ciaobot consumes no model API key of its own.
+**Optional direct-service keys:** none. Every provider owns its own authentication through its own CLI (`ciao auth <provider>`), so Settings → Models & providers has no API-key fields; Ciaobot consumes no model API key of its own.
 
 Workspace-specific integrations can still be set in `.env`, but the public `.env.example` does not ship private/work examples. Use user-owned credentials for each integration:
 
@@ -276,8 +276,9 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **Notion MCP:** `NOTION_TOKEN` (internal integration secret from https://www.notion.so/profile/integrations, used by the official `@notionhq/notion-mcp-server` stdio MCP registered in `.mcp.json`). Lives in `.env` only, value redacted. Settings → Assets → MCP servers shows the key status and can write it into `.env`. Workspace-scoped: add `mcp__notion` to a workspace's `disallowed_tools` to keep it out of that workspace — for example, to make Notion personal-only, set the **work** workspace's denylist to the harness defaults plus `mcp__notion`. Tools surface as `mcp__notion__*`.
 
-**Provider connections.** Settings → Providers launches, verifies, and logs out
-Claude Code and opencode through their own CLIs; Ciaobot stores none of
+**Provider connections.** The chat providers card in Settings → Models &
+providers launches, verifies, and logs out Claude Code and opencode through
+their own CLIs; Ciaobot stores none of
 their credentials, and there are no API-key fields to fill in. Voice and Apple
 Intelligence are on-device and need no provider key.
 
