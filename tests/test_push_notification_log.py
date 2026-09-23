@@ -25,7 +25,7 @@ def test_send_logs_notification_even_without_subscriptions(tmp_path: Path) -> No
 
 
 def test_send_with_empty_subject_skips_webpush_but_still_logs(tmp_path: Path) -> None:
-    """No CIAO_PUSH_CONTACT: Web Push delivery is skipped without errors and
+    """An empty subject: Web Push delivery is skipped without errors and
     the local notification log (menu bar companion) still gets the entry."""
     manager = PushManager(tmp_path, subject="")
     manager.add({"endpoint": "https://push.example/sub-1"})

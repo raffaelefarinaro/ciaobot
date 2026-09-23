@@ -459,6 +459,18 @@ def _read_or_create_secret(path: Path) -> str:
     return token
 
 
+# The exit code that asks `scripts/run-ciao.sh` (and `ciao run`) to restart in
+# place. Fixed: the shell loop hardcodes the same number.
+RESTART_EXIT_CODE = 75
+
+# Upload size caps for chat attachments.
+MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
+MAX_VOICE_SIZE_BYTES = 25 * 1024 * 1024
+
+# Anthropic model aliases offered in the picker; the first is the default.
+CLAUDE_MODELS = ("opus", "sonnet", "haiku", "fable")
+
+
 @dataclass(slots=True)
 class CiaoConfig:
     """Environment-backed configuration."""
@@ -470,12 +482,6 @@ class CiaoConfig:
     # Real installs get this from ``from_env``, which defaults it to True (see
     # there); the field default only covers configs built directly in code.
     pwa_auth_required: bool = False
-    # Extra origins accepted for state-changing HTTP + WebSocket handshakes when
-    # the app is reached under a host it doesn't bind to (reverse proxy / tunnel
-    # / host alias). Bare hostnames or full origins; from CIAO_ALLOWED_ORIGINS.
-    # A proxy-supplied X-Forwarded-Host is honored too (browsers can't forge it
-    # on a handshake, so it's safe against cross-site WS hijacking).
-    pwa_allowed_origins: tuple[str, ...] = ()
     dev_mode: bool = False
     # Path to the Ciaobot source checkout for developer-only deploy/restart
     # workflows. Packaged apps update the app bundle atomically instead. From
@@ -484,18 +490,11 @@ class CiaoConfig:
     vault_mode: str = "scratch"
     bootstrap_mode: bool = False
     vault_root: Path = Path("memory-vault")
-    max_image_size_bytes: int = 10 * 1024 * 1024
-    max_voice_size_bytes: int = 25 * 1024 * 1024
-    # BCP-47 language for the on-device voice engines. Dictation needs a
-    # matching language installed in System Settings → Keyboard → Dictation;
-    # the synthesizer uses it to choose a voice.
-    transcription_locale: str = "en-US"
     # macOS voice identifier or name for read-aloud. Empty means "the best
-    # installed voice for transcription_locale" -- the right default when the
+    # installed voice for ciao.voice.TRANSCRIPTION_LOCALE" -- the right default when the
     # available voices differ on every machine.
     tts_local_voice: str = ""
-    claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku", "fable"])
-    claude_default_model: str = "opus"
+    claude_default_model: str = CLAUDE_MODELS[0]
     # Per-workspace default models and tool denylists live on the WorkspaceConfig
     # in this registry, set through `workspaces.json`. The former top-level
     # `*_personal` / `*_work` pairs are gone: they existed only to furnish the
@@ -523,13 +522,6 @@ class CiaoConfig:
     # Per-provider session-insights model, set from the PWA Settings → Models
     # tab. A missing entry uses the provider's balanced default.
     provider_insights_models: dict[str, str] = field(default_factory=dict)
-    restart_exit_code: int = 75
-    # Secure by default: only an explicit affirmative value (``true``/``1``/
-    # ``yes``/``on``) runs ``git pull --rebase`` on boot; unset, blank, or
-    # unrecognized values stay disabled. This must stay equal to the
-    # ``CIAO_AUTO_SYNC_ON_START`` fallback in ``from_env`` below.
-    auto_sync_on_start: bool = False
-    auto_vault_index: bool = True
     pwa_port: int = 8443
     # The server binds all interfaces by default so the PWA is reachable over
     # LAN and Tailscale; the dashboard password + login rate limit are the
@@ -540,44 +532,23 @@ class CiaoConfig:
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab. Empty means the provider's own default applies.
     opencode: OpencodeSettings = field(default_factory=OpencodeSettings)
-    # Post-archive insights extraction: when a chat is archived, run the raw
-    # Claude Code session JSONL through a fast cheap model and append a
-    # `## Session insights` section to the archived markdown.
-    insights_enabled: bool = True
     # Fallback when session insights run without workspace context (e.g.
     # ``scripts/backfill_insights.py``). Live archives use
     # :func:`ciao.insights.resolve_insights_model` instead.
     insights_model: str = "sonnet"
     # Operator override for the insights model, set from the PWA Settings →
-    # Models tab (runtime settings store) or ``CIAO_INSIGHTS_MODEL``.
+    # Models tab (runtime settings store).
     # Empty = automatic routing: the workspace's sonnet-tier model.
     insights_model_override: str = ""
-    # Asynchronously backfill missing insights on server startup.
-    # Enable with ``CIAO_INSIGHTS_BACKFILL_ON_STARTUP=1``.
-    insights_backfill_on_startup: bool = False
-    # Ask the extraction model for fact candidate v1 rows as JSON instead of
-    # Markdown, and render the archive's `## Session insights` section from the
-    # parsed records. Opt-in (``CIAO_INSIGHTS_STRUCTURED=1``) and additionally
-    # gated on the runtime: a provider that cannot hold the contract falls back
-    # to the Markdown path rather than failing the archive
-    # (``ciao.insights.structured_unsupported_reason``).
-    insights_structured: bool = False
     # Trajectory capture: when a chat is archived, also write a structured
     # JSON record of skills loaded, tools used, errors, decisions, and the
     # outcome to ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``. The
     # weekly ``ciao.skill_evolution`` pass mines this directory.
-    # Disable with ``CIAO_TRAJECTORIES_DISABLED=1``.
     trajectories_enabled: bool = True
 
     # Comma-separated list of models for the adversarial_review MCP tool.
     # Empty string defaults to the script's built-in panel.
     critique_models: str = ""
-    # Advisory caps for the ``ciao:memory`` / ``ciao:profile`` regions in
-    # the workspace CLAUDE.md. Loaded natively by each provider's guide
-    # loader at session start; edited with Edit on the guide.
-    # See ``ciao/memory_tool.py``.
-    memory_char_limit: int = 3000
-    user_char_limit: int = 1375
 
     def __post_init__(self) -> None:
         self.workspace_root = Path(self.workspace_root).expanduser().resolve()
@@ -1572,12 +1543,6 @@ class CiaoConfig:
                 if not _workspace_env(source):
                     source["CIAO_WORKSPACE"] = discovered_workspace
 
-        pwa_allowed_origins = tuple(
-            o.strip()
-            for o in source.get("CIAO_ALLOWED_ORIGINS", "").split(",")
-            if o.strip()
-        )
-
         pwa_auth_token = source.get("PWA_AUTH_TOKEN", "").strip()
         pwa_auth_required_raw = source.get("PWA_AUTH_REQUIRED", "").strip().lower()
         if pwa_auth_required_raw:
@@ -1646,12 +1611,8 @@ class CiaoConfig:
         except OSError:
             workspaces_json = ""
 
-        claude_models = _split_csv(source.get("CLAUDE_MODELS", "opus,sonnet,haiku,fable"))
-        claude_default_model = claude_models[0] if claude_models else "opus"
-        gws_default_profile = source.get("GWS_PROFILE", "personal").strip() or "personal"
         workspaces = _parse_workspaces_json(workspaces_json) or _bootstrap_registry(
-            vault_root,
-            gws_default_profile=gws_default_profile,
+            vault_root
         )
 
         dev_mode_raw = source.get("CIAO_DEV_MODE", "").strip().lower()
@@ -1670,62 +1631,16 @@ class CiaoConfig:
             state_path=state_path,
             media_root=media_root,
             pwa_auth_required=pwa_auth_required,
-            pwa_allowed_origins=pwa_allowed_origins,
             dev_mode=dev_mode,
             app_repo=app_repo,
             vault_mode=vault_mode,
             bootstrap_mode=bootstrap_mode,
             vault_root=vault_root,
-            max_image_size_bytes=int(
-                source.get("CIAO_MAX_IMAGE_BYTES", str(10 * 1024 * 1024))
-            ),
-            max_voice_size_bytes=int(
-                source.get("CIAO_MAX_VOICE_BYTES", str(25 * 1024 * 1024))
-            ),
-            transcription_locale=source.get("CIAO_TRANSCRIPTION_LOCALE", "").strip()
-            or "en-US",
-            tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip(),
-            claude_models=list(claude_models or ["opus", "sonnet", "haiku", "fable"]),
-            claude_default_model=claude_default_model,
             claude_mode="auto",
-            restart_exit_code=int(
-                source.get("CIAO_RESTART_EXIT_CODE", "75")
-            ),
-            auto_sync_on_start=source.get("CIAO_AUTO_SYNC_ON_START", "")
-            .strip()
-            .lower()
-            in {"true", "1", "yes", "y", "on"},
-            auto_vault_index=source.get("CIAO_AUTO_VAULT_INDEX", "true").strip().lower()
-            not in {"0", "false", "no", "off"},
             pwa_port=int(source.get("PWA_PORT", "8443")),
             pwa_host=(source.get("PWA_HOST") or "0.0.0.0").strip() or "0.0.0.0",
-            gws_default_profile=gws_default_profile,
             workspaces=workspaces,
             legacy_workspaces_env=str(source.get("CIAO_WORKSPACES", "") or "").strip(),
-            insights_enabled=source.get("CIAO_INSIGHTS_DISABLED", "").strip().lower()
-            in {"", "0", "false", "no", "off"},
-            insights_model_override=source.get("CIAO_INSIGHTS_MODEL", "").strip(),
-            insights_backfill_on_startup=source.get(
-                "CIAO_INSIGHTS_BACKFILL_ON_STARTUP", "false"
-            ).strip().lower()
-            not in {"0", "false", "no", "off"},
-            insights_structured=source.get(
-                "CIAO_INSIGHTS_STRUCTURED", "false"
-            ).strip().lower()
-            not in {"", "0", "false", "no", "off"},
-            trajectories_enabled=source.get(
-                "CIAO_TRAJECTORIES_DISABLED", ""
-            ).strip().lower()
-            in {"", "0", "false", "no", "off"},
-
-            critique_models=source.get("CIAO_REVIEW_MODELS", "").strip()
-            or source.get("CIAO_ADVERSARIAL_MODELS", "").strip(),
-            memory_char_limit=int(
-                source.get("CIAO_MEMORY_CHAR_LIMIT", "").strip() or "3000"
-            ),
-            user_char_limit=int(
-                source.get("CIAO_USER_CHAR_LIMIT", "").strip() or "1375"
-            ),
         )
 
 

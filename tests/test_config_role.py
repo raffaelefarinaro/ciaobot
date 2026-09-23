@@ -128,7 +128,7 @@ def test_workspace_registry_file_defines_named_workspaces(tmp_path: Path) -> Non
         ]
     )
 
-    (tmp_path / ".runtime").mkdir()
+    (tmp_path / ".runtime").mkdir(exist_ok=True)
     (tmp_path / ".runtime" / "workspaces.json").write_text(raw, encoding="utf-8")
     config = _config(CIAO_WORKSPACE=str(tmp_path))
 
@@ -179,10 +179,10 @@ def test_runtime_workspaces_json_is_used_when_env_is_absent(tmp_path: Path) -> N
 
 
 def test_unknown_workspace_uses_global_defaults(tmp_path: Path) -> None:
-    config = _config(CIAO_WORKSPACE=str(tmp_path), CLAUDE_MODELS="sonnet,haiku")
+    config = _config(CIAO_WORKSPACE=str(tmp_path))
 
     assert config.workspace("missing") is None
-    assert config.default_model_for_workspace("missing") == "sonnet"
+    assert config.default_model_for_workspace("missing") == "opus"
     # A stale or renamed workspace name still gets the harness denies. Returning
     # [] made it the one input that reached the model with nothing denied.
     assert _policy_denies(config, config.disallowed_tools_for_workspace("missing")) == list(
@@ -196,7 +196,6 @@ def test_missing_auth_token_enters_bootstrap_mode_with_persisted_token(tmp_path:
     config = CiaoConfig.from_env(
         {
             "CIAO_BOOTSTRAP_WORKSPACE": str(bootstrap),
-            "CIAO_PUSH_CONTACT": "",
         }
     )
 

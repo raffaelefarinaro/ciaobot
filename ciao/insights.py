@@ -29,14 +29,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ciao import fact_candidates, job_runs, native_sidecar
+from ciao import job_runs, native_sidecar
 from ciao.memory_policy import UNATTENDED_MARKER as _UNATTENDED_MARKER
 
 if TYPE_CHECKING:
@@ -112,7 +111,7 @@ _TRUNCATE_TOOLS = frozenset({"Read", "Glob", "Grep", "WebFetch", "WebSearch"})
 # The insights model is operator-chosen and may be a slow local/cloud GGUF:
 # measured end-to-end calls on such a backend run 214-253s, so the old flat
 # 120s budget turned tail latency into a guaranteed TimeoutError and the job
-# failed ~79% of the time. Generous by default, tunable for fast models.
+# failed ~79% of the time. Generous on purpose.
 _DEFAULT_TIMEOUT_S = 600.0
 
 # Per-transcript input ceiling. Long sessions otherwise exceed the model's
@@ -292,36 +291,15 @@ def _entity_notes_block(
     )
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning("Ignoring invalid %s=%r; using %s", name, raw, default)
-        return default
-    return value if value > 0 else default
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning("Ignoring invalid %s=%r; using %s", name, raw, default)
-        return default
-    return value if value > 0 else default
-
-
 def _insights_timeout_s() -> float:
-    return _env_float("CIAO_INSIGHTS_TIMEOUT_S", _DEFAULT_TIMEOUT_S)
+    return _DEFAULT_TIMEOUT_S
 
 
 def _max_input_chars() -> int:
-    return _env_int("CIAO_INSIGHTS_MAX_INPUT_CHARS", _DEFAULT_MAX_INPUT_CHARS)
+    return _DEFAULT_MAX_INPUT_CHARS
+
+
+_BACKFILL_MAX = 200
 
 
 def _backfill_ceiling() -> int:
@@ -331,7 +309,7 @@ def _backfill_ceiling() -> int:
     and the Settings button) would otherwise issue one model call per archive
     in the whole vault from a single click.
     """
-    return _env_int("CIAO_INSIGHTS_BACKFILL_MAX", 200)
+    return _BACKFILL_MAX
 
 
 _EXPLICIT_MEMORY_INTENT = re.compile(
@@ -599,15 +577,13 @@ async def call_with_retry(
             logger.info("Apple FoundationModels is unavailable; not retrying: %s", exc)
             return RetryOutcome("", detail, 1, "apple-unavailable")
         if check_context_overflow and is_context_overflow(exc):
-            # Only the JSONL path fits its payload to CIAO_INSIGHTS_MAX_INPUT_CHARS,
-            # so naming that variable on a text-mode overflow sends the operator
-            # to a setting that does nothing for it. Both messages end at the
-            # remedy that always applies.
+            # Only the JSONL path fits its payload to the input budget, so only
+            # that message names it. Both end at the remedy that always applies.
             if budget_applies:
                 logger.error(
                     "%s input still exceeds the model's context window (%s); "
-                    "not retrying. Lower CIAO_INSIGHTS_MAX_INPUT_CHARS "
-                    "(currently %d) or pick a model with a larger window.",
+                    "not retrying. The transcript was already trimmed to %d "
+                    "chars; pick a model with a larger window.",
                     label,
                     exc,
                     _max_input_chars(),
@@ -723,10 +699,7 @@ Rules:
   vault root: [Mo](./People/Mo.md). Do NOT use [[bracketed-wikilinks]] and do NOT wrap the link in backticks, quotes, or other formatting.
 """ + _FINAL_STATEMENT_RULE
 
-# The Markdown output contract. Split from the rules above so the structured
-# mode can reuse the grounding rules *verbatim* and swap only the shape of the
-# answer: the two modes must never drift on what counts as a durable fact or
-# on what has to be cited, only on how the model hands it back.
+# The Markdown output contract, kept apart from the grounding rules above.
 _INSIGHTS_SECTION_SCHEMA = """
 ## Errors
 - <what failed> -> <how it was resolved, or "unresolved">. Only a failure whose fix is worth remembering. [idx=N] <tag>
@@ -754,118 +727,6 @@ _INSIGHTS_SECTION_SCHEMA = """
 """
 
 _INSIGHTS_SYSTEM_PROMPT = _INSIGHTS_RULES + _INSIGHTS_SECTION_SCHEMA
-
-# The section order the Markdown contract above states, reused when candidate
-# records are rendered back to that shape. Stated once so a structured
-# extraction produces the same section order a Markdown one does.
-INSIGHTS_SECTIONS = (
-    "Errors",
-    "User corrections",
-    "New entities",
-    "Decisions",
-    "Reusable snippets",
-    "Open loops",
-    "Vault changes",
-)
-
-# The structured output contract. It restates only the *shape* of the answer:
-# every grounding rule — what counts as durable, what must be cited, which
-# turns may be extracted from — is `_INSIGHTS_RULES`, unchanged, so the
-# evidence gate downstream sees the same claims either way.
-_STRUCTURED_OUTPUT_CONTRACT = """
-Return ONLY a JSON array. No Markdown, no prose, no code fence, no trailing
-commentary. Each element is one fact candidate:
-
-  {
-    "text": "<the bullet exactly as the section schema would phrase it, on ONE
-             line, without the [idx=N] citation and without the destination
-             tag - both are fields below. Keep an [as-of: YYYY-MM-DD] or
-             [expires: YYYY-MM-DD] tag inline here as well as in its field.>",
-    "section": "<Errors | User corrections | New entities | Decisions |
-                 Reusable snippets | Open loops | Vault changes>",
-    "destination": "<memory | profile | project | people | learnings | review>",
-    "payload": "<the person's name when destination is people; the Known
-                 projects name when destination is project and it is not this
-                 chat's own project; else \\"\\">",
-    "source_message_ids": [<the indices the citation rule requires, as
-                            integers, starting at 1; never 0>],
-    "evidence_excerpt": "<a short span copied verbatim from one cited turn
-                         that states this fact, or \\"\\">",
-    "as_of": "<YYYY-MM-DD, or \\"\\">",
-    "expires": "<YYYY-MM-DD, or \\"\\">",
-    "attended": <true when a cited turn is one the user actually typed,
-                 false when every cited turn is assistant output or an
-                 automation turn>
-  }
-
-Every rule above still applies to each element: the same durability bar, the
-same citation requirement, the same refusal to extract from unattended turns
-or from a maintenance session's own operating instructions. A fact you cannot
-cite is a fact you do not emit.
-
-Return an empty array `[]` when the session carries no durable signal - never
-an object, never the word "none", never an explanatory sentence.
-"""
-
-_STRUCTURED_SYSTEM_PROMPT = _INSIGHTS_RULES + _STRUCTURED_OUTPUT_CONTRACT
-
-
-# ── Structured extraction: opt-in, and only where it is supported ─────────
-
-# Runtimes whose models are asked for JSON candidate rows. Deliberately a
-# short allowlist rather than "everything that is not Apple": structured
-# output is a *model* capability that varies by provider and by the upstream
-# an opencode profile happens to point at, and a provider that cannot hold the
-# contract must degrade to Markdown rather than fail an archive. Widen it per
-# deployment with ``CIAO_INSIGHTS_STRUCTURED_PROVIDERS``.
-_DEFAULT_STRUCTURED_PROVIDERS = frozenset({"claude"})
-
-_TRUTHY = frozenset({"1", "true", "yes", "y", "on"})
-
-
-def _structured_providers() -> frozenset[str]:
-    raw = os.environ.get("CIAO_INSIGHTS_STRUCTURED_PROVIDERS", "").strip()
-    if not raw:
-        return _DEFAULT_STRUCTURED_PROVIDERS
-    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
-
-
-def structured_extraction_enabled(config: Any) -> bool:
-    """Whether the operator asked for structured extraction at all.
-
-    Off by default: the Markdown contract is what every archive on disk was
-    produced under, and turning a new extraction shape on for everyone would
-    change what the archive auto-save writes without anyone asking for it.
-    ``CIAO_INSIGHTS_STRUCTURED`` overrides the config field either way.
-    """
-    raw = os.environ.get("CIAO_INSIGHTS_STRUCTURED", "").strip().lower()
-    if raw:
-        return raw in _TRUTHY
-    return bool(getattr(config, "insights_structured", False))
-
-
-def structured_unsupported_reason(
-    model: str, provider: str, *, text_mode: bool = False
-) -> str:
-    """Why this call cannot run structured, or "" when it can.
-
-    A reason string rather than a boolean because the caller records it: a
-    fallback to Markdown is a normal outcome, but an operator who switched
-    structured extraction on and keeps getting Markdown needs to see which
-    check refused it.
-    """
-    if text_mode:
-        # Text mode reads the rendered archive, which has no `idx` numbering;
-        # its prompt forbids `[idx=N]` outright. Asking that path for cited
-        # candidate rows would ask for citations that cannot exist.
-        return "text-mode extraction has no transcript indices to cite"
-    if native_sidecar.is_apple_model(model):
-        return "the on-device model has no structured-output contract"
-    runtime = (provider or "claude").strip().lower()
-    if runtime not in _structured_providers():
-        return f"provider {runtime!r} is not on the structured-output allowlist"
-    return ""
-
 
 def filter_session_jsonl(
     workspace_root: Path,
@@ -1234,7 +1095,6 @@ async def run_archive_pipeline(
     filtered_jsonl = str(inputs.get("filtered_jsonl") or "")
     session_id = str(inputs.get("session_id") or "")
     workspace_root = inputs.get("workspace_root")
-    vault_root = inputs.get("vault_root")
     proposal_vault_root = inputs["proposal_vault_root"]
     guide_path = inputs.get("guide_path")
     trajectory_meta = dict(inputs.get("trajectory_meta") or {})
@@ -1354,56 +1214,8 @@ async def run_archive_pipeline(
                             ),
                         )
                     )
-                    # Structured extraction is opt-in *and* capability-gated.
-                    # Off, or refused by the gate, the Markdown contract runs
-                    # exactly as before — a provider that cannot return
-                    # candidate rows degrades to the path it has always used
-                    # instead of failing the archive.
-                    use_structured = False
-                    if structured_extraction_enabled(config):
-                        refusal = structured_unsupported_reason(
-                            effective_model,
-                            effective_provider,
-                            text_mode=text_mode,
-                        )
-                        if refusal:
-                            run.extra["structured_fallback"] = refusal
-                            logger.info(
-                                "Structured insights unavailable (%s); "
-                                "falling back to the Markdown extraction path",
-                                refusal,
-                            )
-                        else:
-                            use_structured = True
-                    run.extra["extraction"] = (
-                        "structured" if use_structured
-                        else "text" if text_mode
-                        else "markdown"
-                    )
-                    if use_structured:
-                        (
-                            extracted,
-                            model_error,
-                            parse_errors,
-                        ) = await _run_structured_model_with_retry(
-                            filtered_jsonl=filtered_jsonl,
-                            model=effective_model,
-                            provider=effective_provider,
-                            cwd=workspace_root,
-                            context_block=context_block,
-                        )
-                        if parse_errors:
-                            # Rows that survived as `[review]` candidates. The
-                            # count is the point: a model quietly drifting off
-                            # the contract looks like a sudden taste for
-                            # review rows unless the run row says otherwise.
-                            run.extra["structured_parse_errors"] = parse_errors[:5]
-                            logger.warning(
-                                "Structured insights: %d unreadable row(s) in %s",
-                                len(parse_errors),
-                                archive_path.name,
-                            )
-                    elif text_mode:
+                    run.extra["extraction"] = "text" if text_mode else "markdown"
+                    if text_mode:
                         extracted, model_error = await _run_text_model_with_retry(
                             archive_path=archive_path,
                             model=effective_model,
@@ -2031,128 +1843,6 @@ async def _call_model(
     return await run_oneshot(user_prompt, **kwargs)
 
 
-async def _call_structured_model(
-    filtered_jsonl: str,
-    model: str,
-    *,
-    provider: str = "claude",
-    cwd: Path | None = None,
-    context_block: str = "",
-) -> str:
-    """Ask for fact candidate rows as JSON. Returns the raw, unparsed answer.
-
-    No Apple branch and no provider fan-out: `structured_unsupported_reason`
-    has already refused every runtime this contract is not offered to, so a
-    call that reaches here is one the allowlist admitted.
-    """
-    from ciao.providers.oneshot import run_oneshot
-
-    user_prompt = (
-        context_block
-        + "Below is a coding-agent session transcript as line-oriented JSON.\n"
-        "Each line is one message with a numeric `idx` you must cite.\n"
-        "Return the fact candidates as the JSON array the system prompt "
-        "specifies, and nothing else.\n\n"
-        f"{filtered_jsonl}"
-    )
-
-    kwargs: dict[str, Any] = {
-        "system_prompt": _STRUCTURED_SYSTEM_PROMPT,
-        "model": model,
-        "timeout_s": _insights_timeout_s(),
-    }
-    if provider != "claude":
-        kwargs.update({"provider": provider, "cwd": cwd})
-    return await run_oneshot(user_prompt, **kwargs)
-
-
-def _reviewable(candidate: fact_candidates.FactCandidate) -> fact_candidates.FactCandidate:
-    """Fold a row's parse error into the text a reviewer will actually read.
-
-    `candidates_from_structured` keeps the error on the record, but the record
-    is rendered to a Markdown bullet and the bullet is all the review queue and
-    the archive ever show. Without this the queue would carry a bare
-    "(unreadable candidate row 3)" with no way to tell what was wrong with it.
-    """
-    if not candidate.parse_error:
-        return candidate
-    reason = candidate.parse_error.strip()[:160]
-    return replace(candidate, text=f"{candidate.text} - unreadable structured row: {reason}")
-
-
-async def _run_structured_model_with_retry(
-    *,
-    filtered_jsonl: str,
-    model: str,
-    provider: str = "claude",
-    cwd: Path | None = None,
-    context_block: str = "",
-) -> tuple[str, str, list[str]]:
-    """Run structured extraction and render it back to the archive's shape.
-
-    Returns ``(insights_markdown, error, parse_errors)``. The Markdown is the
-    same ``## Session insights`` body the Markdown path produces, so nothing
-    downstream — the append, the project fold, the proposals router, the
-    evidence gate — has to know which mode produced it. What changes is that
-    the section is rendered from validated candidate records rather than
-    trusted as free text.
-
-    Three outcomes the caller has to keep apart:
-
-    * **Nothing to say.** An empty answer, or an explicit ``[]``, is "no
-      durable signal in this session" — exactly as in Markdown mode. It is not
-      an error and it saves nothing.
-    * **Readable, wholly or partly.** Rows that parse become candidates; rows
-      that do not come back as ``[review]`` bullets carrying their parse
-      error, so an unreadable row is queued for a human instead of dropped.
-      ``parse_errors`` reports them so the run row can say how many.
-    * **Unreadable as a whole.** A non-empty answer that is not a JSON array
-      of rows is an explicit failure, not an empty save: the stage fails and
-      stays retryable rather than settling as "this session had nothing".
-      Falling back to Markdown here would hide a provider that has started
-      returning prose from a contract it accepted.
-    """
-    reserve = len(context_block)
-    payload, dropped = _fit_transcript(filtered_jsonl, reserve=reserve)
-    if dropped:
-        logger.info(
-            "Structured insights transcript over the %d-char budget; "
-            "dropped %d oldest line(s)",
-            max(0, _max_input_chars() - reserve),
-            dropped,
-        )
-
-    async def call() -> str:
-        return await _call_structured_model(
-            payload, model, provider=provider, cwd=cwd, context_block=context_block
-        )
-
-    outcome = await call_with_retry(
-        call, label="Insights structured call", model=model
-    )
-    if outcome.error:
-        return "", outcome.error, []
-    if not outcome.output.strip():
-        return "", "", []
-
-    candidates, errors = fact_candidates.candidates_from_structured(outcome.output)
-    if not candidates:
-        if errors:
-            detail = "; ".join(errors[:3])
-            return (
-                "",
-                f"structured extraction returned no readable candidates: {detail}",
-                errors,
-            )
-        return "", "", []
-
-    body = fact_candidates.render_insights_markdown(
-        [_reviewable(candidate) for candidate in candidates],
-        sections=INSIGHTS_SECTIONS,
-    )
-    return body, "", errors
-
-
 UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
@@ -2409,7 +2099,7 @@ async def backfill_insights_task(
         stats["remaining_after_cap"] = len(todo) - ceiling
         logger.info(
             "Backfill capped at %d of %d eligible archives "
-            "(raise CIAO_INSIGHTS_BACKFILL_MAX, or pass an explicit limit, to change)",
+            "(pass an explicit limit to change)",
             ceiling,
             len(todo),
         )

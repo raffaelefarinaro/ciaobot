@@ -690,21 +690,7 @@ export interface ProviderConnection {
 }
 
 export interface ProviderConfigSettings {
-  keys: Record<string, {
-    label: string
-    description: string
-    configured: boolean
-    auth_method?: string
-  }>
-  service_keys?: Record<string, {
-    label: string
-    description: string
-    configured: boolean
-    auth_method?: string
-  }>
   connections?: Record<string, ProviderConnection>
-  requires_restart: boolean
-  env_path: string
 }
 
 export interface GwsIntegrationProfile {

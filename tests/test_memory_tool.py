@@ -135,123 +135,6 @@ def test_migrate_region_caps_is_idempotent_and_tolerates_absence(
     assert not absent.exists()
 
 
-def test_migrate_region_caps_respects_explicit_override(
-    tmp_path: Path,
-    monkeypatch: Any,
-) -> None:
-    """An explicit CIAO_MEMORY_CHAR_LIMIT=2200 is a choice, not a stale stamp.
-
-    Restamping the marker to 3000 while the runtime enforces 2200 would
-    recreate the guide/runtime disagreement this migration exists to remove,
-    and every sync would do it again.
-    """
-    guide = tmp_path / "CLAUDE.md"
-    original = (
-        "# Guide\n\n"
-        "<!-- ciao:memory:start cap=2200 -->\n"
-        "<!-- ciao:memory:end -->\n"
-    )
-    guide.write_text(original, encoding="utf-8")
-    monkeypatch.setenv("CIAO_MEMORY_CHAR_LIMIT", "2200")
-
-    assert mt.migrate_region_caps(guide) == []
-    assert guide.read_text(encoding="utf-8") == original
-
-
-def test_migrate_region_caps_stamps_explicit_override_value(
-    tmp_path: Path,
-    monkeypatch: Any,
-) -> None:
-    """With an explicit non-default limit, the stamp follows that limit.
-
-    The guide must advertise the cap the runtime actually enforces, whatever
-    its source; a leftover former-default stamp is still drift.
-    """
-    guide = tmp_path / "CLAUDE.md"
-    guide.write_text(
-        "# Guide\n\n"
-        "<!-- ciao:memory:start cap=2200 -->\n"
-        "<!-- ciao:memory:end -->\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("CIAO_MEMORY_CHAR_LIMIT", "5000")
-
-    assert mt.migrate_region_caps(guide) == ["memory"]
-    text = guide.read_text(encoding="utf-8")
-    assert "<!-- ciao:memory:start cap=5000 -->" in text
-    assert "cap=2200" not in text
-
-
-def test_migrate_region_caps_ignores_nonnumeric_override(
-    tmp_path: Path,
-    monkeypatch: Any,
-) -> None:
-    """A garbage env value falls back to the shipped default, like config."""
-    guide = tmp_path / "CLAUDE.md"
-    guide.write_text(
-        "# Guide\n\n"
-        "<!-- ciao:memory:start cap=2200 -->\n"
-        "<!-- ciao:memory:end -->\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("CIAO_MEMORY_CHAR_LIMIT", "lots")
-
-    assert mt.migrate_region_caps(guide) == ["memory"]
-    assert "<!-- ciao:memory:start cap=3000 -->" in guide.read_text(
-        encoding="utf-8"
-    )
-
-
-def test_migrate_region_caps_reconciles_current_default_stamp(
-    tmp_path: Path,
-    monkeypatch: Any,
-) -> None:
-    """A freshly seeded guide stamped with the shipped default follows too.
-
-    Seeding stamps cap=3000; when an explicit override enforces 2200 the
-    guide must say 2200, otherwise sync leaves a brand-new guide advertising
-    a cap nothing enforces. Only known shipped defaults reconcile — custom
-    caps stay.
-    """
-    guide = tmp_path / "CLAUDE.md"
-    guide.write_text(
-        "# Guide\n\n"
-        "<!-- ciao:memory:start cap=3000 -->\n"
-        "<!-- ciao:memory:end -->\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("CIAO_MEMORY_CHAR_LIMIT", "2200")
-
-    assert mt.migrate_region_caps(guide) == ["memory"]
-    text = guide.read_text(encoding="utf-8")
-    assert "<!-- ciao:memory:start cap=2200 -->" in text
-
-
-def test_migrate_region_caps_caller_limit_beats_env(
-    tmp_path: Path,
-    monkeypatch: Any,
-) -> None:
-    """A caller-resolved limit (e.g. workspace .env) wins over the process env.
-
-    The standalone `ciao sync-skills` path resolves the workspace dotenv
-    itself because memory_tool cannot see it; the parameter must dominate so
-    the stamp matches what a server start will enforce.
-    """
-    guide = tmp_path / "CLAUDE.md"
-    guide.write_text(
-        "# Guide\n\n"
-        "<!-- ciao:memory:start cap=2200 -->\n"
-        "<!-- ciao:memory:end -->\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("CIAO_MEMORY_CHAR_LIMIT", "2200")
-
-    assert mt.migrate_region_caps(guide, char_limit=5000) == ["memory"]
-    assert "<!-- ciao:memory:start cap=5000 -->" in guide.read_text(
-        encoding="utf-8"
-    )
-
-
 def test_read_and_write_region(tmp_path: Path) -> None:
     guide = _guide_with_regions(tmp_path / "CLAUDE.md")
     mt.write_region(guide, "memory", ["alpha", "beta"])
@@ -426,11 +309,13 @@ def test_migrate_legacy_files(tmp_path: Path) -> None:
     assert "Name: Raffa" in profile
 
 
-def test_user_char_limit_defaults_agree() -> None:
+def test_region_char_limits_are_fixed() -> None:
     from ciao.config import CiaoConfig
 
+    assert mt.DEFAULT_MEMORY_CHAR_LIMIT == 3000
     assert mt.DEFAULT_USER_CHAR_LIMIT == 1375
-    assert CiaoConfig.__dataclass_fields__["user_char_limit"].default == 1375
+    assert "memory_char_limit" not in CiaoConfig.__dataclass_fields__
+    assert "user_char_limit" not in CiaoConfig.__dataclass_fields__
 
 
 def test_the_advisory_cap_never_blocks_a_write(tmp_path: Path) -> None:

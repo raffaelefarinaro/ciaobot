@@ -158,9 +158,8 @@ def _rename(
 
     A plain ``Path.rename`` on a tracked guide leaves the workspace dirty —
     ``T AGENTS.md`` / ``D CLAUDE.md`` — and `workspace_reroot.apply` refuses
-    to run against uncommitted tracked changes. Nothing else commits it
-    (`auto_sync_on_start` is off by default), so the re-root would be blocked
-    on every later boot by a rename Ciaobot performed itself, with the
+    to run against uncommitted tracked changes. Nothing else commits it, so
+    the re-root would be blocked on every later boot by a rename Ciaobot performed itself, with the
     housekeeping strip telling the operator to commit a file they never
     touched.
 

@@ -5,8 +5,8 @@ This document is for agents and operators working inside an installed Ciaobot wo
 ## Where to Look First
 
 - `CIAO_CUSTOMIZATION.md`: this guide.
-- `.env`: server config, provider keys, model lists, OAuth-related paths, push contact, and runtime paths.
-- `.runtime/workspaces.json`: the logical workspace registry, managed from Settings → Workspaces.
+- `.env`: server config (auth, host/port) and runtime paths.
+- `.runtime/workspaces.json`: logical workspaces, managed from Settings → Workspaces.
 - `.claude/agents/`: project agents available to Claude-backed chats.
 - `.claude/commands/`: slash commands available to Claude-backed chats.
 - `.claude/skills/`: skills available to Claude-backed chats.
@@ -58,13 +58,6 @@ Ciaobot supports two chat providers, each authenticating through its own CLI:
 
 - `claude`: Claude Code / Claude Agent SDK, against Anthropic.
 - `opencode`: the open-source agent CLI, bring-your-own model provider. This is how you reach anything else — Ollama, OpenRouter, or any OpenAI-compatible endpoint. Configure it in opencode and its models appear in Ciaobot's pickers automatically; Ciaobot lists whatever opencode reports as connected.
-
-Useful `.env` settings:
-
-- `CLAUDE_MODELS`: Anthropic model aliases shown in the picker. Default:
-  `opus,sonnet,haiku,fable`. Leave it unset unless you want to expose full
-  Anthropic model ids or change the default tier (the first entry): pinning
-  it freezes the picker, so a tier added in a later release stays hidden.
 
 Each provider has its own default model, thinking level, and permission mode
 for new chats, all set on the chat providers card in Settings → Models &
@@ -149,12 +142,9 @@ Safe workspace-level changes:
 - Add or edit `.runtime/workspaces.json`.
 - Add project docs, vault references, and memory pages.
 - Add or update canonical `skills/`, `subagents/`, and `commands/` assets, then run `ciao sync-skills`.
-- Change model lists and provider keys in `.env` without printing secrets.
 
 Changes that usually need restart:
 
-- Provider keys.
-- Model list env vars.
 - `CIAO_WORKSPACE`, `CIAO_VAULT_ROOT`, and runtime path changes.
 
 Changes that should be made through the app or package update flow:

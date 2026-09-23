@@ -201,9 +201,9 @@ def _manager_for_classifier() -> ProjectChatManager:
     manager = ProjectChatManager.__new__(ProjectChatManager)
     manager._config = CiaoConfig.from_env({
         "PWA_AUTH_TOKEN": "t",
-        "CIAO_INSIGHTS_MODEL": "haiku",
         "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
     })
+    manager._config.insights_model_override = "haiku"
     manager._projects = {}
     return manager
 
@@ -292,7 +292,7 @@ async def test_schedule_attention_classifier_records_bare_timeout_type(
 async def test_schedule_attention_classifier_uses_insights_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The classifier shares the insights job's env-tunable budget.
+    """The classifier shares the insights job's timeout budget.
 
     The slow Ollama Cloud model measures 214-253s on a successful call;
     a hard 60s window turns tail latency into a guaranteed TimeoutError.
@@ -304,7 +304,7 @@ async def test_schedule_attention_classifier_uses_insights_timeout(
         return '{"needs_user": false, "reason": "routine"}'
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
-    monkeypatch.setenv("CIAO_INSIGHTS_TIMEOUT_S", "900")
+    monkeypatch.setattr("ciao.insights._DEFAULT_TIMEOUT_S", 900.0)
 
     needs_user = await _manager_for_classifier()._schedule_run_needs_user(
         _entry(), ScheduleRunOutcome(completed=True, final_text="done")

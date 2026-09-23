@@ -52,7 +52,6 @@ def claude_cli_present(monkeypatch):
 def _config(tmp_path, env_extra: dict[str, str] | None = None) -> CiaoConfig:
     env = {
         "PWA_AUTH_TOKEN": "test-token",
-        "CIAO_PUSH_CONTACT": "mailto:owner@example.com",
         "CIAO_WORKSPACE": str(tmp_path),
         "CIAO_RUNTIME_ROOT": str(tmp_path / ".runtime"),
         "CIAO_VAULT_ROOT": "memory-vault",
@@ -70,8 +69,6 @@ def test_setup_status_reports_workspace_and_required_config(tmp_path) -> None:
         config,
         env={
             "PWA_AUTH_TOKEN": "test-token",
-            "CIAO_PUSH_CONTACT": "mailto:owner@example.com",
-            "ANTHROPIC_API_KEY": "sk-anthropic",
         },
     )
 
@@ -81,7 +78,7 @@ def test_setup_status_reports_workspace_and_required_config(tmp_path) -> None:
     assert checks["workspace"]["ok"] is True
     assert checks["vault"]["ok"] is True
     assert checks["pwa_auth_token"]["ok"] is True
-    assert checks["push_contact"]["ok"] is True
+    assert "push_contact" not in checks
     assert data["configured"] is True
 
 
@@ -121,32 +118,14 @@ def test_setup_status_accepts_a_pre_migration_guide(tmp_path) -> None:
     assert checks["workspace_guides"]["detail"].endswith("CLAUDE.md")
 
 
-def test_setup_status_configured_without_push_contact(tmp_path) -> None:
-    """An empty CIAO_PUSH_CONTACT never blocks a configured workspace."""
-    config = _config(tmp_path, {"CIAO_PUSH_CONTACT": ""})
-    (tmp_path / "memory-vault").mkdir()
-
-    data = setup_status(
-        config,
-        env={"PWA_AUTH_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-anthropic"},
-    )
-
-    checks = {row["id"]: row for row in data["checks"]}
-    assert checks["push_contact"]["ok"] is False
-    assert data["configured"] is True
-
-
 def test_setup_status_reports_missing_required_config(tmp_path) -> None:
-    config = _config(tmp_path, {"CIAO_PUSH_CONTACT": ""})
+    config = _config(tmp_path)
 
     data = setup_status(config, env={})
 
     checks = {row["id"]: row for row in data["checks"]}
     assert checks["vault"]["ok"] is False
     assert checks["pwa_auth_token"]["ok"] is True
-    # push contact is optional: reported as not ok, but never blocks setup
-    assert checks["push_contact"]["ok"] is False
-    assert checks["push_contact"]["required"] is False
     assert data["configured"] is False
 
 
@@ -192,12 +171,8 @@ def test_setup_status_marks_bootstrap_mode(tmp_path) -> None:
     assert data["configured"] is False
 
 
-def test_setup_status_detects_claude_api_key_and_cli_oauth(tmp_path, monkeypatch) -> None:
-    config = _config(tmp_path, {"ANTHROPIC_API_KEY": "sk-anthropic"})
-    data = setup_status(config, env={"ANTHROPIC_API_KEY": "sk-anthropic"})
-    assert data["providers"]["claude"]["ok"] is True
-    assert data["providers"]["claude"]["auth"] == "api_key"
-
+def test_setup_status_detects_claude_cli_oauth(tmp_path, monkeypatch) -> None:
+    config = _config(tmp_path)
     monkeypatch.setattr(
         "ciao.setup_status.claude_auth_status",
         lambda *args, **kwargs: {
@@ -588,7 +563,6 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
             "password": "wizard-pass",
             "workspace": str(workspace),
             "vault_root": str(notes),
-            "push_contact": "mailto:owner@example.com",
             "launch_agents_dir": str(launch_agents),
             "app_dir": str(apps),
             "python": "/opt/ciao/bin/python",
@@ -600,7 +574,7 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     body = resp.json()
     assert body["ok"] is True
     assert body["restart_requested"] is True
-    assert restarts == [config.restart_exit_code]
+    assert restarts == [75]
     # The env handoff for the re-exec'd foreground `ciao run`: without it the
     # relaunched process boots back into bootstrap mode.
     assert os.environ["CIAO_WORKSPACE"] == str(workspace.resolve())
@@ -613,7 +587,7 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     env_text = (workspace / ".env").read_text(encoding="utf-8")
     assert "PWA_AUTH_TOKEN=wizard-pass" in env_text
     assert "PWA_AUTH_REQUIRED=true" in env_text
-    assert "CIAO_PUSH_CONTACT=mailto:owner@example.com" in env_text
+    assert "CIAO_PUSH_CONTACT" not in env_text
     assert f"CIAO_VAULT_ROOT={notes}" in env_text
     assert (notes / "MEMORY.md").is_file()
     assert not (workspace / "memory-vault" / "MEMORY.md").exists()
@@ -862,41 +836,6 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
     assert "launchctl" in script
 
 
-def test_setup_finish_accepts_empty_push_contact(tmp_path) -> None:
-    """Push contact is optional: setup finishes and writes an empty value
-    (Web Push then uses the localhost placeholder subject)."""
-    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
-    serializer = URLSafeTimedSerializer("test-secret")
-    app = Starlette(
-        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
-        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
-    )
-    app.state.config = config
-    app.state.serializer = serializer
-
-    workspace = tmp_path / "workspace"
-    resp = TestClient(app, base_url="http://localhost:8443").post(
-        "/api/setup/finish",
-        json={
-            "password": "wizard-pass",
-            "workspace": str(workspace),
-            "push_contact": "",
-            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
-            "app_dir": str(tmp_path / "Applications"),
-            "restart": False,
-        },
-    )
-
-    assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    env_lines = (workspace / ".env").read_text(encoding="utf-8").splitlines()
-    assert "CIAO_PUSH_CONTACT=" in env_lines
-    assert not any(
-        line.startswith("CIAO_PUSH_CONTACT=") and line != "CIAO_PUSH_CONTACT="
-        for line in env_lines
-    )
-
-
 def test_setup_finish_requires_a_password(tmp_path) -> None:
     """Password protection is the default, so the wizard cannot skip it: the
     bootstrap token it would otherwise inherit is machine-generated and unusable
@@ -1047,7 +986,6 @@ def test_setup_finish_is_localhost_only(tmp_path) -> None:
         json={
             "password": "wizard-pass",
             "workspace": str(tmp_path / "workspace"),
-            "push_contact": "mailto:owner@example.com",
         },
     )
 

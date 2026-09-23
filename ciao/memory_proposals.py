@@ -405,18 +405,7 @@ def _is_changelog_decision(text: str) -> bool:
 
 
 def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
-    """Scan an insights markdown blob and emit destination-addressed proposals.
-
-    The unreadable-output section is scanned alongside the routed ones. A
-    structured extraction renders every row it could not parse there as a
-    ``[review]`` bullet carrying the parse error
-    (:func:`ciao.fact_candidates.candidates_from_structured`); without this the
-    row would reach the archive and stop, which is the silent loss the review
-    destination exists to prevent. Nothing is auto-applied from it — ``review``
-    is queue-only — so the section can only ever add a question for a human.
-    """
-    from ciao.fact_candidates import UNREADABLE_SECTION
-
+    """Scan an insights markdown blob and emit destination-addressed proposals."""
     if not insights_md.strip():
         return []
 
@@ -424,7 +413,7 @@ def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
     proposals: list[MemoryProposal] = []
 
     for heading in (
-        *_BEHAVIORAL_SECTIONS, *_IDENTITY_SECTIONS, UNREADABLE_SECTION, "Open loops"
+        *_BEHAVIORAL_SECTIONS, *_IDENTITY_SECTIONS, "Open loops"
     ):
         for item in sections.get(heading, []):
             kind, payload, citations, text = _peel_trailing_metadata(item)
@@ -2750,12 +2739,7 @@ def _route_to_known_entity(
     through a model call that can answer "already covered", so a routed row
     is a proposal, not a write.
     """
-    from ciao.fact_candidates import UNREADABLE_SECTION
-
-    # An unreadable structured row is a parse failure waiting for a human;
-    # re-addressing it by the names it mentions could hand it to a doc the
-    # fold already read, which drops it without anyone seeing it.
-    if proposal.target != "review" or proposal.source_section == UNREADABLE_SECTION:
+    if proposal.target != "review":
         return proposal
     text = proposal.text
 

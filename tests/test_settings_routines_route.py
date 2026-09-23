@@ -57,7 +57,7 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     # Automatic resolves to the workspace's default model.
     assert data["insights_model_effective"] == config.claude_default_model
     # The Claude model list is the vocabulary the selectors offer.
-    assert data["model_options"]["anthropic"] == list(config.claude_models)
+    assert data["model_options"]["anthropic"] == ["opus", "sonnet", "haiku", "fable"]
     assert data["backends"] == {"anthropic": True}
     assert data["workspace_context"] == {
         "workspace_root": str(config.workspace_root),
@@ -221,16 +221,18 @@ def test_an_override_clears_the_per_workspace_maps(monkeypatch, tmp_path):
     assert data["insights_model_by_workspace"] == {}
 
 
-def test_patch_persists_the_voice_locale_and_voice(tmp_path):
-    """What is left to configure once the engine choice is gone: the language
-    the on-device engines use, and which installed voice reads aloud."""
+def test_patch_persists_the_voice(tmp_path):
+    """What is left to configure once the engine choice is gone: which
+    installed voice reads aloud. The locale is fixed, so a PATCH naming it
+    is ignored like any unknown key."""
     client, config = _make_client(tmp_path)
     resp = client.patch(
         "/api/settings/routines",
         json={"transcription_locale": "it-IT", "tts_local_voice": "com.apple.voice.x"},
     )
     assert resp.status_code == 200
-    assert config.transcription_locale == "it-IT"
+    assert resp.json()["transcription"]["locale"] == "en-US"
+    assert not hasattr(config, "transcription_locale")
     assert config.tts_local_voice == "com.apple.voice.x"
     assert not hasattr(config, "transcription_engine")
     assert not hasattr(config, "tts_engine")

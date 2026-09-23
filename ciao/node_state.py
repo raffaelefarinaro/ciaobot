@@ -54,7 +54,7 @@ def normalize_role(role: str) -> str:
 
 
 def get_default_role() -> str:
-    return normalize_role(os.environ.get("CIAO_DEFAULT_NODE_ROLE", "host"))
+    return "host"
 
 
 def _normalize_peer_url(url: str) -> str:

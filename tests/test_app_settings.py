@@ -15,8 +15,6 @@ class FakeConfig:
     def __init__(self) -> None:
         self.insights_model_override = ""
         self.insights_model = "sonnet"
-
-        self.transcription_locale = "en-US"
         self.tts_local_voice = "af_heart"
         self.critique_models = ""
         # Per-provider default models / thinking / routine models; no
@@ -72,16 +70,14 @@ def test_apply_overlays_and_clear_restores_defaults(tmp_path):
     store = AppSettingsStore(tmp_path / "app_settings.json")
     config = FakeConfig()
 
-    store.update({"insights_model": "gemma4:12b-it-qat", "transcription_locale": "it-IT"})
+    store.update({"insights_model": "gemma4:12b-it-qat"})
     store.apply_to_config(config)
     assert config.insights_model_override == "gemma4:12b-it-qat"
-    assert config.transcription_locale == "it-IT"
 
-    # Clearing restores the env-backed default captured on first apply.
-    store.update({"insights_model": "", "transcription_locale": ""})
+    # Clearing restores the default captured on first apply.
+    store.update({"insights_model": ""})
     store.apply_to_config(config)
     assert config.insights_model_override == ""
-    assert config.transcription_locale == "en-US"
 
 
 def test_tts_overrides_apply_and_clear(tmp_path):

@@ -21,11 +21,6 @@ def _config(env_extra: dict[str, str] | None = None, tmp_path=None) -> CiaoConfi
     return CiaoConfig.from_env(env)
 
 
-def test_locale_env_override(tmp_path):
-    config = _config({"CIAO_TRANSCRIPTION_LOCALE": "it-IT"}, tmp_path)
-    assert config.transcription_locale == "it-IT"
-
-
 def test_apple_transcriber_refuses_when_dictation_is_unavailable(monkeypatch):
     monkeypatch.setattr(voice, "apple_dictation_available", lambda: False)
     monkeypatch.setattr(
@@ -71,7 +66,8 @@ def test_dictation_settings_have_no_engine_choice(tmp_path):
     """Cloud transcription is gone with the openai dependency, so there is one
     engine and nothing to select."""
     config = _config(tmp_path=tmp_path)
-    assert config.transcription_locale == "en-US"
+    assert voice.TRANSCRIPTION_LOCALE == "en-US"
+    assert not hasattr(config, "transcription_locale")
     assert not hasattr(config, "transcription_engine")
     assert not hasattr(config, "transcription_model")
     assert not hasattr(config, "openai_api_key")
@@ -117,8 +113,8 @@ async def test_transcribe_voice_is_free(tmp_path, monkeypatch):
     monkeypatch.setattr(voice, "apple_dictation_available", lambda: True)
 
     class FakeTranscriber:
-        def __init__(self, locale):
-            assert locale == "en-US"
+        def __init__(self):
+            pass
 
         async def transcribe(self, path):
             return "transcribed text"

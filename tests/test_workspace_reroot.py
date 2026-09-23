@@ -2126,11 +2126,9 @@ def test_the_trigger_never_raises_on_a_broken_config(tmp_path: Path) -> None:
     assert result["reason"]
 
 
-def test_startup_runs_the_trigger_between_the_sync_and_the_index(tmp_path: Path) -> None:
-    """Ordering is the caller's job and it matters both ways.
-
-    After the git sync, so the clean-tree gate judges the real tree. Before the
-    index refresh, so the indexes are rebuilt for the layout that now exists.
+def test_startup_runs_the_trigger_before_the_index(tmp_path: Path) -> None:
+    """Ordering is the caller's job: the re-root runs before the index
+    refresh, so the indexes are rebuilt for the layout that now exists.
     """
     import inspect
 
@@ -2145,10 +2143,9 @@ def test_startup_runs_the_trigger_between_the_sync_and_the_index(tmp_path: Path)
     source = "\n".join(
         line.split("#", 1)[0] for line in inspect.getsource(main).splitlines()
     )
-    sync = source.index("await sync_workspace(")
     reroot = source.index("migrate_if_needed, config")
     index = source.index("_refresh_vault_index,")
-    assert sync < reroot < index, (sync, reroot, index)
+    assert reroot < index, (reroot, index)
 
 
 def test_startup_restarts_after_a_successful_migration(tmp_path: Path) -> None:
@@ -2169,7 +2166,7 @@ def test_startup_restarts_after_a_successful_migration(tmp_path: Path) -> None:
         line.split("#", 1)[0] for line in inspect.getsource(main).splitlines()
     )
     reroot = source.index("migrate_if_needed, config")
-    restart = source.index("return config.restart_exit_code", reroot)
+    restart = source.index("return RESTART_EXIT_CODE", reroot)
     serve = source.index("await server.serve()")
     assert reroot < restart < serve, "it must return before anything serves"
 

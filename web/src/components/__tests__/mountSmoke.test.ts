@@ -55,14 +55,6 @@ vi.mock('../../lib/api', () => {
   const responses: Record<string, unknown> = {
     '/api/settings': {},
     '/api/settings/providers': {
-      keys: {},
-      service_keys: {
-        OPENAI_API_KEY: {
-          label: 'OpenAI voice API key',
-          description: 'Used directly by Ciaobot for cloud transcription and speech.',
-          configured: false,
-        },
-      },
       connections: {
         claude: {
           name: 'claude',
@@ -86,8 +78,6 @@ vi.mock('../../lib/api', () => {
           short_label: 'opencode',
         },
       },
-      requires_restart: true,
-      env_path: '/tmp/workspace/.env',
     },
     '/api/local/status': { git_repo: true, branch: 'main', dirty: false },
     '/api/admin/skills': {

@@ -212,9 +212,6 @@ REGISTRY: tuple[JobSpec, ...] = (
             "Runs one command in a tracked subprocess and wakes the chat that "
             "started it.", False, True,
             trigger="When a chat starts one with the background_run_start tool."),
-    JobSpec("startup_sync", "Startup git sync", "system",
-            "Commits and pulls the workspace on server startup.", False, False,
-            trigger="On server startup."),
     JobSpec("vault_index", "Vault index refresh", "system",
             "Regenerates each agent root's INDEX.md and VOCABULARY.md from frontmatter.",
             False, False,
@@ -259,15 +256,14 @@ REGISTRY: tuple[JobSpec, ...] = (
 RETIRED_JOBS: frozenset[str] = frozenset({
     "pwa_rebuild",       # startup PWA rebuild phase, removed
     "insights_backfill",  # renamed to backfill_insights
+    "startup_sync",      # opt-in startup git pull, removed
 })
 
 # StartupTracker phase name -> registry job id (phases not listed are skipped,
 # e.g. the connect_* health checks, which are not automations).
 STARTUP_PHASE_JOBS: dict[str, str] = {
-    "sync_workspace": "startup_sync",
     "refresh_vault_index": "vault_index",
     "update_skills": "skills_update",
-    "backfill_insights": "backfill_insights",
 }
 
 

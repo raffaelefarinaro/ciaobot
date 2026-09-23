@@ -37,7 +37,7 @@ INSIGHTS_STAMP = "<!-- ciao:session-insights -->"
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
 
-def _config(tmp_path: Path, *, insights_enabled: bool = True) -> CiaoConfig:
+def _config(tmp_path: Path) -> CiaoConfig:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     return CiaoConfig(
@@ -45,12 +45,11 @@ def _config(tmp_path: Path, *, insights_enabled: bool = True) -> CiaoConfig:
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
-        insights_enabled=insights_enabled,
     )
 
 
-def _manager(tmp_path: Path, *, insights_enabled: bool = True) -> ProjectChatManager:
-    config = _config(tmp_path, insights_enabled=insights_enabled)
+def _manager(tmp_path: Path) -> ProjectChatManager:
+    config = _config(tmp_path)
     runtime = config.state_path.parent
     return ProjectChatManager(
         config,
@@ -788,42 +787,6 @@ def test_proposals_empty_archive_is_still_success(tmp_path: Path) -> None:
     asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["memory_proposals"]))
 
     assert job.status_of("memory_proposals") == aj.SUCCEEDED
-
-
-def test_insights_disabled_settles_both_dependent_stages_skipped(
-    tmp_path: Path,
-) -> None:
-    """With extraction disabled, the fold and proposals are not left pending.
-
-    They were intentionally never planned (there is no insights text to consume);
-    leaving them pending made the manifest read `incomplete` and offered a retry
-    for stages that can never run for this chat.
-    """
-    archive = _archive(tmp_path)
-    manager = _manager(tmp_path, insights_enabled=False)
-    project = manager.create_project("Work", workspace="work")
-    chat = manager.create_chat(project.project_id, title="A chat")
-    chat.archived = True
-    chat.archive_path = str(archive.relative_to(tmp_path))
-
-    async def drive() -> object:
-        manager.run_archive_postprocess(
-            chat.chat_id,
-            ArchiveOutcome(
-                path=archive, session_id="sess-1", turn_count=1,
-                filtered_jsonl="line",
-            ),
-            chat,
-            project,
-        )
-        await asyncio.sleep(0)
-        return manager._archive_jobs[chat.chat_id]
-
-    job = asyncio.run(drive())
-    assert job.status_of("insights") == aj.SKIPPED
-    assert job.status_of("project_doc_update") == aj.SKIPPED
-    assert job.status_of("memory_proposals") == aj.SKIPPED
-
 
 
 # ── Idempotency: no duplicates on retry ───────────────────────────────────

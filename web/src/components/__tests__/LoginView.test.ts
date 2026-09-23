@@ -464,7 +464,7 @@ describe('LoginView setup wizard tests', () => {
           ok: false,
           auth: 'missing',
           command: 'claude auth login',
-          detail: 'Run Claude OAuth or set ANTHROPIC_API_KEY.',
+          detail: 'Run Claude OAuth.',
         },
       },
     })

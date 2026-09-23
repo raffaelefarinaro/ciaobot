@@ -38,20 +38,10 @@ def _workspace_name_arg(value: str) -> str:
 
 
 def _restart_exit_code() -> int:
-    """The exit code the server uses to request a restart (config default 75).
+    """The exit code the server uses to request a restart."""
+    from ciao.config import RESTART_EXIT_CODE
 
-    Read from the environment after the server ran: ``CiaoConfig.from_env``
-    loads the workspace ``.env`` into ``os.environ``, so an override set there
-    is visible here too.
-    """
-    raw = (
-        os.environ.get("CIAO_RESTART_EXIT_CODE", "").strip()
-        or "75"
-    )
-    try:
-        return int(raw)
-    except ValueError:
-        return 75
+    return RESTART_EXIT_CODE
 
 
 def _relaunch_argv() -> list[str]:
@@ -478,10 +468,23 @@ def _disable_legacy_menubar_agent(launch_agents_dir: Path | None = None) -> bool
     return True
 
 
-# Shared with the startup-sync repair path so a workspace created here and a
-# workspace repaired there ignore exactly the same paths (see git_sync).
-from ciao.git_sync import WORKSPACE_GITIGNORE_ENTRIES as _WORKSPACE_GITIGNORE_ENTRIES
 from ciao.workspace_guide import guide_path
+
+# Paths a workspace snapshot must never pick up. No `.codex/` entry: codex is
+# retired (`sync_skills` only prunes what older versions left behind, it never
+# writes there), so ignoring it would be dead config.
+_WORKSPACE_GITIGNORE_ENTRIES = (
+    ".env",
+    ".envrc",
+    ".direnv/",
+    "secrets/",
+    ".runtime/",
+    ".claude/",
+    ".agents/",
+    ".opencode/",
+    "opencode.json",
+    "*.log",
+)
 
 
 def _ensure_workspace_gitignore(root: Path) -> None:
@@ -702,7 +705,6 @@ def setup_workspace(
     *,
     auth_token: str | None = None,
     auth_required: bool = True,
-    push_contact: str | None = None,
     vault_root: Path | str | None = None,
     vault_mode: str = "scratch",
     workspace_name: str | None = None,
@@ -810,10 +812,6 @@ def setup_workspace(
     name = requested_name or "personal"
 
     token = auth_token or secrets.token_urlsafe(32)
-    # Empty contact is fine: Web Push then uses the localhost placeholder
-    # subject (ciao.main.DEFAULT_PUSH_SUBJECT). Never write a fake default
-    # into .env.
-    contact = (push_contact or "").strip()
     # Always pin PWA_AUTH_REQUIRED: an unset value is read as "protect when a
     # token exists" (see CiaoConfig.from_env), and a setup that deliberately
     # opted out must survive that default.
@@ -822,7 +820,6 @@ def setup_workspace(
         ("PWA_AUTH_REQUIRED", "true" if auth_required else "false"),
     ]
     desired_env.extend([
-        ("CIAO_PUSH_CONTACT", contact),
         ("CIAO_WORKSPACE", "."),
         ("CIAO_VAULT_ROOT", vault_value),
         ("CIAO_VAULT_MODE", vault_mode),
@@ -1224,7 +1221,6 @@ def _setup_command(args: argparse.Namespace) -> int:
             args.workspace,
             auth_token=args.auth_token,
             auth_required=auth_required,
-            push_contact=args.push_contact,
             workspace_name=args.workspace_name,
             python_path=args.python,
             port=args.port,
@@ -2463,6 +2459,7 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
     number that hides which workspace is over budget.
     """
     from ciao.config import CiaoConfig
+    from ciao.memory_tool import DEFAULT_MEMORY_CHAR_LIMIT, DEFAULT_USER_CHAR_LIMIT
     from ciao.os_audit import (
         _aggregate_memory_guides,
         _memory_guide_specs,
@@ -2496,7 +2493,10 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
             workspace=name,
             workspace_dir=workspace,
             current=datetime.date.today(),
-            region_limits={"memory": config.memory_char_limit, "profile": config.user_char_limit},
+            region_limits={
+                "memory": DEFAULT_MEMORY_CHAR_LIMIT,
+                "profile": DEFAULT_USER_CHAR_LIMIT,
+            },
         )
         for name, guide in specs
     ]
@@ -2612,9 +2612,7 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
             print(
                 "  Fix: open a chat in that workspace and ask the agent to "
                 'consolidate the region (e.g. "consolidate my ciao:memory '
-                'region under its cap"), or raise CIAO_MEMORY_CHAR_LIMIT / '
-                "CIAO_USER_CHAR_LIMIT in .env and restart Ciaobot if every "
-                "entry is high-signal."
+                'region under its cap").'
             )
         print(f"Event-shaped entries: {len(report['event_shaped_entries'])}")
         for finding in report["event_shaped_entries"]:
@@ -3891,7 +3889,6 @@ def build_parser() -> argparse.ArgumentParser:
             "with a password. Only for a machine nobody else can reach."
         ),
     )
-    setup_parser.add_argument("--push-contact", help="Web Push contact to write when .env is new.")
     setup_parser.add_argument(
         "--python",
         default=None,

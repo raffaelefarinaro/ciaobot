@@ -33,8 +33,12 @@ from ciao.fts_search import (
     vault_key_prefix,
 )
 from ciao.memory_tool import memory_status as memory_status_payload
-from ciao.memory_tool import resolve_region, update_region
-from ciao.web.project_chats import UnknownModelError
+from ciao.memory_tool import (
+    DEFAULT_MEMORY_CHAR_LIMIT,
+    DEFAULT_USER_CHAR_LIMIT,
+    resolve_region,
+    update_region,
+)
 from ciao.schedules import (
     DEFAULT_INTERVAL_MINUTES,
     FREQUENCIES,
@@ -54,7 +58,7 @@ logger = logging.getLogger(__name__)
 # A GWS health reading older than this is treated as stale: the monitor
 # preserves prior state when probes are unavailable or checks are disabled, so
 # a cached "valid" reading can outlive the token it described. Mirrors the
-# default CIAO_GWS_HEALTH_INTERVAL (900s) plus a small grace period.
+# 900s check interval in ``ciao.main`` plus a small grace period.
 _GWS_HEALTH_STALE_AFTER = 1200.0
 
 #: Heavy/hidden subtrees skipped by the ``file_surface`` suggestions walk so a
@@ -542,8 +546,8 @@ class CiaoControlPlane:
         token_valid = (
             bool(health.get("token_valid")) if "token_valid" in health else None
         )
-        # The health monitor preserves prior state when a probe is unavailable or
-        # checks are disabled (CIAO_GWS_HEALTH_INTERVAL=0), so a cached reading
+        # The health monitor preserves prior state when a probe is unavailable,
+        # so a cached reading
         # can outlive the token it described. Only a fresh, confirmed valid
         # reading establishes a connection; a stale one is reported as unknown
         # rather than assumed good.
@@ -582,8 +586,6 @@ class CiaoControlPlane:
         guide = guide_path(self.config.agent_root(workspace))
         return _ok(memory_status_payload(
             guide,
-            memory_char_limit=int(getattr(self.config, "memory_char_limit", 3000)),
-            user_char_limit=int(getattr(self.config, "user_char_limit", 1375)),
         ))
 
     def memory_update(
@@ -603,9 +605,9 @@ class CiaoControlPlane:
             raise ControlPlaneError("invalid_action", "action must be add, replace, or remove.")
         canonical = resolve_region(region)
         limit = (
-            int(getattr(self.config, "memory_char_limit", 3000))
+            DEFAULT_MEMORY_CHAR_LIMIT
             if canonical == "memory"
-            else int(getattr(self.config, "user_char_limit", 1375))
+            else DEFAULT_USER_CHAR_LIMIT
         )
         guide = guide_path(self.config.agent_root(workspace))
         try:

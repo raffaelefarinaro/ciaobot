@@ -17,10 +17,7 @@ mirroring the Memory-Proposals.md promote/dismiss pattern:
 
 Threshold is deliberately a constant rather than a registry entry: ``5`` matched
 the tier boundary in the original sweep and is the point where a tag moves
-from ``Tags (emerging)`` to ``Tags (established)`` in ``VOCABULARY.md``. It
-is configurable via ``VOCAB_PROMOTION_THRESHOLD`` env for tests/installs
-that want a different bar, but the default is the deliberate number from the
-plan's open question.
+from ``Tags (emerging)`` to ``Tags (established)`` in ``VOCABULARY.md``.
 
 Types are a single global canonical set, so usage is counted across EVERY
 workspace vault via ``config.vault_scan_targets()`` when a registry is
@@ -44,7 +41,6 @@ from pathlib import Path
 from typing import Any
 
 from ciao.vault_index import (
-    DEFAULT_PROMOTION_THRESHOLD,
     Entry,
     promotion_threshold,
     scan_targets,

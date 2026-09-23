@@ -38,7 +38,6 @@ def test_run_relaunches_on_restart_exit_code(
     execs: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(ciao.main, "main", _raise_system_exit(75))
     monkeypatch.setattr(cli.os, "execv", lambda exe, argv: execs.append((exe, argv)))
-    monkeypatch.delenv("CIAO_RESTART_EXIT_CODE", raising=False)
 
     assert cli._run_server() == 75
 
@@ -59,7 +58,6 @@ def test_run_relaunch_drops_dotenv_exports_so_the_new_process_rereads_env(
     monkeypatch.setattr(
         cli.os, "execv", lambda exe, argv: seen.append(cli.os.environ.get("CIAO_TEST_DOTENV_KEY"))
     )
-    monkeypatch.delenv("CIAO_RESTART_EXIT_CODE", raising=False)
     monkeypatch.setenv("CIAO_TEST_DOTENV_KEY", "stale")
     monkeypatch.setattr(ciao_config, "_EXPORTED_DOTENV_KEYS", {"CIAO_TEST_DOTENV_KEY"})
 
@@ -79,21 +77,6 @@ def test_run_propagates_other_exit_codes_without_relaunch(
     monkeypatch.setattr(cli.os, "execv", fail_execv)
 
     assert cli._run_server() == 3
-
-
-def test_run_restart_exit_code_honors_env_override(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import ciao.main
-
-    execs: list[list[str]] = []
-    monkeypatch.setattr(ciao.main, "main", _raise_system_exit(42))
-    monkeypatch.setattr(cli.os, "execv", lambda exe, argv: execs.append(argv))
-    monkeypatch.setenv("CIAO_RESTART_EXIT_CODE", "42")
-
-    assert cli._run_server() == 42
-
-    assert len(execs) == 1
 
 
 def test_cli_public_preflight_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -447,8 +430,6 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
             "research",
             "--auth-token",
             "test-token",
-            "--push-contact",
-            "mailto:owner@example.com",
             "--launch-agents-dir",
             str(launch_agents),
             "--app-dir",
@@ -461,12 +442,11 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     )
 
     assert rc == 0
-    assert (workspace / ".env").read_text(encoding="utf-8").splitlines()[:3] == [
+    assert (workspace / ".env").read_text(encoding="utf-8").splitlines()[:2] == [
         "PWA_AUTH_TOKEN=test-token",
         # Password protection is the default and is pinned explicitly, so an
         # unset value never has to be guessed at on the next start.
         "PWA_AUTH_REQUIRED=true",
-        "CIAO_PUSH_CONTACT=mailto:owner@example.com",
     ]
     # Agent assets belong to the WORKSPACE root, not the install root: a fresh
     # setup now builds the per-workspace layout directly instead of the shared one
