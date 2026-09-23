@@ -90,6 +90,7 @@ SHIPPED_STOCK_COMMAND_DIGESTS: dict[str, frozenset[str]] = {
         "86f6854b33701e02518cec19160fb0e2b466c31d48819678088af4c27a9560d5",
         "98950dfedb6db9dc0f2c0e8c39c2164369e3f591d4c1928dd4d18e18a6665fd3",
         "98bf1b2cda1b97d9ae7caf43357d002580b038645737b895a42267f08cf4c7ec",
+        "d7d8eb94dd11a6f84b9bb329c4f7ed6c5050d79a6fd2fa20fd1e7369c361ce6c",
         "e89dbfdda0580280fdced71cabf50fad529c9824fb275104f60969b000ebb012",
     }),
 }

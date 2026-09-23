@@ -65,9 +65,11 @@ fail-open if the provider is unavailable.
 
 opencode chats follow the chat's permission mode (the per-provider default
 from Settings → Models & providers, Auto unless changed). In Auto the session
-permission ruleset is `allow` for routine tools, with `bash` (every shell
-command) and Ciaobot's destructive control-plane tools routed to `ask`; Manual
-routes every tool to `ask` and Bypass allows everything. Each `ask` surfaces an
+permission ruleset is `allow` for every tool except `bash` (every shell
+command, including `ciao …` control-plane calls), which is routed to `ask`;
+Manual routes every tool to `ask` and Bypass allows everything. In every mode
+the credential-path denies (`.env`, `.runtime`, `secrets`) are appended last,
+so even Bypass cannot read them. Each `ask` surfaces an
 approval card in the chat that the operator approves or denies.
 
 To get a Claude-Code/Codex-style **automatic** approval classifier instead of
@@ -112,7 +114,7 @@ Use `ciao gws <profile> <gws-args>` to switch between accounts (`$GWS_PROFILE` h
 
 **PWA-native OAuth (no terminal required).** The Settings → Workspaces Google Workspace card can upload a GCP `client_secret.json` and drive the full OAuth code-exchange from the browser. The server generates the Google authorization URL, opens it in a new tab, and exchanges the returned authorization code for a refresh token. Accounts are added in that card (there are no built-in ones); credentials are written to `<workspace>/secrets/gws-<account>/`, except the two pre-registry names, which keep `<workspace>/secrets/gws-personal/` (personal) and `<workspace>/secrets/gws/` (work). Scopes granted: every account requests the same set — Gmail, Calendar, Drive, Sheets, Docs, Slides, Tasks, Contacts, Forms, plus `openid` and the user's email/profile (`ciao/gws_auth.py`). Use `Disconnect` to delete the stored credential files from the same panel. Note: these paths (`<workspace>/secrets/gws-*/`) are separate from `~/.config/gws-*/`, which the `gws` CLI uses by default when invoked directly via `ciao gws`.
 
-**Getting `client_secret.json`.** In [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials): create or pick a project, enable the APIs you need (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks), then create an OAuth 2.0 client ID (Desktop app, or Web application with redirect URI `http://localhost`). Download the JSON credentials file and upload it in Settings → Workspaces (Google Workspace card). The PWA ⓘ panel on that card repeats these steps for end users. Stock `gws-*` skills ship with the app once `gws` is installed and authenticated.
+**Getting `client_secret.json`.** In [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials): create or pick a project, enable the APIs you need (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, People for Contacts, Forms), then create an OAuth 2.0 client ID (Desktop app, or Web application with redirect URI `http://localhost`). Download the JSON credentials file and upload it in Settings → Workspaces (Google Workspace card). The PWA ⓘ panel on that card repeats these steps for end users. Stock `gws-*` skills ship with the app once `gws` is installed and authenticated.
 
 **Auth + scope gotchas.** Use `gws auth login --full` for complete scopes. `gws auth login --services calendar` has produced tokens that still lack the calendar scope. `ciao gws` already execs `gws`, so `ciao gws personal gws calendar ...` doubles the command and fails with `Unknown service 'gws'`; pass the subcommand directly: `ciao gws personal calendar ...`. If auth fails despite a fresh login, `credentials.enc` (AES-256-GCM) may hold the valid refresh token while `credentials.json` carries a stale one. The work gcloud account only has `openid`/`cloud-platform` scopes and returns 403 on Drive uploads, so do not substitute `gcloud auth print-access-token` for `gws` auth in Drive flows.
 

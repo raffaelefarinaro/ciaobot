@@ -3891,7 +3891,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Directory to scan for legacy launcher bundles during migration. "
-            "Defaults to /Applications when writable, else ~/Applications."
+            "Defaults to ~/Applications."
         ),
     )
     setup_parser.add_argument(

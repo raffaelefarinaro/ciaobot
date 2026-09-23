@@ -867,7 +867,7 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
 
 def test_setup_finish_accepts_empty_push_contact(tmp_path) -> None:
     """Push contact is optional: setup finishes and writes an empty value
-    (Web Push stays disabled until configured in Settings)."""
+    (Web Push then uses the localhost placeholder subject)."""
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(

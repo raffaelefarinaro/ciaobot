@@ -20,11 +20,11 @@ Turn `$ARGUMENTS` into one durable, present-tense fact — never "User said X �
 
 If the user explicitly wants it live immediately, write it where step 2 routed it — the destination does not change just because the review step is skipped:
 
-- `memory`/`profile` → edit the `ciao:memory` / `ciao:profile` bounded region in the workspace guide, or use `memory_update`. The region cap is advisory on every path — the write goes through and reports `over_cap`; nothing refuses it and nothing shrinks the region, which is what consolidation is for. Search the region for a superseded entry first and replace it rather than appending; separate entries with `§`.
+- `memory`/`profile` → edit the `ciao:memory` / `ciao:profile` bounded region in the workspace guide with your file-edit tool. The region cap is advisory on every path — the write goes through and reports `over_cap`; nothing refuses it and nothing shrinks the region, which is what consolidation is for. Search the region for a superseded entry first and replace it rather than appending; separate entries with `§`.
 - `project` → the project's canonical doc.
 - `people` → that person's note in `People/`.
 - `learnings` → `Workspace/Learnings.md` under `## Active`.
 
 Then dismiss the queued copy with `ciao memory-proposal-dismiss --text-file <fact-file> --promoted` if one exists, reusing the same file from step 3. The fact never becomes a shell argument in either direction — a substring is only safe if you have read it and know it holds no metacharacter at all, and `;`, `&`, `|`, `<`, `>`, `*` and parentheses are as dangerous as quotes.
 
-`ciao memory update` writes a region directly and skips the review queue, so use it only for the explicit immediate-write case above, never as a substitute for step 3.
+`ciao memory update` also writes a region directly and skips the review queue, but it takes the fact as a `--entry` shell argument, which the rule above forbids for user-supplied text — so do not use it for a fact from `$ARGUMENTS`, and never as a substitute for step 3.
