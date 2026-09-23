@@ -2097,7 +2097,7 @@ defineExpose({ isBusyAuthoring })
 .pfp-btn-sm:hover { background: var(--border); }
 .pfp-btn-sm.primary {
   background: var(--accent, #60a5fa);
-  color: white;
+  color: var(--on-accent);
   border-color: transparent;
 }
 .pfp-btn-sm.primary:disabled {

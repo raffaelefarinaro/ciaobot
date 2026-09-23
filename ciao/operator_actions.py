@@ -89,6 +89,12 @@ class OperatorAction:
     # A "not now" button for ask-style actions: records a suppression receipt
     # via dismiss_action() instead of running a fix.
     dismiss_label: str = ""
+    # Which button leads the tile. Empty keeps the default order (run, link and
+    # view buttons filled, chat as a chip below). "chat" puts the chat button
+    # first as the filled primary and demotes the link to a chip: on the update
+    # tile the forward action is updating, and release notes are supporting
+    # reading.
+    primary: str = ""
     # Unmissable and not dismissible: a precondition the install cannot get past
     # on its own. Deliberately NOT an app-wide lock — the one realistic cause is
     # an uncommitted vault, and locking the app would take away the assistant the
@@ -113,6 +119,7 @@ class OperatorAction:
             "link_label": self.link_label,
             "link_url": self.link_url,
             "dismiss_label": self.dismiss_label,
+            "primary": self.primary,
             "blocking": self.blocking,
         }
 
@@ -205,6 +212,7 @@ def _detect_package_update(context: DetectionContext) -> list[OperatorAction]:
             link_label="Release notes",
             link_url=latest_release_redirect_url(),
             chat_label="How to install",
+            primary="chat",
             chat_prompt=(
                 f"A new Ciaobot version ({latest}) is available. The current "
                 "install is updated through Ciaobot.app or the one-line "

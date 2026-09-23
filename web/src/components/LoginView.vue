@@ -1039,7 +1039,7 @@ onUnmounted(() => {
 .prompt-submit {
   flex-shrink: 0;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border: none;
   border-radius: var(--radius-sm);
   padding: 4px 10px;

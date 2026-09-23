@@ -688,7 +688,7 @@ onBeforeUnmount(() => {
 
 .ms-item--active {
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
 }
 
 .ms-item--active:hover,
@@ -715,7 +715,7 @@ onBeforeUnmount(() => {
 
 .model-selector__checkmark {
   font-size: 11px;
-  color: white;
+  color: var(--on-accent);
 }
 
 .model-selector__item-label {

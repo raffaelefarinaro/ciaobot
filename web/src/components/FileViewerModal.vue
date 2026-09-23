@@ -1790,7 +1790,7 @@ if (typeof window !== 'undefined') {
 .fv-btn-sm.primary {
   background: var(--accent, #60a5fa);
   border-color: var(--accent, #60a5fa);
-  color: var(--bg);
+  color: var(--on-accent);
 }
 .fv-btn-sm.danger {
   background: var(--error, #f87171);

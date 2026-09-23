@@ -192,6 +192,84 @@ describe('HousekeepingStrip', () => {
   })
 })
 
+describe('the update tile', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    vi.spyOn(useHousekeepingStore(), 'init').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+    delete (window as unknown as Record<string, unknown>).__CIAOBOT_DESKTOP__
+  })
+
+  function updateAction(): OperatorAction {
+    return action({
+      id: 'package-update',
+      kind: 'package-update',
+      workspace: '',
+      link_label: 'Release notes',
+      link_url: 'https://github.com/raffaelefarinaro/ciaobot/releases/latest',
+      chat_label: 'How to install',
+      chat_prompt: 'A new Ciaobot version is available.',
+      primary: 'chat',
+    })
+  }
+
+  function controls(wrapper: ReturnType<typeof mount>) {
+    return wrapper.findAll('.housekeeping-actions > *')
+  }
+
+  it('leads with the filled chat button and demotes release notes on the web', async () => {
+    useHousekeepingStore().actions = [updateAction()]
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+
+    const [first, second] = controls(wrapper)
+    expect(controls(wrapper)).toHaveLength(2)
+    expect(first.element.tagName).toBe('BUTTON')
+    expect(first.text()).toBe('How to install')
+    expect(first.classes()).toContain('btn-primary')
+    expect(first.classes()).not.toContain('btn-chip')
+    expect(second.element.tagName).toBe('A')
+    expect(second.text()).toBe('Release notes')
+    expect(second.classes()).toContain('btn-chip')
+    expect(second.classes()).not.toContain('btn-primary')
+    wrapper.unmount()
+  })
+
+  it('leads with "Update now" in the desktop app', async () => {
+    ;(window as unknown as Record<string, unknown>).__CIAOBOT_DESKTOP__ = true
+    useHousekeepingStore().actions = [updateAction()]
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+
+    const [first, second] = controls(wrapper)
+    expect(first.text()).toBe('Update now')
+    expect(first.classes()).toContain('btn-primary')
+    expect(second.text()).toBe('Release notes')
+    expect(second.classes()).toContain('btn-chip')
+    wrapper.unmount()
+  })
+
+  it('keeps the default order when the action names no lead', async () => {
+    useHousekeepingStore().actions = [{ ...updateAction(), primary: '' }]
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+
+    const [first, second] = controls(wrapper)
+    expect(first.element.tagName).toBe('A')
+    expect(first.classes()).toContain('btn-primary')
+    expect(second.element.tagName).toBe('BUTTON')
+    expect(second.classes()).toContain('btn-chip')
+    wrapper.unmount()
+  })
+})
+
 describe('a tile that names an existing surface', () => {
   it('offers a button that navigates there, not only chat', async () => {
     // The queue tiles offered "Review in chat" alone, so the operator was asked
