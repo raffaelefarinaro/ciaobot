@@ -14,6 +14,7 @@ from urllib.parse import unquote, urlsplit
 import yaml
 
 from ciao.vault_index import (
+    ARCHIVED_WORKSPACES_DIR,
     canonical_type,
     is_generated_vault_file,
     is_reserved_bookkeeping,
@@ -80,7 +81,7 @@ def duplicate_key(stem: str) -> str:
 # Directories that aren't vault content: app state, generated projections, tool
 # caches, and any venv/node_modules checked out inside the vault root (#129).
 EXCLUDE_DIRS = {
-    "Logs", "Templates", ".obsidian", ".vault-trash", ".archived-workspaces",
+    "Logs", "Templates", ".obsidian", ".vault-trash", ARCHIVED_WORKSPACES_DIR,
     ".venv", "venv", "node_modules", ".git",
     ".claude", ".agents", ".codex", ".opencode", "__pycache__",
 }

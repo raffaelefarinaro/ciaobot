@@ -5,7 +5,8 @@ workspace, which mixed e.g. Work notes into Personal memory with no way back.
 It is now archived like a completed project: unregistered, its folder moved
 byte for byte to ``<install>/.archived-workspaces/<name>-<stamp>/``, its chats
 archived, its schedules taken with it, and its notes dropped from search and
-the shared index. A restore puts all of it back.
+the shared index. A restore puts the files, the registry entry and the
+schedules back; vault-backed projects are rediscovered from the notes.
 """
 
 from __future__ import annotations
@@ -591,3 +592,94 @@ def test_restore_rejects_bad_ids(tmp_path, bad):
 def test_primary_is_reported_so_the_ui_can_hide_its_archive_button(tmp_path):
     client, config, _pcm, _store = _app(tmp_path, rerooted=True)
     assert client.get("/api/workspaces").json()["primary"] == "personal"
+
+
+# ── review follow-ups ────────────────────────────────────────────────────────
+
+
+def test_a_failed_move_keeps_the_chats_and_schedules(tmp_path, monkeypatch):
+    client, config, pcm, store = _app(tmp_path, rerooted=True)
+    general = next(p for p in pcm.list_projects("work") if p.is_auto)
+    chat = pcm.create_chat(general.project_id, title="work chat")
+    mine = store.create(
+        daily_time_utc="08:00", prompt="standup", model="", mode="auto",
+        chat_id=0, workspace="work",
+    )
+
+    def _refuse(*_a, **_kw):
+        raise OSError("busy")
+
+    monkeypatch.setattr("ciao.workspace_archive.os.rename", _refuse)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500
+    assert config.workspace("work") is not None
+    assert (tmp_path / "work").is_dir()
+    assert pcm.get_chat(chat.chat_id) is not None
+    assert general.project_id in {p.project_id for p in pcm.list_projects("work")}
+    assert {e.schedule_id for e in store.list_entries()} == {mine.schedule_id}
+    root = archive_root(config)
+    assert not root.exists() or not any(root.iterdir())
+
+
+def test_archive_waits_for_a_running_archive_job(tmp_path):
+    client, config, pcm, _store = _app(tmp_path, rerooted=True)
+    general = next(p for p in pcm.list_projects("work") if p.is_auto)
+    chat = pcm.create_chat(general.project_id, title="postprocessing")
+
+    class _Running:
+        def done(self) -> bool:
+            return False
+
+    pcm._archive_tasks[chat.chat_id] = _Running()  # type: ignore[assignment]
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 409
+    assert "being archived" in response.json()["error"]
+    assert (tmp_path / "work").is_dir()
+
+
+def test_shared_layout_restores_a_custom_vault_folder_name(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=False)
+    shared = Path(config.vault_root)
+    (shared / "work").rename(shared / "client-a")
+    config.workspaces["work"] = WorkspaceConfig(
+        name="work", vault_root="memory-vault/client-a", color="cyan"
+    )
+    before = _tree(shared / "client-a")
+
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    assert not (shared / "client-a").exists()
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert not (shared / "work").exists()
+    assert _tree(shared / "client-a") == before
+    assert Path(config.workspace_vault_root("work")) == shared / "client-a"
+
+
+@pytest.mark.parametrize("content_dir", ["..", "../personal", "/etc", "a/b"])
+def test_restore_refuses_an_unsafe_content_dir(tmp_path, content_dir):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    meta_path = archive_root(config) / archived["id"] / "archive.json"
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    metadata["content_dir"] = content_dir
+    meta_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 409
+    assert config.workspace("work") is None
+    assert (tmp_path / "personal").is_dir()
+
+
+def test_shared_layout_refuses_a_vault_that_is_its_own_repository(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=False)
+    (Path(config.vault_root) / ".git").mkdir()
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 409
+    assert "own repository" in response.json()["error"]
+    assert (Path(config.vault_root) / "work").is_dir()

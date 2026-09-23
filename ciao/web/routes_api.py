@@ -396,105 +396,139 @@ def _publish_automations_changed(request: Request) -> None:
         logger.debug("Could not publish automations_changed", exc_info=True)
 
 
+def _workspace_archive_lock(request: Request) -> asyncio.Lock:
+    """One archive or restore at a time per app.
+
+    Without it a double-submitted archive ran twice: the second pass found the
+    folder already gone and recorded an empty "archived" copy, or its failed
+    rename refreshed the manager while the workspace was still registered and
+    recreated the General folder at the old path. Kept on ``app.state`` rather
+    than at module level so it binds to the app's own event loop.
+    """
+    lock = getattr(request.app.state, "workspace_archive_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        request.app.state.workspace_archive_lock = lock
+    return lock
+
+
 async def archive_workspace_setting(request: Request) -> JSONResponse:
     """Archive a workspace: unregister it and move its folder aside, intact.
 
     Nothing is merged into another workspace and nothing is deleted - see
     ``ciao/workspace_archive.py``. Order matters: everything that is refused is
-    refused before anything changes; chats are archived and schedules taken
-    while the workspace is still registered; the folder moves before the
-    registry entry goes, so a failed move leaves the workspace registered.
+    refused before anything changes; schedules are taken and the folder moves
+    first, so a failed move changes nothing that cannot be put back; only then
+    are the chats archived (irreversible), still while the workspace is
+    registered; the registry entry goes last.
     """
     from ciao import workspace_archive  # noqa: PLC0415
 
     config = request.app.state.config
     name = str(request.path_params.get("name", "")).strip()
-    try:
-        target = workspace_archive.plan_archive(config, name)
-    except workspace_archive.WorkspaceArchiveError as exc:
-        return JSONResponse({"error": exc.message}, status_code=exc.status)
+    async with _workspace_archive_lock(request):
+        try:
+            target = workspace_archive.plan_archive(config, name)
+        except workspace_archive.WorkspaceArchiveError as exc:
+            return JSONResponse({"error": exc.message}, status_code=exc.status)
 
-    pcm = getattr(request.app.state, "project_chat_manager", None)
-    busy = getattr(pcm, "workspace_busy_chat_ids", None)
-    if callable(busy) and busy(name):
-        return JSONResponse(
-            {
-                "error": (
-                    f"a chat in '{name}' is still working; let it finish or "
-                    "stop it, then archive the workspace"
-                )
-            },
-            status_code=409,
+        pcm = getattr(request.app.state, "project_chat_manager", None)
+        busy = getattr(pcm, "workspace_busy_chat_ids", None)
+        if callable(busy) and busy(name):
+            return JSONResponse(
+                {
+                    "error": (
+                        f"a chat in '{name}' is still working or being archived; "
+                        "let it finish or stop it, then archive the workspace"
+                    )
+                },
+                status_code=409,
+            )
+
+        scope = getattr(pcm, "workspace_scope", None)
+        project_ids, chat_ids = scope(name) if callable(scope) else (set(), set())
+
+        def _belongs(item: dict) -> bool:
+            return (
+                str(item.get("workspace") or "") == name
+                or str(item.get("web_project_id") or "") in project_ids
+                or str(item.get("fallback_project_id") or "") in project_ids
+                or str(item.get("web_chat_id") or "") in chat_ids
+            )
+
+        counts = getattr(pcm, "workspace_counts", None)
+        summary: dict[str, Any] = (
+            dict(counts(name)) if callable(counts) else {"projects": 0, "chats": 0}
         )
+        manager = _schedule_manager(request)
+        take = getattr(manager, "take_user_items", None)
+        schedules: list[dict] = take(_belongs) if callable(take) else []
+        summary["schedules"] = len(schedules)
+        try:
+            # On the event loop on purpose: from the busy check above to the
+            # chats being archived below there is no await, so no turn can start
+            # in this workspace in between. The move is one same-filesystem
+            # rename plus two small metadata writes.
+            archived = workspace_archive.move_to_archive(
+                config, target, schedules=schedules, summary=summary
+            )
+        except workspace_archive.WorkspaceArchiveError as exc:
+            put_back = getattr(manager, "put_back_user_items", None)
+            if callable(put_back) and schedules:
+                put_back(schedules)
+            return JSONResponse({"error": exc.message}, status_code=exc.status)
 
-    scope = getattr(pcm, "workspace_scope", None)
-    project_ids, chat_ids = scope(name) if callable(scope) else (set(), set())
-
-    def _belongs(item: dict) -> bool:
-        return (
-            str(item.get("workspace") or "") == name
-            or str(item.get("web_project_id") or "") in project_ids
-            or str(item.get("fallback_project_id") or "") in project_ids
-            or str(item.get("web_chat_id") or "") in chat_ids
-        )
-
-    manager = _schedule_manager(request)
-    take = getattr(manager, "take_user_items", None)
-    schedules: list[dict] = take(_belongs) if callable(take) else []
-
-    archive_chats = getattr(pcm, "archive_workspace_projects", None)
-    summary: dict[str, Any] = (
-        dict(archive_chats(name)) if callable(archive_chats) else {"projects": 0, "chats": 0}
-    )
-    summary["schedules"] = len(schedules)
-    try:
-        archived = await asyncio.to_thread(
-            workspace_archive.move_to_archive,
-            config,
-            target,
-            schedules=schedules,
-            summary=summary,
-        )
-    except workspace_archive.WorkspaceArchiveError as exc:
-        put_back = getattr(manager, "put_back_user_items", None)
-        if callable(put_back) and schedules:
-            put_back(schedules)
+        archive_chats = getattr(pcm, "archive_workspace_projects", None)
+        if callable(archive_chats):
+            try:
+                archive_chats(name)
+            except Exception:  # noqa: BLE001 - the folder already moved; finish unregistering
+                logger.exception("Could not archive every chat of workspace %s", name)
+        try:
+            workspace_archive.unregister(config, name)
+        except OSError as exc:
+            logger.exception("Could not save the registry after archiving %s", name)
+            return JSONResponse(
+                {
+                    "error": (
+                        f"'{name}' was moved to {archived['path']}, but the "
+                        f"workspace registry could not be saved: {exc}"
+                    )
+                },
+                status_code=500,
+            )
         _refresh_project_manager_workspaces(request)
-        return JSONResponse({"error": exc.message}, status_code=exc.status)
+        if schedules:
+            _publish_automations_changed(request)
 
-    workspace_archive.unregister(config, name)
-    _refresh_project_manager_workspaces(request)
-    if schedules:
-        _publish_automations_changed(request)
+        def _forget() -> tuple[int, bool]:
+            rows = 0
+            rebuilt = False
+            try:
+                rows = workspace_archive.forget_search_rows(config, target.vault)
+            except Exception:  # noqa: BLE001 - derived state; the next index pass prunes it
+                logger.exception("Could not drop search rows for archived workspace %s", name)
+            try:
+                rebuilt = workspace_archive.refresh_shared_index(config)
+            except Exception:  # noqa: BLE001 - regenerated at the next startup
+                logger.exception("Could not rebuild INDEX.md after archiving %s", name)
+            return rows, rebuilt
 
-    def _forget() -> tuple[int, bool]:
-        rows = 0
-        rebuilt = False
-        try:
-            rows = workspace_archive.forget_search_rows(config, target.vault)
-        except Exception:  # noqa: BLE001 - derived state; the next index pass prunes it
-            logger.exception("Could not drop search rows for archived workspace %s", name)
-        try:
-            rebuilt = workspace_archive.refresh_shared_index(config)
-        except Exception:  # noqa: BLE001 - regenerated at the next startup
-            logger.exception("Could not rebuild INDEX.md after archiving %s", name)
-        return rows, rebuilt
-
-    search_rows, index_rebuilt = await asyncio.to_thread(_forget)
-    await _resync_shared_skills(config, name, "archiving")
-    payload = _workspaces_payload(config)
-    payload["archived"] = {
-        "id": archived["id"],
-        "name": name,
-        "path": archived["path"],
-        "archived_at": archived["archived_at"],
-        "projects": int(summary.get("projects", 0)),
-        "chats": int(summary.get("chats", 0)),
-        "schedules": len(schedules),
-        "search_rows_removed": search_rows,
-        "index_rebuilt": index_rebuilt,
-    }
-    return JSONResponse(payload)
+        search_rows, index_rebuilt = await asyncio.to_thread(_forget)
+        await _resync_shared_skills(config, name, "archiving")
+        payload = _workspaces_payload(config)
+        payload["archived"] = {
+            "id": archived["id"],
+            "name": name,
+            "path": archived["path"],
+            "archived_at": archived["archived_at"],
+            "projects": int(summary.get("projects", 0)),
+            "chats": int(summary.get("chats", 0)),
+            "schedules": len(schedules),
+            "search_rows_removed": search_rows,
+            "index_rebuilt": index_rebuilt,
+        }
+        return JSONResponse(payload)
 
 
 async def list_archived_workspaces(request: Request) -> JSONResponse:
@@ -518,40 +552,44 @@ async def restore_archived_workspace(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"error": "expected an object"}, status_code=400)
     archive_id = str(body.get("id") or "").strip()
-    try:
-        restored = await asyncio.to_thread(
-            workspace_archive.restore_archive, config, archive_id
-        )
-    except workspace_archive.WorkspaceArchiveError as exc:
-        return JSONResponse({"error": exc.message}, status_code=exc.status)
-    name = str(restored["name"])
-    schedules = restored.get("schedules")
-    added = 0
-    manager = _schedule_manager(request)
-    put_back = getattr(manager, "put_back_user_items", None)
-    if callable(put_back) and isinstance(schedules, list) and schedules:
-        added = int(put_back(schedules))
-    _refresh_project_manager_workspaces(request)
-    if added:
-        _publish_automations_changed(request)
-    try:
-        await asyncio.to_thread(workspace_archive.refresh_shared_index, config)
-    except Exception:  # noqa: BLE001 - regenerated at the next startup
-        logger.exception("Could not rebuild INDEX.md after restoring %s", name)
-    if getattr(config, "_rerooted", lambda: False)():
-        # The root's guide and assets came back with it, but its skill mirrors
-        # may point at a packaged catalog that changed while it was archived.
-        await _bootstrap_new_agent_root(config, name)
-    else:
-        await _resync_shared_skills(config, name, "restoring")
-    payload = _workspaces_payload(config)
-    payload["restored"] = {
-        "id": archive_id,
-        "name": name,
-        "path": restored.get("restored_to", ""),
-        "schedules": added,
-    }
-    return JSONResponse(payload)
+    async with _workspace_archive_lock(request):
+        try:
+            folder, metadata, destination = await asyncio.to_thread(
+                workspace_archive.move_back, config, archive_id
+            )
+        except workspace_archive.WorkspaceArchiveError as exc:
+            return JSONResponse({"error": exc.message}, status_code=exc.status)
+        # The registry is mutated here, on the event loop, never in the worker:
+        # other handlers iterate ``config.workspaces`` on this thread.
+        restored = workspace_archive.register_restored(config, folder, metadata, destination)
+        name = str(restored["name"])
+        schedules = restored.get("schedules")
+        added = 0
+        manager = _schedule_manager(request)
+        put_back = getattr(manager, "put_back_user_items", None)
+        if callable(put_back) and isinstance(schedules, list) and schedules:
+            added = int(put_back(schedules))
+        _refresh_project_manager_workspaces(request)
+        if added:
+            _publish_automations_changed(request)
+        try:
+            await asyncio.to_thread(workspace_archive.refresh_shared_index, config)
+        except Exception:  # noqa: BLE001 - regenerated at the next startup
+            logger.exception("Could not rebuild INDEX.md after restoring %s", name)
+        if getattr(config, "_rerooted", lambda: False)():
+            # The root's guide and assets came back with it, but its skill mirrors
+            # may point at a packaged catalog that changed while it was archived.
+            await _bootstrap_new_agent_root(config, name)
+        else:
+            await _resync_shared_skills(config, name, "restoring")
+        payload = _workspaces_payload(config)
+        payload["restored"] = {
+            "id": archive_id,
+            "name": name,
+            "path": restored.get("restored_to", ""),
+            "schedules": added,
+        }
+        return JSONResponse(payload)
 
 
 def _env_path(config) -> Path:

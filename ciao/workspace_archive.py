@@ -147,6 +147,17 @@ def plan_archive(config: Any, name: str) -> ArchiveTarget:
                 f"'{name}' by hand",
                 409,
             )
+        if shared != install and (shared / ".git").exists():
+            # The vault is inside the install but is its own repository, the
+            # one git sync commits and pushes (``local_session.sync_root``).
+            # Moving a folder out of it would sync as a deletion to every other
+            # device while the archive sat unversioned on this one.
+            raise WorkspaceArchiveError(
+                f"the vault is its own repository ({shared}); archiving would "
+                "move notes out of it and sync that as a deletion, so archive "
+                f"'{name}' by hand",
+                409,
+            )
         if vault == shared:
             raise WorkspaceArchiveError(
                 f"'{name}' uses the whole shared vault, which holds every "
@@ -292,21 +303,15 @@ def forget_search_rows(config: Any, vault: Path) -> int:
     """Drop the archived vault's rows from the install's search database."""
     from ciao.async_reads import keyed_lock  # noqa: PLC0415
     from ciao.fts_search import (  # noqa: PLC0415
-        SEARCH_DB_NAME,
         forget_subtree,
         get_db_path,
         init_db,
         vault_key_prefix,
     )
 
-    runtime_dir = Path(config.state_path).parent
-    override = os.environ.get("CIAO_MEMORY_DIR", "").strip()
-    expected = (
-        Path(override).expanduser() if override else runtime_dir
-    ) / SEARCH_DB_NAME
-    if not expected.exists():
+    db_path = get_db_path(Path(config.state_path).parent)
+    if not db_path.exists():
         return 0
-    db_path = get_db_path(runtime_dir)
     prefix = vault_key_prefix(vault, Path(config.workspace_root))
     conn = sqlite3.connect(db_path)
     try:
@@ -342,10 +347,28 @@ def _current_layout(config: Any) -> str:
 
 
 def _restore_destination(config: Any, metadata: dict[str, Any]) -> Path:
-    name = str(metadata.get("name") or "")
+    # The folder goes back under the name it left with, not the workspace name:
+    # on the shared layout a workspace's vault folder can be named differently
+    # (Settings' free-text "Vault name"), and the restored registry entry still
+    # points at that folder.
+    folder_name = str(metadata.get("content_dir") or "") or str(metadata.get("name") or "")
     if metadata.get("layout") == LAYOUT_PER_ROOT:
-        return Path(config.workspace_root) / name
-    return Path(config.vault_root) / name
+        return Path(config.workspace_root) / folder_name
+    return Path(config.vault_root) / folder_name
+
+
+def _safe_content_dir(content_dir: str) -> bool:
+    """Whether ``content_dir`` names one plain entry inside the archive folder.
+
+    ``archive.json`` is a file on disk; an absolute path or ``..`` in it would
+    otherwise make a restore move an arbitrary directory into the install.
+    """
+    return (
+        content_dir not in {".", ".."}
+        and "/" not in content_dir
+        and "\\" not in content_dir
+        and Path(content_dir).name == content_dir
+    )
 
 
 def _restore_blocker(config: Any, metadata: dict[str, Any], folder: Path) -> str:
@@ -365,6 +388,10 @@ def _restore_blocker(config: Any, metadata: dict[str, Any], folder: Path) -> str
             f"folder; restore it by hand from {_display(config, folder)}"
         )
     content_dir = str(metadata.get("content_dir") or "")
+    if content_dir and not _safe_content_dir(content_dir):
+        return f"the archive metadata in {_display(config, folder)} names an unsafe folder"
+    if content_dir and (folder / content_dir).is_symlink():
+        return f"the archived folder in {_display(config, folder)} is a symlink"
     if content_dir and not (folder / content_dir).is_dir():
         return f"the archived folder is missing from {_display(config, folder)}"
     destination = _restore_destination(config, metadata)
@@ -416,26 +443,25 @@ def list_archives(config: Any) -> list[dict[str, Any]]:
     return out
 
 
-def restore_archive(config: Any, archive_id: str) -> dict[str, Any]:
-    """Move an archived workspace back and re-register it.
+def move_back(config: Any, archive_id: str) -> tuple[Path, dict[str, Any], Path]:
+    """Validate an archive and move its folder back; never touches the registry.
 
-    Refuses when the name is taken, the destination exists, or the archive was
-    made on the other layout. Returns the archive metadata; the caller restores
-    the schedules it carries and refreshes the live managers. The emptied
-    archive folder is removed once the workspace is back.
+    Returns ``(archive folder, metadata, destination)`` for
+    :func:`register_restored`. Split so the caller can run this filesystem half
+    in a worker thread and mutate ``config.workspaces`` on its own thread.
     """
     folder = _archive_folder(config, archive_id)
     metadata = _read_metadata(folder)
     if metadata is None or not metadata.get("name"):
         raise WorkspaceArchiveError("archive metadata is missing or unreadable", 409)
-    blocker = _restore_blocker(config, metadata, folder)
-    if blocker:
-        raise WorkspaceArchiveError(f"cannot restore: {blocker}", 409)
     name = str(metadata["name"])
     from ciao.workspaces import WORKSPACE_NAME_RE  # noqa: PLC0415
 
-    if not WORKSPACE_NAME_RE.match(name):
+    if not WORKSPACE_NAME_RE.fullmatch(name):
         raise WorkspaceArchiveError("archive names an invalid workspace", 409)
+    blocker = _restore_blocker(config, metadata, folder)
+    if blocker:
+        raise WorkspaceArchiveError(f"cannot restore: {blocker}", 409)
     content_dir = str(metadata.get("content_dir") or "")
     destination = _restore_destination(config, metadata)
     if content_dir:
@@ -446,7 +472,14 @@ def restore_archive(config: Any, archive_id: str) -> dict[str, Any]:
             raise WorkspaceArchiveError(
                 f"could not move the archive back to {destination}: {exc}", 500
             ) from exc
+    return folder, metadata, destination
 
+
+def register_restored(
+    config: Any, folder: Path, metadata: dict[str, Any], destination: Path
+) -> dict[str, Any]:
+    """Re-register a workspace whose folder :func:`move_back` put back."""
+    name = str(metadata["name"])
     entry = _workspace_entry(metadata)
     try:
         stored_root = config.stored_workspace_vault_root(name)
@@ -471,4 +504,22 @@ def restore_archive(config: Any, archive_id: str) -> dict[str, Any]:
         # Something else was left in the archive folder. It is not ours to
         # delete; the workspace itself is already back.
         logger.warning("Archive folder %s was not empty after restore", folder)
-    return {**metadata, "id": archive_id, "restored_to": _display(config, destination)}
+    return {
+        **metadata,
+        "id": folder.name,
+        "restored_to": _display(config, destination),
+    }
+
+
+def restore_archive(config: Any, archive_id: str) -> dict[str, Any]:
+    """Move an archived workspace back and re-register it.
+
+    Refuses when the name is taken, the destination exists, or the archive was
+    made on the other layout. Returns the archive metadata; the caller restores
+    the schedules it carries and refreshes the live managers. The emptied
+    archive folder is removed once the workspace is back. Projects and chats
+    are not part of an archive: vault-backed projects are rediscovered from
+    the restored notes, and every workspace gets its General project again.
+    """
+    folder, metadata, destination = move_back(config, archive_id)
+    return register_restored(config, folder, metadata, destination)

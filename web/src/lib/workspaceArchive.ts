@@ -9,6 +9,7 @@ export function archiveConfirmMessage(name: string): string {
   return (
     `Archive workspace ${name}? It leaves the sidebar and Ciaobot stops using its notes and memory. `
     + 'Its chats are archived and its automations are set aside. '
+    + 'A restore brings back its files, settings and automations, but not its chat list. '
     + 'Files are kept in .archived-workspaces/ in your Ciaobot folder, '
     + 'and you can restore it from Settings → Workspaces.'
   )

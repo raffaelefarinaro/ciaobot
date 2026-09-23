@@ -5119,9 +5119,28 @@ class ProjectChatManager:
         return project_ids, chat_ids
 
     def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
-        """Chats in *workspace* with a turn, drain or subagent still running."""
+        """Chats in *workspace* with a turn, subagent or archive job running.
+
+        An archive job (insights, memory proposals, the project-doc fold) keeps
+        writing into the workspace vault after the chat itself is archived, so
+        it counts too: finishing after the folder moved would recreate the
+        folder at its old path, outside the archive, and block the restore.
+        """
         _project_ids, chat_ids = self.workspace_scope(workspace)
-        return [cid for cid in self.active_chat_ids() if cid in chat_ids]
+        busy = set(self.active_chat_ids())
+        busy.update(
+            cid for cid, task in self._archive_tasks.items() if not task.done()
+        )
+        return sorted(cid for cid in busy if cid in chat_ids)
+
+    def workspace_counts(self, workspace: str) -> dict[str, int]:
+        """How many projects and open chats archiving *workspace* would close."""
+        project_ids, chat_ids = self.workspace_scope(workspace)
+        open_chats = sum(
+            1 for cid in chat_ids
+            if cid in self._chats and not self._chats[cid].archived
+        )
+        return {"projects": len(project_ids), "chats": open_chats}
 
     def archive_workspace_projects(self, workspace: str) -> dict[str, int]:
         """Remove every project of *workspace*, archiving its chats.
@@ -5136,14 +5155,11 @@ class ProjectChatManager:
         Must run while *workspace* is still registered, so any path resolution
         the removal needs still finds its own agent root.
         """
-        project_ids, chat_ids = self.workspace_scope(workspace)
-        open_chats = sum(
-            1 for cid in chat_ids
-            if cid in self._chats and not self._chats[cid].archived
-        )
+        counts = self.workspace_counts(workspace)
+        project_ids, _chat_ids = self.workspace_scope(workspace)
         for project_id in sorted(project_ids):
             self._remove_project(project_id)
-        return {"projects": len(project_ids), "chats": open_chats}
+        return counts
 
     def refresh_workspaces(self) -> None:
         self._ensure_defaults()
