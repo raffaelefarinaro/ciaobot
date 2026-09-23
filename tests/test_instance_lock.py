@@ -58,19 +58,25 @@ async def test_startup_persists_normalized_registry_only_after_lock(
     )
 
     def persist() -> None:
-        assert events == ["lock"]
+        assert events == ["lock", "import"]
         events.append("persist")
 
     config.persist_workspace_registry = persist
+
+    def import_legacy() -> list[str]:
+        assert events == ["lock"]
+        events.append("import")
+        return []
+
+    config.import_legacy_workspaces_env = import_legacy
 
     async def run_server_locked(_config) -> int:
         events.append("run")
         return 0
 
-    monkeypatch.delenv("CIAO_WORKSPACES", raising=False)
     monkeypatch.setattr(main.CiaoConfig, "from_env", lambda: config)
     monkeypatch.setattr(instance_lock, "WorkspaceInstanceLock", RecordingLock)
     monkeypatch.setattr(main, "_run_server_locked", run_server_locked)
 
     assert await main._async_main() == 0
-    assert events == ["lock", "persist", "run", "unlock"]
+    assert events == ["lock", "import", "persist", "run", "unlock"]

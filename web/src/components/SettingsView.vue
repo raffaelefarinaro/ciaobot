@@ -426,19 +426,181 @@
       </template>
 
 
-      <!-- MODELS TAB -->
+      <!-- MODELS TAB: chat providers, then background models, then voice.
+           The old providers tab folded in here; /settings/providers
+           redirects to /settings/models#chat-providers (router.ts). -->
       <template v-if="currentTab === 'models'">
+        <!-- Chat providers -->
+        <div v-if="!providerKeysLoaded" class="card" role="status" aria-live="polite" aria-label="Loading providers">
+          <div class="mm-loading-heading"><span class="history-loading-spinner" aria-hidden="true"></span><span>Loading providers…</span></div>
+          <div class="mm-skeleton-block" aria-hidden="true">
+            <span class="mm-shimmer-line" style="width: 100%; height: 72px; margin-bottom: 12px;"></span>
+            <span class="mm-shimmer-line" style="width: 100%; height: 72px; margin-bottom: 12px;"></span>
+            <span class="mm-shimmer-line" style="width: 100%; height: 72px; margin-bottom: 12px;"></span>
+            <span class="mm-shimmer-line" style="width: 88%; height: 56px;"></span>
+          </div>
+        </div>
+        <template v-else-if="providerKeysError">
+          <div class="card"><p class="hint hint--warn">{{ providerKeysError }}</p></div>
+        </template>
+        <template v-else-if="providerKeys">
+          <div id="chat-providers" class="card">
+            <div class="settings-card-header">
+              <div>
+                <p class="section-title">chat providers</p>
+                <p class="hint">
+                  Each provider CLI manages its own login and credentials. Ciaobot verifies every connection.
+                  The defaults below apply to new chats; any chat can override them from the picker.
+                </p>
+              </div>
+            </div>
+
+            <div v-if="providerKeys.connections" class="provider-connections">
+              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row">
+                <div class="setting-row-main setting-row-main--inline">
+                  <div class="routine-info">
+                    <span class="routine-name">{{ conn.label || connKey }}</span>
+                    <p class="hint hint--compact provider-connection-detail">
+                      <span v-if="conn.version">{{ conn.version }}</span>
+                      <span v-if="conn.account">{{ conn.account }}</span>
+                      <span v-if="!conn.version && conn.detail">{{ conn.detail }}</span>
+                    </p>
+                    <p v-if="conn.auth === 'not_installed'" class="hint hint--compact">
+                      {{ conn.detail }}
+                      Install it with <code>{{ conn.command }}</code>
+                      <template v-if="conn.path_command">
+                        , then put it on your PATH with
+                        <code>{{ conn.path_command }}</code>
+                      </template>
+                      <a
+                        v-if="conn.install_url"
+                        :href="conn.install_url"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >installation guide ↗</a>
+                    </p>
+                    <p
+                      v-if="conn.auth !== 'not_installed' && conn.path_command"
+                      class="hint hint--compact"
+                    >
+                      Your terminal cannot find this CLI yet — put it on your PATH with
+                      <code>{{ conn.path_command }}</code>
+                    </p>
+                  </div>
+                  <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
+                    {{ conn.ok ? `Connected · ${conn.auth}` : 'Not connected' }}
+                  </span>
+                </div>
+                <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
+                  <label class="settings-field">
+                    <span class="ws-label">Default model</span>
+                    <ModelSelector
+                      v-if="getProviderSection(String(connKey))?.configurable"
+                      :model-value="providerDefaultModelSelectorValue(String(connKey) as AliasProviderKey)"
+                      :sections="providerDefaultModelSectionsFor(String(connKey) as AliasProviderKey)"
+                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                      @update:model-value="saveProviderDefaultModel(String(connKey) as AliasProviderKey, $event)"
+                    />
+                    <span v-else class="hint hint--compact">Automatic — {{ (conn.label || connKey) }} picks its own default.</span>
+                  </label>
+                  <label class="settings-field">
+                    <span class="ws-label">Permission mode</span>
+                    <select
+                      class="routine-select"
+                      :value="providerDefaultModeValue(String(connKey) as AliasProviderKey)"
+                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                      @change="saveProviderDefaultMode(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
+                    >
+                      <option v-for="option in PROVIDER_MODE_OPTIONS" :key="option.value" :value="option.value">
+                        {{ option.label }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="settings-field">
+                    <span class="ws-label">Default thinking</span>
+                    <select
+                      class="routine-select"
+                      :value="providerDefaultThinkingValue(String(connKey) as AliasProviderKey)"
+                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                      @change="saveProviderDefaultThinking(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
+                    >
+                      <option
+                        v-for="option in providerThinkingOptions(String(connKey) as AliasProviderKey)"
+                        :key="option.value"
+                        :value="option.value"
+                      >
+                        {{ option.label }}
+                      </option>
+                    </select>
+                  </label>
+                </div>
+                <div class="action-row provider-connection-actions">
+                  <button class="btn-primary btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'connect')">
+                    {{ conn.ok ? 'Reconnect' : 'Connect' }}
+                  </button>
+                  <button class="btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'verify')">Verify</button>
+                  <button v-if="conn.ok" class="btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'logout')">Log out</button>
+                </div>
+                <!-- What the CLI brings on its own. Long chip lists, so they sit
+                     behind a disclosure, collapsed by default. -->
+                <details class="provider-brings">
+                  <summary>
+                    What this CLI brings ({{ providerBringsCounts(String(connKey), conn) }})
+                  </summary>
+                  <div class="provider-mcps-preview">
+                    <div class="ws-connectors-header">
+                      <span class="ws-label">Configured MCP Servers &amp; Connectors ({{ connectionMcps(String(connKey)).length }})</span>
+                    </div>
+                    <div class="workspace-connector-pills">
+                      <template v-if="connectionMcps(String(connKey)).length">
+                        <span
+                          v-for="mcpName in connectionMcps(String(connKey))"
+                          :key="mcpName"
+                          class="connector-pill connector-pill--enabled"
+                          :title="`${mcpName} configured for ${conn.label || connKey}`"
+                        >
+                          <span class="pill-dot"></span> {{ mcpName }}
+                        </span>
+                      </template>
+                      <span v-else class="hint hint--compact">No MCP servers enabled</span>
+                    </div>
+
+                    <!-- Platform System Skills -->
+                    <div class="ws-connectors-header" style="margin-top: 10px;">
+                      <span class="ws-label">Platform System Skills &amp; Plugins ({{ (conn.skills && conn.skills.length) ? conn.skills.length : 0 }})</span>
+                    </div>
+                    <div class="workspace-connector-pills">
+                      <template v-if="conn.skills && conn.skills.length">
+                        <span v-for="skill in conn.skills" :key="skill" class="connector-pill connector-pill--enabled" :title="`Installed CLI plugin/skill: ${skill}`">
+                          <span class="pill-dot"></span> {{ skill }}
+                        </span>
+                      </template>
+                      <template v-else>
+                        <span class="hint hint--compact">
+                          {{ conn.ok ? 'None reported by this CLI' : 'Connect to discover' }}
+                        </span>
+                      </template>
+                    </div>
+                  </div>
+                </details>
+              </div>
+              <div v-if="providerConnectionResult" class="action-result">{{ providerConnectionResult }}</div>
+            </div>
+          </div>
+        </template>
+
+        <!-- Background models and voice -->
         <div v-if="!routinesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
         <template v-else-if="routinesError">
           <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
         </template>
         <template v-else-if="routines">
-          <!-- Internal routines -->
+          <!-- Background models (internal routines) -->
           <div class="card">
             <div class="settings-card-header">
-              <p class="section-title">internal models</p>
+              <p class="section-title">background models</p>
               <p class="hint">
-                These tasks use their own model setting, separate from the active chat model.
+                These background tasks use their own model setting, separate from the chat defaults above.
                 "Automatic" keeps the built-in default.
                 System automations without a model picker are tracked on the Automations page.
               </p>
@@ -628,160 +790,6 @@
           </div>
           <div v-if="routinesResult" class="action-result">{{ routinesResult }}</div>
         </template>
-      </template>
-
-      <!-- PROVIDERS TAB -->
-      <template v-if="currentTab === 'providers'">
-        <div v-if="!providerKeysLoaded" class="card" role="status" aria-live="polite" aria-label="Loading providers">
-          <div class="mm-loading-heading"><span class="history-loading-spinner" aria-hidden="true"></span><span>Loading providers…</span></div>
-          <div class="mm-skeleton-block" aria-hidden="true">
-            <span class="mm-shimmer-line" style="width: 100%; height: 72px; margin-bottom: 12px;"></span>
-            <span class="mm-shimmer-line" style="width: 100%; height: 72px; margin-bottom: 12px;"></span>
-            <span class="mm-shimmer-line" style="width: 100%; height: 72px; margin-bottom: 12px;"></span>
-            <span class="mm-shimmer-line" style="width: 88%; height: 56px;"></span>
-          </div>
-        </div>
-        <template v-else-if="providerKeysError">
-          <div class="card"><p class="hint hint--warn">{{ providerKeysError }}</p></div>
-        </template>
-        <template v-else-if="providerKeys">
-          <div class="card">
-            <div class="settings-card-header">
-              <div>
-                <p class="section-title">providers</p>
-                <p class="hint">
-                  Each provider CLI manages its own login and credentials. Ciaobot verifies every connection.
-                </p>
-              </div>
-            </div>
-
-            <div v-if="providerKeys.connections" class="provider-connections">
-              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row">
-                <div class="setting-row-main setting-row-main--inline">
-                  <div class="routine-info">
-                    <span class="routine-name">{{ conn.label || connKey }}</span>
-                    <p class="hint hint--compact provider-connection-detail">
-                      <span v-if="conn.version">{{ conn.version }}</span>
-                      <span v-if="conn.account">{{ conn.account }}</span>
-                      <span v-if="!conn.version && conn.detail">{{ conn.detail }}</span>
-                    </p>
-                    <p v-if="conn.auth === 'not_installed'" class="hint hint--compact">
-                      {{ conn.detail }}
-                      Install it with <code>{{ conn.command }}</code>
-                      <template v-if="conn.path_command">
-                        , then put it on your PATH with
-                        <code>{{ conn.path_command }}</code>
-                      </template>
-                      <a
-                        v-if="conn.install_url"
-                        :href="conn.install_url"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >installation guide ↗</a>
-                    </p>
-                    <p
-                      v-if="conn.auth !== 'not_installed' && conn.path_command"
-                      class="hint hint--compact"
-                    >
-                      Your terminal cannot find this CLI yet — put it on your PATH with
-                      <code>{{ conn.path_command }}</code>
-                    </p>
-                  </div>
-                  <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
-                    {{ conn.ok ? `Connected · ${conn.auth}` : 'Not connected' }}
-                  </span>
-                </div>
-                <div class="provider-mcps-preview">
-                  <div class="ws-connectors-header">
-                    <span class="ws-label">Configured MCP Servers &amp; Connectors ({{ connectionMcps(String(connKey)).length }})</span>
-                  </div>
-                  <div class="workspace-connector-pills">
-                    <template v-if="connectionMcps(String(connKey)).length">
-                      <span
-                        v-for="mcpName in connectionMcps(String(connKey))"
-                        :key="mcpName"
-                        class="connector-pill connector-pill--enabled"
-                        :title="`${mcpName} configured for ${conn.label || connKey}`"
-                      >
-                        <span class="pill-dot"></span> {{ mcpName }}
-                      </span>
-                    </template>
-                    <span v-else class="hint hint--compact">No MCP servers enabled</span>
-                  </div>
-
-                  <!-- Platform System Skills -->
-                  <div class="ws-connectors-header" style="margin-top: 10px;">
-                    <span class="ws-label">Platform System Skills &amp; Plugins ({{ (conn.skills && conn.skills.length) ? conn.skills.length : 0 }})</span>
-                  </div>
-                  <div class="workspace-connector-pills">
-                    <template v-if="conn.skills && conn.skills.length">
-                      <span v-for="skill in conn.skills" :key="skill" class="connector-pill connector-pill--enabled" :title="`Installed CLI plugin/skill: ${skill}`">
-                        <span class="pill-dot"></span> {{ skill }}
-                      </span>
-                    </template>
-                    <template v-else>
-                      <span class="hint hint--compact">
-                        {{ conn.ok ? 'None reported by this CLI' : 'Connect to discover' }}
-                      </span>
-                    </template>
-                  </div>
-                </div>
-                <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
-                  <label class="settings-field">
-                    <span class="ws-label">Default model</span>
-                    <ModelSelector
-                      v-if="getProviderSection(String(connKey))?.configurable"
-                      :model-value="providerDefaultModelSelectorValue(String(connKey) as AliasProviderKey)"
-                      :sections="providerDefaultModelSectionsFor(String(connKey) as AliasProviderKey)"
-                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
-                      @update:model-value="saveProviderDefaultModel(String(connKey) as AliasProviderKey, $event)"
-                    />
-                    <span v-else class="hint hint--compact">Automatic — {{ (conn.label || connKey) }} picks its own default.</span>
-                  </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Permission mode</span>
-                    <select
-                      class="routine-select"
-                      :value="providerDefaultModeValue(String(connKey) as AliasProviderKey)"
-                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
-                      @change="saveProviderDefaultMode(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
-                    >
-                      <option v-for="option in PROVIDER_MODE_OPTIONS" :key="option.value" :value="option.value">
-                        {{ option.label }}
-                      </option>
-                    </select>
-                  </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Default thinking</span>
-                    <select
-                      class="routine-select"
-                      :value="providerDefaultThinkingValue(String(connKey) as AliasProviderKey)"
-                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
-                      @change="saveProviderDefaultThinking(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
-                    >
-                      <option
-                        v-for="option in providerThinkingOptions(String(connKey) as AliasProviderKey)"
-                        :key="option.value"
-                        :value="option.value"
-                      >
-                        {{ option.label }}
-                      </option>
-                    </select>
-                  </label>
-                </div>
-                <div class="action-row provider-connection-actions">
-                  <button class="btn-primary btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'connect')">
-                    {{ conn.ok ? 'Reconnect' : 'Connect' }}
-                  </button>
-                  <button class="btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'verify')">Verify</button>
-                  <button v-if="conn.ok" class="btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'logout')">Log out</button>
-                </div>
-              </div>
-              <div v-if="providerConnectionResult" class="action-result">{{ providerConnectionResult }}</div>
-            </div>
-
-           </div>
-         </template>
       </template>
 
       <!-- AUTOMATIONS TAB -->
@@ -1392,7 +1400,7 @@
 
           <p class="hint hint--info skill-scope-note">
              Ciaobot runs chats through Claude Code or opencode. Ciaobot-managed skills are synchronized into both runtimes where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed stock and custom skills — see
-            <RouterLink to="/settings/providers">Providers</RouterLink> for what each CLI brings on its own.
+            <RouterLink to="/settings/models#chat-providers">Models &amp; providers</RouterLink> for what each CLI brings on its own.
           </p>
 
           <!-- Add Skill Form: folder note + zip upload -->
@@ -1737,7 +1745,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
@@ -1764,6 +1772,7 @@ import type {
   ModelsResponse,
   NodeStatus,
   ProviderConfigSettings,
+  ProviderConnection,
   ProposalOutcomes,
   RoutineSettings,
   SkillInventory,
@@ -2233,7 +2242,7 @@ async function saveProviderDefaultThinking(provider: AliasProviderKey, value: st
   await saveRoutines({ provider_default_thinking: defaults })
 }
 
-// ── Per-provider default permission mode (Providers tab) ────────────────
+// ── Per-provider default permission mode (Models tab) ────────────────
 const DEFAULT_MODE_SELECTION = '__ciao_mode_default__'
 
 // PWA-facing names; "manual" maps to the BridgeMode "normal" on the backend.
@@ -2368,7 +2377,7 @@ function routineModelSummary(key: RoutineModelKey): string {
   return `${aliasProviderLabel(provider)}: ${model || 'default'}`
 }
 
-// ── Provider API Key settings (Providers tab) ─────────────────────────────────
+// ── Provider connections (Models tab, chat providers card) ───────────────────
 const providerKeys = ref<ProviderConfigSettings | null>(null)
 const providerKeysLoaded = ref(false)
 const providerKeysError = ref('')
@@ -2776,6 +2785,29 @@ async function fetchProviderKeys() {
   } finally {
     providerKeysLoaded.value = true
   }
+}
+
+// /settings/providers lands on /settings/models#chat-providers. The anchor
+// only exists once the connections have loaded, so the browser's own hash
+// jump misses it, and the router has no scrollBehavior for in-app links (this
+// view stays mounted across tabs). Scroll on the first load and on each
+// navigation to the anchor — not after every refetch, or Verify/Connect would
+// yank the page back to the top of the card.
+function scrollToChatProvidersIfLinked(): void {
+  if (route.hash !== '#chat-providers') return
+  void nextTick(() => {
+    document.getElementById('chat-providers')?.scrollIntoView?.({ block: 'start' })
+  })
+}
+watch(() => route.fullPath, scrollToChatProvidersIfLinked)
+
+/** Summary line for the collapsed "What this CLI brings" disclosure. */
+function providerBringsCounts(providerId: string, conn: ProviderConnection): string {
+  const mcps = connectionMcps(providerId).length
+  const skills = conn.skills?.length ?? 0
+  const mcpLabel = `${mcps} MCP ${mcps === 1 ? 'server' : 'servers'}`
+  const skillLabel = `${skills} ${skills === 1 ? 'skill or plugin' : 'skills & plugins'}`
+  return `${mcpLabel}, ${skillLabel}`
 }
 
 
@@ -3544,7 +3576,7 @@ onMounted(async () => {
   fetchRoutines()
   fetchAutomation()
   fetchPackageStatus()
-  fetchProviderKeys()
+  fetchProviderKeys().then(scrollToChatProvidersIfLinked)
   mcp.fetchStatus()
   mcp.fetchUsage()
   mcp.fetchAgentStatus()
@@ -5451,6 +5483,46 @@ a.btn-secondary {
   flex: 0 0 56px;
   text-align: center;
 }
+
+/* "What this CLI brings": the per-provider MCP and skill chip lists, folded
+   away by default so the models tab stays scannable. The summary is the whole
+   touch target, so it keeps the 44px minimum. */
+.provider-brings > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--touch);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  list-style: none;
+}
+.provider-brings > summary::-webkit-details-marker { display: none; }
+/* inline-flex drops the native marker, so draw the disclosure caret. */
+.provider-brings > summary::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin: 0 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 120ms var(--ease);
+}
+.provider-brings[open] > summary::before { transform: rotate(45deg); }
+@media (prefers-reduced-motion: reduce) {
+  .provider-brings > summary::before { transition: none; }
+}
+/* /settings/providers scrolls here; keep the card clear of the pane header. */
+#chat-providers { scroll-margin-top: var(--space-4); }
+.provider-brings > summary:hover { color: var(--fg); }
+.provider-brings > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.provider-brings[open] > .provider-mcps-preview { margin-top: var(--space-1); }
 
 /* Provider & Workspace MCP Connectors Bar */
 .provider-mcps-preview {

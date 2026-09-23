@@ -249,9 +249,9 @@ def test_undo_preserves_registry_changes_made_after_the_relocation(tmp_path: Pat
 def test_apply_refuses_when_workspace_is_missing_from_the_registry(tmp_path: Path) -> None:
     """A registry that cannot record the new location must not lose the vault.
 
-    Covers an install whose workspaces come from CIAO_WORKSPACES (an env var)
-    rather than workspaces.json, or a registry missing this workspace's entry:
-    apply must refuse before moving anything, not move it and report success.
+    Covers an install with no workspaces.json, or a registry missing this
+    workspace's entry: apply must refuse before moving anything, not move it
+    and report success.
     """
     install, config = _shared_root_install(tmp_path)
     runtime = install / ".runtime"
@@ -770,36 +770,6 @@ def test_plan_refuses_a_whole_directory_move_containing_another_workspace(
     assert result.refused
     assert "client" in result.refusals[0]
     assert not result.whole_directory
-
-
-# -- registry authority is passed explicitly, not read from os.environ ------
-
-
-def test_apply_refuses_when_registry_is_not_authoritative(tmp_path: Path) -> None:
-    """registry_authoritative reflects what the CALLER's merged environment
-    actually sourced workspaces from — vault_relocate has no way to know
-    this on its own, so it trusts the flag over a coincidentally-valid
-    workspaces.json.
-    """
-    install, config = _shared_root_install(tmp_path)
-    runtime = install / ".runtime"
-
-    result = apply(config, "scandit", runtime, registry_authoritative=False)
-
-    assert result["status"] == "refused"
-    assert (install / "memory-vault" / "People").is_dir(), "moved despite non-authoritative registry"
-
-
-def test_undo_refuses_when_registry_is_not_authoritative(tmp_path: Path) -> None:
-    install, config = _shared_root_install(tmp_path)
-    runtime = install / ".runtime"
-    applied = apply(config, "scandit", runtime)
-    assert applied["status"] == "relocated"
-
-    result = undo(config, "scandit", runtime, registry_authoritative=False)
-
-    assert result["status"] == "refused"
-    assert (install / "memory-vault" / "scandit" / "People").is_dir(), "reversed despite non-authoritative registry"
 
 
 # -- CLI: an explicit --workspace ignores ambient env, uses the target's .env
