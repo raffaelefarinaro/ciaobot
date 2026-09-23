@@ -113,6 +113,7 @@ from ciao.web.chat_broker import (
 from ciao.web import chat_service
 from ciao.web.subagent_watchers import (
     NUDGE_DECLINED,
+    NUDGE_REPORTED,
     NUDGE_SENT,
     NUDGE_SUPERSEDED,
     NudgeOutcome,
@@ -7727,7 +7728,8 @@ class ProjectChatManager:
 
 
     async def _nudge_synthesis_after_subagents(
-        self, chat_id: str, awaiting_user_answer: bool = False
+        self, chat_id: str, awaiting_user_answer: bool = False,
+        already_reported: bool = False,
     ) -> NudgeOutcome:
         """Ask the parent to post a final report once its subagents finish.
 
@@ -7736,8 +7738,9 @@ class ProjectChatManager:
         would otherwise stay on the interim "I'll report back" message. We
         inject a synthesis prompt on the persistent client; the between-turns
         drain (started alongside this watcher) consumes the resulting turn and
-        publishes it like any other reply. Returns True when the nudge reached
-        a live client, False otherwise (caller falls back to a plain push).
+        publishes it like any normal reply. Returns ``sent`` when the nudge
+        reached a live client, ``reported`` when the drain already owns a
+        completed report, and a declined/superseded outcome otherwise.
 
         ``awaiting_user_answer`` holds the nudge back when the parent ended its
         turn by asking the user a question: answering it is the user's move,
@@ -7748,9 +7751,11 @@ class ProjectChatManager:
         in the transcript; the finished agents are still surfaced by the
         ``chat_subagents_ready`` count dropping to zero and by the subagent
         panel refresh it triggers.
+
+        ``already_reported`` hands the parked announce to the drain without
+        injecting another prompt when the CLI resumed the parent itself and
+        the parent already wrote its report.
         """
-        if awaiting_user_answer:
-            return NUDGE_DECLINED
         provider = self._providers.get(chat_id)
         if provider is None or not provider.can_drain:
             return NUDGE_DECLINED
@@ -7768,6 +7773,10 @@ class ProjectChatManager:
             return NUDGE_SUPERSEDED
         chat = self._chats.get(chat_id)
         if chat is None:
+            return NUDGE_DECLINED
+        if already_reported:
+            return NUDGE_REPORTED
+        if awaiting_user_answer:
             return NUDGE_DECLINED
         prefix = self._build_prompt_prefix(chat)
         full_prompt = (

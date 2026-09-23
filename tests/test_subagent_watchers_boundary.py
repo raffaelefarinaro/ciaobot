@@ -54,8 +54,12 @@ class _StubHost:
     def _cli_owner_alive(self, chat_id: str) -> bool:
         return False
 
+    def _is_interim_subagent_text(self, text: str) -> bool:
+        return False
+
     async def _nudge_synthesis_after_subagents(
-        self, chat_id: str, awaiting_user_answer: bool = False
+        self, chat_id: str, awaiting_user_answer: bool = False,
+        already_reported: bool = False,
     ):
         return NUDGE_DECLINED
 
