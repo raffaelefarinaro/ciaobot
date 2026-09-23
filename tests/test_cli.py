@@ -46,6 +46,27 @@ def test_run_relaunches_on_restart_exit_code(
     assert "Restart requested — relaunching Ciaobot" in capsys.readouterr().err
 
 
+def test_run_relaunch_drops_dotenv_exports_so_the_new_process_rereads_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """load_dotenv never overrides an inherited key, so a stale export would
+    shadow a value edited in the workspace .env across the restart."""
+    import ciao.main
+    from ciao import config as ciao_config
+
+    seen: list[str | None] = []
+    monkeypatch.setattr(ciao.main, "main", _raise_system_exit(75))
+    monkeypatch.setattr(
+        cli.os, "execv", lambda exe, argv: seen.append(cli.os.environ.get("CIAO_TEST_DOTENV_KEY"))
+    )
+    monkeypatch.delenv("CIAO_RESTART_EXIT_CODE", raising=False)
+    monkeypatch.setenv("CIAO_TEST_DOTENV_KEY", "stale")
+    monkeypatch.setattr(ciao_config, "_EXPORTED_DOTENV_KEYS", {"CIAO_TEST_DOTENV_KEY"})
+
+    assert cli._run_server() == 75
+    assert seen == [None]
+
+
 def test_run_propagates_other_exit_codes_without_relaunch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

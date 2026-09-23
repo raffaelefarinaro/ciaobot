@@ -255,7 +255,7 @@ def detect_install_mode() -> str:
     # first misclassifies a bundled app during development and in tests.
     try:
         executable = Path(sys.executable).resolve()
-        if os.environ.get("CIAO_BUNDLED_APP") or "Ciaobot.app/Contents/Resources/ciao-runtime" in str(executable):
+        if os.environ.get("CIAO_BUNDLED_APP") == "1" or "Ciaobot.app/Contents/Resources/ciao-runtime" in str(executable):
             return "bundled_app"
     except Exception:
         pass

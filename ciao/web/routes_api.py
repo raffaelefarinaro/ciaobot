@@ -5534,15 +5534,16 @@ def _restart_only(config, *, dev_mode: bool) -> bool:
     packaged Ciaobot.app never qualifies: its embedded runtime is not a
     checkout, and ``pip install -e`` cannot replace it even when
     ``CIAO_APP_REPO`` names one. Linux hosts outside dev mode are
-    administrator-managed and restart only. Elsewhere, anything that is not a
-    deployable checkout (a plain package install) restarts only too.
+    administrator-managed and restart only. Everywhere else, including Linux
+    dev mode, anything that is not a deployable checkout (a plain package
+    install) restarts only too, since deploy would stop at "locate checkout".
     """
     from ciao.package_version import detect_install_mode
 
     if detect_install_mode() == "bundled_app":
         return True
-    if sys.platform.startswith("linux"):
-        return not dev_mode
+    if sys.platform.startswith("linux") and not dev_mode:
+        return True
     if config is None:
         return False
     return bool(_checkout_problem(_resolve_codebase_root(config)))

@@ -110,6 +110,21 @@ async def test_mac_install_without_checkout_is_restart_only(tmp_path, monkeypatc
     ) is True
 
 
+async def test_linux_dev_mode_without_checkout_is_restart_only(tmp_path, monkeypatch):
+    # Deploy would only stop at "locate checkout", so offer the restart.
+    assert await _status_restart_only(
+        monkeypatch, platform="linux", dev_mode=True,
+        app_repo=tmp_path / "site-packages", bundled=False,
+    ) is True
+
+
+async def test_linux_dev_checkout_keeps_redeploy(tmp_path, monkeypatch):
+    assert await _status_restart_only(
+        monkeypatch, platform="linux", dev_mode=True,
+        app_repo=_checkout(tmp_path), bundled=False,
+    ) is False
+
+
 async def test_deploy_refuses_bundled_app_before_any_step(tmp_path, monkeypatch):
     import json
 

@@ -20,6 +20,19 @@ def test_detect_install_mode_bundled_app(monkeypatch) -> None:
     assert detect_install_mode() == "bundled_app"
 
 
+def test_detect_install_mode_ignores_a_non_one_bundled_marker(monkeypatch, tmp_path) -> None:
+    # Matches ciao.main, which only treats CIAO_BUNDLED_APP == "1" as bundled.
+    monkeypatch.setenv("CIAO_BUNDLED_APP", "0")
+    monkeypatch.setitem(
+        sys.modules,
+        "ciao",
+        types.SimpleNamespace(
+            __file__=str(tmp_path / "site-packages" / "ciao" / "__init__.py")
+        ),
+    )
+    assert detect_install_mode() == "unknown"
+
+
 def test_detect_install_mode_unknown_without_package_manager(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
     monkeypatch.setitem(
