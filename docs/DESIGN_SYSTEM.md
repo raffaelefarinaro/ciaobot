@@ -260,7 +260,7 @@ sites), then settings incrementally per tab. Do not big-bang 28 cards.
 
 `SettingsView.vue` is the largest file in the app: a 2,210-line template and
 2,051 lines of scoped CSS covering seven routed tabs. The routes already exist
-(`/settings/providers`, `/settings/workspaces`, `/settings/models`,
+(`/settings/workspaces`, `/settings/models`,
 `/settings/context`, `/settings/skills`, `/settings/automations`), so the tabs
 are separable with no router change — each becomes its own SFC. This is also
 where most of the L1.1 violations live, and splitting makes them visible.

@@ -544,7 +544,7 @@
                 <!-- What the CLI brings on its own. Long chip lists, so they sit
                      behind a disclosure, collapsed by default. -->
                 <details class="provider-brings">
-                  <summary class="provider-brings-summary">
+                  <summary>
                     What this CLI brings ({{ providerBringsCounts(String(connKey), conn) }})
                   </summary>
                   <div class="provider-mcps-preview">
@@ -1745,7 +1745,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
@@ -1835,13 +1835,9 @@ const mcp = useMcpServers({
     destructive: true,
   }),
 })
-// The providers tab folded into models. router.ts redirects
-// /settings/providers, and the alias here covers any other router (tests, a
-// link resolved outside the app router).
-const LEGACY_TAB_ALIASES: Record<string, string> = { providers: 'models' }
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
-  return LEGACY_TAB_ALIASES[tab] ?? tab
+  return tab
 })
 
 // ── GitHub star nudge, mirrored onto the open-source card ─────────────────
@@ -2789,18 +2785,21 @@ async function fetchProviderKeys() {
   } finally {
     providerKeysLoaded.value = true
   }
-  scrollToChatProvidersIfLinked()
 }
 
 // /settings/providers lands on /settings/models#chat-providers. The anchor
 // only exists once the connections have loaded, so the browser's own hash
-// jump misses it; scroll once the card is rendered.
+// jump misses it, and the router has no scrollBehavior for in-app links (this
+// view stays mounted across tabs). Scroll on the first load and on each
+// navigation to the anchor — not after every refetch, or Verify/Connect would
+// yank the page back to the top of the card.
 function scrollToChatProvidersIfLinked(): void {
-  if (route.hash !== '#chat-providers' && route.params.tab !== 'providers') return
+  if (route.hash !== '#chat-providers') return
   void nextTick(() => {
     document.getElementById('chat-providers')?.scrollIntoView?.({ block: 'start' })
   })
 }
+watch(() => route.fullPath, scrollToChatProvidersIfLinked)
 
 /** Summary line for the collapsed "What this CLI brings" disclosure. */
 function providerBringsCounts(providerId: string, conn: ProviderConnection): string {
@@ -3577,7 +3576,7 @@ onMounted(async () => {
   fetchRoutines()
   fetchAutomation()
   fetchPackageStatus()
-  fetchProviderKeys()
+  fetchProviderKeys().then(scrollToChatProvidersIfLinked)
   mcp.fetchStatus()
   mcp.fetchUsage()
   mcp.fetchAgentStatus()
@@ -5521,7 +5520,7 @@ a.btn-secondary {
 .provider-brings > summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
 }
 .provider-brings[open] > .provider-mcps-preview { margin-top: var(--space-1); }
 

@@ -777,20 +777,43 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('SettingsView still renders the merged tab for the legacy providers tab id', async () => {
+  it('SettingsView scrolls to the chat providers card once, not after every refetch', async () => {
+    const proto = Element.prototype as Element & { scrollIntoView?: unknown }
+    const original = proto.scrollIntoView
+    const scrolled = vi.fn()
+    proto.scrollIntoView = scrolled
     const router = makeRouter()
-    await router.push('/settings/providers')
+    await router.push('/settings/models#chat-providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
+    // Attached, so document.getElementById can find the card.
     const wrapper = mount(mod.default as never, {
+      attachTo: document.body,
       global: { plugins: [router], stubs: { Teleport: true } },
     })
-    await flushPromises()
-    await nextTick()
+    try {
+      await flushPromises()
+      await nextTick()
+      expect(scrolled).toHaveBeenCalledTimes(1)
 
-    const titles = wrapper.findAll('.section-title').map((el) => el.text())
-    expect(titles).toEqual(['chat providers', 'background models', 'voice'])
-    wrapper.unmount()
+      // Verify refetches the connections; the hash is still in the URL but
+      // the page must not jump back to the top of the card.
+      const verify = wrapper.findAll('.provider-connection-actions button').find((b) => b.text() === 'Verify')
+      await verify!.trigger('click')
+      await flushPromises()
+      await nextTick()
+      expect(scrolled).toHaveBeenCalledTimes(1)
+
+      // An in-app link to the anchor (this view stays mounted) scrolls again.
+      await router.push('/settings/skills')
+      await router.push('/settings/models#chat-providers')
+      await flushPromises()
+      await nextTick()
+      expect(scrolled).toHaveBeenCalledTimes(2)
+    } finally {
+      wrapper.unmount()
+      proto.scrollIntoView = original
+    }
   })
 
   it('SettingsView folds what each CLI brings behind a collapsed disclosure', async () => {

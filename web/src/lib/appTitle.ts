@@ -9,8 +9,6 @@ export function formatDocumentTitle(pageTitle?: string | null, unread = 0): stri
 
 export function settingsTabTitle(tab: string | undefined): string {
   switch (tab) {
-    // /settings/providers redirects to the merged models tab.
-    case 'providers':
     case 'models':
       return 'models & providers'
     case 'workspaces':

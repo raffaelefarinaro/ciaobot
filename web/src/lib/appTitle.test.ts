@@ -23,8 +23,6 @@ describe('settingsTabTitle', () => {
   it('maps settings tabs to lowercase titles', () => {
     expect(settingsTabTitle(undefined)).toBe('settings')
     expect(settingsTabTitle('models')).toBe('models & providers')
-    // The providers tab folded into models; an old link titles the same.
-    expect(settingsTabTitle('providers')).toBe('models & providers')
     expect(settingsTabTitle('skills')).toBe('agent assets')
   })
 })
