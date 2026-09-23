@@ -99,7 +99,7 @@
             <span class="nav-item-label" aria-hidden="true">memory</span>
           </router-link>
           <!-- mode, not active-class: every settings tab is its own route
-               (/settings/providers, /settings/models, ...) and none of them match
+               (/settings/models, /settings/workspaces, ...) and none of them match
                the /settings record, so active-class left this item inactive on
                nearly every settings page - and with it the label collapsed. The
                sibling links already key off mode for the same reason. -->
@@ -277,13 +277,6 @@
           home
         </router-link>
         <router-link
-          to="/settings/providers"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/providers' }"
-        >
-          providers
-        </router-link>
-        <router-link
           to="/settings/workspaces"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/workspaces' }"
@@ -295,7 +288,7 @@
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/models' }"
         >
-          models
+          models &amp; providers
         </router-link>
         <router-link
           to="/settings/skills"
