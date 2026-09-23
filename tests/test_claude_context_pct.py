@@ -111,9 +111,16 @@ def _event() -> ResultEvent:
     )
 
 
-async def _augment(client: object, result: ResultMessage | None, last: AssistantMessage | None) -> ResultEvent:
+async def _augment(
+    client: object,
+    result: ResultMessage | None,
+    last: AssistantMessage | None,
+    requested_model: str | None = None,
+) -> ResultEvent:
     event = _event()
-    await ClaudeProvider._augment_with_context_pct(client, event, result, last)  # type: ignore[arg-type]
+    await ClaudeProvider._augment_with_context_pct(  # type: ignore[arg-type]
+        client, event, result, last, requested_model=requested_model
+    )
     return event
 
 
@@ -146,6 +153,59 @@ async def test_window_matches_canonical_model_for_a_plain_key() -> None:
         _last_call(cache_read=49894, model="claude-sonnet-4-5"),
     )
     assert event.usage["context_pct"] == "25.0%"
+
+
+def _both_variants() -> dict[str, object]:
+    """A turn that used the 200k and the ``[1m]`` variant of one model."""
+    return {
+        "claude-haiku-4-5-20251001": HAIKU,
+        "claude-opus-5-5": _opus(200_000),
+        "claude-opus-5-5[1m]": _opus(),
+    }
+
+
+@pytest.mark.asyncio
+async def test_both_variants_with_standard_requested_use_the_200k_window() -> None:
+    event = await _augment(
+        _FailingClient(),
+        _result(model_usage=_both_variants()),
+        _last_call(cache_read=99894),
+        requested_model="claude-opus-5-5",
+    )
+    # 100,000 / 200,000, not 100,000 / 1,000,000 (10.0%).
+    assert event.usage["context_pct"] == "50.0%"
+
+
+@pytest.mark.asyncio
+async def test_both_variants_with_1m_requested_use_the_1m_window() -> None:
+    event = await _augment(
+        _FailingClient(),
+        _result(model_usage=_both_variants()),
+        _last_call(cache_read=99894),
+        requested_model="claude-opus-5-5[1m]",
+    )
+    assert event.usage["context_pct"] == "10.0%"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested", [None, "opus"])
+async def test_both_variants_without_a_matching_request_omit_the_pct(requested) -> None:
+    """An alias or a missing request cannot say which window the call used."""
+    event = await _augment(
+        _FailingClient(),
+        _result(model_usage=_both_variants()),
+        _last_call(cache_read=99894),
+        requested_model=requested,
+    )
+    assert "context_pct" not in event.usage
+
+
+@pytest.mark.asyncio
+async def test_single_variant_ignores_an_alias_request() -> None:
+    event = await _augment(
+        _FailingClient(), _result(), _last_call(cache_read=150000), requested_model="opus"
+    )
+    assert event.usage["context_pct"] == "15.0%"
 
 
 @pytest.mark.asyncio

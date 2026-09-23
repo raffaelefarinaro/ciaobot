@@ -918,7 +918,11 @@ class ClaudeProvider(BaseSDKProvider):
 
                 if pending_result is not None:
                     await self._augment_with_context_pct(
-                        client, pending_result, last_result_msg, last_main_msg
+                        client,
+                        pending_result,
+                        last_result_msg,
+                        last_main_msg,
+                        requested_model=request.model,
                     )
                     # A mid-response connection drop is emitted by the CLI as
                     # assistant text and may come back as a *non-error* terminal
@@ -1034,6 +1038,8 @@ class ClaudeProvider(BaseSDKProvider):
         event: ResultEvent,
         result_msg: ResultMessage | None = None,
         last_main_msg: AssistantMessage | None = None,
+        *,
+        requested_model: str | None = None,
     ) -> None:
         """Attach the context-window occupancy after the turn to ``event.usage``.
 
@@ -1064,7 +1070,9 @@ class ClaudeProvider(BaseSDKProvider):
                     "context_pct": f"{min(100.0, float(total) / float(mx) * 100):.1f}%",
                 }
                 return
-        estimate = ClaudeProvider._estimate_context_pct(result_msg, last_main_msg)
+        estimate = ClaudeProvider._estimate_context_pct(
+            result_msg, last_main_msg, requested_model=requested_model
+        )
         if estimate is not None:
             event.usage = {**event.usage, "context_pct": f"{estimate:.1f}%"}
 
@@ -1072,6 +1080,8 @@ class ClaudeProvider(BaseSDKProvider):
     def _estimate_context_pct(
         result_msg: ResultMessage | None,
         last_main_msg: AssistantMessage | None,
+        *,
+        requested_model: str | None = None,
     ) -> float | None:
         """Context % from the last model call, or None when it is not reliable.
 
@@ -1085,7 +1095,8 @@ class ClaudeProvider(BaseSDKProvider):
         The window comes from the ``model_usage`` entry of the model that made
         that call. ``model_usage`` also lists side calls (a haiku title or
         classifier call with a 200k window), so the first entry is not the
-        chat model.
+        chat model. ``requested_model`` is the id the chat asked the CLI for;
+        it tells the 200k and ``[1m]`` variants of one model apart.
         """
         call_usage: dict[str, Any] | None = None
         call_model = ""
@@ -1108,6 +1119,7 @@ class ClaudeProvider(BaseSDKProvider):
         window = ClaudeProvider._context_window_for_model(
             result_msg.model_usage if result_msg is not None else None,
             call_model,
+            requested_model,
         )
         if not window:
             return None
@@ -1135,7 +1147,9 @@ class ClaudeProvider(BaseSDKProvider):
         return total
 
     @staticmethod
-    def _context_window_for_model(model_usage: Any, model: str) -> int | None:
+    def _context_window_for_model(
+        model_usage: Any, model: str, requested_model: str | None = None
+    ) -> int | None:
         """The ``contextWindow`` of ``model``'s entry in ``model_usage``.
 
         Entries are keyed by the requested id (``claude-opus-5-5[1m]``) while
@@ -1143,6 +1157,11 @@ class ClaudeProvider(BaseSDKProvider):
         both the key and ``canonicalModel`` are compared with any ``[...]``
         suffix removed. Without a model to match, only an unambiguous single
         entry is used.
+
+        The assistant message drops the suffix, so when the standard and
+        ``[1m]`` variants of one model are both listed, the match alone cannot
+        say which window the call used. The requested id settles it when it
+        is one of the listed keys; otherwise disagreeing windows yield None.
         """
         if not isinstance(model_usage, dict):
             return None
@@ -1151,6 +1170,7 @@ class ClaudeProvider(BaseSDKProvider):
             return str(name or "").split("[", 1)[0].strip().lower()
 
         windows: list[int] = []
+        matched: dict[str, int] = {}
         target = _base(model)
         for key, entry in model_usage.items():
             if not isinstance(entry, dict):
@@ -1160,14 +1180,19 @@ class ClaudeProvider(BaseSDKProvider):
                 continue
             if target and target in {_base(key), _base(entry.get("canonicalModel"))}:
                 windows.append(int(window))
+                matched[str(key).strip().lower()] = int(window)
             elif not target:
                 windows.append(int(window))
         if not target and len(windows) != 1:
             return None
-        # Two entries for one model (e.g. a mid-turn switch between the 200k
-        # and 1M variants) resolve to the larger window: under-stating is safer
-        # than a spurious "full" footer.
-        return max(windows) if windows else None
+        if len(set(windows)) > 1:
+            requested = (requested_model or "").strip().lower()
+            if requested in matched:
+                return matched[requested]
+            # Both variants were used this turn and the requested id is not
+            # one of them (an alias such as "opus"): the window is unknown.
+            return None
+        return windows[0] if windows else None
 
     def _convert_message(self, msg: Any) -> list[StreamEvent]:
         if isinstance(msg, SDKStreamEvent):
