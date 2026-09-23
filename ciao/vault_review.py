@@ -431,6 +431,16 @@ def _generate_candidates(
     return result
 
 
+def _completed_counterpart(path: str) -> str:
+    """Where ``projects/active/<x>/...`` lands once the project is completed."""
+    parts = list(Path(path).parts)
+    for index in range(len(parts) - 1):
+        if parts[index].casefold() == "projects" and parts[index + 1].casefold() == "active":
+            parts[index + 1] = "completed"
+            return str(Path(*parts))
+    return ""
+
+
 def _record_vanished(
     root: Path,
     workspace: str,
@@ -484,6 +494,11 @@ def _record_vanished(
         if path in present_paths:
             continue
         if str(decision.get("content_hash") or "") in present_digests:
+            continue
+        if _completed_counterpart(path) in present_paths:
+            # Completing a project moves it *and* rewrites its status line,
+            # so neither the path nor the hash matches any more; the note is
+            # under projects/completed, not gone.
             continue
         try:
             note = (root / Path(path).relative_to("memory-vault")).resolve()

@@ -1224,3 +1224,20 @@ def test_list_cleared_reads_only_as_far_as_the_page(tmp_path: Path) -> None:
 
     assert len(rows) == 3
     assert len(reads) == 3, f"read {len(reads)} notes to return 3 rows"
+
+
+def test_a_completed_project_with_a_rewritten_status_is_not_vanished(tmp_path: Path) -> None:
+    """complete_project moves the folder and rewrites `status:`, changing the hash."""
+    _note(tmp_path, "projects/active/demo/demo.md", "A project still in flight.")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    record_decision(tmp_path, candidate, disposition="keep")
+
+    source = tmp_path / "projects" / "active" / "demo" / "demo.md"
+    target = tmp_path / "projects" / "completed" / "demo" / "demo.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(source.read_text(encoding="utf-8") + "\nstatus: completed\n", encoding="utf-8")
+    source.unlink()
+
+    generate_candidates(tmp_path, workspace="personal", write_queue=True)
+
+    assert not [r for r in review.read_ledger(tmp_path) if r["disposition"] == "vanished"]

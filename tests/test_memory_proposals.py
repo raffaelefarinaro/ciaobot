@@ -3305,3 +3305,21 @@ def test_session_write_evidence_must_be_in_the_named_file(tmp_path: Path) -> Non
 
     assert out is not None
     assert len(mp.list_proposals(out)) == 1
+
+
+def test_a_filename_stem_outside_command_files_does_not_suppress(tmp_path: Path) -> None:
+    """`deploy` naming `scripts/deploy.sh` is a mention, not a definition."""
+    vault = tmp_path / "vault"
+    _changed_file(tmp_path, "scripts/deploy.sh", "set -eu\n")
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose `scripts/deploy.sh` for every `deploy` from now on. [idx=4] [memory]\n"
+        "## Vault changes\n"
+        "- scripts/deploy.sh - added set -eu. [idx=4]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+    assert len(mp.list_proposals(out)) == 1

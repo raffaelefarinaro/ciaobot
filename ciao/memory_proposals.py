@@ -2845,7 +2845,7 @@ def _written_this_session(
     same file as it is now contains another term the bullet puts in backticks —
     so an unrelated edit to a file the fact merely mentions ("`scripts/test.sh`
     is the entry point" alongside a new flag in it) is not taken as the fact
-    being saved. A file named for what it defines (`/styleit` for
+    being saved. A command file named for what it defines (`/styleit` for
     `commands/styleit.md`) only has to exist. Anything unreadable stays
     reviewable.
     A User correction is never suppressed: "run tests via `scripts/test.sh`"
@@ -2884,9 +2884,15 @@ def _written_this_session(
         # file the same turn happened to edit.
         if named and any(tok in text for tok in tokens - named):
             return True
-        # The name the file defines: `/styleit` for `commands/styleit.md`.
+        # The name a command file defines: `/styleit` for `commands/styleit.md`.
+        # Only a definition file counts — `deploy` naming `scripts/deploy.sh`
+        # is a mention, and an unrelated edit to that script proves nothing.
         stem = Path(norm).stem
-        if len(stem) >= 5 and stem in tokens:
+        if (
+            len(stem) >= 5
+            and stem in tokens
+            and any(part in {"commands", "subagents", "agents"} for part in Path(norm).parent.parts)
+        ):
             return True
     return False
 
