@@ -1062,7 +1062,8 @@ def setup_status(
             check_id="push_contact",
             label="Push contact",
             ok=bool(source.get("CIAO_PUSH_CONTACT", "").strip()),
-            # Optional: without it Web Push stays disabled, nothing else breaks.
+            # Optional: without it Web Push uses the localhost placeholder
+            # subject (ciao.main.DEFAULT_PUSH_SUBJECT) and still delivers.
             required=False,
             detail="CIAO_PUSH_CONTACT",
         ),

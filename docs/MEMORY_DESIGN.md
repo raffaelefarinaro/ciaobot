@@ -29,10 +29,12 @@ A personal assistant's memory must be, with **zero user configuration**:
 independent lines of work converged on: MemGPT/Letta's core-vs-archival
 split (arXiv:2310.08560), Claude Code's capped MEMORY.md index over topic
 files, and ChatGPT's injected profile beside on-demand history search. In
-Ciaobot the core is the two fenced regions in each agent root's `CLAUDE.md`
-(`ciao:memory` ~3000 chars, `ciao:profile` ~1375), loaded natively by every
-session; the long tail is the vault plus archived transcripts behind
-`ciao vault search` (SQLite FTS5).
+Ciaobot the core is the two fenced regions in each agent root's `AGENTS.md`
+(`ciao:memory` ~3000 chars, `ciao:profile` ~1375; an install that still has
+only the legacy `CLAUDE.md` keeps them there), loaded natively by every
+session; the long tail is the vault notes behind `ciao vault search` (SQLite
+FTS5) plus the archived transcripts under `Logs/`, which that search does not
+cover (`Logs/` is excluded from the vault index).
 
 The core is deliberately small because an always-injected memory has a real cost:
 it spends context on every turn and, worse, it asserts itself before the
@@ -64,7 +66,7 @@ outperforms any pipeline that summarizes those sources away.
 | Decay by disuse, reinforce by access | MemoryBank (Ebbinghaus + access reinforcement) | `ciao vault search` hits logged to `.runtime/vault_search_hits.jsonl`; "stale AND never retrieved in 90d" (`retrieved_recently: false`) is the strongest demotion signal — signal only, no auto-delete |
 | Consolidate episodes into cited rules | Generative Agents' reflection: derived memories cite their sources | Learnings entries carry `[key] [first → last] (xN) — sources: chat ids`; recurrence counting is mechanical, promotion at x3 cites its episodes; connections only among retrieved items |
 | Scope by default, promote explicitly | Anthropic's project-scoped memory; wrong scoping is a production failure | Per-workspace vaults, regions, and curation; `[project]` facts go to the project doc, never a region; archive time auto-applies NEW region facts only when they are confident and state-shaped, an attended "remember" is explicit, and the unattended curator never promotes a new region fact — it may only consolidate what is already there, under the undo-log rule |
-| The machinery must not remember itself | observed self-ingestion, 2026-08: the nightly curator's transcript re-extracted its own prompt rules into `ciao:memory` | System-schedule chats keep insights (audit trail) but cannot write memory; extraction prompts refuse machinery rules; bookkeeping files are `RESERVED_UNINDEXED_FILES` in FTS and `search: false` is a general opt-out |
+| The machinery must not remember itself | observed self-ingestion, 2026-08: the nightly curator's transcript re-extracted its own prompt rules into `ciao:memory` | System-schedule chats keep insights (audit trail) but skip the project-doc fold, and facts citing only automation turns are deferred to the queue; extraction prompts refuse machinery rules; bookkeeping files are `RESERVED_UNINDEXED_FILES` in FTS and `search: false` is a general opt-out |
 | Recall must survive paraphrase | LongMemEval ablations (arXiv:2410.10813): key expansion + query rewriting | AND→OR fallback for zero-hit multi-word queries; system prompt mandates 2–3 reformulations before "not found"; curation maintains `aliases:` frontmatter ("brother-in-law", "hourly rate") |
 | Procedures are contracts, not prose | prompt drift: three near-copies of the curation contract had diverged | The nightly procedure is one stock skill (`memory-curation`); the schedule prompt only dispatches; tests pin the contract to the skill file |
 | A managed mutation must be safe and reversible | one read-merge-write per region, plus a queue bullet and a decision record, is not one transaction in plain markdown | `ciao/memory_receipts.py`: every managed region write, queue resolution and prune records a stable-id receipt (`Workspace/Memory-Receipts.jsonl`) with actor/source, revisions and before/after images; the guide lock is required (unavailable = retryable failure, never an unlocked write), preview/apply/undo compare revisions so an external edit is a conflict, startup recovery reconciles an interrupted receipt from its images, and undo refuses a changed destination. External direct edits are conflicts, not audited writes |
