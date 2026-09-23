@@ -73,7 +73,7 @@ def test_schedule_chat_is_stamped_with_the_providers_pinned_mode(tmp_path) -> No
     """The end of the chain the empty default unblocks.
 
     A routine chat is created with the entry's mode, so a hardcoded "auto" on
-    the entry was stamped onto the chat and the operator's Settings -> Providers
+    the entry was stamped onto the chat and the operator's Settings -> Models & providers
     pin never applied. The chat then disagreed with its own unattended run
     (which `_effective_mode_for_chat` forces to bypass), and on opencode a reply
     to that chat rotated the session — a session's permission rules are fixed
