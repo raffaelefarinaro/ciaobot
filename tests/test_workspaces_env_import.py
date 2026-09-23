@@ -148,3 +148,31 @@ def test_invalid_variable_imports_nothing_and_keeps_registry(tmp_path: Path) -> 
 
     assert [e["name"] for e in _registry(tmp_path)] == ["alpha"]
     assert config.workspace_names() == ["alpha"]
+
+
+def test_setup_rerun_imports_the_variable_before_writing_a_registry(tmp_path: Path) -> None:
+    """The upgrade installer reruns setup before the new server first starts.
+
+    Without importing first, setup would write a synthetic single-workspace
+    registry and the server's import would then keep it over the variable's
+    real entries.
+    """
+    from ciao.cli import setup_workspace
+
+    (tmp_path / "memory-vault").mkdir()
+    (tmp_path / ".env").write_text(
+        "PWA_AUTH_TOKEN=t\n"
+        "CIAO_WORKSPACE=.\n"
+        "CIAO_VAULT_ROOT=memory-vault\n"
+        "CIAO_RUNTIME_ROOT=.runtime\n"
+        f"CIAO_WORKSPACES='{json.dumps(LEGACY)}'\n",
+        encoding="utf-8",
+    )
+
+    setup_workspace(tmp_path, auth_token="t", auth_required=False)
+
+    entries = {e["name"]: e for e in _registry(tmp_path)}
+    assert list(entries) == ["home", "client"]
+    assert entries["client"]["disallowed_tools"] == ["Bash"]
+    assert entries["client"]["allowed_mcp_servers"] == []
+    assert (tmp_path / ".runtime" / LEGACY_WORKSPACES_IMPORT_MARKER).is_file()
