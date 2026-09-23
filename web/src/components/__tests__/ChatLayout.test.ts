@@ -1928,6 +1928,66 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     wrapper.unmount()
   })
 
+  // Option+letter is how a Mac types accents and symbols (⌥N then N is ñ, ⌥D
+  // is ∂), so inside a text field a Mac Option press must reach the field
+  // untouched. The same events outside a text field are shortcuts.
+  it.each([
+    ['⌥N', { key: 'Dead', code: 'KeyN' }],
+    ['⌥D', { key: '∂', code: 'KeyD' }],
+    ['⌥M', { key: 'µ', code: 'KeyM' }],
+  ] as const)('Mac %s in a focused textarea types the character instead of firing', async (_label, init) => {
+    const wrapper = await mountWebLayout()
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    textarea.focus()
+
+    const event = press(init, textarea)
+    await flushPromises()
+
+    expect(event.defaultPrevented).toBe(false)
+    expect(toggleDictation).not.toHaveBeenCalled()
+    expect(toggleModelPicker).not.toHaveBeenCalled()
+    expect(pendingNewChat.value).toBeNull()
+
+    textarea.remove()
+    wrapper.unmount()
+  })
+
+  it('Mac ⌥N and ⌥D fire their shortcuts when focus is on the body', async () => {
+    const wrapper = await mountWebLayout()
+    const newChat = press({ key: 'Dead', code: 'KeyN' }, document.body)
+    await flushPromises()
+    expect(newChat.defaultPrevented).toBe(true)
+    expect(pendingNewChat.value).not.toBeNull()
+    pendingNewChat.value?.resolve(null)
+    await flushPromises()
+
+    const dictation = press({ key: '∂', code: 'KeyD' }, document.body)
+    expect(dictation.defaultPrevented).toBe(true)
+    expect(toggleDictation).toHaveBeenCalledOnce()
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['Windows Alt+N', { key: 'n', code: 'KeyN' }],
+    ['Mac ⌥Backspace', { key: 'Backspace', code: 'Backspace' }],
+  ] as const)('%s still fires while a textarea is focused', async (label, init) => {
+    const wrapper = await mountWebLayout()
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    textarea.focus()
+
+    const event = press(init, textarea)
+    await flushPromises()
+
+    expect(event.defaultPrevented).toBe(true)
+    if (label === 'Windows Alt+N') expect(pendingNewChat.value).not.toBeNull()
+    else expect(archiveActiveChat).toHaveBeenCalledOnce()
+
+    textarea.remove()
+    wrapper.unmount()
+  })
+
   // The physical key decides when `code` is present: Option on the D key is
   // dictation whatever character the layout reports.
   it('ignores the Option-produced character when code names another key', async () => {

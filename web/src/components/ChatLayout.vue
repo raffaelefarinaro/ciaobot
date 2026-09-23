@@ -760,7 +760,14 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // letters never matched on a Mac. `e.code` names the key position and is
 // unaffected by Option. When a browser or a synthetic event leaves `code`
 // empty, fall back to `e.key` so Windows/Linux Alt chords still match.
+//
+// Inside a text field the physical match is off: Option+letter is how a Mac
+// types accents and symbols (⌥N then N is ñ, ⌥D is ∂, ⌥M is µ), so a press
+// whose `key` is a produced character or "Dead" must reach the field. There
+// only the old `e.key` comparison applies, which still matches Windows/Linux
+// Alt chords and ⌥Backspace (Backspace produces no character).
 function optionChord(e: KeyboardEvent, codes: readonly string[], keys: readonly string[]): boolean {
+  if (isTypingTarget(e.target)) return keys.includes(e.key)
   if (e.code) return codes.includes(e.code)
   return keys.includes(e.key)
 }
