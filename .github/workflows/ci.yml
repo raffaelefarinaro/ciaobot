@@ -11,7 +11,40 @@ on:
 permissions:
   contents: read
 
+# Two tiers. `linux-server` is the gate every PR waits on: the same blocking
+# steps a contributor runs locally (mypy, pytest, frontend tests, build), with
+# pytest parallelized. `test` is the full macOS job — coverage, browser tests,
+# the Rust shell, the Swift sidecar and a cold-started app bundle — and takes
+# ~18 minutes, so it runs on pushes to develop, on PRs to main (release cuts),
+# and on any PR that touches the desktop shell, which nothing else compiles.
+# A macOS-only regression in a develop PR therefore surfaces on the post-merge
+# push run instead, before any release can ship it.
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      desktop: ${{ steps.diff.outputs.desktop }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Detect desktop changes
+      id: diff
+      shell: bash
+      run: |
+        if [ "${{ github.event_name }}" != "pull_request" ]; then
+          echo "desktop=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        base="${{ github.event.pull_request.base.sha }}"
+        # The bundle job also builds the embedded runtime and cold-starts it,
+        # so the scripts and pins that feed that build count as desktop too.
+        if git diff --name-only "$base"...HEAD | grep -qE '^(desktop/|scripts/(build-bundled-runtime\.sh|pinned-python-runtime\.env|check-desktop\.sh)|\.github/workflows/ci\.yml)'; then
+          echo "desktop=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "desktop=false" >> "$GITHUB_OUTPUT"
+        fi
+
   linux-server:
     runs-on: ubuntu-24.04
     steps:
@@ -30,7 +63,7 @@ jobs:
     - name: Python static type check
       run: mypy ciao
     - name: Linux backend tests
-      run: pytest tests/
+      run: pytest -n auto tests/
     - name: Install frontend dependencies
       working-directory: web
       run: npm ci
@@ -44,6 +77,11 @@ jobs:
       run: ciao package-smoke --skip-frontend
 
   test:
+    needs: changes
+    if: >-
+      github.event_name != 'pull_request'
+      || github.base_ref == 'main'
+      || needs.changes.outputs.desktop == 'true'
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@v4
@@ -78,7 +116,7 @@ jobs:
 
     - name: Run pytest with coverage
       run: |
-        pytest --cov=ciao --cov-report=term-missing tests/
+        pytest -n auto --cov=ciao --cov-report=term-missing tests/
 
     - name: Install frontend dependencies
       run: |
