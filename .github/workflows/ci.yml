@@ -37,9 +37,14 @@ jobs:
           exit 0
         fi
         base="${{ github.event.pull_request.base.sha }}"
+        # Capture first: piping straight into `grep -q` under the runner's
+        # `-o pipefail` turns an early match into SIGPIPE (141) on a large
+        # diff, which would read as "no desktop changes". A failed diff fails
+        # the step, and the test job treats a failed detection as desktop.
+        changed="$(git diff --name-only "$base"...HEAD)"
         # The bundle job also builds the embedded runtime and cold-starts it,
         # so the scripts and pins that feed that build count as desktop too.
-        if git diff --name-only "$base"...HEAD | grep -qE '^(desktop/|scripts/(build-bundled-runtime\.sh|pinned-python-runtime\.env|check-desktop\.sh)|\.github/workflows/ci\.yml)'; then
+        if grep -qE '^(desktop/|pyproject\.toml$|scripts/(build-bundled-runtime\.sh|pinned-python-runtime\.env|check-desktop\.sh)|\.github/workflows/ci\.yml)' <<<"$changed"; then
           echo "desktop=true" >> "$GITHUB_OUTPUT"
         else
           echo "desktop=false" >> "$GITHUB_OUTPUT"
@@ -78,10 +83,14 @@ jobs:
 
   test:
     needs: changes
+    # A skipped job reports success to a required check, so a failed
+    # detection must run the full job rather than skip it.
     if: >-
+      !cancelled() && (
       github.event_name != 'pull_request'
       || github.base_ref == 'main'
-      || needs.changes.outputs.desktop == 'true'
+      || needs.changes.result != 'success'
+      || needs.changes.outputs.desktop == 'true')
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@v4

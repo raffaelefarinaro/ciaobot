@@ -93,7 +93,7 @@ archive, its signature, and `latest.json`.
   full macOS `test` job (coverage, browser tests, desktop Rust, the Swift
   sidecar and a cold-started app bundle, about 18 minutes) runs on pushes to
   `develop`, on PRs into `main`, and on PRs that touch `desktop/`, the embedded
-  runtime build scripts, or the CI workflow itself. When it is skipped on a PR
+  runtime build scripts, `pyproject.toml`, or the CI workflow itself. When it is skipped on a PR
   it still reports as passing, so a required `test` check does not block.
   A macOS-only regression in a `develop` PR shows up on the post-merge push run.
 - **Release prep:** from a clean checkout, run:
