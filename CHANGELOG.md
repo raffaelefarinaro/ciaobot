@@ -11,6 +11,7 @@
 - Remove clusters and bridge notes from the memory map (`50435cdd`)
 - Release review fixes for the proposal routing and vault review changes (`a2c7d10d`)
 - Keep review rows and unresolved project names instead of dropping them (`3f300486`)
+- Address Codex review on #522: keep facts reviewable instead of guessing (`e2c0de47`)
 
 ### Fixed
 - Fix silent drops and edge cases found reviewing the release fixes (`228b0148`)
