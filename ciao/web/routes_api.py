@@ -47,6 +47,7 @@ from ciao.web.document_conversion import is_anydoc_document
 from ciao.native_sessions import live_sessions_for_workspace
 from ciao.config import (
     CLAUDE_MODELS,
+    GWS_DEFAULT_PROFILE,
     MAX_IMAGE_SIZE_BYTES,
     MAX_VOICE_SIZE_BYTES,
     RESTART_EXIT_CODE,
@@ -1060,7 +1061,7 @@ def _gws_integration_payload(config) -> dict:
     names = _gws_profile_names(config)
     # An operator default that names no existing account is not a default the
     # UI should advertise; workspaces then show "No Google account" instead.
-    default_profile = str(getattr(config, "gws_default_profile", "") or "").strip()
+    default_profile = GWS_DEFAULT_PROFILE
     if default_profile not in names:
         default_profile = ""
     return {
@@ -4741,7 +4742,7 @@ async def list_models(request: Request) -> JSONResponse:
     claude_default = (
         config.claude_default_model
         if config.claude_default_model in claude_models
-        else (claude_models[0] if claude_models else "")
+        else claude_models[0]
     )
 
     return JSONResponse({
@@ -4782,10 +4783,10 @@ def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
     from ciao import native_sidecar
     from ciao.voice import (
-        TRANSCRIPTION_LOCALE,
         apple_dictation_available,
         apple_speech_available,
         dictation_unavailable_reason,
+        system_locale,
         system_voices,
     )
 
@@ -4842,7 +4843,7 @@ def _routines_payload(config, app_settings) -> dict:
         "apple_model_available": native_sidecar.apple_model_available(),
         "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
         "transcription": {
-            "locale": TRANSCRIPTION_LOCALE,
+            "locale": system_locale(),
             # On-device dictation needs macOS 26+, the installed app, and a
             # dictation language. Settings hides the local option entirely when
             # it cannot run, and shows the reason when the user asks.

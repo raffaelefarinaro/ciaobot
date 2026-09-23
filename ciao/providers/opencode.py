@@ -2388,9 +2388,7 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def opencode_login_status(
-    env: Mapping[str, str] | None = None, *, timeout: float = 5.0
-) -> dict[str, Any]:
+def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
     """Bounded, credential-free opencode install/auth status for Settings."""
     import subprocess
 

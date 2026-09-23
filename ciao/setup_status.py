@@ -625,7 +625,7 @@ def opencode_status_probe(
 ) -> dict[str, Any]:
     from ciao.providers.opencode import opencode_login_status
 
-    return opencode_login_status(env)
+    return opencode_login_status()
 
 
 # Where the wizard sends someone who has no Claude Code at all. Kept as a

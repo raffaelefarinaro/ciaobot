@@ -362,9 +362,7 @@ def _looks_like_workspace_dir(path: Path) -> bool:
         return False
 
 
-def _bootstrap_registry(
-    vault_root: Path | None = None, *, gws_default_profile: str = "personal"
-) -> dict[str, WorkspaceConfig]:
+def _bootstrap_registry(vault_root: Path | None = None) -> dict[str, WorkspaceConfig]:
     """The registry an install gets before it has one, read off the vault.
 
     This is the bootstrap default, not a fallback — nothing else seeds a registry
@@ -402,7 +400,7 @@ def _bootstrap_registry(
         )
     if not names:
         names = ["personal"]
-    profile = gws_default_profile or "personal"
+    profile = GWS_DEFAULT_PROFILE
     return {
         name: WorkspaceConfig(
             name=name,
@@ -463,6 +461,9 @@ def _read_or_create_secret(path: Path) -> str:
 # place. Fixed: the shell loop hardcodes the same number.
 RESTART_EXIT_CODE = 75
 
+# Google account a workspace falls back to when it links none.
+GWS_DEFAULT_PROFILE = "personal"
+
 # Upload size caps for chat attachments.
 MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
 MAX_VOICE_SIZE_BYTES = 25 * 1024 * 1024
@@ -491,7 +492,7 @@ class CiaoConfig:
     bootstrap_mode: bool = False
     vault_root: Path = Path("memory-vault")
     # macOS voice identifier or name for read-aloud. Empty means "the best
-    # installed voice for ciao.voice.TRANSCRIPTION_LOCALE" -- the right default when the
+    # installed voice for the Mac's language (ciao.voice.system_locale)" -- the right default when the
     # available voices differ on every machine.
     tts_local_voice: str = ""
     claude_default_model: str = CLAUDE_MODELS[0]
@@ -528,7 +529,6 @@ class CiaoConfig:
     # access control. Set ``PWA_HOST=127.0.0.1`` in ``.env`` for loopback-only.
     # This must stay equal to the ``PWA_HOST`` fallback in ``from_env`` below.
     pwa_host: str = "0.0.0.0"
-    gws_default_profile: str = "personal"
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab. Empty means the provider's own default applies.
     opencode: OpencodeSettings = field(default_factory=OpencodeSettings)
@@ -559,10 +559,7 @@ class CiaoConfig:
             vault_root = self.workspace_root / vault_root
         self.vault_root = vault_root.resolve()
         if not self.workspaces:
-            self.workspaces = _bootstrap_registry(
-                self.vault_root,
-                gws_default_profile=self.gws_default_profile,
-            )
+            self.workspaces = _bootstrap_registry(self.vault_root)
         self._workspace_registry_changed = self._normalize_workspace_vault_roots()
         # Migrate pre-existing workspaces onto the allowlist now, so deny
         # resolution never sees a ``None`` allowlist on a workspace that existed
@@ -1611,9 +1608,7 @@ class CiaoConfig:
         except OSError:
             workspaces_json = ""
 
-        workspaces = _parse_workspaces_json(workspaces_json) or _bootstrap_registry(
-            vault_root
-        )
+        workspaces = _parse_workspaces_json(workspaces_json) or _bootstrap_registry(vault_root)
 
         dev_mode_raw = source.get("CIAO_DEV_MODE", "").strip().lower()
         dev_mode = dev_mode_raw in {"true", "1", "yes", "y"}

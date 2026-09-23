@@ -53,10 +53,6 @@ def normalize_role(role: str) -> str:
     return mapped if mapped in _VALID_ROLES else "host"
 
 
-def get_default_role() -> str:
-    return "host"
-
-
 def _normalize_peer_url(url: str) -> str:
     cleaned = url.strip().rstrip("/")
     if not cleaned:
@@ -87,7 +83,7 @@ class NodeStateManager:
         data = self._read_raw()
         if not data:
             now = _now_iso()
-            default_role = get_default_role()
+            default_role = "host"
             data = {
                 "node_id": self.node_id,
                 "role": default_role,
@@ -155,7 +151,7 @@ class NodeStateManager:
 
     def get_role(self) -> str:
         data = self._read_raw()
-        return normalize_role(str(data.get("role", get_default_role())))
+        return normalize_role(str(data.get("role", "host")))
 
     def get_host_url(self) -> str | None:
         data = self._read_raw()

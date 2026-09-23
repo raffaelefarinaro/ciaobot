@@ -239,10 +239,6 @@ def canonical_type(raw: str) -> str:
 DEFAULT_PROMOTION_THRESHOLD = 5
 
 
-def promotion_threshold() -> int:
-    return DEFAULT_PROMOTION_THRESHOLD
-
-
 H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 # Duplicated from `vault_lint` rather than imported: `vault_lint` imports this
 # module, so the dependency only runs one way.
@@ -1283,7 +1279,7 @@ def format_vocabulary(entries: list[Entry]) -> str:
     tags: dict[str, int] = report["tags"]
     workspaces: dict[str, list[str]] = report["tag_workspaces"]
     lines: list[str] = []
-    established = promotion_threshold()
+    established = DEFAULT_PROMOTION_THRESHOLD
 
     lines.append("## Types (canonical — choose one of these)\n")
     for name in sorted(CANONICAL_TYPES):

@@ -534,7 +534,6 @@ def test_established_tag_tier_uses_configured_threshold(tmp_path: Path, monkeypa
     from ciao import vault_index as vi_mod
 
     monkeypatch.setattr(vi_mod, "DEFAULT_PROMOTION_THRESHOLD", 10)
-    assert vi_mod.promotion_threshold() == 10
 
     vault = tmp_path / "vault"
     vault.mkdir()

@@ -37,13 +37,6 @@ def _workspace_name_arg(value: str) -> str:
     return name
 
 
-def _restart_exit_code() -> int:
-    """The exit code the server uses to request a restart."""
-    from ciao.config import RESTART_EXIT_CODE
-
-    return RESTART_EXIT_CODE
-
-
 def _relaunch_argv() -> list[str]:
     """argv for re-execing the CLI: a fresh interpreter picks up new code
     after a package update."""
@@ -51,6 +44,7 @@ def _relaunch_argv() -> list[str]:
 
 
 def _run_server() -> int:
+    from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
 
     try:
@@ -59,7 +53,7 @@ def _run_server() -> int:
         code = exc.code if isinstance(exc.code, int) else 0
     else:
         code = 0
-    if code == _restart_exit_code():
+    if code == RESTART_EXIT_CODE:
         # The setup wizard and package updates request a restart by exiting
         # with this code. Under launchd KeepAlive relaunches us anyway, but a
         # foreground `ciao run` would just die and leave the site unreachable.

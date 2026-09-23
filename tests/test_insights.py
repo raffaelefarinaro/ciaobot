@@ -672,6 +672,7 @@ def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     config = _config()
     config.vault_root = vault_root
     config.workspace_root = workspace_root
+    config.state_path = tmp_path / "runtime" / "state.json"
     config.insights_model = "deepseek-v4-flash:0731-cloud"
     
     calls = []
@@ -700,6 +701,7 @@ def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         "success": 2,
         "skipped": 0,
         "gated": 0,
+        "no_signal": 0,
         "errors": 0,
     }
     assert insights.format_backfill_summary(result) == "Processed 2/2: 2 succeeded, 0 skipped."
@@ -847,8 +849,7 @@ def test_apple_prefilter_fails_open_when_model_unavailable(
 
 def test_insights_timeout_is_generous() -> None:
     # The old flat 120s was below the 214-253s this path really takes.
-    assert insights._insights_timeout_s() == insights._DEFAULT_TIMEOUT_S
-    assert insights._insights_timeout_s() > 200
+    assert insights._DEFAULT_TIMEOUT_S > 200
 
 
 def test_context_overflow_is_distinguished_from_a_transient_timeout() -> None:
@@ -961,19 +962,6 @@ def test_transient_failure_still_retries_once(monkeypatch: pytest.MonkeyPatch) -
     assert err == ""
     assert "boom" in out
     assert calls == 2
-
-
-def test_backfill_caps_an_unlimited_run_and_reports_it(monkeypatch, tmp_path):
-    """limit=0 must not mean "one model call per archive in the vault".
-
-    Both automatic callers (startup, the Settings button) pass no limit, and
-    the archive path was broken until recently, so this had never run against
-    a real workspace. The cap is recorded rather than silent.
-    """
-    from ciao import insights
-
-    monkeypatch.setattr(insights, "_BACKFILL_MAX", 2)
-    assert insights._backfill_ceiling() == 2
 
 
 # ── locate_insights_section ──────────────────────────────────────────────
@@ -1754,6 +1742,52 @@ def test_backfill_discovers_an_opencode_archive(
 
     assert result["eligible"] == 1, "a ses_ id is a session id too"
     assert "## Session insights" in archive.read_text(encoding="utf-8")
+
+
+def test_backfill_sends_a_no_signal_archive_only_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An archive with nothing to extract never gets an insights section.
+
+    Backfill runs on every server start, so without a record of what it
+    already checked it would send the same archive to the model on every boot.
+    An archive that changes afterwards is checked again.
+    """
+    chats_dir = tmp_path / "vault" / "Logs" / "Chats" / "chat-789" / "opencode"
+    chats_dir.mkdir(parents=True)
+    archive = chats_dir / "2026-08-31T00-04-57Z-ses_nosignal0000000000000000000.md"
+    archive.write_text("# Archived chat\n\nhello\n", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    config = _config()
+    config.vault_root = tmp_path / "vault"
+    config.workspace_root = tmp_path / "ws"
+    config.state_path = tmp_path / "runtime" / "state.json"
+    config.insights_model = "deepseek-v4-flash:0731-cloud"
+    calls: list[str] = []
+
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        calls.append(user_prompt)
+        return ""
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    first = asyncio.run(insights.backfill_insights_task(config, mode="both", concurrency=1))
+    assert first["no_signal"] == 1
+    assert first["errors"] == 0
+    assert len(calls) == 1
+    assert (tmp_path / "runtime" / "insights_checked.json").is_file()
+
+    second = asyncio.run(insights.backfill_insights_task(config, mode="both", concurrency=1))
+    assert second["to_process"] == 0
+    assert len(calls) == 1, "a checked archive must not be sent again"
+
+    archive.write_text("# Archived chat\n\nhello again\n", encoding="utf-8")
+    import os
+
+    os.utime(archive, ns=(1, archive.stat().st_mtime_ns + 1_000_000))
+    asyncio.run(insights.backfill_insights_task(config, mode="both", concurrency=1))
+    assert len(calls) == 2, "a changed archive is checked again"
 
 
 def test_backfill_workspace_filter_uses_the_chat_registry(

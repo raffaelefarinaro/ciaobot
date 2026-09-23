@@ -521,8 +521,13 @@ class CiaoControlPlane:
             getattr(self.config.workspace(workspace), "gws_profile", "") or ""
         ).strip()
         if not profile:
-            default = str(getattr(self.config, "gws_default_profile", "") or "").strip()
-            profile = default if default in gws_auth.known_profiles(self.config) else ""
+            from ciao.config import GWS_DEFAULT_PROFILE
+
+            profile = (
+                GWS_DEFAULT_PROFILE
+                if GWS_DEFAULT_PROFILE in gws_auth.known_profiles(self.config)
+                else ""
+            )
         if not profile:
             return _ok(
                 {

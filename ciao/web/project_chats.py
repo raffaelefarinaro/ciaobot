@@ -67,6 +67,7 @@ from ciao.subagent_tracking import SubagentInfo
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
+    GWS_DEFAULT_PROFILE,
     MAX_IMAGE_SIZE_BYTES,
     MAX_VOICE_SIZE_BYTES,
     BridgeConfig,
@@ -5202,13 +5203,11 @@ class ProjectChatManager:
             return
         if is_tier(model):
             return
-        allowed = list(CLAUDE_MODELS)
-        if model in allowed:
+        if model in CLAUDE_MODELS:
             return
-        sample = ", ".join(allowed[:8]) if allowed else "(none configured)"
         raise UnknownModelError(
             f"Unknown model '{model}' for provider '{provider or 'default'}' "
-            f"(configured models: {sample})"
+            f"(configured models: {', '.join(CLAUDE_MODELS)})"
         )
 
     def _thinking_level_for_chat(self, chat: ChatInfo) -> str:
@@ -5249,7 +5248,7 @@ class ProjectChatManager:
         except (AttributeError, ValueError, OSError):
             logger.debug("could not resolve the agent vault root for %r", workspace)
         env["GWS_PROFILE"] = self._workspace_gws_profile(workspace)
-        env["CIAO_ACTIVE_WORKSPACE"] = workspace or self._config.gws_default_profile
+        env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
         env["CIAO_LEGACY_ENTITY_WORKSPACE"] = (
             self._config.legacy_entity_workspace()
         )
@@ -8838,7 +8837,7 @@ class ProjectChatManager:
                 logger.info("Schedule attention classifier %s", note)
             try:
                 from ciao.providers.oneshot import run_oneshot
-                from ciao.insights import _insights_timeout_s, is_context_overflow
+                from ciao.insights import _DEFAULT_TIMEOUT_S, is_context_overflow
 
                 # Same env-tunable budget as the insights job: a slow local
                 # model can take minutes on a successful call,
@@ -8849,7 +8848,7 @@ class ProjectChatManager:
                     system_prompt=system_prompt,
                     model=model,
                     env=env,
-                    timeout_s=_insights_timeout_s(),
+                    timeout_s=_DEFAULT_TIMEOUT_S,
                     provider=classifier_provider,
                     cwd=self._config.workspace_root,
                 )

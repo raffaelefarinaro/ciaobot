@@ -195,3 +195,30 @@ def test_correct_keeps_the_whole_transcript_when_fitting_drops_content(monkeypat
     trans = voice.AppleDictationTranscriber("en-US")
     long_text = "word " * 10000
     assert asyncio.run(trans.correct(long_text)) == long_text
+
+
+def test_system_locale_follows_the_macs_preferred_language(monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(voice.sys, "platform", "darwin")
+    outputs = {
+        "AppleLanguages": '(\n    "it-IT",\n    "en-US"\n)\n',
+        "AppleLocale": "en_US@rg=chzzzz\n",
+    }
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda args, **_kw: SimpleNamespace(stdout=outputs.get(args[-1], "")),
+    )
+    voice.system_locale.cache_clear()
+    try:
+        assert voice.system_locale() == "it-IT"
+        outputs["AppleLanguages"] = ""
+        voice.system_locale.cache_clear()
+        # No language list: the region-qualified locale is normalized.
+        assert voice.system_locale() == "en-US"
+        outputs["AppleLocale"] = ""
+        voice.system_locale.cache_clear()
+        assert voice.system_locale() == voice.TRANSCRIPTION_LOCALE
+    finally:
+        voice.system_locale.cache_clear()

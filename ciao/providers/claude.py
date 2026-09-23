@@ -422,9 +422,8 @@ class ClaudeProvider(BaseSDKProvider):
         # the session is held by a background agent. The next connect
         # attempt re-resumes with ``--fork-session`` to branch a copy.
         self._fork_resume_next = False
-        # Hostname the CLI is pointed at for the in-flight turn, captured at
-        # connect time so a hostless connection error can name its endpoint.
-        self._api_host = ""
+        # Hostname a hostless connection error is annotated with.
+        self._api_host = _API_HOST
         # Runtime root: state_path.parent on CiaoConfig; fall back to
         # workspace_root/.runtime when config is absent (tests).
         runtime_root = Path(
@@ -453,9 +452,6 @@ class ClaudeProvider(BaseSDKProvider):
 
     async def _ensure_connected(self, request: AgentRequest) -> ClaudeSDKClient:
         requested_model = request.model
-        # Refresh every turn: a reused client can still change host if the
-        # chat's routing env changed, and errors annotate against this value.
-        self._api_host = _API_HOST
         if (
             self._client is not None
             and self._connected

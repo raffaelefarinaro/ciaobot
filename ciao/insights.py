@@ -291,25 +291,10 @@ def _entity_notes_block(
     )
 
 
-def _insights_timeout_s() -> float:
-    return _DEFAULT_TIMEOUT_S
-
-
-def _max_input_chars() -> int:
-    return _DEFAULT_MAX_INPUT_CHARS
-
-
+# Most archives one un-limited backfill run will process. A safety bound, not
+# a preference: the callers that pass no limit (startup and the Settings
+# button) would otherwise issue one model call per archive in the whole vault.
 _BACKFILL_MAX = 200
-
-
-def _backfill_ceiling() -> int:
-    """Most archives one un-limited backfill run will process.
-
-    A safety bound, not a preference: the callers that pass no limit (startup
-    and the Settings button) would otherwise issue one model call per archive
-    in the whole vault from a single click.
-    """
-    return _BACKFILL_MAX
 
 
 _EXPLICIT_MEMORY_INTENT = re.compile(
@@ -373,7 +358,7 @@ async def _apple_prefilter_skips(
         verdict = await native_sidecar.respond(
             fitted,
             instructions=_PREGATE_SYSTEM_PROMPT,
-            timeout=_insights_timeout_s(),
+            timeout=_DEFAULT_TIMEOUT_S,
         )
         return verdict.strip().upper().startswith("NO")
     except native_sidecar.SidecarError:
@@ -469,7 +454,7 @@ def _fit_transcript(filtered_jsonl: str, *, reserve: int = 0) -> tuple[str, int]
     fitting (the known-context block) — the oversized-input rejection is
     deliberately not retried, so the first call must already be within budget.
     """
-    budget = max(0, _max_input_chars() - reserve)
+    budget = max(0, _DEFAULT_MAX_INPUT_CHARS - reserve)
     if len(filtered_jsonl) <= budget:
         return filtered_jsonl, 0
     lines = filtered_jsonl.splitlines()
@@ -586,7 +571,7 @@ async def call_with_retry(
                     "chars; pick a model with a larger window.",
                     label,
                     exc,
-                    _max_input_chars(),
+                    _DEFAULT_MAX_INPUT_CHARS,
                 )
             else:
                 logger.error(
@@ -918,8 +903,11 @@ async def extract_and_append(
     project_doc_path: str = "",
     text_mode: bool = False,
     guide_path: Path | None = None,
-) -> None:
+) -> Any:
     """Run the post-archive pipeline for one archive (stage-resumable).
+
+    Returns the in-memory job, so a caller can read how the insights stage
+    settled (succeeded, skipped for lack of signal, or failed).
 
     This is a thin, backward-compatible wrapper over
     :func:`run_archive_pipeline`. It builds an in-memory
@@ -963,6 +951,7 @@ async def extract_and_append(
     )
     job.inputs = {k: v for k, v in inputs.items() if k not in ("guide_path", "workspace_root", "vault_root", "proposal_vault_root")}
     await run_archive_pipeline(job, inputs)
+    return job
 
 
 def _pipeline_inputs(
@@ -1684,7 +1673,7 @@ async def _run_model_with_retry(
         budget = max(0, native_sidecar.APPLE_MAX_INPUT_CHARS - reserve)
     else:
         payload, dropped = _fit_transcript(filtered_jsonl, reserve=reserve)
-        budget = max(0, _max_input_chars() - reserve)
+        budget = max(0, _DEFAULT_MAX_INPUT_CHARS - reserve)
     if dropped:
         logger.info(
             "Insights transcript over the %d-char budget; dropped %d oldest line(s)",
@@ -1739,7 +1728,7 @@ async def _call_text_model(
         return await native_sidecar.respond(
             _text_user_prompt(apple_body, context_block),
             instructions=_TEXT_MODE_SYSTEM_PROMPT,
-            timeout=_insights_timeout_s(),
+            timeout=_DEFAULT_TIMEOUT_S,
         )
     from ciao.providers.oneshot import run_oneshot
 
@@ -1747,7 +1736,7 @@ async def _call_text_model(
         _text_user_prompt(body, context_block),
         system_prompt=_TEXT_MODE_SYSTEM_PROMPT,
         model=model,
-        timeout_s=_insights_timeout_s(),
+        timeout_s=_DEFAULT_TIMEOUT_S,
         cwd=cwd,
         provider=provider,
     )
@@ -1820,7 +1809,7 @@ async def _call_model(
             "</transcript>\nNow extract durable signal using the required section "
             "schema. Return Markdown sections only; never return JSON or a recap.",
             instructions=_INSIGHTS_SYSTEM_PROMPT,
-            timeout=_insights_timeout_s(),
+            timeout=_DEFAULT_TIMEOUT_S,
         )
 
     from ciao.providers.oneshot import run_oneshot
@@ -1836,7 +1825,7 @@ async def _call_model(
     kwargs: dict[str, Any] = {
         "system_prompt": _INSIGHTS_SYSTEM_PROMPT,
         "model": model,
-        "timeout_s": _insights_timeout_s(),
+        "timeout_s": _DEFAULT_TIMEOUT_S,
     }
     if provider != "claude":
         kwargs.update({"provider": provider, "cwd": cwd})
@@ -1856,6 +1845,59 @@ UUID_RE = re.compile(
 SESSION_ID_RE = re.compile(rf"{UUID_RE.pattern}|ses_[A-Za-z0-9]+")
 
 
+_CHECKED_LEDGER_NAME = "insights_checked.json"
+
+
+class _CheckedArchives:
+    """Archives a backfill already sent and found to hold no durable signal.
+
+    Such an archive never gets a ``## Session insights`` section, so without
+    this record every backfill (one runs on each server start) would pick it
+    again and pay the same model call for the same empty answer. Keyed by path
+    with the file's mtime: an archive that changes since it was checked is
+    checked again.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._dirty = False
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raw = {}
+        self._entries: dict[str, int] = {
+            str(k): int(v) for k, v in raw.items() if isinstance(v, int)
+        } if isinstance(raw, dict) else {}
+
+    @staticmethod
+    def _mtime(archive: Path) -> int | None:
+        try:
+            return archive.stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def is_checked(self, archive: Path) -> bool:
+        mtime = self._mtime(archive)
+        return mtime is not None and self._entries.get(str(archive)) == mtime
+
+    def mark(self, archive: Path) -> None:
+        mtime = self._mtime(archive)
+        if mtime is not None:
+            self._entries[str(archive)] = mtime
+            self._dirty = True
+
+    def save(self) -> None:
+        if not self._dirty:
+            return
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._entries, indent=1, sort_keys=True), encoding="utf-8")
+            tmp.replace(self._path)
+        except OSError:
+            logger.warning("Could not record checked archives in %s", self._path, exc_info=True)
+
+
 def _empty_backfill_stats() -> dict[str, int]:
     return {
         "total_discovered": 0,
@@ -1866,6 +1908,7 @@ def _empty_backfill_stats() -> dict[str, int]:
         "success": 0,
         "skipped": 0,
         "gated": 0,
+        "no_signal": 0,
         "errors": 0,
     }
 
@@ -1887,6 +1930,8 @@ def format_backfill_summary(stats: dict[str, int]) -> str:
     summary = f"Processed {processed}/{selected}: {success} succeeded, {skipped} skipped"
     if stats.get("gated"):
         summary += f", {stats['gated']} gated (no durable signal)"
+    if stats.get("no_signal"):
+        summary += f", {stats['no_signal']} with no durable signal"
     if errors:
         summary += f", {errors} errors"
     return summary + "."
@@ -2020,6 +2065,7 @@ async def backfill_insights_task(
         if config.workspace_root not in search_roots:
             search_roots.append(config.workspace_root)
     project_dirs = [(r, _claude_projects_dir(r)) for r in search_roots]
+    _checked = _CheckedArchives(Path(config.state_path).parent / _CHECKED_LEDGER_NAME)
 
     by_chat = dict(chat_workspaces or {})
     if workspace and not by_chat:
@@ -2062,6 +2108,11 @@ async def backfill_insights_task(
             if _has_insights_section(md):
                 done += 1
                 continue
+            if _checked.is_checked(md):
+                # Already sent once and found to hold nothing worth keeping;
+                # sending it again would cost the same call for the same answer.
+                done += 1
+                continue
 
             jsonl_root = next(
                 (r for r, d in project_dirs if (d / f"{session_id}.jsonl").exists()),
@@ -2086,7 +2137,7 @@ async def backfill_insights_task(
     stats["eligible"] = len(todo)
     if limit > 0:
         todo = todo[:limit]
-    elif len(todo) > _backfill_ceiling():
+    elif len(todo) > _BACKFILL_MAX:
         # limit=0 means "no caller-supplied limit", which is what the startup
         # job and the Settings button both pass. Until the archive path was
         # fixed this function found nothing, so nobody had run it against a
@@ -2094,7 +2145,7 @@ async def backfill_insights_task(
         # workspace that is hours of runtime and a large bill. Cap it, and
         # record the cap in the stats so the job report says how many were
         # left rather than implying it processed everything.
-        ceiling = _backfill_ceiling()
+        ceiling = _BACKFILL_MAX
         stats["capped_at"] = ceiling
         stats["remaining_after_cap"] = len(todo) - ceiling
         logger.info(
@@ -2141,6 +2192,7 @@ async def backfill_insights_task(
                     )
                     if not filtered:
                         logger.warning("Session JSONL empty or filtered to nothing for %s", archive_path)
+                        _checked.mark(archive_path)
                         return "skipped"
                     if await _apple_prefilter_skips(
                         filtered,
@@ -2152,8 +2204,9 @@ async def backfill_insights_task(
                             "On-device prefilter found no durable signal in %s; skipping extraction",
                             archive_path.name,
                         )
+                        _checked.mark(archive_path)
                         return "gated"
-                    await extract_and_append(
+                    job = await extract_and_append(
                         archive_path=archive_path,
                         filtered_jsonl=filtered,
                         config=config,
@@ -2174,6 +2227,11 @@ async def backfill_insights_task(
                         trajectories_enabled=getattr(config, "trajectories_enabled", True),
                     )
                     if not _has_insights_section(archive_path):
+                        from ciao.archive_jobs import SKIPPED
+
+                        if job.status_of("insights") == SKIPPED:
+                            _checked.mark(archive_path)
+                            return "no_signal"
                         return "error"
                     logger.info("Backfilled [full] insights for %s", archive_path.name)
                     return "success"
@@ -2209,14 +2267,14 @@ async def backfill_insights_task(
                             return await native_sidecar.respond(
                                 apple_prompt,
                                 instructions=_TEXT_MODE_SYSTEM_PROMPT,
-                                timeout=_insights_timeout_s(),
+                                timeout=_DEFAULT_TIMEOUT_S,
                             )
                         from ciao.providers.oneshot import run_oneshot
                         return await run_oneshot(
                             user_prompt,
                             system_prompt=_TEXT_MODE_SYSTEM_PROMPT,
                             model=effective_model,
-                            timeout_s=_insights_timeout_s(),
+                            timeout_s=_DEFAULT_TIMEOUT_S,
                             cwd=config.workspace_root,
                             provider=text_provider,
                         )
@@ -2249,6 +2307,10 @@ async def backfill_insights_task(
                         _append_section(archive_path, output)
                         logger.info("Backfilled [text] insights for %s", archive_path.name)
                         return "success"
+                    if not outcome.error:
+                        # The model answered, with nothing to extract.
+                        _checked.mark(archive_path)
+                        return "no_signal"
                     return "error"
             except Exception:
                 logger.exception("Failed backfilling insights for %s", archive_path)
@@ -2264,7 +2326,10 @@ async def backfill_insights_task(
             stats["skipped"] += 1
         elif result == "gated":
             stats["gated"] += 1
+        elif result == "no_signal":
+            stats["no_signal"] += 1
         else:
             stats["errors"] += 1
+    _checked.save()
     logger.info("Backfill task completed.")
     return stats
