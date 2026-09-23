@@ -760,9 +760,115 @@ describe('component mount smoke', () => {
     }
   })
 
+  it('SettingsView models tab stacks chat providers, background models, then voice', async () => {
+    const router = makeRouter()
+    await router.push('/settings/models')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    const titles = wrapper.findAll('.section-title').map((el) => el.text())
+    expect(titles).toEqual(['chat providers', 'background models', 'voice'])
+    expect(wrapper.find('#chat-providers').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('SettingsView scrolls to the chat providers card once, not after every refetch', async () => {
+    const proto = Element.prototype as Element & { scrollIntoView?: unknown }
+    const original = proto.scrollIntoView
+    const scrolled = vi.fn()
+    proto.scrollIntoView = scrolled
+    const router = makeRouter()
+    await router.push('/settings/models#chat-providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    // Attached, so document.getElementById can find the card.
+    const wrapper = mount(mod.default as never, {
+      attachTo: document.body,
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    try {
+      await flushPromises()
+      await nextTick()
+      expect(scrolled).toHaveBeenCalledTimes(1)
+
+      // Verify refetches the connections; the hash is still in the URL but
+      // the page must not jump back to the top of the card.
+      const verify = wrapper.findAll('.provider-connection-actions button').find((b) => b.text() === 'Verify')
+      await verify!.trigger('click')
+      await flushPromises()
+      await nextTick()
+      expect(scrolled).toHaveBeenCalledTimes(1)
+
+      // An in-app link to the anchor (this view stays mounted) scrolls again.
+      await router.push('/settings/skills')
+      await router.push('/settings/models#chat-providers')
+      await flushPromises()
+      await nextTick()
+      expect(scrolled).toHaveBeenCalledTimes(2)
+    } finally {
+      wrapper.unmount()
+      proto.scrollIntoView = original
+    }
+  })
+
+  it('SettingsView folds what each CLI brings behind a collapsed disclosure', async () => {
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const original = testApi.getResponse('/api/settings/providers') as {
+      connections: Record<string, Record<string, unknown>>
+    }
+    testApi.setResponse('/api/settings/providers', {
+      ...original,
+      connections: {
+        ...original.connections,
+        claude: {
+          ...original.connections.claude,
+          mcps: ['ciao-memory', 'github'],
+          skills: ['frontend-design'],
+        },
+      },
+    })
+    const router = makeRouter()
+    await router.push('/settings/models')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    try {
+      const disclosures = wrapper.findAll('.provider-connections details.provider-brings')
+      expect(disclosures).toHaveLength(2)
+      // Collapsed by default: the chip lists are there but folded away.
+      for (const d of disclosures) {
+        expect((d.element as HTMLDetailsElement).open).toBe(false)
+        expect(d.find('.provider-mcps-preview').exists()).toBe(true)
+      }
+      const claude = disclosures[0]!
+      expect(claude.find('summary').text()).toMatch(/What this CLI brings \(\d+ MCP servers?, 1 skill or plugin\)/)
+      expect(claude.text()).toContain('frontend-design')
+      expect(disclosures[1]!.find('summary').text()).toContain('0 MCP servers, 0 skills & plugins')
+      // The defaults and actions stay outside the disclosure.
+      expect(wrapper.find('details.provider-brings .provider-inline-defaults').exists()).toBe(false)
+      expect(wrapper.find('details.provider-brings .provider-connection-actions').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/settings/providers', original)
+    }
+  })
+
   it('SettingsView labels every provider connection from the backend registry', async () => {
     const router = makeRouter()
-    await router.push('/settings/providers')
+    await router.push('/settings/models')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -787,7 +893,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView renders no API-key entry UI even when the payload advertises keys', async () => {
     const router = makeRouter()
-    await router.push('/settings/providers')
+    await router.push('/settings/models')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -810,7 +916,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView shows per-provider defaults and saves a default model', async () => {
     const router = makeRouter()
-    await router.push('/settings/providers')
+    await router.push('/settings/models')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -859,7 +965,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView offers a per-provider default permission mode', async () => {
     const router = makeRouter()
-    await router.push('/settings/providers')
+    await router.push('/settings/models')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -893,7 +999,7 @@ describe('component mount smoke', () => {
       opencode_models: [],
     })
     const router = makeRouter()
-    await router.push('/settings/providers')
+    await router.push('/settings/models')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {

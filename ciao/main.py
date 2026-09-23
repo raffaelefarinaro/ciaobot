@@ -287,10 +287,10 @@ async def _async_main() -> int:
         port=config.pwa_port,
     )
     with lock:
-        if (
-            config._workspace_registry_changed
-            and not os.environ.get("CIAO_WORKSPACES", "").strip()
-        ):
+        # One-time import of the retired CIAO_WORKSPACES variable; it writes
+        # the registry, so it runs under the lock like the persist below.
+        config.import_legacy_workspaces_env()
+        if config._workspace_registry_changed:
             config.persist_workspace_registry()
         return await _run_server_locked(config)
 
@@ -610,7 +610,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     def _resolve_schedule_target(entry):
         # Empty entry.model / entry.mode means "use the current default".
         # The mode default is the operator's pin for the provider this run
-        # actually resolves to (Settings -> Providers -> permission mode), so a
+        # actually resolves to (Settings -> Models & providers -> permission mode), so a
         # routine obeys the same setting a hand-opened chat on that provider
         # does. It used to fall back to the Telegram context's mode, which is a
         # different surface's state and belongs to no workspace.
