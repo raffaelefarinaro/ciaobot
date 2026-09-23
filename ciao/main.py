@@ -754,12 +754,8 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         mcp_service.bind(control_plane)
         pcm._mcp_service = mcp_service
         app.state.control_plane = control_plane
+    # Never empty: an unset CIAO_PUSH_CONTACT falls back to DEFAULT_PUSH_SUBJECT.
     push_subject = _push_subject_for_config(config)
-    if not push_subject:
-        logger.info(
-            "CIAO_PUSH_CONTACT is not set; Web Push notifications stay "
-            "disabled until a contact is configured in Settings."
-        )
     app.state.push_manager = PushManager(config.state_path.parent, subject=push_subject)
     app.state.focused_chats = {}
 
@@ -1229,6 +1225,11 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                     "Cleanup did not finish; re-execing for the requested restart"
                 )
                 try:
+                    # Same as ciao.cli._run_server: let the fresh process
+                    # reload the workspace .env instead of inheriting it.
+                    from ciao.config import reset_exported_dotenv
+
+                    reset_exported_dotenv()
                     os.execv(
                         sys.executable,
                         [sys.executable, "-m", "ciao.cli", *sys.argv[1:]],

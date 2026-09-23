@@ -153,7 +153,7 @@ onBeforeUnmount(() => {
 .prompt-action--primary {
   border-color: var(--accent);
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
 }
 .prompt-action--primary:hover {
   border-color: var(--accent-strong);

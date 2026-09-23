@@ -193,12 +193,14 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 
 ## Agent recipes
 
-### Restart an installed Linux server
+### Restart an installed server
 
 `POST /api/admin/restart` uses the backend's existing chat-drain lifecycle and
-does not run git, pip, npm, or desktop builds. Linux production Settings chooses
-this action when `/api/local/status` reports `restart_only: true`. Development
-deploys retain `/api/admin/deploy`.
+does not run git, pip, npm, or desktop builds. Settings chooses this action when
+`/api/local/status` reports `restart_only: true`: Linux production, the packaged
+macOS Ciaobot.app (whatever the dev mode), and any install that is not a
+deployable source checkout. Development deploys from a checkout retain
+`/api/admin/deploy`, which returns 400 up front on a packaged Ciaobot.app.
 
 ```sh
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/restart"

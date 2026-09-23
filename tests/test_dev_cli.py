@@ -34,6 +34,20 @@ def test_build_dev_environment_loads_dotenv_and_sets_dev_defaults(tmp_path: Path
     assert result.frontend_url == "http://localhost:5173"
 
 
+def test_build_dev_environment_drops_inherited_bundled_marker(tmp_path: Path) -> None:
+    # A shell opened by Ciaobot.app inherits CIAO_BUNDLED_APP=1; the source
+    # backend must not see it or it reports itself as the packaged app.
+    workspace = tmp_path / "workspace"
+    (workspace / "web").mkdir(parents=True)
+
+    result = dev.build_dev_environment(
+        workspace,
+        base_env={"PWA_AUTH_TOKEN": "token", "CIAO_BUNDLED_APP": "1"},
+    )
+
+    assert "CIAO_BUNDLED_APP" not in result.env
+
+
 def test_build_dev_environment_requires_web_checkout(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="app checkout"):
         dev.build_dev_environment(tmp_path, base_env={"PWA_AUTH_TOKEN": "token"})

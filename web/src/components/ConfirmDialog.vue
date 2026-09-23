@@ -143,7 +143,7 @@ onBeforeUnmount(() => {
 .confirm-action--primary {
   border-color: var(--accent);
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
 }
 .confirm-action--primary:hover {
   border-color: var(--accent-strong);

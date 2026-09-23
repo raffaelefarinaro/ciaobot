@@ -1131,6 +1131,9 @@ export interface OperatorAction {
   link_url?: string
   /** A "not now" button for ask-style actions; records a suppression receipt. */
   dismiss_label?: string
+  /** Which button leads the tile: "chat" makes the chat button the filled
+   *  primary and demotes the link to a chip. Empty keeps the default order. */
+  primary?: string
   /** A precondition the install cannot get past on its own: unmissable and not
    *  dismissible. Deliberately not an app-wide lock. */
   blocking: boolean

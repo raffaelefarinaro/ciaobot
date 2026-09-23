@@ -2172,7 +2172,7 @@ onBeforeUnmount(() => {
 .mm-seg button {
   background: transparent; border: none; color: var(--fg2); padding: 6px 12px; font-size: var(--text-sm); cursor: pointer; font-family: var(--font);
 }
-.mm-seg button.active { background: var(--accent); color: #fff; }
+.mm-seg button.active { background: var(--accent); color: var(--on-accent); }
 
 /* Canvas toolbar: overlays the graph top-left, opposite the zoom controls.
    Wraps rather than scrolls so a narrow window stacks the groups instead of
@@ -2201,5 +2201,5 @@ onBeforeUnmount(() => {
   background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--fg2); font-family: var(--font); font-size: var(--text-xs); padding: 4px 10px; cursor: pointer;
 }
-.mm-toggle.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.mm-toggle.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 </style>

@@ -76,6 +76,13 @@ def _run_server() -> int:
         # Re-exec (rather than loop) so the relaunch picks up new code.
         print("Restart requested — relaunching Ciaobot…", file=sys.stderr)
         sys.stderr.flush()
+        # The exec inherits os.environ, and load_dotenv never overrides a key
+        # that is already set, so without this a value edited in the workspace
+        # .env would be shadowed by the stale copy the old process exported.
+        # Only keys the .env added are dropped; the fresh process reloads them.
+        from ciao.config import reset_exported_dotenv
+
+        reset_exported_dotenv()
         os.execv(sys.executable, _relaunch_argv())
     return code
 
@@ -803,8 +810,9 @@ def setup_workspace(
     name = requested_name or "personal"
 
     token = auth_token or secrets.token_urlsafe(32)
-    # Empty contact = Web Push disabled until configured in Settings;
-    # never invent a fake default.
+    # Empty contact is fine: Web Push then uses the localhost placeholder
+    # subject (ciao.main.DEFAULT_PUSH_SUBJECT). Never write a fake default
+    # into .env.
     contact = (push_contact or "").strip()
     # Always pin PWA_AUTH_REQUIRED: an unset value is read as "protect when a
     # token exists" (see CiaoConfig.from_env), and a setup that deliberately
@@ -3825,8 +3833,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--app-dir",
         type=Path,
         default=None,
-        help="Directory holding Ciaobot.app (defaults to /Applications, "
-        "or ~/Applications on a non-admin account).",
+        help="Directory holding Ciaobot.app (defaults to ~/Applications, "
+        "falling back to /Applications when the bundle is only there).",
     )
     desktop_uninstall_parser.add_argument("--json", action="store_true", dest="as_json")
     desktop_uninstall_parser.set_defaults(func=_desktop_command)
@@ -3910,7 +3918,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Directory to scan for legacy launcher bundles during migration. "
-            "Defaults to /Applications when writable, else ~/Applications."
+            "Defaults to ~/Applications."
         ),
     )
     setup_parser.add_argument(

@@ -5973,7 +5973,7 @@ details[open] > .activity-summary::before {
   justify-content: center;
   transition: background 120ms var(--ease), transform 120ms var(--ease);
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
 }
 .send-btn:hover { background: var(--accent-strong); }
 .send-btn:active { transform: scale(0.96); }
@@ -6392,10 +6392,10 @@ details[open] > .activity-summary::before {
   border-radius: 3px;
   opacity: 0.75;
 }
-.btn-approve .permission-key { color: rgba(255, 255, 255, 0.85); }
+.btn-approve .permission-key { color: inherit; }
 .btn-approve {
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
   border-color: var(--accent);
 }
 .btn-approve:hover { background: var(--accent-strong); }
@@ -6505,7 +6505,7 @@ details[open] > .activity-summary::before {
 .thinking-chip--active {
   background: var(--accent);
   border-color: var(--accent);
-  color: white;
+  color: var(--on-accent);
 }
 
 .archive-btn {
@@ -6576,7 +6576,7 @@ details[open] > .activity-summary::before {
 .picker-pill:hover { background: var(--bg2); }
 .picker-pill.active {
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
   border-color: var(--accent);
 }
 .picker-pill.handover {
@@ -6721,7 +6721,7 @@ details[open] > .activity-summary::before {
 .btn-sm.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 600;
 }
 .btn-sm.primary:disabled {
