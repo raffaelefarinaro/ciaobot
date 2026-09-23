@@ -234,13 +234,15 @@ def move_to_archive(
 
     The metadata is written BEFORE the move (status ``archiving``) so a crash
     between the two leaves a folder that says what it was for, and is
-    rewritten after it. A failed rename removes the empty archive folder and
-    raises, leaving the workspace exactly where it was.
+    rewritten after it. Every filesystem failure raises
+    :class:`WorkspaceArchiveError` with the workspace exactly where it was: a
+    failed folder creation or first metadata write changes nothing, a failed
+    rename removes the empty archive folder, and a failed final metadata write
+    moves the folder back first. The caller relies on that to put back the
+    schedules it took.
     """
     workspace = config.workspaces[target.name]
     moment = now or datetime.now(UTC)
-    folder = _new_archive_dir(config, target.name, moment)
-    folder.mkdir(parents=True)
     moved = target.source.is_dir()
     metadata: dict[str, Any] = {
         "schema_version": METADATA_VERSION,
@@ -254,22 +256,65 @@ def move_to_archive(
         "schedules": list(schedules or []),
         "summary": dict(summary or {}),
     }
-    _write_metadata(folder, metadata)
+    try:
+        folder = _new_archive_dir(config, target.name, moment)
+        folder.mkdir(parents=True)
+    except OSError as exc:
+        raise WorkspaceArchiveError(
+            f"could not create the archive folder in {_display(config, archive_root(config))}: {exc}",
+            500,
+        ) from exc
+    try:
+        _write_metadata(folder, metadata)
+    except OSError as exc:
+        _remove_empty_archive_folder(folder)
+        raise WorkspaceArchiveError(
+            f"could not write {METADATA_FILE} in {_display(config, folder)}: {exc}", 500
+        ) from exc
     if moved:
         try:
             os.rename(target.source, folder / target.source.name)
         except OSError as exc:
-            try:
-                (folder / METADATA_FILE).unlink()
-                folder.rmdir()
-            except OSError:
-                logger.warning("Could not clean up %s after a failed archive", folder)
+            _remove_empty_archive_folder(folder)
             raise WorkspaceArchiveError(
                 f"could not move {target.source} into the archive: {exc}", 500
             ) from exc
     metadata["status"] = "archived"
-    _write_metadata(folder, metadata)
+    try:
+        _write_metadata(folder, metadata)
+    except OSError as exc:
+        if moved:
+            try:
+                os.rename(folder / target.source.name, target.source)
+            except OSError as back_exc:
+                # The folder is in the archive and its metadata still says
+                # ``archiving``; say where it is rather than guess.
+                raise WorkspaceArchiveError(
+                    f"could not finish {METADATA_FILE} in {_display(config, folder)} "
+                    f"({exc}), and moving the folder back to {target.source} failed "
+                    f"too ({back_exc}); move it back by hand",
+                    500,
+                ) from exc
+        _remove_empty_archive_folder(folder)
+        raise WorkspaceArchiveError(
+            f"could not write {METADATA_FILE} in {_display(config, folder)}: {exc}; "
+            "the workspace was left where it was",
+            500,
+        ) from exc
     return {**metadata, "id": folder.name, "path": _display(config, folder)}
+
+
+def _remove_empty_archive_folder(folder: Path) -> None:
+    """Undo a fresh archive folder that holds nothing but its own metadata."""
+    for leftover in (folder / METADATA_FILE, (folder / METADATA_FILE).with_suffix(".json.tmp")):
+        try:
+            leftover.unlink(missing_ok=True)
+        except OSError:
+            pass
+    try:
+        folder.rmdir()
+    except OSError:
+        logger.warning("Could not clean up %s after a failed archive", folder)
 
 
 def unregister(config: Any, name: str) -> None:
@@ -496,7 +541,30 @@ def register_restored(
     )
     from ciao.workspaces import persist_workspaces  # noqa: PLC0415
 
-    persist_workspaces(config)
+    try:
+        persist_workspaces(config)
+    except OSError as exc:
+        # Undo both halves so the archive stays restorable: without this the
+        # folder sat at its old path while the registry on disk lacked the
+        # entry, and a retry was refused (content missing, destination exists).
+        config.workspaces.pop(name, None)
+        content_dir = str(metadata.get("content_dir") or "")
+        if content_dir:
+            try:
+                os.rename(destination, folder / content_dir)
+            except OSError as back_exc:
+                raise WorkspaceArchiveError(
+                    f"the workspace registry could not be saved ({exc}), and "
+                    f"moving {_display(config, destination)} back into "
+                    f"{_display(config, folder)} failed too ({back_exc}); move "
+                    "it back by hand to restore it again",
+                    500,
+                ) from exc
+        raise WorkspaceArchiveError(
+            f"could not restore '{name}': the workspace registry could not be "
+            f"saved ({exc}); the archive was left in place",
+            500,
+        ) from exc
     try:
         (folder / METADATA_FILE).unlink()
         folder.rmdir()

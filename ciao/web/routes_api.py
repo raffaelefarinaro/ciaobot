@@ -472,11 +472,18 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
             archived = workspace_archive.move_to_archive(
                 config, target, schedules=schedules, summary=summary
             )
-        except workspace_archive.WorkspaceArchiveError as exc:
+        except (workspace_archive.WorkspaceArchiveError, OSError) as exc:
+            # ``move_to_archive`` leaves the workspace where it was on every
+            # failure, so the schedules it took go straight back.
             put_back = getattr(manager, "put_back_user_items", None)
             if callable(put_back) and schedules:
                 put_back(schedules)
-            return JSONResponse({"error": exc.message}, status_code=exc.status)
+            if isinstance(exc, workspace_archive.WorkspaceArchiveError):
+                return JSONResponse({"error": exc.message}, status_code=exc.status)
+            logger.exception("Archiving workspace %s failed", name)
+            return JSONResponse(
+                {"error": f"could not archive '{name}': {exc}"}, status_code=500
+            )
 
         archive_chats = getattr(pcm, "archive_workspace_projects", None)
         if callable(archive_chats):
@@ -561,7 +568,12 @@ async def restore_archived_workspace(request: Request) -> JSONResponse:
             return JSONResponse({"error": exc.message}, status_code=exc.status)
         # The registry is mutated here, on the event loop, never in the worker:
         # other handlers iterate ``config.workspaces`` on this thread.
-        restored = workspace_archive.register_restored(config, folder, metadata, destination)
+        try:
+            restored = workspace_archive.register_restored(
+                config, folder, metadata, destination
+            )
+        except workspace_archive.WorkspaceArchiveError as exc:
+            return JSONResponse({"error": exc.message}, status_code=exc.status)
         name = str(restored["name"])
         schedules = restored.get("schedules")
         added = 0

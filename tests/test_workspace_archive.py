@@ -683,3 +683,135 @@ def test_shared_layout_refuses_a_vault_that_is_its_own_repository(tmp_path):
     assert response.status_code == 409
     assert "own repository" in response.json()["error"]
     assert (Path(config.vault_root) / "work").is_dir()
+
+
+# ── metadata and registry I/O failures ───────────────────────────────────────
+
+
+def _work_schedule(store: ScheduleStore):
+    return store.create(
+        daily_time_utc="08:00", prompt="standup", model="", mode="auto",
+        chat_id=0, workspace="work",
+    )
+
+
+def _assert_archive_undone(tmp_path, config, store, schedule_id, before):
+    assert config.workspace("work") is not None
+    assert _tree(tmp_path / "work") == before
+    assert {e.schedule_id for e in store.list_entries()} == {schedule_id}
+    root = archive_root(config)
+    assert not root.is_dir() or not any(root.iterdir())
+
+
+def test_archive_folder_creation_failure_puts_the_schedules_back(tmp_path):
+    client, config, _pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    before = _tree(tmp_path / "work")
+    # A file where the archive root should be: mkdir fails with an OSError.
+    archive_root(config).write_text("not a directory", encoding="utf-8")
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500
+    assert "archive folder" in response.json()["error"]
+    assert config.workspace("work") is not None
+    assert _tree(tmp_path / "work") == before
+    assert {e.schedule_id for e in store.list_entries()} == {mine.schedule_id}
+
+
+def test_first_metadata_write_failure_puts_the_schedules_back(tmp_path, monkeypatch):
+    client, config, _pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    before = _tree(tmp_path / "work")
+
+    def _disk_full(*_a, **_kw):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("ciao.workspace_archive._write_metadata", _disk_full)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500
+    assert "archive.json" in response.json()["error"]
+    _assert_archive_undone(tmp_path, config, store, mine.schedule_id, before)
+
+
+def test_final_metadata_write_failure_moves_the_folder_back(tmp_path, monkeypatch):
+    from ciao import workspace_archive
+
+    client, config, _pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    before = _tree(tmp_path / "work")
+    real_write = workspace_archive._write_metadata
+    calls = {"n": 0}
+
+    def _second_fails(folder, metadata):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError(13, "Permission denied")
+        real_write(folder, metadata)
+
+    monkeypatch.setattr("ciao.workspace_archive._write_metadata", _second_fails)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500
+    assert "left where it was" in response.json()["error"]
+    _assert_archive_undone(tmp_path, config, store, mine.schedule_id, before)
+
+
+def test_a_raw_oserror_from_the_move_still_puts_the_schedules_back(tmp_path, monkeypatch):
+    client, config, _pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+
+    def _boom(*_a, **_kw):
+        raise OSError("unexpected")
+
+    monkeypatch.setattr("ciao.workspace_archive.move_to_archive", _boom)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500
+    assert "could not archive 'work'" in response.json()["error"]
+    assert config.workspace("work") is not None
+    assert {e.schedule_id for e in store.list_entries()} == {mine.schedule_id}
+
+
+@pytest.mark.parametrize("rerooted", [True, False])
+def test_restore_registry_save_failure_leaves_the_archive_restorable(
+    tmp_path, monkeypatch, rerooted
+):
+    client, config, _pcm, store = _app(tmp_path, rerooted=rerooted)
+    _work_schedule(store)
+    source = tmp_path / "work" if rerooted else Path(config.vault_root) / "work"
+    before = _tree(source)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    folder = archive_root(config) / archived["id"]
+    registry_path = tmp_path / ".runtime" / "workspaces.json"
+    registry_before = registry_path.read_text(encoding="utf-8")
+    names_before = set(config.workspaces)
+
+    real_persist = CiaoConfig.persist_workspace_registry
+    failing = {"on": True}
+
+    def _disk_full(self: CiaoConfig) -> None:
+        if failing["on"]:
+            raise OSError(28, "No space left on device")
+        real_persist(self)
+
+    monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 500
+    assert "registry could not be saved" in refused.json()["error"]
+    assert set(config.workspaces) == names_before
+    assert not source.exists()
+    assert (folder / "archive.json").is_file()
+    assert registry_path.read_text(encoding="utf-8") == registry_before
+    assert store.list_entries() == []
+    listing = client.get("/api/workspaces/archived").json()["archived"]
+    assert listing[0]["restorable"] is True, listing
+
+    failing["on"] = False
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert restored.json()["restored"]["schedules"] == 1
+    assert _tree(source) == before

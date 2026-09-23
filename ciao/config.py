@@ -1032,6 +1032,25 @@ class CiaoConfig:
         tmp.replace(path)
         self._workspace_registry_changed = False
 
+    def _archived_workspace_names(self) -> set[str]:
+        """Casefolded names recorded in ``<install>/.archived-workspaces/*/archive.json``."""
+        from ciao.vault_index import ARCHIVED_WORKSPACES_DIR  # noqa: PLC0415
+
+        root = Path(self.workspace_root) / ARCHIVED_WORKSPACES_DIR
+        names: set[str] = set()
+        try:
+            folders = list(root.iterdir()) if root.is_dir() else []
+        except OSError:
+            return names
+        for folder in folders:
+            try:
+                data = json.loads((folder / "archive.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and data.get("name"):
+                names.add(str(data["name"]).casefold())
+        return names
+
     def import_legacy_workspaces_env(self) -> list[str]:
         """Import the retired ``CIAO_WORKSPACES`` variable into the registry, once.
 
@@ -1075,6 +1094,17 @@ class CiaoConfig:
             )
             return []
         legacy = _parse_workspaces_json(raw)
+        # A workspace archived in Settings left the registry on purpose; the
+        # variable must not bring it back while its folder sits in the archive.
+        archived = self._archived_workspace_names()
+        skipped = sorted(n for n in legacy if n.casefold() in archived)
+        if skipped:
+            logger.warning(
+                "CIAO_WORKSPACES names archived workspace(s) %s; not re-registering "
+                "them. Restore them from Settings instead.",
+                ", ".join(skipped),
+            )
+            legacy = {n: w for n, w in legacy.items() if n.casefold() not in archived}
         registry_path = runtime_root / "workspaces.json"
         on_disk: dict[str, WorkspaceConfig] = {}
         try:
