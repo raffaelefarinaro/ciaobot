@@ -420,7 +420,9 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
     refused before anything changes; schedules are taken and the folder moves
     first, so a failed move changes nothing that cannot be put back; only then
     are the chats archived (irreversible), still while the workspace is
-    registered; the registry entry goes last.
+    registered; the registry entry goes last. A failure after the move puts
+    the folder and schedules back so the workspace stays registered and the
+    archive can be retried.
     """
     from ciao import workspace_archive  # noqa: PLC0415
 
@@ -485,25 +487,72 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
                 {"error": f"could not archive '{name}': {exc}"}, status_code=500
             )
 
-        archive_chats = getattr(pcm, "archive_workspace_projects", None)
-        if callable(archive_chats):
+        def _roll_back(failure: str) -> JSONResponse:
+            """Leave the workspace registered, with its folder and schedules.
+
+            A step after the move failed while the workspace is still
+            registered. Chats already archived stay archived (that part is
+            irreversible and was persisted); everything else goes back so the
+            archive can simply be retried. The schedules go back even when the
+            folder cannot: they belong to a registered workspace, and
+            ``archive.json`` keeps its own copy.
+            """
+            undo_error = ""
             try:
-                archive_chats(name)
-            except Exception:  # noqa: BLE001 - the folder already moved; finish unregistering
-                logger.exception("Could not archive every chat of workspace %s", name)
-        try:
-            workspace_archive.unregister(config, name)
-        except OSError as exc:
-            logger.exception("Could not save the registry after archiving %s", name)
+                workspace_archive.undo_move_to_archive(config, target, archived)
+            except workspace_archive.WorkspaceArchiveError as undo_exc:
+                undo_error = undo_exc.message
+            put_back = getattr(manager, "put_back_user_items", None)
+            if callable(put_back) and schedules:
+                try:
+                    put_back(schedules)
+                except Exception:  # noqa: BLE001 - archive.json still holds them
+                    logger.exception(
+                        "Could not put back the schedules of %s; they remain in %s",
+                        name,
+                        archived["path"],
+                    )
+            if undo_error:
+                # Not refreshed: the manager would recreate the General folder
+                # at the old path, where the archived folder has to go back.
+                return JSONResponse(
+                    {
+                        "error": (
+                            f"could not archive '{name}': {failure}; {undo_error}. "
+                            f"It is still registered and its folder is in "
+                            f"{archived['path']}"
+                        )
+                    },
+                    status_code=500,
+                )
+            # Chat archival may have removed projects from memory before failing;
+            # the refresh recreates the General project of the registered workspace.
+            _refresh_project_manager_workspaces(request)
             return JSONResponse(
                 {
                     "error": (
-                        f"'{name}' was moved to {archived['path']}, but the "
-                        f"workspace registry could not be saved: {exc}"
+                        f"could not archive '{name}': {failure}; the workspace "
+                        "was left in place, retry the archive"
                     )
                 },
                 status_code=500,
             )
+
+        archive_chats = getattr(pcm, "archive_workspace_projects", None)
+        if callable(archive_chats):
+            try:
+                archive_chats(name)
+            except Exception as exc:  # noqa: BLE001 - unregistering now would orphan the chats
+                # Unregistering with the chat registry removal not saved would
+                # bring the chats back at the next start, routed through the
+                # primary workspace.
+                logger.exception("Could not archive every chat of workspace %s", name)
+                return _roll_back(f"its chats could not be archived ({exc})")
+        try:
+            workspace_archive.unregister(config, name)
+        except OSError as exc:
+            logger.exception("Could not save the registry after archiving %s", name)
+            return _roll_back(f"the workspace registry could not be saved ({exc})")
         _refresh_project_manager_workspaces(request)
         if schedules:
             _publish_automations_changed(request)
@@ -580,7 +629,39 @@ async def restore_archived_workspace(request: Request) -> JSONResponse:
         manager = _schedule_manager(request)
         put_back = getattr(manager, "put_back_user_items", None)
         if callable(put_back) and isinstance(schedules, list) and schedules:
-            added = int(put_back(schedules))
+            try:
+                added = int(put_back(schedules))
+            except Exception as exc:  # noqa: BLE001 - archive.json is their only copy
+                logger.exception("Could not put back the schedules of %s", name)
+                try:
+                    workspace_archive.unregister_restored(
+                        config, folder, metadata, destination
+                    )
+                except workspace_archive.WorkspaceArchiveError as undo_exc:
+                    _refresh_project_manager_workspaces(request)
+                    return JSONResponse(
+                        {
+                            "error": (
+                                f"'{name}' was restored but its schedules could not "
+                                f"be saved ({exc}), and undoing the restore failed: "
+                                f"{undo_exc.message}. The schedules are kept in "
+                                f"{workspace_archive.ARCHIVE_DIR_NAME}/{restored['id']}/"
+                                f"{workspace_archive.METADATA_FILE}"
+                            )
+                        },
+                        status_code=500,
+                    )
+                return JSONResponse(
+                    {
+                        "error": (
+                            f"could not restore '{name}': its schedules could not "
+                            f"be saved ({exc}); the archive was left in place"
+                        )
+                    },
+                    status_code=500,
+                )
+        # Only now: until the schedules are back, archive.json is their only copy.
+        workspace_archive.discard_archive_folder(folder)
         _refresh_project_manager_workspaces(request)
         if added:
             _publish_automations_changed(request)

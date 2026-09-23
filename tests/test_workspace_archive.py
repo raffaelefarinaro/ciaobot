@@ -815,3 +815,143 @@ def test_restore_registry_save_failure_leaves_the_archive_restorable(
     assert restored.status_code == 200, restored.json()
     assert restored.json()["restored"]["schedules"] == 1
     assert _tree(source) == before
+
+
+# ── failures after the move: roll back to a registered workspace ─────────────
+
+
+def test_chat_archival_failure_keeps_the_workspace_registered_and_retryable(
+    tmp_path, monkeypatch
+):
+    client, config, pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    general = next(p for p in pcm.list_projects("work") if p.is_auto)
+    first = pcm.create_chat(general.project_id, title="first")
+    second = pcm.create_chat(general.project_id, title="second")
+    before = _tree(tmp_path / "work")
+    real_archive = pcm._transcripts.archive_session
+    calls = {"n": 0}
+
+    def _second_fails(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError(13, "Permission denied: Logs")
+        return real_archive(**kwargs)
+
+    monkeypatch.setattr(pcm._transcripts, "archive_session", _second_fails)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500, response.json()
+    assert "chats could not be archived" in response.json()["error"]
+    _assert_archive_undone(tmp_path, config, store, mine.schedule_id, before)
+    # The project stays, in memory and on disk, with the chat that did not
+    # archive; the one that did is durably gone. Nothing points a chat at a
+    # workspace that is no longer registered.
+    assert general.project_id in {p.project_id for p in pcm.list_projects("work")}
+    remaining = {c.chat_id for c in pcm.list_chats(general.project_id)}
+    assert len(remaining & {first.chat_id, second.chat_id}) == 1
+    on_disk = json.loads((tmp_path / ".runtime" / "web_projects.json").read_text())
+    assert general.project_id in on_disk["projects"]
+    assert set(on_disk["chats"]) & {first.chat_id, second.chat_id} == remaining & {
+        first.chat_id, second.chat_id
+    }
+
+    monkeypatch.setattr(pcm._transcripts, "archive_session", real_archive)
+    retried = client.post("/api/workspaces/work/archive")
+
+    assert retried.status_code == 200, retried.json()
+    assert config.workspace("work") is None
+    assert retried.json()["archived"]["schedules"] == 1
+
+
+def test_registry_save_failure_on_archive_restores_the_entry_and_the_folder(
+    tmp_path, monkeypatch
+):
+    client, config, pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    registry_path = tmp_path / ".runtime" / "workspaces.json"
+    config.persist_workspace_registry()
+    registry_before = registry_path.read_text(encoding="utf-8")
+    before = _tree(tmp_path / "work")
+    order_before = list(config.workspaces)
+
+    real_persist = CiaoConfig.persist_workspace_registry
+    failing = {"on": True}
+
+    def _disk_full(self: CiaoConfig) -> None:
+        if failing["on"]:
+            raise OSError(28, "No space left on device")
+        real_persist(self)
+
+    monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500, response.json()
+    assert "registry could not be saved" in response.json()["error"]
+    assert list(config.workspaces) == order_before
+    assert registry_path.read_text(encoding="utf-8") == registry_before
+    _assert_archive_undone(tmp_path, config, store, mine.schedule_id, before)
+    # The refresh gave the still-registered workspace its General project back.
+    assert any(p.is_auto for p in pcm.list_projects("work"))
+
+    failing["on"] = False
+    retried = client.post("/api/workspaces/work/archive")
+
+    assert retried.status_code == 200, retried.json()
+    assert config.workspace("work") is None
+    assert "work" not in registry_path.read_text(encoding="utf-8")
+
+
+def test_unregister_failure_puts_the_entry_back_in_place(tmp_path, monkeypatch):
+    from ciao import workspace_archive
+
+    config = _config(tmp_path, rerooted=True)
+    order_before = list(config.workspaces)
+
+    def _disk_full(self: CiaoConfig) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
+    with pytest.raises(OSError):
+        workspace_archive.unregister(config, "work")
+
+    assert list(config.workspaces) == order_before
+
+
+def test_restore_schedule_save_failure_keeps_the_archive_and_its_schedules(
+    tmp_path, monkeypatch
+):
+    client, config, _pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    before = _tree(tmp_path / "work")
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    folder = archive_root(config) / archived["id"]
+
+    real_put_back = store.put_back_user_items
+    failing = {"on": True}
+
+    def _disk_full(items):
+        if failing["on"]:
+            raise OSError(28, "No space left on device")
+        return real_put_back(items)
+
+    monkeypatch.setattr(store, "put_back_user_items", _disk_full)
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 500, refused.json()
+    assert "archive was left in place" in refused.json()["error"]
+    assert config.workspace("work") is None
+    assert not (tmp_path / "work").exists()
+    metadata = json.loads((folder / "archive.json").read_text(encoding="utf-8"))
+    assert [row["schedule_id"] for row in metadata["schedules"]] == [mine.schedule_id]
+    listing = client.get("/api/workspaces/archived").json()["archived"]
+    assert listing[0]["restorable"] is True, listing
+
+    failing["on"] = False
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert restored.json()["restored"]["schedules"] == 1
+    assert {e.schedule_id for e in store.list_entries()} == {mine.schedule_id}
+    assert _tree(tmp_path / "work") == before
+    assert not folder.exists()

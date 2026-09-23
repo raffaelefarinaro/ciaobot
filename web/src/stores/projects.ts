@@ -1760,9 +1760,17 @@ export const useProjectStore = defineStore('projects', () => {
 
   // Archive, never delete: the server unregisters the workspace, archives its
   // chats and moves its folder intact into `.archived-workspaces/`. Its
-  // projects leave through `project_deleted` events; the list is refetched too
-  // so a missed frame cannot leave them in the sidebar.
+  // projects leave through `project_deleted` events; they and their chats are
+  // also dropped here so a missed frame cannot leave them in the sidebar.
   async function archiveWorkspace(name: WorkspaceName) {
+    // Captured before the request: the `project_deleted` frames can land
+    // while it is in flight and remove the projects and chats this needs.
+    const projectIds = new Set(
+      projects.value.filter(p => p.workspace === name).map(p => p.project_id),
+    )
+    const selectedChatId = activeChatId.value
+    const selected = activeChat.value
+    const selectedInWorkspace = !!selected && projectIds.has(selected.project_id)
     const res = await api.post<WorkspacesResponse & { archived?: { path: string } }>(
       `/api/workspaces/${encodeURIComponent(name)}/archive`,
     )
@@ -1773,7 +1781,21 @@ export const useProjectStore = defineStore('projects', () => {
     if (activeWorkspace.value === name) {
       activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
     }
-    projects.value = projects.value.filter(p => p.workspace !== name)
+    projects.value.forEach(p => { if (p.workspace === name) projectIds.add(p.project_id) })
+    projects.value = projects.value.filter(p => !projectIds.has(p.project_id))
+    projectIds.forEach(clearDraftsForProject)
+    chats.value = chats.value.filter(c => !projectIds.has(c.project_id))
+    if (selectedInWorkspace && selectedChatId) {
+      disconnectWs(selectedChatId)
+      if (activeChatId.value === selectedChatId) activeChatId.value = null
+      persistState()
+      // Leave Settings where it is; only a view of the archived chat itself
+      // has to move somewhere valid.
+      const { router } = await import('../router')
+      if (router.currentRoute.value.params.chatId === selectedChatId) {
+        await transitionToFirstChat()
+      }
+    }
     return res
   }
 
@@ -3758,10 +3780,17 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
       case 'project_deleted': {
+        // Read before the chats are filtered: afterwards `activeChat` no
+        // longer finds the chat and the selection would never be cleared.
+        const selectedChatId = activeChat.value?.project_id === msg.project_id
+          ? activeChatId.value
+          : null
         projects.value = projects.value.filter(p => p.project_id !== msg.project_id)
         chats.value = chats.value.filter(c => c.project_id !== msg.project_id)
-        if (activeChat.value && activeChat.value.project_id === msg.project_id) {
+        if (selectedChatId) {
+          disconnectWs(selectedChatId)
           activeChatId.value = null
+          persistState()
         }
         break
       }

@@ -2552,13 +2552,20 @@ class ProjectChatManager:
         """Internal removal: pops the project, archives its chats, persists,
         and publishes ``project_deleted``. Skips the vault-backed guard so
         ``complete_project`` can call this after moving the vault entry."""
-        project = self._projects.pop(project_id, None)
-        if project is None:
+        if project_id not in self._projects:
             return False
-        # Archive and remove all chats in this project
-        for cid in list(self._chats):
-            if self._chats[cid].project_id == project_id:
-                self._archive_and_remove_chat(cid)
+        # Archive and remove all chats in this project. The project itself is
+        # only dropped once every chat is gone: if one chat fails to archive,
+        # the chats already archived are saved as removed and the project
+        # stays, with the rest of its chats, so the removal can be retried.
+        try:
+            for cid in list(self._chats):
+                if self._chats[cid].project_id == project_id:
+                    self._archive_and_remove_chat(cid)
+        except Exception:
+            self._save()
+            raise
+        self._projects.pop(project_id, None)
         self._save()
         self._events.publish({
             "type": "project_deleted",

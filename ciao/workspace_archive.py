@@ -318,10 +318,47 @@ def _remove_empty_archive_folder(folder: Path) -> None:
 
 
 def unregister(config: Any, name: str) -> None:
+    """Drop *name* from the registry, in memory and on disk, or from neither.
+
+    A failed save puts the entry back (in its original position) before
+    re-raising, so the running server never disagrees with
+    ``workspaces.json`` about which workspaces exist.
+    """
+    previous = dict(config.workspaces)
     config.workspaces.pop(name, None)
     from ciao.workspaces import persist_workspaces  # noqa: PLC0415
 
-    persist_workspaces(config)
+    try:
+        persist_workspaces(config)
+    except BaseException:
+        config.workspaces.clear()
+        config.workspaces.update(previous)
+        raise
+
+
+def undo_move_to_archive(
+    config: Any, target: ArchiveTarget, archived: dict[str, Any]
+) -> None:
+    """Put a folder :func:`move_to_archive` moved back where it was.
+
+    For a step after the move that failed while the workspace is still
+    registered: the workspace gets its folder back and the emptied archive
+    folder goes. Raises :class:`WorkspaceArchiveError` when the folder cannot
+    be moved back; the archive, and its ``archive.json`` with the schedules,
+    is then left untouched.
+    """
+    folder = archive_root(config) / str(archived["id"])
+    content_dir = str(archived.get("content_dir") or "")
+    if content_dir:
+        try:
+            os.rename(folder / content_dir, target.source)
+        except OSError as exc:
+            raise WorkspaceArchiveError(
+                f"moving {_display(config, folder / content_dir)} back to "
+                f"{target.source} failed ({exc}); move it back by hand",
+                500,
+            ) from exc
+    _remove_empty_archive_folder(folder)
 
 
 def refresh_shared_index(config: Any) -> bool:
@@ -565,6 +602,62 @@ def register_restored(
             f"saved ({exc}); the archive was left in place",
             500,
         ) from exc
+    return {
+        **metadata,
+        "id": folder.name,
+        "restored_to": _display(config, destination),
+    }
+
+
+def unregister_restored(
+    config: Any, folder: Path, metadata: dict[str, Any], destination: Path
+) -> None:
+    """Undo :func:`register_restored` so the archive can be restored again.
+
+    For a step after re-registering that failed (putting the schedules back):
+    the entry leaves the registry and the folder moves back into the archive,
+    whose ``archive.json`` was kept for exactly this. Raises
+    :class:`WorkspaceArchiveError` when either half fails; the workspace is
+    then left registered with its folder and ``archive.json`` stays in place.
+    """
+    name = str(metadata["name"])
+    content_dir = str(metadata.get("content_dir") or "")
+    if content_dir:
+        try:
+            os.rename(destination, folder / content_dir)
+        except OSError as exc:
+            raise WorkspaceArchiveError(
+                f"moving {_display(config, destination)} back into "
+                f"{_display(config, folder)} failed ({exc})",
+                500,
+            ) from exc
+    try:
+        unregister(config, name)
+    except OSError as exc:
+        # Still registered, so the folder must be where the entry points.
+        if content_dir:
+            try:
+                os.rename(folder / content_dir, destination)
+            except OSError as back_exc:
+                raise WorkspaceArchiveError(
+                    f"the workspace registry could not be saved to undo the "
+                    f"restore ({exc}), and moving {_display(config, folder / content_dir)} "
+                    f"to {_display(config, destination)} failed too ({back_exc}); "
+                    "move it there by hand",
+                    500,
+                ) from exc
+        raise WorkspaceArchiveError(
+            f"the workspace registry could not be saved to undo the restore ({exc})",
+            500,
+        ) from exc
+
+
+def discard_archive_folder(folder: Path) -> None:
+    """Remove a restored archive's ``archive.json`` and its emptied folder.
+
+    Last step of a restore, once the schedules the metadata carried are back:
+    until then ``archive.json`` is their only durable copy.
+    """
     try:
         (folder / METADATA_FILE).unlink()
         folder.rmdir()
@@ -572,11 +665,6 @@ def register_restored(
         # Something else was left in the archive folder. It is not ours to
         # delete; the workspace itself is already back.
         logger.warning("Archive folder %s was not empty after restore", folder)
-    return {
-        **metadata,
-        "id": folder.name,
-        "restored_to": _display(config, destination),
-    }
 
 
 def restore_archive(config: Any, archive_id: str) -> dict[str, Any]:
@@ -590,4 +678,6 @@ def restore_archive(config: Any, archive_id: str) -> dict[str, Any]:
     the restored notes, and every workspace gets its General project again.
     """
     folder, metadata, destination = move_back(config, archive_id)
-    return register_restored(config, folder, metadata, destination)
+    restored = register_restored(config, folder, metadata, destination)
+    discard_archive_folder(folder)
+    return restored
