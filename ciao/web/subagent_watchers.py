@@ -64,10 +64,11 @@ logger = logging.getLogger(__name__)
 #
 # It lives with the watcher rather than with the nudge: the nudge is the
 # manager's (it is assembled from provider and drain state), but the watcher
-# is the only caller and these three outcomes are exactly the contract it
-# needs back. ``project_chats`` re-exports them.
-NudgeOutcome = Literal["sent", "superseded", "declined"]
+# is the only caller and these outcomes are exactly the contract it needs back.
+# ``project_chats`` re-exports them.
+NudgeOutcome = Literal["sent", "reported", "superseded", "declined"]
 NUDGE_SENT: NudgeOutcome = "sent"
+NUDGE_REPORTED: NudgeOutcome = "reported"
 NUDGE_SUPERSEDED: NudgeOutcome = "superseded"
 NUDGE_DECLINED: NudgeOutcome = "declined"
 
@@ -107,10 +108,6 @@ class SubagentWatcherHost(Protocol):
     def _flush_result_announce(
         self, chat_id: str, token: int | None = ...
     ) -> bool: ...
-
-    def _discard_result_announce(
-        self, chat_id: str, token: int | None = ...
-    ) -> None: ...
 
     def _arm_parked_announce_deadline(self, chat_id: str, token: int) -> None: ...
 
@@ -406,66 +403,20 @@ class SubagentWatchers:
                             already_reported=already_reported,
                         )
                         nudged = outcome == NUDGE_SENT
-                        if nudged:
-                            # Recorded on the caller's box immediately, so an
-                            # exception on a later tick cannot lose the handoff.
+                        if outcome in (NUDGE_SENT, NUDGE_REPORTED):
                             handed_to_drain.append(True)
-                            # The drain releases the park on every way it can
-                            # END, but a live CLI that simply never answers the
-                            # nudge ends it in no way at all. Arm a deadline so
-                            # that chat cannot sit on the interim message
-                            # forever (issue #437).
                             parked_token = self._host._parked_announce_token(chat_id)
                             if parked_token is not None:
                                 self._host._arm_parked_announce_deadline(
                                     chat_id, parked_token
                                 )
                         elif outcome == NUDGE_DECLINED:
-                            # Nothing will ever announce for this turn — the
-                            # parent ended on a question, or there is no way to
-                            # steer it — so release the parked announce.
-                            # Token- and identity-scoped like the outer
-                            # `finally`: a superseded watcher must not release
-                            # an entry a newer turn parked in the same slot,
-                            # and a live foreground turn (the parent asked a
-                            # question, the user answered it) announces for
-                            # itself.
-                            #
-                            # The already-reported case is the exception:
-                            # there the CLI resumed the parent itself, and the
-                            # between-turns drain owns that report turn and
-                            # publishes it (discarding this same parked entry
-                            # first). Flushing here would race the drain and
-                            # push the interim non-answer alongside the real
-                            # report, so discard instead. A drain that has
-                            # already published makes this a no-op.
                             current = self._pending_subagent_watchers.get(chat_id)
                             if current is None or current is asyncio.current_task():
-                                parked_token = self._host._parked_announce_token(
-                                    chat_id
+                                self._host._flush_result_announce(
+                                    chat_id,
+                                    self._host._parked_announce_token(chat_id),
                                 )
-                                if already_reported:
-                                    self._host._discard_result_announce(
-                                        chat_id, parked_token
-                                    )
-                                else:
-                                    self._host._flush_result_announce(
-                                        chat_id, parked_token
-                                    )
-                        # NUDGE_SUPERSEDED falls through deliberately: a user
-                        # turn took the chat over and will announce its own
-                        # result and clear the park when it ends. Flushing here
-                        # would push the interim non-answer mid-turn.
-                        #
-                        # A landed nudge does NOT discard the park: it only
-                        # hands ownership to the between-turns drain, which
-                        # announces the synthesis reply *if* one arrives and is
-                        # worth announcing. The drain discards it then, and
-                        # flushes it on every other outcome — an error result, a
-                        # banner-only stub, a CLI that never replies after the
-                        # steer, or a drain that raises. Discarding here instead
-                        # re-created the silent completion this whole handoff
-                        # exists to remove, just one step further along.
                     if count != last_count or (ready_to_nudge and nudged):
                         self.publish_count(chat_id, project_id, count, nudged=nudged)
                     last_count = count

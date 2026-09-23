@@ -460,7 +460,7 @@ async def test_watch_subagent_completion_holds_nudge_on_pending_notification(
     assert ready_events[-1]["nudged"] is True
 
 
-async def test_watch_subagent_completion_holds_nudge_when_parent_already_reported(
+async def test_watch_subagent_completion_hands_park_to_drain_when_parent_reported(
     tmp_path: Path, monkeypatch
 ) -> None:
     """The CLI resumed the parent and it already wrote the report.
@@ -496,7 +496,7 @@ async def test_watch_subagent_completion_holds_nudge_when_parent_already_reporte
                 "content": [
                     {
                         "type": "text",
-                        "text": "All agents finished. Here is the full Zendesk report.",
+                        "text": "All agents finished. Here is the full Zendesk report. What should I review?",
                     }
                 ],
             },
@@ -539,12 +539,25 @@ async def test_watch_subagent_completion_holds_nudge_when_parent_already_reporte
     try:
         await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
     finally:
+        pcm._cancel_parked_announce_deadline(chat.chat_id)
         running_drain.cancel()
 
     assert steer_calls == []
-    # The parked interim announce is dropped, not flushed: the drain already
-    # published the real report.
     assert calls == []
+    assert pcm._parked_announce_token(chat.chat_id) == token
+
+    class EmptyDrain:
+        can_drain = True
+
+        async def drain_events(self):
+            if False:
+                yield None
+
+    pcm._providers[chat.chat_id] = EmptyDrain()
+    await pcm._drain_between_turns(chat.chat_id, project.project_id)
+    assert calls == [
+        (chat.chat_id, project.project_id, "Title", "interim")
+    ]
     assert pcm._parked_announce_token(chat.chat_id) is None
 
 
@@ -2469,6 +2482,40 @@ async def test_a_user_turn_taking_over_reports_supersession(
     assert (
         await pcm._nudge_synthesis_after_subagents(chat.chat_id)
     ) == NUDGE_SUPERSEDED
+
+
+@pytest.mark.asyncio
+async def test_an_existing_report_is_handed_to_the_drain(tmp_path: Path) -> None:
+    from ciao.web.project_chats import NUDGE_REPORTED
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("reported", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="reported-test")
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:
+            raise AssertionError("must not steer after the parent reported")
+
+    pcm._providers[chat.chat_id] = FakeProvider()
+    running_drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains[chat.chat_id] = running_drain
+    try:
+        assert (
+            await pcm._nudge_synthesis_after_subagents(
+                chat.chat_id, already_reported=True
+            )
+        ) == NUDGE_REPORTED
+        assert (
+            await pcm._nudge_synthesis_after_subagents(
+                chat.chat_id,
+                awaiting_user_answer=True,
+                already_reported=True,
+            )
+        ) == NUDGE_REPORTED
+    finally:
+        running_drain.cancel()
 
 
 @pytest.mark.asyncio

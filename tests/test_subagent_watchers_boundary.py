@@ -33,7 +33,6 @@ class _StubHost:
         self._restart_draining = False
         self.saves = 0
         self.flushed: list[str] = []
-        self.discarded: list[str] = []
         self.wakes: list[tuple[str, int]] = []
 
     def _save(self, *, reason: str = "registry_mutation") -> None:
@@ -48,9 +47,6 @@ class _StubHost:
     def _flush_result_announce(self, chat_id: str, token: int | None = None) -> bool:
         self.flushed.append(chat_id)
         return True
-
-    def _discard_result_announce(self, chat_id: str, token: int | None = None) -> None:
-        self.discarded.append(chat_id)
 
     def _arm_parked_announce_deadline(self, chat_id: str, token: int) -> None:
         raise AssertionError("no park in these tests")
