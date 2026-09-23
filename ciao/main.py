@@ -287,10 +287,10 @@ async def _async_main() -> int:
         port=config.pwa_port,
     )
     with lock:
-        if (
-            config._workspace_registry_changed
-            and not os.environ.get("CIAO_WORKSPACES", "").strip()
-        ):
+        # One-time import of the retired CIAO_WORKSPACES variable; it writes
+        # the registry, so it runs under the lock like the persist below.
+        config.import_legacy_workspaces_env()
+        if config._workspace_registry_changed:
             config.persist_workspace_registry()
         return await _run_server_locked(config)
 
