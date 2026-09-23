@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Any, Callable, Coroutine, Protocol, cast
 from zoneinfo import ZoneInfo
 
@@ -365,6 +365,175 @@ def migrate_loops(runtime_root: Path) -> int:
             "Retired %s with no importable loop entries", source.name
         )
     return imported
+
+
+_RESTORABLE_SCHEDULE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_RESTORABLE_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_RESTORED_PROMPT_LIMIT = 100_000
+
+
+def _restored_text(value: object, *, limit: int) -> str | None:
+    """A string field of an untrusted row ("" when absent), or None when invalid."""
+    if value is None:
+        return ""
+    if not isinstance(value, str) or len(value) > limit:
+        return None
+    return value
+
+
+def _restored_int(value: object, *, low: int, high: int) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if low <= value <= high else None
+
+
+def restorable_user_schedule(
+    item: object,
+    *,
+    workspace: str,
+    providers: Collection[str],
+    foreign_target: Callable[[str, str], bool] | None = None,
+) -> dict | None:
+    """Rebuild one archived user schedule from untrusted data, or None to drop it.
+
+    ``archive.json`` sits in the install's git repository and syncs like any
+    note, so on restore its schedule rows are input from whoever can push to
+    that remote, not a copy this device made. Nothing is taken as stored: each
+    field is re-validated with the rules ``POST /api/schedules`` applies and
+    the row is rebuilt from a fresh :class:`ScheduleEntry`, so an unknown key,
+    a system scope or a hand-set run-state field cannot come along. Three
+    things are forced rather than validated:
+
+    - ``enabled`` is False. A restored automation never runs unattended until
+      the operator has seen it and re-enabled it in the Automations page.
+    - ``workspace`` is the workspace being restored. A row naming another
+      workspace would otherwise run there. ``foreign_target(kind, id)`` lets
+      the caller drop a chat or project id (``kind`` is ``"chat"`` or
+      ``"project"``) that resolves into a different workspace.
+    - ``mode`` is empty, exactly as the create route leaves it: inherited at
+      dispatch, never pinned by the stored row.
+    """
+    if not isinstance(item, dict) or item.get("scope", "user") != "user":
+        return None
+    schedule_id = item.get("schedule_id")
+    if (
+        not isinstance(schedule_id, str)
+        or not _RESTORABLE_SCHEDULE_ID.fullmatch(schedule_id)
+        or is_system_schedule_id(schedule_id)
+    ):
+        return None
+    prompt = _restored_text(item.get("prompt"), limit=_RESTORED_PROMPT_LIMIT)
+    if not prompt or not prompt.strip():
+        return None
+    frequency = item.get("frequency", "weekly")
+    if not isinstance(frequency, str) or frequency not in FREQUENCIES:
+        return None
+    daily_time = _restored_text(item.get("daily_time_utc"), limit=5)
+    if daily_time is None or wall_clock_time_value_error(frequency, daily_time):
+        return None
+    interval_minutes = 0
+    if frequency == INTERVAL_FREQUENCY:
+        raw_minutes = item.get("interval_minutes")
+        if isinstance(raw_minutes, bool):
+            return None
+        try:
+            interval_minutes = normalize_interval_minutes(raw_minutes)
+        except ValueError:
+            return None
+    provider = _restored_text(item.get("provider"), limit=64)
+    if provider is None or (provider and provider not in providers):
+        return None
+    policy = _restored_text(item.get("archive_policy"), limit=16)
+    if policy is None:
+        return None
+    try:
+        archive_policy = normalize_archive_policy(policy)
+    except ValueError:
+        return None
+    timezone_name = _restored_text(item.get("timezone_name"), limit=64)
+    if timezone_name is None:
+        return None
+    timezone_name = timezone_name or DEFAULT_TIMEZONE
+    try:
+        ZoneInfo(timezone_name)
+    except (ValueError, KeyError, OSError):
+        return None
+    days = item.get("days_of_week")
+    if days is not None and (
+        not isinstance(days, list)
+        or any(not isinstance(day, str) or day not in WEEKDAY_NAMES for day in days)
+    ):
+        return None
+    day_of_month = item.get("day_of_month")
+    if day_of_month is not None and _restored_int(day_of_month, low=1, high=31) is None:
+        return None
+    run_at_date = item.get("run_at_date")
+    if run_at_date is not None and (
+        not isinstance(run_at_date, str) or not _RESTORABLE_DATE.fullmatch(run_at_date)
+    ):
+        return None
+    if frequency == "once" and not run_at_date:
+        return None
+    thread_id = item.get("thread_id")
+    if thread_id is not None and _restored_int(thread_id, low=-(2**63), high=2**63) is None:
+        return None
+    chat_id = item.get("chat_id", 0)
+    if _restored_int(chat_id, low=-(2**63), high=2**63) is None:
+        return None
+    texts: dict[str, str] = {}
+    for key, limit in (
+        ("model", 200),
+        ("title", 500),
+        ("description", 5_000),
+        ("created_at", 64),
+        ("web_project_name", 500),
+    ):
+        value = _restored_text(item.get(key), limit=limit)
+        if value is None:
+            return None
+        texts[key] = value
+    targets: dict[str, str] = {}
+    for key, kind in (
+        ("web_chat_id", "chat"),
+        ("web_project_id", "project"),
+        ("fallback_project_id", "project"),
+    ):
+        target = _restored_text(item.get(key), limit=128)
+        if target is None or (target and not _RESTORABLE_SCHEDULE_ID.fullmatch(target)):
+            return None
+        if target and foreign_target is not None and foreign_target(kind, target):
+            target = ""
+        targets[key] = target
+    entry = ScheduleEntry(
+        schedule_id=schedule_id,
+        daily_time_utc=daily_time,
+        prompt=prompt,
+        chat_id=int(chat_id),
+        created_at=texts["created_at"] or _now_utc().isoformat().replace("+00:00", "Z"),
+        model=texts["model"].strip(),
+        provider=provider,
+        mode="",
+        timezone_name=timezone_name,
+        days_of_week=list(days) if days else None,
+        thread_id=thread_id,
+        frequency=frequency,
+        interval_minutes=interval_minutes,
+        day_of_month=day_of_month,
+        run_at_date=run_at_date or None,
+        web_chat_id=targets["web_chat_id"] or None,
+        web_project_id=targets["web_project_id"] or None,
+        web_project_name=texts["web_project_name"],
+        fallback_project_id=targets["fallback_project_id"],
+        workspace=workspace,
+        enabled=False,
+        archive_policy=archive_policy,
+        title=texts["title"].strip(),
+        description=texts["description"].strip(),
+    )
+    normalize_auto_archive(entry)
+    payload = asdict(entry)
+    payload.pop("mode", None)
+    return payload
 
 
 def normalize_archive_policy(value: str | None) -> str:
@@ -996,6 +1165,59 @@ class ScheduleStore:
             self._save(data)
             return True
 
+    def take_user_items(self, predicate: Callable[[dict], bool]) -> list[dict]:
+        """Remove the user schedules ``predicate`` selects and return them raw.
+
+        Used when a workspace is archived: its schedules leave the active list
+        with it (an automation pointing at a workspace that no longer exists
+        would either fail every run or fall back to another workspace's General
+        project), and the raw rows travel with the archive so a restore can put
+        them back exactly. System rows are never stored here, so they cannot
+        be taken; per-workspace system routines stop by losing their workspace
+        from the registry instead.
+        """
+        with self._lock:
+            data = self._load()
+            items = [item for item in data.get("schedules", []) if isinstance(item, dict)]
+            taken = [
+                item for item in items
+                if item.get("scope") != "system" and predicate(item)
+            ]
+            if not taken:
+                return []
+            taken_ids = {id(item) for item in taken}
+            data["schedules"] = [item for item in items if id(item) not in taken_ids]
+            self._save(data)
+            return taken
+
+    def put_back_user_items(self, items: Sequence[dict]) -> int:
+        """Re-add raw user schedules removed by :meth:`take_user_items`.
+
+        A row whose ``schedule_id`` is already present is skipped rather than
+        duplicated. Returns how many rows were added.
+        """
+        with self._lock:
+            data = self._load()
+            current = data.setdefault("schedules", [])
+            present = {
+                str(item.get("schedule_id"))
+                for item in current
+                if isinstance(item, dict)
+            }
+            added = 0
+            for item in items:
+                if not isinstance(item, dict) or item.get("scope") == "system":
+                    continue
+                schedule_id = str(item.get("schedule_id") or "")
+                if not schedule_id or schedule_id in present:
+                    continue
+                current.append(dict(item))
+                present.add(schedule_id)
+                added += 1
+            if added:
+                self._save(data)
+            return added
+
     def _load(self) -> dict:
         if not self._path.exists():
             return {"schedules": []}
@@ -1482,6 +1704,14 @@ class ScheduleManager:
 
     def delete(self, schedule_id: str) -> bool:
         return self._store.delete(schedule_id)
+
+    def take_user_items(self, predicate: Callable[[dict], bool]) -> list[dict]:
+        """See :meth:`ScheduleStore.take_user_items`."""
+        return self._store.take_user_items(predicate)
+
+    def put_back_user_items(self, items: Sequence[dict]) -> int:
+        """See :meth:`ScheduleStore.put_back_user_items`."""
+        return self._store.put_back_user_items(items)
 
     def replace(self, entry: ScheduleEntry) -> None:
         """Persist a validated schedule update through the public manager API."""

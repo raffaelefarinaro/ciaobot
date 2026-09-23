@@ -3086,6 +3086,105 @@ describe('deep-link chat navigation', () => {
     expect(store.activeChatId).toBeNull()
   })
 
+  function workspaceFixture(store: ReturnType<typeof useProjectStore>) {
+    store.projects = [
+      { project_id: 'p-personal', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+      { project_id: 'p-work', name: 'General', workspace: 'work', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c-personal', project_id: 'p-personal', title: 'Personal', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'c-work', project_id: 'p-work', title: 'Work', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'work'
+    store.activeChatId = 'c-work'
+    store.connectWs('c-work')
+    return fakeSockets[fakeSockets.length - 1]
+  }
+
+  const archivedResponse = {
+    workspaces: [{ name: 'personal', vault_root: 'personal', default_provider: 'claude' }],
+    active: 'personal',
+    archived: { path: '.archived-workspaces/work-20260923-000000' },
+  }
+
+  test('archiveWorkspace clears the selected chat of the archived workspace', async () => {
+    const store = useProjectStore()
+    const chatSocket = workspaceFixture(store)
+    localStorage.setItem('ciao-active-chat', 'c-work')
+    apiPost.mockResolvedValue(archivedResponse)
+    routerPush.mockClear()
+
+    await store.archiveWorkspace('work')
+
+    expect(store.activeWorkspace).toBe('personal')
+    expect(store.activeChatId).toBeNull()
+    expect(store.chats.map(c => c.chat_id)).toEqual(['c-personal'])
+    expect(store.projects.map(p => p.project_id)).toEqual(['p-personal'])
+    expect(chatSocket.readyState).toBe(FakeWebSocket.CLOSED)
+    // Settings stays open; only the selection is cleared, and durably.
+    expect(routerPush).not.toHaveBeenCalled()
+    expect(localStorageData['ciao-active-chat']).toBeUndefined()
+  })
+
+  test('archiveWorkspace clears the selection when project_deleted lands first', async () => {
+    const store = useProjectStore()
+    const chatSocket = workspaceFixture(store)
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    apiPost.mockImplementation(async () => {
+      events.onmessage?.({ data: JSON.stringify({ type: 'project_deleted', project_id: 'p-work' }) })
+      return archivedResponse
+    })
+
+    await store.archiveWorkspace('work')
+
+    expect(store.activeChatId).toBeNull()
+    expect(store.chats.map(c => c.chat_id)).toEqual(['c-personal'])
+    expect(chatSocket.readyState).toBe(FakeWebSocket.CLOSED)
+  })
+
+  test('project_deleted event clears the selected chat and closes its socket', () => {
+    const store = useProjectStore()
+    const chatSocket = workspaceFixture(store)
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+
+    events.onmessage?.({ data: JSON.stringify({ type: 'project_deleted', project_id: 'p-work' }) })
+
+    expect(store.activeChatId).toBeNull()
+    expect(store.chats.map(c => c.chat_id)).toEqual(['c-personal'])
+    expect(chatSocket.readyState).toBe(FakeWebSocket.CLOSED)
+  })
+
+  test('workspaces_changed from another client refetches the registry and drops archived projects', async () => {
+    const store = useProjectStore()
+    const chatSocket = workspaceFixture(store)
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') {
+        return { workspaces: [{ name: 'personal', vault_root: 'personal', default_provider: 'claude' }], active: 'personal' }
+      }
+      if (path === '/api/projects') {
+        return [{ project_id: 'p-personal', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' }]
+      }
+      return {}
+    })
+    const revision = store.workspaceRegistryRevision
+
+    events.onmessage?.({ data: JSON.stringify({ type: 'workspaces_changed' }) })
+
+    await vi.waitFor(() => {
+      expect(store.workspaceRegistryRevision).toBe(revision + 1)
+    })
+    expect(store.workspaces.map(w => w.name)).toEqual(['personal'])
+    expect(store.activeWorkspace).toBe('personal')
+    expect(store.projects.map(p => p.project_id)).toEqual(['p-personal'])
+    expect(store.chats.map(c => c.chat_id)).toEqual(['c-personal'])
+    expect(store.activeChatId).toBeNull()
+    expect(chatSocket.readyState).toBe(FakeWebSocket.CLOSED)
+  })
+
   function twoChats(): ChatInfo[] {
     return [
       { chat_id: 'parent', project_id: 'p1', title: 'Parent', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },

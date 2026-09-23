@@ -176,3 +176,19 @@ def test_setup_rerun_imports_the_variable_before_writing_a_registry(tmp_path: Pa
     assert entries["client"]["disallowed_tools"] == ["Bash"]
     assert entries["client"]["allowed_mcp_servers"] == []
     assert (tmp_path / ".runtime" / LEGACY_WORKSPACES_IMPORT_MARKER).is_file()
+
+
+def test_an_archived_workspace_is_not_reimported(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [{"name": "personal", "vault_root": "memory-vault/personal"}])
+    archive = tmp_path / ".archived-workspaces" / "client-20260901-120000"
+    archive.mkdir(parents=True)
+    (archive / "archive.json").write_text(
+        json.dumps({"name": "client", "status": "archived"}), encoding="utf-8"
+    )
+    config = _config(tmp_path, LEGACY)
+
+    imported = config.import_legacy_workspaces_env()
+
+    assert imported == ["home"]
+    assert "client" not in config.workspaces
+    assert {e["name"] for e in _registry(tmp_path)} == {"personal", "home"}

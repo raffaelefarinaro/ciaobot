@@ -24,7 +24,11 @@ A fresh first logical workspace and workspaces added later in Settings live at
 `<CIAO_VAULT_ROOT>/<workspace-name>/`. Their registry path is read-only in the
 PWA. Existing-folder setup preserves the selected notes in place so the
 onboarding agent can inspect them; `ciao os-audit` then offers a model-guided,
-backed-up migration into the standard named folder.
+backed-up migration into the standard named folder. Settings → Workspaces →
+Archive never deletes or merges a workspace: it moves the folder intact to
+`<install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/` and unregisters it
+(`ciao/workspace_archive.py`); tests for it live in
+`tests/test_workspace_archive.py`.
 
 Common package CLI entry points:
 

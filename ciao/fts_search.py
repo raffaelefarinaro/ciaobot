@@ -22,7 +22,15 @@ logger = logging.getLogger(__name__)
 # Directory-based type inference (similar to vault_index.py). `.vault-trash`
 # holds notes `ciao.vault_review` has trashed: still on disk so a restore is
 # possible, but no longer part of the vault, so never searchable.
-EXCLUDED_VAULT_DIRS = {"Logs", "Templates", ".obsidian", ".vault-trash"}
+# `.archived-workspaces` is the same kind of exclusion for whole workspaces
+# (see `ciao.workspace_archive`).
+EXCLUDED_VAULT_DIRS = {
+    "Logs",
+    "Templates",
+    ".obsidian",
+    ".vault-trash",
+    vault_index.ARCHIVED_WORKSPACES_DIR,
+}
 
 # The reserved-bookkeeping definitions live in `vault_index` so the scan, the
 # lint, and this index cannot disagree about what counts as a note.
@@ -640,6 +648,29 @@ def vault_key_prefix(vault_root: Path, path_base: Path | None) -> str:
     if prefix is None:
         prefix = _scope_prefix(Path(vault_root).resolve(), Path(base).resolve())
     return NO_MATCH_KEY_PREFIX if prefix is None else prefix
+
+
+def forget_subtree(conn: sqlite3.Connection, prefix: str) -> int:
+    """Drop every vault row stored under ``prefix``; return how many went.
+
+    The prune in :func:`_index_directory` is scoped to the directory being
+    indexed, so a vault that stops being indexed at all — an archived
+    workspace's root — keeps its rows forever unless someone removes them. An
+    unscoped search would then keep returning notes the operator archived.
+
+    Refuses the two prefixes that do not name one subtree: ``""`` (every row)
+    and :data:`NO_MATCH_KEY_PREFIX` (a vault outside the key base, whose rows
+    this prefix cannot identify).
+    """
+    if not prefix or prefix == NO_MATCH_KEY_PREFIX:
+        return 0
+    pattern = _like_prefix_pattern(prefix)
+    removed = conn.execute(
+        "DELETE FROM vault_fts WHERE path LIKE ? ESCAPE '\\'", (pattern,)
+    ).rowcount
+    conn.execute("DELETE FROM vault_meta WHERE path LIKE ? ESCAPE '\\'", (pattern,))
+    conn.commit()
+    return int(removed or 0)
 
 
 def index_file(

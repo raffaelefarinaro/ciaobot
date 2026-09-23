@@ -176,6 +176,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
             },
         ],
         "active": "personal",
+        "primary": "personal",
         "provider_options": [
             {"value": "claude", "label": "Anthropic (via Claude Code)"},
             {"value": "opencode", "label": "opencode"},

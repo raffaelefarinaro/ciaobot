@@ -2552,13 +2552,20 @@ class ProjectChatManager:
         """Internal removal: pops the project, archives its chats, persists,
         and publishes ``project_deleted``. Skips the vault-backed guard so
         ``complete_project`` can call this after moving the vault entry."""
-        project = self._projects.pop(project_id, None)
-        if project is None:
+        if project_id not in self._projects:
             return False
-        # Archive and remove all chats in this project
-        for cid in list(self._chats):
-            if self._chats[cid].project_id == project_id:
-                self._archive_and_remove_chat(cid)
+        # Archive and remove all chats in this project. The project itself is
+        # only dropped once every chat is gone: if one chat fails to archive,
+        # the chats already archived are saved as removed and the project
+        # stays, with the rest of its chats, so the removal can be retried.
+        try:
+            for cid in list(self._chats):
+                if self._chats[cid].project_id == project_id:
+                    self._archive_and_remove_chat(cid)
+        except Exception:
+            self._save()
+            raise
+        self._projects.pop(project_id, None)
         self._save()
         self._events.publish({
             "type": "project_deleted",
@@ -5106,24 +5113,60 @@ class ProjectChatManager:
         )
         return provider, model, workspace
 
-    def reassign_workspace(self, old: str, new: str) -> int:
-        """Repoint every project on *old* at *new*; returns how many moved.
+    def workspace_scope(self, workspace: str) -> tuple[set[str], set[str]]:
+        """The project ids and chat ids (active and archived) in *workspace*."""
+        project_ids = {
+            pid for pid, project in self._projects.items()
+            if project.workspace == workspace
+        }
+        chat_ids = {
+            cid for cid, chat in self._chats.items()
+            if chat.project_id in project_ids
+        }
+        return project_ids, chat_ids
 
-        Deleting a workspace kept its projects and chats, still naming a
-        registry entry that no longer existed - and `_agent_root_for_chat`
-        then fell through to `primary_workspace()`, so continuing one of those
-        chats silently loaded the primary workspace's guide and could read and
-        write its vault. Migrating the projects makes that move explicit and
-        recorded rather than an accident of the fallback.
+    def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
+        """Chats in *workspace* with a turn, subagent or archive job running.
+
+        An archive job (insights, memory proposals, the project-doc fold) keeps
+        writing into the workspace vault after the chat itself is archived, so
+        it counts too: finishing after the folder moved would recreate the
+        folder at its old path, outside the archive, and block the restore.
         """
-        moved = 0
-        for project in self._projects.values():
-            if project.workspace == old:
-                project.workspace = new
-                moved += 1
-        if moved:
-            self._save(reason="workspace_deleted")
-        return moved
+        _project_ids, chat_ids = self.workspace_scope(workspace)
+        busy = set(self.active_chat_ids())
+        busy.update(
+            cid for cid, task in self._archive_tasks.items() if not task.done()
+        )
+        return sorted(cid for cid in busy if cid in chat_ids)
+
+    def workspace_counts(self, workspace: str) -> dict[str, int]:
+        """How many projects and open chats archiving *workspace* would close."""
+        project_ids, chat_ids = self.workspace_scope(workspace)
+        open_chats = sum(
+            1 for cid in chat_ids
+            if cid in self._chats and not self._chats[cid].archived
+        )
+        return {"projects": len(project_ids), "chats": open_chats}
+
+    def archive_workspace_projects(self, workspace: str) -> dict[str, int]:
+        """Remove every project of *workspace*, archiving its chats.
+
+        The workspace-level counterpart of ``complete_project``: each project
+        goes through ``_remove_project``, which transcript-archives every chat
+        that is still open, removes the chats and publishes
+        ``project_deleted``. Nothing is repointed at another workspace — a
+        chat that kept running under the primary workspace's guide and vault
+        would mix the two, which is what archiving exists to prevent.
+
+        Must run while *workspace* is still registered, so any path resolution
+        the removal needs still finds its own agent root.
+        """
+        counts = self.workspace_counts(workspace)
+        project_ids, _chat_ids = self.workspace_scope(workspace)
+        for project_id in sorted(project_ids):
+            self._remove_project(project_id)
+        return counts
 
     def refresh_workspaces(self) -> None:
         self._ensure_defaults()

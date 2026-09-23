@@ -15,6 +15,8 @@ import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft } f
 import { isPostprocessing, postprocessNeedsRetry } from '../lib/postprocessView'
 import type {
   ArchiveChatResponse,
+  ArchivedWorkspace,
+  ArchivedWorkspacesResponse,
   ArchiveJobView,
   ProjectInfo,
   ChatInfo,
@@ -1756,8 +1758,22 @@ export const useProjectStore = defineStore('projects', () => {
     return res
   }
 
-  async function deleteWorkspace(name: WorkspaceName) {
-    const res = await api.del<WorkspacesResponse>(`/api/workspaces/${encodeURIComponent(name)}`)
+  // Archive, never delete: the server unregisters the workspace, archives its
+  // chats and moves its folder intact into `.archived-workspaces/`. Its
+  // projects leave through `project_deleted` events; they and their chats are
+  // also dropped here so a missed frame cannot leave them in the sidebar.
+  async function archiveWorkspace(name: WorkspaceName) {
+    // Captured before the request: the `project_deleted` frames can land
+    // while it is in flight and remove the projects and chats this needs.
+    const projectIds = new Set(
+      projects.value.filter(p => p.workspace === name).map(p => p.project_id),
+    )
+    const selectedChatId = activeChatId.value
+    const selected = activeChat.value
+    const selectedInWorkspace = !!selected && projectIds.has(selected.project_id)
+    const res = await api.post<WorkspacesResponse & { archived?: { path: string } }>(
+      `/api/workspaces/${encodeURIComponent(name)}/archive`,
+    )
     workspaces.value = res.workspaces || []
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
@@ -1765,6 +1781,37 @@ export const useProjectStore = defineStore('projects', () => {
     if (activeWorkspace.value === name) {
       activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
     }
+    projects.value.forEach(p => { if (p.workspace === name) projectIds.add(p.project_id) })
+    projects.value = projects.value.filter(p => !projectIds.has(p.project_id))
+    projectIds.forEach(clearDraftsForProject)
+    chats.value = chats.value.filter(c => !projectIds.has(c.project_id))
+    if (selectedInWorkspace && selectedChatId) {
+      disconnectWs(selectedChatId)
+      if (activeChatId.value === selectedChatId) activeChatId.value = null
+      persistState()
+      // Leave Settings where it is; only a view of the archived chat itself
+      // has to move somewhere valid.
+      const { router } = await import('../router')
+      if (router.currentRoute.value.params.chatId === selectedChatId) {
+        await transitionToFirstChat()
+      }
+    }
+    return res
+  }
+
+  async function fetchArchivedWorkspaces(): Promise<ArchivedWorkspace[]> {
+    const res = await api.get<ArchivedWorkspacesResponse>('/api/workspaces/archived')
+    return res.archived || []
+  }
+
+  async function restoreArchivedWorkspace(id: string) {
+    const res = await api.post<WorkspacesResponse & {
+      restored?: { schedules_paused?: number; schedules_dropped?: number }
+    }>('/api/workspaces/archived/restore', { id })
+    workspaces.value = res.workspaces || []
+    workspaceProviderOptions.value = res.provider_options?.length
+      ? res.provider_options
+      : [{ value: 'claude', label: 'Claude' }]
     return res
   }
 
@@ -3432,6 +3479,43 @@ export const useProjectStore = defineStore('projects', () => {
     }, 150)
   }
 
+  // Bumped when another tab or device archived or restored a workspace, so
+  // views holding their own copy of the registry (Settings) refetch it too.
+  const workspaceRegistryRevision = ref(0)
+  let workspacesRefetchTimer: ReturnType<typeof setTimeout> | null = null
+  function scheduleWorkspacesRefetch(): void {
+    if (workspacesRefetchTimer !== null) return
+    workspacesRefetchTimer = setTimeout(() => {
+      workspacesRefetchTimer = null
+      void refreshWorkspaceRegistry().catch(() => {})
+    }, 150)
+  }
+
+  // The workspace list and the projects in it, from the server. An archived
+  // workspace's projects are gone from /api/projects; a restored one's
+  // General project appears there.
+  async function refreshWorkspaceRegistry(): Promise<void> {
+    const [, fresh] = await Promise.all([
+      fetchWorkspaces(),
+      api.get<ProjectInfo[]>('/api/projects'),
+    ])
+    const known = new Set(fresh.map(p => p.project_id))
+    const dropped = projects.value.filter(p => !known.has(p.project_id)).map(p => p.project_id)
+    projects.value = fresh
+    if (dropped.length) {
+      const gone = new Set(dropped)
+      dropped.forEach(clearDraftsForProject)
+      const selected = activeChat.value
+      chats.value = chats.value.filter(c => !gone.has(c.project_id))
+      if (selected && gone.has(selected.project_id) && activeChatId.value === selected.chat_id) {
+        disconnectWs(selected.chat_id)
+        activeChatId.value = null
+        persistState()
+      }
+    }
+    workspaceRegistryRevision.value++
+  }
+
   function handleEventsMessage(msg: EventsWsMessage) {
     switch (msg.type) {
       case 'snapshot': {
@@ -3735,10 +3819,17 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
       case 'project_deleted': {
+        // Read before the chats are filtered: afterwards `activeChat` no
+        // longer finds the chat and the selection would never be cleared.
+        const selectedChatId = activeChat.value?.project_id === msg.project_id
+          ? activeChatId.value
+          : null
         projects.value = projects.value.filter(p => p.project_id !== msg.project_id)
         chats.value = chats.value.filter(c => c.project_id !== msg.project_id)
-        if (activeChat.value && activeChat.value.project_id === msg.project_id) {
+        if (selectedChatId) {
+          disconnectWs(selectedChatId)
           activeChatId.value = null
+          persistState()
         }
         break
       }
@@ -3752,6 +3843,13 @@ export const useProjectStore = defineStore('projects', () => {
           const next = orderMap.get(p.project_id)
           if (next !== undefined) p.order = next
         })
+        break
+      }
+      case 'workspaces_changed': {
+        // A workspace was archived or restored in another tab or device.
+        // Refetch the registry so the sidebar and pickers stop offering it
+        // (or show it again) without a reload.
+        scheduleWorkspacesRefetch()
         break
       }
       case 'schedules_changed': {
@@ -5023,7 +5121,9 @@ export const useProjectStore = defineStore('projects', () => {
     insightsFailedChats, workspaceInsightsFailedCount,
     archivingChats, isArchiving, archivingChatsList, workspaceArchivingCount, projectArchivingCount,
     // Actions
-    fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
+    fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace,
+    archiveWorkspace, fetchArchivedWorkspaces, restoreArchivedWorkspace,
+    workspaceRegistryRevision, refreshWorkspaceRegistry,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     generalProject,
