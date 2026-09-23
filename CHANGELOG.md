@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.18.1 - 2026-09-23
+
+### Changed
+- Merge pull request #518 from raffaelefarinaro/chore/sync-develop-v0.18.0 (`bc111da0`)
+- Exclude completed projects from vault review queue (`64df3422`)
+- Require frontmatter on every vault note the agent writes (`3f47e499`)
+- Show the model that did the turn's work in the chat footer (`4f23a23e`)
+- Improve memory proposal quality: route known entities, drop session noise (`49951935`)
+- Remove clusters and bridge notes from the memory map (`50435cdd`)
+- Release review fixes for the proposal routing and vault review changes (`a2c7d10d`)
+- Keep review rows and unresolved project names instead of dropping them (`3f300486`)
+- Address Codex review on #522: keep facts reviewable instead of guessing (`e2c0de47`)
+- Check session-write evidence in the named file only (`ec6ac33a`)
+- Narrow the stem shortcut and recognise completed-project moves (`9e831b38`)
+
+### Fixed
+- Fix silent drops and edge cases found reviewing the release fixes (`228b0148`)
+
 ## v0.18.0 - 2026-09-22
 
 ### Added
