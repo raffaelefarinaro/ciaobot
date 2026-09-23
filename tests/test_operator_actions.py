@@ -137,6 +137,23 @@ def test_package_update_fires_only_on_available(tmp_path: Path) -> None:
     assert "package-update" in ids
 
 
+def test_package_update_leads_with_the_chat_button(tmp_path: Path) -> None:
+    """Updating is the forward action; release notes are supporting reading."""
+    _starred(tmp_path)
+    context = _context(
+        tmp_path,
+        package_status=lambda: {
+            "update_available": True,
+            "latest_version": "9.9.9",
+            "current_version": "0.1.0",
+        },
+    )
+    tile = next(a for a in detect_actions(context) if a.id == "package-update")
+    assert tile.primary == "chat"
+    assert tile.as_dict()["primary"] == "chat"
+    assert tile.link_label == "Release notes"
+
+
 def test_github_star_silent_while_bootstrapping(tmp_path: Path) -> None:
     """The first-run wizard is not the moment to ask for a star."""
     config = _FakeConfig(tmp_path)
