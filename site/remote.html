@@ -16,11 +16,7 @@
         <a href="./">Home</a>
         <a href="guide.html">Get started</a>
         <a href="features.html">Features</a>
-        <a href="builtin.html">Built in</a>
         <a href="memory.html">Memory</a>
-        <a href="models.html">AI models</a>
-        <a href="remote.html" aria-current="page">Anywhere</a>
-        <a href="configure.html">Configure</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
     </div>
@@ -61,7 +57,7 @@
       </div>
     </section>
 
-    <section>
+    <section id="tailscale">
       <h2>Step 1: connect your devices with Tailscale</h2>
       <p><a href="https://tailscale.com/">Tailscale</a> is a free app that links your devices into a private network. They can reach each other from anywhere, but nobody else on the internet can see them. No router settings needed.</p>
       <ol class="steps">
@@ -84,10 +80,10 @@
       </ol>
     </section>
 
-    <section>
+    <section id="browser">
       <h2>Step 2a: use it from a phone, tablet or any browser</h2>
       <p>Nothing to install besides Tailscale. Open the host's address in the browser (or scan the QR code), log in with your Ciaobot password, and you're in, with all your workspaces, chats and memory.</p>
-      <p><strong>Make it feel like an app:</strong> on iPhone or iPad, tap <em>Share → Add to Home Screen</em>; on Android, use <em>Install app</em> in the browser menu. Dictation works from the phone too, as long as the host is a Mac with the desktop app.</p>
+      <p><strong>Make it feel like an app:</strong> on iPhone or iPad, tap <em>Share → Add to Home Screen</em>; on Android, use <em>Install app</em> in the browser menu.</p>
       <div class="note">
         <p><strong>Optional: a secure https address.</strong> Browsers enable some app features (installing to the home screen, notifications) only over <code>https</code>. Tailscale can provide one. On the host, run:</p>
         <pre><code>tailscale serve --bg 8443</code></pre>
@@ -112,21 +108,20 @@
           <p>The laptop pauses its own automations and everything runs on the host. A banner shows that you're connected as a client.</p>
         </li>
       </ol>
-      <p><strong>To switch back</strong>, open <em>this device</em> again and click <strong>Disconnect</strong>. The host sends over its latest changes and the laptop becomes a host again. If the host is off or unreachable, <strong>Force disconnect</strong> switches back without waiting for it.</p>
+      <p><strong>To switch back</strong>, open <em>this device</em> again and click <strong>Disconnect</strong>.</p>
     </section>
 
     <section>
       <h2>Keep it private</h2>
       <ul>
-        <li>Always set a strong dashboard password. It protects Ciaobot on every network it's reachable from, and repeated wrong passwords are slowed down.</li>
+        <li>Always set a strong dashboard password. It protects Ciaobot on every network it's reachable from.</li>
         <li>Use Tailscale (or another private network) rather than opening port <code>8443</code> on your router to the whole internet.</li>
-        <li>If you want Ciaobot reachable <em>only</em> through <code>tailscale serve</code>, add <code>PWA_HOST=127.0.0.1</code> to the <code>.env</code> file in your Ciaobot folder and restart it.</li>
       </ul>
     </section>
 
     <section id="vps">
       <h2>Run it on a server (VPS)</h2>
-      <p>A <strong>VPS</strong> (virtual private server) is a small computer you rent in a data centre. It's always on, so your automations run on time and Ciaobot is reachable from every device, wherever you are, even with your laptop closed. Any provider that offers <strong>Ubuntu 24.04</strong> works; for example a <a href="https://www.hostinger.com/vps-hosting">Hostinger VPS</a>. A small plan is fine for one person.</p>
+      <p>A <strong>VPS</strong> is a small computer you rent in a data centre: always on, so automations run on time even with your laptop closed. Any provider that offers <strong>Ubuntu 24.04</strong> works; for example a <a href="https://www.hostinger.com/vps-hosting">Hostinger VPS</a>. A small plan is fine for one person.</p>
       <ol class="steps">
         <li>
           <h3>Rent the server</h3>
@@ -134,7 +129,7 @@
         </li>
         <li>
           <h3>Put it on your private network</h3>
-          <p>Install <a href="https://tailscale.com/download/linux">Tailscale</a> on the server and sign in with the same account as your other devices. From now on you reach it by its private Tailscale name, and it doesn't need to be open to the internet.</p>
+          <p>Install <a href="https://tailscale.com/download/linux">Tailscale</a> on the server, exactly as in <a href="#tailscale">Step 1</a>.</p>
         </li>
         <li>
           <h3>Install Ciaobot and an AI tool</h3>
@@ -143,15 +138,15 @@
         </li>
         <li>
           <h3>Open it from anywhere</h3>
-          <p>Turn on a private https address with <a href="https://tailscale.com/kb/1312/serve">Tailscale Serve</a> and open it on your phone, tablet or laptop. Log in with your Ciaobot password and add it to the home screen.</p>
+          <p>Continue with <a href="#browser">Step 2a</a>, including the https address.</p>
         </li>
       </ol>
-      <p><strong>What's different on a server:</strong> dictation, read-aloud and Apple Intelligence need a Mac host, and updates are installed by you rather than with one click. Everything else (workspaces, memory, automations, Google Workspace, documents, every AI model) works the same.</p>
+      <p><strong>What's different on a server:</strong> dictation, read-aloud and Apple Intelligence need a Mac host, and updates are installed by you rather than with one click. Everything else works the same.</p>
     </section>
 
     <nav class="next-page" aria-label="Next pages">
       <a class="btn" href="models.html">← AI models</a>
-      <a class="btn btn-primary" href="configure.html">Configure →</a>
+      <a class="btn btn-primary" href="guide.html">Get started →</a>
     </nav>
   </main>
 

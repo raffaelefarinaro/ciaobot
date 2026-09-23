@@ -16,11 +16,7 @@
         <a href="./">Home</a>
         <a href="guide.html">Get started</a>
         <a href="features.html">Features</a>
-        <a href="builtin.html">Built in</a>
         <a href="memory.html">Memory</a>
-        <a href="models.html" aria-current="page">AI models</a>
-        <a href="remote.html">Anywhere</a>
-        <a href="configure.html">Configure</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
     </div>
@@ -60,8 +56,7 @@
 
     <section>
       <h2>Why Ciaobot doesn't build its own agent</h2>
-      <p>The agent (the part that talks to the model, calls tools, edits files and keeps a long task on track) is where the hardest engineering in AI tools happens, and it changes every month. Anthropic and the opencode team do that full time. Rebuilding it would give you a worse, older version.</p>
-      <p>So Ciaobot stands on their work and focuses on what they don't do: organising your life into workspaces and projects, remembering what matters, giving the agent instructions and skills written for a personal assistant, and wrapping it all in an app you'd use every day. When Claude Code or opencode gets better, so does Ciaobot.</p>
+      <p>The agent (the part that talks to the model, calls tools and edits files) is the hardest part of any AI tool, and Anthropic and the opencode team work on it full time. So Ciaobot builds on theirs and focuses on what they don't do: workspaces and projects, memory, assistant-tuned instructions and skills, and an app around it all. When Claude Code or opencode gets better, so does Ciaobot.</p>
     </section>
 
     <section>
@@ -97,8 +92,8 @@
       <h2>Pick a model per workspace, per chat, per job</h2>
       <ul>
         <li><strong>Per workspace:</strong> Settings → Workspaces sets which tool each workspace uses by default, for example Claude for Work and a local model for Personal.</li>
-        <li><strong>Per chat:</strong> click the model chip in the chat header (<kbd>⌘</kbd>+<kbd>⇧</kbd>+<kbd>M</kbd> in the app, <kbd>⌥</kbd>+<kbd>M</kbd> in the browser) to change model or thinking level. Switching to the other tool hands the chat over with its visible history.</li>
-        <li><strong>Per job:</strong> automations, memory extraction and the <code>/critique</code> review panel each have their own model setting, so you can put cheaper models on background work.</li>
+        <li><strong>Per chat:</strong> click the model chip in the chat header (<kbd>⌘</kbd>+<kbd>⇧</kbd>+<kbd>M</kbd>) to change model or thinking level. Switching to the other tool hands the chat over with its visible history.</li>
+        <li><strong>Per job:</strong> automations, memory extraction and the <code>/critique</code> review panel each have their own model setting, so you can put cheaper models on background work. On a Mac, voice and chat titles need no model at all: <a href="features.html#voice">they run on-device</a>.</li>
       </ul>
       <figure>
         <a href="assets/img/voice.webp"><img src="assets/img/voice.webp" alt="Settings, Models tab: the model used for memory extraction and the critique panel" loading="lazy" width="1600" height="1000"></a>
@@ -106,10 +101,6 @@
       </figure>
     </section>
 
-    <section>
-      <h2>And some things need no model at all</h2>
-      <p>On a Mac, dictation, read-aloud and chat titles run on Apple's on-device engines and Apple Intelligence: free, private, and not counted against any subscription. <a href="features.html#voice">Voice on the Mac →</a></p>
-    </section>
 
     <nav class="next-page" aria-label="Next pages">
       <a class="btn" href="memory.html">← How memory works</a>
