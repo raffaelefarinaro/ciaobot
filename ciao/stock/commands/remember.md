@@ -27,4 +27,4 @@ If the user explicitly wants it live immediately, write it where step 2 routed i
 
 Then dismiss the queued copy with `ciao memory-proposal-dismiss --text-file <fact-file> --promoted` if one exists, reusing the same file from step 3. The fact never becomes a shell argument in either direction — a substring is only safe if you have read it and know it holds no metacharacter at all, and `;`, `&`, `|`, `<`, `>`, `*` and parentheses are as dangerous as quotes.
 
-There is no `ciao memory` command.
+`ciao memory update` writes a region directly and skips the review queue, so use it only for the explicit immediate-write case above, never as a substitute for step 3.
