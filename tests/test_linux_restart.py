@@ -65,6 +65,18 @@ async def test_local_status_advertises_linux_restart_only(monkeypatch, platform,
 _BUNDLE_PYTHON = (
     "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/python/arm64/bin/python3.12"
 )
+_BUNDLE_CIAO = (
+    "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/"
+    "site-packages/arm64/ciao/__init__.py"
+)
+
+
+def _run_as_bundled_app(monkeypatch):
+    # Interpreter and package both inside the bundle runtime; the suite's own
+    # ciao is imported from a checkout, which otherwise counts as editable.
+    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
+    monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
+    monkeypatch.setattr(sys.modules["ciao"], "__file__", _BUNDLE_CIAO)
 
 
 def _checkout(tmp_path):
@@ -80,8 +92,7 @@ async def _status_restart_only(monkeypatch, *, platform, dev_mode, app_repo, bun
     import sys
 
     if bundled:
-        monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
-        monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
+        _run_as_bundled_app(monkeypatch)
     else:
         monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
     monkeypatch.setattr(sys, "platform", platform)
@@ -137,8 +148,7 @@ async def test_deploy_refuses_bundled_app_before_any_step(tmp_path, monkeypatch)
 
     from ciao.web import routes_api
 
-    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
-    monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
+    _run_as_bundled_app(monkeypatch)
 
     async def must_not_run(*args, **kwargs):
         raise AssertionError("deploy steps must not run on a bundled app")
