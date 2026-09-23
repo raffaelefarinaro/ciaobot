@@ -1,3 +1,4 @@
+import sys
 from types import SimpleNamespace
 
 from itsdangerous import URLSafeTimedSerializer
@@ -61,6 +62,11 @@ async def test_local_status_advertises_linux_restart_only(monkeypatch, platform,
     assert json.loads(response.body)["restart_only"] is expected
 
 
+_BUNDLE_PYTHON = (
+    "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/python/arm64/bin/python3.12"
+)
+
+
 def _checkout(tmp_path):
     repo = tmp_path / "repo"
     (repo / "web").mkdir(parents=True)
@@ -75,6 +81,7 @@ async def _status_restart_only(monkeypatch, *, platform, dev_mode, app_repo, bun
 
     if bundled:
         monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
+        monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
     else:
         monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
     monkeypatch.setattr(sys, "platform", platform)
@@ -131,6 +138,7 @@ async def test_deploy_refuses_bundled_app_before_any_step(tmp_path, monkeypatch)
     from ciao.web import routes_api
 
     monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
+    monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
 
     async def must_not_run(*args, **kwargs):
         raise AssertionError("deploy steps must not run on a bundled app")

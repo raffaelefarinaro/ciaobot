@@ -60,6 +60,9 @@ def build_dev_environment(
     if not env.get("PWA_AUTH_TOKEN"):
         raise RuntimeError("Set PWA_AUTH_TOKEN in .env first.")
 
+    # A shell opened by Ciaobot.app inherits the bundled launcher's marker;
+    # the dev backend runs from this checkout, not the app bundle.
+    env.pop("CIAO_BUNDLED_APP", None)
     env["CIAO_AUTO_SYNC_ON_START"] = "false"
     env["PWA_PORT"] = str(env.get("PWA_PORT") or backend_port)
     env.setdefault("VITE_BACKEND_URL", f"http://127.0.0.1:{env['PWA_PORT']}")

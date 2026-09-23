@@ -245,17 +245,48 @@ def package_changelog(
     }
 
 
-def detect_install_mode() -> str:
-    """Return the runtime distribution mode used by the current process."""
-    import sys
+_BUNDLE_RUNTIME_MARKER = "Ciaobot.app/Contents/Resources/ciao-runtime"
+
+
+def _inside_app_bundle(path: str | os.PathLike[str] | None) -> bool:
+    """Whether ``path`` resolves inside a Ciaobot.app embedded runtime."""
+    if not path:
+        return False
     from pathlib import Path
 
-    # The bundled marker is authoritative. The embedded runtime imports the
-    # same ``ciao`` package as a source checkout, so checking the checkout
-    # first misclassifies a bundled app during development and in tests.
     try:
-        executable = Path(sys.executable).resolve()
-        if os.environ.get("CIAO_BUNDLED_APP") == "1" or "Ciaobot.app/Contents/Resources/ciao-runtime" in str(executable):
+        resolved = str(Path(path).resolve())
+    except (OSError, RuntimeError, ValueError):
+        resolved = str(path)
+    return _BUNDLE_RUNTIME_MARKER in resolved or _BUNDLE_RUNTIME_MARKER in str(path)
+
+
+def running_from_app_bundle() -> bool:
+    """Whether this process is the engine embedded in Ciaobot.app.
+
+    Decided from where the interpreter and the ``ciao`` package actually live,
+    not from ``CIAO_BUNDLED_APP`` alone: the bundled launcher exports that
+    marker, so every shell a Ciaobot chat opens inherits it, and a source dev
+    server started from such a shell would otherwise call itself bundled and
+    refuse every redeploy.
+    """
+    if _inside_app_bundle(sys.executable):
+        return True
+    ciao_module = sys.modules.get("ciao")
+    return _inside_app_bundle(getattr(ciao_module, "__file__", None))
+
+
+def detect_install_mode() -> str:
+    """Return the runtime distribution mode used by the current process."""
+    from pathlib import Path
+
+    # Bundle location is authoritative. The embedded runtime imports the same
+    # ``ciao`` package layout as a source checkout, so checking the checkout
+    # first would misclassify a bundled app. An inherited CIAO_BUNDLED_APP
+    # marker without a bundle location does not count (see
+    # ``running_from_app_bundle``).
+    try:
+        if running_from_app_bundle():
             return "bundled_app"
     except Exception:
         pass
