@@ -687,13 +687,28 @@ describe('talk about it', () => {
     await flushPromises()
     expect(switchChat).toHaveBeenCalledWith('chat-d')
 
+    // A reload mounts before the chat list arrives; the link must survive that.
+    wrapper.unmount()
+    const chats = projects.chats
+    projects.chats = []
+    const reloaded = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    projects.chats = chats
+    await flushPromises()
+    expect(reloaded.findAll('.pr-actions button').map((b) => b.text()))
+      .toEqual(['review', 'dismiss', 'open chat'])
+    await testArchiveDropsLink(reloaded)
+  })
+
+  async function testArchiveDropsLink(wrapper: ReturnType<typeof mount>) {
+    const projects = useProjectStore()
     // Archiving the chat drops the link and brings the action back.
     projects.chats.find((c) => c.chat_id === 'chat-d')!.archived = true
     await flushPromises()
     expect(wrapper.findAll('.pr-actions button').map((b) => b.text()))
       .toEqual(['review', 'dismiss', 'talk about it'])
     wrapper.unmount()
-  })
+  }
 })
 
 describe('workspace scoping', () => {

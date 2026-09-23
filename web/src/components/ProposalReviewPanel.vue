@@ -307,11 +307,17 @@ async function openLinkedChat(row: ProposalRow) {
 }
 
 function prunedLinks(links: Record<string, string>): Record<string, string> | null {
+  // Before the queue and the chat list have loaded, every link looks dead: on a
+  // reload the mount-time prune used to drop them all before either arrived.
+  // The render already hides a link whose chat is missing, so waiting is safe.
+  const rowsKnown = store.loaded
+  const chatsKnown = projectStore.chats.length > 0
+  if (!rowsKnown && !chatsKnown) return null
   const liveIds = new Set(store.rows.map(r => r.id))
   const next = { ...links }
   let changed = false
   for (const pid of Object.keys(next)) {
-    if (!liveIds.has(pid) || !liveChat(next[pid])) {
+    if ((rowsKnown && !liveIds.has(pid)) || (chatsKnown && !liveChat(next[pid]))) {
       delete next[pid]
       changed = true
     }

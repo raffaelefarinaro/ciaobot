@@ -1388,9 +1388,11 @@ def _people_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
         out["operation"] = "update"
         out["exact"] = False
         out["can_accept"] = True
+        # The card already says the wording is decided at accept time for any
+        # inexact preview; this line says what the merge will do.
         out["reason"] = (
-            "a model merges this into the existing note when you accept, "
-            "so the exact wording is decided then"
+            "merged into the existing note where it fits; if the note already "
+            "says this, nothing is written and the row stays queued"
         )
         return out
     after = (
