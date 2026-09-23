@@ -484,7 +484,7 @@ def test_workspace_color_defaults_persists_and_validates(tmp_path):
 
 
 def test_provider_config_offers_no_api_keys(tmp_path, monkeypatch):
-    """Settings -> Providers has no key fields left to type into.
+    """Settings -> Models & providers has no key fields left to type into.
 
     Every provider authenticates through its own CLI, so both key maps are
     empty and a PATCH naming any key is rejected rather than silently written.

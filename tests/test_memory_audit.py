@@ -531,7 +531,6 @@ def test_memory_audit_command_tells_the_user_how_to_fix_over_cap(
     # a workspaces.json, raised caps — flips this test's outcome, so scrub
     # every variable it consumes instead of just the workspace trio.
     for name in (
-        "CIAO_WORKSPACES",
         "CIAO_VAULT_ROOT",
         "CIAO_WORKSPACE",
         "CIAO_VAULT_MODE",
@@ -577,7 +576,6 @@ def test_memory_audit_with_vault_marks_retrieved_stale_notes(
     from ciao.memory_tool import ensure_regions
 
     for name in (
-        "CIAO_WORKSPACES",
         "CIAO_VAULT_ROOT",
         "CIAO_WORKSPACE",
         "CIAO_VAULT_MODE",

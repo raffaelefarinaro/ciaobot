@@ -109,7 +109,7 @@ def test_a_note_folder_is_not_mistaken_for_a_workspace(tmp_path: Path) -> None:
 
     assert list(config.workspaces) == ["personal"]
 
-def test_ciao_workspaces_json_defines_named_workspaces(tmp_path: Path) -> None:
+def test_workspace_registry_file_defines_named_workspaces(tmp_path: Path) -> None:
     raw = json.dumps(
         [
             {
@@ -128,7 +128,9 @@ def test_ciao_workspaces_json_defines_named_workspaces(tmp_path: Path) -> None:
         ]
     )
 
-    config = _config(CIAO_WORKSPACE=str(tmp_path), CIAO_WORKSPACES=raw)
+    (tmp_path / ".runtime").mkdir()
+    (tmp_path / ".runtime" / "workspaces.json").write_text(raw, encoding="utf-8")
+    config = _config(CIAO_WORKSPACE=str(tmp_path))
 
     assert list(config.workspaces) == ["home", "client"]
     assert config.workspace_names() == ["home", "client"]

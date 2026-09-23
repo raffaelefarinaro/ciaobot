@@ -760,7 +760,7 @@ class ScheduleEntry:
     provider: str = ""
     # "" means "inherit", exactly as an empty `model`/`provider` does: the
     # permission mode is resolved from the operator's own per-provider pin
-    # (Settings -> Providers) on every dispatch. A hardcoded "auto" here was
+    # (Settings -> Models & providers) on every dispatch. A hardcoded "auto" here was
     # not a default, it was an override — truthy, so it won every dispatch and
     # the inheritance fallback below it could never fire. A routine on a
     # provider pinned to `bypass` still stamped its chat `auto`, and a reply

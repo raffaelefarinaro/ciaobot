@@ -1,6 +1,6 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
-const routes = [
+export const routes: RouteRecordRaw[] = [
   {
     path: '/login',
     name: 'login',
@@ -77,6 +77,12 @@ const routes = [
     name: 'settings',
     component: () => import('./components/ChatLayout.vue'),
     meta: { requiresAuth: true },
+  },
+  {
+    // The providers tab folded into models (chat providers are its first
+    // card). Keep old links and bookmarks working.
+    path: '/settings/providers',
+    redirect: { path: '/settings/models', hash: '#chat-providers' },
   },
   {
     path: '/settings/:tab',
