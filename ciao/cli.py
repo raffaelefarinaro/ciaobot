@@ -109,6 +109,26 @@ def _copy_tree_if_missing(src, dest: Path) -> list[Path]:
     return written
 
 
+def _import_legacy_workspaces_for_setup(root: Path, existing_env: dict[str, str]) -> None:
+    """Run the one-time ``CIAO_WORKSPACES`` import against ``root``'s ``.env``.
+
+    Built from the install's own ``.env`` (not the ambient environment) so the
+    import targets the same runtime root the server will use.
+    """
+    from ciao.config import CiaoConfig
+
+    runtime = Path(existing_env.get("CIAO_RUNTIME_ROOT", "").strip() or ".runtime").expanduser()
+    if not runtime.is_absolute():
+        runtime = root / runtime
+    source = {
+        **existing_env,
+        "CIAO_WORKSPACE": str(root),
+        "CIAO_RUNTIME_ROOT": str(runtime.resolve()),
+        "PWA_AUTH_TOKEN": existing_env.get("PWA_AUTH_TOKEN") or "setup",
+    }
+    CiaoConfig.from_env(source).import_legacy_workspaces_env()
+
+
 def _write_if_missing(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
@@ -765,6 +785,16 @@ def setup_workspace(
     else:
         vault_path = root / vault_path
     workspaces_registry = root / ".runtime" / "workspaces.json"
+    if existing_env.get("CIAO_WORKSPACES", "").strip() and not workspaces_registry.exists():
+        # An install that still configures workspaces through the retired
+        # variable usually has no registry file (the server never persisted
+        # one while the variable was set). The upgrade installer reruns setup
+        # before the new server first starts, so writing a synthetic
+        # single-workspace registry here would make the server's one-time
+        # import keep that synthetic entry and drop the variable's real
+        # vault_root / disallowed_tools / allowlist for the same name. Import
+        # the variable first so the registry setup sees is the real one.
+        _import_legacy_workspaces_for_setup(root, existing_env)
     registered_vaults = _setup_registry_vaults(
         workspaces_registry,
         workspace_root=root,
@@ -2208,22 +2238,13 @@ def _vault_relocate_command(args: argparse.Namespace) -> int:
         "PWA_AUTH_TOKEN": os.environ.get("PWA_AUTH_TOKEN") or "vault-relocate",
     }
     config = CiaoConfig.from_env(effective_source)
-    # Whether workspaces.json is what `config` actually sourced its workspaces
-    # from, per CiaoConfig.from_env's own precedence — read off the SAME
-    # merged environment that built `config` (target .env, then ambient env
-    # only when --workspace was not explicit), not the raw process
-    # environment, which can disagree with it when CIAO_WORKSPACES is set
-    # only in the target install's .env.
-    registry_authoritative = not effective_source.get("CIAO_WORKSPACES", "").strip()
 
     if args.name not in set(config.workspace_names()):
         print(f"No registered workspace named '{args.name}'.", file=sys.stderr)
         return 1
 
     if args.undo:
-        result = vault_relocate.undo(
-            config, args.name, runtime, registry_authoritative=registry_authoritative
-        )
+        result = vault_relocate.undo(config, args.name, runtime)
         print(json.dumps(result, indent=2))
         return 0 if result["status"] in {"undone", "nothing_to_undo"} else 1
 
@@ -2235,7 +2256,6 @@ def _vault_relocate_command(args: argparse.Namespace) -> int:
             args.name,
             runtime,
             plan_result=plan_result,
-            registry_authoritative=registry_authoritative,
         )
         if args.json:
             print(json.dumps(result, indent=2))

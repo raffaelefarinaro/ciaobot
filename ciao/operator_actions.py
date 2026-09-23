@@ -1072,6 +1072,13 @@ _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
     # Execution mode is fixed at auto for every provider; there is no override.
     ("CLAUDE_EXECUTION_MODE", "remove it: execution mode is always auto"),
     ("CLAUDE_PERMISSION_MODE", "remove it: execution mode is always auto"),
+    # The workspace list is runtime state owned by Settings. Server startup
+    # imports the variable into workspaces.json once; after that it is inert.
+    (
+        "CIAO_WORKSPACES",
+        "remove it: its workspaces were imported into workspaces.json once, "
+        "and workspaces are managed in Settings now",
+    ),
 )
 
 
@@ -1080,7 +1087,8 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
 
     Some described the two hardcoded `personal`/`work` names and went with the
     bootstrap registry that manufactured them; the execution-mode vars were
-    retired when auto became the only mode. A variable that is set and silently
+    retired when auto became the only mode; `CIAO_WORKSPACES` gave way to the
+    Settings-owned runtime registry. A variable that is set and silently
     ignored is worse than one that never existed: the operator believes a setting
     is in effect. Chat-only — the fix edits `.env`, which is theirs.
     """
@@ -1096,21 +1104,23 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
             severity=_DRIFT_SEVERITY,
             title=f"{len(stale)} setting(s) in .env are no longer read",
             detail=(
-                f"{names} described the old hardcoded personal/work pair and are "
-                "ignored now, so whatever they say is not in effect."
+                f"{names} are no longer read by the engine, so whatever they "
+                "say is not in effect."
             ),
             glyph="⚑",
             workspace="",
             chat_label="Move them for me",
             chat_prompt=(
                 f"These variables in my `.env` are no longer read by the engine: "
-                f"{names}. For each one, tell me its current value and the "
-                "workspace it was meant for, then move the setting onto that "
+                f"{names}. For each one: "
+                + "; ".join(f"{name}: {hint}" for name, hint in stale)
+                + ". Tell me its current value and the workspace it was meant "
+                "for, and move any setting that has no home yet onto that "
                 "workspace in `.runtime/workspaces.json` (`disallowed_tools` is "
-                "a per-workspace field there). Ask before "
-                "changing a value rather than assuming the old one still reflects "
-                "what I want, and comment the variable out of `.env` once its "
-                "setting has a new home."
+                "a per-workspace field there). Ask before changing a value "
+                "rather than assuming the old one still reflects what I want, "
+                "and comment the variable out of `.env` once its setting has a "
+                "new home."
             ),
         )
     ]
