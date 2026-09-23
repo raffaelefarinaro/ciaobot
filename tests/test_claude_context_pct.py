@@ -232,6 +232,10 @@ async def test_streaming_turn_tracks_the_main_agents_last_call(tmp_path, monkeyp
             sub.parent_tool_use_id = "toolu_task"
             yield sub
             yield _last_call(cache_read=299894, cache_creation=104)
+            # A synthetic error notice with zero usage must not replace it.
+            synthetic = _last_call(cache_read=0, cache_creation=0, model="<synthetic>")
+            synthetic.usage = {k: 0 for k in synthetic.usage or {}}
+            yield synthetic
             yield _result(cache_read=900000)
 
     fake = FakeClient()

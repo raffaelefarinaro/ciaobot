@@ -904,8 +904,11 @@ class ClaudeProvider(BaseSDKProvider):
                     elif (
                         isinstance(msg, AssistantMessage)
                         and msg.parent_tool_use_id is None
-                        and isinstance(msg.usage, dict)
+                        and self._call_context_tokens(msg.usage) > 0
                     ):
+                        # Zero-usage messages are synthetic (API error or
+                        # connection-drop notices, model "<synthetic>"); keep
+                        # the last real call rather than clobbering it.
                         last_main_msg = msg
                     for event in self._convert_message(msg):
                         if isinstance(event, ResultEvent):
@@ -1099,15 +1102,7 @@ class ClaudeProvider(BaseSDKProvider):
             return None
         if not call_model and result_msg is not None:
             call_model = ClaudeProvider._extract_effective_model(result_msg)
-        context_tokens = 0
-        for key in (
-            "input_tokens",
-            "cache_creation_input_tokens",
-            "cache_read_input_tokens",
-        ):
-            value = call_usage.get(key)
-            if isinstance(value, int) and not isinstance(value, bool):
-                context_tokens += value
+        context_tokens = ClaudeProvider._call_context_tokens(call_usage)
         if context_tokens <= 0:
             return None
         window = ClaudeProvider._context_window_for_model(
@@ -1122,6 +1117,22 @@ class ClaudeProvider(BaseSDKProvider):
         if pct > 100.0:
             return None
         return pct
+
+    @staticmethod
+    def _call_context_tokens(usage: Any) -> int:
+        """Prompt tokens one model call read (input + cache write + cache read)."""
+        if not isinstance(usage, dict):
+            return 0
+        total = 0
+        for key in (
+            "input_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        ):
+            value = usage.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                total += value
+        return total
 
     @staticmethod
     def _context_window_for_model(model_usage: Any, model: str) -> int | None:
