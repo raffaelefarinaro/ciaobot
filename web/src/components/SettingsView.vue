@@ -69,38 +69,38 @@
           <ul class="shortcut-list">
             <li>
               <kbd v-if="inDesktopApp">&#8984;T</kbd>
-              <kbd v-else>&#8224;N</kbd>
+              <kbd v-else>&#8997;N</kbd>
               <span>Open a new chat in the default General project</span>
             </li>
             <li>
               <kbd v-if="inDesktopApp">&#8984;D</kbd>
-              <kbd v-else>&#8224;D</kbd>
+              <kbd v-else>&#8997;D</kbd>
               <span>Toggle voice dictation (start / stop)</span>
             </li>
             <li>
               <kbd v-if="inDesktopApp">&#8984;&#9003;</kbd>
-              <kbd v-else>&#8224;&#9003;</kbd>
+              <kbd v-else>&#8997;&#9003;</kbd>
               <span>Archive the open chat (asks to confirm)</span>
             </li>
             <li>
               <kbd v-if="inDesktopApp">&#8984;S</kbd>
-              <kbd v-else>&#8224;S</kbd>
+              <kbd v-else>&#8997;S</kbd>
               <span>Show or hide the sidebar</span>
             </li>
             <li>
               <kbd v-if="inDesktopApp">&#8984;&#8679;M</kbd>
-              <kbd v-else>&#8224;M</kbd>
+              <kbd v-else>&#8997;M</kbd>
               <span>Open the model picker</span>
             </li>
             <li><kbd>1–9</kbd><span>Switch to the first through ninth workspace in the sidebar</span></li>
             <li>
               <kbd v-if="inDesktopApp">&#8984;&#8679;=</kbd>
-              <kbd v-else>&#8224;=</kbd>
+              <kbd v-else>&#8997;=</kbd>
               <span>Increase the font size</span>
             </li>
             <li>
               <kbd v-if="inDesktopApp">&#8984;&#8679;-</kbd>
-              <kbd v-else>&#8224;-</kbd>
+              <kbd v-else>&#8997;-</kbd>
               <span>Decrease the font size</span>
             </li>
             <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
