@@ -24,8 +24,8 @@ Verification:
      for one) are typed `Any` because they are wired after construction, so
      returning a call on one straight out of a typed function is an error.
      Annotate the local instead.
-  2. `pytest tests/` — the full suite, before claiming backend work is
-     complete. A fake object in an unrelated test can break on a new
+  2. `pytest -n auto tests/` — the full suite (parallel, about a minute),
+     before claiming backend work is complete. A fake object in an unrelated test can break on a new
      attribute (adding a field to the `/ws/events` snapshot broke
      `tests/test_ws_auth.py`, whose `SimpleNamespace` stub had no such
      attribute), so a green focused run proves nothing about the suite.
@@ -33,6 +33,9 @@ Verification:
      `npx vitest` on an older Node silently skips component files while
      printing green.
   4. `cd web && npm run build` after frontend changes.
+  PRs into `develop` only run these on Linux; the macOS job (browser tests,
+  desktop, app bundle) runs after merge unless the PR touches `desktop/`, so
+  a PR going green is not proof the macOS job will.
   `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
   Lint is still worth running — it just will not fail the build for you.
 - Run `./scripts/check-desktop.sh` after changes under `desktop/` — nothing else

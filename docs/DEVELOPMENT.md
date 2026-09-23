@@ -88,6 +88,14 @@ archive, its signature, and `latest.json`.
 - **`develop`** is the integration branch. Feature and fix PRs target `develop`.
 - **`main`** is release-only. Direct pushes and merges to `main` are blocked; only release PRs land there.
 - **CI** (`.github/workflows/ci.yml`) runs on pushes to `develop` and on pull requests into `develop` or `main`.
+  Every PR runs the `linux-server` job: `mypy ciao`, `pytest -n auto tests/`,
+  `npm test`, `npm run build` and a package smoke test, in about 5 minutes. The
+  full macOS `test` job (coverage, browser tests, desktop Rust, the Swift
+  sidecar and a cold-started app bundle, about 18 minutes) runs on pushes to
+  `develop`, on PRs into `main`, and on PRs that touch `desktop/`, the embedded
+  runtime build scripts, `pyproject.toml`, or the CI workflow itself. When it is skipped on a PR
+  it still reports as passing, so a required `test` check does not block.
+  A macOS-only regression in a `develop` PR shows up on the post-merge push run.
 - **Release prep:** from a clean checkout, run:
 
 ```bash
