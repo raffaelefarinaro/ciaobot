@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Getting Started · Ciaobot</title>
+  <meta name="description" content="Install Ciaobot, set up your workspaces and projects, and learn the chat-then-archive habit.">
+  <link rel="icon" href="assets/img/favicon.png">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="./"><img src="assets/img/logo.png" alt="">Ciaobot</a>
+      <nav class="site-nav" aria-label="Main">
+        <a href="./">Home</a>
+        <a href="guide.html" aria-current="page">Get started</a>
+        <a href="features.html">Features</a>
+        <a href="builtin.html">Built in</a>
+        <a href="memory.html">Memory</a>
+        <a href="models.html">AI models</a>
+        <a href="remote.html">Anywhere</a>
+        <a href="configure.html">Configure</a>
+        <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="narrow">
+    <section>
+      <p class="eyebrow">Getting started</p>
+      <h1>From install to your first archived chat</h1>
+      <p class="lead">About 15 minutes. You don't need to be technical, but you'll paste a command into the Terminal app.</p>
+    </section>
+
+    <section>
+      <h2>Set up</h2>
+      <ol class="steps">
+        <li id="ai-tool">
+          <h3>Have Claude Code or opencode signed in</h3>
+          <p>Ciaobot doesn't have its own AI account or API key. It drives an AI tool you already use, so you need <strong>one of these two</strong> installed and signed in on the computer that runs Ciaobot:</p>
+          <div class="grid">
+            <div class="card">
+              <h3>Claude Code</h3>
+              <p>Use your Claude subscription (or an Anthropic API key).</p>
+              <pre><code>curl -fsSL https://claude.ai/install.sh | bash
+claude auth login</code></pre>
+              <p><a href="https://docs.anthropic.com/en/docs/claude-code/overview">Claude Code docs →</a></p>
+            </div>
+            <div class="card">
+              <h3>opencode</h3>
+              <p>Use OpenAI, OpenRouter, Z.ai, Ollama Cloud, a local Ollama and many more.</p>
+              <pre><code>curl -fsSL https://opencode.ai/install | bash
+opencode auth login</code></pre>
+              <p><a href="https://opencode.ai/docs/providers/">opencode providers →</a></p>
+            </div>
+          </div>
+          <p>You can set up both and switch per workspace or per chat. <a href="models.html">How the two work with Ciaobot →</a></p>
+        </li>
+        <li>
+          <h3>Install Ciaobot</h3>
+          <p>On a Mac with Apple Silicon (M1 or newer, macOS 13 or later), open the <strong>Terminal</strong> app and paste:</p>
+          <div class="install-box">
+          <code id="install-cmd">curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
+          <button type="button" data-copy="install-cmd" aria-label="Copy the install command">Copy</button>
+        </div>
+          <p>This installs the Ciaobot app and starts it in the background. Hosting it on a Linux server instead? See <a href="remote.html#vps">Run it on a server</a>.</p>
+        </li>
+        <li>
+          <h3>Follow the setup wizard</h3>
+          <p>The Ciaobot app opens by itself (you can also go to <a href="http://localhost:8443">http://localhost:8443</a>). The wizard asks for three things:</p>
+          <ul>
+            <li><strong>A folder</strong> where Ciaobot keeps your notes and memory. A new, empty folder is fine. If you already keep notes in a folder (for example an Obsidian vault), you can point it there.</li>
+            <li><strong>A password</strong> for the dashboard. You'll need it to open Ciaobot from other devices.</li>
+            <li><strong>Your AI tool</strong>: Claude Code or opencode.</li>
+          </ul>
+          <p>Once it's done, Ciaobot opens a welcome chat and can give you a tour. Just say yes.</p>
+        </li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>Find your way around</h2>
+      <figure>
+        <a href="assets/img/home.webp"><img src="assets/img/home.webp" alt="The Ciaobot home screen, with workspaces and projects in the sidebar and the chats that need attention in the middle" loading="lazy" width="1600" height="1000"></a>
+        <figcaption>The home screen. Workspaces sit at the top of the sidebar, projects and their chats below; the middle lists what needs you.</figcaption>
+      </figure>
+      <p>Press the number keys <kbd>1</kbd>, <kbd>2</kbd>, … to jump between workspaces in the order they appear in the sidebar.</p>
+    </section>
+
+    <section>
+      <h2>Your first project</h2>
+      <p>Think of something you'll keep coming back to, like a trip you're planning, a language you're learning or a project at work. The easiest way to create a project is to ask:</p>
+      <div class="prompt">Create a project called Learning Spanish in my personal workspace. I'm a beginner, I practise 20 minutes a day, and I want to hold a simple conversation by next summer.</div>
+      <p>Ciaobot creates the project and saves that description. From now on it's sent with every chat in <em>Learning Spanish</em>, so you never repeat it. You can also use <strong>+ New Project</strong> at the bottom of the sidebar.</p>
+      <figure>
+        <a href="assets/img/project.webp"><img src="assets/img/project.webp" alt="A project page: the project context box, its active chats, files and archived chats, and a Complete button" loading="lazy" width="1600" height="1000"></a>
+        <figcaption>A project page: the description Ciaobot reads, the active and archived chats, and <strong>Complete</strong> for when the project is done.</figcaption>
+      </figure>
+      <div class="note">Not sure whether something needs a project? If you'd want Ciaobot to remember it next week, make one. Quick one-off tasks can go in <strong>General</strong>.</div>
+    </section>
+
+    <section>
+      <h2>The everyday habit</h2>
+      <ol class="steps">
+        <li>
+          <h3>Start a new chat in the right project</h3>
+          <p>Use <strong>+ new</strong> on the home screen. The small arrow next to it lets you choose the project. You can also press <kbd>Option</kbd>+<kbd>N</kbd> in the browser or <kbd>⌘</kbd>+<kbd>T</kbd> in the app.</p>
+        </li>
+        <li>
+          <h3>Do one task</h3>
+          <p>Talk to it as you would to an assistant: "Add a dentist appointment next Tuesday at 3pm", "Give me five phrases for ordering at a restaurant". On a Mac you can also dictate instead of typing.</p>
+        </li>
+        <li>
+          <h3>Archive it as soon as the task is done</h3>
+          <p>Use the archive button in the chat header, press <kbd>Option</kbd>+<kbd>⌫</kbd> in the browser (<kbd>⌘</kbd>+<kbd>⌫</kbd> in the app), or just type "archive this chat".</p>
+          <figure>
+            <video src="assets/img/archive.mp4" poster="assets/img/archive-poster.webp" autoplay muted loop playsinline aria-label="Sending a follow-up, reading the answer, then archiving the chat"></video>
+            <figcaption>Archiving a finished chat. It moves to <em>tidying up</em> while Ciaobot reads it back and files what's worth keeping.</figcaption>
+          </figure>
+        </li>
+        <li>
+          <h3>Glance at suggestions now and then</h3>
+          <p>Things Ciaobot can back up with what you said are filed automatically. Things it isn't sure about show up as suggestions for you to accept, edit or dismiss. <a href="memory.html">More on memory →</a></p>
+        </li>
+      </ol>
+      <div class="callout">
+        <p><strong>Why not keep one chat going?</strong> AI models get measurably worse as a conversation grows: details from the start get missed and unrelated topics bleed into each other. Researchers call this <a href="https://research.trychroma.com/context-rot">context rot</a>, and Anthropic's guide to <a href="https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents">context engineering</a> explains why a short, focused context works better. A long chat is also slower and more expensive, and Ciaobot only learns from it once you archive it. Short chats keep your assistant sharp and up to date.</p>
+      </div>
+      <p>Need to pick up an archived chat later? Open it and choose <strong>Continue in new chat</strong>.</p>
+    </section>
+
+    <section>
+      <h2>Let it work on a schedule</h2>
+      <div class="note"><strong>Ask yourself:</strong> is this a task I do more than once? If it is, make it a schedule instead of typing the same request again next week.</div>
+      <p>Ask for anything that should happen regularly:</p>
+      <div class="prompt">Every weekday at 8am, look at my calendar and tell me what's coming up today.</div>
+      <div class="prompt">Every Sunday evening, give me ten new Spanish words based on what I practised this week.</div>
+      <p>Ciaobot shows you a draft (when it runs, and in which project) and asks before creating it. Each run leaves its result in a chat. You can see and pause everything on the <strong>Automations</strong> page.</p>
+      <figure>
+        <a href="assets/img/automations.webp"><img src="assets/img/automations.webp" alt="The Automations page listing custom and system routines with their next runs" loading="lazy" width="1600" height="1000"></a>
+        <figcaption>The Automations page lists every recurring task with its next run, including the nightly memory tidy-up.</figcaption>
+      </figure>
+    </section>
+
+    <section>
+      <h2>A few more things worth knowing</h2>
+      <div class="grid">
+        <a class="card card-link" href="features.html#google"><h3>Connect Google</h3><p>In <strong>Settings → Workspaces</strong>, connect a Google account per workspace, for example a personal one and a work one.</p></a>
+        <a class="card card-link" href="features.html#documents"><h3>Work on documents</h3><p>When Ciaobot writes a note or table, it opens beside the chat. Highlight any passage and comment on it.</p></a>
+        <div class="card"><h3>Try a different direction</h3><p><strong>Fork conversation from here</strong> on any answer starts a new chat from that point, leaving the original untouched.</p></div>
+        <div class="card"><h3>Ask it about itself</h3><p>"What can you do?" or "How do schedules work?" It knows its own features and can take you on a tour.</p></div>
+      </div>
+    </section>
+
+    <nav class="next-page" aria-label="Next pages">
+      <a class="btn" href="./">← Home</a>
+      <a class="btn btn-primary" href="features.html">Features →</a>
+    </nav>
+  </main>
+
+  <footer class="site-footer">
+    <div class="inner">
+      <span>Ciaobot is open source.</span>
+      <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
+    </div>
+  </footer>
+  <script src="assets/site.js" defer></script>
+</body>
+</html>

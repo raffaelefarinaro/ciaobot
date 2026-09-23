@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Models · Ciaobot</title>
+  <meta name="description" content="Ciaobot uses Claude Code for your Anthropic subscription and opencode for everything else: OpenAI, OpenRouter, Z.ai, Ollama Cloud, local Ollama and more.">
+  <link rel="icon" href="assets/img/favicon.png">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="./"><img src="assets/img/logo.png" alt="">Ciaobot</a>
+      <nav class="site-nav" aria-label="Main">
+        <a href="./">Home</a>
+        <a href="guide.html">Get started</a>
+        <a href="features.html">Features</a>
+        <a href="builtin.html">Built in</a>
+        <a href="memory.html">Memory</a>
+        <a href="models.html" aria-current="page">AI models</a>
+        <a href="remote.html">Anywhere</a>
+        <a href="configure.html">Configure</a>
+        <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="narrow">
+    <section>
+      <p class="eyebrow">Any AI model</p>
+      <h1>Bring the AI you already use</h1>
+      <p class="lead">Ciaobot doesn't sell you a model or ask for an API key. It runs chats through one of two open agent tools you install and sign in to yourself, and adds the workspaces, memory, files and schedules around them.</p>
+    </section>
+
+    <section>
+      <svg class="diagram" viewBox="0 0 720 260" role="img" aria-labelledby="prov-title prov-desc">
+        <title id="prov-title">Two ways to reach a model</title>
+        <desc id="prov-desc">Ciaobot sits on top. Claude Code connects to your Anthropic subscription or API key. opencode connects to OpenAI, OpenRouter, Z.ai, Ollama Cloud, local Ollama and many other providers.</desc>
+        <rect class="box-accent" x="210" y="10" width="300" height="60" rx="14"/>
+        <text x="360" y="37" text-anchor="middle" font-weight="700" font-size="17">Ciaobot</text>
+        <text class="muted" x="360" y="57" text-anchor="middle" font-size="13">workspaces · memory · files · schedules</text>
+        <rect class="box" x="40" y="110" width="280" height="60" rx="12"/>
+        <text x="180" y="137" text-anchor="middle" font-weight="600" font-size="16">Claude Code</text>
+        <text class="muted" x="180" y="157" text-anchor="middle" font-size="13">official Anthropic agent</text>
+        <rect class="box" x="400" y="110" width="280" height="60" rx="12"/>
+        <text x="540" y="137" text-anchor="middle" font-weight="600" font-size="16">opencode</text>
+        <text class="muted" x="540" y="157" text-anchor="middle" font-size="13">open-source agent, any provider</text>
+        <rect class="box-secondary" x="40" y="200" width="280" height="50" rx="12"/>
+        <text x="180" y="230" text-anchor="middle" font-size="14">Claude subscription or API key</text>
+        <rect class="box-secondary" x="400" y="200" width="280" height="50" rx="12"/>
+        <text x="540" y="222" text-anchor="middle" font-size="13">OpenAI · OpenRouter · Z.ai · Ollama Cloud</text>
+        <text x="540" y="240" text-anchor="middle" font-size="13">local Ollama · LM Studio · and more</text>
+        <path class="line" d="M300 70 L180 110"/>
+        <path class="line" d="M420 70 L540 110"/>
+        <path class="line" d="M180 170 V200"/>
+        <path class="line" d="M540 170 V200"/>
+      </svg>
+    </section>
+
+    <section>
+      <h2>Why Ciaobot doesn't build its own agent</h2>
+      <p>The agent (the part that talks to the model, calls tools, edits files and keeps a long task on track) is where the hardest engineering in AI tools happens, and it changes every month. Anthropic and the opencode team do that full time. Rebuilding it would give you a worse, older version.</p>
+      <p>So Ciaobot stands on their work and focuses on what they don't do: organising your life into workspaces and projects, remembering what matters, giving the agent instructions and skills written for a personal assistant, and wrapping it all in an app you'd use every day. When Claude Code or opencode gets better, so does Ciaobot.</p>
+    </section>
+
+    <section>
+      <h2>Claude: through Claude Code</h2>
+      <p>For Anthropic's models, Ciaobot uses <a href="https://docs.anthropic.com/en/docs/claude-code/overview">Claude Code</a>, Anthropic's own agent, through its official SDK. That means you use your <strong>Claude subscription</strong> exactly as Anthropic intends (or an API key, if you prefer to pay per use). Sign in once with <code>claude auth login</code> and Ciaobot uses that session.</p>
+      <p>If the model you picked is busy or unavailable, Ciaobot steps down to the next one automatically instead of failing the chat.</p>
+    </section>
+
+    <section>
+      <h2>Everything else: through opencode</h2>
+      <p>For every other provider, Ciaobot uses <a href="https://opencode.ai/">opencode</a>, an open-source agent that connects to <a href="https://opencode.ai/docs/providers/">dozens of providers</a>:</p>
+      <ul>
+        <li><strong>OpenAI</strong> models, with a ChatGPT plan or an API key;</li>
+        <li><strong><a href="https://openrouter.ai">OpenRouter</a></strong>, for hundreds of models behind one account;</li>
+        <li><strong><a href="https://z.ai">Z.ai</a></strong> (GLM) and other hosted providers;</li>
+        <li><strong><a href="https://ollama.com">Ollama Cloud</a></strong>, or <strong>Ollama running locally</strong> on your own machine, fully offline;</li>
+        <li>LM Studio and any OpenAI-compatible endpoint.</li>
+      </ul>
+      <p>Connect a provider with <code>opencode auth login</code>. Every model opencode can reach appears in Ciaobot's model pickers by itself.</p>
+    </section>
+
+    <section id="inherit">
+      <h2>You keep your plugins, skills and MCP servers</h2>
+      <p>Ciaobot starts Claude Code and opencode with your normal settings, not a stripped-down copy. So whatever you've already set up there keeps working in Ciaobot chats:</p>
+      <ul>
+        <li><strong>Claude Code:</strong> your skills, subagents, commands, plugins and MCP servers, plus the connectors you've enabled on claude.ai (Slack, Notion, Atlassian and so on).</li>
+        <li><strong>opencode:</strong> your global configuration, providers, plugins, skills and MCP servers.</li>
+      </ul>
+      <p>On top of that, anything you add <strong>inside Ciaobot</strong> is shared by both tools: an MCP server you add in Settings → MCP, a skill in Settings → Skills, a subagent in Settings → Subagents. Ciaobot writes each one once and translates it into the format each tool expects. <a href="builtin.html#extend">How to add your own →</a></p>
+    </section>
+
+    <section>
+      <h2>Pick a model per workspace, per chat, per job</h2>
+      <ul>
+        <li><strong>Per workspace:</strong> Settings → Workspaces sets which tool each workspace uses by default, for example Claude for Work and a local model for Personal.</li>
+        <li><strong>Per chat:</strong> click the model chip in the chat header (<kbd>⌘</kbd>+<kbd>⇧</kbd>+<kbd>M</kbd> in the app, <kbd>⌥</kbd>+<kbd>M</kbd> in the browser) to change model or thinking level. Switching to the other tool hands the chat over with its visible history.</li>
+        <li><strong>Per job:</strong> automations, memory extraction and the <code>/critique</code> review panel each have their own model setting, so you can put cheaper models on background work.</li>
+      </ul>
+      <figure>
+        <a href="assets/img/voice.webp"><img src="assets/img/voice.webp" alt="Settings, Models tab: the model used for memory extraction and the critique panel" loading="lazy" width="1600" height="1000"></a>
+        <figcaption>Settings → Models: separate models for memory extraction and for second opinions.</figcaption>
+      </figure>
+    </section>
+
+    <section>
+      <h2>And some things need no model at all</h2>
+      <p>On a Mac, dictation, read-aloud and chat titles run on Apple's on-device engines and Apple Intelligence: free, private, and not counted against any subscription. <a href="features.html#voice">Voice on the Mac →</a></p>
+    </section>
+
+    <nav class="next-page" aria-label="Next pages">
+      <a class="btn" href="memory.html">← How memory works</a>
+      <a class="btn btn-primary" href="remote.html">Use it anywhere →</a>
+    </nav>
+  </main>
+
+  <footer class="site-footer">
+    <div class="inner">
+      <span>Ciaobot is open source.</span>
+      <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
+    </div>
+  </footer>
+  <script src="assets/site.js" defer></script>
+</body>
+</html>
