@@ -67,9 +67,14 @@ opencode chats follow the chat's permission mode (the per-provider default
 from Settings → Models & providers, Auto unless changed). In Auto the session
 permission ruleset is `allow` for every tool except `bash` (every shell
 command, including `ciao …` control-plane calls), which is routed to `ask`;
-Manual routes every tool to `ask` and Bypass allows everything. In every mode
-the credential-path denies (`.env`, `.runtime`, `secrets`) are appended last,
-so even Bypass cannot read them. Each `ask` surfaces an
+Manual routes every tool to `ask` and Bypass allows everything. In every mode,
+including Bypass, credential-path denies (`**/.env`, `**/.runtime/**`,
+`**/secrets/**`, plus the resolved `CIAO_RUNTIME_ROOT`) are appended last for
+opencode's native file tools only: `read`, `edit`, `write`, `patch`, `glob`,
+`grep` and `list`. They do not cover `bash`, because a shell command cannot be
+path-scoped by a glob. In Manual and Auto a shell command such as `cat .env`
+still raises an approval card; in Bypass it runs without one, so Bypass does
+not protect those files from shell access. Each `ask` surfaces an
 approval card in the chat that the operator approves or denies.
 
 To get a Claude-Code/Codex-style **automatic** approval classifier instead of
