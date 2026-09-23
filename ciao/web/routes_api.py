@@ -5526,8 +5526,45 @@ def _run_root_npm_install(codebase_root: Path) -> subprocess.CompletedProcess:
     return desktop_build.run_step(args, cwd=str(codebase_root), timeout=180)
 
 
+def _restart_only(config, *, dev_mode: bool) -> bool:
+    """Whether Settings' Restart must only restart, never redeploy from source.
+
+    Redeploy (``admin_deploy``) pulls, pip-installs, and rebuilds a source
+    checkout, so it only makes sense for a developer running from one. A
+    packaged Ciaobot.app never qualifies: its embedded runtime is not a
+    checkout, and ``pip install -e`` cannot replace it even when
+    ``CIAO_APP_REPO`` names one. Linux hosts outside dev mode are
+    administrator-managed and restart only. Elsewhere, anything that is not a
+    deployable checkout (a plain package install) restarts only too.
+    """
+    from ciao.package_version import detect_install_mode
+
+    if detect_install_mode() == "bundled_app":
+        return True
+    if sys.platform.startswith("linux"):
+        return not dev_mode
+    if config is None:
+        return False
+    return bool(_checkout_problem(_resolve_codebase_root(config)))
+
+
+_BUNDLED_DEPLOY_REFUSAL = (
+    "This engine runs from the installed Ciaobot.app, not a source checkout, "
+    "so there is nothing to pull or rebuild. Use Restart to restart it; updates "
+    "come from the in-app updater or the one-line installer."
+)
+
+
 async def admin_restart(request: Request) -> JSONResponse:
-    """Restart the installed engine after draining work, without updating code."""
+    """Restart the installed engine after draining work, without updating code.
+
+    ``request_restart`` drains chats, shuts uvicorn down, and returns the
+    restart exit code from ``ciao.main``; ``ciao.cli._run_server`` then
+    re-execs a fresh interpreter in the same process. That works under every
+    supervisor: the bundled app's ``com.ciao.server`` LaunchAgent keeps
+    tracking the same pid (and its ``KeepAlive`` relaunches the job if the
+    exec ever fails), and a foreground ``ciao run`` comes back on its own.
+    """
     from starlette.background import BackgroundTask
 
     restart = getattr(request.app.state, "request_restart", None)
@@ -5545,6 +5582,16 @@ async def admin_restart(request: Request) -> JSONResponse:
 
 async def admin_deploy(request: Request) -> JSONResponse:
     """Snapshot local work, pull latest, rebuild frontend, restart service."""
+    from ciao.package_version import detect_install_mode
+
+    # Refuse before the secrets preflight and the snapshot: a packaged app can
+    # never be redeployed from source, so none of the steps below may run.
+    if detect_install_mode() == "bundled_app":
+        return JSONResponse(
+            {"steps": [], "ok": False, "error": _BUNDLED_DEPLOY_REFUSAL},
+            status_code=400,
+        )
+
     mgr = getattr(request.app.state, "local_session_manager", None)
     confirm_warnings = False
     try:
@@ -6028,7 +6075,10 @@ async def local_status(request: Request) -> JSONResponse:
             {"error": "local session manager not initialised"}, status_code=500
         )
     status = dict(mgr.status())
-    status["restart_only"] = sys.platform.startswith("linux") and not status.get("dev_mode", False)
+    status["restart_only"] = _restart_only(
+        getattr(request.app.state, "config", None),
+        dev_mode=bool(status.get("dev_mode", False)),
+    )
     return JSONResponse(status)
 
 
