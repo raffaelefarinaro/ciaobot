@@ -15,9 +15,89 @@ from ciao.package_version import detect_install_mode, update_package
 from ciao.web.routes_node import package_update_endpoint
 
 
-def test_detect_install_mode_bundled_app(monkeypatch) -> None:
+_BUNDLE_PYTHON = (
+    "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/python/arm64/bin/python3.12"
+)
+
+
+def _fake_ciao_module(monkeypatch, path) -> None:
+    monkeypatch.setitem(
+        sys.modules, "ciao", types.SimpleNamespace(__file__=str(path))
+    )
+
+
+def test_detect_install_mode_bundled_app(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
+    monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
+    _fake_ciao_module(monkeypatch, tmp_path / "site-packages" / "ciao" / "__init__.py")
     assert detect_install_mode() == "bundled_app"
+
+
+def test_detect_install_mode_bundled_app_from_package_location(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python3"))
+    _fake_ciao_module(
+        monkeypatch,
+        "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/"
+        "site-packages/arm64/ciao/__init__.py",
+    )
+    assert detect_install_mode() == "bundled_app"
+
+
+def test_detect_install_mode_ignores_inherited_marker_in_checkout(monkeypatch, tmp_path) -> None:
+    # `ciao dev` started from a shell the app opened inherits the marker, but
+    # the backend runs from a checkout and must keep redeploy.
+    repo = tmp_path / "repo"
+    (repo / "ciao").mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / "pyproject.toml").write_text("", encoding="utf-8")
+    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
+    monkeypatch.setattr(sys, "executable", str(repo / ".venv" / "bin" / "python3"))
+    _fake_ciao_module(monkeypatch, repo / "ciao" / "__init__.py")
+    assert detect_install_mode() == "editable"
+
+
+def test_detect_install_mode_prefers_checkout_over_bundled_interpreter(
+    monkeypatch, tmp_path
+) -> None:
+    # `ciao dev` from an app shell: the bundle's bin is first on PATH, so the
+    # backend reuses the bundled interpreter while importing ciao from the
+    # checkout. The imported package decides: this is a source checkout.
+    repo = tmp_path / "repo"
+    (repo / "ciao").mkdir(parents=True)
+    (repo / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
+    (repo / "pyproject.toml").write_text("", encoding="utf-8")
+    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
+    monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
+    _fake_ciao_module(monkeypatch, repo / "ciao" / "__init__.py")
+    assert detect_install_mode() == "editable"
+
+
+def test_detect_install_mode_bundled_package_on_bundled_interpreter(
+    monkeypatch,
+) -> None:
+    # The genuine app: interpreter and package both inside the bundle runtime.
+    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
+    monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
+    _fake_ciao_module(
+        monkeypatch,
+        "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/"
+        "site-packages/arm64/ciao/__init__.py",
+    )
+    assert detect_install_mode() == "bundled_app"
+
+
+def test_detect_install_mode_ignores_a_non_one_bundled_marker(monkeypatch, tmp_path) -> None:
+    # Matches ciao.main, which only treats CIAO_BUNDLED_APP == "1" as bundled.
+    monkeypatch.setenv("CIAO_BUNDLED_APP", "0")
+    monkeypatch.setitem(
+        sys.modules,
+        "ciao",
+        types.SimpleNamespace(
+            __file__=str(tmp_path / "site-packages" / "ciao" / "__init__.py")
+        ),
+    )
+    assert detect_install_mode() == "unknown"
 
 
 def test_detect_install_mode_unknown_without_package_manager(monkeypatch, tmp_path) -> None:

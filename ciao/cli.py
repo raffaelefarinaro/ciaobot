@@ -76,6 +76,13 @@ def _run_server() -> int:
         # Re-exec (rather than loop) so the relaunch picks up new code.
         print("Restart requested — relaunching Ciaobot…", file=sys.stderr)
         sys.stderr.flush()
+        # The exec inherits os.environ, and load_dotenv never overrides a key
+        # that is already set, so without this a value edited in the workspace
+        # .env would be shadowed by the stale copy the old process exported.
+        # Only keys the .env added are dropped; the fresh process reloads them.
+        from ciao.config import reset_exported_dotenv
+
+        reset_exported_dotenv()
         os.execv(sys.executable, _relaunch_argv())
     return code
 

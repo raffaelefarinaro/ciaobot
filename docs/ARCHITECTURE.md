@@ -251,7 +251,12 @@ Linux production hosts run the engine under systemd. Settings uses the
 authenticated `POST /api/admin/restart` endpoint, selected by `restart_only` in
 `/api/local/status`, to enter the same chat-drain/re-exec lifecycle without a
 source checkout or desktop rebuild. Code updates remain administrator-managed;
-developer mode retains the deploy endpoint.
+developer mode retains the deploy endpoint. `restart_only` is also true for
+the packaged Ciaobot.app (`detect_install_mode() == "bundled_app"`, whatever
+the dev mode) and for any macOS install that is not a deployable checkout. The
+re-exec happens in-process (`ciao.cli._run_server`), so the `com.ciao.server`
+LaunchAgent keeps tracking the same pid, and its `KeepAlive` relaunches the
+job if the exec fails. `POST /api/admin/deploy` refuses a bundled app up front.
 
 `ciao/` is a Starlette web server that mounts the PWA frontend, exposes a JSON API for projects/chats/schedules, and drives Claude Agent SDK sessions for each chat turn. Auth is a pre-shared token (`PWA_AUTH_TOKEN` — the dashboard password) traded for a signed session cookie, and it is required by default: an unset `PWA_AUTH_REQUIRED` protects any workspace that has a token, and only an explicit `PWA_AUTH_REQUIRED=false` runs the dashboard open. Settings can change the password but not disable protection. Operational state lives in `.runtime/` under `CIAO_WORKSPACE`; durable memory lives under `CIAO_VAULT_ROOT` (default `<CIAO_WORKSPACE>/memory-vault`).
 

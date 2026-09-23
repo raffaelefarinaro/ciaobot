@@ -245,17 +245,75 @@ def package_changelog(
     }
 
 
-def detect_install_mode() -> str:
-    """Return the runtime distribution mode used by the current process."""
-    import sys
+_BUNDLE_RUNTIME_MARKER = "Ciaobot.app/Contents/Resources/ciao-runtime"
+
+
+def _inside_app_bundle(path: str | os.PathLike[str] | None) -> bool:
+    """Whether ``path`` resolves inside a Ciaobot.app embedded runtime."""
+    if not path:
+        return False
     from pathlib import Path
 
-    # The bundled marker is authoritative. The embedded runtime imports the
-    # same ``ciao`` package as a source checkout, so checking the checkout
-    # first misclassifies a bundled app during development and in tests.
     try:
-        executable = Path(sys.executable).resolve()
-        if os.environ.get("CIAO_BUNDLED_APP") or "Ciaobot.app/Contents/Resources/ciao-runtime" in str(executable):
+        resolved = str(Path(path).resolve())
+    except (OSError, RuntimeError, ValueError):
+        resolved = str(path)
+    return _BUNDLE_RUNTIME_MARKER in resolved or _BUNDLE_RUNTIME_MARKER in str(path)
+
+
+def _imported_ciao_file() -> str | None:
+    ciao_module = sys.modules.get("ciao")
+    file = getattr(ciao_module, "__file__", None)
+    return file if isinstance(file, str) and file else None
+
+
+def _in_source_checkout(ciao_file: str | None) -> bool:
+    """Whether ``ciao_file`` is the package of a git source checkout."""
+    if not ciao_file:
+        return False
+    from pathlib import Path
+
+    try:
+        project_root = Path(ciao_file).resolve().parent.parent
+        git_marker = project_root / ".git"
+        return (project_root / "pyproject.toml").is_file() and (
+            git_marker.is_dir() or git_marker.is_file()
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def running_from_app_bundle() -> bool:
+    """Whether this process is the engine embedded in Ciaobot.app.
+
+    Decided from where the ``ciao`` package and the interpreter actually live,
+    not from ``CIAO_BUNDLED_APP`` alone: the bundled launcher exports that
+    marker, so every shell a Ciaobot chat opens inherits it, and a source dev
+    server started from such a shell would otherwise call itself bundled and
+    refuse every redeploy.
+
+    The imported package wins over the interpreter. The bundled launcher also
+    prepends the bundle's ``bin`` to ``PATH``, so ``ciao dev`` run from an app
+    shell can reuse the bundled interpreter while importing ``ciao`` from the
+    checkout it was started in; that server is a source checkout.
+    """
+    ciao_file = _imported_ciao_file()
+    if _inside_app_bundle(ciao_file):
+        return True
+    if _in_source_checkout(ciao_file):
+        return False
+    return _inside_app_bundle(sys.executable)
+
+
+def detect_install_mode() -> str:
+    """Return the runtime distribution mode used by the current process."""
+    # Bundle location is authoritative when the package itself lives inside
+    # the app bundle. A package imported from a git checkout is `editable`
+    # even on the bundled interpreter (see ``running_from_app_bundle``). An
+    # inherited CIAO_BUNDLED_APP marker without a bundle location does not
+    # count.
+    try:
+        if running_from_app_bundle():
             return "bundled_app"
     except Exception:
         pass
@@ -263,16 +321,10 @@ def detect_install_mode() -> str:
     try:
         import ciao
 
-        ciao_file = Path(ciao.__file__).resolve()
-        project_root = ciao_file.parent.parent
-        git_marker = project_root / ".git"
-        if (
-            (project_root / "pyproject.toml").is_file()
-            and (git_marker.is_dir() or git_marker.is_file())
-        ):
+        if _in_source_checkout(ciao.__file__):
             return "editable"
     except Exception:
-        ciao_file = None
+        pass
 
     return "unknown"
 

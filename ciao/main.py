@@ -1229,6 +1229,11 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                     "Cleanup did not finish; re-execing for the requested restart"
                 )
                 try:
+                    # Same as ciao.cli._run_server: let the fresh process
+                    # reload the workspace .env instead of inheriting it.
+                    from ciao.config import reset_exported_dotenv
+
+                    reset_exported_dotenv()
                     os.execv(
                         sys.executable,
                         [sys.executable, "-m", "ciao.cli", *sys.argv[1:]],

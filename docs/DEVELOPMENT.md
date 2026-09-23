@@ -4,8 +4,9 @@ Setup, dev workflow, testing, and change guidelines. For the system design, read
 
 ## Server install
 
-Linux production Settings restarts the installed engine through
-`POST /api/admin/restart`; `CIAO_DEV_MODE=true` retains the source deploy workflow.
+Linux production and the installed macOS Ciaobot.app restart the engine from
+Settings through `POST /api/admin/restart`; `CIAO_DEV_MODE=true` on a source
+checkout retains the source deploy workflow.
 
 ```bash
 python3.12 -m venv .venv

@@ -31,6 +31,18 @@ def _reset_exported_dotenv() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _drop_inherited_bundled_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ignore ``CIAO_BUNDLED_APP`` inherited from a Ciaobot.app agent shell.
+
+    The bundled launcher exports it, so every command a Ciaobot chat runs -
+    including this suite - inherits it, and ``detect_install_mode`` would call
+    the test process a packaged app (``admin_deploy`` then refuses up front).
+    Tests that need it set it explicitly.
+    """
+    monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_claude_session_scan_cache() -> None:
     """Drop the cross-test ``~/.claude/projects`` listing cache.
 
