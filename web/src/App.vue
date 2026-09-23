@@ -318,6 +318,11 @@ watch(showStartup, (show) => {
   --accent: #ff4d6d;    /* warmer pink for contrast on dark */
   --accent-strong: #ff2e54;
   --accent2: #6a47b8;
+  /* Label colour on a filled accent surface (.btn-primary, active pills,
+     accent badges). The dark-theme accents are bright, so white on them sits
+     at 2-3.6:1; the canvas indigo clears WCAG AA (4.5:1) on every dark accent
+     and its hover shade. */
+  --on-accent: #1a1a2e;
   /* Edges */
   --border: #2e3258;
   --border-strong: #3a3f70;
@@ -378,6 +383,7 @@ watch(showStartup, (show) => {
   --accent: #d81b60;    /* crisp pink/crimson for white bg */
   --accent-strong: #b00d46;
   --accent2: #512da8;   /* deep violet secondary */
+  --on-accent: #ffffff; /* light accents are deep enough for white labels */
   /* Edges */
   --border: #d2d4e3;    /* light grey border */
   --border-strong: #b6b8cf;
@@ -391,14 +397,17 @@ watch(showStartup, (show) => {
    Applied on #ciao-app for the active workspace, and on individual
    controls (home new-chat buttons, workspace pills, chat badges) that
    belong to another workspace. Pink is explicit so a pink-target control
-   inside a non-pink active workspace does not inherit the parent accent. */
+   inside a non-pink active workspace does not inherit the parent accent.
+   Every pair keeps --on-accent at WCAG AA on both --accent and --accent-strong:
+   dark presets hover to a shade still >= 4.5:1 against the indigo label, light
+   presets are deep enough for white labels (and for accent text on white). */
 [data-workspace-color="pink"] {
   --accent: #ff4d6d;
   --accent-strong: #ff2e54;
 }
 [data-workspace-color="cyan"] {
   --accent: #38bdf8;
-  --accent-strong: #0284c7;
+  --accent-strong: #0ea5e9;
 }
 [data-workspace-color="amber"] {
   --accent: #fb923c;
@@ -410,23 +419,23 @@ watch(showStartup, (show) => {
 }
 [data-workspace-color="violet"] {
   --accent: #a78bfa;
-  --accent-strong: #7c3aed;
+  --accent-strong: #9670f7;
 }
 :root.theme-light [data-workspace-color="pink"] {
   --accent: #d81b60;
   --accent-strong: #b00d46;
 }
 :root.theme-light [data-workspace-color="cyan"] {
-  --accent: #0284c7;
-  --accent-strong: #0369a1;
+  --accent: #0369a1;
+  --accent-strong: #075985;
 }
 :root.theme-light [data-workspace-color="amber"] {
-  --accent: #ea580c;
-  --accent-strong: #c2410c;
+  --accent: #c2410c;
+  --accent-strong: #9a3412;
 }
 :root.theme-light [data-workspace-color="emerald"] {
-  --accent: #059669;
-  --accent-strong: #047857;
+  --accent: #047857;
+  --accent-strong: #065f46;
 }
 :root.theme-light [data-workspace-color="violet"] {
   --accent: #7c3aed;
@@ -601,7 +610,7 @@ a:not(.btn-small, .btn-primary, .btn-chip, .btn-icon):hover {
   border: none;
   border-radius: var(--radius);
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
   cursor: pointer;
   font-family: var(--font);
   font-size: calc(14px * var(--font-scale));
@@ -822,7 +831,7 @@ input:focus, textarea:focus, select:focus {
   line-height: 1.3;
   letter-spacing: 0.3px;
 }
-.badge--accent { background: var(--accent); color: #fff; }
+.badge--accent { background: var(--accent); color: var(--on-accent); }
 .badge--accent2 { background: var(--accent2); color: var(--fg); }
 .badge--muted {
   background: var(--bg3);
