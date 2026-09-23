@@ -342,10 +342,13 @@ def undo_move_to_archive(
     """Put a folder :func:`move_to_archive` moved back where it was.
 
     For a step after the move that failed while the workspace is still
-    registered: the workspace gets its folder back and the emptied archive
-    folder goes. Raises :class:`WorkspaceArchiveError` when the folder cannot
-    be moved back; the archive, and its ``archive.json`` with the schedules,
-    is then left untouched.
+    registered: the workspace gets its folder back. The archive folder and its
+    ``archive.json`` stay: until the caller has put the schedules back in the
+    active file, the metadata is their only durable copy. The caller removes
+    it with :func:`discard_rolled_back_archive` once they are back, or marks
+    it with :func:`mark_rolled_back` when they could not be. Raises
+    :class:`WorkspaceArchiveError` when the folder cannot be moved back; the
+    archive is then left untouched.
     """
     folder = archive_root(config) / str(archived["id"])
     content_dir = str(archived.get("content_dir") or "")
@@ -358,7 +361,31 @@ def undo_move_to_archive(
                 f"{target.source} failed ({exc}); move it back by hand",
                 500,
             ) from exc
-    _remove_empty_archive_folder(folder)
+
+
+def discard_rolled_back_archive(config: Any, archived: dict[str, Any]) -> None:
+    """Remove the emptied archive folder of a rolled-back archive."""
+    _remove_empty_archive_folder(archive_root(config) / str(archived["id"]))
+
+
+def mark_rolled_back(config: Any, archived: dict[str, Any]) -> None:
+    """Keep a rolled-back archive whose schedules could not be put back.
+
+    The folder moved back, so ``archive.json`` holds nothing a restore could
+    move — only the schedules. Its status changes so it is listed as an
+    archive that did not finish (restore by hand) rather than one whose folder
+    went missing. Best effort: if even this write fails, the file still says
+    ``archived`` and still holds the schedules.
+    """
+    folder = archive_root(config) / str(archived["id"])
+    metadata = _read_metadata(folder)
+    if metadata is None:
+        return
+    metadata["status"] = "rolled-back"
+    try:
+        _write_metadata(folder, metadata)
+    except OSError:
+        logger.warning("Could not mark %s as rolled back", folder, exc_info=True)
 
 
 def refresh_shared_index(config: Any) -> bool:
@@ -415,6 +442,180 @@ def _read_metadata(folder: Path) -> dict[str, Any] | None:
 def _workspace_entry(metadata: dict[str, Any]) -> dict[str, Any]:
     entry = metadata.get("workspace")
     return entry if isinstance(entry, dict) else {}
+
+
+# ── restoring from untrusted metadata ───────────────────────────────────────
+#
+# ``.archived-workspaces/`` is in the install's git repository and git sync
+# stages it like any note (``git add -A``). It cannot simply be ignored: the
+# workspace folder was tracked where it lived, so ignoring its new home would
+# make sync push the archive as a deletion to every other device and remote.
+# The price is that ``archive.json`` arrives through the same channel as the
+# notes, and on an install whose remote someone else can push to, it is input
+# from them. A restore therefore takes nothing in it at face value: every
+# field is validated with the rules the Settings and Automations routes apply,
+# a value that fails falls back to the safe default rather than a wider one,
+# and automations come back paused.
+#
+# No tamper hash is kept in ``.runtime/`` (which git does not sync): an
+# archive made on another device and restored here is legitimate and would
+# have no local hash, so a missing or mismatched hash could only warn, never
+# decide. And the archived folder itself (guide, skills, notes) arrives over
+# the same channel, so a hash of ``archive.json`` alone would not make the
+# rest of it trustworthy. Validation plus a confirmation that shows what will
+# be applied covers both cases.
+
+_MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}$")
+_GWS_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:*()/@-][A-Za-z0-9_.:*()/@ -]{0,199}$")
+
+
+def _string_list(raw: object, pattern: re.Pattern[str]) -> list[str] | None:
+    """``raw`` as a list of strings that all match ``pattern``, else None."""
+    if not isinstance(raw, list):
+        return None
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not pattern.fullmatch(item.strip()):
+            return None
+        if item.strip() not in out:
+            out.append(item.strip())
+    return out
+
+
+def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
+    """The registry fields a restore applies, validated; never the vault root.
+
+    Same rules as ``workspaces.workspace_from_request``. A value that fails
+    them falls back to what grants the least, not to the stored value: an
+    unreadable MCP allowlist becomes ``[]`` (reach no server) and an
+    unreadable tool deny-list becomes ``None`` (the per-workspace default
+    denies). A readable value is kept as it is, which is why the restore
+    confirmation shows the allowlist and deny-list before anything happens.
+    """
+    from ciao import provider_registry  # noqa: PLC0415
+    from ciao.config import DEFAULT_WORKSPACE_COLOR, coerce_workspace_color  # noqa: PLC0415
+
+    entry = _workspace_entry(metadata)
+    provider = entry.get("default_provider")
+    if not isinstance(provider, str) or provider not in provider_registry.provider_ids():
+        provider = "claude"
+    raw_denied = entry.get("disallowed_tools")
+    disallowed = None if raw_denied is None else _string_list(raw_denied, _TOOL_NAME_RE)
+    raw_allowed = entry.get("allowed_mcp_servers")
+    if raw_allowed is None:
+        allowed: list[str] | None = None
+    else:
+        allowed = _string_list(raw_allowed, _MCP_SERVER_NAME_RE)
+        if allowed is None:
+            allowed = []
+    profile = entry.get("gws_profile")
+    if not isinstance(profile, str) or not (
+        profile == "" or _GWS_PROFILE_RE.fullmatch(profile)
+    ):
+        profile = ""
+    try:
+        color = coerce_workspace_color(entry.get("color"))
+    except ValueError:
+        color = DEFAULT_WORKSPACE_COLOR
+    return {
+        "default_provider": provider,
+        "disallowed_tools": disallowed,
+        "allowed_mcp_servers": allowed,
+        "gws_profile": profile,
+        "color": color,
+    }
+
+
+def restorable_schedules(
+    config: Any,
+    metadata: dict[str, Any],
+    *,
+    foreign_target: Any = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """``(rebuilt rows, how many were dropped)`` for an archive's schedules.
+
+    Every row is rebuilt by ``schedules.restorable_user_schedule``: validated,
+    pinned to this workspace and paused.
+    """
+    from ciao import provider_registry  # noqa: PLC0415
+    from ciao.schedules import restorable_user_schedule  # noqa: PLC0415
+
+    raw = metadata.get("schedules")
+    if not isinstance(raw, list):
+        return [], 0
+    name = str(metadata.get("name") or "")
+    providers = set(provider_registry.provider_ids())
+    rows: list[dict[str, Any]] = []
+    for item in raw:
+        row = restorable_user_schedule(
+            item, workspace=name, providers=providers, foreign_target=foreign_target
+        )
+        if row is not None:
+            rows.append(row)
+    return rows, len(raw) - len(rows)
+
+
+def _restored_vault_root(
+    config: Any, metadata: dict[str, Any], folder: Path
+) -> tuple[str, Path]:
+    """``(registry value, absolute path)`` of the restored workspace's vault.
+
+    The stored ``vault_root`` must land inside the folder being restored:
+    anything else would point the restored workspace, and every chat run in
+    it, at notes the archive never held. It is rebuilt as the registry value
+    for that location rather than copied. Raises ``ValueError`` with the
+    reason when it cannot be.
+    """
+    install = Path(config.workspace_root).resolve()
+    shared = Path(config.vault_root).resolve()
+    destination = _restore_destination(config, metadata)
+    dest = Path(os.path.normpath(destination.parent.resolve() / destination.name))
+    raw = _workspace_entry(metadata).get("vault_root")
+    if raw is None or raw == "":
+        if metadata.get("layout") == LAYOUT_PER_ROOT:
+            candidate = dest / shared.name
+        else:
+            candidate = dest
+    elif not isinstance(raw, str):
+        raise ValueError("the archive's vault location is not a path")
+    else:
+        path = Path(raw.strip())
+        if not raw.strip() or ".." in path.parts or "\\" in raw:
+            raise ValueError("the archive's vault location is not a safe path")
+        if path.is_absolute():
+            candidate = Path(os.path.normpath(path))
+        elif len(path.parts) == 1:
+            candidate = Path(os.path.normpath(shared / path))
+        else:
+            candidate = Path(os.path.normpath(install / path))
+    if candidate != dest and not candidate.is_relative_to(dest):
+        raise ValueError(
+            "the archive points the workspace's notes outside its own folder "
+            f"({_display(config, candidate)})"
+        )
+    # No symlink on the way down from the restored folder: after the move it
+    # would redirect the vault anywhere.
+    content_dir = str(metadata.get("content_dir") or "")
+    if content_dir:
+        # Before the move the tree is in the archive; after it, at ``dest``.
+        archived_tree = folder / content_dir
+        walk = archived_tree if archived_tree.exists() else dest
+        for part in candidate.relative_to(dest).parts:
+            walk = walk / part
+            if walk.is_symlink():
+                raise ValueError(
+                    f"the archived notes folder is a symlink ({_display(config, walk)})"
+                )
+    stored = str(candidate)
+    if candidate.is_relative_to(install) and len(candidate.relative_to(install).parts) > 1:
+        stored = str(candidate.relative_to(install))
+    from ciao.workspaces import vault_root_owner  # noqa: PLC0415
+
+    owner = vault_root_owner(config, candidate)
+    if owner is not None and owner != metadata.get("name"):
+        raise ValueError(f"its notes folder is already used by '{owner}'")
+    return stored, candidate
 
 
 def _taken_name(config: Any, name: str) -> str | None:
@@ -479,6 +680,29 @@ def _restore_blocker(config: Any, metadata: dict[str, Any], folder: Path) -> str
     destination = _restore_destination(config, metadata)
     if content_dir and (destination.exists() or destination.is_symlink()):
         return f"a folder already exists at {_display(config, destination)}"
+    try:
+        _restored_vault_root(config, metadata, folder)
+    except ValueError as exc:
+        return str(exc)
+    return ""
+
+
+def _registration_conflict(config: Any, metadata: dict[str, Any], folder: Path) -> str:
+    """Why the restored entry cannot be registered now, or ``""``.
+
+    Rechecked on the event loop right before the registry is mutated: the
+    folder move ran in a worker thread, and a workspace created meanwhile
+    under the same name (or over the same notes folder) must not be
+    overwritten by the archived settings.
+    """
+    name = str(metadata.get("name") or "")
+    taken = _taken_name(config, name)
+    if taken is not None:
+        return f"a workspace named '{taken}' was created while restoring"
+    try:
+        _restored_vault_root(config, metadata, folder)
+    except ValueError as exc:
+        return str(exc)
     return ""
 
 
@@ -505,19 +729,24 @@ def list_archives(config: Any) -> list[dict[str, Any]]:
         metadata = _read_metadata(folder)
         if metadata is None or not metadata.get("name"):
             continue
-        workspace = _workspace_entry(metadata)
         blocker = _restore_blocker(config, metadata, folder)
-        schedules = metadata.get("schedules")
+        # What a restore would apply, after validation: the confirmation shows
+        # it, because the metadata may have been edited on another device.
+        settings = restored_settings(config, metadata)
+        schedules, dropped = restorable_schedules(config, metadata)
         out.append({
             "id": folder.name,
             "name": str(metadata.get("name")),
             "archived_at": str(metadata.get("archived_at") or ""),
             "path": _display(config, folder),
             "layout": str(metadata.get("layout") or ""),
-            "color": str(workspace.get("color") or ""),
-            "default_provider": str(workspace.get("default_provider") or ""),
-            "gws_profile": str(workspace.get("gws_profile") or ""),
-            "schedules": len(schedules) if isinstance(schedules, list) else 0,
+            "color": settings["color"],
+            "default_provider": settings["default_provider"],
+            "gws_profile": settings["gws_profile"],
+            "disallowed_tools": settings["disallowed_tools"],
+            "allowed_mcp_servers": settings["allowed_mcp_servers"],
+            "schedules": len(schedules),
+            "schedules_dropped": dropped,
             "restorable": not blocker,
             "blocked_reason": blocker,
         })
@@ -560,21 +789,30 @@ def move_back(config: Any, archive_id: str) -> tuple[Path, dict[str, Any], Path]
 def register_restored(
     config: Any, folder: Path, metadata: dict[str, Any], destination: Path
 ) -> dict[str, Any]:
-    """Re-register a workspace whose folder :func:`move_back` put back."""
+    """Re-register a workspace whose folder :func:`move_back` put back.
+
+    Every registry field is rebuilt from validated metadata (see
+    :func:`restored_settings` and :func:`_restored_vault_root`), never copied.
+    A conflict that appeared while the folder was moving, or a registry save
+    that fails, moves the folder back into the archive so it can be retried.
+    """
     name = str(metadata["name"])
-    entry = _workspace_entry(metadata)
-    try:
-        stored_root = config.stored_workspace_vault_root(name)
-    except ValueError:
-        stored_root = name
+    conflict = _registration_conflict(config, metadata, folder)
+    if conflict:
+        _move_into_archive_again(config, folder, metadata, destination, conflict)
+        raise WorkspaceArchiveError(
+            f"cannot restore: {conflict}; the archive was left in place", 409
+        )
+    vault_root, _vault = _restored_vault_root(config, metadata, folder)
+    settings = restored_settings(config, metadata)
     config.workspaces[name] = WorkspaceConfig(
         name=name,
-        vault_root=str(entry.get("vault_root") or stored_root),
-        default_provider=str(entry.get("default_provider") or "claude"),
-        disallowed_tools=entry.get("disallowed_tools"),
-        allowed_mcp_servers=entry.get("allowed_mcp_servers"),
-        gws_profile=str(entry.get("gws_profile") or ""),
-        color=str(entry.get("color") or "pink"),
+        vault_root=vault_root,
+        default_provider=settings["default_provider"],
+        disallowed_tools=settings["disallowed_tools"],
+        allowed_mcp_servers=settings["allowed_mcp_servers"],
+        gws_profile=settings["gws_profile"],
+        color=settings["color"],
     )
     from ciao.workspaces import persist_workspaces  # noqa: PLC0415
 
@@ -607,6 +845,23 @@ def register_restored(
         "id": folder.name,
         "restored_to": _display(config, destination),
     }
+
+
+def _move_into_archive_again(
+    config: Any, folder: Path, metadata: dict[str, Any], destination: Path, why: str
+) -> None:
+    content_dir = str(metadata.get("content_dir") or "")
+    if not content_dir:
+        return
+    try:
+        os.rename(destination, folder / content_dir)
+    except OSError as exc:
+        raise WorkspaceArchiveError(
+            f"cannot restore: {why}, and moving {_display(config, destination)} "
+            f"back into {_display(config, folder)} failed ({exc}); move it back "
+            "by hand to restore it again",
+            500,
+        ) from exc
 
 
 def unregister_restored(

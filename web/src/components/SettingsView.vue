@@ -1828,7 +1828,7 @@ import type {
   LocalHandbackResult,
 } from '../lib/types'
 import { askConfirm } from '../lib/confirm'
-import { archiveConfirmMessage } from '../lib/workspaceArchive'
+import { archiveConfirmMessage, restoreConfirmMessage, restoredMessage } from '../lib/workspaceArchive'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import { useHousekeepingStore } from '../stores/housekeeping'
@@ -3637,11 +3637,18 @@ function formatArchivedAt(iso: string): string {
 }
 
 async function restoreWorkspace(item: ArchivedWorkspace) {
+  // The archive's metadata syncs through git like any note, so show what the
+  // restore will apply (validated server-side) before applying it.
+  if (!await askConfirm(restoreConfirmMessage(item), {
+    title: 'Restore workspace',
+    confirmLabel: 'Restore workspace',
+    destructive: false,
+  })) return
   restoringArchiveId.value = item.id
   workspacesResult.value = ''
   try {
-    await projectStore.restoreArchivedWorkspace(item.id)
-    notifySaved(`Workspace "${item.name}" restored.`, 'Workspaces')
+    const res = await projectStore.restoreArchivedWorkspace(item.id)
+    notifySaved(restoredMessage(item.name, res.restored?.schedules_paused ?? 0), 'Workspaces')
     await Promise.all([fetchWorkspacesList(), fetchArchivedWorkspaces(), projectStore.fetchAll()])
   } catch (e) {
     const detail = apiErrorMessage(e, 'The workspace could not be restored.')
@@ -3674,6 +3681,13 @@ onMounted(async () => {
   // Render from cache immediately, then pick up anything connected elsewhere.
   fetchWorkspaceModels().then(() => fetchWorkspaceModels(true))
   fetchGwsIntegration()
+  fetchWorkspacesList()
+  fetchArchivedWorkspaces()
+})
+
+// Another tab or device archived or restored a workspace: this view keeps its
+// own copy of the registry and the archived list, so refetch both.
+watch(() => projectStore.workspaceRegistryRevision, () => {
   fetchWorkspacesList()
   fetchArchivedWorkspaces()
 })

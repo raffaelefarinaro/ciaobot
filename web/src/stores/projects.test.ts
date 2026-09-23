@@ -3156,6 +3156,35 @@ describe('deep-link chat navigation', () => {
     expect(chatSocket.readyState).toBe(FakeWebSocket.CLOSED)
   })
 
+  test('workspaces_changed from another client refetches the registry and drops archived projects', async () => {
+    const store = useProjectStore()
+    const chatSocket = workspaceFixture(store)
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') {
+        return { workspaces: [{ name: 'personal', vault_root: 'personal', default_provider: 'claude' }], active: 'personal' }
+      }
+      if (path === '/api/projects') {
+        return [{ project_id: 'p-personal', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' }]
+      }
+      return {}
+    })
+    const revision = store.workspaceRegistryRevision
+
+    events.onmessage?.({ data: JSON.stringify({ type: 'workspaces_changed' }) })
+
+    await vi.waitFor(() => {
+      expect(store.workspaceRegistryRevision).toBe(revision + 1)
+    })
+    expect(store.workspaces.map(w => w.name)).toEqual(['personal'])
+    expect(store.activeWorkspace).toBe('personal')
+    expect(store.projects.map(p => p.project_id)).toEqual(['p-personal'])
+    expect(store.chats.map(c => c.chat_id)).toEqual(['c-personal'])
+    expect(store.activeChatId).toBeNull()
+    expect(chatSocket.readyState).toBe(FakeWebSocket.CLOSED)
+  })
+
   function twoChats(): ChatInfo[] {
     return [
       { chat_id: 'parent', project_id: 'p1', title: 'Parent', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },

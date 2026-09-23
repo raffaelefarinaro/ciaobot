@@ -263,53 +263,55 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
     route_name = request.path_params.get("name")
     if route_name:
         body = {**body, "name": route_name}
-    existing = config.workspace(str(body.get("name", "")).strip())
-    try:
-        workspace = _workspace_from_request(body, config=config, existing=existing)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    created = workspace.name not in config.workspaces
-    profile_changed = (
-        not created
-        and existing is not None
-        and str(getattr(existing, "gws_profile", "") or "")
-        != str(getattr(workspace, "gws_profile", "") or "")
-    )
-    config.workspaces[workspace.name] = workspace
-    _persist_workspaces(config)
-    _refresh_project_manager_workspaces(request)
-    payload = _workspaces_payload(config)
-    if created:
-        payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
-    elif profile_changed:
-        # Linking a workspace to its first account (or unlinking it) changes
-        # which `gws-*` stock skills it should get, and skill sync only runs at
-        # startup/repair. Resync now so the catalog matches the new linkage
-        # instead of waiting for a restart. On a pre-re-root install the target
-        # root is shared by every workspace, so the gate aggregates all of them
-        # (unlinking one must not prune the shared catalog while another still
-        # links an account).
-        from ciao.sync_skills import (  # noqa: PLC0415
-            resolve_workspace_skills_gws_gate,
-            sync_workspace_skills,
-        )
-
+    # Serialized with archive and restore; see ``_workspace_archive_lock``.
+    async with _workspace_archive_lock(request):
+        existing = config.workspace(str(body.get("name", "")).strip())
         try:
-            root = Path(config.agent_root(workspace.name))
-            await asyncio.to_thread(
+            workspace = _workspace_from_request(body, config=config, existing=existing)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        created = workspace.name not in config.workspaces
+        profile_changed = (
+            not created
+            and existing is not None
+            and str(getattr(existing, "gws_profile", "") or "")
+            != str(getattr(workspace, "gws_profile", "") or "")
+        )
+        config.workspaces[workspace.name] = workspace
+        _persist_workspaces(config)
+        _refresh_project_manager_workspaces(request)
+        payload = _workspaces_payload(config)
+        if created:
+            payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
+        elif profile_changed:
+            # Linking a workspace to its first account (or unlinking it) changes
+            # which `gws-*` stock skills it should get, and skill sync only runs at
+            # startup/repair. Resync now so the catalog matches the new linkage
+            # instead of waiting for a restart. On a pre-re-root install the target
+            # root is shared by every workspace, so the gate aggregates all of them
+            # (unlinking one must not prune the shared catalog while another still
+            # links an account).
+            from ciao.sync_skills import (  # noqa: PLC0415
+                resolve_workspace_skills_gws_gate,
                 sync_workspace_skills,
-                root,
-                refresh_upstream=False,
-                gws_profile=resolve_workspace_skills_gws_gate(
-                    config, root, workspace.name
-                ),
             )
-        except Exception:  # noqa: BLE001 - the update already succeeded
-            logger.exception(
-                "Could not resync skills for workspace %s after profile change",
-                workspace.name,
-            )
-    return JSONResponse(payload, status_code=201 if created else 200)
+
+            try:
+                root = Path(config.agent_root(workspace.name))
+                await asyncio.to_thread(
+                    sync_workspace_skills,
+                    root,
+                    refresh_upstream=False,
+                    gws_profile=resolve_workspace_skills_gws_gate(
+                        config, root, workspace.name
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - the update already succeeded
+                logger.exception(
+                    "Could not resync skills for workspace %s after profile change",
+                    workspace.name,
+                )
+        return JSONResponse(payload, status_code=201 if created else 200)
 
 
 async def _bootstrap_new_agent_root(config, name: str) -> bool:
@@ -396,13 +398,34 @@ def _publish_automations_changed(request: Request) -> None:
         logger.debug("Could not publish automations_changed", exc_info=True)
 
 
+def _publish_workspaces_changed(request: Request) -> None:
+    """Tell every open client the workspace registry changed.
+
+    Other tabs and devices only see ``project_*`` frames when a workspace is
+    archived or restored; without this their workspace list and active
+    workspace stayed stale until a reload. Carries no payload: clients refetch
+    ``/api/workspaces``. Fire-and-forget, like ``schedules_changed``.
+    """
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    events = getattr(pcm, "events", None)
+    if events is None:
+        return
+    try:
+        events.publish({"type": "workspaces_changed"})
+    except Exception:  # noqa: BLE001 - a missed nudge only delays a refresh
+        logger.debug("Could not publish workspaces_changed", exc_info=True)
+
+
 def _workspace_archive_lock(request: Request) -> asyncio.Lock:
-    """One archive or restore at a time per app.
+    """One registry change at a time per app: archive, restore, create, update.
 
     Without it a double-submitted archive ran twice: the second pass found the
     folder already gone and recorded an empty "archived" copy, or its failed
     rename refreshed the manager while the workspace was still registered and
-    recreated the General folder at the old path. Kept on ``app.state`` rather
+    recreated the General folder at the old path. Create and update take it
+    too: a restore awaits its folder move, and a create for the archived name
+    landing in that gap was silently overwritten by the archived settings.
+    Kept on ``app.state`` rather
     than at module level so it binds to the app's own event loop.
     """
     lock = getattr(request.app.state, "workspace_archive_lock", None)
@@ -502,15 +525,36 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
                 workspace_archive.undo_move_to_archive(config, target, archived)
             except workspace_archive.WorkspaceArchiveError as undo_exc:
                 undo_error = undo_exc.message
+            schedules_back = True
             put_back = getattr(manager, "put_back_user_items", None)
             if callable(put_back) and schedules:
                 try:
                     put_back(schedules)
                 except Exception:  # noqa: BLE001 - archive.json still holds them
+                    schedules_back = False
                     logger.exception(
                         "Could not put back the schedules of %s; they remain in %s",
                         name,
                         archived["path"],
+                    )
+            if not undo_error:
+                # ``archive.json`` outlived the folder move on purpose: it is
+                # the schedules' only durable copy until they are back.
+                if schedules_back:
+                    workspace_archive.discard_rolled_back_archive(config, archived)
+                else:
+                    workspace_archive.mark_rolled_back(config, archived)
+                    _refresh_project_manager_workspaces(request)
+                    return JSONResponse(
+                        {
+                            "error": (
+                                f"could not archive '{name}': {failure}; the "
+                                "workspace was left in place, but its automations "
+                                "could not be saved back and are kept in "
+                                f"{archived['path']}/{workspace_archive.METADATA_FILE}"
+                            )
+                        },
+                        status_code=500,
                     )
             if undo_error:
                 # Not refreshed: the manager would recreate the General folder
@@ -554,6 +598,7 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
             logger.exception("Could not save the registry after archiving %s", name)
             return _roll_back(f"the workspace registry could not be saved ({exc})")
         _refresh_project_manager_workspaces(request)
+        _publish_workspaces_changed(request)
         if schedules:
             _publish_automations_changed(request)
 
@@ -624,11 +669,31 @@ async def restore_archived_workspace(request: Request) -> JSONResponse:
         except workspace_archive.WorkspaceArchiveError as exc:
             return JSONResponse({"error": exc.message}, status_code=exc.status)
         name = str(restored["name"])
-        schedules = restored.get("schedules")
+        pcm = getattr(request.app.state, "project_chat_manager", None)
+
+        def _foreign_target(kind: str, target_id: str) -> bool:
+            # A chat or project that resolves right now belongs to another
+            # workspace: this one's were archived with it, and its projects
+            # are only rediscovered by the refresh below.
+            if pcm is None:
+                return False
+            if kind == "chat":
+                chat = pcm.get_chat(target_id)
+                project = pcm.get_project(chat.project_id) if chat is not None else None
+                return chat is not None and getattr(project, "workspace", "") != name
+            project = pcm.get_project(target_id)
+            return project is not None and getattr(project, "workspace", "") != name
+
+        # archive.json is synced through git, so its rows are untrusted input:
+        # rebuilt, pinned to this workspace and paused (see
+        # ``schedules.restorable_user_schedule``).
+        schedules, dropped = workspace_archive.restorable_schedules(
+            config, restored, foreign_target=_foreign_target
+        )
         added = 0
         manager = _schedule_manager(request)
         put_back = getattr(manager, "put_back_user_items", None)
-        if callable(put_back) and isinstance(schedules, list) and schedules:
+        if callable(put_back) and schedules:
             try:
                 added = int(put_back(schedules))
             except Exception as exc:  # noqa: BLE001 - archive.json is their only copy
@@ -663,6 +728,7 @@ async def restore_archived_workspace(request: Request) -> JSONResponse:
         # Only now: until the schedules are back, archive.json is their only copy.
         workspace_archive.discard_archive_folder(folder)
         _refresh_project_manager_workspaces(request)
+        _publish_workspaces_changed(request)
         if added:
             _publish_automations_changed(request)
         try:
@@ -680,7 +746,10 @@ async def restore_archived_workspace(request: Request) -> JSONResponse:
             "id": archive_id,
             "name": name,
             "path": restored.get("restored_to", ""),
+            # Every restored automation is paused until re-enabled.
             "schedules": added,
+            "schedules_paused": added,
+            "schedules_dropped": dropped,
         }
         return JSONResponse(payload)
 

@@ -11,7 +11,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
 import type { ArchivedWorkspace, WorkspacesResponse } from '../../lib/types'
-import { archiveConfirmMessage } from '../../lib/workspaceArchive'
+import { archiveConfirmMessage, restoreConfirmMessage } from '../../lib/workspaceArchive'
 
 const state = vi.hoisted(() => ({
   workspaces: null as unknown,
@@ -204,12 +204,16 @@ describe('Settings > Workspaces archive', () => {
     }
   })
 
-  it('lists archived workspaces and restores one', async () => {
+  it('lists archived workspaces and restores one after showing what it restores', async () => {
     const { api } = await import('../../lib/api')
-    state.archived = [archived()]
+    const { pendingConfirm } = await import('../../lib/confirm')
+    state.archived = [archived({ allowed_mcp_servers: ['github'], disallowed_tools: null, schedules: 2, schedules_dropped: 1 })]
     vi.mocked(api.post).mockImplementation((path: string) => {
       if (path === '/api/workspaces/archived/restore') {
-        return Promise.resolve(workspaces(['personal', 'work']))
+        return Promise.resolve({
+          ...workspaces(['personal', 'work']),
+          restored: { schedules_paused: 2, schedules_dropped: 1 },
+        })
       }
       return Promise.resolve({})
     })
@@ -225,6 +229,21 @@ describe('Settings > Workspaces archive', () => {
 
       state.archived = []
       await restore.trigger('click')
+      await nextTick()
+
+      const request = pendingConfirm.value
+      expect(request).toBeTruthy()
+      expect(request!.title).toBe('Restore workspace')
+      expect(request!.message).toBe(restoreConfirmMessage(archived({
+        allowed_mcp_servers: ['github'], disallowed_tools: null, schedules: 2, schedules_dropped: 1,
+      })))
+      expect(request!.message).toContain('2 automations, restored paused')
+      expect(request!.message).toContain('1 automation in the archive did not pass validation')
+      expect(request!.message).toContain('MCP servers allowed: github')
+      expect(request!.message).toContain('Extra tools denied: workspace default')
+      expect(request!.message).toContain('Google account: work')
+      expect(api.post).not.toHaveBeenCalled()
+      request!.resolve(true)
       await flushPromises()
 
       expect(api.post).toHaveBeenCalledWith(
@@ -237,6 +256,23 @@ describe('Settings > Workspaces archive', () => {
       wrapper.unmount()
       vi.mocked(api.post).mockReset()
       vi.mocked(api.post).mockImplementation(() => Promise.resolve({}))
+    }
+  })
+
+  it('cancelling the restore confirmation restores nothing', async () => {
+    const { api } = await import('../../lib/api')
+    const { pendingConfirm } = await import('../../lib/confirm')
+    state.archived = [archived()]
+    const wrapper = await mountWorkspacesTab()
+    try {
+      await wrapper.find('.archived-item button').trigger('click')
+      await nextTick()
+      pendingConfirm.value!.resolve(false)
+      await flushPromises()
+      expect(api.post).not.toHaveBeenCalled()
+      expect(wrapper.find('.archived-item').exists()).toBe(true)
+    } finally {
+      wrapper.unmount()
     }
   })
 

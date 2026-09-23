@@ -79,7 +79,13 @@ export interface ArchivedWorkspace {
   color: string
   default_provider: string
   gws_profile: string
+  // What a restore applies, after server-side validation. `null` means unset:
+  // no MCP server is reachable, and the default tool deny-list applies.
+  disallowed_tools?: string[] | null
+  allowed_mcp_servers?: string[] | null
+  // Valid automations, all restored paused, and how many were rejected.
   schedules: number
+  schedules_dropped?: number
   restorable: boolean
   blocked_reason: string
 }
@@ -461,6 +467,9 @@ export type EventsWsMessage =
   // payload: the client refetches /api/schedules, which is the only place the
   // computed running/next_run fields are assembled.
   | { type: 'schedules_changed' }
+  // A workspace was archived or restored (here or on another device). No
+  // payload: the client refetches /api/workspaces.
+  | { type: 'workspaces_changed' }
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }

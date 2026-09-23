@@ -955,3 +955,331 @@ def test_restore_schedule_save_failure_keeps_the_archive_and_its_schedules(
     assert {e.schedule_id for e in store.list_entries()} == {mine.schedule_id}
     assert _tree(tmp_path / "work") == before
     assert not folder.exists()
+
+
+# ── review round: rollback keeps metadata, registry events, restore races ────
+
+
+def test_rollback_keeps_archive_json_when_the_schedules_cannot_be_put_back(
+    tmp_path, monkeypatch
+):
+    """A full disk can fail the registry save AND the schedule save."""
+    client, config, _pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    before = _tree(tmp_path / "work")
+
+    def _disk_full(self: CiaoConfig) -> None:
+        raise OSError(28, "No space left on device")
+
+    def _no_put_back(_items):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
+    monkeypatch.setattr(store, "put_back_user_items", _no_put_back)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500, response.json()
+    assert "kept in" in response.json()["error"]
+    assert config.workspace("work") is not None
+    assert _tree(tmp_path / "work") == before
+    # The only durable copy of the automation survived the rollback.
+    folders = list(archive_root(config).iterdir())
+    assert len(folders) == 1
+    metadata = json.loads((folders[0] / "archive.json").read_text(encoding="utf-8"))
+    assert [row["schedule_id"] for row in metadata["schedules"]] == [mine.schedule_id]
+    assert metadata["status"] == "rolled-back"
+    listing = list_archives(config)
+    assert listing[0]["restorable"] is False
+    assert "did not finish" in listing[0]["blocked_reason"]
+
+
+def test_rollback_removes_archive_json_only_after_the_schedules_are_back(
+    tmp_path, monkeypatch
+):
+    client, config, _pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    seen: list[bool] = []
+    real_put_back = store.put_back_user_items
+
+    def _watch(items):
+        seen.append(any(archive_root(config).glob("work-*/archive.json")))
+        return real_put_back(items)
+
+    def _disk_full(self: CiaoConfig) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
+    monkeypatch.setattr(store, "put_back_user_items", _watch)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500
+    assert seen == [True], "archive.json must exist while the schedules go back"
+    assert {e.schedule_id for e in store.list_entries()} == {mine.schedule_id}
+    root = archive_root(config)
+    assert not root.is_dir() or not any(root.iterdir())
+
+
+def _capture_events(monkeypatch, pcm) -> list[dict]:
+    events: list[dict] = []
+    monkeypatch.setattr(pcm.events, "publish", events.append)
+    return events
+
+
+def test_archive_and_restore_tell_other_clients_the_registry_changed(
+    tmp_path, monkeypatch
+):
+    client, _config, pcm, _store = _app(tmp_path, rerooted=True)
+    events = _capture_events(monkeypatch, pcm)
+
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    assert {"type": "workspaces_changed"} in events
+
+    events.clear()
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+    assert restored.status_code == 200, restored.json()
+    assert {"type": "workspaces_changed"} in events
+
+
+def test_a_failed_archive_does_not_announce_a_registry_change(tmp_path, monkeypatch):
+    client, _config, pcm, _store = _app(tmp_path, rerooted=True)
+    events = _capture_events(monkeypatch, pcm)
+
+    def _disk_full(self: CiaoConfig) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
+    assert client.post("/api/workspaces/work/archive").status_code == 500
+    assert {"type": "workspaces_changed"} not in events
+
+
+def test_restore_rechecks_the_name_after_the_folder_move(tmp_path, monkeypatch):
+    """A create for the archived name can land while the move runs in a thread."""
+    from ciao import workspace_archive
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    folder = archive_root(config) / archived["id"]
+    real_move_back = workspace_archive.move_back
+    created = WorkspaceConfig(name="work", vault_root="work/memory-vault", color="green")
+
+    def _move_then_create(cfg, archive_id):
+        result = real_move_back(cfg, archive_id)
+        cfg.workspaces["work"] = created
+        return result
+
+    monkeypatch.setattr(workspace_archive, "move_back", _move_then_create)
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 409, refused.json()
+    assert "created while restoring" in refused.json()["error"]
+    # The workspace created meanwhile keeps its own settings...
+    assert config.workspaces["work"] is created
+    # ...and the archive went back where it was, whole, to be restored later.
+    assert (folder / "work" / "memory-vault").is_dir()
+    assert (folder / "archive.json").is_file()
+
+
+def test_workspace_create_and_update_take_the_registry_lock(tmp_path):
+    """Serialized with restore, so a create cannot land in its await gap."""
+    from ciao.web.routes_api import upsert_workspace_setting
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    client.app.router.routes.insert(
+        0, Route("/api/workspaces", upsert_workspace_setting, methods=["POST"])
+    )
+    held: list[bool] = []
+
+    class _RecordingLock:
+        async def __aenter__(self):
+            held.append(True)
+
+        async def __aexit__(self, *_exc):
+            held.append(False)
+
+    client.app.state.workspace_archive_lock = _RecordingLock()
+    response = client.post("/api/workspaces", json={"name": "extra"})
+
+    assert response.status_code == 201, response.json()
+    assert held == [True, False]
+    assert config.workspace("extra") is not None
+
+
+# ── untrusted archive.json on restore (it is synced through git) ─────────────
+
+
+def _tamper(config: CiaoConfig, archive_id: str, edit) -> None:
+    path = archive_root(config) / archive_id / "archive.json"
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+    edit(metadata)
+    path.write_text(json.dumps(metadata), encoding="utf-8")
+
+
+def test_restored_automations_come_back_paused_and_pinned_to_the_workspace(tmp_path):
+    client, config, pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    personal_general = next(p for p in pcm.list_projects("personal") if p.is_auto)
+    personal_chat = pcm.create_chat(personal_general.project_id, title="personal")
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+
+    def _edit(metadata):
+        row = metadata["schedules"][0]
+        row["enabled"] = True
+        row["mode"] = "bypass"
+        row["workspace"] = "personal"
+        row["last_triggered_on"] = "2099-01-01"
+        row["unknown_key"] = "x"
+        metadata["schedules"].extend([
+            # An unattended loop aimed at another workspace's chat.
+            {
+                "schedule_id": "sched-evil001", "prompt": "exfiltrate",
+                "frequency": "interval", "interval_minutes": 1,
+                "daily_time_utc": "", "chat_id": 0, "enabled": True,
+                "web_chat_id": personal_chat.chat_id, "workspace": "personal",
+            },
+            {"schedule_id": "system-memory-curation@work", "prompt": "x",
+             "frequency": "manual", "scope": "system"},
+            {"schedule_id": "sched-bad0001", "prompt": "x", "frequency": "hourly"},
+            {"schedule_id": "../../x", "prompt": "x", "frequency": "manual"},
+            {"schedule_id": "sched-bad0002", "prompt": "x", "frequency": "daily",
+             "daily_time_utc": "25:99"},
+            {"schedule_id": "sched-bad0003", "prompt": "x", "frequency": "manual",
+             "provider": "evil"},
+            "not a row",
+        ])
+
+    _tamper(config, archived["id"], _edit)
+    listing = client.get("/api/workspaces/archived").json()["archived"]
+    assert listing[0]["schedules"] == 2
+    assert listing[0]["schedules_dropped"] == 6
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    body = restored.json()["restored"]
+    assert body["schedules"] == 2
+    assert body["schedules_paused"] == 2
+    assert body["schedules_dropped"] == 6
+    entries = {e.schedule_id: e for e in store.list_entries()}
+    assert set(entries) == {mine.schedule_id, "sched-evil001"}
+    for entry in entries.values():
+        assert entry.enabled is False
+        assert entry.workspace == "work"
+        assert entry.mode == ""
+        assert entry.scope == "user"
+        assert entry.last_triggered_on == ""
+    # The foreign chat binding was dropped rather than kept.
+    assert entries["sched-evil001"].web_chat_id is None
+    raw = json.loads((tmp_path / ".runtime" / "schedules.json").read_text())
+    assert all("unknown_key" not in row for row in raw["schedules"])
+
+
+@pytest.mark.parametrize(
+    "vault_root",
+    ["personal/memory-vault", "/etc", "../outside", "work/../personal/memory-vault", 7],
+)
+def test_restore_refuses_a_vault_root_outside_the_restored_folder(tmp_path, vault_root):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    _tamper(
+        config,
+        archived["id"],
+        lambda metadata: metadata["workspace"].__setitem__("vault_root", vault_root),
+    )
+
+    listing = client.get("/api/workspaces/archived").json()["archived"]
+    assert listing[0]["restorable"] is False
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 409, refused.json()
+    assert config.workspace("work") is None
+    assert (archive_root(config) / archived["id"] / "work").is_dir()
+    assert not (tmp_path / "work").exists()
+
+
+def test_restore_refuses_a_notes_folder_that_became_a_symlink(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    tree = archive_root(config) / archived["id"] / "work"
+    import shutil
+
+    shutil.rmtree(tree / "memory-vault")
+    (tree / "memory-vault").symlink_to(tmp_path / "personal" / "memory-vault")
+
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 409, refused.json()
+    assert "symlink" in refused.json()["error"]
+    assert config.workspace("work") is None
+
+
+def test_restore_rebuilds_settings_and_never_widens_access(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+
+    def _edit(metadata):
+        metadata["workspace"].update({
+            "default_provider": "evil-cli",
+            "allowed_mcp_servers": ["github", {"all": True}],
+            "disallowed_tools": "Bash",
+            "gws_profile": "../../secrets",
+            "color": "ultraviolet",
+        })
+
+    _tamper(config, archived["id"], _edit)
+    preview = client.get("/api/workspaces/archived").json()["archived"][0]
+    assert preview["allowed_mcp_servers"] == []
+    assert preview["disallowed_tools"] is None
+    assert preview["default_provider"] == "claude"
+    assert preview["gws_profile"] == ""
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    work = config.workspaces["work"]
+    assert work.default_provider == "claude"
+    assert work.allowed_mcp_servers == [], "an unreadable allowlist must deny all"
+    assert work.disallowed_tools is None
+    assert work.gws_profile == ""
+    assert work.color == "pink"
+    assert work.vault_root == "work/memory-vault"
+
+
+def test_restore_preview_shows_a_valid_allowlist_and_deny_list(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    config.workspaces["work"].allowed_mcp_servers = ["github", "n8n_mcp"]
+    config.workspaces["work"].disallowed_tools = ["Bash"]
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+
+    preview = client.get("/api/workspaces/archived").json()["archived"][0]
+
+    assert preview["id"] == archived["id"]
+    assert preview["allowed_mcp_servers"] == ["github", "n8n_mcp"]
+    assert preview["disallowed_tools"] == ["Bash"]
+
+
+def test_shared_layout_refuses_a_vault_root_pointing_at_another_workspace(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=False)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    _tamper(
+        config,
+        archived["id"],
+        lambda metadata: metadata["workspace"].__setitem__("vault_root", "memory-vault/personal"),
+    )
+
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 409, refused.json()
+    assert "outside its own folder" in refused.json()["error"]
+    assert config.workspace("work") is None
+    assert (archive_root(config) / archived["id"] / "work").is_dir()
+
+
+def test_a_missing_vault_root_is_rebuilt_for_the_layout(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    _tamper(config, archived["id"], lambda metadata: metadata["workspace"].pop("vault_root"))
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert config.workspaces["work"].vault_root == "work/memory-vault"
