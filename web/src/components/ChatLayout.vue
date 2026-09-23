@@ -754,6 +754,17 @@ function isTypingTarget(el: EventTarget | null): boolean {
   return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
 }
 
+// The PWA's Option/Alt chords match the physical key. On macOS, Option turns
+// `e.key` into the character the chord would type (⌥D is "∂", ⌥S "ß", ⌥M "µ",
+// ⌥= "≠", ⌥- "–", and ⌥N is a "Dead" key), so comparing `e.key` with ASCII
+// letters never matched on a Mac. `e.code` names the key position and is
+// unaffected by Option. When a browser or a synthetic event leaves `code`
+// empty, fall back to `e.key` so Windows/Linux Alt chords still match.
+function optionChord(e: KeyboardEvent, codes: readonly string[], keys: readonly string[]): boolean {
+  if (e.code) return codes.includes(e.code)
+  return keys.includes(e.key)
+}
+
 // Unmodified keys, which no browser reserves: number keys switch to the
 // corresponding workspace, arrow keys roam the home recent-chat grid (Enter
 // opens the focused card natively), and Esc closes the open chat. Anything
