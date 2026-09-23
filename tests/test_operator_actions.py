@@ -952,6 +952,23 @@ def test_env_vars_the_engine_no_longer_reads_are_surfaced(tmp_path: Path) -> Non
     assert not actions[0].run_label
 
 
+def test_retired_ciao_workspaces_variable_is_surfaced(tmp_path: Path) -> None:
+    """The workspace list is Settings-owned runtime state; a CIAO_WORKSPACES
+    still in .env is inert after its one-time import and should be removed."""
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {"CIAO_WORKSPACES": '[{"name":"personal"}]'}
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "legacy-env-ignored"]
+
+    assert len(actions) == 1
+    assert "CIAO_WORKSPACES" in actions[0].detail
+    assert "Settings" in actions[0].chat_prompt
+
+
 def test_no_legacy_env_vars_means_no_tile(tmp_path: Path) -> None:
     config = _RerootedConfig(tmp_path)
     for name in ("personal", "work"):
