@@ -768,6 +768,55 @@ def test_backfill_defers_archive_owned_by_an_unfinished_job(
     assert "## Session insights" not in archive.read_text(encoding="utf-8")
 
 
+def test_manual_backfill_recovers_an_attempt_exhausted_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.archive_jobs import FAILED, MAX_AUTO_ATTEMPTS, RUNNING, create_job
+
+    chats_dir = tmp_path / "vault" / "Logs" / "Chats" / "chat-exhausted" / "claude"
+    chats_dir.mkdir(parents=True)
+    archive = chats_dir / "exhausted-00000000-0000-0000-0000-000000000001.md"
+    archive.write_text("# Archived chat\n", encoding="utf-8")
+
+    runtime_root = tmp_path / "runtime"
+    job = create_job(
+        runtime_root,
+        chat_id="chat-exhausted",
+        archive_path=str(archive.relative_to(tmp_path)),
+    )
+    job.mark("insights", RUNNING)
+    job.mark("insights", FAILED, "authentication failed")
+    job.stage("insights").attempts = MAX_AUTO_ATTEMPTS
+    job.save()
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    config = _config()
+    config.vault_root = tmp_path / "vault"
+    config.workspace_root = tmp_path
+    config.state_path = runtime_root / "state.json"
+    calls: list[dict[str, object]] = []
+
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        calls.append(kwargs)
+        return "## Decisions\n- recovered\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    result = asyncio.run(
+        insights.backfill_insights_task(
+            config,
+            mode="both",
+            concurrency=1,
+            model_override="alternate-model",
+            manual=True,
+        )
+    )
+
+    assert result["success"] == 1
+    assert result["deferred"] == 0
+    assert calls[0]["model"] == "alternate-model"
+    assert "recovered" in archive.read_text(encoding="utf-8")
+
+
 # ── Input budget and non-retryable overflow (issue #248) ──────────────────
 
 

@@ -69,6 +69,7 @@ def test_setup_status_reports_workspace_and_required_config(tmp_path) -> None:
         config,
         env={
             "PWA_AUTH_TOKEN": "test-token",
+            "ANTHROPIC_API_KEY": "sk-anthropic",
         },
     )
 

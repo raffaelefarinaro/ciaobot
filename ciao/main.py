@@ -259,6 +259,32 @@ def _ensure_tool_dirs_on_path() -> None:
         os.environ["PATH"] = os.pathsep.join([*missing, *parts])
 
 
+async def _run_startup_backfill(
+    config: CiaoConfig, pcm, node_state_manager
+) -> None:
+    if getattr(config, "bootstrap_mode", False) or not node_state_manager.is_active():
+        return
+    from ciao import job_runs
+    from ciao.insights import backfill_insights_task, format_backfill_summary
+
+    try:
+        async with job_runs.track(
+            "backfill_insights", "Insights backfill", category="system",
+        ) as run:
+            result = await backfill_insights_task(
+                config,
+                chat_workspaces=pcm.chat_workspaces(),
+            )
+            run.extra.update(result)
+            summary = format_backfill_summary(result)
+            run.extra["summary"] = summary
+            if result["errors"]:
+                run.status = "error"
+                run.error = summary
+    except Exception:
+        logger.exception("Insights backfill failed")
+
+
 async def _async_main() -> int:
     _ensure_tool_dirs_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
@@ -275,6 +301,7 @@ async def _async_main() -> int:
         # One-time import of the retired CIAO_WORKSPACES variable; it writes
         # the registry, so it runs under the lock like the persist below.
         config.import_legacy_workspaces_env()
+        config.import_legacy_gws_profile_env()
         if config._workspace_registry_changed:
             config.persist_workspace_registry()
         return await _run_server_locked(config)
@@ -929,27 +956,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # `insights._BACKFILL_MAX`, so an aged vault is worked through over boots.
     # Deliberately not a StartupTracker phase: the boot screen waits for every
     # phase, and a backfill is up to that many model calls.
-    async def _backfill_task() -> None:
-        from ciao.insights import backfill_insights_task, format_backfill_summary
-
-        try:
-            async with job_runs.track(
-                "backfill_insights", "Insights backfill", category="system",
-            ) as run:
-                result = await backfill_insights_task(
-                    config,
-                    chat_workspaces=pcm.chat_workspaces(),
-                )
-                run.extra.update(result)
-                summary = format_backfill_summary(result)
-                run.extra["summary"] = summary
-                if result["errors"]:
-                    run.status = "error"
-                    run.error = summary
-        except Exception:
-            logger.exception("Insights backfill failed")
-
-    asyncio.create_task(_backfill_task())
+    asyncio.create_task(_run_startup_backfill(config, pcm, node_state_manager))
 
     # ── Branch backup ────────────────────────────────────────
     # Backs up the same repo the sync flow targets (the repo containing the

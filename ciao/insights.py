@@ -1909,13 +1909,21 @@ def _archive_path_key(path: Path, workspace_root: Path) -> Path:
 
 
 def _unfinished_archive_paths(
-    runtime_root: Path, workspace_root: Path
+    runtime_root: Path, workspace_root: Path, *, manual: bool = False
 ) -> set[Path]:
-    from ciao.archive_jobs import list_jobs
+    from ciao.archive_jobs import PIPELINE_STAGES, RUNNING, list_jobs
 
     claimed: set[Path] = set()
     for job in list_jobs(runtime_root):
-        if not job.archive_path or job.tombstoned or not job.unfinished():
+        if not job.archive_path or job.tombstoned:
+            continue
+        if manual:
+            active = any(
+                job.status_of(name) == RUNNING for name in PIPELINE_STAGES
+            )
+            if not active and not job.resumable():
+                continue
+        elif not job.unfinished():
             continue
         claimed.add(_archive_path_key(Path(job.archive_path), workspace_root))
     return claimed
@@ -2052,6 +2060,7 @@ async def backfill_insights_task(
     concurrency: int = 2,
     workspace: str = "",
     model_override: str = "",
+    manual: bool = False,
     agent_root: Path | None = None,
     chat_workspaces: Mapping[str, str] | None = None,
 ) -> dict[str, int]:
@@ -2059,7 +2068,9 @@ async def backfill_insights_task(
 
     *model_override* runs this pass with an explicit model instead of the
     configured one, without changing the stored setting — the retry path when
-    the configured insights model keeps failing.
+    the configured insights model keeps failing. *manual* marks an explicit
+    operator run, which may recover blocked or attempt-exhausted manifests while
+    still yielding to live or automatically resumable work.
 
     *chat_workspaces* maps chat id to workspace, and is required to scope a
     run with *workspace*: an archive's path names the chat that wrote it, not
@@ -2118,7 +2129,9 @@ async def backfill_insights_task(
         event loop, where it would stall every request for its duration.
         """
         found: list[tuple[Path, str, Path | None]] = []
-        claimed = _unfinished_archive_paths(runtime_root, config.workspace_root)
+        claimed = _unfinished_archive_paths(
+            runtime_root, config.workspace_root, manual=manual
+        )
         # Sorted for a deterministic order (oldest first / alphabetic).
         # All providers (claude and opencode) — the previous
         # `*/claude/*.md` made opencode transcripts invisible to
@@ -2224,7 +2237,9 @@ async def backfill_insights_task(
         async with sem:
             try:
                 if _archive_path_key(archive_path, config.workspace_root) in (
-                    _unfinished_archive_paths(runtime_root, config.workspace_root)
+                    _unfinished_archive_paths(
+                        runtime_root, config.workspace_root, manual=manual
+                    )
                 ):
                     return "deferred"
                 from ciao import provider_registry

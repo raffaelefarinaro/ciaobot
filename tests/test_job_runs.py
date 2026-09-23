@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -131,6 +132,43 @@ def test_track_sync_records(tmp_path: Path) -> None:
     rows = _read_lines(tmp_path)
     assert rows[0]["status"] == "ok"
     assert rows[0]["extra"]["proposal_count"] == 3
+
+
+@pytest.mark.parametrize(
+    ("bootstrap", "active", "expected_calls"),
+    [
+        (False, True, 1),
+        (False, False, 0),
+        (True, True, 0),
+    ],
+)
+async def test_startup_backfill_runs_only_on_a_configured_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bootstrap: bool,
+    active: bool,
+    expected_calls: int,
+) -> None:
+    from ciao import main
+
+    calls: list[dict[str, str]] = []
+
+    async def fake_backfill(_config, *, chat_workspaces):
+        calls.append(chat_workspaces)
+        return {"errors": 0}
+
+    monkeypatch.setattr("ciao.insights.backfill_insights_task", fake_backfill)
+    jr.configure(tmp_path)
+    config = SimpleNamespace(bootstrap_mode=bootstrap)
+    pcm = SimpleNamespace(chat_workspaces=lambda: {"chat-1": "personal"})
+    node_state = SimpleNamespace(is_active=lambda: active)
+
+    await main._run_startup_backfill(config, pcm, node_state)
+
+    assert len(calls) == expected_calls
+    if expected_calls:
+        assert calls == [{"chat-1": "personal"}]
+        assert _read_lines(tmp_path)[0]["job"] == "backfill_insights"
 
 
 # ── rotation / fail-open ─────────────────────────────────────────────────

@@ -4424,6 +4424,7 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
                 config,
                 mode="both",
                 model_override=model,
+                manual=True,
                 chat_workspaces=request.app.state.project_chat_manager.chat_workspaces(),
             )
             handle.extra.update(result)
