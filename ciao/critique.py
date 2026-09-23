@@ -43,12 +43,14 @@ _OPENCODE_AVAILABLE_CACHE: tuple[float, bool] | None = None
 _PROVIDER_AVAILABLE_TTL = 30.0  # seconds — panel resolution is read-hot
 
 def is_anthropic_available() -> bool:
-    """True when Claude Code reports an active login.
+    """True when Anthropic API key or Claude Code reports an active login.
 
     Cached on the shared TTL for the same reason as the opencode probe: panel
     resolution is read-hot (every Settings → Models load resolves it) and
     ``claude auth status`` is a subprocess.
     """
+    if os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        return True
     global _ANTHROPIC_AVAILABLE_CACHE
     now = time.monotonic()
     cached = _ANTHROPIC_AVAILABLE_CACHE

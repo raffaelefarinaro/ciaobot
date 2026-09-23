@@ -191,6 +191,18 @@ def test_setup_status_detects_claude_cli_oauth(tmp_path, monkeypatch) -> None:
     assert "operator@example.com" in data["providers"]["claude"]["detail"]
 
 
+def test_setup_status_detects_claude_api_key_without_oauth(tmp_path) -> None:
+    secret = "sk-ant-secret-value"
+    config = _config(tmp_path)
+    data = setup_status(config, env={"ANTHROPIC_API_KEY": secret})
+
+    claude = data["providers"]["claude"]
+    assert claude["ok"] is True
+    assert claude["auth"] == "api_key"
+    assert claude["account"] == "Anthropic API"
+    assert secret not in json.dumps(data)
+
+
 def test_setup_status_does_not_treat_oauth_account_metadata_as_auth(tmp_path) -> None:
     """Desktop metadata alone must not make setup claim Claude is connected."""
     config = _config(tmp_path)

@@ -52,8 +52,8 @@ def resolve_insights_model(
     """Pick the model for session-insights extraction.
 
     When the operator has not set an explicit override (Settings → Models →
-    Session insights = Automatic), use the workspace's default model. Scripts
-    without workspace context fall back to ``config.insights_model``.
+    Session insights = Automatic), use the workspace/provider default model.
+    Scripts without either context fall back to ``config.insights_model``.
 
     ``provider``, when given, is the chat's actual provider; it is passed
     through to ``default_model_for_workspace`` so an opencode chat in a
@@ -62,7 +62,7 @@ def resolve_insights_model(
     """
     if config.insights_model_override:
         return config.insights_model_override
-    if workspace is not None:
+    if workspace is not None or provider is not None:
         return config.default_model_for_workspace(workspace, provider)
     return config.insights_model
 
@@ -1898,10 +1898,34 @@ class _CheckedArchives:
             logger.warning("Could not record checked archives in %s", self._path, exc_info=True)
 
 
+def _archive_path_key(path: Path, workspace_root: Path) -> Path:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = workspace_root / candidate
+    try:
+        return candidate.resolve()
+    except OSError:
+        return candidate.absolute()
+
+
+def _unfinished_archive_paths(
+    runtime_root: Path, workspace_root: Path
+) -> set[Path]:
+    from ciao.archive_jobs import list_jobs
+
+    claimed: set[Path] = set()
+    for job in list_jobs(runtime_root):
+        if not job.archive_path or job.tombstoned or not job.unfinished():
+            continue
+        claimed.add(_archive_path_key(Path(job.archive_path), workspace_root))
+    return claimed
+
+
 def _empty_backfill_stats() -> dict[str, int]:
     return {
         "total_discovered": 0,
         "already_done": 0,
+        "deferred": 0,
         "eligible": 0,
         "to_process": 0,
         "processed": 0,
@@ -1920,14 +1944,20 @@ def format_backfill_summary(stats: dict[str, int]) -> str:
     processed = stats.get("processed", 0)
     success = stats.get("success", 0)
     skipped = stats.get("skipped", 0)
+    deferred = stats.get("deferred", 0)
     errors = stats.get("errors", 0)
 
     if selected == 0:
         if total == 0:
             return "No archived chats found."
+        if deferred:
+            noun = "archive" if deferred == 1 else "archives"
+            return f"{deferred} {noun} deferred to active post-processing."
         return f"No archives needed backfill ({stats.get('already_done', 0)} already complete)."
 
     summary = f"Processed {processed}/{selected}: {success} succeeded, {skipped} skipped"
+    if deferred:
+        summary += f", {deferred} deferred"
     if stats.get("gated"):
         summary += f", {stats['gated']} gated (no durable signal)"
     if stats.get("no_signal"):
@@ -2065,7 +2095,8 @@ async def backfill_insights_task(
         if config.workspace_root not in search_roots:
             search_roots.append(config.workspace_root)
     project_dirs = [(r, _claude_projects_dir(r)) for r in search_roots]
-    _checked = _CheckedArchives(Path(config.state_path).parent / _CHECKED_LEDGER_NAME)
+    runtime_root = Path(config.state_path).parent
+    _checked = _CheckedArchives(runtime_root / _CHECKED_LEDGER_NAME)
 
     by_chat = dict(chat_workspaces or {})
     if workspace and not by_chat:
@@ -2076,7 +2107,7 @@ async def backfill_insights_task(
         )
         workspace = ""
 
-    def _discover() -> tuple[list[tuple[Path, str, Path | None]], int, int]:
+    def _discover() -> tuple[list[tuple[Path, str, Path | None]], int, int, int]:
         """Walk the archive tree and decide what needs backfilling.
 
         Runs off the loop: this globs the whole archive directory and reads
@@ -2087,12 +2118,14 @@ async def backfill_insights_task(
         event loop, where it would stall every request for its duration.
         """
         found: list[tuple[Path, str, Path | None]] = []
+        claimed = _unfinished_archive_paths(runtime_root, config.workspace_root)
         # Sorted for a deterministic order (oldest first / alphabetic).
         # All providers (claude and opencode) — the previous
         # `*/claude/*.md` made opencode transcripts invisible to
         # backfill and to the scheduled insights run.
         archives = sorted(base.glob("*/*/*.md"))
         done = 0
+        deferred = 0
         for md in archives:
             # Cheap filters first. _has_insights_section reads the whole file,
             # so a workspace-scoped run must not pay for every archive in the
@@ -2114,6 +2147,10 @@ async def backfill_insights_task(
                 done += 1
                 continue
 
+            if _archive_path_key(md, config.workspace_root) in claimed:
+                deferred += 1
+                continue
+
             jsonl_root = next(
                 (r for r, d in project_dirs if (d / f"{session_id}.jsonl").exists()),
                 None,
@@ -2124,15 +2161,16 @@ async def backfill_insights_task(
                 found.append((md, session_id, jsonl_root))
             elif jsonl_root is None and mode in {"both", "text"}:
                 found.append((md, session_id, None))
-        return found, len(archives), done
+        return found, len(archives), done, deferred
 
     if not base.exists():
         logger.info("Vault directory %s does not exist, skipping backfill", base)
         return stats
 
-    todo, discovered, already_done = await asyncio.to_thread(_discover)
+    todo, discovered, already_done, deferred = await asyncio.to_thread(_discover)
     stats["total_discovered"] = discovered
     stats["already_done"] = already_done
+    stats["deferred"] = deferred
 
     stats["eligible"] = len(todo)
     if limit > 0:
@@ -2185,7 +2223,32 @@ async def backfill_insights_task(
     ) -> str:
         async with sem:
             try:
-                insights_model = model_override or resolve_insights_model(config)
+                if _archive_path_key(archive_path, config.workspace_root) in (
+                    _unfinished_archive_paths(runtime_root, config.workspace_root)
+                ):
+                    return "deferred"
+                from ciao import provider_registry
+
+                chat_id = archive_path.parent.parent.name
+                archive_workspace = by_chat.get(chat_id, "")
+                provider = archive_path.parent.name
+                if not provider_registry.is_provider(provider):
+                    logger.warning(
+                        "Backfill skipped unknown archive provider %r in %s",
+                        provider,
+                        archive_path,
+                    )
+                    return "error"
+                provider_insights_models = (
+                    getattr(config, "provider_insights_models", {}) or {}
+                )
+                insights_model = (
+                    model_override
+                    or provider_insights_models.get(provider, "")
+                    or resolve_insights_model(
+                        config, archive_workspace or None, provider
+                    )
+                )
                 if jsonl_root is not None:
                     filtered = filter_session_jsonl(
                         config.workspace_root, session_id, agent_root=jsonl_root
@@ -2215,16 +2278,19 @@ async def backfill_insights_task(
                         workspace_root=config.workspace_root,
                         vault_root=config.vault_root,
                         proposal_vault_root=(
-                            config.workspace_vault_root(workspace)
-                            if workspace and config.workspace(workspace) is not None
+                            config.workspace_vault_root(archive_workspace)
+                            if archive_workspace
+                            and config.workspace(archive_workspace) is not None
                             else None
                         ),
                         guide_path=(
-                            guide_path(config.agent_root(workspace))
-                            if workspace and config.workspace(workspace) is not None
+                            guide_path(config.agent_root(archive_workspace))
+                            if archive_workspace
+                            and config.workspace(archive_workspace) is not None
                             else None
                         ),
                         trajectories_enabled=getattr(config, "trajectories_enabled", True),
+                        provider=provider,
                     )
                     if not _has_insights_section(archive_path):
                         from ciao.archive_jobs import SKIPPED
@@ -2244,7 +2310,7 @@ async def backfill_insights_task(
                         f"{body}"
                     )
                     effective_model, text_provider, note = _resolve_insights_call(
-                        config, insights_model
+                        config, insights_model, provider=provider
                     )
 
                     async def run_text_extract():
@@ -2328,6 +2394,8 @@ async def backfill_insights_task(
             stats["gated"] += 1
         elif result == "no_signal":
             stats["no_signal"] += 1
+        elif result == "deferred":
+            stats["deferred"] += 1
         else:
             stats["errors"] += 1
     _checked.save()

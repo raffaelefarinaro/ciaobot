@@ -488,30 +488,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     tracker.start("update_skills")
     asyncio.create_task(asyncio.to_thread(_skills_task))
 
-    # Fill in insights for archives that missed them (a failed model call at
-    # archive time, a budget or network error). Capped per run by
-    # `insights._BACKFILL_MAX`, so an aged vault is worked through over boots.
-    # Deliberately not a StartupTracker phase: the boot screen waits for every
-    # phase, and a backfill is up to that many model calls.
-    async def _backfill_task() -> None:
-        from ciao.insights import backfill_insights_task, format_backfill_summary
-
-        try:
-            async with job_runs.track(
-                "backfill_insights", "Insights backfill", category="system",
-            ) as run:
-                result = await backfill_insights_task(config)
-                run.extra.update(result)
-                summary = format_backfill_summary(result)
-                run.extra["summary"] = summary
-                if result["errors"]:
-                    run.status = "error"
-                    run.error = summary
-        except Exception:
-            logger.exception("Insights backfill failed")
-
-    asyncio.create_task(_backfill_task())
-
     # Initialize stores
     state = StateStore(
         config.state_path,
@@ -947,6 +923,33 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                 logger.exception("Schedule catch-up failed")
 
         asyncio.create_task(_run_catch_up())
+
+    # Fill in insights for archives that missed them (a failed model call at
+    # archive time, a budget or network error). Capped per run by
+    # `insights._BACKFILL_MAX`, so an aged vault is worked through over boots.
+    # Deliberately not a StartupTracker phase: the boot screen waits for every
+    # phase, and a backfill is up to that many model calls.
+    async def _backfill_task() -> None:
+        from ciao.insights import backfill_insights_task, format_backfill_summary
+
+        try:
+            async with job_runs.track(
+                "backfill_insights", "Insights backfill", category="system",
+            ) as run:
+                result = await backfill_insights_task(
+                    config,
+                    chat_workspaces=pcm.chat_workspaces(),
+                )
+                run.extra.update(result)
+                summary = format_backfill_summary(result)
+                run.extra["summary"] = summary
+                if result["errors"]:
+                    run.status = "error"
+                    run.error = summary
+        except Exception:
+            logger.exception("Insights backfill failed")
+
+    asyncio.create_task(_backfill_task())
 
     # ── Branch backup ────────────────────────────────────────
     # Backs up the same repo the sync flow targets (the repo containing the

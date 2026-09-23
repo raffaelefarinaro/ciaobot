@@ -267,7 +267,7 @@ The agent control plane runs inside `ciao/mcp_server.py` (the shared operation t
 
 **Internal command markers:** `CIAO_COMMAND_BEGIN`, `CIAO_COMMAND_INSTRUCTIONS`, and `CIAO_COMMAND_END` are reserved transcript markers used when Ciaobot expands a Claude-style slash command for a managed provider. They are not environment variables and should not be configured.
 
-**Optional direct-service keys:** none. Every provider owns its own authentication through its own CLI (`ciao auth <provider>`), so Settings → Models & providers has no API-key fields; Ciaobot consumes no model API key of its own.
+**Provider-owned credentials:** Claude Code also accepts `ANTHROPIC_API_KEY` from the process environment when OAuth is not used. Ciaobot only checks whether that key is present, never returns or stores its value, and exposes no API-key editor; opencode credentials remain owned by opencode.
 
 Workspace-specific integrations can still be set in `.env`, but the public `.env.example` does not ship private/work examples. Use user-owned credentials for each integration:
 
@@ -287,9 +287,11 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **Provider connections.** The chat providers card in Settings → Models &
 providers launches, verifies, and logs out Claude Code and opencode through
-their own CLIs; Ciaobot stores none of
-their credentials, and there are no API-key fields to fill in. Voice and Apple
-Intelligence are on-device and need no provider key.
+their own CLIs; Ciaobot stores none of their credentials, and there are no
+API-key fields to fill in. Claude Code may instead use an
+`ANTHROPIC_API_KEY` inherited from the process environment; Ciaobot reports only
+whether one is present. Voice and Apple Intelligence are on-device and need no
+provider key.
 
 **Reaching any other model.** Ciaobot talks to exactly two providers: Claude
 Code (Anthropic) and opencode (everything else). opencode is

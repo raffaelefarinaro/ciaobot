@@ -542,6 +542,13 @@ def test_resolve_insights_model_falls_back_without_workspace() -> None:
     assert insights.resolve_insights_model(config) == config.insights_model
 
 
+def test_resolve_insights_model_uses_provider_default_without_workspace() -> None:
+    config = _config()
+    config.insights_model_override = ""
+    config.provider_default_models = {"opencode": "provider/model"}
+    assert insights.resolve_insights_model(config, provider="opencode") == "provider/model"
+
+
 def test_resolve_insights_call_routes_qualified_runtime_provider() -> None:
     config = _config()
 
@@ -695,6 +702,7 @@ def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert result == {
         "total_discovered": 3,
         "already_done": 1,
+        "deferred": 0,
         "eligible": 2,
         "to_process": 2,
         "processed": 2,
@@ -718,6 +726,46 @@ def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     text_text = text_archive.read_text(encoding="utf-8")
     assert "## Session insights" in text_text
     assert "Text mode decisions" in text_text
+
+
+def test_backfill_defers_archive_owned_by_an_unfinished_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.archive_jobs import create_job
+
+    chats_dir = tmp_path / "vault" / "Logs" / "Chats" / "chat-owned" / "claude"
+    chats_dir.mkdir(parents=True)
+    archive = chats_dir / "owned-00000000-0000-0000-0000-000000000001.md"
+    archive.write_text("# Archived chat\n", encoding="utf-8")
+
+    runtime_root = tmp_path / "runtime"
+    create_job(
+        runtime_root,
+        chat_id="chat-owned",
+        archive_path=str(archive.relative_to(tmp_path)),
+    )
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    config = _config()
+    config.vault_root = tmp_path / "vault"
+    config.workspace_root = tmp_path
+    config.state_path = runtime_root / "state.json"
+
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        raise AssertionError("an owned archive must not be sent to the model")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    result = asyncio.run(
+        insights.backfill_insights_task(config, mode="both", concurrency=1)
+    )
+
+    assert result["eligible"] == 0
+    assert result["to_process"] == 0
+    assert result["deferred"] == 1
+    assert insights.format_backfill_summary(result) == (
+        "1 archive deferred to active post-processing."
+    )
+    assert "## Session insights" not in archive.read_text(encoding="utf-8")
 
 
 # ── Input budget and non-retryable overflow (issue #248) ──────────────────
@@ -1731,8 +1779,11 @@ def test_backfill_discovers_an_opencode_archive(
     config.vault_root = tmp_path / "vault"
     config.workspace_root = tmp_path / "ws"
     config.insights_model = "deepseek-v4-flash:0731-cloud"
+    config.provider_insights_models = {"opencode": "provider/insights-model"}
+    calls: list[dict[str, object]] = []
 
     async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        calls.append(kwargs)
         return "## Decisions\n- d\n"
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
@@ -1742,6 +1793,62 @@ def test_backfill_discovers_an_opencode_archive(
 
     assert result["eligible"] == 1, "a ses_ id is a session id too"
     assert "## Session insights" in archive.read_text(encoding="utf-8")
+    assert calls[0]["model"] == "provider/insights-model"
+    assert calls[0]["provider"] == "opencode"
+
+
+def test_backfill_routes_each_archive_by_provider_and_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.config import WorkspaceConfig
+
+    chats = tmp_path / "vault" / "Logs" / "Chats"
+    archives: dict[str, Path] = {}
+    for chat_id, provider in (("chat-claude", "claude"), ("chat-opencode", "opencode")):
+        directory = chats / chat_id / provider
+        directory.mkdir(parents=True)
+        session = f"ses_{chat_id.replace('-', '')}"
+        archive = directory / f"2026-08-31T00-00-00Z-{session}.md"
+        archive.write_text("# Archived chat\n", encoding="utf-8")
+        archives[provider] = archive
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    config = _config()
+    config.vault_root = tmp_path / "vault"
+    config.workspace_root = tmp_path / "ws"
+    config.state_path = tmp_path / "runtime" / "state.json"
+    config.workspaces = {
+        "work": WorkspaceConfig(name="work", vault_root=str(tmp_path / "vault"))
+    }
+    config.provider_default_models = {
+        "claude": "claude/work-model",
+        "opencode": "opencode/work-model",
+    }
+    calls: list[tuple[str, str]] = []
+
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        calls.append((str(kwargs["model"]), str(kwargs["provider"])))
+        return "## Decisions\n- d\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    result = asyncio.run(
+        insights.backfill_insights_task(
+            config,
+            mode="both",
+            concurrency=1,
+            chat_workspaces={
+                "chat-claude": "work",
+                "chat-opencode": "work",
+            },
+        )
+    )
+
+    assert result["success"] == 2
+    assert set(calls) == {
+        ("claude/work-model", "claude"),
+        ("opencode/work-model", "opencode"),
+    }
+    assert all("## Session insights" in path.read_text(encoding="utf-8") for path in archives.values())
 
 
 def test_backfill_sends_a_no_signal_archive_only_once(

@@ -817,6 +817,20 @@ def _claude_status(
             app_path=app_path,
             path_command=claude_path_hint(""),
         )
+    if env.get("ANTHROPIC_API_KEY", "").strip():
+        return _provider(
+            name="claude",
+            ok=True,
+            auth="api_key",
+            command=claude_auth_command(binary),
+            detail="ANTHROPIC_API_KEY is set.",
+            version=version,
+            account="Anthropic API",
+            protocol="Agent SDK ready",
+            skills=claude_skills,
+            mcps=claude_mcps,
+            cli_path=binary,
+        )
     auth_status = claude_auth_status(binary, env=env)
     if auth_status["logged_in"]:
         email = auth_status.get("email", "")
