@@ -654,6 +654,46 @@ describe('talk about it', () => {
     expect(act).not.toHaveBeenCalled()
     wrapper.unmount()
   })
+
+  it('swaps talk about it for a link back to the open chat, keeping the decision buttons', async () => {
+    // The toast is the only other way back into the chat, and it fades. The row
+    // still needs a decision, so review and dismiss stay where they were.
+    localStorage.removeItem('ciao:proposal-discuss-links')
+    apiGet.mockResolvedValue({ rows: [row({ workspace: 'work' })] })
+    const projects = useProjectStore()
+    projects.activeWorkspace = 'work'
+    projects.projects = [{
+      project_id: 'p-work', name: 'General', workspace: 'work', context: '',
+      created_at: '', order: 0, vault_folder: 'general', is_auto: true,
+    } as never]
+    apiPost.mockResolvedValue({ chat_id: 'chat-d', project_id: 'p-work', archived: false } as never)
+    vi.spyOn(projects, 'sendMessage').mockImplementation(() => true as never)
+    const switchChat = vi.spyOn(projects, 'switchChat').mockResolvedValue(undefined as never)
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    await wrapper
+      .findAll('.pr-actions button')
+      .find((b) => b.text() === 'talk about it')!
+      .trigger('click')
+    await flushPromises()
+
+    const labels = wrapper.findAll('.pr-actions button').map((b) => b.text())
+    expect(labels).toEqual(['review', 'dismiss', 'open chat'])
+    await wrapper
+      .findAll('.pr-actions button')
+      .find((b) => b.text() === 'open chat')!
+      .trigger('click')
+    await flushPromises()
+    expect(switchChat).toHaveBeenCalledWith('chat-d')
+
+    // Archiving the chat drops the link and brings the action back.
+    projects.chats.find((c) => c.chat_id === 'chat-d')!.archived = true
+    await flushPromises()
+    expect(wrapper.findAll('.pr-actions button').map((b) => b.text()))
+      .toEqual(['review', 'dismiss', 'talk about it'])
+    wrapper.unmount()
+  })
 })
 
 describe('workspace scoping', () => {

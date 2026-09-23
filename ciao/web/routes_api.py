@@ -7047,7 +7047,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         # sequentially; write-then-dismiss still holds per row.
                         promotion = await proposal_service._accept_project_row(config, row)
                     elif accept.action == "write_people_note":
-                        promotion = proposal_service._accept_people_row(config, row)
+                        promotion = await proposal_service._accept_people_row(config, row)
                     elif accept.action == "append_learnings":
                         promotion = proposal_service._accept_learnings_row(config, row)
                     else:
@@ -7542,7 +7542,7 @@ async def proposal_action(request: Request) -> JSONResponse:
                         status_code=409,
                     )
             elif accept.action == "write_people_note":
-                promoted = proposal_service._accept_people_row(config, promote_row)
+                promoted = await proposal_service._accept_people_row(config, promote_row)
                 if not promoted.ok:
                     return JSONResponse(
                         {"error": promoted.error or "could not write the note", "id": pid},

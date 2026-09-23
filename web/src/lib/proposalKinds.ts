@@ -101,15 +101,15 @@ export interface ProposalKindDescriptor {
 // fact out of argv for that reason all along; the dismissal gained the same
 // door in the CLI, and these are its main interactive callers.
 
-function peopleMergePrompt(row: ProposalRow): string {
+function peopleMergePrompt(row: ProposalRow, errorMsg: string): string {
   const target = row.target || '?'
   const where = `queued in the ${row.workspace} workspace`
   return (
-    `A \`[people ${target}]\` proposal is queued (${where}) but \`People/${target}.md\` already exists, so a direct accept correctly refused to overwrite it. Work in this chat only; do not delegate this helper task.\n\n` +
+    `A \`[people ${target}]\` proposal is queued (${where}) but the direct accept into the existing \`People/${target}.md\` refused: ${errorMsg}\n\nWork in this chat only; do not delegate this helper task.\n\n` +
     `Fact to merge: ${row.text}\n\n` +
     `Read \`People/${target}.md\` in the ${row.workspace} vault, merge this fact into it without duplicating anything already there (keep \`tags: [person]\`, add a sentence under the heading or appropriate section), and write it back.\n\n` +
     `After the note is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss --text-file <file> --promoted\` so it disappears from Review (the flag records the promotion; do not delete the bullet from the file directly — that skips the outcome log). ` +
-    `If the fact is already present verbatim, just dismiss the proposal. Leave other proposals untouched. Nothing is broken – this is the expected merge path for existing person notes.`
+    `If the note already covers the fact, run the same command without \`--promoted\`. Leave other proposals untouched. Nothing is broken – this is the expected merge path when the fold guards refuse.`
   )
 }
 
@@ -239,13 +239,16 @@ export const PROPOSAL_KINDS: Record<string, ProposalKindDescriptor> = {
     label: 'people',
     destination: (row) => `People/${row.target || '?'}.md`,
     consequence: (row) =>
-      `Added to the note about ${row.target || 'this person'}, creating it if there is none`,
+      `Merged into the note about ${row.target || 'this person'}, creating it if there is none`,
     canAccept: ALWAYS,
     fallback: {
       chatTitle: (row) => `Merge ${row.target || 'person'} fact`,
       toastDetail: (row) => `${row.target || 'Person'} fact — click to open the chat`,
       prompt: peopleMergePrompt,
-      when: (msg) => /already exists/i.test(msg),
+      // An existing note is folded by a model at accept time. A fold that
+      // changed nothing or tripped a guard is the merge path; a vault or
+      // naming error is a real error worth surfacing.
+      when: (msg) => /fold|appeared while accepting/i.test(msg),
     },
     discussLabel: () => 'a `people` proposal',
   },

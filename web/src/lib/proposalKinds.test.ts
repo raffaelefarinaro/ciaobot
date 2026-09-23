@@ -165,11 +165,12 @@ describe('rehomeMode', () => {
 
 describe('accept fallback', () => {
   it('only people narrows on the error message', () => {
-    // A people accept is create-only, so "already exists" is the merge path and
-    // anything else is a real error worth surfacing.
+    // An existing note is folded at accept time, so a refused fold is the
+    // merge path and anything else is a real error worth surfacing.
     const people = PROPOSAL_KINDS.people.fallback
     expect(people).not.toBeNull()
-    expect(people!.when('People/Mo.md already exists')).toBe(true)
+    expect(people!.when('the fold reported no changes to People/Mo.md')).toBe(true)
+    expect(people!.when('fold failed: TimeoutError')).toBe(true)
     expect(people!.when('permission denied')).toBe(false)
   })
 
@@ -279,7 +280,7 @@ describe('consequence', () => {
 
   it('names the person a people row would be filed under', () => {
     expect(consequenceFor({ kind: 'people', target: 'Mo' }))
-      .toBe('Added to the note about Mo, creating it if there is none')
+      .toBe('Merged into the note about Mo, creating it if there is none')
   })
 
   it('separates the two region kinds, which share one destination form', () => {
