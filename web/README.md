@@ -87,7 +87,7 @@ iOS Safari suspends JS and WebSockets when the PWA is backgrounded. On resume, `
 
 CSS custom properties live in `App.vue` as `:root` declarations. The system is opinionated:
 
-- **Color**: Deep blue-violet surfaces (`--bg #1a1a2e`, `--bg2 #1f2240`, `--bg3 #2a2e54`, `--bg-elev #23264a`), pink accent (`--accent #ff4d6d`, `--accent-strong #ff2e54`), violet secondary (`--accent2 #6a47b8`). A clean light theme is supported via `.theme-light` overrides.
+- **Color**: Deep blue-violet surfaces (`--bg #1a1a2e`, `--bg2 #1f2240`, `--bg3 #2a2e54`, `--bg-elev #23264a`), pink accent (`--accent #ff4d6d`, `--accent-strong #ff2e54`, labels on accent fills use `--on-accent #1a1a2e`), violet secondary (`--accent2 #6a47b8`). A clean light theme is supported via `.theme-light` overrides.
 - **Type**: Monospace stack (SF Mono, Fira Code, Cascadia Code). Scale: 11/12/13/15px (`--text-xs`, `--text-sm`, `--text-base`, `--text-lg`), dynamically adjusted via the client-side `--font-scale` multiplier (from 0.8x to 1.5x, configured under Settings > Appearance).
 - **Geometry**: 10/6/14px radii (`--radius`, `--radius-sm`, `--radius-lg`). Spacing scale `--space-1` through `--space-6`.
 - **Motion**: `--ease: cubic-bezier(0.2, 0.8, 0.2, 1)`.

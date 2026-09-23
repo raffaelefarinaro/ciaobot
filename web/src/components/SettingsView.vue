@@ -4471,7 +4471,7 @@ a.btn-secondary {
 }
 .toggle-btn.active {
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
 }
 .toggle-btn:disabled {
   opacity: 0.6;

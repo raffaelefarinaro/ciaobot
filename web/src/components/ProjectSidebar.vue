@@ -3479,8 +3479,8 @@ async function confirmDeleteChat(chatId: string) {
 }
 .guide-card-btn:disabled { opacity: 0.5; cursor: default; }
 .guide-card-btn:hover:not(:disabled) { background: var(--bg3); color: var(--fg); }
-.guide-card-btn--primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.guide-card-btn--primary:hover:not(:disabled) { filter: brightness(1.08); color: #fff; }
+.guide-card-btn--primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.guide-card-btn--primary:hover:not(:disabled) { filter: brightness(1.08); color: var(--on-accent); }
 .guide-card-error { color: var(--warning); font-size: var(--text-xs); }
 .guide-card-hint { color: var(--fg3); font-size: var(--text-xs); }
 .guide-card-regions { display: flex; flex-direction: column; gap: 10px; }

@@ -5,6 +5,7 @@ description: A calm, terminal-inspired control surface for a personal AI assista
 colors:
   primary: "#ff4d6d"
   primary-strong: "#ff2e54"
+  on-primary: "#1a1a2e"
   secondary: "#6a47b8"
   background: "#1a1a2e"
   surface: "#1f2240"
@@ -20,6 +21,7 @@ colors:
   error: "#f44336"
   light-primary: "#d81b60"
   light-primary-strong: "#b00d46"
+  light-on-primary: "#ffffff"
   light-secondary: "#512da8"
   light-background: "#f4f4fa"
   light-surface: "#ffffff"
@@ -68,7 +70,7 @@ spacing:
 components:
   button-primary:
     backgroundColor: "{colors.primary}"
-    textColor: "#ffffff"
+    textColor: "{colors.on-primary}"
     typography: "{typography.body}"
     rounded: "{rounded.md}"
     padding: 10px
@@ -147,6 +149,8 @@ the PWA automatically when the engine becomes reachable.
 Dark mode is the primary visual expression. It uses layered indigo surfaces instead of neutral black, keeping long sessions comfortable while preserving clear hierarchy.
 
 - **Primary pink (`#ff4d6d`):** The brand accent and primary-action color. Use it for the current location, focus, progress, and the single most important action in a region. Workspaces may override this with a saved accent preset (`pink`, `cyan`, `amber`, `emerald`, `violet`); canvas and surface tokens stay fixed.
+- **On-primary (`--on-accent`, `#1a1a2e` dark / `#ffffff` light):** The label colour on any filled accent surface: primary buttons, active pills and toggles, accent badges. Never hard-code white on the accent. The dark accents are bright, so white on pink measures 3.21:1 (3.64:1 on hover) and on the cyan/amber/emerald presets about 2:1; the indigo canvas colour clears 4.5:1 on every dark accent and its hover shade (pink 5.31 / 4.69). Light accents are deep enough for white (pink 4.95 / 7.02).
+- **Accent presets:** Each preset pairs `--accent` with a hover shade `--accent-strong`, and both must keep `--on-accent` at WCAG AA. Dark: pink `#ff4d6d`/`#ff2e54`, cyan `#38bdf8`/`#0ea5e9`, amber `#fb923c`/`#ea580c`, emerald `#34d399`/`#059669`, violet `#a78bfa`/`#9670f7`. Light: pink `#d81b60`/`#b00d46`, cyan `#0369a1`/`#075985`, amber `#c2410c`/`#9a3412`, emerald `#047857`/`#065f46`, violet `#7c3aed`/`#6d28d9`. The light shades also keep accent-coloured text at AA on white.
 - **Violet (`#6a47b8`):** A secondary accent for selected filters, contextual information, and supporting distinctions. It must not compete with the primary action.
 - **Background (`#1a1a2e`):** The deepest application canvas.
 - **Surfaces (`#1f2240`, `#23264a`, `#2a2e54`):** Cards, elevated controls, hover, and pressed states. Prefer tonal separation and borders over large shadows.
