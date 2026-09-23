@@ -126,7 +126,7 @@ Use `ciao vault-index` after larger vault edits. Use `ciao vault-search` to sear
 
 Runtime schedules live in `.runtime/schedules.json`.
 
-System schedules are seeded by the package and are normally read-only in the UI. User schedules can run normal chat prompts against a target workspace/project/chat and can inherit that target's provider and model.
+System schedules are seeded by the package and are normally read-only in the UI. User schedules can run normal chat prompts against a target workspace/project/chat and can inherit that target's provider and model. Settings → Automations also owns the **Automatic session insights** privacy switch; turning it off stops model processing for new and archived chats while leaving the explicit one-time backfill action available.
 
 Important fields:
 

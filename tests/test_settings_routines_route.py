@@ -56,6 +56,7 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     data = client.get("/api/settings/routines").json()
     # Automatic resolves to the workspace's default model.
     assert data["insights_model_effective"] == config.claude_default_model
+    assert data["insights_enabled"] is True
     # The Claude model list is the vocabulary the selectors offer.
     assert data["model_options"]["anthropic"] == ["opus", "sonnet", "haiku", "fable"]
     assert data["backends"] == {"anthropic": True}
@@ -116,6 +117,29 @@ def test_patch_applies_to_live_config_and_persists(tmp_path):
     # Persisted: a fresh store sees the values.
     fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
     assert fresh.settings.insights_model == "haiku"
+
+
+def test_patch_toggles_insights_enabled(tmp_path):
+    client, config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"insights_enabled": False},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["insights_enabled"] is False
+    assert config.insights_enabled is False
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.settings.insights_enabled is False
+
+
+def test_patch_rejects_non_boolean_insights_enabled(tmp_path):
+    client, _config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"insights_enabled": "false"},
+    )
+    assert resp.status_code == 400
 
 
 def test_patch_applies_provider_default_models(tmp_path):

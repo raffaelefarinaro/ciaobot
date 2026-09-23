@@ -510,6 +510,7 @@ class CiaoConfig:
     # it into ``.runtime/workspaces.json`` once and then ignores it.
     legacy_workspaces_env: str = field(default="", repr=False)
     legacy_gws_profile: str = field(default="", repr=False)
+    legacy_insights_disabled: bool | None = field(default=None, repr=False)
     claude_mode: BridgeMode = "auto"
     # Per-provider default execution (permission) mode for new chats, set from
     # the PWA Settings → Models & providers tab (runtime settings store). A missing
@@ -538,6 +539,7 @@ class CiaoConfig:
     # ``scripts/backfill_insights.py``). Live archives use
     # :func:`ciao.insights.resolve_insights_model` instead.
     insights_model: str = "sonnet"
+    insights_enabled: bool = True
     # Operator override for the insights model, set from the PWA Settings →
     # Models tab (runtime settings store).
     # Empty = automatic routing: the workspace's sonnet-tier model.
@@ -1692,6 +1694,15 @@ class CiaoConfig:
         if vault_mode not in {"existing", "scratch"}:
             vault_mode = "scratch"
 
+        legacy_insights_raw = str(
+            source.get("CIAO_INSIGHTS_DISABLED", "") or ""
+        ).strip().lower()
+        legacy_insights_disabled = (
+            None
+            if not legacy_insights_raw
+            else legacy_insights_raw not in {"0", "false", "no", "off"}
+        )
+
         return cls(
             pwa_auth_token=pwa_auth_token,
             workspace_root=workspace_root,
@@ -1709,6 +1720,7 @@ class CiaoConfig:
             workspaces=workspaces,
             legacy_workspaces_env=str(source.get("CIAO_WORKSPACES", "") or "").strip(),
             legacy_gws_profile=str(source.get("GWS_PROFILE", "") or "").strip(),
+            legacy_insights_disabled=legacy_insights_disabled,
         )
 
 

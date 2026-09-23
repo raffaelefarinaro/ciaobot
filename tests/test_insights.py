@@ -5,9 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.testclient import TestClient
 
 from ciao import insights, native_sidecar
 
@@ -726,6 +730,157 @@ def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     text_text = text_archive.read_text(encoding="utf-8")
     assert "## Session insights" in text_text
     assert "Text mode decisions" in text_text
+
+
+def test_backfill_respects_disabled_insights_unless_forced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chats_dir = tmp_path / "vault" / "Logs" / "Chats" / "chat-private" / "claude"
+    chats_dir.mkdir(parents=True)
+    archive = chats_dir / "private-00000000-0000-0000-0000-000000000001.md"
+    archive.write_text("# Private archived chat\n", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    config = _config()
+    config.vault_root = tmp_path / "vault"
+    config.workspace_root = tmp_path
+    config.state_path = tmp_path / "runtime" / "state.json"
+    config.insights_enabled = False
+    calls: list[str] = []
+
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        calls.append(user_prompt)
+        return "## Decisions\n- explicit run\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    disabled = asyncio.run(
+        insights.backfill_insights_task(config, mode="both", concurrency=1)
+    )
+    assert disabled["processed"] == 0
+    assert calls == []
+    assert "## Session insights" not in archive.read_text(encoding="utf-8")
+
+    forced = asyncio.run(
+        insights.backfill_insights_task(
+            config,
+            mode="both",
+            concurrency=1,
+            manual=True,
+            force=True,
+        )
+    )
+    assert forced["success"] == 1
+    assert len(calls) == 1
+    assert "explicit run" in archive.read_text(encoding="utf-8")
+
+
+async def test_backfill_coordinator_serializes_whole_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chats_dir = tmp_path / "vault" / "Logs" / "Chats" / "chat-shared" / "claude"
+    chats_dir.mkdir(parents=True)
+    archive = chats_dir / "shared-00000000-0000-0000-0000-000000000001.md"
+    archive.write_text("# Archived chat\n", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    config = _config()
+    config.vault_root = tmp_path / "vault"
+    config.workspace_root = tmp_path
+    config.state_path = tmp_path / "runtime" / "state.json"
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    calls: list[str] = []
+
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        model = str(kwargs["model"])
+        calls.append(model)
+        if model == "first-model":
+            first_started.set()
+            await release_first.wait()
+        return f"## Decisions\n- {model}\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    coordinator = insights.BackfillCoordinator()
+    first = coordinator.submit(
+        lambda: insights.backfill_insights_task(
+            config,
+            mode="both",
+            concurrency=1,
+            model_override="first-model",
+        )
+    )
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    second = coordinator.submit(
+        lambda: insights.backfill_insights_task(
+            config,
+            mode="both",
+            concurrency=1,
+            model_override="second-model",
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert calls == ["first-model"]
+    release_first.set()
+    await asyncio.gather(first, second)
+
+    assert calls == ["first-model"]
+    assert archive.read_text(encoding="utf-8").count("## Session insights") == 1
+
+
+def test_backfill_route_rejects_disabled_run() -> None:
+    from ciao.web.routes_api import trigger_backfill_insights
+
+    app = Starlette(
+        routes=[
+            Route(
+                "/api/automation/backfill-insights",
+                trigger_backfill_insights,
+                methods=["POST"],
+            )
+        ]
+    )
+    app.state.config = SimpleNamespace(insights_enabled=False)
+    response = TestClient(app).post("/api/automation/backfill-insights", json={})
+
+    assert response.status_code == 409
+
+
+def test_backfill_route_queues_forced_run() -> None:
+    from ciao.web.routes_api import trigger_backfill_insights
+
+    class Coordinator:
+        def __init__(self) -> None:
+            self.run = None
+
+        def submit(self, run):
+            self.run = run
+            return SimpleNamespace()
+
+    coordinator = Coordinator()
+    app = Starlette(
+        routes=[
+            Route(
+                "/api/automation/backfill-insights",
+                trigger_backfill_insights,
+                methods=["POST"],
+            )
+        ]
+    )
+    app.state.config = SimpleNamespace(insights_enabled=False)
+    app.state.backfill_coordinator = coordinator
+    app.state.project_chat_manager = SimpleNamespace(
+        chat_workspaces=lambda: {"chat-1": "personal"}
+    )
+
+    response = TestClient(app).post(
+        "/api/automation/backfill-insights",
+        json={"force": True},
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {"status": "queued", "model": "", "forced": True}
+    assert coordinator.run is not None
 
 
 def test_backfill_defers_archive_owned_by_an_unfinished_job(

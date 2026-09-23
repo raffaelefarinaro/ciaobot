@@ -135,17 +135,19 @@ def test_track_sync_records(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("bootstrap", "active", "expected_calls"),
+    ("bootstrap", "insights_enabled", "active", "expected_calls"),
     [
-        (False, True, 1),
-        (False, False, 0),
-        (True, True, 0),
+        (False, True, True, 1),
+        (False, True, False, 0),
+        (False, False, True, 0),
+        (True, True, True, 0),
     ],
 )
 async def test_startup_backfill_runs_only_on_a_configured_host(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     bootstrap: bool,
+    insights_enabled: bool,
     active: bool,
     expected_calls: int,
 ) -> None:
@@ -159,7 +161,10 @@ async def test_startup_backfill_runs_only_on_a_configured_host(
 
     monkeypatch.setattr("ciao.insights.backfill_insights_task", fake_backfill)
     jr.configure(tmp_path)
-    config = SimpleNamespace(bootstrap_mode=bootstrap)
+    config = SimpleNamespace(
+        bootstrap_mode=bootstrap,
+        insights_enabled=insights_enabled,
+    )
     pcm = SimpleNamespace(chat_workspaces=lambda: {"chat-1": "personal"})
     node_state = SimpleNamespace(is_active=lambda: active)
 

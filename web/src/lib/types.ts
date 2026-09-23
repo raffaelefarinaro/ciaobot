@@ -614,6 +614,7 @@ export interface ModelsResponse {
 export interface RoutineSettings {
   // Overrides as stored; empty string = automatic default.
   insights_model: string
+  insights_enabled?: boolean
 
   critique_models: string
   // Per-provider default model for new chats; a missing entry = the provider's

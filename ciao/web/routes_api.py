@@ -4403,7 +4403,6 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
     times out on slow local backends). The stored Settings → Models choice is
     left alone.
     """
-    import asyncio
     from ciao.job_runs import track
     from ciao.insights import backfill_insights_task, format_backfill_summary
 
@@ -4412,8 +4411,19 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:  # noqa: BLE001 — empty body means "use the configured model"
         body = {}
-    model = (body or {}).get("model")
+    body = body if isinstance(body, dict) else {}
+    model = body.get("model")
     model = model.strip() if isinstance(model, str) else ""
+    force = body.get("force") is True
+    if not getattr(config, "insights_enabled", True) and not force:
+        return JSONResponse(
+            {"error": "session insights are disabled in Settings"},
+            status_code=409,
+        )
+    coordinator = getattr(request.app.state, "backfill_coordinator", None)
+    if coordinator is None:
+        return JSONResponse({"error": "backfill coordinator unavailable"}, status_code=503)
+    chat_workspaces = request.app.state.project_chat_manager.chat_workspaces()
 
     async def _run_backfill():
         async with track(
@@ -4425,19 +4435,25 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
                 mode="both",
                 model_override=model,
                 manual=True,
-                chat_workspaces=request.app.state.project_chat_manager.chat_workspaces(),
+                force=force,
+                chat_workspaces=chat_workspaces,
             )
             handle.extra.update(result)
             summary = format_backfill_summary(result)
             handle.extra["summary"] = summary
             if model:
                 handle.extra["model_override"] = model
+            if force:
+                handle.extra["forced"] = True
             if result["errors"]:
                 handle.status = "error"
                 handle.error = summary
 
-    asyncio.create_task(_run_backfill())
-    return JSONResponse({"status": "started", "model": model}, status_code=202)
+    coordinator.submit(_run_backfill)
+    return JSONResponse(
+        {"status": "queued", "model": model, "forced": force},
+        status_code=202,
+    )
 
 
 async def create_schedule(request: Request) -> JSONResponse:
@@ -4816,6 +4832,7 @@ def _routines_payload(config, app_settings) -> dict:
     return {
         # Overrides as stored ("" = automatic default).
         "insights_model": s.insights_model,
+        "insights_enabled": config.insights_enabled,
 
         "critique_models": s.critique_models,
         # Per-provider default model for new chats, as stored (missing =

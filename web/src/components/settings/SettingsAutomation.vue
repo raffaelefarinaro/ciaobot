@@ -15,6 +15,25 @@
       </div>
     </div>
 
+    <div v-if="routines" class="insights-control">
+      <div class="insights-control-copy">
+        <span class="insights-control-title">Automatic session insights</span>
+        <span class="hint">
+          Off stops model processing for new and archived chats. The run action below remains an explicit one-time choice.
+        </span>
+      </div>
+      <button
+        class="btn-small insights-toggle"
+        type="button"
+        :aria-pressed="insightsEnabled"
+        :aria-label="`Toggle automatic session insights (currently ${insightsEnabled ? 'on' : 'off'})`"
+        :disabled="routinesSaving"
+        @click="toggleInsights"
+      >
+        {{ insightsEnabled ? 'On' : 'Off' }}
+      </button>
+    </div>
+
     <div v-if="!automationLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
     <p v-else-if="automationError" class="hint hint--warn">{{ automationError }}</p>
     <template v-else-if="automationItems">
@@ -140,6 +159,8 @@ const props = defineProps<{
   // Model routing table, so a model-backed job that keeps failing can be
   // retried with a different model without leaving the page.
   routines: RoutineSettings | null
+  routinesSaving: boolean
+  saveRoutines: (patch: Record<string, unknown>) => Promise<void>
   // Per-provider model lists, from /api/models.
   providerModels: Record<string, string[]> | undefined
   providerLabels: Record<string, string>
@@ -179,6 +200,11 @@ const retryModelOptions = computed(() =>
 const configuredInsightsModel = computed(
   () => props.routines?.insights_model_effective || '',
 )
+const insightsEnabled = computed(() => props.routines?.insights_enabled === true)
+
+async function toggleInsights() {
+  await props.saveRoutines({ insights_enabled: !insightsEnabled.value })
+}
 
 const expandedAutomations = ref<Record<string, boolean>>({})
 function toggle(job: string) {
@@ -231,11 +257,14 @@ async function runJob(item: AutomationProcess, model: string) {
   runningJobs.value[item.job] = true
   try {
     if (item.job === 'insights') {
-      await api.post('/api/automation/backfill-insights', model ? { model } : {})
+      const body: { model?: string; force?: boolean } = {}
+      if (model) body.model = model
+      if (!insightsEnabled.value) body.force = true
+      await api.post('/api/automation/backfill-insights', body)
+      const modelText = model ? ` using ${model}` : ''
+      const forcedText = body.force ? ' once while automatic insights are off' : ''
       props.notifySaved(
-        model
-          ? `Running session insights over every archive missing them, using ${model}.`
-          : 'Running session insights over every archive missing them.',
+        `Running session insights over every archive missing them${modelText}${forcedText}.`,
         'Automations',
       )
       setTimeout(props.fetchAutomation, 2000)
@@ -301,6 +330,41 @@ async function runJob(item: AutomationProcess, model: string) {
 .loading {
   color: var(--fg2);
   font-size: var(--text-base);
+}
+
+.insights-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.insights-control-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.insights-control-title {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.insights-control .hint {
+  margin: 0;
+  max-width: 72ch;
+}
+.insights-toggle {
+  min-width: 64px;
+  min-height: var(--touch);
+  flex: 0 0 auto;
+}
+.insights-toggle[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--on-accent, var(--fg));
+  background: var(--accent);
 }
 
 .automation-headline {
@@ -370,5 +434,15 @@ async function runJob(item: AutomationProcess, model: string) {
 
 .automation-settled[open] > summary {
   margin-bottom: var(--space-3);
+}
+
+@media (max-width: 600px) {
+  .insights-control {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .insights-toggle {
+    width: 100%;
+  }
 }
 </style>

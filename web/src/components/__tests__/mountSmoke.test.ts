@@ -19,6 +19,7 @@ import { api } from '../../lib/api'
 vi.mock('../../lib/api', () => {
   let routineSettings = {
     insights_model: '',
+    insights_enabled: true,
 
     critique_models: '',
     insights_model_effective: 'haiku',
@@ -277,7 +278,7 @@ vi.mock('../../lib/api', () => {
     return Promise.resolve([])
   })
   const post = vi.fn(() => Promise.resolve({}))
-  const patch = vi.fn((path: string, body: Record<string, string>) => {
+  const patch = vi.fn((path: string, body: Record<string, unknown>) => {
     if (path === '/api/settings/routines') {
       routineSettings = { ...routineSettings, ...body }
       return Promise.resolve(routineSettings)

@@ -262,7 +262,11 @@ def _ensure_tool_dirs_on_path() -> None:
 async def _run_startup_backfill(
     config: CiaoConfig, pcm, node_state_manager
 ) -> None:
-    if getattr(config, "bootstrap_mode", False) or not node_state_manager.is_active():
+    if (
+        getattr(config, "bootstrap_mode", False)
+        or not getattr(config, "insights_enabled", True)
+        or not node_state_manager.is_active()
+    ):
         return
     from ciao import job_runs
     from ciao.insights import backfill_insights_task, format_backfill_summary
@@ -332,6 +336,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     from ciao.app_settings import AppSettingsStore
 
     app_settings = AppSettingsStore(config.state_path.parent / "app_settings.json")
+    app_settings.migrate_legacy_insights_enabled(
+        getattr(config, "legacy_insights_disabled", None)
+    )
     app_settings.apply_to_config(config)
 
     # Pin the job-run recorder to the same .runtime the config uses, then
@@ -679,7 +686,10 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     control_plane = None
     if not getattr(config, "bootstrap_mode", False):
         mcp_service = CiaoMcpService(config)
+    from ciao.insights import BackfillCoordinator
+
     app = create_app(config, app_settings=app_settings, mcp_service=mcp_service)
+    app.state.backfill_coordinator = BackfillCoordinator()
     app.state.startup_tracker = tracker
     app.state.node_state_manager = node_state_manager
     # Stamp the target project's name on schedules that only recorded its id,
@@ -956,7 +966,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # `insights._BACKFILL_MAX`, so an aged vault is worked through over boots.
     # Deliberately not a StartupTracker phase: the boot screen waits for every
     # phase, and a backfill is up to that many model calls.
-    asyncio.create_task(_run_startup_backfill(config, pcm, node_state_manager))
+    app.state.backfill_coordinator.submit(
+        lambda: _run_startup_backfill(config, pcm, node_state_manager)
+    )
 
     # ── Branch backup ────────────────────────────────────────
     # Backs up the same repo the sync flow targets (the repo containing the

@@ -67,6 +67,7 @@ _NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
     "provider_insights_models": _clean_provider_map,
     "provider_default_modes": _clean_default_modes,
 }
+_BOOLEAN_FIELDS = {"insights_enabled"}
 
 
 def _default_model_settings(config: object, descriptor: object) -> Any:
@@ -93,6 +94,7 @@ class AppSettings:
     provider.
     """
 
+    insights_enabled: bool = True
     # Model used by post-archive session-insights extraction.
     insights_model: str = ""
 
@@ -146,11 +148,15 @@ class AppSettingsStore:
             field.name
             for field in fields(AppSettings)
             if field.name not in _NESTED_CLEANERS
+            and field.name not in _BOOLEAN_FIELDS
         }
         settings = AppSettings()
         for key, value in raw.items():
             if key in string_fields and isinstance(value, str):
                 setattr(settings, key, value.strip())
+        for key in _BOOLEAN_FIELDS:
+            if isinstance(raw.get(key), bool):
+                setattr(settings, key, raw[key])
         for key, cleaner in _NESTED_CLEANERS.items():
             cleaned = cleaner(raw.get(key))
             if cleaned:
@@ -160,7 +166,7 @@ class AppSettingsStore:
     def _save(self) -> None:
         payload = {}
         for key, value in asdict(self.settings).items():
-            if value:
+            if key in _BOOLEAN_FIELDS or value:
                 payload[key] = value
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(
@@ -176,6 +182,11 @@ class AppSettingsStore:
         known = {f.name for f in fields(AppSettings)}
         for key, value in changes.items():
             if key not in known:
+                continue
+            if key in _BOOLEAN_FIELDS:
+                if not isinstance(value, bool):
+                    raise ValueError(f"{key} must be a boolean")
+                setattr(self.settings, key, value)
                 continue
             if key in _NESTED_CLEANERS:
                 if not isinstance(value, dict):
@@ -204,6 +215,25 @@ class AppSettingsStore:
         self._save()
         return self.settings
 
+    def migrate_legacy_insights_enabled(
+        self, legacy_disabled: bool | None
+    ) -> bool | None:
+        if legacy_disabled is None:
+            return None
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, ValueError):
+            raw = {}
+        if isinstance(raw, dict) and isinstance(raw.get("insights_enabled"), bool):
+            return None
+        self.settings.insights_enabled = not legacy_disabled
+        self._save()
+        logger.warning(
+            "CIAO_INSIGHTS_DISABLED is no longer read; migrated it to Settings → "
+            "Automations once. Remove it from .env."
+        )
+        return self.settings.insights_enabled
+
     def apply_to_config(self, config) -> None:
         """Overlay settings onto the live ``CiaoConfig`` object.
 
@@ -228,6 +258,7 @@ class AppSettingsStore:
                 )
         d = self._defaults
         s = self.settings
+        config.insights_enabled = s.insights_enabled
         config.insights_model_override = s.insights_model or d["insights_model_override"]
         config.tts_local_voice = s.tts_local_voice or d["tts_local_voice"]
         config.critique_models = s.critique_models or d["critique_models"]

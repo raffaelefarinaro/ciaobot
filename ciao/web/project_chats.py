@@ -4143,17 +4143,31 @@ class ProjectChatManager:
                 self._archive_jobs[job.chat_id] = job
                 self._overlay_job_postprocess(job.chat_id, job)
                 continue
-            if not job.resumable():
+            resumable = job.resumable()
+            if not getattr(self._config, "insights_enabled", True):
+                resumable = [
+                    name
+                    for name in resumable
+                    if name not in (
+                        "insights",
+                        "project_doc_update",
+                        "memory_proposals",
+                    )
+                ]
+            if not resumable:
+                self._archive_jobs[job.chat_id] = job
                 self._overlay_job_postprocess(job.chat_id, job)
                 continue
             self._archive_jobs[job.chat_id] = job
-            self._begin_postprocess(job.chat_id, list(job.resumable()))
+            self._begin_postprocess(job.chat_id, list(resumable))
 
             async def _guarded(
-                job: Any = job, inputs: dict[str, Any] = inputs
+                job: Any = job,
+                inputs: dict[str, Any] = inputs,
+                stages: list[str] = list(resumable),
             ) -> None:
                 async with semaphore:
-                    await self._run_job(job.chat_id, job, inputs)
+                    await self._run_job(job.chat_id, job, inputs, stages=stages)
 
             task = asyncio.create_task(
                 self._tracked_postprocess(job.chat_id, _guarded())
@@ -4188,7 +4202,9 @@ class ProjectChatManager:
             and outcome.filtered_jsonl is not None
             and outcome.session_id != ""
         )
-        run_insights = bool(outcome.filtered_jsonl)
+        run_insights = bool(
+            getattr(config, "insights_enabled", True) and outcome.filtered_jsonl
+        )
         chat = self._chats.get(chat_id)
         if chat is None:
             # Nothing durable to key a manifest on; index the archive below so

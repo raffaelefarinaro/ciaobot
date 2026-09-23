@@ -902,6 +902,7 @@ async def extract_and_append(
     provider: str = "claude",
     project_doc_path: str = "",
     text_mode: bool = False,
+    force: bool = False,
     guide_path: Path | None = None,
 ) -> Any:
     """Run the post-archive pipeline for one archive (stage-resumable).
@@ -947,9 +948,21 @@ async def extract_and_append(
         provider=provider,
         project_doc_path=project_doc_path,
         text_mode=text_mode,
+        force=force,
         guide_path=guide_path,
     )
-    job.inputs = {k: v for k, v in inputs.items() if k not in ("guide_path", "workspace_root", "vault_root", "proposal_vault_root")}
+    job.inputs = {
+        key: value
+        for key, value in inputs.items()
+        if key
+        not in (
+            "force",
+            "guide_path",
+            "workspace_root",
+            "vault_root",
+            "proposal_vault_root",
+        )
+    }
     await run_archive_pipeline(job, inputs)
     return job
 
@@ -970,6 +983,7 @@ def _pipeline_inputs(
     provider: str,
     project_doc_path: str,
     text_mode: bool,
+    force: bool,
     guide_path: Path | None,
 ) -> dict[str, Any]:
     """The resolved per-run inputs a stage needs, frozen once per invocation.
@@ -995,6 +1009,7 @@ def _pipeline_inputs(
         "provider": provider,
         "project_doc_path": project_doc_path,
         "text_mode": text_mode,
+        "force": force,
         "guide_path": guide_path,
     }
 
@@ -1079,6 +1094,14 @@ async def run_archive_pipeline(
 
     job.started = True
     config = inputs["config"]
+    if not getattr(config, "insights_enabled", True) and not inputs.get("force"):
+        order = [
+            name
+            for name in order
+            if name not in ("insights", "project_doc_update", "memory_proposals")
+        ]
+        if not order:
+            return job
     model = str(inputs.get("model") or "")
     provider = str(inputs.get("provider") or "claude")
     filtered_jsonl = str(inputs.get("filtered_jsonl") or "")
@@ -1521,6 +1544,8 @@ async def retry_insights_for_chat(
     wrote one (the pipeline's trajectory step runs in a ``finally``), and the
     insights section this retry appends is what memory curation reads.
     """
+    if not getattr(config, "insights_enabled", True):
+        return False
     effective_model = model or resolve_insights_model(config, workspace or None, provider)
     await extract_and_append(
         archive_path=archive_path,
@@ -1929,6 +1954,24 @@ def _unfinished_archive_paths(
     return claimed
 
 
+class BackfillCoordinator:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    def submit(
+        self, run: Callable[[], Awaitable[Any]]
+    ) -> asyncio.Task[None]:
+        async def _serialized() -> None:
+            async with self._lock:
+                await run()
+
+        task = asyncio.create_task(_serialized())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+
 def _empty_backfill_stats() -> dict[str, int]:
     return {
         "total_discovered": 0,
@@ -2061,6 +2104,7 @@ async def backfill_insights_task(
     workspace: str = "",
     model_override: str = "",
     manual: bool = False,
+    force: bool = False,
     agent_root: Path | None = None,
     chat_workspaces: Mapping[str, str] | None = None,
 ) -> dict[str, int]:
@@ -2070,7 +2114,8 @@ async def backfill_insights_task(
     configured one, without changing the stored setting — the retry path when
     the configured insights model keeps failing. *manual* marks an explicit
     operator run, which may recover blocked or attempt-exhausted manifests while
-    still yielding to live or automatically resumable work.
+    still yielding to live or automatically resumable work. *force* permits one
+    explicit manual run while automatic session insights are disabled.
 
     *chat_workspaces* maps chat id to workspace, and is required to scope a
     run with *workspace*: an archive's path names the chat that wrote it, not
@@ -2083,6 +2128,9 @@ async def backfill_insights_task(
     single root finds no blob for chats that ran anywhere else.
     """
     stats = _empty_backfill_stats()
+    manual = manual or force
+    if not getattr(config, "insights_enabled", True) and not force:
+        return stats
     # Archives live under the promoted logs root (see main.py:transcript_root),
     # which is <vault_root>/Logs before the re-rooting and <install>/Logs after
     # it. `config.logs_root` is the one place that distinction is made.
@@ -2306,6 +2354,7 @@ async def backfill_insights_task(
                         ),
                         trajectories_enabled=getattr(config, "trajectories_enabled", True),
                         provider=provider,
+                        force=force,
                     )
                     if not _has_insights_section(archive_path):
                         from ciao.archive_jobs import SKIPPED

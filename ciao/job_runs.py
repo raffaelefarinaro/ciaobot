@@ -245,7 +245,7 @@ REGISTRY: tuple[JobSpec, ...] = (
             one_time=True),
     JobSpec("backfill_insights", "Insights backfill", "system",
             "Runs session insights over every archive that is missing them.", True, True,
-            trigger="On server startup, and on demand from this page.",
+            trigger="On server startup when enabled, and on demand from this page.",
             parent="insights"),
 )
 

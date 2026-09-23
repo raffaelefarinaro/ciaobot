@@ -43,6 +43,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from ciao.app_settings import AppSettingsStore
 from ciao.config import CiaoConfig
 from ciao.insights import backfill_insights_task
 
@@ -79,6 +80,11 @@ def parse_args() -> argparse.Namespace:
         help="Parallel model calls. Keep low to be gentle on Ollama (default 2).",
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Run once even when automatic session insights are disabled.",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -94,6 +100,16 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     config = CiaoConfig.from_env()
+    app_settings = AppSettingsStore(
+        config.state_path.parent / "app_settings.json"
+    )
+    app_settings.migrate_legacy_insights_enabled(
+        config.legacy_insights_disabled
+    )
+    app_settings.apply_to_config(config)
+    if not config.insights_enabled and not args.force:
+        print("Session insights are disabled in Settings; pass --force to run once.")
+        return 2
     asyncio.run(
         backfill_insights_task(
             config,
@@ -102,6 +118,8 @@ def main() -> int:
             dry_run=args.dry_run,
             concurrency=args.concurrency,
             workspace=args.workspace,
+            manual=True,
+            force=args.force,
         )
     )
     return 0
