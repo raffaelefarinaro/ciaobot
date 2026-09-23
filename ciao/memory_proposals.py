@@ -45,12 +45,15 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from collections.abc import Iterable
+from urllib.parse import unquote
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, date
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
 
 from ciao.curation_run import curation_in_progress
+from ciao.vault_links import MARKDOWN_LINK_RE, WIKILINK_RE
 
 logger = logging.getLogger(__name__)
 
@@ -373,6 +376,34 @@ def _default_destination(section: str, text: str) -> tuple[str, str]:
     return "review", ""
 
 
+# A "Decisions" bullet that opens on a past-tense action is a changelog line
+# ("Added regression test ...", "Deleted the ESL schedule ...", "Committed only
+# the three modified files"): it records what this session did, which the
+# archive already holds. Measured on a real queue history: 60 such bullets,
+# none ever accepted. A bullet that also states what holds from now on keeps
+# its place — "Retired X; Y remains the active skill going forward" is state.
+_CHANGELOG_VERBS = (
+    "fixed|added|deleted|removed|committed|created|updated|renamed|moved|"
+    "marked|stopped|merged|pushed|shipped|ran|wrote|edited|filed|sent|"
+    "drafted|replied|implemented|refactored|reverted|restored|replaced|"
+    "bumped|installed|configured|enabled|disabled|cleaned|tested|verified|"
+    "confirmed|opened|closed|published|released|rewrote|migrated|documented|"
+    "archived|retired|dropped|landed"
+)
+_CHANGELOG_RE = re.compile(rf"^(?:the\s+\w+\s+)?(?:{_CHANGELOG_VERBS})\b", re.IGNORECASE)
+_STANDING_MARKER_RE = re.compile(
+    r"going forward|from now on|in future|future sessions|this governs|"
+    r"standard way|\bdefault\b|\balways\b|\bnever\b|\bshould\b|\bmust\b|"
+    r"\brule\b|\bprefer",
+    re.IGNORECASE,
+)
+
+
+def _is_changelog_decision(text: str) -> bool:
+    """A Decisions bullet that only reports an action this session took."""
+    return bool(_CHANGELOG_RE.match(text)) and not _STANDING_MARKER_RE.search(text)
+
+
 def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
     """Scan an insights markdown blob and emit destination-addressed proposals.
 
@@ -392,12 +423,27 @@ def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
     sections = _split_sections(insights_md)
     proposals: list[MemoryProposal] = []
 
-    for heading in (*_BEHAVIORAL_SECTIONS, *_IDENTITY_SECTIONS, UNREADABLE_SECTION):
+    for heading in (
+        *_BEHAVIORAL_SECTIONS, *_IDENTITY_SECTIONS, UNREADABLE_SECTION, "Open loops"
+    ):
         for item in sections.get(heading, []):
             kind, payload, citations, text = _peel_trailing_metadata(item)
+            if heading == "Open loops" and not (kind == "project" and payload):
+                # Open loops are the chat's own business and the doc fold's
+                # to track; only one the model filed under a named other
+                # project needs routing, because the fold skips those.
+                continue
             if not kind:
                 kind, payload = _default_destination(heading, text)
             if not _is_durable(text):
+                continue
+            if heading == "Decisions" and (
+                kind == "review" or _is_changelog_decision(text)
+            ):
+                # A decision the model could not place is, in practice, a
+                # one-off choice about this session: 564 of them on a real
+                # queue, none accepted. A precedent-setting decision names its
+                # home ([memory], [learnings], [project]) and still flows.
                 continue
             proposals.append(MemoryProposal(
                 target=kind,
@@ -2491,6 +2537,366 @@ def _is_already_applied(
     return False
 
 
+# ── Known-entity routing ──────────────────────────────────────────────────
+
+
+# A "New entities" bullet opens on "<type>: <name>" ("Person: Mo - ...",
+# "Anthropic person: Finn Cummins (...)", "Project: ai-native-sdk / ...").
+_ENTITY_SUBJECT_RE = re.compile(
+    r"^(?P<type>[^:]{1,40}?)\s*:\s*(?P<name>.+?)(?:\s+[-–—]\s|\s*[(;,:]|$)"
+)
+# Project folder names that are containers, not a project a fact belongs to.
+_ROUTING_SKIP_PROJECTS = frozenset({"general"})
+_NON_PROJECT_STEMS = frozenset({"readme", "index", "log"})
+
+
+def _is_scaffold(name: str) -> bool:
+    """An index, template or `_`-prefixed scaffold, not a project a fact belongs to.
+
+    Deliberately narrower than ``vault_lint.is_template_stem`` (a substring
+    test), which would also drop a real project named ``email-templates``.
+    """
+    lowered = name.lower()
+    return (
+        lowered in _ROUTING_SKIP_PROJECTS
+        or lowered in _NON_PROJECT_STEMS
+        or lowered.startswith(("_", "template"))
+        or lowered.endswith(("-template", "_template"))
+    )
+# Shorter names ("mo", "ux") match too much prose to count as a mention.
+_MIN_ENTITY_MENTION = 4
+
+
+def entity_key(name: str) -> str:
+    """``Finn-Cummins`` / ``finn cummins`` / ``Finn_Cummins`` → ``finn cummins``."""
+    return " ".join(re.sub(r"[-_]+", " ", name).lower().split())
+
+
+def known_entities(vault_root: Path) -> tuple[dict[str, Path], dict[str, str]]:
+    """Known projects (key → canonical doc) and people (key → note stem).
+
+    The same roster the extraction prompt is shown (``insights._known_context_block``)
+    read back so code can enforce what the prompt only asks: a fact about an
+    entity the vault already has belongs in that entity's note.
+    """
+    projects: dict[str, Path] = {}
+    people: dict[str, str] = {}
+    try:
+        for bucket in ("active", "completed"):
+            folder = vault_root / "projects" / bucket
+            if not folder.is_dir():
+                continue
+            for entry in folder.iterdir():
+                if not entry.is_dir() or _is_scaffold(entry.name):
+                    continue
+                # README first, the order the app's own project-doc lookup
+                # uses (`project_chats._project_doc_file`), so a folder with
+                # both routes facts to the doc the app treats as canonical.
+                for doc in (entry / "README.md", entry / f"{entry.name}.md"):
+                    if doc.is_file():
+                        projects.setdefault(entity_key(entry.name), doc)
+                        break
+        # The roster also lists single-file projects (``projects/<name>.md``);
+        # a ``[project: <name>]`` tag naming one must resolve here too, or it
+        # falls through to the chat's own doc.
+        projects_dir = vault_root / "projects"
+        if projects_dir.is_dir():
+            for doc in projects_dir.glob("*.md"):
+                if doc.is_file() and not _is_scaffold(doc.stem):
+                    projects.setdefault(entity_key(doc.stem), doc)
+        people_dir = vault_root / _PEOPLE_DIR
+        if people_dir.is_dir():
+            for note in people_dir.glob("*.md"):
+                people.setdefault(entity_key(note.stem), note.stem)
+    except OSError:
+        logger.debug("memory proposals: could not read the entity roster", exc_info=True)
+    return projects, people
+
+
+def project_name(doc: Path) -> str:
+    """The roster name of a project doc: its folder, or a single file's stem."""
+    return doc.stem if doc.parent.name == "projects" else doc.parent.name
+
+
+def entity_mention_counts(text: str, keys: Iterable[str]) -> dict[str, int]:
+    """How often each entity key is named in *text* as a whole word.
+
+    A key matches in its spaced or hyphenated spelling ("finn cummins",
+    "finn-cummins"). One alternation, longest spelling first, scans the text
+    once however many entities the vault has; the longest name wins where
+    names overlap, so "finn cummins" is not also a mention of "finn".
+    """
+    # Keys are `entity_key`-normalized (no hyphens), so a spelling names
+    # exactly one key.
+    forms: dict[str, str] = {}
+    for key in keys:
+        for form in {key, key.replace(" ", "-")}:
+            if len(form) >= _MIN_ENTITY_MENTION:
+                forms[form] = key
+    if not forms or not text:
+        return {}
+    pattern = re.compile(
+        r"(?<![\w-])("
+        + "|".join(re.escape(form) for form in sorted(forms, key=len, reverse=True))
+        + r")(?![\w-])"
+    )
+    counts: dict[str, int] = {}
+    for match in pattern.finditer(text.lower()):
+        key = forms[match.group(1)]
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _unwrap_links(text: str) -> str:
+    """Markdown links and wikilinks replaced by the words they display."""
+    text = MARKDOWN_LINK_RE.sub(lambda m: m.group("label"), text)
+    return WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), text)
+
+
+def _known_project_doc(payload: str, projects: dict[str, Path]) -> Path | None:
+    """The doc a ``[project: <name>]`` payload names, when it is a known project.
+
+    The extraction prompt asks for the name exactly as the roster lists it;
+    a model that writes the doc path instead still resolves by its folder.
+    """
+    if not payload.strip():
+        return None
+    raw = Path(payload.strip())
+    # A path names its project by folder ("projects/active/wedding/notes/x.md"),
+    # so every enclosing folder, innermost first, is tried before the stem.
+    for candidate in (payload, *(parent.name for parent in raw.parents), raw.stem):
+        doc = projects.get(entity_key(candidate))
+        if doc is not None:
+            return doc
+    return None
+
+
+def _address_tagged(
+    proposal: MemoryProposal,
+    projects: dict[str, Path],
+    people: dict[str, str],
+    *,
+    own_doc: Path | None,
+    own_doc_path: str = "",
+    fold_wrote: bool,
+) -> MemoryProposal | None:
+    """Resolve a model-tagged destination against the vault roster.
+
+    ``[project: <name>]`` naming a known project other than the chat's own
+    goes to that project's doc — the extraction prompt lists the roster so
+    the model can choose, and code resolves the choice instead of guessing
+    from the wording. A bare ``[project]`` belongs to the chat's own doc:
+    consumed (``None``) when the fold already read it, else addressed to it,
+    and ``[review]`` in a chat that has no doc. ``[people: <Name>]`` is
+    normalized to the existing note's stem, so "Finn Cummins" lands in
+    ``People/Finn-Cummins.md`` rather than creating a second note.
+    """
+    if proposal.target == "people" and proposal.payload:
+        stem = people.get(entity_key(proposal.payload))
+        return replace(proposal, payload=stem) if stem else proposal
+    if proposal.target != "project":
+        return proposal
+    named = _known_project_doc(proposal.payload, projects)
+    if named is not None and not _same_doc(named, own_doc):
+        return replace(proposal, payload=str(named))
+    payload = proposal.payload.strip()
+    if payload and named is None and "/" not in payload and not payload.endswith(".md"):
+        # A named tag means "a different project"; one the roster cannot
+        # resolve belongs to a human, not to this chat's doc. A path is the
+        # older tag shape for this chat's own project and is handled below.
+        return replace(proposal, target="review", payload="")
+    if own_doc is not None:
+        # The chat's resolved canonical doc is authoritative over a path the
+        # model invented; only a roster name can move a fact elsewhere. Only
+        # a bare [project] was the fold's to consume: the fold prompt skips
+        # every named tag, so dropping one here would lose it.
+        if fold_wrote and not proposal.payload:
+            return None
+        return replace(proposal, payload=own_doc_path or str(own_doc))
+    # A General chat has no project document to own a project-scoped fact.
+    # Keep the claim reviewable, never an unroutable project row.
+    return replace(proposal, target="review", payload="")
+
+
+def _same_doc(a: Path | str, resolved: Path | None) -> bool:
+    """Whether *a* names the already-resolved doc, however *a* is spelled."""
+    if resolved is None:
+        return False
+    try:
+        return Path(a).resolve() == resolved
+    except OSError:
+        return Path(a) == resolved
+
+
+def _route_to_known_entity(
+    proposal: MemoryProposal,
+    projects: dict[str, Path],
+    people: dict[str, str],
+) -> MemoryProposal:
+    """Give a ``[review]`` fact about a known person or project its home.
+
+    ``[review]`` means "nowhere to put this", and a review row cannot be
+    accepted — so a fact about a project or person that already has a note
+    reached the queue as a dead end. Routed, in order:
+
+    * a "New entities" bullet whose subject is a known person or project →
+      that note or doc. Whether it restates the note or changes it is not
+      decidable from the wording (an update need not carry a date, and a
+      restatement can), so it is routed either way and the accept's fold
+      answers "already covered";
+    * any bullet naming exactly one known project → that project's doc.
+
+    Anything else stays ``[review]``. The destination accept still folds
+    through a model call that can answer "already covered", so a routed row
+    is a proposal, not a write.
+    """
+    from ciao.fact_candidates import UNREADABLE_SECTION
+
+    # An unreadable structured row is a parse failure waiting for a human;
+    # re-addressing it by the names it mentions could hand it to a doc the
+    # fold already read, which drops it without anyone seeing it.
+    if proposal.target != "review" or proposal.source_section == UNREADABLE_SECTION:
+        return proposal
+    text = proposal.text
+
+    def routed(target: str, payload: str) -> MemoryProposal:
+        return replace(proposal, target=target, payload=payload)
+
+    if proposal.source_section == "New entities":
+        # Unwrap links first: "project: [Wedding](./projects/...) - ..." names
+        # Wedding, and the subject pattern would otherwise stop at the "(".
+        subject = _ENTITY_SUBJECT_RE.match(_unwrap_links(text))
+        if subject:
+            key = entity_key(subject.group("name").split(" / ")[0])
+            person = key in people and bool(
+                re.search(r"\b(?:person|people)\b", subject.group("type"), re.I)
+            )
+            if person or key in projects:
+                if person:
+                    return routed("people", people[key])
+                return routed("project", str(projects[key]))
+    named = list(entity_mention_counts(text, projects))
+    if len(named) == 1:
+        return routed("project", str(projects[named[0]]))
+    return proposal
+
+
+# ── Facts the session already wrote ───────────────────────────────────────
+
+
+_BACKTICK_TOKEN_RE = re.compile(r"`([^`\n]{4,})`")
+# Vault changes to these trees record an episode, not a durable home; a fact
+# that only reached a journal entry still deserves its own destination.
+_EPISODIC_PREFIXES = ("journal/", "logs/")
+
+
+def _session_vault_changes(insights_md: str) -> list[tuple[str, frozenset[int]]]:
+    """``(path, cited idx)`` for each "Vault changes" bullet the extractor wrote."""
+    out: list[tuple[str, frozenset[int]]] = []
+    for item in _split_sections(insights_md).get("Vault changes", []):
+        _kind, _payload, citations, text = _peel_trailing_metadata(item)
+        # The citation rule asks for vault paths as relative Markdown links,
+        # so "[Mo](./People/Mo.md) - ..." names People/Mo.md; a name with
+        # spaces is `[Mo](<./People/Mo Salah.md>)` or `%20`-escaped. Match the
+        # link before splitting on " - ", which a label may itself contain.
+        link = MARKDOWN_LINK_RE.match(text.strip())
+        if link:
+            target = link.group("angle") or link.group("bare") or ""
+            path = unquote(re.split(r"[#?]", target, maxsplit=1)[0])
+        else:
+            path = re.split(r"\s+[-–—]\s", text, maxsplit=1)[0].strip().strip("`")
+        if path and citations:
+            out.append((path, frozenset(citations)))
+    return out
+
+
+def _changed_file_text(path: str, vault_root: Path) -> str | None:
+    """The current text of a Vault changes path, or None when it is unreadable.
+
+    Paths come back vault-relative ("People/Mo.md") or workspace-relative
+    ("work/commands/styleit.md", two levels above the vault).
+    """
+    rel = path.lstrip("./")
+    for base in (vault_root, vault_root.parent, vault_root.parent.parent):
+        candidate = base / rel
+        try:
+            if candidate.is_file():
+                return candidate.read_text(encoding="utf-8", errors="replace").lower()
+        except OSError:
+            continue
+    return None
+
+
+def _written_this_session(
+    proposal: MemoryProposal,
+    changes: list[tuple[str, frozenset[int]]],
+    vault_root: Path,
+) -> bool:
+    """True when the fact is the session's own edit to a file, restated.
+
+    The extractor lists what the session wrote under "Vault changes" and then,
+    often, repeats the same edit as a Decision ("Chose to create `/styleit`
+    ... in `work/commands/styleit.md`"). The destination guard cannot see
+    that — the edit went to a file, not the region the proposal targets — so
+    the review queue asked for a fact that was already saved.
+
+    Precision-first, three signals together: the bullet cites a turn that a
+    vault change also cites, it names that changed file in backticks, and the
+    same file as it is now contains another term the bullet puts in backticks —
+    so an unrelated edit to a file the fact merely mentions ("`scripts/test.sh`
+    is the entry point" alongside a new flag in it) is not taken as the fact
+    being saved. A command file named for what it defines (`/styleit` for
+    `commands/styleit.md`) only has to exist. Anything unreadable stays
+    reviewable.
+    A User correction is never suppressed: "run tests via `scripts/test.sh`"
+    can share a turn with the edit to that script and still be a standing
+    preference the file itself does not state.
+    """
+    if proposal.source_section == "User corrections":
+        return False
+    if not proposal.citations or not changes:
+        return False
+    cited = set(proposal.citations)
+    tokens = {
+        tok.strip().lstrip("./").lower()
+        for tok in _BACKTICK_TOKEN_RE.findall(proposal.text)
+    }
+    if not tokens:
+        return False
+    co_cited = [
+        (path, path.lstrip("./").lower())
+        for path, idx in changes
+        if cited & idx
+        and not any(
+            path.lstrip("./").lower().startswith(p) or f"/{p}" in path.lower()
+            for p in _EPISODIC_PREFIXES
+        )
+    ]
+    for path, norm in co_cited:
+        text = _changed_file_text(path, vault_root)
+        if text is None:
+            continue
+        named = {
+            tok for tok in tokens
+            if tok == norm or norm.endswith("/" + tok) or tok.endswith("/" + norm)
+        }
+        # The evidence must be in the file the fact names, not in some other
+        # file the same turn happened to edit.
+        if named and any(tok in text for tok in tokens - named):
+            return True
+        # The name a command file defines: `/styleit` for `commands/styleit.md`.
+        # Only a definition file counts — `deploy` naming `scripts/deploy.sh`
+        # is a mention, and an unrelated edit to that script proves nothing.
+        stem = Path(norm).stem
+        if (
+            len(stem) >= 5
+            and stem in tokens
+            and any(part in {"commands", "subagents", "agents"} for part in Path(norm).parent.parts)
+        ):
+            return True
+    return False
+
+
 # ── Pipeline entry point ──────────────────────────────────────────────────
 
 
@@ -2552,42 +2958,46 @@ def proposals_from_archive(
             return None
         proposals = propose_from_insights(body)
 
-        if project_fold_wrote:
-            consumed = [p for p in proposals if p.target == "project"]
-            if consumed:
-                logger.info(
-                    "memory proposals: doc fold consumed %d project fact(s) from %s",
-                    len(consumed),
-                    archive_path.name,
-                )
-            proposals = [p for p in proposals if p.target != "project"]
-        elif project_doc_path:
-            # The chat's resolved canonical doc is authoritative. Do not trust
-            # a path guessed by the extraction model, since that could route a
-            # fact into a different project.
-            proposals = [
-                p if p.target != "project"
-                else MemoryProposal(
-                    target=p.target,
-                    text=p.text,
-                    source_section=p.source_section,
-                    payload=project_doc_path,
-                )
-                for p in proposals
-            ]
-        else:
-            # A General chat has no project document to own a project-scoped
-            # fact. Keep the claim reviewable, but never create an unroutable
-            # project proposal with a missing or model-invented destination.
-            proposals = [
-                p if p.target != "project"
-                else MemoryProposal(
-                    target="review",
-                    text=p.text,
-                    source_section=p.source_section,
-                )
-                for p in proposals
-            ]
+        projects, people = known_entities(workspace_vault_root)
+        own_doc = (
+            _resolve_doc_path(workspace_vault_root, project_doc_path).resolve()
+            if project_doc_path
+            else None
+        )
+        def route(p: MemoryProposal) -> MemoryProposal | None:
+            addressed = _address_tagged(
+                p,
+                projects,
+                people,
+                own_doc=own_doc,
+                own_doc_path=project_doc_path,
+                fold_wrote=project_fold_wrote,
+            )
+            if addressed is None:
+                return None
+            routed = _route_to_known_entity(addressed, projects, people)
+            if (
+                routed.target == "review"
+                and routed.source_section == "Decisions"
+                and not (p.target == "project" and p.payload)
+            ):
+                # Same rule as `propose_from_insights`, for the bare [project]
+                # decisions a General chat demoted to review above. A named
+                # project the roster could not resolve stays for a human.
+                return None
+            return routed
+
+        routed_all = [route(p) for p in proposals]
+        dropped = sum(1 for p in routed_all if p is None)
+        if dropped:
+            logger.info(
+                "memory proposals: dropped %d fact(s) already folded, restated, "
+                "or with no destination from %s",
+                dropped,
+                archive_path.name,
+            )
+        proposals = [p for p in routed_all if p is not None]
+        session_changes = _session_vault_changes(body)
 
         # Extra guard before creating a review card: if the chat already
         # applied the change in-session (via memory_update/Edit/Write), the
@@ -2596,7 +3006,9 @@ def proposals_from_archive(
             filtered: list[MemoryProposal] = []
             suppressed = 0
             for _p in proposals:
-                if _is_already_applied(
+                if _written_this_session(
+                    _p, session_changes, workspace_vault_root
+                ) or _is_already_applied(
                     _p, workspace_vault_root, guide_path, project_doc_path
                 ):
                     suppressed += 1

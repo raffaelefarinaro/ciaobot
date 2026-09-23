@@ -348,6 +348,14 @@ def _generate_candidates(
         present_paths.add(path)
         digest = content_hash(raw)
         present_digests.add(digest)
+        # A completed project is a closed record, not a live note: nothing
+        # links to it by design, and `Still true` would stamp `updated: today`
+        # onto a `Closed …` file. Same class of exemption as templates. Skipped
+        # only after it is counted as present, so a project moved from
+        # active/ to completed/ reads as a move, not a vanished note.
+        parts = [part.casefold() for part in Path(path).parts]
+        if any(a == "projects" and b == "completed" for a, b in zip(parts, parts[1:])):
+            continue
         text = raw.decode("utf-8", errors="replace")
         note_type = entry.type or "note"
         # `entry.type` is the raw frontmatter string. The two type filters below
@@ -423,6 +431,16 @@ def _generate_candidates(
     return result
 
 
+def _completed_counterpart(path: str) -> str:
+    """Where ``projects/active/<x>/...`` lands once the project is completed."""
+    parts = list(Path(path).parts)
+    for index in range(len(parts) - 1):
+        if parts[index].casefold() == "projects" and parts[index + 1].casefold() == "active":
+            parts[index + 1] = "completed"
+            return str(Path(*parts))
+    return ""
+
+
 def _record_vanished(
     root: Path,
     workspace: str,
@@ -476,6 +494,11 @@ def _record_vanished(
         if path in present_paths:
             continue
         if str(decision.get("content_hash") or "") in present_digests:
+            continue
+        if _completed_counterpart(path) in present_paths:
+            # Completing a project moves it *and* rewrites its status line,
+            # so neither the path nor the hash matches any more; the note is
+            # under projects/completed, not gone.
             continue
         try:
             note = (root / Path(path).relative_to("memory-vault")).resolve()

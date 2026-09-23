@@ -1310,12 +1310,16 @@ def test_known_context_block_carries_regions_and_roster(tmp_path):
     (vault / "People").mkdir(parents=True)
     (vault / "People" / "Elena.md").write_text("# Elena\n", encoding="utf-8")
     (vault / "projects" / "active" / "Wedding").mkdir(parents=True)
+    (vault / "projects" / "active" / "Wedding" / "README.md").write_text("# Wedding\n", encoding="utf-8")
+    # A folder with no doc cannot receive a routed fact, so it is not offered.
+    (vault / "projects" / "active" / "Empty").mkdir(parents=True)
 
     block = _known_context_block(guide, vault)
     assert block.startswith("## Known context")
     assert "Prefers plain engineering notes." in block
     assert "Known people: Elena" in block
     assert "Known projects: Wedding" in block
+    assert "Empty" not in block
     # Absent inputs mean no context section at all, not an empty header.
     assert _known_context_block(None, None) == ""
     assert _known_context_block(tmp_path / "missing.md", tmp_path / "nope") == ""
@@ -2089,3 +2093,69 @@ def test_structured_extraction_treats_an_empty_array_as_no_signal(
     assert run["status"] == "skipped"
     assert run["error"] is None
     assert run["extra"]["skip_reason"] == "no durable signal in this session"
+
+
+def test_known_context_excerpts_notes_the_transcript_mentions(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    doc = vault / "projects" / "active" / "wedding" / "wedding.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(
+        "---\ndescription: Civil wedding and party in September.\n---\n# Wedding\n\n"
+        "- Party at La Montagnola on Sept 11.\n",
+        encoding="utf-8",
+    )
+    other = vault / "projects" / "active" / "upwordo" / "upwordo.md"
+    other.parent.mkdir(parents=True)
+    other.write_text("# Upwordo\n\n- German microstories app.\n", encoding="utf-8")
+    (vault / "People").mkdir()
+    (vault / "People" / "Finn-Cummins.md").write_text("# Finn\n\n- Anthropic GTM.\n", encoding="utf-8")
+
+    block = insights._known_context_block(
+        None, vault, transcript="We planned the wedding with Finn Cummins today."
+    )
+
+    assert "Known projects:" in block
+    assert "[project: wedding]" in block
+    assert "description: Civil wedding and party in September." in block
+    assert "Party at La Montagnola" in block
+    assert "[people: Finn-Cummins]" in block
+    # Not mentioned, so not excerpted (it is still on the roster).
+    assert "[project: upwordo]" not in block
+    assert "German microstories" not in block
+
+
+def test_known_context_without_transcript_has_no_note_excerpts(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    doc = vault / "projects" / "active" / "wedding" / "wedding.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("# Wedding\n\n- Party.\n", encoding="utf-8")
+
+    assert "Known notes" not in insights._known_context_block(None, vault)
+
+
+def test_extraction_prompts_offer_named_project_destinations() -> None:
+    for prompt in (insights._INSIGHTS_RULES, insights._TEXT_MODE_SYSTEM_PROMPT):
+        assert "[project: <name>]" in prompt
+        assert "Known notes" in prompt
+
+
+def test_note_excerpt_reads_crlf_frontmatter(tmp_path: Path) -> None:
+    note = tmp_path / "Mo.md"
+    note.write_bytes(b"---\r\ndescription: Coach.\r\ntype: person\r\n---\r\n# Mo\r\n\r\n- Trains Tuesdays.")
+
+    excerpt = insights._note_excerpt(note)
+
+    assert excerpt.splitlines() == ["description: Coach.", "- Trains Tuesdays."]
+
+
+def test_person_and_project_sharing_a_name_are_both_excerpted(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    doc = vault / "projects" / "active" / "atlas" / "README.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("# Atlas\n\n- The mapping project.\n", encoding="utf-8")
+    (vault / "People").mkdir()
+    (vault / "People" / "Atlas.md").write_text("# Atlas\n\n- A colleague.\n", encoding="utf-8")
+
+    block = insights._known_context_block(None, vault, transcript="Talked to Atlas about atlas.")
+
+    assert "[project: atlas]" in block and "[people: Atlas]" in block

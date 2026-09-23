@@ -7,7 +7,7 @@ import { api } from '../lib/api'
 vi.mock('../lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
 }))
-import { clusterColorFor, COLORED_CLUSTERS, useMemoryMapStore, type MemoryGraphNode } from './memoryMap'
+import { useMemoryMapStore, type MemoryGraphNode } from './memoryMap'
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -225,22 +225,6 @@ describe('staleness', () => {
     expect(mm.ageLabelOf(node('b', 0, { ageDays: 45 }))).toBe('1mo')
     expect(mm.ageLabelOf(node('c', 0, { ageDays: 3 }))).toBe('3d')
     expect(mm.ageLabelOf(node('d', 0, { ageDays: null, mtime: 0 }))).toBe('')
-  })
-})
-
-describe('cluster palette', () => {
-  test('only the validated slots get a hue; overflow shares the neutral', () => {
-    const hues = new Set<string>()
-    for (let slot = 0; slot < COLORED_CLUSTERS; slot++) hues.add(clusterColorFor(slot))
-    expect(hues.size).toBe(COLORED_CLUSTERS)
-    const overflow = clusterColorFor(COLORED_CLUSTERS)
-    expect(hues.has(overflow)).toBe(false)
-    expect(clusterColorFor(COLORED_CLUSTERS + 5)).toBe(overflow)
-    expect(clusterColorFor(undefined)).toBe(overflow)
-  })
-
-  test('light and dark themes use different steps', () => {
-    expect(clusterColorFor(0, true)).not.toBe(clusterColorFor(0, false))
   })
 })
 

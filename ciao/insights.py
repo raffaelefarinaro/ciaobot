@@ -132,7 +132,7 @@ _KNOWN_CONTEXT_MAX_NAMES = 120
 
 
 def _known_context_block(
-    guide_path: Path | None, vault_root: Path | None
+    guide_path: Path | None, vault_root: Path | None, transcript: str = ""
 ) -> str:
     """Workspace context the extractor should know, fetched by code.
 
@@ -157,26 +157,22 @@ def _known_context_block(
                 parts.extend(f"- {entry}" for entry in entries)
     except Exception:  # noqa: BLE001 — context is optional
         logger.exception("Known-context: could not read regions")
+    projects: dict[str, Path] = {}
+    people: dict[str, str] = {}
     try:
         if vault_root is not None and vault_root.exists():
-            people = sorted(
-                p.stem for p in (vault_root / "People").glob("*.md")
-            )[:_KNOWN_CONTEXT_MAX_NAMES]
-            if people:
-                parts.append("Known people: " + ", ".join(people))
-            projects: set[str] = set()
-            projects_dir = vault_root / "projects"
-            for bucket in ("active", "completed"):
-                folder = projects_dir / bucket
-                if folder.is_dir():
-                    projects.update(
-                        p.name for p in folder.iterdir() if p.is_dir()
-                    )
-            if projects_dir.is_dir():
-                projects.update(p.stem for p in projects_dir.glob("*.md"))
-            if projects:
-                names = sorted(projects)[:_KNOWN_CONTEXT_MAX_NAMES]
-                parts.append("Known projects: " + ", ".join(names))
+            # The same roster `memory_proposals` resolves `[project: <name>]`
+            # and `[people: <Name>]` against, so the prompt never offers a
+            # name code cannot route (a folder with no doc, `general`).
+            from ciao.memory_proposals import known_entities, project_name
+
+            projects, people = known_entities(vault_root)
+            names = sorted(people.values())[:_KNOWN_CONTEXT_MAX_NAMES]
+            if names:
+                parts.append("Known people: " + ", ".join(names))
+            names = sorted({project_name(doc) for doc in projects.values()})
+            if names:
+                parts.append("Known projects: " + ", ".join(names[:_KNOWN_CONTEXT_MAX_NAMES]))
     except Exception:  # noqa: BLE001 — context is optional
         logger.exception("Known-context: could not build entity roster")
     if not parts:
@@ -191,7 +187,109 @@ def _known_context_block(
         # prompt tells the model to trust.
         cut = block.rfind("\n", 0, _KNOWN_CONTEXT_MAX_CHARS)
         block = block[:_KNOWN_CONTEXT_MAX_CHARS] if cut <= 0 else block[:cut]
-    return block + "\n\n"
+    notes = ""
+    if transcript and vault_root is not None:
+        try:
+            notes = _entity_notes_block(vault_root, transcript, projects, people)
+        except Exception:  # noqa: BLE001 — context is optional
+            logger.exception("Known-context: could not excerpt entity notes")
+    return block + "\n\n" + notes
+
+
+# Excerpts of the notes this session's entities already have. Capped apart
+# from the roster above so a long roster can never crowd them out, and small:
+# enough for the model to see what a note already says, not the note itself.
+_ENTITY_NOTES_MAX = 8
+_ENTITY_NOTE_MAX_LINES = 6
+_ENTITY_NOTE_LINE_CHARS = 240
+_ENTITY_NOTES_MAX_CHARS = 8000
+
+
+def _archive_body_for_mentions(archive_path: Path) -> str:
+    """The rendered archive text-mode extraction reads, for entity mentions."""
+    try:
+        return archive_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _note_excerpt(path: Path) -> str:
+    """A note's ``description:`` plus its newest body lines, each clipped."""
+    from ciao.vault_index import FENCED_CODE_RE, FRONTMATTER_RE, _parse_frontmatter
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    # FRONTMATTER_RE wants LF endings and a newline after the closing fence.
+    text = text.replace("\r\n", "\n")
+    if not text.endswith("\n"):
+        text += "\n"
+    description = str(_parse_frontmatter(text).get("description") or "").strip()
+    match = FRONTMATTER_RE.match(text)
+    body = FENCED_CODE_RE.sub("", text[match.end():] if match else text)
+    lines = [
+        line.strip()
+        for line in body.splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", "<!--", "|"))
+    ][-_ENTITY_NOTE_MAX_LINES:]
+    out = [f"description: {' '.join(description.split())}"] if description else []
+    for line in lines:
+        if len(line) > _ENTITY_NOTE_LINE_CHARS:
+            line = line[: _ENTITY_NOTE_LINE_CHARS - 1].rstrip() + "…"
+        out.append(line)
+    return "\n".join(out)
+
+
+def _entity_notes_block(
+    vault_root: Path,
+    transcript: str,
+    projects: dict[str, Path],
+    people: dict[str, str],
+) -> str:
+    """Excerpts of the known people/project notes the transcript mentions.
+
+    The roster alone told the model which names exist but not what their
+    notes say, so it could not tell a new fact from a restated one, and it
+    re-proposed "Project: Wedding - civil wedding + party" for a project whose
+    doc says exactly that. Each excerpt is headed by the destination tag that
+    routes to it, so the tag the model writes is the one code resolves.
+    """
+    from ciao.memory_proposals import entity_mention_counts, project_name
+
+    # A person and a project may share a name; a mention of it shows both.
+    notes: dict[str, list[tuple[str, Path]]] = {}
+    for key, doc in projects.items():
+        notes.setdefault(key, []).append((f"[project: {project_name(doc)}]", doc))
+    for key, stem in people.items():
+        notes.setdefault(key, []).append(
+            (f"[people: {stem}]", vault_root / "People" / f"{stem}.md")
+        )
+    counts = entity_mention_counts(transcript, notes)
+    ranked = [
+        note
+        for key in sorted(counts, key=lambda key: -counts[key])
+        for note in notes[key]
+    ]
+    sections: list[str] = []
+    total = 0
+    for tag, path in ranked[:_ENTITY_NOTES_MAX]:
+        excerpt = _note_excerpt(path)
+        if not excerpt:
+            continue
+        section = f"{tag}\n{excerpt}"
+        if total + len(section) > _ENTITY_NOTES_MAX_CHARS:
+            break
+        sections.append(section)
+        total += len(section) + 2
+    if not sections:
+        return ""
+    return (
+        "## Known notes for entities this session mentions "
+        "(fetched from the workspace, NOT transcript content)\n"
+        + "\n\n".join(sections)
+        + "\n\n"
+    )
 
 
 def _env_float(name: str, default: float) -> float:
@@ -550,6 +648,11 @@ _KNOWN_CONTEXT_RULE = """\
   transcript shows a known fact CHANGED, emit the updated fact. A person or
   project in the roster is never a New entity — only names absent from the
   roster qualify.
+- A "Known notes" section, when present, excerpts the existing note of each
+  known person or project this session mentions, headed by the tag that
+  files into it. A fact that note already states must be OMITTED. A new or
+  changed fact about that entity goes in whichever section fits, tagged with
+  that heading's tag exactly as written.
 """
 
 _FINAL_STATEMENT_RULE = """\
@@ -591,10 +694,13 @@ Rules:
   - [memory] - true regardless of which project is open: a standing
     preference, an environment fact, a cross-project lesson.
   - [profile] - who the user is: identity, role, communication style.
-  - [project] - true only within this project/repo: its decisions,
-    constraints, status. When unsure whether a fact is project-scoped or
-    global, use [review] instead of guessing.
-  - [people: <Name>] - a durable fact about a person; use their name.
+  - [project] - true only within this chat's own project/repo: its
+    decisions, constraints, status. When unsure whether a fact is
+    project-scoped or global, use [review] instead of guessing.
+  - [project: <name>] - true only within a DIFFERENT project listed under
+    "Known projects"; use the name exactly as listed. Never invent one.
+  - [people: <Name>] - a durable fact about a person; for someone under
+    "Known people", use the name exactly as listed.
   - [learnings] - reusable how-to knowledge that spans projects.
   - [review] - durable, but you are not sure where it belongs.
 - Skip routine successful tool calls.
@@ -610,6 +716,9 @@ Rules:
   references to something in this transcript.
 - "Decisions" = choices that set a precedent for future sessions ("chose X over
   Y, and we should keep doing X"). Drop one-off picks about this transcript.
+  Decisions is not a changelog: never list what the session fixed, added,
+  deleted or committed, and never restate an edit already listed under
+  "Vault changes" — that file already holds it.
 - When citing a vault link, use a relative Markdown link with the path from the
   vault root: [Mo](./People/Mo.md). Do NOT use [[bracketed-wikilinks]] and do NOT wrap the link in backticks, quotes, or other formatting.
 """ + _FINAL_STATEMENT_RULE
@@ -675,7 +784,9 @@ commentary. Each element is one fact candidate:
     "section": "<Errors | User corrections | New entities | Decisions |
                  Reusable snippets | Open loops | Vault changes>",
     "destination": "<memory | profile | project | people | learnings | review>",
-    "payload": "<the person's name when destination is people, else \\"\\">",
+    "payload": "<the person's name when destination is people; the Known
+                 projects name when destination is project and it is not this
+                 chat's own project; else \\"\\">",
     "source_message_ids": [<the indices the citation rule requires, as
                             integers, starting at 1; never 0>],
     "evidence_excerpt": "<a short span copied verbatim from one cited turn
@@ -1230,7 +1341,19 @@ async def run_archive_pipeline(
                     if note:
                         run.extra["fallback"] = note
                         logger.info("Insights %s", note)
-                    context_block = _known_context_block(guide_path, proposal_vault_root)
+                    # Off the loop: a vault walk, note reads and a scan of the whole
+                    # transcript would otherwise stall every chat on this server.
+                    context_block = await asyncio.to_thread(
+                        lambda: _known_context_block(
+                            guide_path,
+                            proposal_vault_root,
+                            transcript=(
+                                filtered_jsonl
+                                if not text_mode
+                                else _archive_body_for_mentions(archive_path)
+                            ),
+                        )
+                    )
                     # Structured extraction is opt-in *and* capability-gated.
                     # Off, or refused by the gate, the Markdown contract runs
                     # exactly as before — a provider that cannot return
@@ -2113,10 +2236,13 @@ Rules:
   - [memory] - true regardless of which project is open: a standing
     preference, an environment fact, a cross-project lesson.
   - [profile] - who the user is: identity, role, communication style.
-  - [project] - true only within this project/repo: its decisions,
-    constraints, status. When unsure whether a fact is project-scoped or
-    global, use [review] instead of guessing.
-  - [people: <Name>] - a durable fact about a person; use their name.
+  - [project] - true only within this chat's own project/repo: its
+    decisions, constraints, status. When unsure whether a fact is
+    project-scoped or global, use [review] instead of guessing.
+  - [project: <name>] - true only within a DIFFERENT project listed under
+    "Known projects"; use the name exactly as listed. Never invent one.
+  - [people: <Name>] - a durable fact about a person; for someone under
+    "Known people", use the name exactly as listed.
   - [learnings] - reusable how-to knowledge that spans projects.
   - [review] - durable, but you are not sure where it belongs.
 - "User corrections" = a correction that implies a preference the user wants to
@@ -2127,7 +2253,8 @@ Rules:
 - "New entities" = people/projects/places/products the user will keep dealing
   with, not one-off references in this transcript.
 - "Decisions" = choices that set a precedent for future sessions; drop one-off
-  picks about this transcript.
+  picks about this transcript. Not a changelog: never list what the session
+  fixed, added, deleted or committed, or restate an edit it already saved.
 """ + _FINAL_STATEMENT_RULE + """
 Your entire response must be Markdown using only the section headers below. Never
 return JSON, a code-fenced transcript, session metadata, or a generic recap.

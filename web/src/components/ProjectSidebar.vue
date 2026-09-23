@@ -533,8 +533,7 @@
             <span class="history-loading-spinner" aria-hidden="true"></span>
             <span>Loading vault graph…</span>
           </div>
-          <div class="mm-stat-grid mm-stat-grid--3" aria-hidden="true">
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
+          <div class="mm-stat-grid" aria-hidden="true">
             <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
             <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
           </div>
@@ -550,18 +549,16 @@
         </template>
         <template v-else>
           <h3>Vault</h3>
-          <!-- Three tiles, not four: "notes shown" and "total" were separate
-               tiles showing the same number whenever nothing was filtered, so the
-               total moved into the sublabel and the freed slot went to cluster
-               count, which nothing else reported. Orphans left the grid entirely
-               — as a bare number it was not actionable, and it is now a list. -->
-          <div class="mm-stat-grid mm-stat-grid--3">
+          <!-- Two tiles: "notes shown" and "total" were separate tiles showing
+               the same number whenever nothing was filtered, so the total moved
+               into the sublabel. Orphans left the grid entirely — as a bare
+               number it was not actionable, and it is now a list. -->
+          <div class="mm-stat-grid">
             <div class="mm-stat">
               <div class="n">{{ mm.visibleNodes.length }}</div>
               <div class="l">of {{ mm.nodes.length }} shown</div>
             </div>
             <div class="mm-stat"><div class="n">{{ mm.visibleEdgeCount }}</div><div class="l">links</div></div>
-            <div class="mm-stat"><div class="n">{{ mm.clusters.length }}</div><div class="l">clusters</div></div>
           </div>
 
           <!-- Workspace guide (AGENTS.md; CLAUDE.md pre-migration) — the only file every chat loads.
@@ -633,27 +630,6 @@
           </div>
         </div>
 
-        <!-- Clusters double as the legend for the "Clusters" colour mode. It is
-             always present, not a toggle: only the first four clusters carry a
-             hue and the palette's residual CVD/contrast warnings are only
-             relieved by labelling, so identity must never be colour-alone. -->
-        <template v-if="mm.clusters.length">
-           <h3>Clusters</h3>
-          <div class="mm-link-list">
-            <div
-              v-for="c in mm.clusters"
-              :key="c.id"
-              class="mm-link-item"
-              :title="`${c.size} notes — centre on this cluster`"
-              @click="mm.requestFocus(c.memberIds[0])"
-            >
-              <span class="dot" :style="{ background: clusterColorFor(c.slot, isLightTheme) }" />
-              <span class="label">{{ c.label }}</span>
-              <span class="cnt">{{ c.size }}</span>
-            </div>
-          </div>
-        </template>
-
         <template v-if="mm.mostConnected.length">
           <h3>Most connected</h3>
           <div class="mm-link-list">
@@ -661,27 +637,6 @@
               <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
               <span class="label">{{ n.title }}</span>
               <span class="cnt">{{ n.degree }}</span>
-            </div>
-          </div>
-        </template>
-
-        <!-- Bridge notes rank by betweenness, not degree: these are the notes
-             that sit between clusters, so they are the ones whose removal would
-             split the vault. A degree ranking cannot surface them — a bridge
-             often has only two or three links. -->
-        <template v-if="mm.bridgeNotes.length">
-          <h3>Bridges between clusters</h3>
-          <div class="mm-link-list">
-            <div
-              v-for="n in mm.bridgeNotes"
-              :key="n.id"
-              class="mm-link-item"
-              title="Connects otherwise separate parts of the vault"
-              @click="mm.requestFocus(n.id)"
-            >
-              <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
-              <span class="label">{{ n.title }}</span>
-              <span class="cnt">{{ Math.round(mm.betweennessOf(n.id) * 100) }}</span>
             </div>
           </div>
         </template>
@@ -1195,10 +1150,9 @@ import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useFileViewerStore } from '../stores/fileViewer'
-import { useMemoryMapStore, categoryColorFor, catKeyFor, clusterColorFor } from '../stores/memoryMap'
+import { useMemoryMapStore, categoryColorFor, catKeyFor } from '../stores/memoryMap'
 import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
-import { isLightTheme } from '../lib/theme'
 import ChatSignals from './ChatSignals.vue'
 import { scheduleInWorkspace } from '../lib/automationWorkspace'
 import { colorForWorkspace } from '../lib/workspaceColors'

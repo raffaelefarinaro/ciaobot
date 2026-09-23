@@ -172,7 +172,7 @@ function discussPrompt(candidate: VaultReviewCandidate): string {
   const facts = [candidate.evidence.type, verifyLabelOf(candidate)]
   const backlinks = candidate.evidence.backlinks.length
   facts.push(backlinks ? `${backlinks} backlink${backlinks === 1 ? '' : 's'}` : 'no backlinks')
-  if (candidate.evidence.bridge) facts.push('it bridges two clusters')
+  if (candidate.evidence.bridge) facts.push('many notes link to or from it')
   const duplicates = candidate.evidence.duplicate_group.filter(p => p !== candidate.path)
   if (duplicates.length) facts.push(`possible duplicates: ${duplicates.slice(0, 3).join(', ')}`)
   return (
@@ -379,7 +379,7 @@ function clearedDate(note: VaultClearedNote): string {
               <span v-if="candidate.evidence.backlinks.length">
                 · {{ candidate.evidence.backlinks.length }} backlink{{ candidate.evidence.backlinks.length === 1 ? '' : 's' }}
               </span>
-              <span v-if="candidate.evidence.bridge" class="vr-badge --warn">bridges clusters — think twice</span>
+              <span v-if="candidate.evidence.bridge" class="vr-badge --warn">well linked — think twice</span>
             </p>
             <p v-if="candidate.evidence.duplicate_group.length" class="vr-meta">
               Possible {{ candidate.evidence.duplicate_group.length === 1 ? 'duplicate' : 'duplicates' }}:

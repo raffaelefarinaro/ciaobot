@@ -49,6 +49,8 @@ made, open loops added or resolved, status changes.
 Rules:
 - Preserve the doc's existing frontmatter, structure, headings, and voice.
 - Do not invent facts. Do not summarise the chat. Do not append a changelog.
+- A bullet tagged `[project: <name>]` belongs to a different project, not
+  this one: never fold it into this doc.
 - Strip `[idx=N]` citations and bracketed destination tags (`[memory]`,
   `[project]`, `[people: <Name>]`, `[learnings]`, `[review]`) from anything
   you carry over.

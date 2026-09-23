@@ -579,7 +579,7 @@ def test_trajectory_write_failure_is_retryable(tmp_path: Path, monkeypatch) -> N
 def test_proposals_write_failure_is_retryable(tmp_path: Path, monkeypatch) -> None:
     archive = _stamped_archive(
         tmp_path,
-        "## Decisions\n- Chose X over Y because reasons. [review]\n",
+        "## New entities\n- tool: Chose X over Y because reasons. [review]\n",
     )
     vault = tmp_path / "vault"
     (vault / "Workspace").mkdir(parents=True, exist_ok=True)
@@ -832,7 +832,7 @@ def test_insights_disabled_settles_both_dependent_stages_skipped(
 def test_retry_does_not_duplicate_proposal_rows(tmp_path: Path) -> None:
     archive = _stamped_archive(
         tmp_path,
-        "## Decisions\n- Chose X over Y because reasons. [review]\n",
+        "## New entities\n- tool: Chose X over Y because reasons. [review]\n",
     )
     vault = tmp_path / "vault"
     (vault / "Workspace").mkdir(parents=True, exist_ok=True)

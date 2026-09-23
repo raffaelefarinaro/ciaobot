@@ -307,6 +307,31 @@ def test_templates_are_never_retirement_candidates(tmp_path: Path) -> None:
     assert generate_candidates(tmp_path, workspace="personal", write_queue=False) == []
 
 
+def test_completed_projects_are_never_retirement_candidates(tmp_path: Path) -> None:
+    """A closed project is a record, not a live note awaiting re-verification."""
+    completed = tmp_path / "projects" / "completed" / "evaluate-sdk-docs-page"
+    completed.mkdir(parents=True)
+    (completed / "evaluate-sdk-docs-page.md").write_text(
+        "---\ntype: project\nstatus: completed\ntags: [project]\nupdated: 2026-05-19\n---\n"
+        "# evaluate-sdk-docs-page\n\n[!done] Closed 2026-05-19 — not pursued.\n",
+        encoding="utf-8",
+    )
+    assert generate_candidates(tmp_path, workspace="personal", write_queue=False) == []
+
+    # The same note under active/ is still queued: only completed/ is exempt.
+    active = tmp_path / "projects" / "active" / "evaluate-sdk-docs-page"
+    active.mkdir(parents=True)
+    (active / "evaluate-sdk-docs-page.md").write_text(
+        "---\ntype: project\nstatus: active\ntags: [project]\nupdated: 2026-05-19\n---\n"
+        "# evaluate-sdk-docs-page\n\nStill in flight.\n",
+        encoding="utf-8",
+    )
+    candidates = generate_candidates(tmp_path, workspace="personal", write_queue=False)
+    assert [c.path for c in candidates] == [
+        "memory-vault/projects/active/evaluate-sdk-docs-page/evaluate-sdk-docs-page.md"
+    ]
+
+
 def test_improve_link_is_no_longer_a_disposition(tmp_path: Path) -> None:
     """Nobody re-links a note by hand, so the claim had no honest caller."""
     _note(tmp_path, "Ideas/Loose.md", "An unlinked note.")
@@ -562,6 +587,26 @@ def test_a_note_deleted_outside_the_workflow_is_recorded(tmp_path: Path) -> None
     # Once, however often the nightly pass runs afterwards.
     generate_candidates(tmp_path, workspace="personal", write_queue=True)
     assert len([r for r in review.read_ledger(tmp_path) if r["disposition"] == "vanished"]) == 1
+
+
+def test_a_project_moved_to_completed_is_not_recorded_vanished(tmp_path: Path) -> None:
+    """Closing a project moves its doc; the exemption must not read that as a delete."""
+    _note(tmp_path, "projects/active/demo/demo.md", "A project still in flight.")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    record_decision(tmp_path, candidate, disposition="keep")
+
+    source = tmp_path / "projects" / "active" / "demo" / "demo.md"
+    target = tmp_path / "projects" / "completed" / "demo" / "demo.md"
+    target.parent.mkdir(parents=True)
+    source.rename(target)
+    assert generate_candidates(tmp_path, workspace="personal", write_queue=True) == []
+    assert not [r for r in review.read_ledger(tmp_path) if r["disposition"] == "vanished"]
+
+
+def test_only_projects_completed_is_exempt(tmp_path: Path) -> None:
+    _note(tmp_path, "Ideas/completed/Loose.md", "An unlinked note.")
+    candidates = generate_candidates(tmp_path, workspace="personal", write_queue=False)
+    assert [c.path for c in candidates] == ["memory-vault/Ideas/completed/Loose.md"]
 
 
 def test_a_read_only_listing_never_writes_a_vanished_row(tmp_path: Path) -> None:
@@ -1179,3 +1224,20 @@ def test_list_cleared_reads_only_as_far_as_the_page(tmp_path: Path) -> None:
 
     assert len(rows) == 3
     assert len(reads) == 3, f"read {len(reads)} notes to return 3 rows"
+
+
+def test_a_completed_project_with_a_rewritten_status_is_not_vanished(tmp_path: Path) -> None:
+    """complete_project moves the folder and rewrites `status:`, changing the hash."""
+    _note(tmp_path, "projects/active/demo/demo.md", "A project still in flight.")
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    record_decision(tmp_path, candidate, disposition="keep")
+
+    source = tmp_path / "projects" / "active" / "demo" / "demo.md"
+    target = tmp_path / "projects" / "completed" / "demo" / "demo.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(source.read_text(encoding="utf-8") + "\nstatus: completed\n", encoding="utf-8")
+    source.unlink()
+
+    generate_candidates(tmp_path, workspace="personal", write_queue=True)
+
+    assert not [r for r in review.read_ledger(tmp_path) if r["disposition"] == "vanished"]
