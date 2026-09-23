@@ -990,14 +990,14 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // New Chat: Cmd+T (Desktop) or Option+N (Web/PWA). Opens a small picker to
   // choose the workspace the new chat should live in; Enter creates it in the
   // active workspace's General project.
-  if ((isDesktop && mod && (e.key === 't' || e.key === 'T')) || (!isDesktop && alt && (e.key === 'n' || e.key === 'N'))) {
+  if ((isDesktop && mod && (e.key === 't' || e.key === 'T')) || (!isDesktop && alt && optionChord(e, ['KeyN'], ['n', 'N']))) {
     e.preventDefault()
     void handleNewChatShortcut()
     return
   }
 
   // Dictation: Cmd+D (Desktop) or Option+D (Web/PWA).
-  if ((isDesktop && mod && (e.key === 'd' || e.key === 'D')) || (!isDesktop && alt && (e.key === 'd' || e.key === 'D'))) {
+  if ((isDesktop && mod && (e.key === 'd' || e.key === 'D')) || (!isDesktop && alt && optionChord(e, ['KeyD'], ['d', 'D']))) {
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.toggleDictation()
@@ -1009,7 +1009,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // point: archive from mid-thought without clicking out. The confirm dialog
   // from archiveActiveChat is what makes this safe to fire while typing, and
   // it gates on shortcutsActive anyway, so the dialog swallows further keys.
-  if ((isDesktop && mod && !alt && e.key === 'Backspace') || (!isDesktop && alt && !mod && e.key === 'Backspace')) {
+  if ((isDesktop && mod && !alt && e.key === 'Backspace') || (!isDesktop && alt && !mod && optionChord(e, ['Backspace'], ['Backspace']))) {
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.archiveActiveChat()
@@ -1020,7 +1020,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // browser's Save Page. Skipped while typing for the same reason as archive:
   // in a text field Option+S is how you type ß, and stealing it would break
   // text entry for the sake of a view toggle.
-  if ((isDesktop && mod && (e.key === 's' || e.key === 'S')) || (!isDesktop && alt && (e.key === 's' || e.key === 'S'))) {
+  if ((isDesktop && mod && (e.key === 's' || e.key === 'S')) || (!isDesktop && alt && optionChord(e, ['KeyS'], ['s', 'S']))) {
     if (isTypingTarget(e.target)) return
     e.preventDefault()
     sidebarCollapsed.value = !sidebarCollapsed.value
@@ -1032,7 +1032,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // Not gated on the typing target, like dictation: opening the picker is the
   // useful reading of the key even mid-compose, and the picker is a popover,
   // not a text mutation.
-  if ((isDesktop && mod && e.shiftKey && !alt && (e.key === 'm' || e.key === 'M')) || (!isDesktop && alt && (e.key === 'm' || e.key === 'M'))) {
+  if ((isDesktop && mod && e.shiftKey && !alt && (e.key === 'm' || e.key === 'M')) || (!isDesktop && alt && optionChord(e, ['KeyM'], ['m', 'M']))) {
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.toggleModelPicker()
@@ -1054,12 +1054,14 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // Settings +/- buttons.
   const zoomModifier = isDesktop ? (mod && e.shiftKey && !alt) : (alt && !mod)
   if (zoomModifier && !isTypingTarget(e.target)) {
-    if (e.key === '=' || e.key === '+') {
+    const zoomIn = isDesktop ? (e.key === '=' || e.key === '+') : optionChord(e, ['Equal', 'NumpadAdd'], ['=', '+'])
+    const zoomOut = isDesktop ? (e.key === '-' || e.key === '_') : optionChord(e, ['Minus', 'NumpadSubtract'], ['-', '_'])
+    if (zoomIn) {
       e.preventDefault()
       fontScale.adjust(FONT_SCALE_STEP)
       return
     }
-    if (e.key === '-' || e.key === '_') {
+    if (zoomOut) {
       e.preventDefault()
       fontScale.adjust(-FONT_SCALE_STEP)
       return

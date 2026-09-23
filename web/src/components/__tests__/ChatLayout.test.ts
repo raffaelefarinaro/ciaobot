@@ -1779,3 +1779,162 @@ describe('ChatLayout home arrow navigation', () => {
     wrapper.unmount()
   })
 })
+
+// On macOS, Option rewrites KeyboardEvent.key into the character the chord
+// would type (⌥D is "∂", ⌥S "ß", ⌥N a dead key), so the PWA's Option chords
+// must match the physical key (`code`). Windows/Linux Alt leaves `key` alone;
+// both shapes have to reach the same action.
+describe('ChatLayout PWA Option/Alt chords', () => {
+  class MemoryStorage {
+    private values = new Map<string, string>()
+    getItem(key: string): string | null { return this.values.get(key) ?? null }
+    setItem(key: string, value: string): void { this.values.set(key, value) }
+    removeItem(key: string): void { this.values.delete(key) }
+    clear(): void { this.values.clear() }
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    window.__CIAOBOT_DESKTOP__ = undefined
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
+  })
+
+  afterEach(() => {
+    toggleDictation.mockReset()
+    toggleModelPicker.mockReset()
+    archiveActiveChat.mockReset()
+    pendingNewChat.value?.resolve(null)
+    vi.restoreAllMocks()
+  })
+
+  async function mountWebLayout() {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as unknown as typeof store.projects
+    store.chats = [{ chat_id: 'chat-1', project_id: 'project-1', title: 'Test chat' }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub, ProjectSidebar: EmptyStub, ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub, SettingsView: EmptyStub, FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub, PaneHeader: EmptyStub, HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+    return wrapper
+  }
+
+  function press(init: KeyboardEventInit, target: EventTarget = window): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', { altKey: true, bubbles: true, cancelable: true, ...init })
+    target.dispatchEvent(event)
+    return event
+  }
+
+  const platforms = [
+    ['Mac Option', { n: 'Dead', d: '∂', m: 'µ', s: 'ß', eq: '≠', minus: '–' }],
+    ['Windows Alt', { n: 'n', d: 'd', m: 'm', s: 's', eq: '=', minus: '-' }],
+  ] as const
+
+  it.each(platforms)('%s+D toggles dictation', async (_label, keys) => {
+    const wrapper = await mountWebLayout()
+    const event = press({ key: keys.d, code: 'KeyD' })
+    expect(toggleDictation).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it.each(platforms)('%s+M opens the model picker', async (_label, keys) => {
+    const wrapper = await mountWebLayout()
+    const event = press({ key: keys.m, code: 'KeyM' })
+    expect(toggleModelPicker).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it.each(platforms)('%s+N opens the new-chat picker', async (_label, keys) => {
+    const wrapper = await mountWebLayout()
+    const event = press({ key: keys.n, code: 'KeyN' })
+    await flushPromises()
+    expect(event.defaultPrevented).toBe(true)
+    expect(pendingNewChat.value).not.toBeNull()
+    wrapper.unmount()
+  })
+
+  it.each(platforms)('%s+Backspace archives the open chat', async () => {
+    const wrapper = await mountWebLayout()
+    const event = press({ key: 'Backspace', code: 'Backspace' })
+    expect(archiveActiveChat).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it.each(platforms)('%s+S toggles the sidebar', async (_label, keys) => {
+    const wrapper = await mountWebLayout()
+    expect(wrapper.find('.chat-layout').classes()).toContain('sidebar-open')
+    const event = press({ key: keys.s, code: 'KeyS' })
+    await nextTick()
+    expect(wrapper.find('.chat-layout').classes()).not.toContain('sidebar-open')
+    expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it.each(platforms)('%s+= and %s+- step the font scale', async (_label, keys) => {
+    useFontScale().set(1.2)
+    const wrapper = await mountWebLayout()
+    const zoomIn = press({ key: keys.eq, code: 'Equal' })
+    expect(localStorage.getItem('ciao-font-scale')).toBe('1.25')
+    expect(zoomIn.defaultPrevented).toBe(true)
+    const zoomOut = press({ key: keys.minus, code: 'Minus' })
+    expect(localStorage.getItem('ciao-font-scale')).toBe('1.2')
+    expect(zoomOut.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  // In a text field Option+S types ß and Option+= types ≠ on a Mac; matching
+  // by physical key must not start stealing them.
+  it.each(platforms)('%s+S and %s+= stay inert while a text field is focused', async (_label, keys) => {
+    useFontScale().set(1.2)
+    const wrapper = await mountWebLayout()
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    input.focus()
+
+    const sidebar = press({ key: keys.s, code: 'KeyS' }, input)
+    const zoom = press({ key: keys.eq, code: 'Equal' }, input)
+    await nextTick()
+
+    expect(wrapper.find('.chat-layout').classes()).toContain('sidebar-open')
+    expect(sidebar.defaultPrevented).toBe(false)
+    expect(zoom.defaultPrevented).toBe(false)
+    expect(localStorage.getItem('ciao-font-scale')).toBe('1.2')
+
+    input.remove()
+    wrapper.unmount()
+  })
+
+  // The physical key decides when `code` is present: Option on the D key is
+  // dictation whatever character the layout reports.
+  it('ignores the Option-produced character when code names another key', async () => {
+    const wrapper = await mountWebLayout()
+    const event = press({ key: 'd', code: 'KeyE' })
+    expect(toggleDictation).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+    wrapper.unmount()
+  })
+})
