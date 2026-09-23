@@ -90,3 +90,5 @@ workspace list
           [--project P] [--title T] [--description TEXT] [--provider P] [--model M]
           [--archive-policy P]
 ```
+
+- The memory-proposal review queue has its own two commands, outside the table: `ciao memory-proposals` lists it, and `ciao memory-proposal-dismiss --text-file F [--promoted]` removes one row (fact text in a file, never argv; `--promoted` only after filing the fact).

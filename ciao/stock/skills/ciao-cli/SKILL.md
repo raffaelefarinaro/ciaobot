@@ -17,7 +17,7 @@ Not for:
 - Editing ordinary workspace files — use the provider's native Read/Write/Edit/Glob, same as today.
 - Third-party MCP connectors (Google Workspace beyond `gws status`, or any other integration) — those keep their own tool surface.
 - Git — use the shell's `git` directly; `ciao` has no source-control verbs.
-- Anything not listed in the command table below.
+- Anything not listed in the command tables below.
 
 ## Calling convention
 
@@ -50,6 +50,15 @@ Not for:
 | `vault review trash --candidate ID` | Move a note to trash (reversible). | Same attended-turn guard as `keep`. |
 | `vault review restore --candidate ID` | Restore a trashed note. | Same attended-turn guard. |
 | `vault review delete --candidate ID --confirm ID` | Permanently delete a trashed note. | Same attended-turn guard, plus `--confirm` must repeat the candidate id; irreversible. |
+
+### Memory-proposal review queue
+
+Two older top-level commands, outside the `<noun> <verb>` table and its JSON envelope (plain text unless `--json`). They are how a chat resolves a row from the app's review page.
+
+| Command | Purpose | Guard |
+|---|---|---|
+| `memory-proposals [--json]` | List the pending proposals in this workspace's review queue. | Read-only. |
+| `memory-proposal-dismiss --text-file FILE [--promoted]` | Remove one queued proposal, matched by a unique substring of its text. | Write the text to a file; never pass it as an argument, since proposal text is arbitrary prose. File the fact first, then dismiss with `--promoted`; a plain dismissal records a decision against the fact. Never delete the bullet from the queue file by hand. |
 
 ### Files
 

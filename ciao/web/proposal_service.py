@@ -1032,14 +1032,17 @@ async def _promote_region_row(
     )
 
 
-def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
-    """Write an accepted `[people]` fact into a stub person note.
+async def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
+    """Write an accepted `[people]` fact into its person note.
 
-    A note that already exists is not appended to blindly — merging a new fact
-    into someone's curated note is a judgment call, so the row stays queued
-    and the error says so.
+    A missing note is created as a stub. An existing one is folded by a model
+    call, the same way a `[project]` accept folds its doc: merging into
+    someone's curated note needs judgment about where the fact goes, so it is
+    never a blind append. A fold that changes nothing (already covered) or
+    trips a guard keeps the row queued and says so.
     """
-    from ciao.memory_proposals import write_people_note
+    from ciao.memory_proposals import people_note_path, write_people_note
+    from ciao.project_doc_update import fold_fact_into_person_note
 
     name = str(row.get("target") or "").strip()
     if not name:
@@ -1048,16 +1051,38 @@ def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
         vault = config.workspace_vault_root(row["workspace"])
     except (AttributeError, ValueError) as exc:
         return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
+    note = people_note_path(Path(vault), name)
+    if note is None:
+        return AcceptOutcome(ok=False, error="the bullet names no usable person")
+    destination = f"People/{note.name}"
+    if note.exists():
+        errors: list[str] = []
+        wrote = await fold_fact_into_person_note(
+            note_path=note,
+            fact=row["text"],
+            model=getattr(config, "insights_model", "") or "sonnet",
+            error_out=errors,
+        )
+        if errors:
+            return AcceptOutcome(ok=False, error=f"fold failed: {errors[0]}")
+        if not wrote:
+            return AcceptOutcome(
+                ok=False,
+                error=f"the fold reported no changes to {destination}; "
+                "dismiss instead if the note already covers this",
+            )
+        return AcceptOutcome(ok=True, destination=destination)
     try:
         created = write_people_note(Path(vault), name, row["text"])
     except OSError as exc:
         return AcceptOutcome(ok=False, error=f"could not write the note: {exc}")
     if not created:
+        # Created by someone else between the check and the write.
         return AcceptOutcome(
             ok=False,
-            error=f"People/{name}.md already exists; merge the fact manually, then dismiss",
+            error=f"{destination} appeared while accepting; try again to merge into it",
         )
-    return AcceptOutcome(ok=True, destination=f"People/{name}.md")
+    return AcceptOutcome(ok=True, destination=destination)
 
 
 def _accept_learnings_row(config, row: dict[str, Any]) -> AcceptOutcome:
@@ -1323,11 +1348,11 @@ def _learnings_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]
 
 
 def _people_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
-    """What accepting one `[people]` bullet would create.
+    """What accepting one `[people]` bullet would write.
 
-    Create-only, like the accept: an existing note is a merge nobody can make
-    mechanically, so the preview says so instead of offering an accept that
-    would refuse.
+    A new note is shown exactly. An existing note is folded by a model at
+    accept time, so, like a `[project]` fold, the preview shows the note as it
+    is and marks the result inexact rather than inventing the merge.
     """
     from ciao.memory_proposals import people_note_path
     from ciao.memory_receipts import content_revision
@@ -1349,19 +1374,25 @@ def _people_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
     out["destination"] = f"People/{note.name}"
     out["destination_path"] = str(note)
     if note.exists():
-        out["operation"] = "none"
+        # Folded by a model at accept time, like a `[project]` doc: the note is
+        # shown as it is, and the wording of the merge is decided then.
         try:
             existing = note.read_text(encoding="utf-8")
-        except OSError:
-            existing = ""
+        except OSError as exc:
+            out["reason"] = f"could not read {out['destination']}: {exc}"
+            return out
         before_clip, cut = _clip(existing)
         out["before"] = before_clip
-        out["after"] = before_clip
         out["truncated"] = cut
         out["revision"] = content_revision(existing)
-        out["exact"] = True
+        out["operation"] = "update"
+        out["exact"] = False
+        out["can_accept"] = True
+        # The card already says the wording is decided at accept time for any
+        # inexact preview; this line says what the merge will do.
         out["reason"] = (
-            f"{out['destination']} already exists; merge the fact by hand, then dismiss"
+            "merged into the existing note where it fits; if the note already "
+            "says this, nothing is written and the row stays queued"
         )
         return out
     after = (

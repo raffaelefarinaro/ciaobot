@@ -171,3 +171,89 @@ async def update_project_doc(
         if error_out is not None:
             error_out.append(f"{type(exc).__name__}: {exc}"[:400] or "project doc update failed")
         return False
+
+
+_PERSON_FOLD_SYSTEM_PROMPT = """\
+You maintain a note about one person in a personal knowledge vault.
+You receive the current note and one new fact about that person that the
+operator has approved. Merge the fact into the note where it belongs: the
+section it fits, or a short new line under the most fitting heading.
+
+Rules:
+- Preserve the note's existing frontmatter, structure, headings, and voice.
+- Do not invent facts, and do not drop or reword anything already there
+  except to correct what the new fact directly supersedes.
+- Strip `[idx=N]` citations and bracketed destination tags (`[memory]`,
+  `[project]`, `[people: <Name>]`, `[learnings]`, `[review]`) from the fact.
+- If the note already says what the fact says, reply with exactly
+  NO_CHANGES and nothing else.
+- Otherwise reply with the complete updated note and nothing else —
+  no code fences, no commentary.
+"""
+
+
+async def fold_fact_into_person_note(
+    *,
+    note_path: Path,
+    fact: str,
+    model: str,
+    timeout_s: float = 300.0,
+    error_out: list[str] | None = None,
+) -> bool:
+    """Merge one approved fact into an existing person note. True on write.
+
+    The accept-time counterpart of :func:`update_project_doc` for `[people]`
+    rows: same per-file lock, fence stripping and rewrite guards, with a prompt
+    that takes a single approved fact instead of a session's insights. False
+    means ``NO_CHANGES`` (``error_out`` left empty) or, with ``error_out``
+    filled, a guard rejection, a note edited during the model call, or a
+    failure; the note is untouched in every case.
+    """
+    try:
+        if not note_path.is_file() or not fact.strip():
+            return False
+        async with _lock_for(note_path):
+            current = note_path.read_text(encoding="utf-8")
+
+            from ciao.providers.oneshot import run_oneshot
+
+            prompt = (
+                "Current person note:\n\n"
+                f"{current}\n\n"
+                "---\n\n"
+                f"Approved fact to merge:\n\n{fact.strip()}"
+            )
+            output = await run_oneshot(
+                prompt,
+                system_prompt=_PERSON_FOLD_SYSTEM_PROMPT,
+                model=model,
+                timeout_s=timeout_s,
+            )
+            updated = _strip_code_fence(output)
+            if updated == _NO_CHANGES or updated == current.strip():
+                return False
+            if not _is_safe_rewrite(current, updated):
+                # Not "already covered": the model produced a merge the guards
+                # refused (dropped frontmatter, shrank the note). Say so, or the
+                # operator is told to dismiss a fact that was never filed.
+                if error_out is not None:
+                    error_out.append(
+                        "the model's rewrite was rejected (it dropped the "
+                        "frontmatter or shrank the note)"
+                    )
+                return False
+            # The per-path lock only serializes this process's folds. A hand
+            # edit (or an agent's Edit) during the model call would otherwise be
+            # overwritten by a merge computed from the older text.
+            if note_path.read_text(encoding="utf-8") != current:
+                if error_out is not None:
+                    error_out.append(f"{note_path.name} changed during the fold; nothing was written")
+                return False
+            note_path.write_text(updated + "\n", encoding="utf-8")
+            logger.info("person note updated from an accepted proposal: %s", note_path)
+            return True
+    except Exception as exc:  # noqa: BLE001 — a failed fold keeps the row queued
+        logger.exception("person note fold failed for %s", note_path)
+        if error_out is not None:
+            error_out.append(f"{type(exc).__name__}: {exc}"[:400] or "person note fold failed")
+        return False

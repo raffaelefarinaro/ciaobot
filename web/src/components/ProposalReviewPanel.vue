@@ -199,10 +199,14 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
 // until the chat is archived/deleted or the proposal disappears, at which
 // point we revert to the normal actions.
 const PROPOSAL_CHAT_KEY = 'ciao:proposal-chat-links'
+// "Talk about it" chats are linked separately: the row still needs a decision
+// from the operator, so a discussion keeps the accept/dismiss buttons and only
+// swaps "talk about it" for a way back into the chat it already opened.
+const PROPOSAL_DISCUSS_KEY = 'ciao:proposal-discuss-links'
 
-function loadProposalChatLinks(): Record<string, string> {
+function loadProposalChatLinks(key = PROPOSAL_CHAT_KEY): Record<string, string> {
   try {
-    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(PROPOSAL_CHAT_KEY) : null
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null
     if (!raw) return {}
     const parsed = JSON.parse(raw)
     if (!parsed || typeof parsed !== 'object') return {}
@@ -219,6 +223,45 @@ const proposalChatLinks = ref<Record<string, string>>(loadProposalChatLinks())
 watch(proposalChatLinks, (value) => {
   try { localStorage.setItem(PROPOSAL_CHAT_KEY, JSON.stringify(value)) } catch { /* ignore */ }
 }, { deep: true })
+
+const proposalDiscussLinks = ref<Record<string, string>>(loadProposalChatLinks(PROPOSAL_DISCUSS_KEY))
+
+watch(proposalDiscussLinks, (value) => {
+  try { localStorage.setItem(PROPOSAL_DISCUSS_KEY, JSON.stringify(value)) } catch { /* ignore */ }
+}, { deep: true })
+
+function liveChat(chatId: string | undefined) {
+  if (!chatId) return undefined
+  const chat = projectStore.chats.find(c => c.chat_id === chatId)
+  return chat && !chat.archived ? chat : undefined
+}
+
+/** The still-open "talk about it" chat for this row, if there is one. */
+function discussionChat(row: ProposalRow) {
+  return liveChat(proposalDiscussLinks.value[row.id])
+}
+
+function linkDiscussion(rowIds: string[], chatId: string) {
+  if (!chatId) return
+  const next = { ...proposalDiscussLinks.value }
+  for (const id of rowIds) next[id] = chatId
+  proposalDiscussLinks.value = next
+}
+
+async function openChat(chatId: string) {
+  // Mirror InAppToast's workspace hop: the chat lives in its own workspace,
+  // which may not be the one the review list is currently scoped to.
+  const project = projectStore.projectFor(chatId)
+  if (project && project.workspace !== projectStore.activeWorkspace) {
+    await projectStore.switchWorkspace(project.workspace)
+  }
+  await projectStore.switchChat(chatId)
+}
+
+async function openDiscussion(row: ProposalRow) {
+  const chat = discussionChat(row)
+  if (chat) await openChat(chat.chat_id)
+}
 
 function linkedChatId(rowId: string): string | undefined {
   return proposalChatLinks.value[rowId]
@@ -260,32 +303,33 @@ async function openLinkedChat(row: ProposalRow) {
     clearLink(row.id)
     return
   }
-  // Mirror InAppToast's workspace hop: the chat lives in its own workspace,
-  // which may not be the one the review list is currently scoped to.
-  const project = projectStore.projectFor(chatId)
-  if (project && project.workspace !== projectStore.activeWorkspace) {
-    await projectStore.switchWorkspace(project.workspace)
+  await openChat(chatId)
+}
+
+function prunedLinks(links: Record<string, string>): Record<string, string> | null {
+  // Before the queue and the chat list have loaded, every link looks dead: on a
+  // reload the mount-time prune used to drop them all before either arrived.
+  // The render already hides a link whose chat is missing, so waiting is safe.
+  const rowsKnown = store.loaded
+  const chatsKnown = projectStore.chats.length > 0
+  if (!rowsKnown && !chatsKnown) return null
+  const liveIds = new Set(store.rows.map(r => r.id))
+  const next = { ...links }
+  let changed = false
+  for (const pid of Object.keys(next)) {
+    if ((rowsKnown && !liveIds.has(pid)) || (chatsKnown && !liveChat(next[pid]))) {
+      delete next[pid]
+      changed = true
+    }
   }
-  await projectStore.switchChat(chatId)
+  return changed ? next : null
 }
 
 function pruneProposalChatLinks() {
-  const liveIds = new Set(store.rows.map(r => r.id))
-  const next = { ...proposalChatLinks.value }
-  let changed = false
-  for (const pid of Object.keys(next)) {
-    if (!liveIds.has(pid)) {
-      delete next[pid]
-      changed = true
-      continue
-    }
-    const chat = projectStore.chats.find(c => c.chat_id === next[pid])
-    if (!chat || chat.archived) {
-      delete next[pid]
-      changed = true
-    }
-  }
-  if (changed) proposalChatLinks.value = next
+  const chats = prunedLinks(proposalChatLinks.value)
+  if (chats) proposalChatLinks.value = chats
+  const discussions = prunedLinks(proposalDiscussLinks.value)
+  if (discussions) proposalDiscussLinks.value = discussions
 }
 
 watch(() => store.rows.map(r => r.id).join(','), pruneProposalChatLinks)
@@ -819,6 +863,7 @@ async function discuss(row: ProposalRow) {
   try {
     const chat = await openWorkspaceChatInBackground(row.workspace, 'Proposal review', reviewHelper(row.id))
     if (!chat) return
+    linkDiscussion([row.id], chat.chat_id)
     projectStore.sendMessage(chat.chat_id, discussPrompt(row))
     pushBackgroundToast(chat.chat_id, 'Discussion in background', 'Proposal review — click to open the chat')
   } finally {
@@ -841,10 +886,21 @@ function discussPrompt(row: ProposalRow): string {
     `${about} is waiting for a decision (${where}): ${row.text}\n\n` +
     'Tell me whether this is durable and cross-session enough to keep, and where it ' +
     'should live — a bounded region, a project doc, a person note, Learnings, or ' +
-    'nowhere. Do not edit anything: leave the proposal queued and I will accept or ' +
-    'dismiss it myself.'
+    'nowhere. Do not edit anything until I decide.\n\n' +
+    DISCUSS_RESOLUTION
   )
 }
+
+// A discussion is where the decision often gets made, so the chat has to know
+// how to carry it out. Without this the agent had to discover the dismissal
+// command on its own, and when it could not it told the operator to go back to
+// the review page.
+const DISCUSS_RESOLUTION =
+  'If I tell you to drop it, write its exact text to a file and run ' +
+  '`ciao memory-proposal-dismiss --text-file <file>`. If I tell you to keep it, ' +
+  'file it where we agreed first, then run the same command with `--promoted`. ' +
+  'Never pass the text as a shell argument or edit the queue file by hand. ' +
+  'Until I decide, leave the proposal queued.'
 
 function batchAccept() {
   if (!selectedAcceptable.value.length) return
@@ -884,13 +940,14 @@ async function batchDiscuss() {
   try {
     const chat = await openWorkspaceChatInBackground(projectStore.activeWorkspace, 'Proposal review', reviewHelper(...rows.map(row => row.id)))
     if (!chat) return
+    linkDiscussion(rows.map(row => row.id), chat.chat_id)
     const lines = rows.map((r, i) => `${i + 1}. [${r.kind}] ${r.text}`).join('\n')
     projectStore.sendMessage(
       chat.chat_id,
       `${rows.length} queued proposals need a decision:\n\n${lines}\n\n` +
         'For each one, tell me whether it is durable and belongs where it says, ' +
-        'or should be dropped. Do not edit any region or move any file: leave ' +
-        'them queued and I will accept or dismiss them myself.',
+        'or should be dropped. Do not edit any region or move any file until I ' +
+        'decide.\n\n' + DISCUSS_RESOLUTION,
     )
     pushBackgroundToast(chat.chat_id, 'Discussion in background', `${rows.length} proposals — click to open the chat`)
   } finally {
@@ -1239,7 +1296,8 @@ watch(
                   @click="reconcileFirst(row)"
                 >{{ store.isBusy(row.id) ? 'working…' : 'check first' }}</button>
                 <button v-if="!editingPreview" type="button" class="btn-small btn-chip" @click="startEditingPreview">edit suggestion</button>
-                <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
+                <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip" @click="openDiscussion(row)">open chat</button>
+                <button v-else type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
                 <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">dismiss</button>
                 <button type="button" class="btn-small btn-chip" @click="closePreview">cancel</button>
               </div>
@@ -1298,7 +1356,8 @@ watch(
               @click="doAccept(row, c)"
             >{{ store.isBusy(row.id) ? 'working…' : c }}</button>
             <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">dismiss</button>
-            <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
+            <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip" @click="openDiscussion(row)">open chat</button>
+            <button v-else type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
           </div>
 
           <!-- A skill proposal is a FILE, so its actions are the ones a file
@@ -1313,7 +1372,8 @@ watch(
               @click="implementSkill(row)"
             >implement</button>
             <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'dismiss' }}</button>
-            <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
+            <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip" @click="openDiscussion(row)">open chat</button>
+            <button v-else type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
           </div>
 
           <div v-else class="pr-actions">
@@ -1329,7 +1389,8 @@ watch(
               @click="reviewAccept(row)"
             >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `move to ${rehomeTarget(row)}` : 'review') }}</button>
             <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'dismiss' }}</button>
-            <button type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
+            <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip" @click="openDiscussion(row)">open chat</button>
+            <button v-else type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
           </div>
         </li>
         </ul>

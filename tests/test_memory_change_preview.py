@@ -215,6 +215,34 @@ def test_preview_of_a_learning_shows_the_recurrence_bump(tmp_path: Path) -> None
     assert "(x2)" not in preview["before"]
 
 
+def test_preview_of_a_fact_about_a_known_person_offers_the_fold(tmp_path: Path) -> None:
+    """An existing person note is folded at accept time, not refused.
+
+    The card used to read "Nothing in People/Mo.md changes" with no accept,
+    which left the operator to merge by hand a fact the app could merge.
+    """
+    config = _vault(tmp_path)
+    vault = Path(config.workspace_vault_root("personal"))
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.write_text(
+        QUEUE + "- [people Mo] Mo moved to the platform team.  _(from: chat-1)_\n",
+        encoding="utf-8",
+    )
+    (vault / "People").mkdir(parents=True, exist_ok=True)
+    (vault / "People" / "Mo.md").write_text("---\ntags: [person]\n---\n# Mo\n", encoding="utf-8")
+    client = _client(config)
+    row = _row(client, "people")
+
+    preview = client.get(f"/api/proposals/{row['id']}/preview").json()["preview"]
+
+    assert preview["destination"] == "People/Mo.md"
+    assert preview["operation"] == "update"
+    assert preview["can_accept"] is True
+    assert preview["exact"] is False
+    assert "# Mo" in preview["before"]
+    assert preview["revision"]
+
+
 def test_preview_of_an_unknown_proposal_is_404(tmp_path: Path) -> None:
     client = _client(_vault(tmp_path))
     assert client.get("/api/proposals/nope/preview").status_code == 404
