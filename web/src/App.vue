@@ -564,7 +564,11 @@ a {
   text-decoration-thickness: 1px;
   transition: color 120ms var(--ease);
 }
-a:hover {
+/* Anchors styled as buttons keep their button text colour on hover. A bare
+   a:hover (0,1,1) outranks .btn-primary (0,1,0), so it used to repaint the
+   label accent-strong — the same colour .btn-primary:hover paints the
+   background — and the text vanished. */
+a:not(.btn-small, .btn-primary, .btn-chip, .btn-icon):hover {
   color: var(--accent-strong);
 }
 
@@ -602,6 +606,7 @@ a:hover {
   font-family: var(--font);
   font-size: calc(14px * var(--font-scale));
   font-weight: 600;
+  text-decoration: none;
   transition: background 120ms var(--ease), transform 120ms var(--ease);
 }
 
