@@ -514,10 +514,10 @@ def usage_payload(tokens: Mapping[str, Any] | None) -> dict[str, str]:
         ("reasoningTokens", tokens.get("reasoning")),
         ("cacheReadTokens", cache.get("read")),
         ("cacheWriteTokens", cache.get("write")),
-        # The assistant message reports a cumulative total for the turn
-        # (input + output + reasoning + cache), matching opencode's own
-        # context-window denominator. Preserve it so a later context %
-        # computation does not have to re-sum the parts.
+        # opencode writes one assistant message per model call and sets its
+        # tokens from that call alone (not a turn sum), so the last message's
+        # total (input + output + reasoning + cache) is the current context
+        # size: the figure opencode's own UI puts over the model's window.
         ("totalTokens", tokens.get("total")),
     ):
         count = _token_count(source)
@@ -1972,8 +1972,8 @@ class OpencodeProvider(BaseSDKProvider):
     ) -> None:
         """Attach the turn's context-window occupancy to ``self._usage``.
 
-        Mirrors opencode's own UI: total turn tokens over the model's declared
-        ``limit.context`` from ``GET /provider``. Silent on failure — the field
+        Mirrors opencode's own UI: the last model call's total tokens over the
+        model's declared ``limit.context`` from ``GET /provider``. Silent on failure — the field
         is simply left off the usage payload when the CLI cannot answer.
         """
         if not self._usage:

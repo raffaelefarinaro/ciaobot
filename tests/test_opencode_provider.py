@@ -1180,6 +1180,20 @@ def test_augment_context_pct_attaches_window_occupancy(tmp_path):
     assert provider._usage["context_pct"] == "15.0%"
 
 
+def test_context_total_is_the_last_model_call_not_a_turn_sum(tmp_path):
+    """Each tool-loop step is its own assistant message with its own tokens.
+
+    The recorded turn has two steps (totals 8,412 and 8,429, each re-reading
+    the 8,320-token cached prompt). The context is the last step's size; a
+    turn sum (16,841) would double-count the prompt the way Claude's
+    ResultMessage.usage does.
+    """
+    provider = _provider(tmp_path)
+    _replay(provider)
+    assert provider._usage["totalTokens"] == "8429"
+    assert provider._usage["cacheReadTokens"] == "8320"
+
+
 def test_augment_context_pct_is_silent_when_limit_is_missing(tmp_path):
     provider = _provider(tmp_path)
     provider._usage = {"inputTokens": "100", "outputTokens": "50", "totalTokens": "150"}
