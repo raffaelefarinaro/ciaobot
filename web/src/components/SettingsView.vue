@@ -69,38 +69,38 @@
           <ul class="shortcut-list">
             <li>
               <kbd v-if="inDesktopApp">&#8984;T</kbd>
-              <kbd v-else>&#8224;N</kbd>
+              <kbd v-else>{{ webChord('N') }}</kbd>
               <span>Open a new chat in the default General project</span>
             </li>
             <li>
               <kbd v-if="inDesktopApp">&#8984;D</kbd>
-              <kbd v-else>&#8224;D</kbd>
+              <kbd v-else>{{ webChord('D') }}</kbd>
               <span>Toggle voice dictation (start / stop)</span>
             </li>
             <li>
               <kbd v-if="inDesktopApp">&#8984;&#9003;</kbd>
-              <kbd v-else>&#8224;&#9003;</kbd>
+              <kbd v-else>{{ webChord('\u232B', 'Backspace') }}</kbd>
               <span>Archive the open chat (asks to confirm)</span>
             </li>
             <li>
               <kbd v-if="inDesktopApp">&#8984;S</kbd>
-              <kbd v-else>&#8224;S</kbd>
+              <kbd v-else>{{ webChord('S') }}</kbd>
               <span>Show or hide the sidebar</span>
             </li>
             <li>
               <kbd v-if="inDesktopApp">&#8984;&#8679;M</kbd>
-              <kbd v-else>&#8224;M</kbd>
+              <kbd v-else>{{ webChord('M') }}</kbd>
               <span>Open the model picker</span>
             </li>
             <li><kbd>1–9</kbd><span>Switch to the first through ninth workspace in the sidebar</span></li>
             <li>
               <kbd v-if="inDesktopApp">&#8984;&#8679;=</kbd>
-              <kbd v-else>&#8224;=</kbd>
+              <kbd v-else>{{ webChord('=') }}</kbd>
               <span>Increase the font size</span>
             </li>
             <li>
               <kbd v-if="inDesktopApp">&#8984;&#8679;-</kbd>
-              <kbd v-else>&#8224;-</kbd>
+              <kbd v-else>{{ webChord('-') }}</kbd>
               <span>Decrease the font size</span>
             </li>
             <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
@@ -669,14 +669,15 @@
                         type="button"
                         class="critique-chip"
                         :disabled="routinesSaving"
-                        title="Remove model"
+                        :title="`Remove ${model}`"
+                        :aria-label="`Remove ${model}`"
                         @click="removeCritiqueModel(model)"
                       >
                         <span>{{ model }}</span>
-                        <span>&times;</span>
+                        <span aria-hidden="true">&times;</span>
                       </button>
                     </div>
-                    <span v-else>Automatic default ({{ routines?.critique_models_effective || '' }})</span>
+                    <span v-else class="critique-picker-default">{{ critiqueDefaultLabel }}</span>
                   </div>
                   <button
                     type="button"
@@ -692,7 +693,7 @@
                   :model-value="selectedCritiqueModels"
                   :sections="critiqueModelSections"
                   placeholder="Select critique models"
-                  :empty-placeholder="`Automatic default (${routines?.critique_models_effective || ''})`"
+                  :empty-placeholder="critiqueDefaultLabel"
                   :disabled="routinesSaving"
                   @update:model-value="setCritiqueModels"
                 />
@@ -1750,7 +1751,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
 import { formatTime, formatDuration } from '../lib/time'
-import { isDesktopApp } from '../lib/desktop'
+import { isApplePlatform, isDesktopApp } from '../lib/desktop'
 import {
   DEFAULT_FONT_SCALE,
   FONT_SCALE_STEP,
@@ -1806,6 +1807,12 @@ import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } fro
 
 // The tray owns package updates and native notifications in the desktop app.
 const inDesktopApp = isDesktopApp()
+// The web shortcuts bind altKey. Apple keyboards label that key Option (\u2325);
+// Windows and Linux keyboards label it Alt.
+const onApplePlatform = isApplePlatform()
+function webChord(key: string, nonAppleKey: string = key): string {
+  return onApplePlatform ? `\u2325${key}` : `Alt+${nonAppleKey}`
+}
 import {
   DEFAULT_WORKSPACE_COLOR,
   WORKSPACE_COLOR_PRESETS,
@@ -2093,6 +2100,13 @@ const critiqueModelSections = computed<ModelSection[]>(() =>
 )
 
 const selectedCritiqueModels = computed(() => parseModelList(routines.value?.critique_models || ''))
+
+// The effective panel arrives comma-joined with no spaces, so it rendered as
+// one unbreakable token that overflowed its box on a phone. Rejoin it with
+// ", " so the summary wraps between models.
+const critiqueDefaultLabel = computed(() =>
+  `Automatic default (${parseModelList(routines.value?.critique_models_effective || '').join(', ')})`,
+)
 
 async function setCritiqueModels(value: string | string[]) {
   const models = Array.isArray(value) ? value : [value]
@@ -4636,11 +4650,17 @@ a.btn-secondary {
   color: var(--fg2);
   font-size: var(--text-sm);
 }
+.critique-picker-default {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .critique-picker-header .btn-small {
   width: 100%;
   min-height: 32px;
 }
 .critique-chip-list {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -4663,6 +4683,9 @@ a.btn-secondary {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.critique-chip span:last-child {
+  flex: none;
 }
 .critique-chip:disabled {
   cursor: default;
@@ -4984,7 +5007,10 @@ a.btn-secondary {
   .gws-profile-card .btn-small,
   .gws-profile-card .btn-primary,
   .gws-profile-card .file-upload-btn,
-  .gws-manual-toggle {
+  .gws-manual-toggle,
+  .critique-picker-header .btn-small,
+  .critique-chip,
+  .routine-row :deep(.model-selector__trigger) {
     min-height: var(--touch);
   }
 }
