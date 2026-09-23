@@ -172,6 +172,11 @@ class SessionSubagentState:
     # notification as a prompt, the read task was cancelled, and the run
     # archived on an interim "Waiting on X" message).
     notification_pending: bool = False
+    # True when the most recent completion notification was followed by an
+    # assistant record carrying prose: the CLI resumed the parent on its own and
+    # the parent has already written about the result, so the synthesis nudge
+    # would only produce a redundant "that was the report above" turn.
+    notification_answered: bool = False
 
     @property
     def awaiting_user_answer(self) -> bool:
@@ -468,6 +473,10 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
     # rest of the session — which pins `held_ticks` in the nudge poller and
     # makes the next real notification start out already past its grace.
     queue: list[str | None] = []
+    # Whether any completion notification has been recognised so far. Distinguishes
+    # a parent prose record that answers a notification from ordinary chatter
+    # that precedes the first one entirely.
+    seen_notification = False
 
     try:
         fh = path.open(encoding="utf-8")
@@ -510,6 +519,8 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     if isinstance(content, str) and _notification_fields(content):
                         _apply_notification(state, content)
                         queue.append("queued")
+                        seen_notification = True
+                        state.notification_answered = False
                     else:
                         queue.append(None)
                 continue
@@ -526,6 +537,11 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 assistant_text = _text_content(message)
                 if assistant_text.strip():
                     state.last_assistant_text = assistant_text
+                    if seen_notification:
+                        # The CLI resumed the parent on its own after a
+                        # completion notification, and the parent wrote prose.
+                        # That is the report the nudge would ask for again.
+                        state.notification_answered = True
                 blocks = message.get("content") if isinstance(message, dict) else None
                 if not isinstance(blocks, list):
                     continue
@@ -650,6 +666,8 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     info.raw_status = "lost"
             if _notification_fields(content) is not None:
                 _apply_notification(state, content)
+                seen_notification = True
+                state.notification_answered = False
                 # A notification landed as a user record. If no assistant
                 # record follows it, the CLI has not turned it into a reply
                 # yet — that is exactly the window where steering the nudge

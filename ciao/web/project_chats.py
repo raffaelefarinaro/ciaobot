@@ -7727,7 +7727,8 @@ class ProjectChatManager:
 
 
     async def _nudge_synthesis_after_subagents(
-        self, chat_id: str, awaiting_user_answer: bool = False
+        self, chat_id: str, awaiting_user_answer: bool = False,
+        already_reported: bool = False,
     ) -> NudgeOutcome:
         """Ask the parent to post a final report once its subagents finish.
 
@@ -7748,8 +7749,14 @@ class ProjectChatManager:
         in the transcript; the finished agents are still surfaced by the
         ``chat_subagents_ready`` count dropping to zero and by the subagent
         panel refresh it triggers.
+
+        ``already_reported`` holds it back when the CLI resumed the parent
+        itself and the parent already wrote its report: nudging then only
+        produces a redundant "that was the report above" reply.
         """
         if awaiting_user_answer:
+            return NUDGE_DECLINED
+        if already_reported:
             return NUDGE_DECLINED
         provider = self._providers.get(chat_id)
         if provider is None or not provider.can_drain:

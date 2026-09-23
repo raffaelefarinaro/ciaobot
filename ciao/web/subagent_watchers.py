@@ -108,12 +108,19 @@ class SubagentWatcherHost(Protocol):
         self, chat_id: str, token: int | None = ...
     ) -> bool: ...
 
+    def _discard_result_announce(
+        self, chat_id: str, token: int | None = ...
+    ) -> None: ...
+
     def _arm_parked_announce_deadline(self, chat_id: str, token: int) -> None: ...
 
     def _cli_owner_alive(self, chat_id: str) -> bool: ...
 
+    def _is_interim_subagent_text(self, text: str) -> bool: ...
+
     async def _nudge_synthesis_after_subagents(
-        self, chat_id: str, awaiting_user_answer: bool = ...
+        self, chat_id: str, awaiting_user_answer: bool = ...,
+        already_reported: bool = ...,
     ) -> NudgeOutcome: ...
 
     def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int) -> str: ...
@@ -386,9 +393,17 @@ class SubagentWatchers:
                         # nudge call); only the notification hold above
                         # carries the bounded grace.
                         nudge_attempted = True
+                        already_reported = (
+                            state.notification_answered
+                            and not state.notification_pending
+                            and not self._host._is_interim_subagent_text(
+                                state.last_assistant_text
+                            )
+                        )
                         outcome = await self._host._nudge_synthesis_after_subagents(
                             chat_id,
                             awaiting_user_answer=state.awaiting_user_answer,
+                            already_reported=already_reported,
                         )
                         nudged = outcome == NUDGE_SENT
                         if nudged:
@@ -415,11 +430,28 @@ class SubagentWatchers:
                             # and a live foreground turn (the parent asked a
                             # question, the user answered it) announces for
                             # itself.
+                            #
+                            # The already-reported case is the exception:
+                            # there the CLI resumed the parent itself, and the
+                            # between-turns drain owns that report turn and
+                            # publishes it (discarding this same parked entry
+                            # first). Flushing here would race the drain and
+                            # push the interim non-answer alongside the real
+                            # report, so discard instead. A drain that has
+                            # already published makes this a no-op.
                             current = self._pending_subagent_watchers.get(chat_id)
                             if current is None or current is asyncio.current_task():
-                                self._host._flush_result_announce(
-                                    chat_id, self._host._parked_announce_token(chat_id)
+                                parked_token = self._host._parked_announce_token(
+                                    chat_id
                                 )
+                                if already_reported:
+                                    self._host._discard_result_announce(
+                                        chat_id, parked_token
+                                    )
+                                else:
+                                    self._host._flush_result_announce(
+                                        chat_id, parked_token
+                                    )
                         # NUDGE_SUPERSEDED falls through deliberately: a user
                         # turn took the chat over and will announce its own
                         # result and clear the park when it ends. Flushing here
