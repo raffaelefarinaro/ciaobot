@@ -423,9 +423,16 @@ def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
     sections = _split_sections(insights_md)
     proposals: list[MemoryProposal] = []
 
-    for heading in (*_BEHAVIORAL_SECTIONS, *_IDENTITY_SECTIONS, UNREADABLE_SECTION):
+    for heading in (
+        *_BEHAVIORAL_SECTIONS, *_IDENTITY_SECTIONS, UNREADABLE_SECTION, "Open loops"
+    ):
         for item in sections.get(heading, []):
             kind, payload, citations, text = _peel_trailing_metadata(item)
+            if heading == "Open loops" and not (kind == "project" and payload):
+                # Open loops are the chat's own business and the doc fold's
+                # to track; only one the model filed under a named other
+                # project needs routing, because the fold skips those.
+                continue
             if not kind:
                 kind, payload = _default_destination(heading, text)
             if not _is_durable(text):
@@ -2558,7 +2565,6 @@ def _is_scaffold(name: str) -> bool:
     )
 # Shorter names ("mo", "ux") match too much prose to count as a mention.
 _MIN_ENTITY_MENTION = 4
-_ISO_DATE_RE = re.compile(r"\b20\d\d-\d\d-\d\d\b")
 
 
 def entity_key(name: str) -> str:
@@ -2726,7 +2732,7 @@ def _route_to_known_entity(
     proposal: MemoryProposal,
     projects: dict[str, Path],
     people: dict[str, str],
-) -> MemoryProposal | None:
+) -> MemoryProposal:
     """Give a ``[review]`` fact about a known person or project its home.
 
     ``[review]`` means "nowhere to put this", and a review row cannot be
@@ -2734,10 +2740,10 @@ def _route_to_known_entity(
     reached the queue as a dead end. Routed, in order:
 
     * a "New entities" bullet whose subject is a known person or project →
-      that note or doc. The prompt says a roster entity is never new, so one
-      that carries no ISO date is a re-description ("Project: Wedding -
-      civil wedding + party") and is dropped (``None``); one that does is an
-      update ("confirmed live ... as of 2026-09-03") and is routed;
+      that note or doc. Whether it restates the note or changes it is not
+      decidable from the wording (an update need not carry a date, and a
+      restatement can), so it is routed either way and the accept's fold
+      answers "already covered";
     * any bullet naming exactly one known project → that project's doc.
 
     Anything else stays ``[review]``. The destination accept still folds
@@ -2766,8 +2772,6 @@ def _route_to_known_entity(
                 re.search(r"\b(?:person|people)\b", subject.group("type"), re.I)
             )
             if person or key in projects:
-                if not _ISO_DATE_RE.search(text):
-                    return None
                 if person:
                     return routed("people", people[key])
                 return routed("project", str(projects[key]))
@@ -2806,8 +2810,27 @@ def _session_vault_changes(insights_md: str) -> list[tuple[str, frozenset[int]]]
     return out
 
 
+def _changed_file_text(path: str, vault_root: Path) -> str | None:
+    """The current text of a Vault changes path, or None when it is unreadable.
+
+    Paths come back vault-relative ("People/Mo.md") or workspace-relative
+    ("work/commands/styleit.md", two levels above the vault).
+    """
+    rel = path.lstrip("./")
+    for base in (vault_root, vault_root.parent, vault_root.parent.parent):
+        candidate = base / rel
+        try:
+            if candidate.is_file():
+                return candidate.read_text(encoding="utf-8", errors="replace").lower()
+        except OSError:
+            continue
+    return None
+
+
 def _written_this_session(
-    proposal: MemoryProposal, changes: list[tuple[str, frozenset[int]]]
+    proposal: MemoryProposal,
+    changes: list[tuple[str, frozenset[int]]],
+    vault_root: Path,
 ) -> bool:
     """True when the fact is the session's own edit to a file, restated.
 
@@ -2817,8 +2840,14 @@ def _written_this_session(
     that — the edit went to a file, not the region the proposal targets — so
     the review queue asked for a fact that was already saved.
 
-    Precision-first, two signals together: the bullet cites a turn that a
-    vault change also cites, and it names that changed file in backticks.
+    Precision-first, three signals together: the bullet cites a turn that a
+    vault change also cites, it names that changed file in backticks, and the
+    file as it is now contains another term the bullet puts in backticks —
+    so an unrelated edit to a file the fact merely mentions ("`scripts/test.sh`
+    is the entry point" alongside a new flag in it) is not taken as the fact
+    being saved. A file named for what it defines (`/styleit` for
+    `commands/styleit.md`) only has to exist. Anything unreadable stays
+    reviewable.
     A User correction is never suppressed: "run tests via `scripts/test.sh`"
     can share a turn with the edit to that script and still be a standing
     preference the file itself does not state.
@@ -2834,13 +2863,25 @@ def _written_this_session(
     }
     if not tokens:
         return False
-    for path, idx in changes:
-        norm = path.lstrip("./").lower()
-        if not (cited & idx):
+    co_cited = [
+        (path, path.lstrip("./").lower())
+        for path, idx in changes
+        if cited & idx
+        and not any(
+            path.lstrip("./").lower().startswith(p) or f"/{p}" in path.lower()
+            for p in _EPISODIC_PREFIXES
+        )
+    ]
+    texts = {path: _changed_file_text(path, vault_root) for path, _ in co_cited}
+    corpus = "\n".join(text for text in texts.values() if text)
+    for path, norm in co_cited:
+        if texts[path] is None:
             continue
-        if any(norm.startswith(p) or f"/{p}" in norm for p in _EPISODIC_PREFIXES):
-            continue
-        if any(tok == norm or norm.endswith("/" + tok) or tok.endswith("/" + norm) for tok in tokens):
+        named = {
+            tok for tok in tokens
+            if tok == norm or norm.endswith("/" + tok) or tok.endswith("/" + norm)
+        }
+        if named and any(tok in corpus for tok in tokens - named):
             return True
         # The name the file defines: `/styleit` for `commands/styleit.md`.
         stem = Path(norm).stem
@@ -2928,8 +2969,6 @@ def proposals_from_archive(
             if addressed is None:
                 return None
             routed = _route_to_known_entity(addressed, projects, people)
-            if routed is None:
-                return None
             if (
                 routed.target == "review"
                 and routed.source_section == "Decisions"
@@ -2960,7 +2999,9 @@ def proposals_from_archive(
             filtered: list[MemoryProposal] = []
             suppressed = 0
             for _p in proposals:
-                if _written_this_session(_p, session_changes) or _is_already_applied(
+                if _written_this_session(
+                    _p, session_changes, workspace_vault_root
+                ) or _is_already_applied(
                     _p, workspace_vault_root, guide_path, project_doc_path
                 ):
                     suppressed += 1

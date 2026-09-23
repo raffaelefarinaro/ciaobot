@@ -2863,18 +2863,24 @@ def test_known_person_subject_routes_to_their_note(tmp_path: Path) -> None:
     assert [(r["kind"], r["target"]) for r in rows] == [("people", "Finn-Cummins")]
 
 
-def test_known_entity_redescription_is_dropped(tmp_path: Path) -> None:
-    """The prompt says a roster entity is never new; an undated restatement is noise."""
+def test_undated_known_entity_fact_is_routed_not_dropped(tmp_path: Path) -> None:
+    """No date does not prove a restatement: "now leads partnerships" is news."""
     vault = _known_vault(tmp_path)
     archive = _archive(
         tmp_path,
         "## New entities\n"
-        "- person: Finn Cummins - Anthropic GTM contact. [idx=1] [review]\n"
+        "- person: Finn Cummins - now leads partnerships at Anthropic. [idx=1] [review]\n"
         "- project: [ai-native-sdk](./projects/active/ai-native-sdk/ai-native-sdk.md) - "
         "the AI-native SDK workstream. [idx=2] [project]\n",
     )
 
-    assert mp.proposals_from_archive(archive, vault) is None
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+    assert sorted((r["kind"], r["target"].split("/")[-1]) for r in mp.list_proposals(out)) == [
+        ("people", "Finn-Cummins"),
+        ("project", "ai-native-sdk.md"),
+    ]
 
 
 def test_fact_naming_two_known_projects_stays_review(tmp_path: Path) -> None:
@@ -2894,9 +2900,18 @@ def test_fact_naming_two_known_projects_stays_review(tmp_path: Path) -> None:
     assert [r["kind"] for r in mp.list_proposals(out)] == ["review"]
 
 
+def _changed_file(tmp_path: Path, rel: str, text: str) -> None:
+    """A Vault changes target, workspace-relative (one level above the vault)."""
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 def test_fact_the_session_already_wrote_is_suppressed(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     guide = write_guide(tmp_path / "AGENTS.md")
+    _changed_file(tmp_path, "work/commands/styleit.md", "Rewrite per Writing style, then humanizer.\n")
+    _changed_file(tmp_path, "work/AGENTS.md", "- /styleit - polish a draft\n")
     archive = _archive(
         tmp_path,
         "## Decisions\n"
@@ -3003,6 +3018,7 @@ def test_people_payload_resolves_to_the_existing_note_stem(tmp_path: Path) -> No
 
 def test_session_write_suppression_matches_the_name_the_file_defines(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
+    _changed_file(tmp_path, "work/commands/styleit.md", "Rewrite per Writing style.\n")
     archive = _archive(
         tmp_path,
         "## New entities\n"
@@ -3057,10 +3073,11 @@ def test_unreadable_row_naming_the_own_project_is_not_dropped(tmp_path: Path) ->
 def test_session_write_suppression_reads_a_markdown_link_path(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     guide = write_guide(tmp_path / "AGENTS.md")
+    _changed_file(tmp_path, "work/commands/styleit.md", "Run `humanizer` last.\n")
     archive = _archive(
         tmp_path,
         "## Decisions\n"
-        "- Chose a standing drafts command in `work/commands/styleit.md` "
+        "- Chose a standing drafts command in `work/commands/styleit.md` ending in `humanizer` "
         "as the standard way to polish drafts. [idx=21] [memory]\n"
         "## Vault changes\n"
         "- [styleit](./work/commands/styleit.md) - new command created. [idx=21]\n",
@@ -3141,10 +3158,11 @@ def test_an_index_beside_the_project_folders_is_not_a_project(tmp_path: Path) ->
 
 def test_vault_change_link_with_escaped_spaces_suppresses_the_restatement(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
+    _changed_file(tmp_path, "vault/People/Mo Salah.md", "# Mo\n\n- Our coach.\n")
     archive = _archive(
         tmp_path,
         "## Decisions\n"
-        "- Chose `People/Mo Salah.md` as the standard coach note. [idx=5] [memory]\n"
+        "- Chose `People/Mo Salah.md` as the standard `coach` note. [idx=5] [memory]\n"
         "## Vault changes\n"
         "- [Mo - coach](./People/Mo%20Salah.md) - updated. [idx=5]\n",
     )
@@ -3203,12 +3221,67 @@ def test_scaffold_folders_and_deep_paths(tmp_path: Path) -> None:
 
 def test_vault_change_link_fragment_is_ignored(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
+    _changed_file(tmp_path, "vault/People/Mo.md", "# Mo\n\n- Our coach.\n")
     archive = _archive(
         tmp_path,
         "## Decisions\n"
-        "- Chose `People/Mo.md` as the standard coach note. [idx=3] [memory]\n"
+        "- Chose `People/Mo.md` as the standard `coach` note. [idx=3] [memory]\n"
         "## Vault changes\n"
         "- [Mo](./People/Mo.md#facts) - added role. [idx=3]\n",
     )
 
     assert mp.proposals_from_archive(archive, vault) is None
+
+
+def test_unrelated_edit_to_a_mentioned_file_does_not_suppress_the_fact(tmp_path: Path) -> None:
+    """Same turn and same file is not proof the file records the fact."""
+    vault = tmp_path / "vault"
+    _changed_file(tmp_path, "scripts/test.sh", "pytest --cov\n")
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose `scripts/test.sh` as the standard `entry-point` for tests. [idx=4] [memory]\n"
+        "## Vault changes\n"
+        "- scripts/test.sh - added a coverage flag. [idx=4]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+    assert len(mp.list_proposals(out)) == 1
+
+
+def test_missing_changed_file_does_not_suppress_the_fact(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose `work/commands/styleit.md` ending in `humanizer` as standard. [idx=21] [memory]\n"
+        "## Vault changes\n"
+        "- work/commands/styleit.md - new command created. [idx=21]\n",
+    )
+
+    out = mp.proposals_from_archive(archive, vault)
+
+    assert out is not None
+
+
+def test_open_loop_for_another_named_project_is_routed(tmp_path: Path) -> None:
+    """The fold skips a named project tag, so routing must pick it up."""
+    vault = _known_vault(tmp_path)
+    own = vault / "projects" / "active" / "general" / "README.md"
+    archive = _archive(
+        tmp_path,
+        "## Open loops\n"
+        "- Waiting on Finn for the claude.com plugin page. [idx=5] [project: ai-native-sdk]\n"
+        "- Reply to the landlord by Friday. [idx=6] [project]\n",
+    )
+
+    out = mp.proposals_from_archive(
+        archive, vault, project_doc_path=str(own), project_fold_wrote=True
+    )
+
+    assert out is not None
+    rows = mp.list_proposals(out)
+    assert [r["kind"] for r in rows] == ["project"]
+    assert rows[0]["target"].endswith("ai-native-sdk/ai-native-sdk.md")
