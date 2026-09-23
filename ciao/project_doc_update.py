@@ -205,7 +205,8 @@ async def fold_fact_into_person_note(
     The accept-time counterpart of :func:`update_project_doc` for `[people]`
     rows: same per-file lock, fence stripping and rewrite guards, with a prompt
     that takes a single approved fact instead of a session's insights. False
-    means ``NO_CHANGES``, a guard rejection, or (with ``error_out`` filled) a
+    means ``NO_CHANGES`` (``error_out`` left empty) or, with ``error_out``
+    filled, a guard rejection, a note edited during the model call, or a
     failure; the note is untouched in every case.
     """
     try:
@@ -229,7 +230,24 @@ async def fold_fact_into_person_note(
                 timeout_s=timeout_s,
             )
             updated = _strip_code_fence(output)
+            if updated == _NO_CHANGES or updated == current.strip():
+                return False
             if not _is_safe_rewrite(current, updated):
+                # Not "already covered": the model produced a merge the guards
+                # refused (dropped frontmatter, shrank the note). Say so, or the
+                # operator is told to dismiss a fact that was never filed.
+                if error_out is not None:
+                    error_out.append(
+                        "the model's rewrite was rejected (it dropped the "
+                        "frontmatter or shrank the note)"
+                    )
+                return False
+            # The per-path lock only serializes this process's folds. A hand
+            # edit (or an agent's Edit) during the model call would otherwise be
+            # overwritten by a merge computed from the older text.
+            if note_path.read_text(encoding="utf-8") != current:
+                if error_out is not None:
+                    error_out.append(f"{note_path.name} changed during the fold; nothing was written")
                 return False
             note_path.write_text(updated + "\n", encoding="utf-8")
             logger.info("person note updated from an accepted proposal: %s", note_path)

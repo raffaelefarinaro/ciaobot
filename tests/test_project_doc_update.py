@@ -298,12 +298,38 @@ def test_person_fold_rejects_a_rewrite_that_drops_frontmatter(
     note = _write_note(tmp_path)
     _patch_oneshot(monkeypatch, "# Laurene Racine\n\n**Role:** Product Manager\nNew fact.")
 
+    errors: list[str] = []
+
     wrote = asyncio.run(pdu.fold_fact_into_person_note(
-        note_path=note, fact="New fact.", model="m",
+        note_path=note, fact="New fact.", model="m", error_out=errors,
     ))
 
     assert wrote is False
     assert note.read_text(encoding="utf-8") == _NOTE
+    # A guard refusal is not "already covered", so it must not read as a no-op.
+    assert errors and "rejected" in errors[-1]
+
+
+def test_person_fold_keeps_an_edit_made_during_the_model_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    note = _write_note(tmp_path)
+    edited = _NOTE + "\nHand edit while the model ran.\n"
+
+    async def slow(prompt, **kwargs):
+        note.write_text(edited, encoding="utf-8")
+        return _NOTE.strip() + "\nNew fact."
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", slow)
+    errors: list[str] = []
+
+    wrote = asyncio.run(pdu.fold_fact_into_person_note(
+        note_path=note, fact="New fact.", model="m", error_out=errors,
+    ))
+
+    assert wrote is False
+    assert note.read_text(encoding="utf-8") == edited
+    assert errors and "changed during the fold" in errors[-1]
 
 
 def test_person_fold_reports_a_model_failure(
