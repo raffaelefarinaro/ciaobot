@@ -599,6 +599,15 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
+    // The effective panel arrives comma-joined with no spaces. It is shown
+    // rejoined with ", " in a wrapping summary so it cannot overflow on a
+    // phone, and the ellipsized trigger carries the full value as its title.
+    const defaultLabel = 'Automatic default (anthropic/claude-sonnet-4.5, anthropic/claude-haiku-4.5)'
+    expect(wrapper.find('.critique-picker-default').text()).toBe(defaultLabel)
+    expect(
+      wrapper.find('.critique-model-picker .model-selector__trigger').attributes('title'),
+    ).toBe(defaultLabel)
+
     // The critique picker is now a searchable ModelSelector.
     const critiqueSelector = wrapper.find('.critique-model-picker .model-selector')
     expect(critiqueSelector.exists()).toBe(true)
@@ -626,6 +635,10 @@ describe('component mount smoke', () => {
       critique_models: 'opus,opencode:openai/gpt-5.6-luna',
     })
     expect(wrapper.text()).toContain('opencode:openai/gpt-5.6-luna')
+    // Chip text ellipsizes, so the remove button names the model it removes.
+    expect(
+      wrapper.findAll('.critique-chip').map((chip) => chip.attributes('aria-label')),
+    ).toContain('Remove opencode:openai/gpt-5.6-luna')
     wrapper.unmount()
   })
 

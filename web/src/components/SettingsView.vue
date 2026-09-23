@@ -669,14 +669,15 @@
                         type="button"
                         class="critique-chip"
                         :disabled="routinesSaving"
-                        title="Remove model"
+                        :title="`Remove ${model}`"
+                        :aria-label="`Remove ${model}`"
                         @click="removeCritiqueModel(model)"
                       >
                         <span>{{ model }}</span>
-                        <span>&times;</span>
+                        <span aria-hidden="true">&times;</span>
                       </button>
                     </div>
-                    <span v-else>Automatic default ({{ routines?.critique_models_effective || '' }})</span>
+                    <span v-else class="critique-picker-default">{{ critiqueDefaultLabel }}</span>
                   </div>
                   <button
                     type="button"
@@ -692,7 +693,7 @@
                   :model-value="selectedCritiqueModels"
                   :sections="critiqueModelSections"
                   placeholder="Select critique models"
-                  :empty-placeholder="`Automatic default (${routines?.critique_models_effective || ''})`"
+                  :empty-placeholder="critiqueDefaultLabel"
                   :disabled="routinesSaving"
                   @update:model-value="setCritiqueModels"
                 />
@@ -2093,6 +2094,13 @@ const critiqueModelSections = computed<ModelSection[]>(() =>
 )
 
 const selectedCritiqueModels = computed(() => parseModelList(routines.value?.critique_models || ''))
+
+// The effective panel arrives comma-joined with no spaces, so it rendered as
+// one unbreakable token that overflowed its box on a phone. Rejoin it with
+// ", " so the summary wraps between models.
+const critiqueDefaultLabel = computed(() =>
+  `Automatic default (${parseModelList(routines.value?.critique_models_effective || '').join(', ')})`,
+)
 
 async function setCritiqueModels(value: string | string[]) {
   const models = Array.isArray(value) ? value : [value]
@@ -4636,11 +4644,17 @@ a.btn-secondary {
   color: var(--fg2);
   font-size: var(--text-sm);
 }
+.critique-picker-default {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .critique-picker-header .btn-small {
   width: 100%;
   min-height: 32px;
 }
 .critique-chip-list {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -4663,6 +4677,9 @@ a.btn-secondary {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.critique-chip span:last-child {
+  flex: none;
 }
 .critique-chip:disabled {
   cursor: default;
@@ -4984,7 +5001,10 @@ a.btn-secondary {
   .gws-profile-card .btn-small,
   .gws-profile-card .btn-primary,
   .gws-profile-card .file-upload-btn,
-  .gws-manual-toggle {
+  .gws-manual-toggle,
+  .critique-picker-header .btn-small,
+  .critique-chip,
+  .routine-row :deep(.model-selector__trigger) {
     min-height: var(--touch);
   }
 }

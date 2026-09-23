@@ -87,6 +87,17 @@ describe('ModelSelector', () => {
     document.body.innerHTML = ''
   })
 
+  it('exposes the full trigger label as a title, since the label ellipsizes', () => {
+    expect(
+      mountSelector({ multiple: true, modelValue: [], emptyPlaceholder: 'Automatic default (a, b)' })
+        .find('.model-selector__trigger').attributes('title'),
+    ).toBe('Automatic default (a, b)')
+    expect(
+      mountSelector({ multiple: true, modelValue: ['haiku', 'glm-5.2:cloud'] })
+        .find('.model-selector__trigger').attributes('title'),
+    ).toBe('haiku, glm-5.2:cloud')
+  })
+
   it('opens on trigger click and renders sections', async () => {
     const wrapper = mountSelector()
     await wrapper.find('.model-selector__trigger').trigger('click')

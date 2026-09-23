@@ -398,6 +398,7 @@ onBeforeUnmount(() => {
       type="button"
       class="model-selector__trigger"
       :disabled="disabled"
+      :title="triggerLabel"
       :aria-expanded="popoverVisible"
       aria-haspopup="listbox"
       @click="toggle"
