@@ -908,16 +908,17 @@
                     <button
                       class="btn-small"
                       @click="saveWorkspace(form.name)"
-                      :disabled="workspacesSaving === form.name"
+                      :disabled="workspacesSaving === form.name || archivingWorkspace === form.name"
                     >
                       {{ workspacesSaving === form.name ? 'Saving...' : 'Save' }}
                     </button>
                     <button
-                      v-if="workspaceForms.length > 1"
-                      class="btn-small btn-danger"
-                      @click="removeWorkspace(form.name)"
-                      :disabled="workspacesSaving === form.name"
-                    >Delete</button>
+                      v-if="workspaceArchivable(form.name)"
+                      class="btn-small btn-caution"
+                      :aria-label="`Archive workspace ${form.name}`"
+                      @click="archiveWorkspace(form.name)"
+                      :disabled="workspacesSaving === form.name || archivingWorkspace === form.name"
+                    >{{ archivingWorkspace === form.name ? 'Archiving...' : 'Archive' }}</button>
                   </div>
                 </div>
 
@@ -979,6 +980,43 @@
             </div>
 
             <div v-if="workspacesResult" class="action-result action-result--error" role="alert">{{ workspacesResult }}</div>
+
+            <section class="archived-workspaces" aria-labelledby="archived-workspaces-title">
+              <p id="archived-workspaces-title" class="subsection-title">Archived workspaces</p>
+              <p class="hint hint--compact">
+                Archived workspaces keep every file in <code>.archived-workspaces/</code> in the Ciaobot folder. Ciaobot does not read their notes or memory until you restore them.
+              </p>
+              <p v-if="archivedLoading && !archivedWorkspaces.length" class="hint">Loading&hellip;</p>
+              <div v-else-if="archivedLoadError" class="action-result action-result--error" role="alert">
+                {{ archivedLoadError }}
+                <button class="btn-small" type="button" @click="fetchArchivedWorkspaces">Retry</button>
+              </div>
+              <p v-else-if="!archivedWorkspaces.length" class="hint archived-empty">No archived workspaces.</p>
+              <ul v-if="archivedWorkspaces.length" class="archived-list">
+                <li
+                  v-for="item in archivedWorkspaces"
+                  :key="item.id"
+                  class="archived-item"
+                >
+                  <div class="archived-item-text">
+                    <p class="workspace-title">{{ item.name }}</p>
+                    <p class="hint hint--compact">
+                      Archived {{ formatArchivedAt(item.archived_at) }} &middot; <code>{{ item.path }}</code>
+                    </p>
+                    <p v-if="!item.restorable && item.blocked_reason" class="hint hint--warn hint--compact">
+                      {{ item.blocked_reason }}
+                    </p>
+                  </div>
+                  <button
+                    class="btn-small"
+                    type="button"
+                    :aria-label="`Restore workspace ${item.name}`"
+                    :disabled="!item.restorable || restoringArchiveId === item.id"
+                    @click="restoreWorkspace(item)"
+                  >{{ restoringArchiveId === item.id ? 'Restoring...' : 'Restore' }}</button>
+                </li>
+              </ul>
+            </section>
           </div>
 
           <!-- Google Workspace integration -->
@@ -1752,6 +1790,7 @@ import {
 } from '../composables/useFontScale'
 import type {
   AgentAssetsResponse,
+  ArchivedWorkspace,
   AutomationPayload,
   AutomationProcess,
   CommandAsset,
@@ -1780,6 +1819,7 @@ import type {
   LocalHandbackResult,
 } from '../lib/types'
 import { askConfirm } from '../lib/confirm'
+import { archiveConfirmMessage } from '../lib/workspaceArchive'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import { useHousekeepingStore } from '../stores/housekeeping'
@@ -3302,6 +3342,12 @@ const workspacesLoaded = ref(false)
 const workspacesError = ref('')
 const workspacesSaving = ref<string | null>(null)
 const workspacesResult = ref('')
+const archivingWorkspace = ref<string | null>(null)
+const primaryWorkspace = ref<string | null>(null)
+const archivedWorkspaces = ref<ArchivedWorkspace[]>([])
+const archivedLoading = ref(false)
+const archivedLoadError = ref('')
+const restoringArchiveId = ref<string | null>(null)
 const showNewWorkspace = ref(false)
 const workspaceModels = ref<ModelsResponse | null>(null)
 
@@ -3428,7 +3474,8 @@ function connectionMcps(providerId: string): string[] {
 async function fetchWorkspacesList() {
   workspacesError.value = ''
   try {
-    await projectStore.fetchWorkspaces()
+    const res = await projectStore.fetchWorkspaces()
+    primaryWorkspace.value = res?.primary ?? null
     workspaceForms.value = projectStore.workspaces.map(workspaceToForm)
     newWorkspaceForm.value.default_provider = normalizeWorkspaceProvider(newWorkspaceForm.value.default_provider)
   } catch (e) {
@@ -3510,22 +3557,66 @@ async function createNewWorkspace() {
   }
 }
 
-async function removeWorkspace(name: string) {
-  if (!await askConfirm(`Delete workspace "${name}"? Chats keep their history but lose workspace routing.`, {
-    title: 'Delete workspace',
-    confirmLabel: 'Delete workspace',
-    destructive: true,
+// The primary workspace and the last one cannot be archived; the server
+// refuses both, so the button is not offered for them.
+function workspaceArchivable(name: string): boolean {
+  return workspaceForms.value.length > 1 && name !== primaryWorkspace.value
+}
+
+async function archiveWorkspace(name: string) {
+  if (!await askConfirm(archiveConfirmMessage(name), {
+    title: 'Archive workspace',
+    confirmLabel: 'Archive workspace',
+    // Recoverable, so not styled as a destructive delete (DESIGN.md).
+    destructive: false,
   })) return
-  workspacesSaving.value = name
+  archivingWorkspace.value = name
   workspacesResult.value = ''
   try {
-    await projectStore.deleteWorkspace(name)
-    notifySaved(`Workspace "${name}" deleted.`, 'Workspaces')
-    await fetchWorkspacesList()
+    const res = await projectStore.archiveWorkspace(name)
+    const where = res.archived?.path ? ` Files are in ${res.archived.path}.` : ''
+    notifySaved(`Workspace "${name}" archived.${where}`, 'Workspaces')
+    await Promise.all([fetchWorkspacesList(), fetchArchivedWorkspaces()])
   } catch (e) {
-    workspacesResult.value = `Error: ${apiErrorMessage(e, 'The workspace could not be deleted.')}`
+    const detail = apiErrorMessage(e, 'The workspace could not be archived.')
+    workspacesResult.value = `Error: ${detail}`
+    notifyFailed(`Workspace "${name}" not archived`, detail)
   } finally {
-    workspacesSaving.value = null
+    archivingWorkspace.value = null
+  }
+}
+
+async function fetchArchivedWorkspaces() {
+  archivedLoading.value = true
+  archivedLoadError.value = ''
+  try {
+    archivedWorkspaces.value = await projectStore.fetchArchivedWorkspaces()
+  } catch (e) {
+    archivedLoadError.value = `Could not load archived workspaces: ${errorMessage(e)}`
+  } finally {
+    archivedLoading.value = false
+  }
+}
+
+function formatArchivedAt(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+async function restoreWorkspace(item: ArchivedWorkspace) {
+  restoringArchiveId.value = item.id
+  workspacesResult.value = ''
+  try {
+    await projectStore.restoreArchivedWorkspace(item.id)
+    notifySaved(`Workspace "${item.name}" restored.`, 'Workspaces')
+    await Promise.all([fetchWorkspacesList(), fetchArchivedWorkspaces(), projectStore.fetchAll()])
+  } catch (e) {
+    const detail = apiErrorMessage(e, 'The workspace could not be restored.')
+    workspacesResult.value = `Error: ${detail}`
+    notifyFailed(`Workspace "${item.name}" not restored`, detail)
+  } finally {
+    restoringArchiveId.value = null
   }
 }
 
@@ -3552,6 +3643,7 @@ onMounted(async () => {
   fetchWorkspaceModels().then(() => fetchWorkspaceModels(true))
   fetchGwsIntegration()
   fetchWorkspacesList()
+  fetchArchivedWorkspaces()
 })
 
 
@@ -4154,6 +4246,11 @@ async function doPackageUpdate() {
   padding: 6px 12px;
   font-size: var(--text-sm);
   font-weight: 500;
+}
+/* The global mobile rule gives .btn-small a 44px target; the compact caution
+   variant above resets min-height and would otherwise drop below it. */
+@media (max-width: 768px) {
+  .btn-caution.btn-small { min-height: var(--touch); }
 }
 .btn-caution:hover { background: color-mix(in srgb, var(--warning) 15%, var(--bg3)); }
 .btn-secondary:active,
@@ -5149,6 +5246,61 @@ a.btn-secondary {
 .workspace-actions .btn-small {
   flex: 0 0 auto;
 }
+.archived-workspaces {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.archived-workspaces .subsection-title {
+  margin: 0;
+}
+.archived-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.archived-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+}
+.archived-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.archived-item-text p {
+  margin: 0;
+}
+.archived-item-text code {
+  overflow-wrap: anywhere;
+}
+.archived-item .btn-small {
+  flex: 0 0 auto;
+}
+/* The reason is printed beside it; the dimming only confirms it. */
+.archived-item .btn-small:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+/* Same size as the Save button beside it; the compact caution variant is
+   sized for denser rows. */
+.workspace-actions .btn-caution.btn-small {
+  padding: 8px 16px;
+  font-weight: 600;
+}
 .provider-defaults {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -5340,6 +5492,10 @@ a.btn-secondary {
   }
   .workspace-actions .btn-small {
     flex: 1 1 auto;
+  }
+  .archived-item {
+    flex-direction: column;
+    align-items: stretch;
   }
 }
 .skill-source {

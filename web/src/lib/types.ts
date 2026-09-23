@@ -63,7 +63,29 @@ export interface WorkspaceInfo {
 export interface WorkspacesResponse {
   workspaces: WorkspaceInfo[]
   active: WorkspaceName | null
+  // The workspace that cannot be archived (the server refuses it).
+  primary?: WorkspaceName | null
   provider_options?: WorkspaceProviderOption[]
+}
+
+/** One archived workspace, from `GET /api/workspaces/archived`. */
+export interface ArchivedWorkspace {
+  id: string
+  name: WorkspaceName
+  archived_at: string
+  // Install-relative folder the archive lives in.
+  path: string
+  layout: string
+  color: string
+  default_provider: string
+  gws_profile: string
+  schedules: number
+  restorable: boolean
+  blocked_reason: string
+}
+
+export interface ArchivedWorkspacesResponse {
+  archived: ArchivedWorkspace[]
 }
 
 export interface McpEnvKey {

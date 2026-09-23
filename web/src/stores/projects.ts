@@ -15,6 +15,8 @@ import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft } f
 import { isPostprocessing, postprocessNeedsRetry } from '../lib/postprocessView'
 import type {
   ArchiveChatResponse,
+  ArchivedWorkspace,
+  ArchivedWorkspacesResponse,
   ArchiveJobView,
   ProjectInfo,
   ChatInfo,
@@ -1756,8 +1758,14 @@ export const useProjectStore = defineStore('projects', () => {
     return res
   }
 
-  async function deleteWorkspace(name: WorkspaceName) {
-    const res = await api.del<WorkspacesResponse>(`/api/workspaces/${encodeURIComponent(name)}`)
+  // Archive, never delete: the server unregisters the workspace, archives its
+  // chats and moves its folder intact into `.archived-workspaces/`. Its
+  // projects leave through `project_deleted` events; the list is refetched too
+  // so a missed frame cannot leave them in the sidebar.
+  async function archiveWorkspace(name: WorkspaceName) {
+    const res = await api.post<WorkspacesResponse & { archived?: { path: string } }>(
+      `/api/workspaces/${encodeURIComponent(name)}/archive`,
+    )
     workspaces.value = res.workspaces || []
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
@@ -1765,6 +1773,21 @@ export const useProjectStore = defineStore('projects', () => {
     if (activeWorkspace.value === name) {
       activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
     }
+    projects.value = projects.value.filter(p => p.workspace !== name)
+    return res
+  }
+
+  async function fetchArchivedWorkspaces(): Promise<ArchivedWorkspace[]> {
+    const res = await api.get<ArchivedWorkspacesResponse>('/api/workspaces/archived')
+    return res.archived || []
+  }
+
+  async function restoreArchivedWorkspace(id: string) {
+    const res = await api.post<WorkspacesResponse>('/api/workspaces/archived/restore', { id })
+    workspaces.value = res.workspaces || []
+    workspaceProviderOptions.value = res.provider_options?.length
+      ? res.provider_options
+      : [{ value: 'claude', label: 'Claude' }]
     return res
   }
 
@@ -5023,7 +5046,8 @@ export const useProjectStore = defineStore('projects', () => {
     insightsFailedChats, workspaceInsightsFailedCount,
     archivingChats, isArchiving, archivingChatsList, workspaceArchivingCount, projectArchivingCount,
     // Actions
-    fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
+    fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace,
+    archiveWorkspace, fetchArchivedWorkspaces, restoreArchivedWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     generalProject,
