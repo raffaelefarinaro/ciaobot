@@ -16,11 +16,7 @@
         <a href="./">Home</a>
         <a href="guide.html">Get started</a>
         <a href="features.html">Features</a>
-        <a href="builtin.html" aria-current="page">Built in</a>
         <a href="memory.html">Memory</a>
-        <a href="models.html">AI models</a>
-        <a href="remote.html">Anywhere</a>
-        <a href="configure.html">Configure</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
     </div>
@@ -37,20 +33,15 @@
         <li><a href="#skills">Skills</a></li>
         <li><a href="#commands">Commands</a></li>
         <li><a href="#extend">Add your own</a></li>
-        <li><a href="#which">Which one when?</a></li>
       </ul>
     </section>
 
     <section id="cli">
       <h2>The <code>ciao</code> tool: how the assistant runs the app</h2>
-      <p>Ciaobot includes a command-line tool, <code>ciao</code>, that the AI uses to act on the app itself: search memory, update a note, create a project, move or archive a chat, schedule a task, start a background job, check the Google connection, show you a file.</p>
-      <p>This is why <strong>anything you can click, you can also ask for</strong>. When you say "every Friday at 6, remind me to plan my workouts", the assistant runs something like <code>ciao schedule create …</code>, shows you the draft, and waits for your OK. Each chat talks to the app with its own short-lived, scoped key, so a chat can only act where you're working.</p>
-      <pre><code>ciao vault search "venue shortlist"
-ciao project list
-ciao schedule preview …
-ciao chat archive &lt;chat-id&gt;</code></pre>
-      <p>You never need to type these yourself; they're listed so you know what the assistant can do.</p>
+      <p>Ciaobot includes a command-line tool, <code>ciao</code>, that the AI uses to act on the app itself: search memory, create a project, archive a chat, schedule a task. That's why <strong>anything you can click, you can also ask for</strong>. You never need to type it yourself.</p>
     </section>
+
+    <p class="note">Every subagent, skill and command below links to its file on GitHub, so you can read the exact prompt Ciaobot uses, or copy it as a starting point for your own.</p>
 
     <section id="subagents">
       <h2>Subagents <span class="tag">3 included</span></h2>
@@ -59,9 +50,9 @@ ciao chat archive &lt;chat-id&gt;</code></pre>
         <table>
           <thead><tr><th>Subagent</th><th>What it's for</th></tr></thead>
           <tbody>
-            <tr><td><code>secretary</code></td><td>Calendar, email, reminders, scheduling and light admin.</td></tr>
-            <tr><td><code>researcher</code></td><td>Looks up current information on the web and summarises it with sources.</td></tr>
-            <tr><td><code>memory</code></td><td>Careful edits to your notes: updating a person or project note, working through memory suggestions.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/agents/secretary.md"><code>secretary</code></a></td><td>Calendar, email, reminders, scheduling and light admin.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/agents/researcher.md"><code>researcher</code></a></td><td>Looks up current information on the web and summarises it with sources.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/agents/memory.md"><code>memory</code></a></td><td>Careful edits to your notes: updating a person or project note, working through memory suggestions.</td></tr>
           </tbody>
         </table>
       </div>
@@ -82,25 +73,20 @@ ciao chat archive &lt;chat-id&gt;</code></pre>
         <table>
           <thead><tr><th>Skill</th><th>What it does</th></tr></thead>
           <tbody>
-            <tr><td><code>ciao-capabilities</code></td><td>Knows every Ciaobot feature, answers "can you…?" and gives tours.</td></tr>
-            <tr><td><code>ciao-cli</code></td><td>How to use the <code>ciao</code> tool to change the app's state.</td></tr>
-            <tr><td><code>web-research</code></td><td>Reliable web lookups that check the sources.</td></tr>
-            <tr><td><code>html-artifact</code></td><td>Builds interactive pages (dashboards, charts, comparisons) shown beside the chat.</td></tr>
-            <tr><td><code>visual-plan</code></td><td>Turns bigger work into a reviewable plan, with an optional visual companion.</td></tr>
-            <tr><td><code>workspace-authoring</code></td><td>Writes and maintains longer working documents in your notes.</td></tr>
-            <tr><td><code>convert-documents-to-markdown</code></td><td>Reads Word, PowerPoint, Excel, PDF and more by converting them to text.</td></tr>
-            <tr><td><code>memory-curation</code></td><td>The nightly memory tidy-up procedure.</td></tr>
-            <tr><td><code>sop-authoring</code></td><td>Helps you write clean skills and step-by-step procedures of your own.</td></tr>
-            <tr><td><code>ciao-support</code></td><td>Diagnoses problems with Ciaobot and helps report them.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/SKILL.md"><code>ciao-capabilities</code></a></td><td>Knows every Ciaobot feature, answers "can you…?" and gives tours.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-cli/SKILL.md"><code>ciao-cli</code></a></td><td>How to use the <code>ciao</code> tool to change the app's state.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/web-research/SKILL.md"><code>web-research</code></a></td><td>Reliable web lookups that check the sources.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/html-artifact/SKILL.md"><code>html-artifact</code></a></td><td>Builds interactive pages (dashboards, charts, comparisons) shown beside the chat.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/visual-plan/SKILL.md"><code>visual-plan</code></a></td><td>Turns bigger work into a reviewable plan, with an optional visual companion.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/workspace-authoring/SKILL.md"><code>workspace-authoring</code></a></td><td>Writes and maintains longer working documents in your notes.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/convert-documents-to-markdown/SKILL.md"><code>convert-documents-to-markdown</code></a></td><td>Reads Word, PowerPoint, Excel, PDF and more by converting them to text.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/memory-curation/SKILL.md"><code>memory-curation</code></a></td><td>The nightly memory tidy-up procedure.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/sop-authoring/SKILL.md"><code>sop-authoring</code></a></td><td>Helps you write clean skills and step-by-step procedures of your own.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-support/SKILL.md"><code>ciao-support</code></a></td><td>Diagnoses problems with Ciaobot and helps report them.</td></tr>
           </tbody>
         </table>
       </div>
-      <p>When a workspace is linked to a Google account, Ciaobot also installs the Google skills:</p>
-      <ul class="pill-list" aria-label="Google Workspace skills">
-        <li>gmail</li><li>gmail-read</li><li>gmail-triage</li><li>gmail-reply</li><li>gmail-send</li><li>gmail-forward</li><li>gmail-watch</li>
-        <li>calendar</li><li>calendar-agenda</li><li>calendar-insert</li><li>drive</li><li>drive-upload</li><li>docs</li><li>docs-write</li>
-        <li>sheets</li><li>sheets-read</li><li>sheets-append</li><li>slides</li><li>tasks</li><li>forms</li>
-      </ul>
+      <p>When a workspace is linked to a Google account, Ciaobot also installs about 20 <a href="https://github.com/raffaelefarinaro/ciaobot/tree/main/ciao/stock/skills">Google skills</a> for Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks and Forms.</p>
     </section>
 
     <section id="commands">
@@ -110,9 +96,9 @@ ciao chat archive &lt;chat-id&gt;</code></pre>
         <table>
           <thead><tr><th>Command</th><th>What it does</th></tr></thead>
           <tbody>
-            <tr><td><code>/remember</code></td><td>Saves a fact as a memory suggestion for you to confirm.</td></tr>
-            <tr><td><code>/critique</code></td><td>Asks a panel of other AI models to review a plan or answer, then sums up their verdicts.</td></tr>
-            <tr><td><code>/interrogation</code></td><td>Interviews you about a vague project or person and turns the answers into a useful note.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/commands/remember.md"><code>/remember</code></a></td><td>Saves a fact as a memory suggestion for you to confirm.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/commands/critique.md"><code>/critique</code></a></td><td>Asks a panel of other AI models to review a plan or answer, then sums up their verdicts.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/commands/interrogation.md"><code>/interrogation</code></a></td><td>Interviews you about a vague project or person and turns the answers into a useful note.</td></tr>
           </tbody>
         </table>
       </div>
@@ -126,6 +112,18 @@ ciao chat archive &lt;chat-id&gt;</code></pre>
     <section id="extend">
       <h2>Add your own</h2>
       <p>There are three ways to give Ciaobot new abilities, and the easiest is always the same: <strong>ask Ciaobot to make it</strong>. The MCP and Skills settings even have an <em>Add via chat</em> button that opens a chat for exactly that.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>If you want to…</th><th>Use</th><th>Example</th></tr></thead>
+          <tbody>
+            <tr><td>Reach an app or service Ciaobot can't see yet</td><td>MCP server</td><td>Read and update your Notion pages</td></tr>
+            <tr><td>Stop repeating how a task should be done</td><td>Skill</td><td>"How I write the weekly status update"</td></tr>
+            <tr><td>Hand off a self-contained job and get back a summary</td><td>Subagent</td><td>Research five venues and compare them</td></tr>
+            <tr><td>Do the same task on a timetable</td><td><a href="features.html#automations">Automation</a></td><td>Every Monday at 8, draft the status update</td></tr>
+            <tr><td>Save a fact about you or a project</td><td>Just say it</td><td>"Remember that the budget is now €22k"</td></tr>
+          </tbody>
+        </table>
+      </div>
 
       <h3>🔌 MCP servers: connect other apps</h3>
       <p>The <a href="https://modelcontextprotocol.io/">Model Context Protocol</a> is the standard way to plug an outside service (Notion, Linear, GitHub, your home automation) into an AI assistant as a set of tools.</p>
@@ -147,22 +145,6 @@ ciao chat archive &lt;chat-id&gt;</code></pre>
       <p>You keep it. Skills, plugins, subagents and MCP servers you've installed in Claude Code or opencode are also available when that tool runs a Ciaobot chat. <a href="models.html#inherit">More →</a></p>
     </section>
 
-    <section id="which">
-      <h2>Which one when?</h2>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>If you want to…</th><th>Use</th><th>Example</th></tr></thead>
-          <tbody>
-            <tr><td>Reach an app or service Ciaobot can't see yet</td><td>MCP server</td><td>Read and update your Notion pages</td></tr>
-            <tr><td>Stop repeating how a task should be done</td><td>Skill</td><td>"How I write the weekly status update"</td></tr>
-            <tr><td>Hand off a self-contained job and get back a summary</td><td>Subagent</td><td>Research five venues and compare them</td></tr>
-            <tr><td>Do the same task on a timetable</td><td><a href="features.html#automations">Automation</a></td><td>Every Monday at 8, draft the status update</td></tr>
-            <tr><td>Save a fact about you or a project</td><td>Just say it</td><td>"Remember that the budget is now €22k"</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p>A good sign you need a skill: you've explained the same thing in three chats. A good sign you need a subagent: a job would flood your chat with pages of search results or emails. A good sign you need an automation: you've asked for the same thing two weeks running.</p>
-    </section>
 
     <nav class="next-page" aria-label="Next pages">
       <a class="btn" href="features.html">← Features</a>
