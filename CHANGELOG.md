@@ -13,6 +13,7 @@
 - Keep review rows and unresolved project names instead of dropping them (`3f300486`)
 - Address Codex review on #522: keep facts reviewable instead of guessing (`e2c0de47`)
 - Check session-write evidence in the named file only (`ec6ac33a`)
+- Narrow the stem shortcut and recognise completed-project moves (`9e831b38`)
 
 ### Fixed
 - Fix silent drops and edge cases found reviewing the release fixes (`228b0148`)
