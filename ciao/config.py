@@ -8,6 +8,7 @@ import os
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -60,6 +61,10 @@ _DEFAULT_HARNESS_DISALLOWED_TOOLS: tuple[str, ...] = (
 
 
 _REROOTED_CACHE: dict[str, bool] = {}
+
+# Runtime-root file recording that the retired ``CIAO_WORKSPACES`` variable
+# was imported into ``workspaces.json``. Its presence makes the import one-shot.
+LEGACY_WORKSPACES_IMPORT_MARKER = "workspaces-env-imported.json"
 
 # Keys ``from_env`` has injected into ``os.environ`` from a workspace ``.env``.
 #
@@ -312,7 +317,7 @@ def _parse_workspaces_json(raw: str) -> dict[str, WorkspaceConfig]:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        logging.getLogger(__name__).warning("CIAO_WORKSPACES is not valid JSON")
+        logging.getLogger(__name__).warning("Workspace registry is not valid JSON")
         return {}
     items: list[dict]
     if isinstance(parsed, dict):
@@ -499,6 +504,10 @@ class CiaoConfig:
     _workspace_registry_changed: bool = field(
         init=False, default=False, repr=False
     )
+    # Raw value of the retired ``CIAO_WORKSPACES`` variable, if an install
+    # still sets it. Never used as a workspace source; server startup imports
+    # it into ``.runtime/workspaces.json`` once and then ignores it.
+    legacy_workspaces_env: str = field(default="", repr=False)
     claude_mode: BridgeMode = "auto"
     # Per-provider default execution (permission) mode for new chats, set from
     # the PWA Settings → Providers tab (runtime settings store). A missing
@@ -1023,6 +1032,92 @@ class CiaoConfig:
         tmp.replace(path)
         self._workspace_registry_changed = False
 
+    def import_legacy_workspaces_env(self) -> list[str]:
+        """Import the retired ``CIAO_WORKSPACES`` variable into the registry, once.
+
+        ``CIAO_WORKSPACES`` used to override ``.runtime/workspaces.json`` on
+        every start, so a workspace created, edited or archived in Settings
+        could silently revert on the next restart. The registry is now the only
+        source. An install that still sets the variable gets its workspaces
+        copied into the registry the first time a server starts on this
+        release:
+
+        - no registry file (or one with no valid entries): the variable's
+          workspaces become the registry, replacing the in-memory bootstrap
+          list, because the variable was this install's effective list;
+        - a registry file with entries: only workspaces it does not already
+          define are appended; existing entries are never overwritten.
+
+        A marker file in the runtime root records that the import ran, so a
+        later start never re-imports: a workspace removed in Settings stays
+        removed even while the variable is still in ``.env``. Every start that
+        still sees the variable logs a warning saying it is ignored.
+
+        An imported workspace with no ``allowed_mcp_servers`` is stored with an
+        explicit empty allowlist. That is what ``None`` resolved to while the
+        entry lived only in the environment (every declared server denied);
+        leaving it ``None`` in the file would let ``_seed_allowed_mcp_servers``
+        widen it to every declared server on the next start.
+
+        Returns the names of the imported workspaces. The caller must hold the
+        workspace instance lock, since this writes the registry.
+        """
+        raw = self.legacy_workspaces_env.strip()
+        if not raw:
+            return []
+        runtime_root = self.state_path.parent
+        marker = runtime_root / LEGACY_WORKSPACES_IMPORT_MARKER
+        if marker.exists():
+            logger.warning(
+                "CIAO_WORKSPACES is set but no longer read; workspaces are "
+                "managed in Settings and stored in %s. Remove it from .env.",
+                runtime_root / "workspaces.json",
+            )
+            return []
+        legacy = _parse_workspaces_json(raw)
+        registry_path = runtime_root / "workspaces.json"
+        on_disk: dict[str, WorkspaceConfig] = {}
+        try:
+            if registry_path.is_file():
+                on_disk = _parse_workspaces_json(
+                    registry_path.read_text(encoding="utf-8")
+                )
+        except OSError:
+            on_disk = {}
+        if on_disk:
+            imported = {n: w for n, w in legacy.items() if n not in self.workspaces}
+            self.workspaces.update(imported)
+        else:
+            imported = dict(legacy)
+            if imported:
+                self.workspaces = dict(imported)
+        for workspace_config in imported.values():
+            if workspace_config.allowed_mcp_servers is None:
+                workspace_config.allowed_mcp_servers = []
+        if imported:
+            self._normalize_workspace_vault_roots()
+            self.persist_workspace_registry()
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            json.dumps(
+                {
+                    "imported_at": datetime.now(UTC).isoformat(),
+                    "imported": list(imported),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        logger.warning(
+            "CIAO_WORKSPACES is no longer read; imported %s into %s once. "
+            "Workspaces are managed in Settings now; remove CIAO_WORKSPACES "
+            "from .env.",
+            ", ".join(imported) if imported else "no new workspaces",
+            registry_path,
+        )
+        return list(imported)
+
     def default_model_for_workspace(
         self, workspace: str | None, provider: str | None = None
     ) -> str:
@@ -1509,14 +1604,17 @@ class CiaoConfig:
         runtime_root = runtime_root.resolve()
         state_path = runtime_root / "state.json"
         media_root = runtime_root / "telegram_media"  # keep old path for existing media
-        workspaces_json = source.get("CIAO_WORKSPACES", "").strip()
-        if not workspaces_json:
-            workspaces_path = runtime_root / "workspaces.json"
-            try:
-                if workspaces_path.is_file():
-                    workspaces_json = workspaces_path.read_text(encoding="utf-8")
-            except OSError:
-                workspaces_json = ""
+        # The runtime registry is the only source of the workspace list: it is
+        # state the app and Settings own. ``CIAO_WORKSPACES`` is no longer
+        # read as a source; its raw value is kept only so server startup can
+        # import it once (see ``import_legacy_workspaces_env``).
+        workspaces_json = ""
+        workspaces_path = runtime_root / "workspaces.json"
+        try:
+            if workspaces_path.is_file():
+                workspaces_json = workspaces_path.read_text(encoding="utf-8")
+        except OSError:
+            workspaces_json = ""
 
         claude_models = _split_csv(source.get("CLAUDE_MODELS", "opus,sonnet,haiku,fable"))
         claude_default_model = claude_models[0] if claude_models else "opus"
@@ -1573,6 +1671,7 @@ class CiaoConfig:
             pwa_host=(source.get("PWA_HOST") or "0.0.0.0").strip() or "0.0.0.0",
             gws_default_profile=gws_default_profile,
             workspaces=workspaces,
+            legacy_workspaces_env=str(source.get("CIAO_WORKSPACES", "") or "").strip(),
             insights_enabled=source.get("CIAO_INSIGHTS_DISABLED", "").strip().lower()
             in {"", "0", "false", "no", "off"},
             insights_model_override=source.get("CIAO_INSIGHTS_MODEL", "").strip(),

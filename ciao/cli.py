@@ -2207,22 +2207,13 @@ def _vault_relocate_command(args: argparse.Namespace) -> int:
         "PWA_AUTH_TOKEN": os.environ.get("PWA_AUTH_TOKEN") or "vault-relocate",
     }
     config = CiaoConfig.from_env(effective_source)
-    # Whether workspaces.json is what `config` actually sourced its workspaces
-    # from, per CiaoConfig.from_env's own precedence — read off the SAME
-    # merged environment that built `config` (target .env, then ambient env
-    # only when --workspace was not explicit), not the raw process
-    # environment, which can disagree with it when CIAO_WORKSPACES is set
-    # only in the target install's .env.
-    registry_authoritative = not effective_source.get("CIAO_WORKSPACES", "").strip()
 
     if args.name not in set(config.workspace_names()):
         print(f"No registered workspace named '{args.name}'.", file=sys.stderr)
         return 1
 
     if args.undo:
-        result = vault_relocate.undo(
-            config, args.name, runtime, registry_authoritative=registry_authoritative
-        )
+        result = vault_relocate.undo(config, args.name, runtime)
         print(json.dumps(result, indent=2))
         return 0 if result["status"] in {"undone", "nothing_to_undo"} else 1
 
@@ -2234,7 +2225,6 @@ def _vault_relocate_command(args: argparse.Namespace) -> int:
             args.name,
             runtime,
             plan_result=plan_result,
-            registry_authoritative=registry_authoritative,
         )
         if args.json:
             print(json.dumps(result, indent=2))
