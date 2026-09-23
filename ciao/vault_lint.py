@@ -80,7 +80,7 @@ def duplicate_key(stem: str) -> str:
 # Directories that aren't vault content: app state, generated projections, tool
 # caches, and any venv/node_modules checked out inside the vault root (#129).
 EXCLUDE_DIRS = {
-    "Logs", "Templates", ".obsidian", ".vault-trash",
+    "Logs", "Templates", ".obsidian", ".vault-trash", ".archived-workspaces",
     ".venv", "venv", "node_modules", ".git",
     ".claude", ".agents", ".codex", ".opencode", "__pycache__",
 }

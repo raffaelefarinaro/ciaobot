@@ -125,7 +125,10 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/agent/status` | Agent CLI surface status: `{ready, operations, telemetry_path, version}` for the Settings → Agent CLI panel |
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
-| DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
+| POST | `/api/workspaces/{name}/archive` | Archive a workspace: unregister it, archive its chats, take its user schedules, and move its folder intact into `<install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/`. Refuses the primary or last workspace, a workspace with a running chat, and layouts it cannot move safely (409) |
+| DELETE | `/api/workspaces/{name}` | Alias of `POST /api/workspaces/{name}/archive`, kept for existing scripts; it no longer deletes anything |
+| GET | `/api/workspaces/archived` | List archived workspaces, newest first: `{archived: [{id, name, archived_at, path, layout, color, default_provider, gws_profile, schedules, restorable, blocked_reason}]}` |
+| POST | `/api/workspaces/archived/restore` | Restore an archived workspace (`{id}`): move its folder back, re-register it, and put its schedules back. Refuses when the name or the folder is taken (409) |
 | GET, PATCH | `/api/settings/providers` | Read or update provider/service key status; credentials are redacted |
 | POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or opencode CLI |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
@@ -478,7 +481,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 **Workspaces**
 
 ```bash
-# List — returns {workspaces, active, provider_options}.
+# List — returns {workspaces, active, primary, provider_options}.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
 # Upsert — body keys: name, default_provider,
@@ -498,8 +501,18 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/works
   -H 'content-type: application/json' \
   -d '{"disallowed_tools":"mcp__n8n_mcp"}'
 
-# Delete.
-curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/workspaces/client-a"
+# Archive. Nothing is deleted or merged into another workspace: the folder
+# moves intact to <install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/
+# beside an archive.json, its chats are archived, its user schedules leave with
+# it, and search and INDEX.md stop seeing its notes. The primary and the last
+# workspace are refused. DELETE /api/workspaces/{name} is an alias.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/client-a/archive"
+
+# List archived workspaces, then restore one by id (refused if the name is taken).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces/archived"
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/archived/restore" \
+  -H 'content-type: application/json' \
+  -d '{"id":"client-a-20260923-101500"}'
 ```
 
 **Schedules and ops**

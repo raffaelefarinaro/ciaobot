@@ -12,7 +12,7 @@ from starlette.testclient import TestClient
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.execution_modes import credential_path_deny_rules
 from ciao.web.routes_api import (
-    delete_workspace_setting,
+    archive_workspace_setting,
     gws_integration_settings,
     gws_save_client_secret,
     gws_auth_url,
@@ -43,14 +43,20 @@ def _policy_denies(config: CiaoConfig, tools: list[str]) -> list[str]:
 class _PCM:
     def __init__(self) -> None:
         self.refresh_count = 0
-        self.reassigned: list[tuple[str, str]] = []
+        self.archived: list[str] = []
 
     def refresh_workspaces(self) -> None:
         self.refresh_count += 1
 
-    def reassign_workspace(self, old: str, new: str) -> int:
-        self.reassigned.append((old, new))
-        return 2
+    def workspace_scope(self, workspace: str) -> tuple[set[str], set[str]]:
+        return set(), set()
+
+    def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
+        return []
+
+    def archive_workspace_projects(self, workspace: str) -> dict[str, int]:
+        self.archived.append(workspace)
+        return {"projects": 2, "chats": 1}
 
 
 def _client(
@@ -83,7 +89,7 @@ def _client(
             ),
             Route(
                 "/api/workspaces/{name}",
-                delete_workspace_setting,
+                archive_workspace_setting,
                 methods=["DELETE"],
             ),
             Route(
@@ -1289,96 +1295,6 @@ def test_gws_personal_purpose_keeps_the_separation_warning_once_connected(tmp_pa
     assert personal["purpose"].endswith("Connected to Gmail.")
 
 
-def _reroot(tmp_path: Path) -> None:
-    """Make the install look migrated, so vaults live at `<install>/<name>`.
-
-    Note migration on delete only applies to the re-rooted layout: there each
-    vault is its own scan target, so losing the registry entry would make those
-    notes unreachable.
-    """
-    from ciao.config import reset_reroot_cache
-
-    receipt = tmp_path / ".runtime" / "migration" / "workspace-rooting.json"
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
-    reset_reroot_cache()
-
-
-def test_deleting_a_workspace_migrates_its_chats_instead_of_rerouting_them(tmp_path):
-    """A deleted workspace's chats must not resolve to the primary by accident.
-
-    Deletion keeps the projects and chats, and they went on naming a registry
-    entry that no longer existed - so `_agent_root_for_chat` fell through to
-    `primary_workspace()` and continuing an old chat loaded the primary guide
-    and could read and write its vault. The move is now explicit and reported.
-    """
-    client, config, pcm = _client(tmp_path)
-    client.post("/api/workspaces", json={"name": "client-a", "vault_root": "client-a"})
-    primary = config.primary_workspace()
-
-    deleted = client.delete("/api/workspaces/client-a")
-
-    assert deleted.status_code == 200
-    assert pcm.reassigned == [("client-a", primary)]
-    migrated = deleted.json()["migrated"]
-    assert migrated["into"] == primary
-    assert migrated["projects"] == 2
-
-
-def test_the_primary_workspace_cannot_be_deleted(tmp_path):
-    """There is nowhere to migrate to, so the delete has to refuse."""
-    client, config, pcm = _client(tmp_path)
-    client.post("/api/workspaces", json={"name": "client-a", "vault_root": "client-a"})
-
-    refused = client.delete(f"/api/workspaces/{config.primary_workspace()}")
-
-    assert refused.status_code == 400
-    assert pcm.reassigned == []
-
-
-def test_a_colliding_note_aborts_the_whole_deletion(tmp_path):
-    """A note that cannot move must block the delete, not be left behind.
-
-    Refusing the note but completing the delete stranded it: once the registry
-    entry is gone the old vault drops out of `vault_scan_targets`, and the
-    response's `refused` list is not surfaced by the PWA, so the note vanished
-    from the app while still sitting on disk. All or nothing.
-    """
-    _reroot(tmp_path)
-    client, config, pcm = _client(tmp_path)
-    client.post("/api/workspaces", json={"name": "client-a", "vault_root": "client-a"})
-    primary = config.primary_workspace()
-    for workspace in ("client-a", primary):
-        people = Path(config.workspace_vault_root(workspace)) / "People"
-        people.mkdir(parents=True, exist_ok=True)
-        (people / "Mo.md").write_text(
-            f"---\ntype: person\n---\n# Mo in {workspace}\n", encoding="utf-8"
-        )
-    kept = Path(config.workspace_vault_root(primary)) / "People" / "Mo.md"
-    before = kept.read_text(encoding="utf-8")
-
-    source = Path(config.workspace_vault_root("client-a")) / "People" / "Mo.md"
-    source_before = source.read_text(encoding="utf-8")
-    # A note that COULD have moved. It must not, or the vault ends up split
-    # across two roots with one of them about to be deregistered.
-    innocent = Path(config.workspace_vault_root("client-a")) / "People" / "Ada.md"
-    innocent.write_text("---\ntype: person\n---\n# Ada\n", encoding="utf-8")
-
-    deleted = client.delete("/api/workspaces/client-a")
-
-    assert deleted.status_code == 409
-    assert deleted.json()["refused"], "the collision was not reported"
-    # Nothing moved, nothing was overwritten, and the workspace is still there.
-    assert kept.read_text(encoding="utf-8") == before
-    assert source.read_text(encoding="utf-8") == source_before
-    assert config.workspace("client-a") is not None
-    assert pcm.reassigned == []
-    assert innocent.is_file(), "a movable note was migrated despite the abort"
-    assert not (
-        Path(config.workspace_vault_root(primary)) / "People" / "Ada.md"
-    ).exists()
-
-
 def test_creating_a_workspace_seeds_its_agent_root(tmp_path, monkeypatch):
     """A new workspace's chats run from its own root immediately.
 
@@ -1453,141 +1369,6 @@ def test_seeding_failure_does_not_undo_the_created_workspace(tmp_path, monkeypat
     assert created.status_code == 201
     assert created.json()["bootstrapped"] is False
     assert config.workspace("client-c") is not None
-
-
-def test_generated_aggregates_do_not_block_the_deletion(tmp_path, monkeypatch):
-    """`INDEX.md` and friends are regenerated per root, so they always collide.
-
-    `rebuild_indexes` writes them into every workspace vault, so the primary
-    already holds its own copy of each. With the delete made all-or-nothing,
-    that guaranteed collision meant a workspace could never be deleted at all,
-    even when every user-authored note could move.
-    """
-    _reroot(tmp_path)
-    client, config, pcm = _client(tmp_path)
-    client.post("/api/workspaces", json={"name": "client-d", "vault_root": "client-d"})
-    primary = config.primary_workspace()
-    for workspace in ("client-d", primary):
-        vault = Path(config.workspace_vault_root(workspace))
-        (vault / "People").mkdir(parents=True, exist_ok=True)
-        for name in ("INDEX.md", "MEMORY.md", "VOCABULARY.md"):
-            (vault / name).write_text(f"# {name} for {workspace}\n", encoding="utf-8")
-    (Path(config.workspace_vault_root("client-d")) / "People" / "Ada.md").write_text(
-        "---\ntype: person\n---\n# Ada\n", encoding="utf-8"
-    )
-    kept_index = (Path(config.workspace_vault_root(primary)) / "INDEX.md").read_text(
-        encoding="utf-8"
-    )
-    assert "for client-d" not in kept_index
-
-    deleted = client.delete("/api/workspaces/client-d")
-
-    assert deleted.status_code == 200, deleted.json()
-    migrated = deleted.json()["migrated"]
-    assert migrated["refused"] == []
-    # The user's note moved; the primary's own aggregate was not touched.
-    assert (
-        Path(config.workspace_vault_root(primary)) / "People" / "Ada.md"
-    ).is_file()
-    # The primary's own aggregate is REGENERATED to include the arriving note -
-    # not replaced by the deleted workspace's copy of the same filename, which
-    # is what moving it would have done.
-    primary_index = (
-        Path(config.workspace_vault_root(primary)) / "INDEX.md"
-    ).read_text(encoding="utf-8")
-    assert "for client-d" not in primary_index
-    assert "Ada" in primary_index
-
-
-def test_a_shared_vault_delete_moves_no_notes(tmp_path):
-    """Pre-migration installs have one scan target, so nothing has to move.
-
-    The cross-root mover refuses the `memory-vault/<name>` shape by design, so
-    attempting a migration here refused EVERY note and made the workspace
-    undeletable. The notes stay reachable through the single shared target
-    either way, so the delete simply reassigns the chats.
-    """
-    client, config, pcm = _client(tmp_path)
-    client.post("/api/workspaces", json={"name": "client-e", "vault_root": "client-e"})
-    vault = Path(config.workspace_vault_root("client-e"))
-    (vault / "People").mkdir(parents=True, exist_ok=True)
-    note = vault / "People" / "Ada.md"
-    note.write_text("---\ntype: person\n---\n# Ada\n", encoding="utf-8")
-
-    deleted = client.delete("/api/workspaces/client-e")
-    assert deleted.status_code == 200, deleted.json()
-    migrated = deleted.json()["migrated"]
-    assert migrated["notes"] == 0 and migrated["refused"] == []
-    assert note.is_file(), "a shared-vault note must not be moved"
-    assert pcm.reassigned == [("client-e", config.primary_workspace())]
-
-
-def test_deleting_a_workspace_does_not_resync_the_retired_install_root(
-    tmp_path, monkeypatch
-):
-    """After re-rooting, a delete must not repopulate the retired install root.
-
-    The shared-catalog resync on delete is only meaningful in the pre-re-root
-    layout. On a re-rooted install the active catalogs live under each
-    <install>/<workspace> root and the install root is retired, so syncing it
-    would recreate CLAUDE.md/.claude/skills there — the resync must be skipped.
-    """
-    _reroot(tmp_path)
-    client, config, _pcm = _client(tmp_path)
-    client.post("/api/workspaces", json={"name": "client-g", "vault_root": "client-g"})
-    vault = Path(config.workspace_vault_root("client-g"))
-    (vault / "People").mkdir(parents=True, exist_ok=True)
-    (vault / "People" / "Ada.md").write_text(
-        "---\ntype: person\n---\n# Ada\n", encoding="utf-8"
-    )
-
-    synced: list[Path] = []
-
-    def fake_sync(workspace, **_kw):
-        synced.append(Path(workspace))
-        return None
-
-    monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", fake_sync)
-
-    deleted = client.delete("/api/workspaces/client-g")
-    assert deleted.status_code == 200, deleted.json()
-    # No sync against the retired install root.
-    assert synced == []
-
-
-def test_a_vault_outside_the_install_refuses_the_deletion(tmp_path):
-    """An external vault must not be orphaned by a delete.
-
-    `CIAO_VAULT_MODE=existing` can point a workspace at an absolute vault
-    outside the install. Nothing here can move it — every note failed the same
-    `relative_to(install_root)` — so both passes reported no refusals and no
-    moves and the delete went ahead, leaving the whole vault on disk while it
-    dropped out of every scan along with the registry entry.
-    """
-    _reroot(tmp_path)
-    client, config, pcm = _client(tmp_path)
-    outside = tmp_path.parent / "external-vault"
-    (outside / "People").mkdir(parents=True, exist_ok=True)
-    note = outside / "People" / "Ada.md"
-    note.write_text("---\ntype: person\n---\n# Ada\n", encoding="utf-8")
-    # Registered directly, as setup or a legacy pin leaves it: the POST route
-    # rewrites an absolute path to `<name>/memory-vault`, so this state is not
-    # reachable through the API — only through setup, a pinned legacy vault, or
-    # a hand-edited registry. `workspace_vault_root` preserves an absolute
-    # registered root by contract.
-    config.workspaces["client-f"] = WorkspaceConfig(
-        name="client-f", vault_root=str(outside)
-    )
-    assert Path(config.workspace_vault_root("client-f")) == outside
-
-    deleted = client.delete("/api/workspaces/client-f")
-
-    assert deleted.status_code == 409, deleted.json()
-    assert "outside the install" in deleted.json()["error"]
-    # Nothing orphaned: the vault is intact and the workspace still registered.
-    assert note.is_file()
-    assert config.workspace("client-f") is not None
-    assert pcm.reassigned == []
 
 
 def test_chat_creation_carries_no_debug_instrumentation():

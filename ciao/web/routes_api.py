@@ -225,6 +225,9 @@ def _workspaces_payload(config) -> dict:
     return {
         "workspaces": workspaces,
         "active": workspaces[0]["name"] if workspaces else None,
+        # The workspace that cannot be archived; the PWA hides its Archive
+        # button rather than offering an action the server refuses.
+        "primary": config.primary_workspace() or None,
         "provider_options": _workspace_provider_options(config),
     }
 
@@ -347,172 +350,208 @@ async def _bootstrap_new_agent_root(config, name: str) -> bool:
     return True
 
 
-async def delete_workspace_setting(request: Request) -> JSONResponse:
+async def _resync_shared_skills(config, name: str, verb: str) -> None:
+    """Resync the shared skill catalog after the registry changed.
+
+    On a pre-re-root install the shared catalog serves every workspace, so
+    removing (or restoring) the only one with a GWS profile changes whether the
+    gws-* skills belong there. After re-rooting the active catalogs live under
+    each <install>/<workspace> root and the install root is retired, so syncing
+    it would recreate CLAUDE.md/.claude/skills there - skip it in that layout.
+    """
+    if getattr(config, "_rerooted", lambda: False)():
+        return
+    try:
+        from ciao.sync_skills import (  # noqa: PLC0415
+            resolve_workspace_skills_gws_gate,
+            sync_workspace_skills,
+        )
+
+        root = Path(config.workspace_root)
+        await asyncio.to_thread(
+            sync_workspace_skills,
+            root,
+            refresh_upstream=False,
+            gws_profile=resolve_workspace_skills_gws_gate(
+                config, root, config.primary_workspace()
+            ),
+        )
+    except Exception:  # noqa: BLE001 - the registry change already succeeded
+        logger.exception("Could not resync shared skills after %s workspace %s", verb, name)
+
+
+def _schedule_manager(request: Request) -> Any:
+    return getattr(request.app.state, "schedule_manager", None)
+
+
+def _publish_automations_changed(request: Request) -> None:
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        return
+    try:
+        from ciao.schedules import publish_automations_changed  # noqa: PLC0415
+
+        publish_automations_changed(pcm)
+    except Exception:  # noqa: BLE001 - a missed nudge only delays a refresh
+        logger.debug("Could not publish automations_changed", exc_info=True)
+
+
+async def archive_workspace_setting(request: Request) -> JSONResponse:
+    """Archive a workspace: unregister it and move its folder aside, intact.
+
+    Nothing is merged into another workspace and nothing is deleted - see
+    ``ciao/workspace_archive.py``. Order matters: everything that is refused is
+    refused before anything changes; chats are archived and schedules taken
+    while the workspace is still registered; the folder moves before the
+    registry entry goes, so a failed move leaves the workspace registered.
+    """
+    from ciao import workspace_archive  # noqa: PLC0415
+
     config = request.app.state.config
     name = str(request.path_params.get("name", "")).strip()
-    if name not in config.workspaces:
-        return JSONResponse({"error": "workspace not found"}, status_code=404)
-    if len(config.workspaces) <= 1:
-        return JSONResponse({"error": "cannot delete the last workspace"}, status_code=400)
-    target = config.primary_workspace()
-    if target == name:
-        return JSONResponse(
-            {"error": "cannot delete the primary workspace"}, status_code=400
-        )
-    # The chats outlive the registry entry, so they are MOVED rather than left
-    # pointing at a workspace that no longer exists - which resolved them to
-    # the primary agent root by accident of the fallback.
-    vault = _migrate_workspace_vault(config, name, target)
-    if vault["unsupported"]:
-        return JSONResponse({"error": vault["unsupported"]}, status_code=409)
-    if vault["refused"]:
-        # ALL OR NOTHING, and nothing has moved yet - the scan above was a dry
-        # run. Completing a partial migration would strand the refused notes:
-        # once the registry entry is gone the old vault drops out of
-        # `vault_scan_targets`, and the response's `refused` list is not
-        # surfaced by the PWA, so those notes would simply vanish from the app
-        # while still sitting on disk. Refusing the whole delete keeps the
-        # workspace registered and every note reachable.
+    try:
+        target = workspace_archive.plan_archive(config, name)
+    except workspace_archive.WorkspaceArchiveError as exc:
+        return JSONResponse({"error": exc.message}, status_code=exc.status)
+
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    busy = getattr(pcm, "workspace_busy_chat_ids", None)
+    if callable(busy) and busy(name):
         return JSONResponse(
             {
                 "error": (
-                    "cannot delete: some notes would collide in "
-                    f"{target} and were not migrated"
-                ),
-                "refused": vault["refused"],
+                    f"a chat in '{name}' is still working; let it finish or "
+                    "stop it, then archive the workspace"
+                )
             },
             status_code=409,
         )
-    vault = _migrate_workspace_vault(config, name, target, apply=True)
-    moved_projects = _reassign_project_manager_workspace(request, name, target)
-    config.workspaces.pop(name, None)
-    _persist_workspaces(config)
-    _refresh_project_manager_workspaces(request)
-    payload = _workspaces_payload(config)
-    payload["migrated"] = {
-        "into": target,
-        "projects": moved_projects,
-        "notes": len(vault["moved"]),
-        "refused": vault["refused"],
-    }
-    # On a pre-re-root install the shared catalog serves every workspace, so
-    # deleting the only one with a GWS profile must prune the now-unusable
-    # gws-* skills (and deleting an unlinked workspace is a no-op). Resync the
-    # shared root through the aggregate gate. After re-rooting the active
-    # catalogs live under each <install>/<workspace> root and the install root
-    # is retired, so syncing it would recreate CLAUDE.md/.claude/skills there —
-    # skip the resync entirely in that layout.
-    if not getattr(config, "_rerooted", lambda: False)():
-        try:
-            from ciao.sync_skills import (  # noqa: PLC0415
-                resolve_workspace_skills_gws_gate,
-                sync_workspace_skills,
-            )
 
-            root = Path(config.workspace_root)
-            await asyncio.to_thread(
-                sync_workspace_skills,
-                root,
-                refresh_upstream=False,
-                gws_profile=resolve_workspace_skills_gws_gate(config, root, target),
-            )
-        except Exception:  # noqa: BLE001 - the delete already succeeded
-            logger.exception(
-                "Could not resync shared skills after deleting workspace %s", name
-            )
+    scope = getattr(pcm, "workspace_scope", None)
+    project_ids, chat_ids = scope(name) if callable(scope) else (set(), set())
+
+    def _belongs(item: dict) -> bool:
+        return (
+            str(item.get("workspace") or "") == name
+            or str(item.get("web_project_id") or "") in project_ids
+            or str(item.get("fallback_project_id") or "") in project_ids
+            or str(item.get("web_chat_id") or "") in chat_ids
+        )
+
+    manager = _schedule_manager(request)
+    take = getattr(manager, "take_user_items", None)
+    schedules: list[dict] = take(_belongs) if callable(take) else []
+
+    archive_chats = getattr(pcm, "archive_workspace_projects", None)
+    summary: dict[str, Any] = (
+        dict(archive_chats(name)) if callable(archive_chats) else {"projects": 0, "chats": 0}
+    )
+    summary["schedules"] = len(schedules)
+    try:
+        archived = await asyncio.to_thread(
+            workspace_archive.move_to_archive,
+            config,
+            target,
+            schedules=schedules,
+            summary=summary,
+        )
+    except workspace_archive.WorkspaceArchiveError as exc:
+        put_back = getattr(manager, "put_back_user_items", None)
+        if callable(put_back) and schedules:
+            put_back(schedules)
+        _refresh_project_manager_workspaces(request)
+        return JSONResponse({"error": exc.message}, status_code=exc.status)
+
+    workspace_archive.unregister(config, name)
+    _refresh_project_manager_workspaces(request)
+    if schedules:
+        _publish_automations_changed(request)
+
+    def _forget() -> tuple[int, bool]:
+        rows = 0
+        rebuilt = False
+        try:
+            rows = workspace_archive.forget_search_rows(config, target.vault)
+        except Exception:  # noqa: BLE001 - derived state; the next index pass prunes it
+            logger.exception("Could not drop search rows for archived workspace %s", name)
+        try:
+            rebuilt = workspace_archive.refresh_shared_index(config)
+        except Exception:  # noqa: BLE001 - regenerated at the next startup
+            logger.exception("Could not rebuild INDEX.md after archiving %s", name)
+        return rows, rebuilt
+
+    search_rows, index_rebuilt = await asyncio.to_thread(_forget)
+    await _resync_shared_skills(config, name, "archiving")
+    payload = _workspaces_payload(config)
+    payload["archived"] = {
+        "id": archived["id"],
+        "name": name,
+        "path": archived["path"],
+        "archived_at": archived["archived_at"],
+        "projects": int(summary.get("projects", 0)),
+        "chats": int(summary.get("chats", 0)),
+        "schedules": len(schedules),
+        "search_rows_removed": search_rows,
+        "index_rebuilt": index_rebuilt,
+    }
     return JSONResponse(payload)
 
 
-def _reassign_project_manager_workspace(request: Request, old: str, new: str) -> int:
-    pcm = getattr(request.app.state, "project_chat_manager", None)
-    reassign = getattr(pcm, "reassign_workspace", None)
-    return int(reassign(old, new)) if callable(reassign) else 0
+async def list_archived_workspaces(request: Request) -> JSONResponse:
+    """Archived workspaces, newest first, with whether each can be restored."""
+    from ciao import workspace_archive  # noqa: PLC0415
+
+    config = request.app.state.config
+    archives = await asyncio.to_thread(workspace_archive.list_archives, config)
+    return JSONResponse({"archived": archives})
 
 
-def _migrate_workspace_vault(
-    config, name: str, target: str, *, apply: bool = False
-) -> dict[str, Any]:
-    """Move a workspace's notes into *target*, taking their links with them.
+async def restore_archived_workspace(request: Request) -> JSONResponse:
+    """Move an archived workspace back and re-register it."""
+    from ciao import workspace_archive  # noqa: PLC0415
 
-    Per-note rather than a directory rename, because both directions of every
-    link have to be rewritten - a bulk move would leave every reference to
-    these notes pointing at a path that no longer exists. A note whose
-    destination is already taken is REFUSED and reported, never overwritten.
-
-    Called twice by the delete route: once with ``apply=False`` to find out
-    whether every note CAN move, and only then for real. Discovering a
-    collision halfway through would leave the vault split across two roots,
-    one of which is about to stop being registered.
-    """
-    from ciao.vault_rehome import move_note_between_roots
-
-    moved: list[str] = []
-    refused: list[dict[str, Any]] = []
-    unsupported = ""
-    install_root = Path(config.workspace_root)
+    config = request.app.state.config
     try:
-        source_root = Path(config.workspace_vault_root(name))
-    except (ValueError, TypeError):
-        return {"moved": moved, "refused": refused, "unsupported": unsupported}
-    if not source_root.is_dir():
-        return {"moved": moved, "refused": refused, "unsupported": unsupported}
-    # Only a RE-ROOTED install needs this. There the deleted workspace's vault
-    # is its own scan target, so losing the registry entry makes those notes
-    # unreachable and they have to move. On the shared layout the vault is
-    # `memory-vault/<name>` under the single scan target that covers every
-    # workspace, so the notes stay visible either way - and the cross-root
-    # mover refuses that shape by design, which would have refused every note
-    # and made the workspace undeletable.
-    try:
-        relative_vault = source_root.relative_to(install_root)
+        body = await request.json()
     except ValueError:
-        # `CIAO_VAULT_MODE=existing` can point a workspace at an absolute vault
-        # outside the install. Nothing here can move it: every note fails the
-        # same `relative_to`, so both passes reported no refusals and no moves
-        # and the delete went ahead - leaving the whole external vault on disk
-        # while it dropped out of every scan with the registry entry. Refuse
-        # rather than silently orphan somebody's vault.
-        return {
-            "moved": moved,
-            "refused": refused,
-            "unsupported": (
-                f"'{name}' uses a vault outside the install "
-                f"({source_root}); move or unlink it before deleting the "
-                "workspace"
-            ),
-        }
-    if len(relative_vault.parts) != 2 or relative_vault.parts[0] != name:
-        return {"moved": moved, "refused": refused, "unsupported": unsupported}
-    targets = config.vault_scan_targets()
-    workspaces = config.workspace_names()
-    from ciao.workspace_reroot import _REGENERATED_ROOT_NOTES
-
-    for note in sorted(source_root.rglob("*.md")):
-        # `rebuild_indexes` writes these per root, so the primary already has
-        # its own copy of each and every one collided - which, with the delete
-        # now all-or-nothing, meant a workspace could NEVER be deleted even
-        # when every user-authored note could move. They are regenerated, not
-        # authored, so they are not migrated at all: the deleted root's copies
-        # go away with it.
-        if note.parent == source_root and note.name in _REGENERATED_ROOT_NOTES:
-            continue
-        try:
-            relative = note.relative_to(install_root).as_posix()
-        except ValueError:
-            continue
-        result = move_note_between_roots(
-            install_root,
-            relative,
-            target,
-            targets=targets,
-            workspaces=workspaces,
-            apply=apply,
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "expected an object"}, status_code=400)
+    archive_id = str(body.get("id") or "").strip()
+    try:
+        restored = await asyncio.to_thread(
+            workspace_archive.restore_archive, config, archive_id
         )
-        if not result.get("refusals"):
-            moved.append(relative)
-        else:
-            refused.append({"note": relative, "refusals": result.get("refusals", [])})
-    return {"moved": moved, "refused": refused, "unsupported": unsupported}
+    except workspace_archive.WorkspaceArchiveError as exc:
+        return JSONResponse({"error": exc.message}, status_code=exc.status)
+    name = str(restored["name"])
+    schedules = restored.get("schedules")
+    added = 0
+    manager = _schedule_manager(request)
+    put_back = getattr(manager, "put_back_user_items", None)
+    if callable(put_back) and isinstance(schedules, list) and schedules:
+        added = int(put_back(schedules))
+    _refresh_project_manager_workspaces(request)
+    if added:
+        _publish_automations_changed(request)
+    try:
+        await asyncio.to_thread(workspace_archive.refresh_shared_index, config)
+    except Exception:  # noqa: BLE001 - regenerated at the next startup
+        logger.exception("Could not rebuild INDEX.md after restoring %s", name)
+    if getattr(config, "_rerooted", lambda: False)():
+        # The root's guide and assets came back with it, but its skill mirrors
+        # may point at a packaged catalog that changed while it was archived.
+        await _bootstrap_new_agent_root(config, name)
+    else:
+        await _resync_shared_skills(config, name, "restoring")
+    payload = _workspaces_payload(config)
+    payload["restored"] = {
+        "id": archive_id,
+        "name": name,
+        "path": restored.get("restored_to", ""),
+        "schedules": added,
+    }
+    return JSONResponse(payload)
 
 
 def _env_path(config) -> Path:

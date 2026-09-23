@@ -92,7 +92,9 @@ from ciao.web.routes_api import (
     native_sessions,
     list_all_chats,
     list_models,
-    delete_workspace_setting,
+    archive_workspace_setting,
+    list_archived_workspaces,
+    restore_archived_workspace,
     gws_integration_settings,
     gws_save_client_secret,
     gws_auth_url,
@@ -234,7 +236,16 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/workspaces", list_workspaces, methods=["GET"]),
         Route("/api/workspaces", upsert_workspace_setting, methods=["POST"]),
         Route("/api/workspaces/{name}", upsert_workspace_setting, methods=["PATCH"]),
-        Route("/api/workspaces/{name}", delete_workspace_setting, methods=["DELETE"]),
+        # Literal `archived` paths precede the {name} pattern. DELETE is kept as
+        # an alias of archive for existing scripts: it no longer deletes.
+        Route("/api/workspaces/archived", list_archived_workspaces, methods=["GET"]),
+        Route(
+            "/api/workspaces/archived/restore",
+            restore_archived_workspace,
+            methods=["POST"],
+        ),
+        Route("/api/workspaces/{name}/archive", archive_workspace_setting, methods=["POST"]),
+        Route("/api/workspaces/{name}", archive_workspace_setting, methods=["DELETE"]),
         Route("/api/projects", list_projects, methods=["GET"]),
         Route("/api/projects", create_project, methods=["POST"]),
         # Literal `completed` paths must precede the {project_id} pattern so

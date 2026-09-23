@@ -5106,24 +5106,44 @@ class ProjectChatManager:
         )
         return provider, model, workspace
 
-    def reassign_workspace(self, old: str, new: str) -> int:
-        """Repoint every project on *old* at *new*; returns how many moved.
+    def workspace_scope(self, workspace: str) -> tuple[set[str], set[str]]:
+        """The project ids and chat ids (active and archived) in *workspace*."""
+        project_ids = {
+            pid for pid, project in self._projects.items()
+            if project.workspace == workspace
+        }
+        chat_ids = {
+            cid for cid, chat in self._chats.items()
+            if chat.project_id in project_ids
+        }
+        return project_ids, chat_ids
 
-        Deleting a workspace kept its projects and chats, still naming a
-        registry entry that no longer existed - and `_agent_root_for_chat`
-        then fell through to `primary_workspace()`, so continuing one of those
-        chats silently loaded the primary workspace's guide and could read and
-        write its vault. Migrating the projects makes that move explicit and
-        recorded rather than an accident of the fallback.
+    def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
+        """Chats in *workspace* with a turn, drain or subagent still running."""
+        _project_ids, chat_ids = self.workspace_scope(workspace)
+        return [cid for cid in self.active_chat_ids() if cid in chat_ids]
+
+    def archive_workspace_projects(self, workspace: str) -> dict[str, int]:
+        """Remove every project of *workspace*, archiving its chats.
+
+        The workspace-level counterpart of ``complete_project``: each project
+        goes through ``_remove_project``, which transcript-archives every chat
+        that is still open, removes the chats and publishes
+        ``project_deleted``. Nothing is repointed at another workspace — a
+        chat that kept running under the primary workspace's guide and vault
+        would mix the two, which is what archiving exists to prevent.
+
+        Must run while *workspace* is still registered, so any path resolution
+        the removal needs still finds its own agent root.
         """
-        moved = 0
-        for project in self._projects.values():
-            if project.workspace == old:
-                project.workspace = new
-                moved += 1
-        if moved:
-            self._save(reason="workspace_deleted")
-        return moved
+        project_ids, chat_ids = self.workspace_scope(workspace)
+        open_chats = sum(
+            1 for cid in chat_ids
+            if cid in self._chats and not self._chats[cid].archived
+        )
+        for project_id in sorted(project_ids):
+            self._remove_project(project_id)
+        return {"projects": len(project_ids), "chats": open_chats}
 
     def refresh_workspaces(self) -> None:
         self._ensure_defaults()

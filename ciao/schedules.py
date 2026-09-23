@@ -996,6 +996,59 @@ class ScheduleStore:
             self._save(data)
             return True
 
+    def take_user_items(self, predicate: Callable[[dict], bool]) -> list[dict]:
+        """Remove the user schedules ``predicate`` selects and return them raw.
+
+        Used when a workspace is archived: its schedules leave the active list
+        with it (an automation pointing at a workspace that no longer exists
+        would either fail every run or fall back to another workspace's General
+        project), and the raw rows travel with the archive so a restore can put
+        them back exactly. System rows are never stored here, so they cannot
+        be taken; per-workspace system routines stop by losing their workspace
+        from the registry instead.
+        """
+        with self._lock:
+            data = self._load()
+            items = [item for item in data.get("schedules", []) if isinstance(item, dict)]
+            taken = [
+                item for item in items
+                if item.get("scope") != "system" and predicate(item)
+            ]
+            if not taken:
+                return []
+            taken_ids = {id(item) for item in taken}
+            data["schedules"] = [item for item in items if id(item) not in taken_ids]
+            self._save(data)
+            return taken
+
+    def put_back_user_items(self, items: Sequence[dict]) -> int:
+        """Re-add raw user schedules removed by :meth:`take_user_items`.
+
+        A row whose ``schedule_id`` is already present is skipped rather than
+        duplicated. Returns how many rows were added.
+        """
+        with self._lock:
+            data = self._load()
+            current = data.setdefault("schedules", [])
+            present = {
+                str(item.get("schedule_id"))
+                for item in current
+                if isinstance(item, dict)
+            }
+            added = 0
+            for item in items:
+                if not isinstance(item, dict) or item.get("scope") == "system":
+                    continue
+                schedule_id = str(item.get("schedule_id") or "")
+                if not schedule_id or schedule_id in present:
+                    continue
+                current.append(dict(item))
+                present.add(schedule_id)
+                added += 1
+            if added:
+                self._save(data)
+            return added
+
     def _load(self) -> dict:
         if not self._path.exists():
             return {"schedules": []}
@@ -1482,6 +1535,14 @@ class ScheduleManager:
 
     def delete(self, schedule_id: str) -> bool:
         return self._store.delete(schedule_id)
+
+    def take_user_items(self, predicate: Callable[[dict], bool]) -> list[dict]:
+        """See :meth:`ScheduleStore.take_user_items`."""
+        return self._store.take_user_items(predicate)
+
+    def put_back_user_items(self, items: Sequence[dict]) -> int:
+        """See :meth:`ScheduleStore.put_back_user_items`."""
+        return self._store.put_back_user_items(items)
 
     def replace(self, entry: ScheduleEntry) -> None:
         """Persist a validated schedule update through the public manager API."""

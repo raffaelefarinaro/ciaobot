@@ -85,7 +85,14 @@ def is_generated_vault_file(name: str) -> bool:
 # sees while it stayed in the Memory Map, the lint counts, and search — under a
 # name nobody could recognise. Matched on any path part, because the trash lives
 # at `Workspace/.vault-trash`, not at the vault root.
-EXCLUDED_PATH_PARTS: set[str] = {".vault-trash"}
+#
+# `.archived-workspaces` holds workspaces archived from Settings (see
+# `ciao.workspace_archive`). It sits beside the agent roots, outside every
+# registered vault, but the existing-folder setup can make the install root the
+# vault itself, and then an archived workspace would re-enter the index it was
+# archived out of. Its content is kept for a restore, not handed to the agent.
+ARCHIVED_WORKSPACES_DIR = ".archived-workspaces"
+EXCLUDED_PATH_PARTS: set[str] = {".vault-trash", ARCHIVED_WORKSPACES_DIR}
 
 # Vault bookkeeping the memory pipeline itself writes (casefolded names).
 # Indexing them made the proposals queue and the curation logs rank above real
