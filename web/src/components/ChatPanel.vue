@@ -740,13 +740,13 @@
         <div v-else class="question-options">
           <button
             v-for="(opt, oi) in q.options"
-            :key="`${opt.value || opt.label}-${oi}`"
+            :key="`${opt.value ?? opt.label}-${oi}`"
             type="button"
             class="question-option"
-            :class="{ selected: isQuestionOptionSelected(qi, opt.value || opt.label) }"
+            :class="{ selected: isQuestionOptionSelected(qi, opt.value ?? opt.label) }"
             :aria-keyshortcuts="questionOptionShortcut(qi, oi) || undefined"
             :disabled="questionSubmitting"
-            @click="toggleQuestionOption(qi, opt.value || opt.label, q.multiSelect)"
+            @click="toggleQuestionOption(qi, opt.value ?? opt.label, q.multiSelect)"
           >
             <span class="question-option-main">
               <!-- Keyboard hint, not part of the label: only rendered where the
@@ -2282,7 +2282,7 @@ function defaultQuestionAnswer(question: ActiveQuestion): QuestionAnswer | undef
       || candidate.value === raw
       || question.optionValues?.[candidate.label] === raw,
     )
-    return option?.value || option?.label
+    return option?.value ?? option?.label
   }
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -2448,7 +2448,7 @@ function handleQuestionShortcut(e: KeyboardEvent): boolean {
   if (!/^[1-9]$/.test(e.key)) return false
   const opt = q.options[Number(e.key) - 1]
   if (!opt) return false
-  toggleQuestionOption(firstVisible, opt.value || opt.label, q.multiSelect)
+  toggleQuestionOption(firstVisible, opt.value ?? opt.label, q.multiSelect)
   return true
 }
 

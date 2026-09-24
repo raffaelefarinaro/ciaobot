@@ -1,18 +1,24 @@
 <template>
-  <div
-    v-if="store.isOpen"
-    class="fv-backdrop"
-    @click.self="store.close()"
-    @keydown.esc="store.close()"
-    tabindex="-1"
-    ref="backdropEl"
+  <DialogRoot
+    :open="store.isOpen"
+    modal
+    @update:open="onOpenChange"
   >
-    <div class="fv-modal" role="dialog" aria-modal="true" :aria-label="basename" ref="modalEl">
-      <header class="fv-header">
-        <div class="fv-titles">
-          <div class="fv-title" :title="store.path">{{ basename }}</div>
-          <div class="fv-subtitle" :title="store.path">{{ store.path }}<span v-if="store.line"> :{{ store.line }}</span></div>
-        </div>
+    <DialogOverlay as-child>
+      <div class="fv-backdrop">
+        <DialogContent
+          as-child
+          aria-modal="true"
+          @open-auto-focus="onOpenAutoFocus"
+          @escape-key-down="onEscapeKeyDown"
+          @pointer-down-outside="onPointerDownOutside"
+        >
+          <div class="fv-modal" tabindex="-1">
+            <header :ref="setModalEl" class="fv-header">
+              <div class="fv-titles">
+                <DialogTitle as="div" class="fv-title" :title="store.path">{{ basename }}</DialogTitle>
+                <DialogDescription as="div" class="fv-subtitle" :title="store.path">{{ store.path }}<span v-if="store.line"> :{{ store.line }}</span></DialogDescription>
+              </div>
         <div class="fv-actions">
           <button
             v-if="continuableChatId"
@@ -89,13 +95,13 @@
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
           </button>
-          <button class="btn-icon" @click="store.close()" title="Close (Esc)" aria-label="Close">
+          <button class="btn-icon" @click="requestClose" title="Close (Esc)" aria-label="Close">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
       </header>
 
-      <div class="fv-main">
+      <div class="fv-main" ref="mainEl">
         <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-csv': isCsv }" ref="bodyEl">
           <div v-if="store.loading" class="fv-loading">Loading…</div>
           <div v-else-if="store.error" class="fv-error">{{ store.error }}</div>
@@ -118,6 +124,7 @@
               />
               <textarea
                 v-else
+                ref="editTextareaEl"
                 class="fv-edit-textarea"
                 v-model="store.editBuffer"
                 spellcheck="false"
@@ -275,31 +282,56 @@
           class="fv-comment-backdrop"
           @click="handleBackdropClick"
         ></div>
-        <div
+        <FocusScope
           v-if="activePopupComment"
-          class="fv-comment-pop"
-          :style="{ top: popupAnchor.top + 'px', left: popupAnchor.left + 'px' }"
-          @mousedown.stop
+          as-child
+          loop
+          :trapped="true"
+          @mount-auto-focus="onPopupMountAutoFocus"
+          @unmount-auto-focus="onPopupUnmountAutoFocus"
         >
-          <div class="fv-pop-header">
-            <span class="fv-sidebar-card-line" v-if="commentLineLabel(activePopupComment)">{{ commentLineLabel(activePopupComment) }}</span>
-            <div class="fv-sidebar-card-actions fv-pop-actions">
-              <button class="fv-sidebar-card-edit" @click.stop="editFromPopup(activePopupComment)" title="Edit">✎</button>
-              <button class="fv-sidebar-card-remove" @click.stop="deletePopupComment" title="Delete">×</button>
+          <div
+            ref="popupEl"
+            class="fv-comment-pop"
+            role="dialog"
+            aria-label="Comment"
+            tabindex="-1"
+            :style="{ top: placedPopupAnchor.top + 'px', left: placedPopupAnchor.left + 'px' }"
+            @mousedown.stop
+            @keydown="onPopupKeydown"
+          >
+            <div class="fv-pop-header">
+              <span class="fv-sidebar-card-line" v-if="commentLineLabel(activePopupComment)">{{ commentLineLabel(activePopupComment) }}</span>
+              <div class="fv-sidebar-card-actions fv-pop-actions">
+                <button class="fv-sidebar-card-edit" @click.stop="editFromPopup(activePopupComment)" title="Edit">✎</button>
+                <button class="fv-sidebar-card-remove" @click.stop="deletePopupComment" title="Delete">×</button>
+              </div>
             </div>
+            <div v-if="activePopupComment.images?.length" class="fv-sidebar-card-images">
+              <img v-for="img in activePopupComment.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="card-image-thumb" @click.stop />
+            </div>
+            <div class="fv-sidebar-card-note">{{ activePopupComment.comment }}</div>
           </div>
-          <div v-if="activePopupComment.images?.length" class="fv-sidebar-card-images">
-            <img v-for="img in activePopupComment.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="card-image-thumb" @click.stop />
-          </div>
-          <div class="fv-sidebar-card-note">{{ activePopupComment.comment }}</div>
+        </FocusScope>
         </div>
+          </div>
+        </DialogContent>
       </div>
-    </div>
-  </div>
+    </DialogOverlay>
+  </DialogRoot>
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import {
+  DialogContent,
+  DialogDescription,
+  DialogOverlay,
+  DialogRoot,
+  DialogTitle,
+  FocusScope,
+  type PointerDownOutsideEvent,
+} from 'reka-ui'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from 'vue'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { errorMessage } from '../lib/errorMessage'
 import { useProjectStore } from '../stores/projects'
@@ -312,6 +344,8 @@ import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isCsvPath } from '../lib/csv'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
+import { useViewportHeight } from '../composables/useViewportHeight'
+import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import { startFileDiscussion } from '../lib/fileDiscussion'
 import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { writeClipboard } from '../lib/codeCopy'
@@ -322,6 +356,45 @@ const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactView
 const store = useFileViewerStore()
 const projectsStore = useProjectStore()
 const memoryMapStore = useMemoryMapStore()
+let closePending = false
+
+async function requestClose(): Promise<void> {
+  if (!store.isOpen || closePending) return
+  closePending = true
+  try {
+    await store.close()
+  } finally {
+    closePending = false
+  }
+}
+
+function onOpenChange(open: boolean) {
+  if (!open) void requestClose()
+}
+
+function focusViewer(): void {
+  const target = modalEl.value ?? bodyEl.value?.closest<HTMLElement>('.fv-modal')
+  target?.focus()
+}
+
+function onOpenAutoFocus(event: Event) {
+  event.preventDefault()
+  focusViewer()
+  nextTick(focusViewer)
+}
+
+function onEscapeKeyDown(event: KeyboardEvent) {
+  event.preventDefault()
+  void requestClose()
+}
+
+function onPointerDownOutside(event: PointerDownOutsideEvent) {
+  event.preventDefault()
+  const original = event.detail.originalEvent
+  if (original.button !== 0 || original.ctrlKey) return
+  void requestClose()
+}
+
 const memoryPath = computed(() => {
   const path = store.path.replace(/:\d+$/, '')
   return /\.(md|markdown)$/i.test(path) ? path : ''
@@ -580,15 +653,16 @@ let popupOpenTimestamp = 0
 
 function openPopupCommentForElement(el: HTMLElement, id: string): void {
   const rect = el.getBoundingClientRect()
-  const modal = modalEl.value
-  if (!modal) return
-  const modalRect = modal.getBoundingClientRect()
+  const container = mainEl.value ?? modalEl.value
+  if (!container) return
+  const containerRect = container.getBoundingClientRect()
   popupAnchor.value = {
-    top: rect.bottom - modalRect.top + 6,
-    left: Math.max(8, rect.left - modalRect.left),
+    top: rect.bottom - containerRect.top + 6,
+    left: rect.left - containerRect.left,
   }
   activePopupId.value = id
   popupOpenTimestamp = Date.now()
+  measurePopup()
 }
 
 function scrollToHighlight(id: string): void {
@@ -725,26 +799,78 @@ function unobserveBody(): void {
 // ── Mobile popup for reading a comment on tap ───────────────────────
 const activePopupId = ref<string | null>(null)
 const popupAnchor = ref<{ top: number; left: number }>({ top: 0, left: 0 })
+const popupHeight = ref(96)
+let skipPopupFocusRestore = false
 
 const activePopupComment = computed(() => {
   if (!activePopupId.value) return null
   return activeFileComments.value.find(c => c.id === activePopupId.value) || null
 })
 
+// The popup is absolute inside .fv-main, so its clamp boundary is that
+// scroll pane rather than the window. `viewportH` still matters on iOS: the
+// software keyboard can make the modal shorter after the popup opens.
+const placedPopupAnchor = computed(() => {
+  const anchor = popupAnchor.value
+  const main = mainEl.value
+  if (!main) return anchor
+  const rect = main.getBoundingClientRect()
+  const mainHeight = main.clientHeight || rect.height || viewportH.value
+  const visibleHeight = Math.max(80, Math.min(mainHeight, viewportH.value - Math.max(0, rect.top)))
+  const mainWidth = main.clientWidth || rect.width || window.innerWidth
+  return {
+    top: clampAnchorTop(anchor.top, popupHeight.value, visibleHeight),
+    left: clampAnchorLeft(anchor.left, 280, mainWidth),
+  }
+})
+
+function measurePopup(): void {
+  nextTick(() => {
+    const height = popupEl.value?.offsetHeight
+    if (height) popupHeight.value = height
+  })
+}
+
 function openPopupComment(e: MouseEvent, id: string): void {
-  const rect = (e.target as HTMLElement).getBoundingClientRect()
-  const modal = modalEl.value
-  if (!modal) return
-  const modalRect = modal.getBoundingClientRect()
+  const target = e.target as HTMLElement
+  const rect = target.getBoundingClientRect()
+  const container = mainEl.value ?? modalEl.value
+  if (!container) return
+  const containerRect = container.getBoundingClientRect()
   popupAnchor.value = {
-    top: rect.bottom - modalRect.top + 6,
-    left: Math.max(8, rect.left - modalRect.left),
+    top: rect.bottom - containerRect.top + 6,
+    left: rect.left - containerRect.left,
   }
   activePopupId.value = id
+  popupOpenTimestamp = Date.now()
+  measurePopup()
 }
 
 function closePopupComment(): void {
   activePopupId.value = null
+  popupHeight.value = 96
+}
+
+function onPopupMountAutoFocus(event: Event): void {
+  event.preventDefault()
+  nextTick(() => popupEl.value?.querySelector<HTMLElement>('button')?.focus())
+}
+
+function onPopupUnmountAutoFocus(event: Event): void {
+  if (!skipPopupFocusRestore) return
+  skipPopupFocusRestore = false
+  // Edit/selection handoffs focus their next editor synchronously. Do not let
+  // the old nested scope's deferred restoration pull focus back to the mark.
+  event.preventDefault()
+}
+
+function onPopupKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Escape') return
+  // Escape belongs to the nested read popup. Without stopping it here the
+  // enclosing file Dialog would close as well.
+  event.preventDefault()
+  event.stopPropagation()
+  closePopupComment()
 }
 
 function handleBackdropClick(): void {
@@ -755,13 +881,14 @@ function handleBackdropClick(): void {
 function deletePopupComment(): void {
   const id = activePopupId.value
   if (!id) return
-  activePopupId.value = null
+  closePopupComment()
   const c = activeFileComments.value.find(x => x.id === id)
   if (c) comments.deleteFileComment(id)
 }
 
 function editFromPopup(c: { id: string; comment: string; images?: string[] }): void {
-  const local = popupAnchor.value
+  const local = placedPopupAnchor.value
+  skipPopupFocusRestore = true
   closePopupComment()
   comments.startEditComment(c, comments.toViewportAnchor(local))
 }
@@ -832,12 +959,22 @@ function onPreClick(e: MouseEvent): void {
   if (id) openPopupComment(e, id)
 }
 
-const backdropEl = ref<HTMLElement>()
 const modalEl = ref<HTMLElement>()
+const mainEl = ref<HTMLElement>()
 const bodyEl = ref<HTMLElement>()
+const popupEl = ref<HTMLElement>()
 const mdEl = ref<HTMLElement>()
 const preEl = ref<HTMLElement>()
 const preCodeEl = ref<HTMLElement>()
+const editTextareaEl = ref<HTMLTextAreaElement>()
+const viewportH = useViewportHeight()
+
+function setModalEl(value: Element | ComponentPublicInstance | null): void {
+  modalEl.value = value instanceof HTMLElement
+    ? value.closest<HTMLElement>('.fv-modal') ?? undefined
+    : undefined
+}
+
 const copyState = ref<'' | 'ok'>('')
 const openExternalState = ref<'' | 'loading' | 'ok'>('')
 
@@ -987,6 +1124,7 @@ function onArtifactCompose(a: {
   // Close any read popover first, as the pinned panel already does: without
   // this, clicking an existing highlight and then selecting other text in the
   // frame floated the read and compose popovers over it at the same time.
+  if (activePopupId.value) skipPopupFocusRestore = true
   closePopupComment()
   const frameRect = artifactViewerRef.value?.frameEl?.getBoundingClientRect()
   draftAnchor.value = frameRect
@@ -1055,16 +1193,17 @@ function onArtifactOpenComment(p: { id: string; frameX: number; frameY: number }
   // swallow the click. Bail before touching the anchor state.
   if (!activeFileComments.value.some(c => c.id === p.id)) return
   if (artifactDraft) cancelArtifactComment()
-  const modal = modalEl.value
+  const container = mainEl.value ?? modalEl.value
   const frameRect = artifactViewerRef.value?.frameEl?.getBoundingClientRect()
-  if (!modal || !frameRect) return
-  const modalRect = modal.getBoundingClientRect()
+  if (!container || !frameRect) return
+  const containerRect = container.getBoundingClientRect()
   popupAnchor.value = {
-    top: frameRect.top - modalRect.top + p.frameY + 6,
-    left: Math.max(8, frameRect.left - modalRect.left + p.frameX),
+    top: frameRect.top - containerRect.top + p.frameY + 6,
+    left: frameRect.left - containerRect.left + p.frameX,
   }
   activePopupId.value = p.id
   popupOpenTimestamp = Date.now()
+  measurePopup()
 }
 
 const composeDraftRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
@@ -1137,11 +1276,18 @@ const renderedMarkdown = computed(() => {
 watch(
   () => store.loadToken,
   () => {
-    nextTick(() => {
-      backdropEl.value?.focus()
+    setTimeout(() => {
+      focusViewer()
       if (store.loading || store.error) return
       scrollToTarget()
     })
+  },
+)
+
+watch(
+  () => store.editing,
+  editing => {
+    if (editing) nextTick(() => editTextareaEl.value?.focus())
   },
 )
 
@@ -1326,15 +1472,6 @@ watch(
     }
   }
 )
-
-// Global Esc handler — Vue's @keydown on the backdrop only fires when the
-// backdrop has focus, which it might lose to inner content. Belt and braces.
-function onKey(e: KeyboardEvent): void {
-  if (store.isOpen && e.key === 'Escape') store.close()
-}
-if (typeof window !== 'undefined') {
-  window.addEventListener('keydown', onKey)
-}
 </script>
 
 <style scoped>

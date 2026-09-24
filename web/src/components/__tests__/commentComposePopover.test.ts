@@ -81,6 +81,23 @@ describe('CommentComposePopover', () => {
     wrapper.unmount()
   })
 
+  it('exposes dialog semantics and keeps keyboard focus in the composer', async () => {
+    const wrapper = mountCompose({ modelValue: 'note' })
+    await nextTick()
+
+    const dialog = document.body.querySelector<HTMLElement>('.compose')
+    const input = dialog?.querySelector<HTMLTextAreaElement>('.compose-input')
+    const save = dialog?.querySelector<HTMLButtonElement>('.compose-btn.primary')
+    expect(dialog?.getAttribute('role')).toBe('dialog')
+    expect(dialog?.getAttribute('aria-label')).toBe('Add comment')
+    expect(document.activeElement).toBe(input)
+
+    save?.focus()
+    save?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }))
+    expect(document.activeElement).toBe(input)
+    wrapper.unmount()
+  })
+
   it('emits save on Cmd+Enter and cancel on Escape', async () => {
     const wrapper = mountCompose({ anchor: { top: 10, left: 10 }, modelValue: 'note' })
     await nextTick()
@@ -91,6 +108,17 @@ describe('CommentComposePopover', () => {
 
     await input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     expect(wrapper.emitted('cancel')).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('cancels on Escape from an action button', async () => {
+    const wrapper = mountCompose({ modelValue: 'note' })
+    await nextTick()
+    const cancel = document.body.querySelector<HTMLButtonElement>('.compose-btn')
+    cancel?.focus()
+    cancel?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+
+    expect(wrapper.emitted('cancel')).toHaveLength(1)
     wrapper.unmount()
   })
 
@@ -110,6 +138,17 @@ describe('CommentComposePopover', () => {
     setViewportHeight(FULL_HEIGHT)
     await nextTick()
     expect(composeTop()).toBe(700)
+    wrapper.unmount()
+  })
+
+  it('remeasures the rendered composer instead of relying on the fallback height', async () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(300)
+    const wrapper = mountCompose({ anchor: null, modelValue: 'note' })
+    await wrapper.setProps({ anchor: { top: 700, left: 20 } })
+    await nextTick()
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+
+    expect(composeTop()).toBe(FULL_HEIGHT - 300)
     wrapper.unmount()
   })
 

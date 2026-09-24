@@ -54,11 +54,6 @@ from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_path
 logger = logging.getLogger(__name__)
 
 
-_CONTEXT_BLOCK_RE = re.compile(
-    r"^\[CIAO_CONTEXT_BEGIN\]\n.*?\n\[CIAO_CONTEXT_END\]\n\n",
-    re.DOTALL,
-)
-
 # `build_prompt()` in ciao/providers/base.py appends an image manifest block
 # (`[INCOMING IMAGES]\n1. filename.png\n2. other.jpg - caption: ...`) to the
 # user's text before sending to the Claude SDK, so the SDK has filenames and
@@ -320,14 +315,7 @@ def _strip_image_manifest(content: str) -> str:
 
 
 def _strip_injected_context(content: str) -> str:
-    # A continuation / handover turn can stack two [CIAO_CONTEXT_BEGIN] blocks
-    # (e.g. stable context + today). Strip them all, not just the first one.
-    stripped = content
-    while True:
-        nxt = _CONTEXT_BLOCK_RE.sub("", stripped, count=1)
-        if nxt == stripped:
-            break
-        stripped = nxt
+    stripped = cli_envelopes.strip_injected_context(content)
     if stripped != content:
         return _strip_image_manifest(stripped).strip() or content
     legacy = _strip_legacy_context_prefix(content)
@@ -1330,10 +1318,7 @@ async def _assemble_chat_messages(
             if subagent_tracking.is_synthesis_nudge(content):
                 result.append({"role": "system", "content": _SYNTHESIS_NUDGE_LABEL})
                 continue
-            is_compact = (
-                isinstance(m.message, dict) and bool(m.message.get("isCompactSummary"))
-            ) or content.startswith("This session is being continued from a previous conversation")
-            if is_compact:
+            if cli_envelopes.is_compact_summary(m, content):
                 result.append({"role": "system", "content": content})
                 continue
         entry: dict = {

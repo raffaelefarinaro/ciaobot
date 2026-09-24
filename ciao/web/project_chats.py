@@ -3,21 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import mimetypes
-import copy
 import os
 import re
 import shutil
 import sys
 import time
 import uuid
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 if TYPE_CHECKING:
     from ciao.mcp_server import CiaoMcpService
@@ -63,8 +64,8 @@ except ImportError:  # pragma: no cover
 import yaml
 
 from ciao import job_runs, subagent_tracking
-from ciao.subagent_tracking import SubagentInfo
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
+from ciao.archive_jobs import ArchiveJob
 from ciao.config import (
     CLAUDE_MODELS,
     GWS_DEFAULT_PROFILE,
@@ -74,39 +75,34 @@ from ciao.config import (
 )
 from ciao.context.capsule import (
     build_context_capsule,
+)
+from ciao.context.capsule import (
     context_digest as stable_context_digest,
 )
-from ciao.error_log import clear_error_log, tail_error_log
+from ciao.model_tiers import is_tier
 from ciao.models import (
+    THINKING_LEVELS,
     AgentRequest,
-    AssistantTextDelta,
     BridgeMode,
     ChatContext,
     ImageAttachment,
-    ModelCapabilityQuestionEvent,
-    ModelChangedEvent,
     PermissionRequestEvent,
-    ResultEvent,
     StreamEvent,
-    SystemStatusEvent,
-    THINKING_LEVELS,
-    ThinkingEvent,
     ToolUseEvent,
 )
-from ciao.model_tiers import is_tier
-from ciao.providers.claude import get_session_info
-from ciao.providers.opencode import (
-    OpencodeProvider,
-    opencode_collab_tree_counts,
-)
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
+from ciao.providers.claude import get_session_info
+from ciao.providers.opencode import OpencodeProvider
+from ciao.schedules import ScheduleEntry, ScheduleStore
 from ciao.sessions import StateStore
+from ciao.subagent_tracking import SubagentInfo
 from ciao.transcripts import (
     TranscriptStore,
+    TurnJournal,
     _claude_projects_dir,
     _global_session_matches,
-    _journal_event_record,
 )
+from ciao.web import chat_service
 from ciao.web.chat_broker import (
     ChatStream,
     ChatStreamBroker,
@@ -115,7 +111,12 @@ from ciao.web.chat_broker import (
     remove_pending_list,
     reorder_pending_list,
 )
-from ciao.web import chat_service
+from ciao.web.archive_pipeline import ArchivePipeline
+from ciao.web.chat_streaming import ChatStreaming
+from ciao.web.chat_streaming import StreamOutcome as _StreamOutcome
+from ciao.web.schedule_dispatch import ScheduleDispatcher
+from ciao.web.document_conversion import convert_document, is_anydoc_document
+from ciao.web.file_snapshots import SnapshotStore
 from ciao.web.subagent_watchers import (
     NUDGE_DECLINED,
     NUDGE_REPORTED,
@@ -124,8 +125,6 @@ from ciao.web.subagent_watchers import (
     NudgeOutcome,
     SubagentWatchers,
 )
-from ciao.web.file_snapshots import SnapshotStore
-from ciao.web.document_conversion import convert_document, is_anydoc_document
 from ciao.workspace_guide import guide_path as workspace_guide_path
 
 logger = logging.getLogger(__name__)
@@ -538,26 +537,6 @@ class ArchiveOutcome:
     filtered_jsonl: str | None
 
 
-@dataclass(slots=True)
-class _StreamOutcome:
-    """Terminal result of a single ``provider.execute_streaming`` pass.
-
-    Used by :meth:`ProjectChatManager.stream_chat` to decide whether to
-    auto-retry against the next tier in the configured ladder. Carries
-    every field the caller needs to either yield to subscribers, persist
-    a transcript turn, or feed the post-stream accounting block.
-    """
-
-    events: list[StreamEvent] = field(default_factory=list)
-    response_text: str = ""
-    had_error: bool = False
-    effective_model: str = ""
-    usage: dict[str, str] = field(default_factory=dict)
-    quota: dict[str, str] = field(default_factory=dict)
-    cost_usd: float = 0.0
-    tool_events: list[dict[str, Any]] = field(default_factory=list)
-
-
 # ── Manager ──────────────────────────────────────────────────────────────
 
 
@@ -666,6 +645,14 @@ class ProjectChatManager:
         # `self` is that host; the properties further down keep the old
         # attribute names pointing at its state.
         self._subagents = SubagentWatchers(self)
+        self._streaming = ChatStreaming(self)
+        # Scheduled dispatch is a separate lifecycle with its own typed host
+        # seam; this manager remains the coordinator for the target chat and
+        # archive policies it calls back into.
+        self._schedule_dispatcher: ScheduleDispatcher = ScheduleDispatcher(self)
+        # Archive post-processing state, manifests, retries, and completion
+        # hooks are owned together; the manager keeps only coordinating seams.
+        self._archive_pipeline: ArchivePipeline = ArchivePipeline(self)
         # Result announces parked while the synthesis nudge decides whether it
         # will speak instead. See `_park_result_announce`. chat_id ->
         # (token, project_id, title, snippet).
@@ -679,10 +666,6 @@ class ProjectChatManager:
         # cancel it: the deadline's whole premise is "the drain still owns this
         # and will never release it", and that premise dies with the drain.
         self._parked_announce_deadlines: dict[str, asyncio.Task] = {}
-        # Per-chat between-turns SDK drain tasks (see _drain_between_turns).
-        # At most one per chat; cancelled before a new user turn starts so
-        # the drain never competes with receive_response for SDK messages.
-        self._between_turn_drains: dict[str, asyncio.Task] = {}
         # Finished background command runs waiting to wake the chat that
         # started them, keyed by chat id. Held for
         # _BACKGROUND_WAKE_WINDOW_SECONDS so a batch of scripts that finishes
@@ -692,56 +675,32 @@ class ProjectChatManager:
         # Bound by main.py so a wake dropped by the restart drain can mark its
         # runs for replay on the next start instead of vanishing.
         self._background_runner: Any = None
-        # Bound by main.py right after both objects exist. dispatch_schedule
+        # Bound by main.py right after the manager and store exist. dispatch_schedule
         # stamps a failed run's last_status on the stored row so the Automations
         # sidebar flags it for attention (issue #407) — without a store there is
         # nowhere durable to write, and tests build managers without one.
-        self.schedule_store: Any = None
+        self.schedule_store: ScheduleStore | None = None
         # A requested server restart drains existing chat work before uvicorn
         # shuts down. Once draining begins, ongoing streams (including their
         # already-queued follow-ups) may finish, but idle chats must not start
         # new turns or the server could race a fresh provider request.
         self._restart_draining = False
-        # Latest result (text, is_error) captured by the between-turns drain
-        # for a chat, i.e. the CLI's post-subagent synthesis turn. The
-        # schedule pipeline reads this after background subagents settle so
-        # the auto-archive classifier judges the real summary instead of the
-        # interim "dispatched, will report" parent message.
-        self._last_drain_result: dict[str, tuple[str, bool]] = {}
         # Per-chat deferred quota retry loops. Each loop sleeps until the
         # chat's retry_next_at, tries the saved prompt if idle, then repeats
         # hourly until success/stop/archive/delete.
         self._retry_tasks: dict[str, asyncio.Task] = {}
-        # In-memory perf-clock per active turn, keyed by (chat_id, turn_index).
-        # Used to compute agent latency (duration_ms) when the ResultEvent
-        # arrives. Cleared as soon as the turn finishes — wall-clock ISO
-        # timestamps are the persisted record on `user_turn_timings`.
-        self._turn_perf_started: dict[tuple[str, int], float] = {}
+        # Strong references to detached background tasks. asyncio keeps only a
+        # weak reference to a running task, so a fire-and-forget
+        # ``create_task(...)`` whose result nobody holds can be collected
+        # mid-flight, and any exception it raised is reported as "Task
+        # exception was never retrieved" at GC time instead of being logged.
+        self._detached_tasks: set[asyncio.Task[object]] = set()
         # Chats with a native-title poll in flight. Both the first-message and
         # the end-of-turn trigger want to title the same chat, and each poll
         # costs real provider reads (an opencode read spawns a throwaway
         # `opencode serve`), so the second trigger joins the first instead of
         # racing it.
         self._titling: set[str] = set()
-        # Strong references to detached background tasks. asyncio keeps only a
-        # weak reference to a running task, so a fire-and-forget
-        # `create_task(...)` whose result nobody holds can be collected
-        # mid-flight, and any exception it raised is reported as "Task
-        # exception was never retrieved" at GC time instead of being logged.
-        self._detached_tasks: set[asyncio.Task] = set()
-        # Chats whose post-archive pipeline is running right now. Mirrors
-        # `postprocess["state"] == "running"` on the chat, kept as a set so the
-        # /ws/events connect snapshot and the home-screen count are O(1) reads.
-        self._postprocessing: set[str] = set()
-        # Persisted per-archive pipeline manifests (ciao/archive_jobs.py), so a
-        # crash between stages can be resumed by stage instead of re-running
-        # model extraction. Keyed by chat id; the on-disk manifest is the
-        # durable copy and this map is only a read cache for the same process.
-        self._archive_jobs: dict[str, Any] = {}
-        # The live post-archive task per chat, so a delete can cancel a stage
-        # that is currently awaiting a model call (the tombstone flag alone only
-        # stops the *next* stage).
-        self._archive_tasks: dict[str, asyncio.Task] = {}
         self._runtime_root = Path(config.state_path).parent
         # The loop the manager was constructed on, so job-run events arriving
         # from a worker thread can be marshalled back onto it before touching
@@ -3248,7 +3207,7 @@ class ProjectChatManager:
         if task is not None and not task.done():
             task.cancel()
         self._cancel_between_turns_drain(chat_id)
-        self._last_drain_result.pop(chat_id, None)
+        self._streaming.discard_drain_result(chat_id)
         provider = self._pop_provider(chat_id)
         self._schedule_provider_cleanup(chat, provider, agent_root=agent_root)
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
@@ -3456,313 +3415,93 @@ class ProjectChatManager:
             filtered_jsonl=filtered_jsonl,
         )
 
-    # ── Post-archive pipeline visibility ──────────────────────────────────
-    # Archiving a chat dispatches one fire-and-forget task that extracts
-    # insights, folds the project doc, writes a trajectory and files memory
-    # proposals. The steps report themselves through ciao.job_runs; what the
-    # methods below add is the *pipeline's* own lifecycle, so a surface can say
-    # "this chat is being tidied up" without flickering off in the gaps between
-    # steps, and can still say what came out of it a month later.
+    # ── Archive pipeline seams ────────────────────────────────────────────
+
+    def _archive_pipeline_for(self) -> ArchivePipeline:
+        """Return the archive collaborator, including for ``__new__`` fixtures."""
+        try:
+            return self._archive_pipeline
+        except AttributeError:
+            pipeline = ArchivePipeline(self)
+            self._archive_pipeline = pipeline
+            return pipeline
+
+    @property
+    def _postprocessing(self) -> set[str]:
+        return self._archive_pipeline_for().postprocessing
+
+    @_postprocessing.setter
+    def _postprocessing(self, value: set[str]) -> None:
+        state = self._archive_pipeline_for().postprocessing
+        state.clear()
+        state.update(value)
+
+    @property
+    def _archive_jobs(self) -> dict[str, ArchiveJob]:
+        return self._archive_pipeline_for().jobs
+
+    @_archive_jobs.setter
+    def _archive_jobs(self, value: dict[str, ArchiveJob]) -> None:
+        jobs = self._archive_pipeline_for().jobs
+        jobs.clear()
+        jobs.update(value)
+
+    @property
+    def _archive_tasks(self) -> dict[str, asyncio.Task[object]]:
+        return self._archive_pipeline_for().tasks
+
+    @_archive_tasks.setter
+    def _archive_tasks(self, value: dict[str, asyncio.Task[object]]) -> None:
+        tasks = self._archive_pipeline_for().tasks
+        tasks.clear()
+        tasks.update(value)
 
     def attach_job_runs_publisher(self) -> None:
-        """Route live job-run events into this manager. Called once at startup.
+        """Route live archive job events into the manager."""
+        self._archive_pipeline_for().attach_job_runs_publisher()
 
-        Kept out of ``__init__`` on purpose: the publisher is a module-level
-        global in :mod:`ciao.job_runs`, and tests build managers freely. Only
-        the process that actually serves the PWA should claim it."""
-        from ciao import job_runs
+    def _on_job_event(self, event: dict[str, object]) -> None:
+        return self._archive_pipeline_for()._on_job_event(event)
 
-        job_runs.set_publisher(self._on_job_event)
-
-    def _on_job_event(self, event: dict[str, Any]) -> None:
-        """Publisher installed into :mod:`ciao.job_runs`. Never raises.
-
-        Job steps can finish on a worker thread, so this hops back onto the
-        manager's loop before touching EventsHub."""
-        try:
-            chat_id = str(event.get("chat_id") or "")
-            if not chat_id or chat_id not in self._chats:
-                return
-            loop = self._loop
-            running = None
-            try:
-                running = asyncio.get_running_loop()
-            except RuntimeError:
-                running = None
-            if loop is None and running is not None:
-                # Constructed outside a loop (tests, and any future call path):
-                # adopt the first loop we are actually called on, so later
-                # off-thread events still have somewhere to marshal to.
-                self._loop = loop = running
-            if loop is not None and running is not loop:
-                loop.call_soon_threadsafe(self._apply_job_event, chat_id, event)
-                return
-            self._apply_job_event(chat_id, event)
-        except Exception:  # noqa: BLE001 — telemetry must never break a job
-            logger.debug("Failed to handle job event", exc_info=True)
-
-    def _apply_job_event(self, chat_id: str, event: dict[str, Any]) -> None:
-        """Fold one step event into the chat's postprocess record and announce."""
-        try:
-            chat = self._chats.get(chat_id)
-            if chat is None:
-                return
-            # Only fold steps into a pipeline that is actually running. A tracked
-            # job that merely carries a chat_id (a one-off re-run, say) would
-            # otherwise create a half-record with no `state`, which every reader
-            # then has to treat as neither running nor finished.
-            if chat_id not in self._postprocessing:
-                return
-            state = dict(chat.postprocess or {})
-            steps = dict(state.get("steps") or {})
-            job = str(event.get("job") or "")
-            if not job:
-                return
-            if event.get("event") == "started":
-                state["step"] = job
-            else:
-                extra = event.get("extra")
-                steps[job] = {
-                    "status": str(event.get("status") or "ok"),
-                    "extra": dict(extra) if isinstance(extra, dict) else {},
-                }
-                state["steps"] = steps
-                # Leave `step` pointing at the last thing that ran: between two
-                # steps there is no current one, and blanking it would make the
-                # UI flicker back to a generic label for a few milliseconds.
-            state["updated_at"] = chat_service._now_iso()
-            chat.postprocess = state
-            self._publish_postprocess(chat)
-        except Exception:  # noqa: BLE001
-            logger.debug("Failed to apply job event for %s", chat_id, exc_info=True)
+    def _apply_job_event(self, chat_id: str, event: dict[str, object]) -> None:
+        return self._archive_pipeline_for()._apply_job_event(chat_id, event)
 
     def _publish_postprocess(self, chat: ChatInfo) -> None:
-        self._events.publish({
-            "type": "chat_postprocess",
-            "chat_id": chat.chat_id,
-            "project_id": chat.project_id,
-            "postprocess": dict(chat.postprocess or {}),
-        })
+        return self._archive_pipeline_for()._publish_postprocess(chat)
 
     def postprocessing_chat_ids(self) -> list[str]:
-        """Chats whose post-archive pipeline is running, for the connect
-        snapshot: a client that joins mid-pipeline must not miss it."""
-        return sorted(self._postprocessing)
+        return self._archive_pipeline_for().postprocessing_chat_ids()
 
     def _begin_postprocess(self, chat_id: str, expected: list[str]) -> None:
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return
-        self._postprocessing.add(chat_id)
-        chat.postprocess = {
-            "state": "running",
-            "step": expected[0] if expected else "",
-            "expected": list(expected),
-            "steps": {},
-            "started_at": chat_service._now_iso(),
-            "updated_at": chat_service._now_iso(),
-        }
-        self._publish_postprocess(chat)
+        return self._archive_pipeline_for()._begin_postprocess(chat_id, expected)
 
     def _end_postprocess(self, chat_id: str) -> None:
-        self._postprocessing.discard(chat_id)
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return
-        state = dict(chat.postprocess or {})
-        # Settle to the manifest's own outcome: a job that still has failed
-        # stages is "incomplete" (retryable), one that needs a config/human
-        # change is "blocked", and only an all-settled job is "done". Without
-        # this a partly-failed pipeline would report success and hide its
-        # retry affordance.
-        job = self._archive_jobs.get(chat_id)
-        job_state = getattr(job, "state", "") if job is not None else ""
-        if job_state in ("incomplete", "blocked"):
-            state["state"] = job_state
-        else:
-            state["state"] = "done"
-        state["step"] = ""
-        state["updated_at"] = chat_service._now_iso()
-        chat.postprocess = state
-        # Persisted so an archived chat can still report what was learned from
-        # it after a restart — the run log rotates, this does not.
-        self._save()
-        self._publish_postprocess(chat)
+        return self._archive_pipeline_for()._end_postprocess(chat_id)
 
-    async def _tracked_postprocess(self, chat_id: str, coro: Any) -> None:
-        """Own the pipeline's start/finish around the existing task body."""
-        try:
-            await coro
-        finally:
-            self._end_postprocess(chat_id)
+    async def _tracked_postprocess(
+        self, chat_id: str, coro: Coroutine[object, object, object]
+    ) -> None:
+        return await self._archive_pipeline_for()._tracked_postprocess(chat_id, coro)
 
     def retry_insights(self, chat_id: str) -> str:
-        """Resume the unfinished post-archive stages for an archived chat.
+        return self._archive_pipeline_for().retry_insights(chat_id)
 
-        An archive that already carries insights but whose project fold,
-        trajectory or memory writes never landed is exactly the case this
-        repairs (see ``ciao/archive_jobs.py``). Returns ``"started"`` when a
-        resume task is launched, ``"running"`` when the chat's pipeline is
-        already live, ``"complete"`` when nothing is left to do, ``"blocked"``
-        when the job needs a config/human change, or ``"not_found"`` /
-        ``"not_archived"`` / ``"no_archive"`` for the non-starts. Used by
-        ``/api/chats/{chat_id}/retry-insights``.
+    def retry_archive_steps(self, chat_id: str) -> dict[str, object]:
+        return self._archive_pipeline_for().retry_archive_steps(chat_id)
 
-        The method name is kept for route/back-compat; PWA_API.md documents it
-        as "retry unfinished steps".
-        """
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return "not_found"
-        if not chat.archived:
-            return "not_archived"
-        if not chat.archive_path:
-            return "no_archive"
-        if chat_id in self._postprocessing:
-            return "running"
-
-        archive_path = self._archive_path_for_chat(chat)
-        if not archive_path.exists():
-            return "no_archive"
-
-        job, inputs = self._resume_job(chat_id, archive_path)
-        if job is None or inputs is None:
-            return "no_archive"
-        if job.tombstoned:
-            return "complete"
-        if not job.unfinished():
-            return "complete"
-        # An explicit user retry is a deliberate action: always clear failed
-        # stages, blocks, and exhausted attempt budgets before launching, even
-        # when `resumable()` is nominally non-empty because a *dependent*
-        # pending stage kept it so. Otherwise an exhausted `insights` whose
-        # dependents are still pending would be skipped, and the launch would
-        # run only work that immediately waits for it — a silent no-op retry.
-        job.reset_failed(include_blocked=True)
-        if not job.resumable():
-            return "complete"
-        self._launch_job(chat_id, job, inputs)
-        return "started"
-
-    def retry_archive_steps(self, chat_id: str) -> dict[str, Any]:
-        """Retry every unfinished stage and report the manifest to the caller.
-
-        The richer sibling of :meth:`retry_insights` used by the postprocess
-        UI: same launch path, but it returns the current manifest view so the
-        archived-chat panel can render partial completion immediately.
-        """
-        status = self.retry_insights(chat_id)
-        return {"status": status, "job": self.archive_job_view(chat_id)}
-
-    def archive_job_view(self, chat_id: str) -> dict[str, Any] | None:
-        """The persisted manifest for a chat, projected for the PWA, or None."""
-        from ciao.archive_jobs import load_job, manifest_view, new_job_id
-
-        chat = self._chats.get(chat_id)
-        if chat is None or not chat.archive_path:
-            return None
-        job = self._archive_jobs.get(chat_id)
-        if job is None:
-            job = load_job(
-                self._runtime_root, new_job_id(chat_id, chat.archive_path)
-            )
-        if job is None:
-            return None
-        return manifest_view(job)
+    def archive_job_view(self, chat_id: str) -> dict[str, object] | None:
+        return self._archive_pipeline_for().archive_job_view(chat_id)
 
     def _delete_archived_transcript(self, chat_id: str) -> None:
-        """Remove a deleted chat's archived transcript directory.
-
-        Without this, an explicit delete does not stick. `_discover_archived_chats`
-        treats ``<logs_root>/Chats`` as the source of truth and re-imports any
-        directory that is not in the registry, so the very next `list_projects()`
-        poll brought the chat back — with the same ``chat_id`` and
-        ``archive_path``, hence the same `new_job_id`, which `_cancel_archive_job`
-        had just tombstoned for good. The resurrected chat could therefore never
-        run insights, the project-doc fold, trajectories or memory proposals
-        again, and `retry_insights` reported "complete" for a pipeline that had
-        never run.
-
-        Scoped to this chat's own directory under the derived transcript
-        archive: that tree is Ciaobot-generated, one directory per chat, and the
-        user asked for this chat to be deleted. Everything else in the vault is
-        left alone.
-        """
-        chats_root = self._config.logs_root / "Chats"
-        chat_dir = chats_root / chat_id
-        # Defend the path: `chat_id` reaching a filesystem join must not escape
-        # the archive root, whatever it contains.
-        try:
-            resolved = chat_dir.resolve()
-            if resolved.parent != chats_root.resolve():
-                return
-        except OSError:
-            return
-        if not resolved.is_dir():
-            return
-        try:
-            shutil.rmtree(resolved)
-        except OSError:
-            logger.warning(
-                "Could not delete archived transcript for %s", chat_id, exc_info=True
-            )
+        return self._archive_pipeline_for()._delete_archived_transcript(chat_id)
 
     def _cancel_archive_job(
         self, chat_id: str, chat: ChatInfo | None = None
     ) -> None:
-        """Tombstone a deleted chat's archive job and stop its live task.
-
-        Called on explicit delete. The tombstone is the durable half: it is
-        written even when the manifest does not exist yet, and ``save_job``
-        refuses to clear it, so a task that finishes after this point (or a
-        startup resume on the next boot) cannot recreate work for the chat.
-
-        ``chat`` is passed in because ``delete_chat`` pops the row from the
-        registry first: looking it up here found nothing, so the on-disk
-        manifest lookup and the "no manifest yet" tombstone were both dead and
-        a deleted chat could leave a live job record behind.
-        """
-        from ciao.archive_jobs import load_job, tombstone_job
-
-        # Cancel an in-flight stage first: a task awaiting a model call would
-        # otherwise resume after the delete and write derived state. The
-        # tombstone below then stops any next stage and any startup resume.
-        task = self._archive_tasks.pop(chat_id, None)
-        if task is not None and not task.done():
-            task.cancel()
-        if chat is None:
-            chat = self._chats.get(chat_id)
-        job = self._archive_jobs.pop(chat_id, None)
-        if job is None and chat is not None and chat.archive_path:
-            from ciao.archive_jobs import new_job_id
-
-            job = load_job(self._runtime_root, new_job_id(chat_id, chat.archive_path))
-        if job is not None:
-            job.tombstoned = True
-            job.state = "tombstoned"
-            job.blocked_reason = "chat deleted"
-            job.save()
-            return
-        # No manifest yet: create the tombstone so a racing task cannot write
-        # one afterwards.
-        if chat is not None and chat.archive_path:
-            from ciao.archive_jobs import new_job_id
-
-            tombstone_job(
-                self._runtime_root,
-                new_job_id(chat_id, chat.archive_path),
-                reason="chat deleted",
-                chat_id=chat_id,
-                archive_path=chat.archive_path,
-            )
-
-    # ── Archive job wiring ────────────────────────────────────────────────
+        return self._archive_pipeline_for()._cancel_archive_job(chat_id, chat)
 
     def _archive_path_for_chat(self, chat: ChatInfo) -> Path:
-        archive_path = Path(chat.archive_path)
-        if not archive_path.is_absolute():
-            archive_path = self._config.workspace_root / archive_path
-        return archive_path
+        return self._archive_pipeline_for()._archive_path_for_chat(chat)
 
     def _job_inputs(
         self,
@@ -3772,427 +3511,69 @@ class ProjectChatManager:
         filtered_jsonl: str = "",
         session_id: str = "",
         text_mode: bool = False,
-    ) -> dict[str, Any]:
-        """Resolve every stage input for one chat's archive job.
-
-        Paths are re-derived from the live config rather than stored, so a
-        resume after a workspace move still finds the right guide/vault; the
-        JSON-safe subset is persisted on the manifest by
-        :meth:`_persist_job_inputs`.
-        """
-        config = self._config
-        workspace = project.workspace if project else ""
-        is_system_chat = False
-        if chat.schedule_id:
-            from ciao.schedules import is_system_schedule_id
-
-            is_system_chat = is_system_schedule_id(chat.schedule_id)
-        trajectories_enabled = bool(
-            getattr(config, "trajectories_enabled", True)
-            and session_id
-            and filtered_jsonl
+    ) -> dict[str, object]:
+        return self._archive_pipeline_for()._job_inputs(
+            chat,
+            project,
+            filtered_jsonl=filtered_jsonl,
+            session_id=session_id,
+            text_mode=text_mode,
         )
-        project_doc_path = (
-            project.vault_doc_path
-            if project and not project.is_auto and not is_system_chat
-            else ""
-        )
-        proposal_vault_root = (
-            self._workspace_vault_root(workspace) if workspace else None
-        )
-        guide_path = (
-            workspace_guide_path(config.agent_root(workspace))
-            if workspace and config.workspace(workspace) is not None
-            else None
-        )
-        return {
-            "archive_path": self._archive_path_for_chat(chat),
-            "config": config,
-            "model": self._insights_model_for(chat, workspace),
-            "provider": chat.provider or "claude",
-            "session_id": session_id,
-            "filtered_jsonl": filtered_jsonl,
-            "text_mode": text_mode,
-            "trajectory_meta": {
-                "context": project.context if project else "",
-                "project_id": chat.project_id,
-                "chat_id": chat.chat_id,
-                "task_summary": chat.title,
-                "workspace": workspace,
-            },
-            "workspace_root": config.workspace_root,
-            "vault_root": config.vault_root,
-            "proposal_vault_root": proposal_vault_root,
-            "guide_path": guide_path,
-            "trajectories_enabled": trajectories_enabled,
-            "memory_proposals_enabled": True,
-            "project_doc_path": project_doc_path,
-        }
 
     def _insights_model_for(self, chat: ChatInfo, workspace: str) -> str:
-        from ciao.insights import resolve_insights_model
+        return self._archive_pipeline_for()._insights_model_for(chat, workspace)
 
-        insights_models = getattr(self._config, "provider_insights_models", {}) or {}
-        return insights_models.get(chat.provider or "", "") or resolve_insights_model(
-            self._config, workspace or None, chat.provider or None
-        )
-
-    def _persist_job_inputs(self, job: Any, inputs: dict[str, Any]) -> None:
-        """Store the JSON-safe subset a resume needs on the manifest."""
-        job.inputs.update(
-            {
-                "model": str(inputs.get("model") or ""),
-                "provider": str(inputs.get("provider") or "claude"),
-                "session_id": str(inputs.get("session_id") or ""),
-                "filtered_jsonl": str(inputs.get("filtered_jsonl") or ""),
-                "text_mode": bool(inputs.get("text_mode", False)),
-                "trajectory_meta": dict(inputs.get("trajectory_meta") or {}),
-                "trajectories_enabled": bool(inputs.get("trajectories_enabled", True)),
-                "memory_proposals_enabled": bool(
-                    inputs.get("memory_proposals_enabled", True)
-                ),
-                "project_doc_path": str(inputs.get("project_doc_path") or ""),
-                "workspace": str(
-                    (inputs.get("trajectory_meta") or {}).get("workspace", "")
-                ),
-            }
-        )
+    def _persist_job_inputs(
+        self, job: ArchiveJob, inputs: dict[str, object]
+    ) -> None:
+        return self._archive_pipeline_for()._persist_job_inputs(job, inputs)
 
     def _restore_job_inputs(
-        self, chat: ChatInfo, project: ProjectInfo | None, job: Any
-    ) -> dict[str, Any]:
-        """Rebuild live stage inputs from a persisted manifest + live config."""
-        meta = dict(job.inputs.get("trajectory_meta") or {})
-        workspace = str(job.inputs.get("workspace") or "")
-        if not workspace and project is not None:
-            workspace = project.workspace
-        config = self._config
-        guide_path = (
-            workspace_guide_path(config.agent_root(workspace))
-            if workspace and config.workspace(workspace) is not None
-            else None
-        )
-        proposal_vault_root = (
-            self._workspace_vault_root(workspace) if workspace else None
-        )
-        return {
-            "archive_path": self._archive_path_for_chat(chat),
-            "config": config,
-            "model": str(job.inputs.get("model") or ""),
-            "provider": str(job.inputs.get("provider") or chat.provider or "claude"),
-            "session_id": str(job.inputs.get("session_id") or ""),
-            "filtered_jsonl": str(job.inputs.get("filtered_jsonl") or ""),
-            "text_mode": bool(job.inputs.get("text_mode", False)),
-            "trajectory_meta": meta,
-            "workspace_root": config.workspace_root,
-            "vault_root": config.vault_root,
-            "proposal_vault_root": proposal_vault_root,
-            "guide_path": guide_path,
-            "trajectories_enabled": bool(
-                getattr(config, "trajectories_enabled", True)
-            )
-            and bool(job.inputs.get("trajectories_enabled", True)),
-            "memory_proposals_enabled": bool(
-                job.inputs.get("memory_proposals_enabled", True)
-            ),
-            "project_doc_path": str(job.inputs.get("project_doc_path") or ""),
-        }
+        self, chat: ChatInfo, project: ProjectInfo | None, job: ArchiveJob
+    ) -> dict[str, object]:
+        return self._archive_pipeline_for()._restore_job_inputs(chat, project, job)
 
-    def _new_job_for_chat(self, chat: ChatInfo, inputs: dict[str, Any]) -> Any:
-        from ciao.archive_jobs import archive_content_revision, create_job
-
-        job = create_job(
-            self._runtime_root,
-            chat_id=chat.chat_id,
-            archive_path=chat.archive_path,
-            content_revision_value=archive_content_revision(inputs["archive_path"]),
-        )
-        self._persist_job_inputs(job, inputs)
-        job.save()
-        self._archive_jobs[chat.chat_id] = job
-        return job
+    def _new_job_for_chat(
+        self, chat: ChatInfo, inputs: dict[str, object]
+    ) -> ArchiveJob:
+        return self._archive_pipeline_for()._new_job_for_chat(chat, inputs)
 
     def _resume_job(
         self, chat_id: str, archive_path: Path
-    ) -> tuple[Any, dict[str, Any]] | tuple[None, None]:
-        """Load (or seed) the manifest for an archived chat.
-
-        A chat archived before this feature has no manifest, so one is seeded
-        from the archive's current state: insights settled when the section is
-        present, trajectory unavailable (the raw JSONL is gone), and the fold
-        and proposals pending — which is what makes a legacy archive
-        repairable.
-        """
-        from ciao.archive_jobs import (
-            SKIPPED,
-            SUCCEEDED,
-            archive_content_revision,
-            create_job,
-            load_job,
-            new_job_id,
-        )
-
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return None, None
-        project = self._projects.get(chat.project_id) if chat.project_id else None
-        job = self._archive_jobs.get(chat_id)
-        if job is None:
-            job = load_job(self._runtime_root, new_job_id(chat_id, chat.archive_path))
-        if job is None:
-            inputs = self._job_inputs(chat, project, text_mode=True)
-            job = create_job(
-                self._runtime_root,
-                chat_id=chat_id,
-                archive_path=chat.archive_path,
-                content_revision_value=archive_content_revision(archive_path),
-            )
-            self._persist_job_inputs(job, inputs)
-            from ciao.insights import _has_insights_section
-
-            if _has_insights_section(archive_path):
-                job.mark("insights", SUCCEEDED)
-            if not job.inputs.get("filtered_jsonl"):
-                job.mark("trajectory", SKIPPED, "raw session no longer available")
-            job.save()
-            self._archive_jobs[chat_id] = job
-        else:
-            inputs = self._restore_job_inputs(chat, project, job)
-            self._archive_jobs[chat_id] = job
-        return job, inputs
+    ) -> tuple[ArchiveJob, dict[str, object]] | tuple[None, None]:
+        return self._archive_pipeline_for()._resume_job(chat_id, archive_path)
 
     def _launch_job(
         self,
         chat_id: str,
-        job: Any,
-        inputs: dict[str, Any],
+        job: ArchiveJob,
+        inputs: dict[str, object],
         *,
         stages: list[str] | None = None,
     ) -> None:
-        self._begin_postprocess(chat_id, list(stages or job.resumable()))
-        task = asyncio.create_task(
-            self._tracked_postprocess(
-                chat_id, self._run_job(chat_id, job, inputs, stages=stages)
-            )
+        return self._archive_pipeline_for()._launch_job(
+            chat_id, job, inputs, stages=stages
         )
-        # Retained so a delete can cancel an in-flight stage. The tombstone alone
-        # is not enough: a stage already awaiting a model call would otherwise
-        # resume and write derived state (append insights, fold the doc) after
-        # the chat was deleted.
-        self._archive_tasks[chat_id] = task
-
-        def _drop_finished(_task: asyncio.Task, _chat_id: str = chat_id) -> None:
-            self._archive_tasks.pop(_chat_id, None)
-
-        task.add_done_callback(_drop_finished)
 
     async def _run_job(
         self,
         chat_id: str,
-        job: Any,
-        inputs: dict[str, Any],
+        job: ArchiveJob,
+        inputs: dict[str, object],
         *,
         stages: list[str] | None = None,
     ) -> None:
-        """Check the archive revision, run the stages, settle the record."""
-        from ciao.archive_jobs import (
-            PENDING,
-            RUNNING,
-            resume_revision_matches,
+        return await self._archive_pipeline_for()._run_job(
+            chat_id, job, inputs, stages=stages
         )
-        from ciao.insights import run_archive_pipeline
 
-        try:
-            # Revision validation runs for every resume, not only an
-            # insights-pending one. While insights is still pending/running the
-            # recorded revision is the pre-insights one, and the pipeline's own
-            # append is accepted only when the on-disk section authenticates
-            # against the exact output the pipeline recorded before writing it.
-            # Once insights settles, a full-file match against the
-            # post-insights revision is required.
-            insights_pending = job.status_of("insights") in (PENDING, RUNNING)
-            recorded = (
-                job.content_revision if insights_pending else job.post_insights_revision
-            ) or job.content_revision
-            expected_append = job.insights_append_revision if insights_pending else ""
-            if not resume_revision_matches(
-                inputs["archive_path"],
-                recorded,
-                expected_append_revision=expected_append,
-            ):
-                if insights_pending:
-                    blocked = ["insights"]
-                else:
-                    # Whatever this resume was actually asked to run and has
-                    # not settled — not a hardcoded stage. Blocking
-                    # `project_doc_update` unconditionally overwrote the audit
-                    # state of a fold that had already succeeded while leaving
-                    # the genuinely pending stage untouched, so a retry reset
-                    # the fold and could run it a second time.
-                    requested = list(stages) if stages else list(job.resumable())
-                    blocked = [
-                        name
-                        for name in requested
-                        if job.status_of(name) in (PENDING, RUNNING)
-                    ] or list(job.unfinished())
-                for name in blocked:
-                    job.block(
-                        name,
-                        "archive content changed since the job was created",
-                    )
-                job.save()
-                return
-            await run_archive_pipeline(job, inputs, stages=stages)
-        except Exception:  # noqa: BLE001 — the tracked wrapper always settles
-            logger.exception("Archive job failed for chat %s", chat_id)
-        finally:
-            job.save()
-            self._overlay_job_postprocess(chat_id, job)
-
-    def _overlay_job_postprocess(self, chat_id: str, job: Any) -> None:
-        """Fold a manifest's stage states into the chat's postprocess record.
-
-        The live step events already fill ``steps`` with counts and paths; the
-        manifest adds what they cannot: which stages are still unfinished,
-        whether the job is blocked, and the reason. Applied on settle and on
-        load so a partially-complete archive reports accurately without a live
-        pipeline.
-        """
-        from ciao.archive_jobs import manifest_view
-
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return
-        view = manifest_view(job)
-        state = dict(chat.postprocess or {})
-        steps = dict(state.get("steps") or {})
-        # Only terminal outcomes become step entries. Pending/running/blocked
-        # stages are named by the manifest's `unfinished` list instead; folding
-        # them in would make a blocked insights stage read as "insights added".
-        terminal = {"ok": "ok", "skipped": "skipped", "error": "error"}
-        for name, status in (view.get("steps") or {}).items():
-            manifest_status = status.get("status")
-            if manifest_status not in terminal:
-                continue
-            entry = steps.get(name)
-            if not isinstance(entry, dict):
-                entry = {"status": terminal[manifest_status], "extra": {}}
-            entry["manifest_status"] = manifest_status
-            steps[name] = entry
-        state["steps"] = steps
-        state["job"] = view
-        if view.get("blocked_reason"):
-            state["blocked_reason"] = view["blocked_reason"]
-        # Reflect the manifest outcome on the record itself, so a blocked or
-        # partly-complete job is visible even before `_end_postprocess` runs.
-        if view.get("state") in ("incomplete", "blocked") and state.get("state") != "running":
-            state["state"] = view["state"]
-        state["updated_at"] = chat_service._now_iso()
-        chat.postprocess = state
-        self._publish_postprocess(chat)
-
-    # ── Startup resume ────────────────────────────────────────────────────
+    def _overlay_job_postprocess(self, chat_id: str, job: ArchiveJob) -> None:
+        return self._archive_pipeline_for()._overlay_job_postprocess(chat_id, job)
 
     async def resume_interrupted_jobs(self, *, max_concurrency: int = 2) -> int:
-        """Resume eligible local archive jobs left incomplete by a crash.
-
-        Called once at startup after the registry loads. Interrupted ``running``
-        stages are made retryable first (nothing is running yet in this
-        process), then unfinished jobs with a live chat are resumed with
-        bounded concurrency. Blocked and tombstoned jobs are left alone.
-        """
-        from ciao.archive_jobs import MAX_AUTO_ATTEMPTS, RUNNING, list_jobs
-
-        jobs = list_jobs(self._runtime_root)
-        semaphore = asyncio.Semaphore(max(1, max_concurrency))
-        started = 0
-        for job in jobs:
-            if job.tombstoned:
-                continue
-            for name in list(job.stages):
-                if job.status_of(name) == RUNNING:
-                    # The old process died with the stage in flight; make it
-                    # retryable rather than a stuck "running" forever. An
-                    # interrupted *final* attempt had already counted toward the
-                    # automatic budget, so reset the counter too: otherwise the
-                    # stage is pending but immediately excluded by
-                    # `resumable()`, and an explicit retry (which resets
-                    # failed/running/blocked, not a pending stage) would launch a
-                    # pipeline that runs nothing.
-                    stage = job.stage(name)
-                    stage.status = "pending"
-                    if stage.attempts >= MAX_AUTO_ATTEMPTS:
-                        stage.attempts = 0
-            # The per-stage writes above bypass `mark`, so the job-level state
-            # is still the dead process's "running". Recompute it before the
-            # save, or a job this pass does not resume (its chat is gone, or it
-            # is out of attempts) reports a pipeline that will never move as
-            # still in flight.
-            job._refresh_state()
-            job.save()
-            chat = self._chats.get(job.chat_id)
-            if chat is None or not chat.archived:
-                continue
-            project = self._projects.get(chat.project_id) if chat.project_id else None
-            inputs = self._restore_job_inputs(chat, project, job)
-            if not inputs["archive_path"].exists():
-                # The archive is gone, so no stage can run. Block (and surface
-                # it) rather than silently leaving a stale running/incomplete
-                # record that a client then downgrades to done, hiding the
-                # retry affordance.
-                for name in job.resumable() or job.unfinished():
-                    job.block(name, "archive file is missing")
-                job.save()
-                self._archive_jobs[job.chat_id] = job
-                self._overlay_job_postprocess(job.chat_id, job)
-                continue
-            resumable = job.resumable()
-            if not getattr(self._config, "insights_enabled", True):
-                resumable = [
-                    name
-                    for name in resumable
-                    if name not in (
-                        "insights",
-                        "project_doc_update",
-                        "memory_proposals",
-                    )
-                ]
-            if not getattr(self._config, "trajectories_enabled", True):
-                resumable = [name for name in resumable if name != "trajectory"]
-            if not resumable:
-                self._archive_jobs[job.chat_id] = job
-                self._overlay_job_postprocess(job.chat_id, job)
-                continue
-            self._archive_jobs[job.chat_id] = job
-            self._begin_postprocess(job.chat_id, list(resumable))
-
-            async def _guarded(
-                job: Any = job,
-                inputs: dict[str, Any] = inputs,
-                stages: list[str] = list(resumable),
-            ) -> None:
-                async with semaphore:
-                    await self._run_job(job.chat_id, job, inputs, stages=stages)
-
-            task = asyncio.create_task(
-                self._tracked_postprocess(job.chat_id, _guarded())
-            )
-            self._detached_tasks.add(task)
-            task.add_done_callback(self._detached_tasks.discard)
-            # Also retain it as this chat's live archive task so a delete can
-            # cancel it. `_cancel_archive_job` cancels `_archive_tasks`, and a
-            # startup-resumed stage awaiting `update_project_doc` would
-            # otherwise write the canonical doc after the chat was deleted.
-            self._archive_tasks[job.chat_id] = task
-
-            def _drop_resumed(
-                _task: asyncio.Task, _chat_id: str = job.chat_id
-            ) -> None:
-                self._archive_tasks.pop(_chat_id, None)
-
-            task.add_done_callback(_drop_resumed)
-            started += 1
-        return started
+        return await self._archive_pipeline_for().resume_interrupted_jobs(
+            max_concurrency=max_concurrency
+        )
 
     def run_archive_postprocess(
         self,
@@ -4201,195 +3582,28 @@ class ProjectChatManager:
         chat_meta: ChatInfo | None,
         project_meta: ProjectInfo | None,
     ) -> None:
-        config = self._config
-        trajectories_enabled = bool(
-            getattr(config, "trajectories_enabled", True)
-            and outcome.filtered_jsonl is not None
-            and outcome.session_id != ""
+        return self._archive_pipeline_for().run_archive_postprocess(
+            chat_id, outcome, chat_meta, project_meta
         )
-        run_insights = bool(
-            getattr(config, "insights_enabled", True) and outcome.filtered_jsonl
-        )
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            # Nothing durable to key a manifest on; index the archive below so
-            # the file is still searchable.
-            pass
-        if chat is not None:
-            from ciao.archive_jobs import SKIPPED
-
-            # The archive path may not be on the chat yet (this runs right after
-            # `archive_chat` set it, but a caller can pass the outcome directly);
-            # use the outcome's path as the authoritative one for the job.
-            if not chat.archive_path and outcome.path is not None:
-                try:
-                    chat.archive_path = str(
-                        outcome.path.relative_to(self._config.workspace_root)
-                    )
-                except ValueError:
-                    chat.archive_path = str(outcome.path)
-            inputs = self._job_inputs(
-                chat,
-                project_meta,
-                filtered_jsonl=outcome.filtered_jsonl or "",
-                session_id=outcome.session_id,
-            )
-            inputs["archive_path"] = outcome.path
-            inputs["trajectories_enabled"] = trajectories_enabled
-
-            # Declare the plan up front so a surface can say "3 steps" honestly
-            # and a stage that was never going to run is not reported as a
-            # failure. System chats keep insights and memory proposals but skip
-            # the project-doc fold (there is no canonical doc to fold into).
-            # `project_doc_update` and `memory_proposals` consume the insights
-            # text, so they are only planned when extraction actually runs;
-            # otherwise there is nothing to fold or route.
-            expected: list[str] = []
-            if run_insights:
-                expected.append("insights")
-                if inputs["project_doc_path"]:
-                    expected.append("project_doc_update")
-            if trajectories_enabled:
-                expected.append("trajectory")
-            if run_insights and inputs["proposal_vault_root"] is not None:
-                expected.append("memory_proposals")
-
-            if expected:
-                job = self._new_job_for_chat(chat, inputs)
-                # Stages that cannot run for this chat settle as skipped now, so
-                # the manifest is an accurate plan even before the task starts
-                # and a stage that was intentionally never planned is not left
-                # pending (which would read as "incomplete" and offer a retry).
-                if not run_insights:
-                    # Extraction is disabled or there is no transcript, so all
-                    # three insights-dependent stages are settled together.
-                    job.mark("insights", SKIPPED, "insights disabled or no transcript")
-                    job.mark(
-                        "project_doc_update", SKIPPED, "no insights extraction planned"
-                    )
-                    job.mark(
-                        "memory_proposals", SKIPPED, "no insights extraction planned"
-                    )
-                else:
-                    if not inputs["project_doc_path"]:
-                        job.mark(
-                            "project_doc_update", SKIPPED, "no canonical project doc"
-                        )
-                    if inputs["proposal_vault_root"] is None:
-                        if inputs["trajectory_meta"].get("workspace"):
-                            # The chat runs in a workspace but its vault root did
-                            # not resolve: recoverable once the registry is fixed.
-                            job.block(
-                                "memory_proposals", "workspace owner unavailable"
-                            )
-                        else:
-                            job.mark(
-                                "memory_proposals",
-                                SKIPPED,
-                                "workspace owner unavailable",
-                            )
-                if not trajectories_enabled:
-                    job.mark(
-                        "trajectory", SKIPPED, "no session input or trajectories disabled"
-                    )
-                job.save()
-
-                self._begin_postprocess(chat_id, expected)
-                task = self._spawn_detached(
-                    self._tracked_postprocess(
-                        chat_id, self._run_job(chat_id, job, inputs, stages=expected)
-                    ),
-                    name=f"archive-postprocess-{chat_id}",
-                )
-                # Retain as the chat's live archive task so a delete can cancel
-                # a stage that is mid-model-call; see `_cancel_archive_job`.
-                self._archive_tasks[chat_id] = task
-
-                def _drop_archive(_task: asyncio.Task, _cid: str = chat_id) -> None:
-                    self._archive_tasks.pop(_cid, None)
-
-                task.add_done_callback(_drop_archive)
-
-        # Index the newly archived file in the FTS5 database. The control
-        # plane now runs its own index passes in bounded workers, so this
-        # formerly loop-serialized writer can overlap them. Run it through the
-        # same off-loop executor and the same per-database `keyed_lock`, or a
-        # concurrent scan holds SQLite's write lock past the connection timeout
-        # and this write is skipped with "database is locked".
-        operation = self._make_archive_index_operation(outcome)
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop is None:
-            # Synchronous caller (CLI/tests): run inline. Best-effort like the
-            # async branch — an optional FTS update must never fail an archive
-            # that already succeeded.
-            self._run_archive_index_best_effort(chat_id, outcome, operation)
-        else:
-            self._spawn_detached(
-                self._index_archive_file_off_loop(chat_id, outcome, operation),
-                name=f"archive-index-{chat_id}",
-            )
 
     def _run_archive_index_best_effort(
         self, chat_id: str, outcome: ArchiveOutcome, operation: Callable[[], None]
     ) -> None:
-        """Run the archive index write inline, logging but never raising."""
-        try:
-            operation()
-        except Exception:  # noqa: BLE001 — archiving already succeeded
-            logger.exception(
-                "FTS search: failed to index archived file %s for chat %s",
-                outcome.path,
-                chat_id,
-            )
+        return self._archive_pipeline_for()._run_archive_index_best_effort(
+            chat_id, outcome, operation
+        )
 
     def _make_archive_index_operation(
         self, outcome: ArchiveOutcome
     ) -> Callable[[], None]:
-        """A closure that indexes one archived file under the shared write lock."""
-        config = self._config
-
-        def _operation() -> None:
-            import sqlite3
-
-            from ciao.async_reads import keyed_lock
-            from ciao.fts_search import get_db_path, index_file, init_db
-
-            # Install-owned: the same database the MCP tools, the CLI and
-            # startup indexing resolve, so an archived chat cannot land in the
-            # legacy global `~/.ciao` index that a second install then clears.
-            db_path = get_db_path(Path(config.state_path).parent)
-            conn = sqlite3.connect(db_path)
-            try:
-                with keyed_lock(f"fts-index:{db_path}"):
-                    init_db(conn)
-                    index_file(
-                        conn,
-                        config.vault_root,
-                        outcome.path,
-                        path_base=Path(config.workspace_root),
-                    )
-            finally:
-                conn.close()
-
-        return _operation
+        return self._archive_pipeline_for()._make_archive_index_operation(outcome)
 
     async def _index_archive_file_off_loop(
         self, chat_id: str, outcome: ArchiveOutcome, operation: Callable[[], None]
     ) -> None:
-        """Run the archive index write in a bounded worker, logging failures."""
-        from ciao.async_reads import run_read
-
-        try:
-            await run_read(f"archive-index:{outcome.path}", operation)
-        except Exception:  # noqa: BLE001 — archiving already succeeded
-            logger.exception(
-                "FTS search: failed to index archived file %s for chat %s",
-                outcome.path,
-                chat_id,
-            )
+        return await self._archive_pipeline_for()._index_archive_file_off_loop(
+            chat_id, outcome, operation
+        )
 
     def new_session(self, chat_id: str) -> ChatInfo | None:
         """Archive current transcript and start a fresh session."""
@@ -4519,11 +3733,9 @@ class ProjectChatManager:
         """
         if chat_id in active:
             return True
-        for tasks in (
-            self._between_turn_drains,
-            self._retry_tasks,
-            self._background_wake_tasks,
-        ):
+        if self._streaming.has_live_drain(chat_id):
+            return True
+        for tasks in (self._retry_tasks, self._background_wake_tasks):
             task = tasks.get(chat_id)
             if task is not None and not task.done():
                 return True
@@ -5356,63 +4568,12 @@ class ProjectChatManager:
         request: AgentRequest,
         outcome: _StreamOutcome,
     ) -> AsyncGenerator[StreamEvent, None]:
-        """Run a single ``execute_streaming`` pass and yield events in real-time.
-
-        Extracted from :meth:`stream_chat` so the auto-fallback wrapper
-        can re-invoke the same logic on a re-issued request without
-        duplicating the event-collecting / session-persisting code. The
-        caller is responsible for forwarding ``events`` to subscribers
-        and for persisting the transcript turn — the helper just
-        aggregates the terminal state into the mutable outcome container.
-        """
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            raise ValueError(f"Chat '{chat_id}' not found")
-        provider = self._get_provider(chat_id)
-
-        async for event in provider.execute_streaming(request):
-            outcome.events.append(event)
+        async for event in self._streaming.drive_stream(
+            chat_id=chat_id,
+            request=request,
+            outcome=outcome,
+        ):
             yield event
-            sdk_sid = provider.current_session_id
-            if sdk_sid:
-                changed = False
-                if sdk_sid != chat.session_id:
-                    self._rotate_session_id(chat, sdk_sid)
-                    changed = True
-                changed = self._commit_context_marker(chat, request, sdk_sid) or changed
-                if changed:
-                    self._save()
-            if isinstance(event, ResultEvent):
-                outcome.response_text = event.result
-                outcome.had_error = bool(event.is_error)
-                outcome.effective_model = event.effective_model or chat.model
-                if (
-                    chat.provider == "opencode"
-                    and not chat.model
-                    and outcome.effective_model
-                ):
-                    chat.model = outcome.effective_model
-                    self._save()
-                outcome.usage = event.usage
-                outcome.quota = event.quota
-                outcome.cost_usd = event.cost_usd or 0.0
-                if event.session_id:
-                    changed = False
-                    if event.session_id != chat.session_id:
-                        self._rotate_session_id(chat, event.session_id)
-                        changed = True
-                    changed = self._commit_context_marker(
-                        chat, request, event.session_id
-                    ) or changed
-                    if changed:
-                        self._save()
-            elif isinstance(event, ToolUseEvent):
-                outcome.tool_events.append({
-                    "id": event.tool_use_id or "",
-                    "name": event.tool_name,
-                    "input": {"summary": event.tool_input},
-                })
-                self._record_agent_tool_use(chat, request, event)
 
     def _record_agent_tool_use(
         self,
@@ -5562,7 +4723,9 @@ class ProjectChatManager:
         supports = await self._opencode_image_support(model)
         return True if supports is None else supports
 
-    async def _capability_candidates(self, chat: ChatInfo, model: str) -> list[dict]:
+    async def _capability_candidates(
+        self, chat: ChatInfo, model: str
+    ) -> list[dict[str, object]]:
         """Vision-capable alternatives for the capability question.
 
         Always leads with the current model as a disabled ``current`` entry so
@@ -5595,8 +4758,8 @@ class ProjectChatManager:
         return entries
 
     async def _await_capability_answer(
-        self, chat_id: str, request_id: str, timeout_s: int
-    ) -> dict | None:
+        self, chat_id: str, request_id: str, timeout_s: float
+    ) -> dict[str, object] | None:
         """Wait for the client's ``capability_response`` on an open question.
 
         Returns the answer dict (``{"action": ..., "model_id": ...}``) or
@@ -5615,11 +4778,13 @@ class ProjectChatManager:
         except asyncio.TimeoutError:
             stream.resolve_capability(request_id, "timeout")
             return None
-        return entry.get("answer")
+        return cast(dict[str, object] | None, entry.get("answer"))
 
     # ── Streaming chat ───────────────────────────────────────────────────
 
-    def _spawn_detached(self, coro: Any, name: str) -> asyncio.Task:
+    def _spawn_detached(
+        self, coro: Coroutine[object, object, object], name: str
+    ) -> asyncio.Task[object]:
         """Run *coro* in the background, keeping it alive and logging failures.
 
         Nothing awaits these, so without a held reference the loop may collect
@@ -5647,48 +4812,12 @@ class ProjectChatManager:
         chat_id: str,
         chat: ChatInfo,
         request: AgentRequest,
-        outcome: "_StreamOutcome",
-        journal: Any,
+        outcome: _StreamOutcome,
+        journal: TurnJournal,
     ) -> None:
-        """Persist a force-stopped turn as a partial one.
-
-        No ResultEvent ever arrived, so ``outcome.response_text`` is empty and
-        the streamed answer exists only as the deltas already collected on the
-        outcome. Rebuild it from those so the durable transcript keeps both
-        halves of the exchange — for opencode chats the transcript IS what a
-        reload renders, so without this a stopped turn vanished from history.
-
-        Best-effort: this runs while a CancelledError is propagating, and a
-        failure to persist must not replace it with a different exception.
-        """
-        try:
-            streamed = "".join(
-                getattr(event, "text", "") or ""
-                for event in outcome.events
-                if type(event).__name__ == "AssistantTextDelta"
-            )
-            self._transcripts.record_turn(
-                request,
-                ctx=ChatContext.for_web(chat_id),
-                response_text=outcome.response_text or streamed,
-                effective_model=outcome.effective_model or chat.model,
-                session_id=chat.session_id or None,
-                usage=outcome.usage,
-                quota=outcome.quota,
-                input_kind="text",
-                context_label=chat.title,
-                provider=chat.provider,
-                tool_events=outcome.tool_events,
-                is_error=False,
-                is_partial=True,
-            )
-            # The transcript owns the turn now; recovery must not fold the
-            # journal in again if the process dies before `finish()` unlinks it.
-            journal.mark_committed()
-        except Exception:  # noqa: BLE001 — never mask the stop's cancellation
-            logger.exception(
-                "Failed to persist force-stopped turn for chat %s", chat_id
-            )
+        self._streaming.record_stopped_turn(
+            chat_id, chat, request, outcome, journal
+        )
 
     async def stream_chat(
         self,
@@ -5698,244 +4827,15 @@ class ProjectChatManager:
         *,
         unattended: bool = False,
     ) -> AsyncGenerator[StreamEvent, None]:
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            raise ValueError(f"Chat '{chat_id}' not found")
-        if chat.archived:
-            raise ValueError("Cannot send messages to an archived chat")
-
-        self._get_provider(chat_id)
-        chat.last_response = ""
-        chat.last_response_status = "running"
-        self._save()
-        handover_context_sent = bool(
-            chat.handover_context_pending and chat.handover_messages
-        )
-
-        request = self.build_agent_request(
-            chat,
-            prompt=prompt,
-            display_prompt=prompt,
+        async for event in self._streaming.stream_chat(
+            chat_id,
+            prompt,
             images=images,
-            resume_session=chat.session_id or None,
             unattended=unattended,
-        )
-
-        response_text = ""
-        effective_model = chat.model
-        usage: dict[str, str] = {}
-        quota: dict[str, str] = {}
-        cost_usd: float = 0.0
-        had_error = False
-        tool_events: list[dict[str, Any]] = []
-
-        # Image-capability pre-flight: when the user attached images, make
-        # sure the selected model can actually see them before dispatching.
-        # If it can't (or its vision status is genuinely unknown), ask the
-        # user to pick a vision-capable model on the same backend instead of
-        # silently dropping the attachment and sending text-only. The answer
-        # may re-dispatch on a switched model; picker/cancel/timeout end the
-        # turn here with no result event.
-        if images:
-            if not await self._model_capable(request.model, chat):
-                if unattended:
-                    # No one is watching to answer; never block the turn.
-                    # Close with the system bubble so the user knows the
-                    # images were not sent.
-                    yield SystemStatusEvent(
-                        type="system",
-                        status=_CAPABILITY_IMAGE_MSG,
-                    )
-                    return
-                request_id = f"cap-{uuid.uuid4().hex[:12]}"
-                stream = self._broker.get(chat_id)
-                registered = stream is not None and stream.open_capability(
-                    request_id
-                )
-                if registered:
-                    candidates = await self._capability_candidates(
-                        chat, request.model
-                    )
-                    yield ModelCapabilityQuestionEvent(
-                        type="model_capability_question",
-                        request_id=request_id,
-                        missing="image_input",
-                        current_model=chat.model,
-                        candidates=candidates,
-                        timeout_s=CAPABILITY_QUESTION_TIMEOUT_S,
-                    )
-                    answer = await self._await_capability_answer(
-                        chat_id,
-                        request_id,
-                        CAPABILITY_QUESTION_TIMEOUT_S,
-                    )
-                    if answer is None:
-                        yield SystemStatusEvent(
-                            type="system",
-                            status=_CAPABILITY_IMAGE_MSG,
-                        )
-                        return
-                    action = str(answer.get("action") or "")
-                    if action == "switch":
-                        picked = str(answer.get("model_id") or "")
-                        # The answer arrives over the chat websocket, so its
-                        # model_id is client input like any other. Persisting it
-                        # unchecked left the chat pinned to an id no provider is
-                        # configured for, failing every later turn - the hole
-                        # create/update/handover were reworked to close. Accept
-                        # only ids this question rendered, including the current
-                        # model's disabled entry (picking it is a no-op that
-                        # falls through to normal dispatch below). Anything else
-                        # ends in the same system bubble as a declined question.
-                        offered = {
-                            str(entry.get("id") or "") for entry in candidates
-                        }
-                        if picked and picked not in offered:
-                            logger.warning(
-                                "Ignoring capability switch to unoffered model %r "
-                                "for chat %s",
-                                picked,
-                                chat_id,
-                            )
-                            yield SystemStatusEvent(
-                                type="system",
-                                status=_CAPABILITY_IMAGE_MSG,
-                            )
-                            return
-                        if picked and picked != request.model:
-                            chat.model = picked
-                            self._save()
-                            yield ModelChangedEvent(
-                                type="model_changed",
-                                model=picked,
-                            )
-                            # Rebuild the request against the new model and
-                            # fall through to the normal dispatch below (not
-                            # the capability-error ladder: nothing failed).
-                            request = self.build_agent_request(
-                                chat,
-                                prompt=prompt,
-                                display_prompt=prompt,
-                                images=images,
-                                resume_session=chat.session_id or None,
-                                unattended=unattended,
-                            )
-                        # A pick of the current (disabled) model falls through
-                        # to normal dispatch; the ladder handles a rejection.
-                    elif action == "picker":
-                        # The PWA opens the model selector on the answering
-                        # device and the user re-sends through the normal
-                        # path. The turn ends with no result event, but not
-                        # silently: the system bubble tells every connected
-                        # client (this one included — the picker renders above
-                        # it) why the turn closed with nothing on the
-                        # transcript, and gives them a system row so their
-                        # stale "thinking" state can settle.
-                        yield SystemStatusEvent(
-                            type="system",
-                            status=_CAPABILITY_IMAGE_MSG,
-                        )
-                        return
-                    elif action == "cancel":
-                        # The user declined to switch. Tell them the images
-                        # were not sent, then end the turn with no result.
-                        yield SystemStatusEvent(
-                            type="system",
-                            status=_CAPABILITY_IMAGE_MSG,
-                        )
-                        return
-
-        outcome = _StreamOutcome(effective_model=chat.model)
-        # Crash journal: mirror user-visible events while the turn streams so
-        # a server crash or provider abort mid-turn can be recovered as an
-        # is_partial turn on next startup instead of losing the exchange.
-        # Finalization below is synchronous, so cancellation cannot interrupt
-        # it mid-write; no shield wrapper is needed.
-        journal = self._transcripts.open_turn_journal(
-            ChatContext.for_web(chat_id), chat.provider
-        )
-        journal.begin({
-            "provider": chat.provider,
-            "prompt": (request.display_prompt or request.prompt)[:2000],
-            "started_at": chat_service._now_iso(),
-        })
-
-        async def _journalled_stream():
-            async for event in self._drive_stream(
-                chat_id=chat_id,
-                request=request,
-                outcome=outcome,
-            ):
-                record = _journal_event_record(event)
-                if record is not None:
-                    journal.append(record)
-                yield event
-
-        try:
-            try:
-                async for event in _journalled_stream():
-                    yield event
-            except asyncio.CancelledError:
-                # stop_chat force-closes a turn whose provider never delivered
-                # a terminal event by cancelling the task driving this
-                # generator. Unwinding straight to `finally` meant
-                # `record_turn` never ran AND `journal.finish()` deleted the
-                # crash journal, so the exchange survived only as live WS
-                # events: reloading the chat showed neither the prompt nor the
-                # partial answer, and no startup recovery could bring it back.
-                # Persist what streamed, flagged partial, before re-raising.
-                self._record_stopped_turn(
-                    chat_id, chat, request, outcome, journal
-                )
-                raise
-            response_text = outcome.response_text
-            had_error = outcome.had_error
-            effective_model = outcome.effective_model
-            usage = outcome.usage
-            quota = outcome.quota
-            cost_usd = outcome.cost_usd
-            tool_events = outcome.tool_events
-
-            # Record transcript turn
-            if handover_context_sent and not had_error:
-                self.mark_handover_context_used(chat_id)
-
-            ctx = ChatContext.for_web(chat_id)
-            self._transcripts.record_turn(
-                request,
-                ctx=ctx,
-                response_text=response_text,
-                effective_model=effective_model,
-                session_id=chat.session_id or None,
-                usage=usage,
-                quota=quota,
-                input_kind="text",
-                context_label=chat.title,
-                provider=chat.provider,
-                tool_events=tool_events,
-                is_error=had_error,
-            )
-            # The transcript owns this turn now, so a death before the
-            # unlink below must not let recovery replay it as a second
-            # partial turn.
-            journal.mark_committed()
-        finally:
-            # A provider exception (or a Stop that raises) used to unwind
-            # straight past `finish()`, leaving a journal that the next
-            # startup folded back in even though the outer handler had
-            # already persisted the turn.
-            journal.finish()
-
-        # Update global cost
-        if cost_usd > 0:
-            self._state.add_cost(cost_usd)
-        if usage:
-            self._state.set_usage(usage)
-        if quota:
-            self._state.set_quota(quota)
-
-        # Update session in state store
-        self._state.update_session(chat.session_id or None, ctx)
+            capability_timeout_s=CAPABILITY_QUESTION_TIMEOUT_S,
+            capability_image_message=_CAPABILITY_IMAGE_MSG,
+        ):
+            yield event
 
     def get_active_stream(self, chat_id: str) -> ChatStream | None:
         """Return the in-flight ChatStream for this chat, if any."""
@@ -6473,8 +5373,6 @@ class ProjectChatManager:
             if chat_for_retry is not None and chat_for_retry.retry_status == "pending":
                 self._clear_chat_retry(chat_for_retry)
 
-        from ciao.web.chat_broker import apply_file_touches_to_payload, event_to_json
-
         stream = ChatStream(prompt_text=prompt)
         self._broker.register(chat_id, stream)
         image_refs: list[str] = []
@@ -6494,8 +5392,15 @@ class ProjectChatManager:
         turn_index: int | None = None
         sent_at_iso: str = ""
         if chat_meta is not None:
-            # A new user turn answers (or supersedes) any paused question, so
-            # the persisted picker state no longer applies.
+            # A legacy picker is answered by the next user turn. A native V2
+            # form is different: its request must be acknowledged through the
+            # question_response path first, otherwise an older/direct client
+            # can erase a still-blocked form before the provider sees it.
+            if self._native_question_request_id(chat_meta.pending_question):
+                self._broker.clear(chat_id, stream)
+                stream.finish()
+                raise ValueError("Answer the open question before sending another message.")
+            # The new turn supersedes a legacy picker.
             chat_meta.pending_question = ""
             # Re-seed messages parked when a prior turn paused on a question
             # (see the question_paused branch in _drive). They flush as
@@ -6525,7 +5430,7 @@ class ProjectChatManager:
                 # this back because the SDK session file has no notion of who
                 # sent a turn.
                 chat_meta.user_turn_unattended[str(turn_index)] = True
-            self._turn_perf_started[(chat_id, turn_index)] = time.perf_counter()
+            self._streaming.start_turn_perf(chat_id, turn_index)
 
         # First buffered event: echo the user prompt so any client subscribing
         # later (fresh connect, reconnect) can render it without relying on
@@ -6583,717 +5488,17 @@ class ProjectChatManager:
             "chat_id": chat_id,
             "project_id": project_id,
         })
-
-        async def _drive() -> None:
-            # Loop across the initial turn plus any queued follow-ups. Each
-            # pass runs a full stream_chat() call; we reuse the same ChatStream
-            # so attached WS clients see one continuous event flow (no broker
-            # churn, no need to resubscribe mid-way).
-            #
-            # Auto-title generation runs separately as its own task fired
-            # right after the user echo (see start_stream above), so this
-            # loop no longer threads title state through.
-            current_prompt = prompt
-            current_images = images
-            # Track the turn_index of the *current* in-flight prompt so we can
-            # stamp completed_at / duration_ms onto the right ChatInfo record
-            # when the ResultEvent arrives. Reassigned to the new turn_index
-            # for each queued follow-up.
-            current_turn_index = turn_index
-            # Only the turn this stream was started for is unattended. A queued
-            # follow-up was typed by a human who is sitting there watching, so
-            # it must keep its approval prompts (see the reset below).
-            turn_unattended = unattended
-            last_assistant_text = ""
-            had_error = False
-            had_provider_progress = False
-            # A between-turns drain and receive_response() consume from the
-            # same SDK stream and must never run concurrently. The cancel in
-            # start_stream is fire-and-forget; await the task here so the
-            # drain has fully unwound before the first provider call.
-            await self._await_between_turns_drain(chat_id)
-            try:
-                while True:
-                    turn_assistant_text = ""
-                    # Assistant text streamed so far this turn, used as the
-                    # synthetic result when the user force-stops the turn
-                    # before the provider emits its terminal event.
-                    turn_streamed_text = ""
-                    # Whether this turn already published a terminal `result`.
-                    # A user stop reaches us two ways -- an is_error ResultEvent
-                    # (published by the loop below) or a raised exception -- and
-                    # only the first leaves clients a frame to settle on.
-                    turn_result_published = False
-                    question_paused = False
-
-                    async def _run_turn() -> None:
-                        # One stream_chat() pass, executed as a dedicated
-                        # task so `stop_chat` can force-close a turn whose
-                        # provider never delivers a terminal event (hung
-                        # CLI, dead SSE subscription) instead of blocking
-                        # forever in the event iterator.
-                        nonlocal turn_assistant_text, turn_streamed_text
-                        nonlocal question_paused, had_error
-                        nonlocal had_provider_progress, turn_result_published
-                        async for event in self.stream_chat(
-                            chat_id,
-                            current_prompt,
-                            images=current_images,
-                            unattended=turn_unattended,
-                        ):
-                            payload = event_to_json(event)
-                            if payload:
-                                apply_file_touches_to_payload(
-                                    payload,
-                                    workspace_root=self._config.workspace_root,
-                                )
-                            if (
-                                payload
-                                and isinstance(event, ResultEvent)
-                                and current_turn_index is not None
-                            ):
-                                completed_at = chat_service._now_iso()
-                                started_perf = self._turn_perf_started.pop(
-                                    (chat_id, current_turn_index), None
-                                )
-                                duration_ms: int | None = None
-                                if started_perf is not None:
-                                    duration_ms = int(
-                                        (time.perf_counter() - started_perf) * 1000
-                                    )
-                                cm = self._chats.get(chat_id)
-                                if cm is not None:
-                                    rec = cm.user_turn_timings.setdefault(
-                                        str(current_turn_index), {}
-                                    )
-                                    rec["completed_at"] = completed_at
-                                    if duration_ms is not None:
-                                        rec["duration_ms"] = duration_ms
-                                    sent_at_rec = rec.get("sent_at", "")
-                                    self._save()
-                                else:
-                                    sent_at_rec = ""
-                                payload["completed_at"] = completed_at
-                                if sent_at_rec:
-                                    payload["sent_at"] = sent_at_rec
-                                if duration_ms is not None:
-                                    payload["duration_ms"] = duration_ms
-                            if payload:
-                                stream.publish(payload)
-                                if isinstance(event, ResultEvent):
-                                    turn_result_published = True
-                            if isinstance(event, AssistantTextDelta):
-                                # Parent-turn prose only: subagent deltas are
-                                # attributed to their own agent in the UI.
-                                if event.parent_tool_use_id is None:
-                                    turn_streamed_text += event.text
-                            if isinstance(event, (AssistantTextDelta, ThinkingEvent, ToolUseEvent, PermissionRequestEvent)):
-                                had_provider_progress = True
-                            if isinstance(event, PermissionRequestEvent):
-                                # Turn is blocked on the user. Notify the
-                                # push manager so a backgrounded/locked
-                                # device gets the Approve/Deny prompt.
-                                self._notify_permission(chat_id, event)
-                                if unattended:
-                                    await self.respond_permission_async(
-                                        chat_id,
-                                        request_id=event.request_id,
-                                        approved=False,
-                                        reason=(
-                                            "Scheduled runs cannot wait for "
-                                            "interactive approval."
-                                        ),
-                                    )
-                            if isinstance(event, ToolUseEvent) and event.tool_name == "AskUserQuestion" and event.tool_input.strip():
-                                # The headless CLI can't render the SDK's
-                                # interactive picker. Left alone it auto-cancels
-                                # the question with empty answers and keeps
-                                # generating a self-answered continuation that
-                                # pollutes the session; a PreToolUse "defer"
-                                # hook is no better — the CLI surfaces the
-                                # deferred tool to the model as an internal
-                                # error and it chatters a fallback (verified
-                                # live, claude-agent-sdk 0.2.93). Interrupting
-                                # the turn is the only clean stop: generation
-                                # halts right at the question. So notify the
-                                # user, persist the question so a reloaded PWA
-                                # can rebuild the picker, interrupt, then stop
-                                # consuming. The CLI records an interrupt
-                                # sentinel that /messages already strips, and
-                                # the user's answer starts a fresh resumed turn.
-                                question_payload = event.tool_input
-                                if event.request_id:
-                                    try:
-                                        parsed_question = json.loads(event.tool_input)
-                                    except (TypeError, json.JSONDecodeError):
-                                        parsed_question = {"questions": []}
-                                    if not isinstance(parsed_question, dict):
-                                        parsed_question = {"questions": []}
-                                    parsed_question["request_id"] = event.request_id
-                                    question_payload = json.dumps(
-                                        parsed_question, ensure_ascii=False
-                                    )
-                                self._notify_question(chat_id, question_payload)
-                                cm_q = self._chats.get(chat_id)
-                                if cm_q is not None:
-                                    cm_q.pending_question = question_payload
-                                    self._save()
-                                # Provider-native requests can be answered in
-                                # band; the Claude SDK picker still requires
-                                # the interrupt and next-turn answer flow.
-                                if event.request_id:
-                                    if unattended:
-                                        q_provider = self._providers.get(chat_id)
-                                        if q_provider is not None:
-                                            try:
-                                                await q_provider.stop_active()
-                                            except Exception:
-                                                logger.exception(
-                                                    "interrupt unattended question failed for chat %s",
-                                                    chat_id,
-                                                )
-                                        question_paused = True
-                                        return
-                                    continue
-                                q_provider = self._providers.get(chat_id)
-                                if q_provider is not None:
-                                    try:
-                                        await q_provider.stop_active()
-                                    except Exception:
-                                        logger.exception(
-                                            "interrupt after AskUserQuestion failed for chat %s",
-                                            chat_id,
-                                        )
-                                question_paused = True
-                                return
-                            if isinstance(event, ToolUseEvent):
-                                # Schedule a debounced file snapshot for
-                                # Write/Edit/MultiEdit/NotebookEdit/Bash creates.
-                                # The ToolUseEvent fires *before* the CLI
-                                # executes the tool, so a 1.5s delay lets the
-                                # actual write land first. Bursts collapse —
-                                # only the last edit per file in a quick
-                                # cluster ends up captured.
-                                # payload["file_touch(es)"] is the already-
-                                # normalised metadata set by event_to_json +
-                                # apply_file_touches_to_payload.
-                                touches: list[dict] = []
-                                if payload:
-                                    multi = payload.get("file_touches")
-                                    if isinstance(multi, list) and multi:
-                                        touches = [
-                                            t for t in multi if isinstance(t, dict)
-                                        ]
-                                    elif isinstance(payload.get("file_touch"), dict):
-                                        touches = [payload["file_touch"]]
-                                for touch in touches:
-                                    fp = touch.get("file_path") or ""
-                                    if not fp:
-                                        continue
-                                    try:
-                                        self._snapshots.schedule_capture(
-                                            chat_id=chat_id,
-                                            file_path=fp,
-                                            action=touch.get("action", "touched"),
-                                            tool=event.tool_name,
-                                        )
-                                    except Exception:
-                                        logger.exception(
-                                            "schedule_capture failed for %s",
-                                            fp,
-                                        )
-                            if isinstance(event, ResultEvent):
-                                if event.is_error:
-                                    had_error = True
-                                    result_text = event.result or ""
-                                    # Quota rejections always auto-retry, same
-                                    # as connection errors: _arm_retry resumes
-                                    # a session that already streamed with
-                                    # "continue" rather than replaying, so
-                                    # progress mid-turn never gets double-run.
-                                    if chat_service._is_retryable_quota_error(result_text):
-                                        self._arm_retry(
-                                            chat_id,
-                                            stream,
-                                            kind="quota",
-                                            current_prompt=current_prompt,
-                                            current_images=current_images,
-                                            had_progress=had_provider_progress,
-                                            reason=result_text or "quota limit",
-                                        )
-                                    elif chat_service._is_retryable_connection_error(result_text):
-                                        self._arm_retry(
-                                            chat_id,
-                                            stream,
-                                            kind="connection",
-                                            current_prompt=current_prompt,
-                                            current_images=current_images,
-                                            had_progress=had_provider_progress,
-                                            reason=result_text or "connection error",
-                                        )
-                                    elif chat_service._is_retryable_auth_error(result_text):
-                                        self._arm_retry(
-                                            chat_id,
-                                            stream,
-                                            kind="auth",
-                                            current_prompt=current_prompt,
-                                            current_images=current_images,
-                                            had_progress=had_provider_progress,
-                                            reason=result_text or "auth error",
-                                        )
-                                else:
-                                    turn_assistant_text = event.result or ""
-
-                    turn_task = asyncio.create_task(
-                        _run_turn(), name=f"chat-turn-{chat_id}"
-                    )
-                    stream.turn_task = turn_task
-                    try:
-                        await turn_task
-                    except asyncio.CancelledError:
-                        if not stream.force_closing:
-                            # The drive task itself was cancelled (shutdown):
-                            # propagate after the per-turn cleanup. Keyed on
-                            # `force_closing`, which `stop_chat` sets only
-                            # around its own cancel, rather than on
-                            # `user_stopped`, which stays true for the rest of
-                            # the turn and so swallowed real shutdowns.
-                            raise
-                        stream.force_closing = False
-                        # The provider never delivered a terminal event
-                        # within stop_chat's grace window (hung CLI, dead SSE
-                        # subscription), so the turn was force-closed. Publish
-                        # a synthetic result carrying the partial answer so
-                        # every client leaves streaming state immediately; the
-                        # streamed deltas are already in each client's
-                        # timeline, and the containment skip below keeps the
-                        # final bubble from duplicating them.
-                        logger.info(
-                            "Turn force-closed by user stop for chat %s", chat_id
-                        )
-                        turn_assistant_text = turn_streamed_text
-                        stream.publish(self._stop_result_payload(
-                            chat_id,
-                            turn_index=current_turn_index,
-                            text=turn_streamed_text,
-                        ))
-                    except Exception as exc:
-                        # A user-initiated stop may surface here (if the SDK
-                        # raises rather than yielding a terminal ResultEvent)
-                        # or as an is_error=True result below. Either path is
-                        # intentional, not a real failure, so fall through to
-                        # the drain-pending step below instead of breaking —
-                        # queued follow-ups should still be sent.
-                        if stream.user_stopped:
-                            logger.info("Stream stopped by user for chat %s", chat_id)
-                            if not turn_result_published:
-                                # The provider raised instead of yielding a
-                                # terminal ResultEvent, so no client ever saw
-                                # a frame for this turn: the composer kept its
-                                # spinner on a turn the server had already
-                                # ended, and only the *next* send cleared it.
-                                # Publish the same synthetic result the
-                                # force-close path uses.
-                                #
-                                # `turn_assistant_text` deliberately stays
-                                # empty: it feeds `last_assistant_text`, which
-                                # gates the result announce below. A turn the
-                                # user just cancelled must not raise an unread
-                                # badge, a toast and a push carrying the half
-                                # sentence they stopped. The partial text still
-                                # reaches the open client through the payload.
-                                stream.publish(self._stop_result_payload(
-                                    chat_id,
-                                    turn_index=current_turn_index,
-                                    text=turn_streamed_text,
-                                ))
-                        elif (
-                            isinstance(exc, ValueError)
-                            and "archived chat" in str(exc)
-                        ):
-                            # Lost a race with archive_chat() between the
-                            # entry-point archived guard and stream_chat. The
-                            # turn is legitimately over; log without a
-                            # traceback and surface a clean error.
-                            logger.info(
-                                "Send to archived chat %s rejected mid-stream",
-                                chat_id,
-                            )
-                            stream.publish({
-                                "type": "error",
-                                "message": "This chat has been archived.",
-                                "archived": True,
-                            })
-                            had_error = True
-                            break
-                        else:
-                            logger.exception("Stream error for chat %s", chat_id)
-                            error_msg = str(exc).strip() or type(exc).__name__
-                            stderr = getattr(exc, "stderr", None)
-                            if stderr and str(stderr) not in error_msg:
-                                error_msg = f"{error_msg}\n{stderr}"
-                            error_chat = self._chats.get(chat_id)
-                            error_model = error_chat.model if error_chat else ""
-                            error_session = error_chat.session_id if error_chat else ""
-                            # A provider can fail before it emits a ResultEvent
-                            # (for example while opencode is starting). Publish
-                            # the same durable shape as a normal failed turn so
-                            # scheduled chats never end as an empty shell.
-                            stream.publish({
-                                "type": "result",
-                                "text": error_msg,
-                                "is_error": True,
-                                "effective_model": error_model,
-                                "usage": {},
-                                "quota": {},
-                                "session_id": error_session,
-                            })
-                            had_error = True
-                            if error_chat is not None:
-                                try:
-                                    error_request = self.build_agent_request(
-                                        error_chat,
-                                        prompt=current_prompt,
-                                        display_prompt=current_prompt,
-                                        images=current_images,
-                                        resume_session=error_chat.session_id or None,
-                                        unattended=turn_unattended,
-                                        require_mcp=False,
-                                    )
-                                    self._transcripts.record_turn(
-                                        error_request,
-                                        ctx=ChatContext.for_web(chat_id),
-                                        response_text=error_msg,
-                                        effective_model=error_model,
-                                        session_id=error_chat.session_id or None,
-                                        usage={},
-                                        quota={},
-                                        input_kind="text",
-                                        context_label=error_chat.title,
-                                        provider=error_chat.provider,
-                                        is_error=True,
-                                    )
-                                except Exception:  # noqa: BLE001
-                                    logger.exception(
-                                        "Failed to persist stream error for chat %s",
-                                        chat_id,
-                                    )
-                            if chat_service._is_retryable_provider_startup_error(error_msg):
-                                self._arm_retry(
-                                    chat_id,
-                                    stream,
-                                    kind="startup",
-                                    current_prompt=current_prompt,
-                                    current_images=current_images,
-                                    had_progress=had_provider_progress,
-                                    reason=error_msg,
-                                )
-                            elif chat_service._is_retryable_quota_error(error_msg):
-                                self._arm_retry(
-                                    chat_id,
-                                    stream,
-                                    kind="quota",
-                                    current_prompt=current_prompt,
-                                    current_images=current_images,
-                                    had_progress=had_provider_progress,
-                                    reason=error_msg,
-                                )
-                            elif chat_service._is_retryable_connection_error(error_msg):
-                                self._arm_retry(
-                                    chat_id,
-                                    stream,
-                                    kind="connection",
-                                    current_prompt=current_prompt,
-                                    current_images=current_images,
-                                    had_progress=had_provider_progress,
-                                    reason=error_msg,
-                                )
-                            elif chat_service._is_retryable_auth_error(error_msg):
-                                self._arm_retry(
-                                    chat_id,
-                                    stream,
-                                    kind="auth",
-                                    current_prompt=current_prompt,
-                                    current_images=current_images,
-                                    had_progress=had_provider_progress,
-                                    reason=error_msg,
-                                )
-                            # Defensive: a no-op if _arm_retry already parked
-                            # (drain_pending on an already-drained stream
-                            # returns []). Covers the non-retryable case,
-                            # where nothing above parks the queue and it
-                            # would otherwise be lost when `finally` tears
-                            # the stream down.
-                            parked = stream.drain_pending()
-                            if parked:
-                                cm_park = self._chats.get(chat_id)
-                                if cm_park is not None:
-                                    cm_park.pending_queue = list(parked)
-                                    self._save()
-                            break
-                    finally:
-                        # Clear before the next turn (or the stream teardown)
-                        # can register a different task on the same stream.
-                        stream.turn_task = None
-
-                    if turn_assistant_text:
-                        last_assistant_text = turn_assistant_text
-
-                    if question_paused:
-                        # The turn stopped on an AskUserQuestion the user must
-                        # answer in a fresh turn (Claude's SDK picker). Anything
-                        # they queued while this turn ran lives only on `stream`,
-                        # which the finally block tears down — so park it on the
-                        # chat. start_stream re-seeds it into the answer turn so
-                        # the follow-ups still flush instead of being dropped.
-                        parked = stream.drain_pending()
-                        if parked:
-                            cm_park = self._chats.get(chat_id)
-                            if cm_park is not None:
-                                cm_park.pending_queue = list(parked)
-                                self._save()
-                        break
-
-                    next_pending = stream.drain_one()
-                    # A user-initiated stop produces an error-shaped ResultEvent
-                    # (is_error=True). Treat that as intentional: consume the
-                    # flag, reset had_error so the loop can start a new turn
-                    # with whatever the user queued, and only bail if there's
-                    # nothing pending.
-                    if stream.user_stopped:
-                        stream.user_stopped = False
-                        if next_pending is not None:
-                            had_error = False
-                    if next_pending is None or had_error:
-                        # Shut the queue before anything else. `drain_one()`
-                        # above and the teardown in `finally` are not one
-                        # atomic step, so a send landing in that window was
-                        # accepted into `_pending` that nothing would ever
-                        # read — the loop had already looked. The user saw a
-                        # QUEUED chip for a message that was never going to be
-                        # sent, and `queue_message` had told the caller it was
-                        # safely queued, so nothing started a turn for it.
-                        stream.accepting_queue = False
-                        # Re-drain after closing: this is the clean-completion
-                        # path too, which parked nothing before. Whatever
-                        # arrived between the check and the close still has to
-                        # survive, and it flushes on the next user turn.
-                        late = stream.drain_pending()
-                        parked = (
-                            [next_pending, *late]
-                            if had_error and next_pending is not None
-                            else late
-                        )
-                        if parked:
-                            cm_park = self._chats.get(chat_id)
-                            if cm_park is not None:
-                                cm_park.pending_queue = list(parked)
-                                self._save()
-                        break
-
-                    combined_text = next_pending.get("text", "").strip()
-                    merged_image_refs: list[str] = list(next_pending.get("images") or [])
-                    merged_images: list[ImageAttachment] = []
-                    for ref in merged_image_refs:
-                        attachment = self.resolve_image_ref(ref)
-                        if attachment:
-                            merged_images.append(attachment)
-                    if not combined_text:
-                        continue
-
-                    # A queued message came from a person, whatever drove the
-                    # turn that was in flight when they sent it.
-                    turn_unattended = False
-
-                    # Bump user-turn counter so image replay from history lines
-                    # up. Capture turn_index2 first so we can attach it to the
-                    # user_echo payload for client-side dedup.
-                    turn_index2: int | None = None
-                    sent_at_iso2: str = ""
-                    chat_meta2 = self._chats.get(chat_id)
-                    if chat_meta2 is not None:
-                        chat_meta2.pending_question = ""
-                        turn_index2 = chat_meta2.user_turn_count
-                        chat_meta2.user_turn_count = turn_index2 + 1
-                        if merged_image_refs:
-                            chat_meta2.user_turn_images[str(turn_index2)] = list(
-                                merged_image_refs
-                            )
-                        sent_at_iso2 = chat_service._now_iso()
-                        chat_meta2.last_activity_at = sent_at_iso2
-                        chat_meta2.last_read_at = sent_at_iso2  # user sending = implicitly read
-                        chat_meta2.user_turn_timings[str(turn_index2)] = {
-                            "sent_at": sent_at_iso2,
-                        }
-                        self._turn_perf_started[(chat_id, turn_index2)] = (
-                            time.perf_counter()
-                        )
-                        self._save()
-
-                    # Echo the queued follow-up as a user bubble so any client
-                    # that didn't render queued chips still sees the turn.
-                    followup_echo: dict = {
-                        "type": "user_echo",
-                        "text": combined_text,
-                        "images": merged_image_refs,
-                        "entry_id": next_pending.get("id"),
-                    }
-                    if turn_index2 is not None:
-                        followup_echo["turn_index"] = turn_index2
-                    if sent_at_iso2:
-                        followup_echo["sent_at"] = sent_at_iso2
-                    stream.publish(followup_echo)
-
-                    current_prompt = combined_text
-                    current_images = merged_images or None
-                    current_turn_index = turn_index2
-            finally:
-                # Every first turn re-runs the titleer with both sides of the
-                # exchange so the title can prefer the assistant's framing when
-                # the prompt alone is a question-shaped meta-inquiry. The publish
-                # step is a no-op when the new title matches the live one, so
-                # this only fires a second chat_title event when the late title
-                # actually differs from the early one. An empty reply (error /
-                # abort) falls back to the user-only prompt path.
-                # Also re-run when the early poll fell back to the deterministic
-                # truncation — the late poll can then upgrade that fallback to
-                # the provider's native title once it finally lands.
-                _late_fallback = chat_service._fallback_title(prompt) if prompt else None
-                if prompt and chat_meta and (
-                    chat_meta.title == "New Chat"
-                    or (_late_fallback is not None and chat_meta.title == _late_fallback)
-                ):
-                    asyncio.create_task(
-                        self._auto_title_and_publish(
-                            chat_id, prompt, last_assistant_text
-                        )
-                    )
-                # Drop any perf-clock entry that didn't get consumed by a
-                # ResultEvent (errored / aborted turn) so the dict stays bounded.
-                if current_turn_index is not None:
-                    self._turn_perf_started.pop((chat_id, current_turn_index), None)
-                # A permission prompt cannot outlive its turn: the gate's own
-                # cancel_all denies anything still pending as the turn tears
-                # down (stop/error/disconnect), but that path doesn't know
-                # about the persisted attention flag. Clear it here so a
-                # denied-by-teardown prompt doesn't leave the chat stuck
-                # looking like it still needs approval.
-                if chat_meta is not None:
-                    permission_pending = bool(chat_meta.pending_permission)
-                    chat_meta.last_response = last_assistant_text[-chat_service._PROVIDER_HANDOVER_MAX_CHARS:]
-                    chat_meta.last_response_status = (
-                        "error" if had_error
-                        else "question" if chat_meta.pending_question
-                        else "permission" if permission_pending
-                        else "success" if last_assistant_text.strip()
-                        else "empty"
-                    )
-                    if permission_pending:
-                        chat_meta.pending_permission = ""
-                    self._save()
-                # Always clean up the per-chat stream entry first so subsequent
-                # sends can start a new one immediately.
-                stream.finish()
-                self._broker.clear(chat_id, stream)
-                # Tell awareness subscribers the stream is no longer active.
-                self._events.publish({
-                    "type": "chat_streaming_done",
-                    "chat_id": chat_id,
-                    "project_id": project_id,
-                    "is_error": had_error,
-                })
-                # Background subagents can outlive the parent turn. Start a
-                # lightweight watcher so the UI gets notified when they finish,
-                # instead of leaving the chat stuck on "I'll compile once the
-                # agents report back".
-                chat_for_watcher = self._chats.get(chat_id)
-                # True only when a synthesis nudge can actually re-announce
-                # this chat's result later. Holding the announce back is safe
-                # ONLY then: the nudge's reply carries the real push. The
-                # opencode watcher has no nudge path at all, so gating on the
-                # watcher alone dropped the push, the unread badge and the
-                # archive proposal outright for any opencode reply that merely
-                # said "waiting on ...".
-                nudge_can_reannounce = False
-                if (
-                    chat_for_watcher is not None
-                    and chat_for_watcher.session_id
-                    and capabilities_for(chat_for_watcher.provider).background_subagents
-                ):
-                    self._start_subagent_watcher(chat_id, project_id)
-                    # Keep the SDK pipe drained while the client idles: a
-                    # finishing background subagent triggers a CLI-initiated
-                    # parent turn whose events would otherwise rot in the
-                    # transport buffer (and its stale ResultMessage would
-                    # truncate the next turn). The drain also gives the PWA
-                    # a live view of that follow-up turn.
-                    if chat_for_watcher.provider == "claude":
-                        self._start_between_turns_drain(chat_id, project_id)
-                        nudge_can_reannounce = True
-                # Successful turn(s): announce result ready (drives unread
-                # badges + in-app toast on clients that aren't focused on
-                # this chat) and dispatch web push (decoupled from any WS).
-                # Gated on non-empty text only. This reply answers something the
-                # user asked, so "Yes" counts: a length floor here also withheld
-                # the last_activity_at bump that reorders recents and the
-                # pending-retry clear below. The banner heuristic belongs to the
-                # synthesis-nudge drain, which nobody asked for.
-                # A new turn ended, so any announce parked by an earlier turn
-                # of this chat is stale: this turn either announces for itself
-                # below or parks its own entry. Without the clear, an interim
-                # turn 1 followed by an ordinary turn 2 left turn 1's entry in
-                # place for turn 2's watcher to flush — a push carrying the
-                # "I'll report back once the agents finish" snippet, which is
-                # precisely what parking exists to avoid. Safe here: the
-                # superseded watcher was cancelled just above and its `finally`
-                # only releases the entry while it is still the registered
-                # watcher.
-                self._discard_result_announce(chat_id)
-                if not had_error and last_assistant_text.strip():
-                    snippet = self._result_snippet(last_assistant_text)
-                    chat_now = self._chats.get(chat_id)
-                    if chat_now is not None:
-                        if chat_now.retry_status == "pending" and is_retry:
-                            self._clear_chat_retry(chat_now)
-                        chat_now.last_activity_at = chat_service._now_iso()
-                        chat_now.last_snippet = snippet
-                        self._save()
-                    title = chat_now.title if chat_now else "Ciaobot"
-                    # A turn that ends on "I'll report back once the agents
-                    # finish" is not a result: the drain started above will
-                    # nudge the synthesis turn and that reply carries the real
-                    # push. Only the announce is held back — the state above
-                    # (recents order, snippet, pending-retry clear) belongs to
-                    # every non-error turn, and withholding it left a retried
-                    # chat pinned at retry_status="pending" forever.
-                    #
-                    # Parked, never dropped. The watcher owns the release: it
-                    # flushes on every path where the nudge does not speak, and
-                    # discards once a nudge lands. See _park_result_announce
-                    # for why predicting the nudge's decision here was wrong.
-                    interim = (
-                        nudge_can_reannounce
-                        and self._is_interim_subagent_text(last_assistant_text)
-                    )
-                    if interim:
-                        self._park_result_announce(
-                            chat_id, project_id, title, snippet
-                        )
-                    else:
-                        # Schedule the push with a small delay. If the user reads
-                        # the chat on any device in the window (via /api/chats/
-                        # {id}/read), the pending task is cancelled and no push
-                        # fires. New replies to the same chat cancel and restart
-                        # the timer (see _schedule_push).
-                        self._announce_result_ready(
-                            chat_id, project_id, title, snippet
-                        )
-                        self._spawn_detached(
-                            self._maybe_archive_proposal_helper(chat_id),
-                            f"archive-proposal-helper-{chat_id}",
-                        )
-
-        asyncio.create_task(_drive())
+        self._streaming.start_drive(
+            chat_id=chat_id,
+            project_id=project_id,
+            prompt=prompt,
+            images=images,
+            turn_index=turn_index,
+            chat_meta=chat_meta,
+            stream=stream,
+            is_retry=is_retry,
+            unattended=unattended,
+        )
         return stream
 
     async def _auto_title_and_publish(
@@ -7750,7 +5955,7 @@ class ProjectChatManager:
         # and it will announce its own result and clear the park when it ends.
         # Releasing the parked announce here would push "I'll report back once
         # the agents finish" into the middle of that turn.
-        drain = self._between_turn_drains.get(chat_id)
+        drain = self._streaming.drain_for(chat_id)
         if drain is None or drain.done():
             return NUDGE_SUPERSEDED
         if self._foreground_turn_active(chat_id):
@@ -7993,162 +6198,47 @@ class ProjectChatManager:
 
     # ── Between-turns SDK drain ──────────────────────────────────────────
 
+    @property
+    def _between_turn_drains(self) -> dict[str, asyncio.Task[None]]:
+        return self._streaming.between_turn_drains
+
+    @_between_turn_drains.setter
+    def _between_turn_drains(self, value: dict[str, asyncio.Task[None]]) -> None:
+        drains = self._streaming.between_turn_drains
+        drains.clear()
+        drains.update(value)
+
+    @property
+    def _last_drain_result(self) -> dict[str, tuple[str, bool]]:
+        return self._streaming.last_drain_results
+
+    @_last_drain_result.setter
+    def _last_drain_result(self, value: dict[str, tuple[str, bool]]) -> None:
+        results = self._streaming.last_drain_results
+        results.clear()
+        results.update(value)
+
+    @property
+    def _turn_perf_started(self) -> dict[tuple[str, int], float]:
+        return self._streaming.turn_perf_started
+
+    @_turn_perf_started.setter
+    def _turn_perf_started(self, value: dict[tuple[str, int], float]) -> None:
+        clocks = self._streaming.turn_perf_started
+        clocks.clear()
+        clocks.update(value)
+
     def _cancel_between_turns_drain(self, chat_id: str) -> None:
-        """Fire-and-forget cancel; pair with _await_between_turns_drain."""
-        # The parked-announce deadline exists only to release an entry the
-        # drain owns and will never release itself. No drain, no premise.
-        self._cancel_parked_announce_deadline(chat_id)
-        task = self._between_turn_drains.get(chat_id)
-        if task is not None and not task.done():
-            task.cancel()
+        self._streaming.cancel_between_turns_drain(chat_id)
 
     async def _await_between_turns_drain(self, chat_id: str) -> None:
-        """Wait until any drain task for this chat has fully unwound."""
-        self._cancel_parked_announce_deadline(chat_id)
-        task = self._between_turn_drains.pop(chat_id, None)
-        if task is None:
-            return
-        if not task.done():
-            task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001 — drain errors must not kill the turn
-            pass
+        await self._streaming.await_between_turns_drain(chat_id)
 
     def _start_between_turns_drain(self, chat_id: str, project_id: str) -> None:
-        provider_service = self._providers.get(chat_id)
-        if provider_service is None or not provider_service.can_drain:
-            return
-        self._cancel_between_turns_drain(chat_id)
-        task = asyncio.create_task(self._drain_between_turns(chat_id, project_id))
-        self._between_turn_drains[chat_id] = task
+        self._streaming.start_between_turns_drain(chat_id, project_id)
 
     async def _drain_between_turns(self, chat_id: str, project_id: str) -> None:
-        """Consume and publish SDK events that arrive with no turn active.
-
-        When a background subagent completes, the CLI injects a
-        task-notification; a follow-up parent turn then arrives either run by
-        the CLI on its own (CLI-version dependent — observed not to happen
-        reliably) or requested by the completion watcher's synthesis nudge
-        (``_nudge_synthesis_after_subagents``). This loop forwards those
-        events to a broker stream (so open chat sockets render them live) and
-        announces the follow-up's result like a normal turn (unread badge,
-        toast, delayed push). Each such turn gets its own background
-        ChatStream so replay stays turn-shaped.
-        """
-        from ciao.web.chat_broker import apply_file_touches_to_payload, event_to_json
-
-        provider_service = self._providers.get(chat_id)
-        if provider_service is None:
-            return
-        stream: ChatStream | None = None
-        # Cancellation means the next user turn took over; it owns the parked
-        # announce from there. Every other exit releases it (see the finally).
-        cancelled = False
-
-        def close_stream(had_error: bool) -> None:
-            nonlocal stream
-            if stream is None:
-                return
-            stream.finish()
-            self._broker.clear(chat_id, stream)
-            self._events.publish({
-                "type": "chat_streaming_done",
-                "chat_id": chat_id,
-                "project_id": project_id,
-                "is_error": had_error,
-            })
-            stream = None
-
-        try:
-            async for event in provider_service.drain_events():
-                payload = event_to_json(event)
-                if payload is None:
-                    continue
-                apply_file_touches_to_payload(
-                    payload,
-                    workspace_root=self._config.workspace_root,
-                )
-                if stream is None:
-                    # Only open a visible stream when a real event arrives —
-                    # most drains sit idle until cancelled by the next turn.
-                    stream = ChatStream(background=True)
-                    self._broker.register(chat_id, stream)
-                    self._events.publish({
-                        "type": "chat_streaming_started",
-                        "chat_id": chat_id,
-                        "project_id": project_id,
-                    })
-                stream.publish(payload)
-                if isinstance(event, PermissionRequestEvent):
-                    self._notify_permission(chat_id, event)
-                if isinstance(event, ResultEvent):
-                    text = event.result or ""
-                    is_error = bool(event.is_error)
-                    # Record the synthesis result so the schedule pipeline can
-                    # feed it to the auto-archive classifier once subagents
-                    # settle (see _await_schedule_subagents / dispatch_schedule).
-                    self._last_drain_result[chat_id] = (text, is_error)
-                    close_stream(is_error)
-                    # The 2026-07-30 watcher fix disabled the standalone
-                    # "Background agents finished" push, but the synthesis
-                    # nudge the watcher triggers writes its own ResultEvent
-                    # here. A short banner-only reply (e.g. "Synthesis
-                    # complete — see trace.") still passed the old `text`
-                    # truthy check and produced an OS push whose snippet was
-                    # a one-line internal comment. Gate the publish+push on
-                    # a real visible reply so devices without foreground
-                    # focus keep getting the in-app count drop and Activity
-                    # row as the only signal.
-                    if (
-                        not is_error
-                        and text
-                        and self._is_worth_announcing_nudge_reply(text)
-                    ):
-                        snippet = self._result_snippet(text)
-                        chat_now = self._chats.get(chat_id)
-                        if chat_now is not None:
-                            chat_now.last_activity_at = chat_service._now_iso()
-                            chat_now.last_snippet = snippet
-                            chat_now.last_response = text[-chat_service._PROVIDER_HANDOVER_MAX_CHARS:]
-                            chat_now.last_response_status = "success"
-                            self._save()
-                        title = chat_now.title if chat_now else "Ciaobot"
-                        # This reply IS the announce the parked entry was
-                        # waiting for, so drop the parked one rather than
-                        # push twice for the same turn.
-                        self._discard_result_announce(chat_id)
-                        self._announce_result_ready(
-                            chat_id, project_id, title, snippet
-                        )
-                        self._spawn_detached(
-                            self._maybe_archive_proposal_helper(chat_id),
-                            f"archive-proposal-helper-{chat_id}",
-                        )
-        except asyncio.CancelledError:
-            # The next user turn cancelled this drain. That turn's own
-            # turn-done handling clears the park (it supersedes the interim
-            # one), so releasing it here would push a stale non-answer.
-            cancelled = True
-            raise
-        except Exception:  # noqa: BLE001 — a broken drain must not crash the app
-            logger.exception("Between-turns drain failed for chat %s", chat_id)
-        finally:
-            close_stream(False)
-            # Release on every way this drain can END: a synthesis reply that
-            # errored, one that was a banner-only stub, an exception, or the
-            # event stream closing without a result. Each used to leave the
-            # chat with no notification at all. `_flush_result_announce` is a
-            # no-op when the drain already discarded the entry, or when nothing
-            # was parked.
-            #
-            # NOT exhaustive over the failure space, and deliberately so: a
-            # live-but-silent CLI never ends `drain_events()` at all (it stays
-            # suspended on the queue), so this block never runs for it. That
-            # case is covered instead by the deadline armed when the nudge
-            # handed the park over (`_arm_parked_announce_deadline`, #437).
-            if not cancelled:
-                self._flush_result_announce(chat_id)
+        await self._streaming.drain_between_turns(chat_id, project_id)
 
     def _notify_permission(
         self, chat_id: str, event: PermissionRequestEvent
@@ -8186,6 +6276,20 @@ class ProjectChatManager:
             cb(chat_id, event.tool_name, event.message, event.request_id)
         except Exception:
             logger.exception("notify_permission_cb failed for %s", chat_id)
+
+    @staticmethod
+    def _native_question_request_id(question_json: str) -> str:
+        """Return a persisted native question id, or empty for legacy cards."""
+        if not question_json:
+            return ""
+        try:
+            payload = json.loads(question_json)
+        except (TypeError, json.JSONDecodeError):
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        value = payload.get("request_id")
+        return "" if value is None else str(value)
 
     def _notify_question(self, chat_id: str, question_json: str) -> None:
         """Fire the configured question notification callback, if any.
@@ -8392,7 +6496,12 @@ class ProjectChatManager:
                 parsed_question = {}
             if isinstance(parsed_question, dict):
                 stored_question = parsed_question
-        stored_request_id = str(stored_question.get("request_id") or "")
+        stored_request_value = stored_question.get("request_id")
+        stored_request_id = (
+            str(stored_request_value)
+            if stored_request_value is not None
+            else ""
+        )
         if stored_request_id and stored_request_id != request_id:
             return False
         # Leave answer-key compatibility to the provider: legacy V1 question
@@ -8413,6 +6522,11 @@ class ProjectChatManager:
                         message = str(exc)
                         if "cancel" not in message and "submitted" not in message:
                             raise
+                        if submitted and not cancel and not answers:
+                            # An old adapter treats an empty answer map as
+                            # cancel. Do not report that as a successful
+                            # submitted reply; the card stays retryable.
+                            return False
                         delivered = bool(await responder(request_id, {} if cancel else answers))
                 else:
                     delivered = bool(await responder(request_id, answers))
@@ -8436,7 +6550,7 @@ class ProjectChatManager:
                 stored = {}
             if (
                 not isinstance(stored, dict)
-                or not stored.get("request_id")
+                or stored.get("request_id") is None
                 or stored.get("request_id") == request_id
             ):
                 chat.pending_question = ""
@@ -8503,6 +6617,8 @@ class ProjectChatManager:
         except TypeError as exc:
             if "cancel" not in str(exc) and "submitted" not in str(exc):
                 raise
+            if submitted and not cancel and not answers:
+                return False
             accepted = bool(responder(request_id, {} if cancel else answers))
         if accepted:
             if chat is not None:
@@ -8512,7 +6628,7 @@ class ProjectChatManager:
                     stored = {}
                 if (
                     not isinstance(stored, dict)
-                    or not stored.get("request_id")
+                    or stored.get("request_id") is None
                     or stored.get("request_id") == request_id
                 ):
                     chat.pending_question = ""
@@ -8520,6 +6636,7 @@ class ProjectChatManager:
             stream = self._broker.get(chat_id)
             if stream is not None:
                 stream.resolve_question(request_id)
+                stream.publish_live({"type": "question_resolved", "request_id": request_id})
         return accepted
 
     def respond_capability(
@@ -8552,7 +6669,7 @@ class ProjectChatManager:
 
     def _stop_result_payload(
         self, chat_id: str, *, turn_index: int | None, text: str
-    ) -> dict:
+    ) -> dict[str, object]:
         """Terminal `result` frame for a turn the user stopped.
 
         A stop ends a turn in one of three ways: the provider yields an
@@ -8569,8 +6686,8 @@ class ProjectChatManager:
         duration_ms: int | None = None
         sent_at_rec = ""
         if turn_index is not None:
-            started_perf = self._turn_perf_started.pop(
-                (chat_id, turn_index), None
+            started_perf = self._streaming.take_turn_perf(
+                chat_id, turn_index
             )
             if started_perf is not None:
                 duration_ms = int((time.perf_counter() - started_perf) * 1000)
@@ -8581,7 +6698,7 @@ class ProjectChatManager:
                     rec["duration_ms"] = duration_ms
                 sent_at_rec = rec.get("sent_at", "")
                 self._save()
-        payload: dict = {
+        payload: dict[str, object] = {
             "type": "result",
             "text": text,
             "is_error": False,
@@ -8638,7 +6755,12 @@ class ProjectChatManager:
         if provider is None:
             return False
         turn_task = stream.turn_task if stream is not None else None
+        drive_task = self._streaming.drive_task(chat_id, stream)
         if turn_task is None or turn_task.done():
+            if drive_task is not None:
+                return await self._streaming.wait_for_drive_cleanup(
+                    chat_id, stream, self._STOP_GRACE_S
+                )
             # No local turn to close (between turns, or the HTTP fallback
             # racing a fresh send): the bounded provider stop is all there
             # is to do.
@@ -8715,6 +6837,10 @@ class ProjectChatManager:
             # The turn raised a real error inside the grace window; its own
             # handler already published an error result.
             stopped = True
+        if drive_task is not None:
+            await self._streaming.wait_for_drive_cleanup(
+                chat_id, stream, self._STOP_GRACE_S
+            )
         return stopped
 
     # ── Auto-title generation ────────────────────────────────────────────
@@ -8897,379 +7023,65 @@ class ProjectChatManager:
 
     # ── Schedule dispatch ────────────────────────────────────────────────
 
+    def _schedule_dispatcher_for(self) -> ScheduleDispatcher:
+        """Return the schedule collaborator, including for ``__new__`` fixtures.
+
+        A few focused tests build a manager shell with ``__new__`` to exercise
+        one small seam.  Constructing the collaborator lazily keeps those tests
+        and third-party lightweight managers on the same typed path as a fully
+        wired server instance without duplicating any lifecycle state.
+        """
+        try:
+            return self._schedule_dispatcher
+        except AttributeError:
+            dispatcher = ScheduleDispatcher(self)
+            self._schedule_dispatcher = dispatcher
+            return dispatcher
+
     async def _await_schedule_subagents(
         self, chat_id: str, *, timeout_s: float = 900.0
     ) -> tuple[bool, bool]:
-        """Block until the schedule chat's background subagents finish.
-
-        A schedule turn can delegate to background subagents (e.g. memory
-        curation dispatches the memory agent) and return before they finish.
-        The archive decision must not run against that half-complete state, so
-        we poll the parent session JSONL — the reliable running-count signal
-        (see ciao/subagent_tracking.py) — until it drains.
-
-        Returns ``(settled, had_async)``: ``settled`` is True when no
-        subagents remain running (or none were ever tracked), False when the
-        timeout elapses with agents still running; ``had_async`` is True when
-        the session ever dispatched a background subagent. Errors resolve to
-        ``(True, False)`` so a tracking failure never blocks the pipeline.
-        """
-        chat = self._chats.get(chat_id)
-        if chat is None or not chat.session_id:
-            return True, False
-        if chat.provider == "opencode":
-            deadline = time.perf_counter() + timeout_s
-            had_async = False
-            running = 0
-            while time.perf_counter() < deadline:
-                tree = await OpencodeProvider.read_collab_tree(
-                    self._config.workspace_root, chat.session_id
-                )
-                running, had_now = opencode_collab_tree_counts(tree)
-                had_async = had_async or had_now
-                if running == 0:
-                    return True, had_async
-                await asyncio.sleep(3)
-            return running == 0, had_async
-        if chat.provider != "claude":
-            return True, False
-        try:
-            # Single-shot lookup: a miss reports the agents settled and can
-            # archive the chat, so force the lookup past the shared cache's
-            # rescan rate limit — see subagent_tracking.find_parent_session_file.
-            path = subagent_tracking.find_parent_session_file(
-                chat.session_id,
-                self._config.workspace_root,
-                agent_root=self._agent_root_for_chat(chat_id),
-                force_refresh=True,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("Subagent wait: session file lookup failed for %s", chat_id)
-            return True, False
-        if path is None:
-            return True, False
-
-        deadline = time.perf_counter() + timeout_s
-        last_size = -1
-        running = 0
-        had_async = False
-        state: subagent_tracking.SessionSubagentState | None = None
-        while time.perf_counter() < deadline:
-            try:
-                size = path.stat().st_size
-            except OSError:
-                return True, had_async
-            if size != last_size or state is None:
-                last_size = size
-                try:
-                    state = subagent_tracking.parse_session_subagents(path)
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "Subagent wait: parse failed for %s", chat_id
-                    )
-                    return True, had_async
-                if not had_async:
-                    had_async = any(
-                        info.is_async and info.kind == "agent"
-                        for info in state.subagents.values()
-                    )
-            # Recomputed every tick, not just when the parent file grows: a
-            # completion the CLI never wrote there still shows up as the
-            # agent's own transcript going quiet (see the watcher above).
-            running = subagent_tracking.running_background_agents(path, state)
-            if running == 0:
-                return True, had_async
-            await asyncio.sleep(3)
-        if running:
-            logger.warning(
-                "Schedule chat %s still has %d background subagent(s) after %.0fs; "
-                "keeping chat visible",
-                chat_id,
-                running,
-                timeout_s,
-            )
-        return running == 0, had_async
+        """Delegate the schedule subagent wait to its lifecycle collaborator."""
+        return await self._schedule_dispatcher_for()._await_schedule_subagents(
+            chat_id, timeout_s=timeout_s
+        )
 
     async def _wait_for_drain_result(
         self, chat_id: str, *, timeout_s: float = 180.0
     ) -> tuple[str, bool] | None:
-        """Wait for the between-turns drain to record a post-subagent result.
-
-        Returns ``(text, is_error)`` from the CLI's synthesis turn, or None if
-        none arrived within ``timeout_s``. Callers pop the slot beforehand so a
-        stale result from an earlier turn is never returned. Exits early as
-        soon as a result lands; the timeout only bounds the rare case where the
-        CLI never emits a synthesis turn after the subagent completes.
-        """
-        deadline = time.perf_counter() + timeout_s
-        while time.perf_counter() < deadline:
-            result = self._last_drain_result.get(chat_id)
-            if result is not None:
-                return result
-            await asyncio.sleep(1)
-        return None
-
-    async def _schedule_run_needs_user(self, entry: object, outcome: chat_service.ScheduleRunOutcome) -> bool:
-        """Return True when an auto-archive schedule result deserves attention.
-
-        Conservative default: if the classifier cannot produce strict JSON,
-        keep the chat visible.
-        """
-        title = str(getattr(entry, "prompt", "")).split("\n", 1)[0].strip()
-        payload = {
-            "schedule_id": getattr(entry, "schedule_id", ""),
-            "title": title,
-            "final_output": outcome.final_text[-6000:],
-        }
-        system_prompt = (
-            "You decide whether the user needs to see a scheduled routine result in the chat interface. "
-            "Return only JSON: {\"needs_user\": boolean, \"reason\": string}. "
-            "needs_user=false when the run is routine maintenance, even if it updated files, triaged proposals, "
-            "or created file stubs automatically (e.g. routine memory curation, git syncs, daily logs, baseline bumps). "
-            "Set needs_user=true ONLY when there is an actual problem, error, warning, unresolved conflict, "
-            "a specific question/decision asked of the user, or a new external finding that requires their direct "
-            "intervention or judgment to proceed."
+        return await self._streaming.wait_for_drain_result(
+            chat_id, timeout_s=timeout_s
         )
-        user_prompt = json.dumps(payload, ensure_ascii=False)
-        try:
-            from ciao.insights import (
-                _resolve_insights_call,
-                resolve_insights_model,
-            )
 
-            # Route through the shared resolver (same as ciao/insights.py) so an
-            # unavailable Apple on-device model is substituted rather than
-            # raising -- a raise here keeps the run visible instead of
-            # auto-archiving it.
-            project_id = getattr(entry, "web_project_id", None)
-            project = self._projects.get(project_id) if project_id else None
-            workspace = project.workspace if project else None
-            fixed_chat_id = getattr(entry, "web_chat_id", None)
-            fixed_chat = self._chats.get(fixed_chat_id) if fixed_chat_id else None
-            classifier_provider = (
-                fixed_chat.provider if fixed_chat is not None
-                else getattr(entry, "provider", "")
-                or self.schedule_default_provider(project_id)
-            )
-            if classifier_provider not in supported_providers():
-                return True
-            insights_model = resolve_insights_model(self._config, workspace)
-            env: dict[str, str] = {}
-            model, classifier_provider, note = _resolve_insights_call(
-                self._config,
-                insights_model,
-                provider=classifier_provider,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("Schedule attention classifier setup failed; keeping chat visible")
-            return True
-        tracked_provider = classifier_provider
-        async with job_runs.track(
-            "schedule_attention_classifier",
-            "Schedule attention classifier",
-            model=model,
-            provider=tracked_provider,
-            extra={
-                "schedule_id": payload["schedule_id"],
-                "workspace": workspace or "",
-            },
-        ) as run:
-            if note:
-                run.extra["fallback_note"] = note
-                logger.info("Schedule attention classifier %s", note)
-            try:
-                from ciao.providers.oneshot import run_oneshot
-                from ciao.insights import _DEFAULT_TIMEOUT_S, is_context_overflow
+    def _discard_schedule_drain_result(self, chat_id: str) -> None:
+        """Drop a stale synthesis result before a scheduled run waits.
 
-                # Same env-tunable budget as the insights job: a slow local
-                # model can take minutes on a successful call,
-                # so a hard 60s window turned tail latency into a guaranteed
-                # TimeoutError and the classifier ran 6/6 in error.
-                text = await run_oneshot(
-                    user_prompt,
-                    system_prompt=system_prompt,
-                    model=model,
-                    env=env,
-                    timeout_s=_DEFAULT_TIMEOUT_S,
-                    provider=classifier_provider,
-                    cwd=self._config.workspace_root,
-                )
-                from ciao.critique import extract_json
+        The schedule collaborator calls this manager seam instead of reaching
+        into ``ChatStreaming`` directly, keeping the streaming owner explicit
+        while preserving the existing drain lifecycle patch point.
+        """
+        self._streaming.discard_drain_result(chat_id)
 
-                verdict = extract_json(text)
-                if verdict is None:
-                    # Expected degradation, not a fault: the conservative
-                    # default below already handles it, so a full traceback in
-                    # server_errors.log only pollutes the triage report.
-                    run.status = "error"
-                    run.error = "classifier returned no parseable JSON"
-                    head = (text or "").strip()[:200]
-                    logger.warning(
-                        "Schedule attention classifier returned no parseable "
-                        "JSON with model %s; keeping chat visible (output head: %r)",
-                        model,
-                        head,
-                    )
-                    return True
-                needs_user = bool(verdict.get("needs_user", True))
-                run.extra["needs_user"] = needs_user
-                reason = str(verdict.get("reason", "")).strip()
-                if reason:
-                    run.extra["reason"] = reason[:500]
-                return needs_user
-            except Exception as exc:  # noqa: BLE001
-                run.status = "error"
-                run.error = (str(exc).strip() or type(exc).__name__)[:1000]
-                # Distinguish a deterministic 400-style overflow from a
-                # transient timeout. The payload is already trimmed to
-                # final_text[-6000:] so an overflow here is rare, but
-                # recording the class lets the job history tell transient
-                # tail-latency from a real context-window problem.
-                if is_context_overflow(exc):
-                    run.extra["context_overflow"] = True
-                    logger.warning(
-                        "Schedule attention classifier hit the context window "
-                        "with model %s; keeping chat visible",
-                        model,
-                    )
-                else:
-                    logger.exception(
-                        "Schedule attention classifier failed with model %s; "
-                        "keeping chat visible",
-                        model,
-                    )
-                return True
+    async def _schedule_run_needs_user(
+        self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome
+    ) -> bool:
+        """Delegate schedule attention classification to its collaborator."""
+        return await self._schedule_dispatcher_for()._schedule_run_needs_user(
+            entry, outcome
+        )
 
     def prepare_schedule_chat(
         self,
-        entry,  # ScheduleEntry
+        entry: ScheduleEntry,
         prompt: str,
         model: str,
         mode: BridgeMode,
         provider: str = "",
     ) -> str | None:
-        """Create/resolve the target chat for a schedule dispatch.
-
-        Returns the chat_id or None if the target can't be resolved.
-        This is synchronous so callers can get the chat_id before the
-        async stream starts.
-
-        ``provider`` applies only when this dispatch creates a new chat
-        (web_project_id path). For fixed-chat schedules (web_chat_id),
-        the existing chat's provider is honoured.
-
-        A fixed-chat entry is handled differently in two ways. It never has its
-        model/mode overwritten — each run uses whatever the user configured on
-        the chat, which is the defining property the merged `interval` cadence
-        inherited from loops. And a missing or archived target does not end the
-        run, whatever the cadence: the archived transcript is forked
-        (``chat_continue`` semantics), or a fresh chat is opened in the entry's
-        project, and ``entry.web_chat_id`` is re-pointed at it. Dispatching into
-        the archived chat itself would resume a reclaimed provider session and
-        fail instantly with a silent ``stream error`` on every future run (see
-        issue #407). Only when no project resolves either does this return
-        None, which the caller turns into "disable the entry".
-        """
-        from datetime import UTC, datetime
-
-        web_project_id = getattr(entry, "web_project_id", None)
-        web_chat_id = getattr(entry, "web_chat_id", None)
-        sched_id = getattr(entry, "schedule_id", "") or ""
-        sched_title = (getattr(entry, "title", "") or "").strip()
-
-        def _stamp(chat: ChatInfo) -> None:
-            # Record the schedule backlink so the PWA can show a
-            # "triggered by schedule X" banner that survives later runs.
-            chat.schedule_id = sched_id
-            chat.schedule_title = sched_title
-
-        if web_project_id:
-            project = self._projects.get(web_project_id)
-            if project is None:
-                project = self._resolve_schedule_project(web_project_id, entry)
-            if project is None:
-                logger.warning("Schedule target project %s not found, skipping", web_project_id)
-                return None
-            # Prefer the routine's own name ("Workspace care") over a
-            # truncated prompt sentence, so schedule chats read cleanly instead
-            # of "Run a structural hygiene pass on the... - Jul 15".
-            routine_name = (getattr(entry, "title", "") or "").strip()
-            if routine_name:
-                title_base = routine_name
-            else:
-                title_base = prompt.split("\n")[0].strip().rstrip(".")
-                if len(title_base) > 40:
-                    title_base = title_base[:37] + "..."
-            date_str = datetime.now(UTC).strftime("%b %d")
-            title = f"{title_base} - {date_str}"
-            chat = self.create_chat(
-                project.project_id,
-                title=title,
-                model=model,
-                mode=mode,
-                provider=provider or None,
-            )
-            _stamp(chat)
-            self._save()
-            return chat.chat_id
-        elif web_chat_id:
-            target_chat = self._chats.get(web_chat_id)
-            if target_chat is None or target_chat.archived:
-                replacement = self._rehome_interval_chat(entry, prompt)
-                if replacement is None:
-                    return None
-                web_chat_id = replacement.chat_id
-                target_chat = replacement
-            if target_chat is None:
-                logger.warning("Schedule target chat %s not found, skipping", web_chat_id)
-                return None
-            interval = getattr(entry, "frequency", "") == "interval"
-            if not interval:
-                # Interval runs inherit the chat's own model/mode instead.
-                target_chat.model = model
-                target_chat.mode = mode
-                # A rehomed replacement was created without a provider arg, so
-                # create_chat defaulted it to the workspace's default — which
-                # can differ from the engine this dispatch resolved (entry
-                # override or workspace default at schedule_effective_routing
-                # time). Dispatch runs the replacement's provider, and would
-                # then feed it a model chosen for a different engine. Pin all
-                # three so the run uses what the schedule asked for.
-                if getattr(target_chat, "provider", "") != (provider or ""):
-                    target_chat.provider = provider
-            _stamp(target_chat)
-            self._save()
-            return cast(str, web_chat_id)
-        elif getattr(entry, "scope", "") == "system":
-            project = self._resolve_schedule_project("", entry)
-            if project is None:
-                logger.warning("System schedule %s has no default project, skipping", getattr(entry, "schedule_id", ""))
-                return None
-            # Prefer the routine's own name ("Workspace care") over a
-            # truncated prompt sentence, so schedule chats read cleanly instead
-            # of "Run a structural hygiene pass on the... - Jul 15".
-            routine_name = (getattr(entry, "title", "") or "").strip()
-            if routine_name:
-                title_base = routine_name
-            else:
-                title_base = prompt.split("\n")[0].strip().rstrip(".")
-                if len(title_base) > 40:
-                    title_base = title_base[:37] + "..."
-            date_str = datetime.now(UTC).strftime("%b %d")
-            title = f"{title_base} - {date_str}"
-            chat = self.create_chat(
-                project.project_id,
-                title=title,
-                model=model,
-                mode=mode,
-                provider=provider or None,
-            )
-            _stamp(chat)
-            self._save()
-            return chat.chat_id
-        else:
-            logger.warning("Schedule has no web target, skipping")
-            return None
+        """Create or resolve the target chat through the schedule collaborator."""
+        return self._schedule_dispatcher_for().prepare_schedule_chat(
+            entry, prompt, model, mode, provider
+        )
 
     def chat_stream_active(self, chat_id: str) -> bool:
         """True when the chat has a live user-visible turn in flight.
@@ -9280,7 +7092,9 @@ class ProjectChatManager:
         existing = self._broker.get(chat_id)
         return existing is not None and not existing.background
 
-    def _rehome_interval_chat(self, entry, prompt: str) -> ChatInfo | None:
+    def _rehome_interval_chat(
+        self, entry: ScheduleEntry, prompt: str
+    ) -> ChatInfo | None:
         """Point a chat-bound entry at a usable chat, or None.
 
         An archived target is forked so the run keeps the conversation it was
@@ -9322,7 +7136,7 @@ class ProjectChatManager:
 
     async def dispatch_schedule(
         self,
-        entry,  # ScheduleEntry
+        entry: ScheduleEntry,
         prompt: str,
         model: str,
         mode: BridgeMode,
@@ -9330,263 +7144,10 @@ class ProjectChatManager:
         *,
         target_chat_id: str | None = None,
     ) -> dict[str, str]:
-        """Dispatch a schedule and return metadata (chat_id, status, archived_to)."""
-        web_project_id = getattr(entry, "web_project_id", None)
-        web_chat_id = getattr(entry, "web_chat_id", None)
-
-        target_id = target_chat_id or self.prepare_schedule_chat(
-            entry, prompt, model, mode, provider,
+        """Dispatch a schedule and return chat/status/archive metadata."""
+        return await self._schedule_dispatcher_for().dispatch_schedule(
+            entry, prompt, model, mode, provider, target_chat_id=target_chat_id
         )
-        if target_id is None:
-            return {}
-
-        result: dict[str, str] = {"chat_id": target_id}
-        outcome = chat_service.ScheduleRunOutcome()
-
-        # Job-run recording: this method swallows its own errors (the broad
-        # except below sets outcome.stream_error and continues) and has a
-        # single exit, so we time it here and record once before returning.
-        _sched_perf = time.perf_counter()
-        _sched_started = datetime.now(UTC)
-        _sched_schedule_id = getattr(entry, "schedule_id", "") or ""
-        # Which dispatch this run *is*, sampled from the entry as it stood when
-        # the run started. The stored row can have moved on to a newer dispatch
-        # by the time the outcome lands (an overlapping manual "Run now"), and
-        # that is exactly what the write-back below has to be able to tell.
-        _sched_dispatch_id = getattr(entry, "last_dispatch_id", "") or ""
-
-        # Save original model/mode for fixed-chat dispatches. Interval entries
-        # are exempt: prepare_schedule_chat leaves the chat's settings alone for
-        # them, so there is nothing to restore.
-        orig_model = orig_mode = None
-        interval = getattr(entry, "frequency", "") == "interval"
-        if not interval and not web_project_id and web_chat_id:
-            chat = self._chats.get(target_id)
-            if chat:
-                orig_model, orig_mode = chat.model, chat.mode
-
-        # Substitute error-log placeholder for weekly maintenance schedules
-        had_error_placeholder = "{{ERROR_LOG}}" in prompt
-        if had_error_placeholder:
-            errors = await asyncio.to_thread(
-                tail_error_log, self._config.workspace_root, 200
-            )
-            prompt = prompt.replace(
-                "{{ERROR_LOG}}",
-                errors or "(no errors logged this week)",
-            )
-        # Richer variant: error log + failed background-job runs
-        had_issue_placeholder = "{{ISSUE_REPORT}}" in prompt
-        if had_issue_placeholder:
-            from ciao.debug_report import build_issue_report
-            from ciao.startup_triage import TRIAGE_SCHEDULE_ID
-
-            # Exclude the triage's own past runs so a triage prompt built from
-            # {{ISSUE_REPORT}} never re-triages its own recorded summary.
-            issue_report = await asyncio.to_thread(
-                build_issue_report,
-                self._config.workspace_root,
-                exclude_schedule_ids={TRIAGE_SCHEDULE_ID},
-            )
-            prompt = prompt.replace(
-                "{{ISSUE_REPORT}}", issue_report["report_text"]
-            )
-
-        try:
-            stream = self.start_stream(target_id, prompt, unattended=True)
-            async for payload in stream.subscribe():
-                if not isinstance(payload, dict):
-                    continue
-                event_type = payload.get("type")
-                if event_type == "permission_request":
-                    outcome.permission_requested = True
-                elif (
-                    event_type == "tool_use"
-                    and payload.get("tool_name") == "AskUserQuestion"
-                ):
-                    outcome.question_requested = True
-                elif event_type == "chat_retry":
-                    if (payload.get("status") or "") == "pending":
-                        outcome.retry_pending = True
-                elif event_type == "error":
-                    outcome.stream_error = True
-                elif event_type == "result":
-                    outcome.completed = True
-                    outcome.is_error = bool(payload.get("is_error"))
-                    outcome.final_text = str(payload.get("text") or "")
-            # Clear only after a clean run: a failed triage must not wipe
-            # the backlog it never processed.
-            if (
-                (had_error_placeholder or had_issue_placeholder)
-                and chat_service._schedule_run_clean(outcome)
-            ):
-                await asyncio.to_thread(
-                    clear_error_log, self._config.workspace_root
-                )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            outcome.stream_error = True
-            logger.exception("Schedule dispatch to %s failed", target_id)
-        finally:
-            if orig_model is not None and not interval and not web_project_id and web_chat_id:
-                chat = self._chats.get(target_id)
-                if chat:
-                    chat.model = orig_model
-                    chat.mode = orig_mode  # type: ignore[assignment]
-
-        chat_state = self._chats.get(target_id)
-        if chat_state and chat_state.retry_status == "pending":
-            outcome.retry_pending = True
-
-        # A clean parent turn may still have live background subagents (e.g.
-        # curation delegating to the memory agent). Wait for them to finish
-        # before the archive decision so the classifier judges the completed
-        # result — not an interim "dispatched, will report later" message. If
-        # they don't settle in time, mark the run pending so it stays visible.
-        if chat_service._schedule_run_clean(outcome):
-            # Drop any stale synthesis result before waiting so we only pick up
-            # the turn that runs when *these* subagents finish. The drain that
-            # captures it was started by start_stream's completion handler.
-            self._last_drain_result.pop(target_id, None)
-            settled, had_async = await self._await_schedule_subagents(target_id)
-            if not settled:
-                outcome.subagents_pending = True
-            elif had_async and chat_state is not None and chat_state.provider == "claude":
-                # Background subagents finished: the CLI runs a synthesis turn
-                # whose result the between-turns drain records. Feed that real
-                # summary to the archive classifier instead of the interim
-                # parent message. Bounded; exits as soon as the result lands.
-                synth = await self._wait_for_drain_result(target_id)
-                if synth is not None:
-                    synth_text, synth_error = synth
-                    if synth_text:
-                        outcome.final_text = synth_text
-                    if synth_error:
-                        outcome.is_error = True
-                    elif not synth_text:
-                        # A drain result that carries neither text nor error
-                        # says nothing; fall through to the interim-text
-                        # guard below with whatever the parent last said.
-                        pass
-                if not outcome.is_error and self._is_interim_subagent_text(
-                    outcome.final_text
-                ):
-                    # The synthesis turn never happened (or the CLI died
-                    # before writing one — the 2026-08-30 daily-log run: the
-                    # nudge and the final task-notification crossed, the SDK
-                    # read task was cancelled, and the run "ended" on an
-                    # interim message). The parent's data is un-synthesized
-                    # and whatever work was supposed to follow — writing the
-                    # log, committing — never ran. The run is not done: keep
-                    # the chat visible instead of archiving a stub.
-                    outcome.subagents_pending = True
-                    logger.warning(
-                        "Schedule chat %s ended on interim subagent text with "
-                        "no synthesis turn; keeping it visible",
-                        target_id,
-                    )
-            self._last_drain_result.pop(target_id, None)
-
-        needs_user = False
-        if getattr(entry, "archive_policy", "manual") == "auto" and chat_service._schedule_run_clean(outcome):
-            needs_user = await self._schedule_run_needs_user(entry, outcome)
-
-        if chat_service._should_auto_archive_schedule_run(entry, outcome, needs_user=needs_user):
-            chat_meta = self._chats.get(target_id)
-            project_meta = (
-                self._projects.get(chat_meta.project_id) if chat_meta else None
-            )
-            try:
-                archive_outcome = await self.archive_chat(target_id)
-            except Exception:  # noqa: BLE001
-                logger.exception("Auto-archive failed for schedule chat %s", target_id)
-                archive_outcome = None
-            if archive_outcome is not None:
-                try:
-                    self.run_archive_postprocess(
-                        target_id, archive_outcome, chat_meta, project_meta
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "Auto-archive postprocess failed for schedule chat %s",
-                        target_id,
-                    )
-                outcome.archived_to = str(archive_outcome.path)
-                result["archived_to"] = str(archive_outcome.path)
-            else:
-                logger.warning(
-                    "Auto-archive requested but archive_chat returned None for %s",
-                    target_id,
-                )
-
-        _sched_status, _sched_error = chat_service._schedule_dispatch_status(outcome)
-        # Interval entries surface their own last_status in the UI, so hand the
-        # classification back. "skipped" (a permission prompt or a deferred
-        # retry) is not an error, but it is not a completed run either -- report
-        # it as such rather than flattening it to "ok".
-        result["status"] = "error" if _sched_status == "error" else _sched_status
-        # A failed run is stamped on the stored row, not just in the job log:
-        # without this a wall-clock entry failing every run (an archived target
-        # resuming a dead provider session, say) produced an endless string of
-        # invisible `stream error` records and nothing the operator could see
-        # anywhere (issue #407). The stamp makes the PWA sidebar flag the
-        # automation for attention on the next schedules refetch. A completed
-        # run clears it again, so a one-off failure does not brand the entry
-        # unhealthy forever — interval entries get this for free from
-        # _run_interval's write-back; wall-clock entries get it here. Re-read
-        # the row first: the run streamed for minutes and the user may have
-        # edited or retargeted it meanwhile — only the health field is ours to
-        # write.
-        #
-        # `stamp_run_outcome` decides what "ours" means when two dispatches
-        # overlap: the health field belongs to the dispatch the row still names,
-        # while a completed run credits the occurrence it was dispatched for
-        # either way (issue #490).
-        if _sched_schedule_id and _sched_status in {"error", "ok", "skipped"}:
-            store = getattr(self, "schedule_store", None)
-            if store is not None:
-                from ciao.schedules import stamp_run_outcome
-
-                latest = store.get(_sched_schedule_id)
-                if latest is not None and stamp_run_outcome(
-                    latest, _sched_dispatch_id, _sched_status
-                ):
-                    store.replace(latest)
-                    # An open sidebar or Automations page only refetches on the
-                    # schedules_changed event; without publishing it the newly
-                    # stamped health (a failure that needs attention, or a
-                    # skipped run waiting on the user) stays invisible until an
-                    # unrelated refetch or reload.
-                    from ciao.schedules import publish_automations_changed
-
-                    publish_automations_changed(self)
-        job_runs.record_run(job_runs.JobRun(
-            job="schedule_dispatch",
-            label="Scheduled dispatch",
-            category="content",
-            started_at=_sched_started.isoformat(),
-            ended_at=datetime.now(UTC).isoformat(),
-            duration_ms=int((time.perf_counter() - _sched_perf) * 1000),
-            status=_sched_status,
-            model=model,
-            provider=provider or "claude",
-            error=_sched_error,
-            extra={
-                "schedule_id": _sched_schedule_id,
-                # Which dispatch produced this result. The entry keeps one
-                # outcome (the latest dispatch's); the run log keeps every
-                # run's, so a superseded one is still attributable to the
-                # dispatch it came from instead of being lost.
-                "dispatch_id": _sched_dispatch_id,
-                "chat_id": target_id,
-                "archived_to": outcome.archived_to,
-                "permission_requested": outcome.permission_requested,
-                "question_requested": outcome.question_requested,
-                "retry_pending": outcome.retry_pending,
-            },
-        ))
-        return result
 
     def find_project(self, name: str, workspace: str) -> ProjectInfo | None:
         """The project with this name in this workspace, or None.
@@ -9607,7 +7168,7 @@ class ProjectChatManager:
         )
 
     def _resolve_schedule_project(
-        self, stale_id: str, entry: object
+        self, stale_id: str, entry: ScheduleEntry
     ) -> ProjectInfo | None:
         """Resolve a stale web_project_id to a local project.
 

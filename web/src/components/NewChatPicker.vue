@@ -1,37 +1,57 @@
 <template>
-  <div
-    v-if="picker"
-    class="newchat-backdrop"
-    role="dialog"
-    aria-modal="true"
-    aria-label="New chat"
-    @click.self="cancel"
+  <DialogRoot
+    :open="picker !== null"
+    modal
+    @update:open="onOpenChange"
   >
-    <div class="newchat-card" role="listbox" aria-label="Choose a project for the new chat">
-      <p class="newchat-title">New chat</p>
-      <p class="newchat-hint">{{ hint }}</p>
-      <button
-        v-for="item in projectItems"
-        :key="item.id"
-        type="button"
-        ref="itemButtons"
-        class="newchat-option"
-        :class="{ 'newchat-option--active': selected === item.id }"
-        :data-workspace-color="item.color"
-        role="option"
-        :aria-selected="selected === item.id"
-        @click="choose(item.id)"
-        @mouseenter="selected = item.id"
-      >
-        <span class="newchat-name">{{ item.label }}</span>
-        <span v-if="item.badge" class="newchat-badge">{{ item.badge }}</span>
-      </button>
-    </div>
-  </div>
+    <DialogOverlay as-child>
+      <div class="newchat-backdrop">
+        <DialogContent
+          class="newchat-card"
+          aria-modal="true"
+          @open-auto-focus="onOpenAutoFocus"
+          @escape-key-down="onEscapeKeyDown"
+        >
+          <DialogTitle as="p" class="newchat-title">New chat</DialogTitle>
+          <DialogDescription as="p" class="newchat-hint">{{ hint }}</DialogDescription>
+          <div
+            class="newchat-options"
+            role="listbox"
+            aria-label="Choose a project for the new chat"
+          >
+            <button
+              v-for="item in projectItems"
+              :key="item.id"
+              type="button"
+              ref="itemButtons"
+              class="newchat-option"
+              :class="{ 'newchat-option--active': selected === item.id }"
+              :data-workspace-color="item.color"
+              role="option"
+              :aria-selected="selected === item.id"
+              @click="choose(item.id)"
+              @mouseenter="selected = item.id"
+            >
+              <span class="newchat-name">{{ item.label }}</span>
+              <span v-if="item.badge" class="newchat-badge">{{ item.badge }}</span>
+            </button>
+          </div>
+        </DialogContent>
+      </div>
+    </DialogOverlay>
+  </DialogRoot>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  DialogContent,
+  DialogDescription,
+  DialogOverlay,
+  DialogRoot,
+  DialogTitle,
+} from 'reka-ui'
+import { useEventListener } from '@vueuse/core'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { pendingNewChat } from '../lib/newChat'
 import { useProjectStore } from '../stores/projects'
 import { workspaceLabel } from '../lib/workspaceLabel'
@@ -88,10 +108,24 @@ function cancel() {
   picker.value?.resolve(null)
 }
 
+function onOpenChange(open: boolean) {
+  if (!open) cancel()
+}
+
 function focusItem(index: number) {
   nextTick(() => {
     itemButtons.value[index]?.focus()
   })
+}
+
+function onOpenAutoFocus(event: Event) {
+  event.preventDefault()
+  focusItem(0)
+}
+
+function onEscapeKeyDown(event: KeyboardEvent) {
+  event.preventDefault()
+  cancel()
 }
 
 // Every key the picker consumes is taken here and taken completely: the
@@ -155,6 +189,8 @@ function onKeydown(event: KeyboardEvent) {
   }
 }
 
+useEventListener(window, 'keydown', onKeydown, { capture: true })
+
 watch(projectItems, () => {
   const current = projectItems.value.find(o => o.id === selected.value)
   if (!current) selected.value = projectItems.value[0]?.id ?? ''
@@ -167,12 +203,10 @@ watch(picker, async value => {
   previewWorkspace.value = store.activeWorkspace
   selected.value = projectItems.value[0]?.id ?? ''
   await nextTick()
-  itemButtons.value[0]?.focus()
+  focusItem(0)
 })
 
-onMounted(() => window.addEventListener('keydown', onKeydown, true))
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onKeydown, true)
   picker.value?.resolve(null)
 })
 </script>
@@ -210,6 +244,11 @@ onBeforeUnmount(() => {
   margin: 0 0 var(--space-1);
   color: var(--fg2);
   font-size: var(--text-sm);
+}
+.newchat-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
 }
 .newchat-option {
   display: flex;

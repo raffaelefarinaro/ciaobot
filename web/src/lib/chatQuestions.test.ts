@@ -5,6 +5,7 @@ import {
   questionAnswerError,
   questionAnswerIsValid,
   questionEmptyAnswerAllowed,
+  questionIsActive,
   questionIsVisible,
   questionsSignature,
   type ActiveQuestion,
@@ -141,6 +142,33 @@ describe('parseQuestions', () => {
     expect(questionAnswerIsValid(qs[2], { selected: new Set(['A', 'B']), other: '' })).toBe(true)
     expect(questionAnswerIsValid(qs[2], { selected: new Set(['A', 'B']), other: 'extra' })).toBe(false)
     expect(questionEmptyAnswerAllowed(qs[0])).toBe(false)
+  })
+
+  test('preserves custom constraints and wire values', () => {
+    const [closed, open] = parseQuestions(JSON.stringify({ questions: [
+      { id: 'closed', type: 'string', custom: false, options: [{ value: '0', label: 'Zero' }] },
+      { id: 'open', type: 'string', custom: true, options: [{ value: '0', label: 'Zero' }] },
+    ] }))
+    expect(closed.custom).toBe(false)
+    expect(closed.options[0].value).toBe('0')
+    expect(questionAnswerIsValid(closed, { selected: new Set(['other']), other: '' })).toBe(false)
+    expect(questionAnswerIsValid(open, { selected: new Set(['other']), other: '' })).toBe(true)
+  })
+
+  test('uses the controlling field type for conditional values', () => {
+    const qs = parseQuestions(JSON.stringify({ questions: [
+      { id: 'tags', type: 'multiselect', options: [{ value: 'yes', label: 'Yes' }] },
+      { id: 'detail', type: 'string', when: [{ key: 'tags', op: 'eq', value: 'yes' }] },
+    ] }))
+    expect(questionIsActive(qs[1], { tags: ['yes', 'also'] }, qs)).toBe(true)
+    expect(questionIsActive(qs[1], { tags: ['no'] }, qs)).toBe(false)
+  })
+
+  test('allows an explicitly empty required multiselect with minItems zero', () => {
+    const [q] = parseQuestions(JSON.stringify({ questions: [
+      { id: 'tags', type: 'multiselect', required: true, minItems: 0, options: [] },
+    ] }))
+    expect(questionAnswerIsValid(q, { selected: new Set(), other: '' })).toBe(true)
   })
 })
 

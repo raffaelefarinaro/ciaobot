@@ -39,11 +39,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ciao.cli_envelopes import (
+    envelope_notification_fields,
+    envelope_notification_task_statuses,
     is_cli_envelope,
+    is_compact_summary,
     is_control_slash_command,
     is_interrupted_request_sentinel,
-    envelope_notification_fields,
     is_no_response_sentinel,
+    strip_injected_context,
 )
 
 logger = logging.getLogger(__name__)
@@ -137,7 +140,7 @@ class SubagentInfo:
     description: str = ""
     subagent_type: str = ""
     is_async: bool = False
-    # "running" | "completed" | "failed" | "" (unknown)
+    # "running" | "completed" | "failed" | "stopped" | "" (unknown)
     status: str = ""
     # 0-based index of the user turn that dispatched this agent, aligned with
     # the `turn_index` the /messages endpoint stamps on user bubbles. None
@@ -147,9 +150,9 @@ class SubagentInfo:
     # CLI-owned Monitor / background Bash / workflow tasks (no transcript,
     # identified by toolUseResult.taskId).
     kind: str = "agent"
-    # Raw <status> from the CLI's <task-notification> ("stopped" maps to
-    # "completed" in `status`). Kept so the wake prompt can distinguish the
-    # CLI's synthetic "no completion record" case.
+    # Raw <status> from the CLI's <task-notification> (the normalized `status`
+    # keeps a neutral "stopped" terminal state). Kept so the wake prompt can
+    # distinguish the CLI's synthetic "no completion record" case.
     raw_status: str = ""
     # First 200 chars of the dispatch command (Monitor / background Bash), so
     # a wake prompt can name the log or output file to check.
@@ -158,9 +161,11 @@ class SubagentInfo:
 
 @dataclass
 class _NotificationWindow:
+    """One CLI prompt window, which may carry several task completions."""
+
     state: str
-    task_id: str
-    kind: str
+    task_ids: list[str]
+    agent_ids: list[str]
 
 
 @dataclass
@@ -421,12 +426,12 @@ def _text_content(message: object) -> str:
     return ""
 
 
-def _is_countable_user_turn(content: str) -> bool:
-    # User-turn skip rules shared with the /messages renderer
-    # (ciao/web/transcript_service.py) via ciao/cli_envelopes.py: records
-    # matching these never render as user bubbles there, so they must not
-    # advance the turn counter here either or `turn_index` anchoring drifts.
-    text = content.strip()
+def _is_countable_user_turn(
+    content: str, record: object = None, *, compact_flagged: bool = False
+) -> bool:
+    if compact_flagged:
+        return False
+    text = strip_injected_context(content).strip()
     if not text:
         return False
     if is_control_slash_command(text):
@@ -436,6 +441,8 @@ def _is_countable_user_turn(content: str) -> bool:
     if is_interrupted_request_sentinel(text):
         return False
     if is_cli_envelope(text):
+        return False
+    if is_compact_summary(record, text):
         return False
     if is_synthesis_nudge(text):
         return False
@@ -456,13 +463,63 @@ def _normalize_agent_id(agent_id: str) -> str:
     return agent_id.removeprefix("agent-")
 
 
-def _notification_identity(
+def _notification_identities(
     state: SessionSubagentState, content: str
-) -> tuple[str, str]:
-    fields = _notification_fields(content) or {}
-    task_id = _normalize_agent_id(fields.get("task-id", ""))
-    info = state.subagents.get(task_id)
-    return task_id, info.kind if info is not None else "agent"
+) -> list[tuple[str, str]]:
+    """Return every task identity in the leading notification run."""
+    identities: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw_id, _status in envelope_notification_task_statuses(content):
+        task_id = _normalize_agent_id(raw_id)
+        if not task_id or task_id in seen:
+            continue
+        seen.add(task_id)
+        info = state.subagents.get(task_id)
+        identities.append((task_id, info.kind if info is not None else "agent"))
+    return identities
+
+
+def _register_notification_agents(
+    state: SessionSubagentState,
+    identities: list[tuple[str, str]],
+    agent_notification_answers: dict[str, bool],
+    current_agent_ids: set[str],
+    carry_agent_ids: list[str],
+) -> None:
+    """Register every agent covered by a notification for later credit."""
+    for agent_id, kind in identities:
+        if kind != "agent" or not agent_id:
+            continue
+        agent_notification_answers[agent_id] = False
+        if agent_id in carry_agent_ids:
+            carry_agent_ids.remove(agent_id)
+        info = state.subagents.get(agent_id)
+        if info is None or info.is_async:
+            current_agent_ids.add(agent_id)
+
+
+def _notification_window_matches(
+    window: _NotificationWindow, task_ids: list[str]
+) -> bool:
+    return set(window.task_ids) == set(task_ids)
+
+
+def _merge_notification_window(
+    window: _NotificationWindow, task_ids: list[str], agent_ids: list[str]
+) -> None:
+    window.task_ids = list(dict.fromkeys([*window.task_ids, *task_ids]))
+    window.agent_ids = list(dict.fromkeys([*window.agent_ids, *agent_ids]))
+
+
+def _make_notification_window(
+    state: SessionSubagentState, content: str, window_state: str
+) -> tuple[list[tuple[str, str]], _NotificationWindow]:
+    identities = _notification_identities(state, content)
+    task_ids = [task_id for task_id, _kind in identities]
+    agent_ids = [
+        task_id for task_id, kind in identities if kind == "agent"
+    ]
+    return identities, _NotificationWindow(window_state, task_ids, agent_ids)
 
 
 def parse_session_subagents(path: Path) -> SessionSubagentState:
@@ -475,6 +532,8 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
     # The CLI's prompt queue, in order. None is an ordinary prompt; a
     # _NotificationWindow is a completion notification still being processed.
     queue: list[_NotificationWindow | None] = []
+    # A combined notification can cover several agents; keep answer state per
+    # agent so one terminal response can credit the whole cohort.
     agent_notification_answers: dict[str, bool] = {}
     latest_agent_turn: int | None = None
     current_agent_ids: set[str] = set()
@@ -522,22 +581,29 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     continue
                 else:
                     content = record.get("content")
-                    fields = (
-                        _notification_fields(content)
+                    normalized_content = (
+                        strip_injected_context(content)
                         if isinstance(content, str)
+                        else ""
+                    )
+                    fields = (
+                        _notification_fields(normalized_content)
+                        if normalized_content
                         else None
                     )
-                    if isinstance(content, str) and fields is not None:
-                        _apply_notification(state, content)
-                        task_id, kind = _notification_identity(state, content)
-                        queue.append(_NotificationWindow("queued", task_id, kind))
-                        if kind == "agent" and task_id:
-                            agent_notification_answers[task_id] = False
-                            if task_id in carry_agent_ids:
-                                carry_agent_ids.remove(task_id)
-                            info = state.subagents.get(task_id)
-                            if info is None or info.is_async:
-                                current_agent_ids.add(task_id)
+                    if fields is not None:
+                        _apply_notification(state, normalized_content)
+                        identities, window = _make_notification_window(
+                            state, normalized_content, "queued"
+                        )
+                        queue.append(window)
+                        _register_notification_agents(
+                            state,
+                            identities,
+                            agent_notification_answers,
+                            current_agent_ids,
+                            carry_agent_ids,
+                        )
                     else:
                         queue.append(None)
                 continue
@@ -560,16 +626,18 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 if assistant_text.strip():
                     state.last_assistant_text = assistant_text
                 if closed_window is not None:
-                    if closed_window.kind == "agent" and closed_window.task_id:
+                    if closed_window.agent_ids:
                         if terminal_prose:
                             for carry_id in [
                                 *carry_agent_ids,
-                                closed_window.task_id,
+                                *closed_window.agent_ids,
                             ]:
                                 agent_notification_answers[carry_id] = True
                             carry_agent_ids.clear()
-                        elif closed_window.task_id not in carry_agent_ids:
-                            carry_agent_ids.append(closed_window.task_id)
+                        else:
+                            for agent_id in closed_window.agent_ids:
+                                if agent_id not in carry_agent_ids:
+                                    carry_agent_ids.append(agent_id)
                 elif terminal_prose and carry_agent_ids and not any(
                     isinstance(entry, _NotificationWindow) for entry in queue
                 ):
@@ -691,6 +759,7 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 continue
 
             content = _text_content(message)
+            normalized_content = strip_injected_context(content)
             if CLI_TASK_WAKE_PREFIX in content:
                 # Our own dead-CLI wake turn, recorded as the user prompt it
                 # was sent as. The server persists prompts with the
@@ -713,27 +782,35 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                         state.subagents[wake_id] = info
                     info.status = "lost"
                     info.raw_status = "lost"
-            fields = _notification_fields(content)
+            fields = _notification_fields(normalized_content)
             if fields is not None:
-                _apply_notification(state, content)
-                task_id, kind = _notification_identity(state, content)
-                if kind == "agent" and task_id:
-                    agent_notification_answers[task_id] = False
-                    if task_id in carry_agent_ids:
-                        carry_agent_ids.remove(task_id)
-                    info = state.subagents.get(task_id)
-                    if info is None or info.is_async:
-                        current_agent_ids.add(task_id)
+                _apply_notification(state, normalized_content)
+                identities, window = _make_notification_window(
+                    state, normalized_content, "surfaced"
+                )
+                task_ids = window.task_ids
+                agent_ids = window.agent_ids
+                _register_notification_agents(
+                    state,
+                    identities,
+                    agent_notification_answers,
+                    current_agent_ids,
+                    carry_agent_ids,
+                )
                 matched_index: int | None = None
                 for index, entry in enumerate(queue):
                     if (
                         isinstance(entry, _NotificationWindow)
                         and entry.state == "dequeued"
-                        and entry.task_id == task_id
+                        and _notification_window_matches(entry, task_ids)
                     ):
                         matched_index = index
                         break
                 if matched_index is None:
+                    # Older queue records can omit the ids that are present in
+                    # the user record. Keep the previous oldest-dequeued
+                    # fallback, but merge every identity so one response still
+                    # credits the complete combined notification.
                     for index, entry in enumerate(queue):
                         if (
                             isinstance(entry, _NotificationWindow)
@@ -745,10 +822,11 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     matched = queue[matched_index]
                     if isinstance(matched, _NotificationWindow):
                         matched.state = "surfaced"
+                        _merge_notification_window(matched, task_ids, agent_ids)
                 else:
-                    queue.append(_NotificationWindow("surfaced", task_id, kind))
+                    queue.append(window)
                 continue
-            if _is_countable_user_turn(content):
+            if _is_countable_user_turn(normalized_content, record):
                 user_idx += 1
                 carry_agent_ids.clear()
 
@@ -773,29 +851,26 @@ def _tool_result_use_id(message: object) -> str:
 
 
 def _apply_notification(state: SessionSubagentState, content: str) -> None:
-    fields = _notification_fields(content)
-    if not fields:
-        return
-    task_id = _normalize_agent_id(fields.get("task-id", ""))
-    if not task_id:
-        return
-    raw_status = fields.get("status", "") or "completed"
-    status = raw_status
-    if status not in ("completed", "failed"):
-        # The CLI's vocabulary may grow; anything non-failed counts as done
-        # for "is it still running" purposes.
-        status = "failed" if "fail" in status or "error" in status else "completed"
-    info = state.subagents.get(task_id)
-    if info is None:
-        # Notification for an agent we never saw dispatched at parent level
-        # (e.g. an agent spawned by another subagent). Record it so the
-        # transcript endpoint can still attach a status.
-        state.subagents[task_id] = SubagentInfo(
-            agent_id=task_id,
-            is_async=True,
-            status=status,
-            raw_status=raw_status,
-        )
-    else:
-        info.status = status
-        info.raw_status = raw_status
+    """Settle every real task named by the leading notifications."""
+    for raw_id, raw_status in envelope_notification_task_statuses(content):
+        status_key = raw_status.strip().lower()
+        if status_key in {"completed", "success", "succeeded", "done"}:
+            status = "completed"
+        elif "fail" in status_key or "error" in status_key:
+            status = "failed"
+        else:
+            status = "stopped"
+        task_id = _normalize_agent_id(raw_id)
+        if not task_id:
+            continue
+        info = state.subagents.get(task_id)
+        if info is None:
+            state.subagents[task_id] = SubagentInfo(
+                agent_id=task_id,
+                is_async=True,
+                status=status,
+                raw_status=raw_status,
+            )
+        else:
+            info.status = status
+            info.raw_status = raw_status

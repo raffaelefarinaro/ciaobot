@@ -396,6 +396,7 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 
 # Subagent transcripts — one entry per subagent this chat's session ever
 # spawned: {agent_id, messages, description, subagent_type, status, turn_index}.
+# `status` is running, completed, failed, or the neutral terminal stopped state.
 # `messages` shares the /messages shape; both provider renderers omit
 # `timestamp` on these, so a reader must tolerate it being absent. The PWA's
 # read-only subagent view (/chat/{chat_id}/subagent/{agent_id}) reads this.

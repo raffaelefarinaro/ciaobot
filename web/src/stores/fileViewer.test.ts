@@ -125,6 +125,36 @@ describe('file viewer edit mode', () => {
     expect(store.editBuffer).toBe('unsaved draft')
   })
 
+  test('keeps a dirty file open when close is declined and closes after confirmation', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('saved content')))
+    const askConfirmModule = await import('../lib/confirm')
+    const confirmDiscard = vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+    const spy = vi.spyOn(askConfirmModule, 'askConfirm').mockImplementation(confirmDiscard as never)
+
+    try {
+      const store = useFileViewerStore()
+      await store.open('notes/today.txt')
+      store.startEditing()
+      store.editBuffer = 'unsaved draft'
+
+      expect(await store.close()).toBe(false)
+      expect(store.isOpen).toBe(true)
+      expect(store.path).toBe('notes/today.txt')
+      expect(store.editing).toBe(true)
+      expect(store.editBuffer).toBe('unsaved draft')
+
+      expect(await store.close()).toBe(true)
+      expect(store.isOpen).toBe(false)
+      expect(store.path).toBe('')
+      expect(store.editing).toBe(false)
+      expect(confirmDiscard).toHaveBeenCalledTimes(2)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   test('asks before replacing a dirty file', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)

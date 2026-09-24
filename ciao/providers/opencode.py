@@ -3181,7 +3181,10 @@ class OpencodeProvider(BaseSDKProvider):
                 continue
             for item in payload:
                 if isinstance(item, Mapping):
-                    recovered.extend(handler(item))
+                    enriched = dict(item)
+                    if not enriched.get("sessionID"):
+                        enriched["sessionID"] = session_id
+                    recovered.extend(handler(enriched))
         return recovered
 
     def _event_to_stream(self, event: Mapping[str, Any]) -> list[StreamEvent]:
@@ -3417,7 +3420,11 @@ class OpencodeProvider(BaseSDKProvider):
         for index, field in enumerate(fields):
             if not isinstance(field, Mapping):
                 continue
-            question_id = str(field.get("key") or index)
+            question_id = str(
+                field.get("key")
+                if field.get("key") is not None
+                else index
+            )
             field_type = str(field.get("type") or "string")
             options = []
             for option in field.get("options") or []:
@@ -3766,7 +3773,7 @@ class OpencodeProvider(BaseSDKProvider):
         if not request_id or not isinstance(questions, list) or not questions:
             return []
         question_ids = tuple(
-            str(item.get("id") or index)
+            str(item.get("id") if item.get("id") is not None else index)
             for index, item in enumerate(questions)
             if isinstance(item, Mapping)
         )

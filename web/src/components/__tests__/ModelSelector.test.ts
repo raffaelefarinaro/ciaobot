@@ -1,8 +1,16 @@
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ModelSelector, { type ModelSection } from '../ModelSelector.vue'
+
+beforeEach(() => {
+  vi.stubGlobal('IntersectionObserver', class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  })
+})
 
 const SECTIONS: ModelSection[] = [
   { key: 'anthropic', label: 'Anthropic', models: ['haiku', 'sonnet', 'opus'] },
@@ -12,6 +20,7 @@ const SECTIONS: ModelSection[] = [
 
 function mountSelector(props: Record<string, unknown> = {}) {
   return mount(ModelSelector, {
+    attachTo: document.body,
     props: {
       sections: SECTIONS,
       ...props,
@@ -19,62 +28,35 @@ function mountSelector(props: Record<string, unknown> = {}) {
   })
 }
 
-/** Give the host a real rect and the popover a real size, as jsdom reports 0. */
-function stubGeometry(
-  wrapper: ReturnType<typeof mountSelector>,
-  rect: { left: number; right: number; top: number; bottom: number },
-  size: { width: number; height: number },
-) {
-  const host = wrapper.find('.model-selector').element as HTMLElement
-  host.getBoundingClientRect = () => ({
-    ...rect,
-    width: rect.right - rect.left,
-    height: rect.bottom - rect.top,
-    x: rect.left,
-    y: rect.top,
-    toJSON: () => ({}),
-  }) as DOMRect
-  const pop = wrapper.find('.model-selector__popover').element as HTMLElement
-  Object.defineProperty(pop, 'offsetWidth', { value: size.width, configurable: true })
-  Object.defineProperty(pop, 'offsetHeight', { value: size.height, configurable: true })
-}
-
 describe('ModelSelector placement', () => {
-  // The popover used to be absolutely positioned inside the selector, so
-  // `.chat-panel`'s `overflow: hidden` sliced it off at the pane edge in a
-  // split view. It is viewport-positioned now, and clamped so it also cannot
-  // simply hang off-screen instead.
-  it('keeps a menu wider than its pane inside the viewport', async () => {
-    window.innerWidth = 1200
-    window.innerHeight = 800
+  // Reka's Popper owns collision placement. jsdom has no layout engine, so
+  // these tests pin the primitive contract (side/alignment/state) rather than
+  // pretending that a zero-sized DOM node can report a browser coordinate.
+  // The real viewport clamp is exercised by the browser suite and by
+  // `popoverAnchor.test.ts`.
+  it('uses a fixed Reka popover with the requested bottom-end placement', async () => {
     const wrapper = mountSelector({ triggerless: true, placement: 'bottom-end' })
     await flushPromises()
-    // Trigger sits 300px from the left edge; a 400px menu aligned to its right
-    // edge would start at -100.
-    stubGeometry(wrapper, { left: 280, right: 300, top: 40, bottom: 70 }, { width: 400, height: 200 })
-    window.dispatchEvent(new Event('resize'))
-    await nextTick()
 
-    const style = (wrapper.find('.model-selector__popover').element as HTMLElement).style
-    expect(style.position).toBe('')          // comes from the stylesheet
-    expect(parseFloat(style.left)).toBe(8)   // clamped to the viewport margin
-    expect(parseFloat(style.top)).toBe(74)   // just under the trigger
-    expect(wrapper.find('.model-selector__popover').classes())
-      .toContain('model-selector__popover--placed')
+    const popover = wrapper.get('.model-selector__popover')
+    expect(popover.attributes('role')).toBe('dialog')
+    expect(popover.attributes('data-state')).toBe('open')
+    expect(popover.attributes('data-side')).toBe('bottom')
+    expect(popover.attributes('data-align')).toBe('end')
+    expect(popover.classes()).toContain('model-selector__popover--placed')
+    // No app-owned top/left writes can race Reka's fixed Popper transform.
+    expect((popover.element as HTMLElement).style.left).toBe('')
+    expect((popover.element as HTMLElement).style.top).toBe('')
   })
 
-  it('flips above the trigger when there is no room below', async () => {
-    window.innerWidth = 1200
-    window.innerHeight = 800
-    const wrapper = mountSelector({ triggerless: true, placement: 'bottom-end' })
+  it('maps a top-start request to Reka without changing the searchable content', async () => {
+    const wrapper = mountSelector({ triggerless: true, placement: 'top-start' })
     await flushPromises()
-    stubGeometry(wrapper, { left: 600, right: 900, top: 600, bottom: 640 }, { width: 400, height: 300 })
-    window.dispatchEvent(new Event('resize'))
-    await nextTick()
 
-    const style = (wrapper.find('.model-selector__popover').element as HTMLElement).style
-    expect(parseFloat(style.top)).toBe(296)  // 600 - 300 - 4
-    expect(parseFloat(style.left)).toBe(500) // right-aligned: 900 - 400
+    const popover = wrapper.get('.model-selector__popover')
+    expect(popover.attributes('data-side')).toBe('top')
+    expect(popover.attributes('data-align')).toBe('start')
+    expect(wrapper.find('.model-selector__search').exists()).toBe(true)
   })
 })
 
@@ -177,15 +159,49 @@ describe('ModelSelector', () => {
     expect(wrapper.find('.model-selector__empty').exists()).toBe(true)
   })
 
-  it('closes on Escape', async () => {
+  it('dismisses on an outside pointer and returns focus to its trigger', async () => {
+    const wrapper = mountSelector()
+    const trigger = wrapper.get<HTMLButtonElement>('.model-selector__trigger')
+    trigger.element.focus()
+    await trigger.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(true)
+
+    document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
+    await flushPromises()
+
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
+    expect(document.activeElement).toBe(trigger.element)
+  })
+
+  it('supports keyboard navigation and Enter selection without a pointer', async () => {
     const wrapper = mountSelector()
     await wrapper.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    const search = wrapper.get<HTMLInputElement>('.model-selector__search')
+    search.element.focus()
+    await search.trigger('keydown', { key: 'ArrowDown' })
+    const first = wrapper.get<HTMLButtonElement>('.model-selector__item')
+    expect(document.activeElement).toBe(first.element)
+    await first.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    expect(wrapper.emitted('update:modelValue')).toEqual([['haiku']])
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
+  })
+
+  it('closes on Escape and restores the trigger', async () => {
+    const wrapper = mountSelector()
+    const trigger = wrapper.get<HTMLButtonElement>('.model-selector__trigger')
+    await trigger.trigger('click')
     await flushPromises()
 
     await wrapper.find('.model-selector__search').trigger('keydown', { key: 'Escape' })
     await flushPromises()
 
     expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
+    expect(document.activeElement).toBe(trigger.element)
   })
 
   it('renders disabled sections with hint', async () => {

@@ -2438,6 +2438,83 @@ describe('provider-neutral input state', () => {
     }) })
     expect(store.activeQuestions[questionChat]?.[0]?.requestId).toBe('form-retry')
   })
+
+  test('correlates question results by chat and request id', () => {
+    const store = useProjectStore()
+    const first = 'same-request-a'
+    const second = 'same-request-b'
+    store.chats = [first, second].map(chat_id => ({
+      chat_id,
+      project_id: 'p1',
+      title: chat_id,
+      model: 'gpt-test',
+      provider: 'opencode' as const,
+      mode: 'normal',
+      session_id: chat_id,
+      created_at: '',
+      archived: false,
+    }))
+    store.connectWs(first)
+    store.connectWs(second)
+    const firstSocket = fakeSockets[0]
+    const secondSocket = fakeSockets[1]
+    for (const socket of [firstSocket, secondSocket]) {
+      socket.onmessage?.({ data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'AskUserQuestion',
+        request_id: 'reused-request',
+        tool_input: JSON.stringify({ questions: [{ id: 'choice', question: 'Pick?' }] }),
+      }) })
+    }
+
+    expect(store.respondQuestion(first, 'reused-request', { choice: ['a'] })).toBe(true)
+    expect(store.respondQuestion(second, 'reused-request', { choice: ['b'] })).toBe(true)
+    firstSocket.onmessage?.({ data: JSON.stringify({
+      type: 'question_response_result', request_id: 'reused-request', ok: true,
+    }) })
+
+    expect(store.activeQuestions[first]).toBeUndefined()
+    expect(store.activeQuestions[second]?.[0]?.requestId).toBe('reused-request')
+    expect(store.questionSubmissions[second]?.pending).toBe(true)
+  })
+
+  test('queues a native response while the socket is closed and flushes it on open', () => {
+    const store = useProjectStore()
+    const chatId = 'closed-form-chat'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Closed form',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'normal',
+      session_id: 's1',
+      created_at: '',
+      archived: false,
+    }]
+    store.activeQuestions[chatId] = [{
+      id: 'choice',
+      question: 'Pick?',
+      header: '',
+      multiSelect: false,
+      allowOther: true,
+      isSecret: false,
+      requestId: 'form-closed',
+      options: [],
+      type: 'string',
+      required: true,
+    }]
+
+    expect(store.respondQuestion(chatId, 'form-closed', { choice: ['yes'] })).toBe(false)
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+    expect(store.questionSubmissions[chatId]?.queued).toBe(true)
+
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    expect(socket.send).toHaveBeenCalledWith(expect.stringContaining('form-closed'))
+    expect(store.questionSubmissions[chatId]?.queued).toBe(false)
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+  })
 })
 
 describe('image-capability questions', () => {

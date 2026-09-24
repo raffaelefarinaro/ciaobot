@@ -229,6 +229,15 @@ def test_apply_release_files_prepends_existing_changelog(tmp_path: Path) -> None
     assert "## v0.2.0 - 2026-07-01" in changelog
 
 
+def _is_audit_command(command: list[str]) -> bool:
+    if not command:
+        return False
+    executable = Path(command[0]).stem.lower()
+    return executable == "pip-audit" or (
+        executable == "npm" and command[1:2] == ["audit"]
+    )
+
+
 def test_release_gate_blocks_on_types_like_ci_does(monkeypatch, tmp_path: Path) -> None:
     """CI's `test` job blocks on `mypy ciao` and this suite did not, so a type
     error passed every local gate and first surfaced as a red release PR - after
@@ -243,9 +252,29 @@ def test_release_gate_blocks_on_types_like_ci_does(monkeypatch, tmp_path: Path) 
     assert "mypy ciao" in labels
     # CI runs pip-audit, eslint and npm audit with `|| true`, so gating on them
     # here would make a release stricter than the thing it predicts.
-    flat = " ".join(" ".join(c) for c in ran)
-    assert "pip-audit" not in flat
-    assert "audit" not in flat
+    assert not any(_is_audit_command(command) for command in ran)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["/worktrees/release-audit/.venv/bin/pip-audit"],
+        ["/worktrees/release-audit/node/bin/npm", "audit", "--json"],
+    ],
+)
+def test_release_gate_audit_check_matches_exact_invocations(command: list[str]) -> None:
+    assert _is_audit_command(command)
+
+
+def test_release_gate_audit_check_ignores_audit_in_checkout_path() -> None:
+    command = [
+        "/worktrees/release-audit/.venv/bin/python",
+        "-m",
+        "mypy",
+        "ciao",
+    ]
+
+    assert not _is_audit_command(command)
 
 
 def test_built_pwa_check_requires_the_shell(tmp_path: Path) -> None:
