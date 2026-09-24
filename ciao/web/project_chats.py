@@ -3888,7 +3888,10 @@ class ProjectChatManager:
             "vault_root": config.vault_root,
             "proposal_vault_root": proposal_vault_root,
             "guide_path": guide_path,
-            "trajectories_enabled": bool(job.inputs.get("trajectories_enabled", True)),
+            "trajectories_enabled": bool(
+                getattr(config, "trajectories_enabled", True)
+            )
+            and bool(job.inputs.get("trajectories_enabled", True)),
             "memory_proposals_enabled": bool(
                 job.inputs.get("memory_proposals_enabled", True)
             ),
@@ -4154,6 +4157,8 @@ class ProjectChatManager:
                         "memory_proposals",
                     )
                 ]
+            if not getattr(self._config, "trajectories_enabled", True):
+                resumable = [name for name in resumable if name != "trajectory"]
             if not resumable:
                 self._archive_jobs[job.chat_id] = job
                 self._overlay_job_postprocess(job.chat_id, job)

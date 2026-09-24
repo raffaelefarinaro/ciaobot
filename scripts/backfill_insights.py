@@ -106,6 +106,9 @@ def main() -> int:
     app_settings.migrate_legacy_insights_enabled(
         config.legacy_insights_disabled
     )
+    app_settings.migrate_legacy_trajectories_enabled(
+        config.legacy_trajectories_disabled
+    )
     app_settings.apply_to_config(config)
     if not config.insights_enabled and not args.force:
         print("Session insights are disabled in Settings; pass --force to run once.")

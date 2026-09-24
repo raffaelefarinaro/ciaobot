@@ -244,8 +244,13 @@ def opencode_default_model(config: object) -> str:
     return str(getattr(settings, "default_model", "") or "")
 
 
-def resolve_opencode_binary() -> str | None:
-    """Absolute path to the opencode CLI on the login-shell PATH, or None."""
+def resolve_opencode_binary(env: Mapping[str, str] | None = None) -> str | None:
+    """Absolute path to the opencode CLI, or None when it is not installed."""
+    source: Mapping[str, str] = {**os.environ, **env} if env else os.environ
+    explicit = str(source.get("CIAO_OPENCODE_BIN", "")).strip()
+    if explicit:
+        path = Path(explicit).expanduser()
+        return str(path.resolve()) if path.is_file() else None
     return resolve_tool("opencode")
 
 
@@ -889,10 +894,11 @@ class OpencodeProvider(BaseSDKProvider):
                 return self._client
             await self.disconnect()
 
-        binary = resolve_opencode_binary()
+        binary = resolve_opencode_binary(request.extra_env)
         if not binary:
             raise FileNotFoundError(
-                "opencode CLI not found. Install it and make sure it is on your login shell PATH."
+                "opencode CLI not found. Install it, make sure it is on your login shell PATH, "
+                "or set CIAO_OPENCODE_BIN."
             )
 
         lock = _server_start_lock(self.workspace_root)

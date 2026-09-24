@@ -22,9 +22,9 @@ A personal assistant's memory must be, with **zero user configuration**:
    pollutes the store with its own paperwork.
 6. **Legible** — plain markdown the user can read, edit, and diff. User
    correction is the only reliable fix for extraction errors.
-7. **Private by choice** — automatic archive extraction is on by default, but
-   Settings → Automations can stop all automatic model processing; an explicit
-   one-time backfill remains available.
+7. **Private by choice** — automatic archive extraction and trajectory capture
+   are on by default, but Settings → Automations can stop each automatic
+   process; explicit one-time backfill remains available.
 
 ## Architecture: two layers, verbatim long tail
 

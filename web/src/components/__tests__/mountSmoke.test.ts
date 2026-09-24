@@ -20,6 +20,7 @@ vi.mock('../../lib/api', () => {
   let routineSettings = {
     insights_model: '',
     insights_enabled: true,
+    trajectories_enabled: true,
 
     critique_models: '',
     insights_model_effective: 'haiku',

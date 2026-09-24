@@ -157,6 +157,19 @@ describe('SettingsAutomation insights privacy toggle', () => {
     post.mockRestore()
   })
 
+  it('shows and saves the trajectory capture state', async () => {
+    const saveRoutines = vi.fn(() => Promise.resolve())
+    const routines = { trajectories_enabled: true } as RoutineSettings
+    const view = mountPanel({ routines, saveRoutines })
+    const toggles = view.findAll('.insights-toggle')
+
+    expect(toggles).toHaveLength(2)
+    expect(toggles[1].text()).toBe('On')
+    await toggles[1].trigger('click')
+
+    expect(saveRoutines).toHaveBeenCalledWith({ trajectories_enabled: false })
+  })
+
   it('forces the explicit bulk run when automatic insights are off', async () => {
     const post = vi.spyOn(api, 'post').mockResolvedValue({})
     const routines = { insights_enabled: false } as RoutineSettings

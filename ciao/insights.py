@@ -1110,7 +1110,9 @@ async def run_archive_pipeline(
     proposal_vault_root = inputs["proposal_vault_root"]
     guide_path = inputs.get("guide_path")
     trajectory_meta = dict(inputs.get("trajectory_meta") or {})
-    trajectories_enabled = bool(inputs.get("trajectories_enabled", True))
+    trajectories_enabled = bool(inputs.get("trajectories_enabled", True)) and bool(
+        getattr(config, "trajectories_enabled", True)
+    )
     memory_proposals_enabled = bool(inputs.get("memory_proposals_enabled", True))
     project_doc_path = str(inputs.get("project_doc_path") or "")
     text_mode = bool(inputs.get("text_mode", False))

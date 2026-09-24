@@ -593,11 +593,12 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 **Routine settings (Settings → Models / Automations)**
 
 ```bash
-# Read internal-routine settings: the automatic-session-insights switch,
-# insights and critique model overrides, the per-provider default model /
-# thinking / routine-model maps, and the effective models after defaults.
-# insights_enabled=false stops live extraction, automatic resume, and startup
-# backfill; the explicit bulk backfill route can still run with force=true.
+# Read internal-routine settings: the automatic-session-insights and trajectory
+# capture switches, insights and critique model overrides, the per-provider
+# default model / thinking / routine-model maps, and the effective models after
+# defaults. insights_enabled=false stops live extraction, automatic resume, and
+# startup backfill; trajectories_enabled=false stops trajectory records; the
+# explicit bulk backfill route can still run with force=true.
 #
 # insights_model_effective is the PRIMARY workspace's answer only. With no
 # override the insights routine resolves from the chat's own workspace, so
@@ -613,7 +614,7 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # provider_default_models, provider_default_thinking, provider_insights_models.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"insights_enabled":false,"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
+  -d '{"insights_enabled":false,"trajectories_enabled":false,"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
 ```
 
 **Project MCP servers (Settings → MCP tab)**

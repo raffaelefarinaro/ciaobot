@@ -1267,6 +1267,36 @@ def test_startup_resume_defers_insights_while_disabled(tmp_path: Path) -> None:
     assert "## Session insights" not in archive.read_text(encoding="utf-8")
 
 
+def test_startup_resume_defers_trajectory_capture_while_disabled(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+    manager._config.trajectories_enabled = False
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        chat_id=chat.chat_id,
+        trajectories_enabled=True,
+    )
+    job = manager._new_job_for_chat(chat, inputs)
+    for stage in ("insights", "project_doc_update", "memory_proposals"):
+        job.mark(stage, aj.SKIPPED, "not under test")
+    job.save()
+
+    started = asyncio.run(manager.resume_interrupted_jobs(max_concurrency=1))
+
+    assert started == 0
+    reloaded = aj.load_job(manager._runtime_root, job.job_id)
+    assert reloaded is not None
+    assert reloaded.status_of("trajectory") == aj.PENDING
+
+
 def test_startup_resume_blocks_a_missing_archive(tmp_path: Path) -> None:
     """A missing archive settles blocked and is surfaced, not left stale."""
     manager = _manager(tmp_path)

@@ -172,8 +172,9 @@ REGISTRY: tuple[JobSpec, ...] = (
     # they actually execute.
     JobSpec("insights", "Session insights", "content",
             "Extracts durable insights from an archived session transcript.", True, True,
-            trigger="When a chat is archived.",
+            trigger="When a chat is archived and Automatic session insights is on.",
             pipeline_label="When you archive a chat"),
+
     JobSpec("project_doc_update", "Project doc update", "content",
             "Folds a session's decisions and open loops into the project document.",
             True, True,
@@ -182,12 +183,13 @@ REGISTRY: tuple[JobSpec, ...] = (
             step_condition="if the chat belongs to a real project"),
     JobSpec("trajectory", "Trajectory capture", "content",
             "Records a structured trajectory of the session for skill mining.", False, True,
-            trigger="When a chat is archived. Feeds Skill reflection.",
+            trigger="When a chat is archived and Automatic trajectory capture is on.",
             step_of="insights",
             # Runs in a `finally`, so a failed extraction still leaves a
             # trajectory; and `run_archive_postprocess` writes one directly
-            # when insights is off or the chat is under the size gate.
-            step_condition="always — also runs standalone"),
+            # when trajectory capture is enabled and insights is off, or when
+            # the chat is under the size gate.
+            step_condition="when enabled — also runs standalone"),
     JobSpec("memory_proposals", "Memory proposals", "content",
             "Proposes durable facts from a session's insights.", False, True,
             trigger=(

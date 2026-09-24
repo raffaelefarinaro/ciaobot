@@ -511,6 +511,7 @@ class CiaoConfig:
     legacy_workspaces_env: str = field(default="", repr=False)
     legacy_gws_profile: str = field(default="", repr=False)
     legacy_insights_disabled: bool | None = field(default=None, repr=False)
+    legacy_trajectories_disabled: bool | None = field(default=None, repr=False)
     claude_mode: BridgeMode = "auto"
     # Per-provider default execution (permission) mode for new chats, set from
     # the PWA Settings → Models & providers tab (runtime settings store). A missing
@@ -547,7 +548,9 @@ class CiaoConfig:
     # Trajectory capture: when a chat is archived, also write a structured
     # JSON record of skills loaded, tools used, errors, decisions, and the
     # outcome to ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``. The
-    # weekly ``ciao.skill_evolution`` pass mines this directory.
+    # weekly ``ciao.skill_evolution`` pass mines this directory. The operator
+    # setting is persisted by AppSettingsStore and migrated from the retired
+    # CIAO_TRAJECTORIES_DISABLED value.
     trajectories_enabled: bool = True
 
     # Comma-separated list of models for the adversarial_review MCP tool.
@@ -1702,6 +1705,14 @@ class CiaoConfig:
             if not legacy_insights_raw
             else legacy_insights_raw not in {"0", "false", "no", "off"}
         )
+        legacy_trajectories_raw = str(
+            source.get("CIAO_TRAJECTORIES_DISABLED", "") or ""
+        ).strip().lower()
+        legacy_trajectories_disabled = (
+            None
+            if not legacy_trajectories_raw
+            else legacy_trajectories_raw not in {"0", "false", "no", "off"}
+        )
 
         return cls(
             pwa_auth_token=pwa_auth_token,
@@ -1721,6 +1732,7 @@ class CiaoConfig:
             legacy_workspaces_env=str(source.get("CIAO_WORKSPACES", "") or "").strip(),
             legacy_gws_profile=str(source.get("GWS_PROFILE", "") or "").strip(),
             legacy_insights_disabled=legacy_insights_disabled,
+            legacy_trajectories_disabled=legacy_trajectories_disabled,
         )
 
 

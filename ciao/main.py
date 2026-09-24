@@ -339,6 +339,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app_settings.migrate_legacy_insights_enabled(
         getattr(config, "legacy_insights_disabled", None)
     )
+    app_settings.migrate_legacy_trajectories_enabled(
+        getattr(config, "legacy_trajectories_disabled", None)
+    )
     app_settings.apply_to_config(config)
 
     # Pin the job-run recorder to the same .runtime the config uses, then

@@ -57,6 +57,7 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     # Automatic resolves to the workspace's default model.
     assert data["insights_model_effective"] == config.claude_default_model
     assert data["insights_enabled"] is True
+    assert data["trajectories_enabled"] is True
     # The Claude model list is the vocabulary the selectors offer.
     assert data["model_options"]["anthropic"] == ["opus", "sonnet", "haiku", "fable"]
     assert data["backends"] == {"anthropic": True}
@@ -138,6 +139,29 @@ def test_patch_rejects_non_boolean_insights_enabled(tmp_path):
     resp = client.patch(
         "/api/settings/routines",
         json={"insights_enabled": "false"},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_toggles_trajectories_enabled(tmp_path):
+    client, config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"trajectories_enabled": False},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["trajectories_enabled"] is False
+    assert config.trajectories_enabled is False
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.settings.trajectories_enabled is False
+
+
+def test_patch_rejects_non_boolean_trajectories_enabled(tmp_path):
+    client, _config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"trajectories_enabled": "false"},
     )
     assert resp.status_code == 400
 

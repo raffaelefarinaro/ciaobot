@@ -4833,6 +4833,7 @@ def _routines_payload(config, app_settings) -> dict:
         # Overrides as stored ("" = automatic default).
         "insights_model": s.insights_model,
         "insights_enabled": config.insights_enabled,
+        "trajectories_enabled": config.trajectories_enabled,
 
         "critique_models": s.critique_models,
         # Per-provider default model for new chats, as stored (missing =

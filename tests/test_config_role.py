@@ -51,6 +51,14 @@ def test_legacy_insights_opt_out_is_captured_for_settings_migration(
     )
     assert enabled.legacy_insights_disabled is False
 
+    trajectories = _config(
+        CIAO_WORKSPACE=str(tmp_path),
+        CIAO_RUNTIME_ROOT=str(tmp_path / ".runtime"),
+        CIAO_TRAJECTORIES_DISABLED="true",
+    )
+    assert trajectories.trajectories_enabled is True
+    assert trajectories.legacy_trajectories_disabled is True
+
 
 def test_vault_root_defaults_under_workspace_root(tmp_path: Path) -> None:
     config = _config(CIAO_WORKSPACE=str(tmp_path))

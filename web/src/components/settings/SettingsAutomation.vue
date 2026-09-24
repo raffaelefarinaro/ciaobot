@@ -8,8 +8,8 @@
         </div>
         <p class="hint">
           Work Ciaobot does on its own: naming chats, extracting insights when a chat is
-          archived, keeping the vault and skills in order. Each row says when it runs and
-          what happened last time. Rows that run several steps on one trigger list those
+          archived, capturing trajectories when enabled, keeping the vault and skills in order. Each row says when it runs
+          and what happened last time. Rows that run several steps on one trigger list those
           steps in the order they execute.
         </p>
       </div>
@@ -31,6 +31,25 @@
         @click="toggleInsights"
       >
         {{ insightsEnabled ? 'On' : 'Off' }}
+      </button>
+    </div>
+
+    <div v-if="routines" class="insights-control">
+      <div class="insights-control-copy">
+        <span class="insights-control-title">Automatic trajectory capture</span>
+        <span class="hint">
+          Off stops writing structured trajectory records for archived chats.
+        </span>
+      </div>
+      <button
+        class="btn-small insights-toggle"
+        type="button"
+        :aria-pressed="trajectoriesEnabled"
+        :aria-label="`Toggle automatic trajectory capture (currently ${trajectoriesEnabled ? 'on' : 'off'})`"
+        :disabled="routinesSaving"
+        @click="toggleTrajectories"
+      >
+        {{ trajectoriesEnabled ? 'On' : 'Off' }}
       </button>
     </div>
 
@@ -201,9 +220,16 @@ const configuredInsightsModel = computed(
   () => props.routines?.insights_model_effective || '',
 )
 const insightsEnabled = computed(() => props.routines?.insights_enabled === true)
+const trajectoriesEnabled = computed(
+  () => props.routines?.trajectories_enabled === true,
+)
 
 async function toggleInsights() {
   await props.saveRoutines({ insights_enabled: !insightsEnabled.value })
+}
+
+async function toggleTrajectories() {
+  await props.saveRoutines({ trajectories_enabled: !trajectoriesEnabled.value })
 }
 
 const expandedAutomations = ref<Record<string, boolean>>({})

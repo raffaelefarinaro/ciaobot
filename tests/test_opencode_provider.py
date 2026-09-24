@@ -53,6 +53,21 @@ def _provider(tmp_path: Path) -> OpencodeProvider:
     return OpencodeProvider(tmp_path)
 
 
+def test_resolve_opencode_binary_honors_exported_path(tmp_path, monkeypatch):
+    binary = tmp_path / "opencode"
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("CIAO_OPENCODE_BIN", str(binary))
+
+    assert resolve_opencode_binary({"OPENCODE_CONFIG": "/x"}) == str(binary.resolve())
+    assert resolve_opencode_binary() == str(binary.resolve())
+
+    request_binary = tmp_path / "opencode-request"
+    request_binary.write_text("#!/bin/sh\n")
+    assert resolve_opencode_binary(
+        {"CIAO_OPENCODE_BIN": str(request_binary)}
+    ) == str(request_binary.resolve())
+
+
 # ── capabilities ────────────────────────────────────────────────────────
 
 
