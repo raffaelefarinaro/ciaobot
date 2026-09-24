@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 # ── Bundled harness skills Ciaobot replaces ──────────────────────────────
 # The CLI ships a bundle of skills and workflows. Some expose surfaces that
 # bypass Ciaobot entirely (cloud routines, harness cron loops, design-system
@@ -131,21 +133,53 @@ CREDENTIAL_DENY_PATTERNS: tuple[str, ...] = (
 )
 
 
-def _runtime_root_patterns(runtime_root: object) -> tuple[str, ...]:
-    """Absolute deny patterns for a resolved, non-default runtime root.
+def _runtime_root_patterns(
+    runtime_root: object,
+    workspace_root: object = None,
+) -> tuple[str, ...]:
+    """Return absolute and, when known, V2-relative runtime deny patterns.
 
     ``CIAO_RUNTIME_ROOT`` can put ``state.json`` and the chat/project/schedule
     stores anywhere, including outside the workspace tree, where no
     ``**/.runtime/**`` pattern reaches them. A caller that has resolved the
     real root hands it over and gets a pattern that matches it exactly, so the
     guarantee stops depending on the directory being *named* ``.runtime``.
+    OpenCode 2 represents internal resources relative to the session location,
+    so a root inside the workspace also needs the corresponding relative
+    spellings; absolute rules alone do not match those resources.
     """
     if not runtime_root:
         return ()
     root = str(runtime_root).rstrip("/")
     if not root:
         return ()
-    return (root, f"{root}/**")
+    patterns = [root, f"{root}/**"]
+    if not workspace_root:
+        return tuple(patterns)
+
+    try:
+        root_path = Path(root).expanduser()
+        resolved_root = root_path.resolve()
+        workspace_path = Path(str(workspace_root)).expanduser().resolve()
+        candidates = (root_path, resolved_root)
+    except (OSError, RuntimeError, ValueError):
+        return tuple(patterns)
+
+    relative_patterns: list[str] = []
+    for candidate in candidates:
+        try:
+            relative = candidate.relative_to(workspace_path).as_posix()
+        except ValueError:
+            continue
+        if relative in {"", "."}:
+            # If the runtime root is the session location itself, fail closed
+            # for every internal resource rather than leave a spelling gap.
+            relative_patterns.extend((".", "**"))
+        else:
+            relative_patterns.extend((relative, f"{relative}/**"))
+    if relative_patterns:
+        patterns.extend(relative_patterns)
+    return tuple(dict.fromkeys(patterns))
 
 # Claude's native file tools, as ``disallowed_tools`` names them. ``Glob`` and
 # ``Grep`` are included so the paths do not leak through a listing either.
@@ -191,14 +225,21 @@ def credential_path_deny_rules(runtime_root: object = None) -> tuple[str, ...]:
     )
 
 
-def opencode_credential_deny_rules(runtime_root: object = None) -> list[dict[str, str]]:
-    """The same denies as opencode session permission rules.
+def opencode_credential_deny_rules(
+    runtime_root: object = None,
+    workspace_root: object = None,
+) -> list[dict[str, str]]:
+    """The same denies as OpenCode session permission rules.
 
-    Appended last by ``ciao.providers.opencode.mode_settings``: opencode
+    Appended last by ``ciao.providers.opencode.mode_settings``: OpenCode
     resolves rules last-match-wins, so placed first the wildcard ``allow`` in
-    ``auto``/``bypass`` would override them.
+    ``auto``/``bypass`` would override them. ``workspace_root`` enables the
+    location-relative aliases required by OpenCode 2's internal resources.
     """
-    patterns = (*CREDENTIAL_DENY_PATTERNS, *_runtime_root_patterns(runtime_root))
+    patterns = (
+        *CREDENTIAL_DENY_PATTERNS,
+        *_runtime_root_patterns(runtime_root, workspace_root),
+    )
     return [
         {"action": action, "resource": resource, "effect": "deny"}
         for action in OPENCODE_CREDENTIAL_DENY_PERMISSIONS

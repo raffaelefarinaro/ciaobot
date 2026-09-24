@@ -580,6 +580,7 @@ def mode_settings(
     *,
     tools_enabled: bool = True,
     runtime_root: object = None,
+    workspace_root: object = None,
 ) -> tuple[str, list[dict[str, str]]]:
     """Map a Ciaobot mode onto an opencode (agent, permission ruleset).
 
@@ -589,7 +590,8 @@ def mode_settings(
 
     ``runtime_root`` is the resolved runtime directory, when the caller can
     reach it, so the credential denies cover a relocated
-    ``CIAO_RUNTIME_ROOT`` and not only the default ``.runtime`` name.
+    ``CIAO_RUNTIME_ROOT`` and not only the default ``.runtime`` name. When a
+    workspace location is known, relative V2 aliases are included as well.
 
     Since S6 every chat is on the CLI surface. Auto mode does not pre-approve
     any ``ciao …`` argv prefix: an allow rule is a prefix a shell suffix
@@ -609,7 +611,7 @@ def mode_settings(
     # Last, and for every mode including `bypass`: resolution is
     # last-match-wins, and this is the one carve-out no mode may buy its way
     # out of. See `opencode_credential_deny_rules`.
-    rules.extend(opencode_credential_deny_rules(runtime_root))
+    rules.extend(opencode_credential_deny_rules(runtime_root, workspace_root))
     return _MODE_AGENTS[key], rules
 
 
@@ -692,12 +694,12 @@ def _data(payload: object) -> object:
     return payload
 
 
-def _legacy_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Project one flat V2 message into the provider's historical part shape.
+def _projected_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Project one flat V2 message into the provider's internal part shape.
 
-    Keeping the V1-shaped ``{info, parts}`` representation inside this module
+    Keeping the stable ``{info, parts}`` representation inside this module
     means transcript rendering, session handovers, and subagent lifecycle code
-    stay small while the wire adapter owns the V2 schema change.
+    stay small while the wire adapter owns the V2 schema.
     """
     message_type = str(message.get("type") or "")
     if message_type == "user":
@@ -800,7 +802,7 @@ async def _read_v2_messages(
         for message in page:
             if not isinstance(message, Mapping):
                 continue
-            normalized = _legacy_message(message)
+            normalized = _projected_message(message)
             if normalized is not None:
                 messages.append(normalized)
         cursor_body = body.get("cursor") if isinstance(body, Mapping) else None
@@ -1264,6 +1266,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._answer_parts.clear()
         self._effective_model = ""
         self._turn_recovered_via_poll = False
+        self._poll_idle_outcome: str = ""
         self._poll_error: str = ""
         self._stop_requested = None
 
@@ -1641,6 +1644,7 @@ class OpencodeProvider(BaseSDKProvider):
             request.mode,
             tools_enabled=self._tools_enabled,
             runtime_root=self._runtime_root(),
+            workspace_root=self.workspace_root,
         )
         provider_id, model_id = split_model(request.model)
         if model_id and not provider_id:
@@ -1834,9 +1838,13 @@ class OpencodeProvider(BaseSDKProvider):
 
     # ------------------------------------------------------------ permissions
 
-    def tool_use_id_for_request(self, request_id: str) -> str:
+    def tool_use_id_for_request(
+        self, request_id: str, session_id: str = ""
+    ) -> str:
         pending = self._permission_requests.get(request_id)
-        return pending.tool_use_id if pending is not None else ""
+        if pending is None or (session_id and pending.session_id != session_id):
+            return ""
+        return pending.tool_use_id
 
     async def _reply_permission(
         self, pending: _PendingRequest, reply: str, message: str = ""
@@ -1866,9 +1874,18 @@ class OpencodeProvider(BaseSDKProvider):
         )
 
     async def send_permission_response(
-        self, request_id: str, approved: bool, message: str = ""
+        self,
+        request_id: str,
+        approved: bool,
+        message: str = "",
+        *,
+        session_id: str = "",
     ) -> QuestionResponseResult:
         pending = self._permission_requests.get(request_id)
+        if pending is not None and session_id and pending.session_id != session_id:
+            return QuestionResponseResult(
+                False, "Permission request belongs to another session", False
+            )
         if pending is None or self._client is None:
             return QuestionResponseResult(False, "Permission request is no longer active", False)
         result = await self._reply_permission(
@@ -1929,6 +1946,7 @@ class OpencodeProvider(BaseSDKProvider):
         answers: Mapping[str, Sequence[str]],
         *,
         cancel: bool = False,
+        session_id: str = "",
     ) -> QuestionResponseResult:
         """Reply to or explicitly cancel a V2 form.
 
@@ -1937,6 +1955,10 @@ class OpencodeProvider(BaseSDKProvider):
         so the caller can keep the card retryable when V2 rejects it.
         """
         pending = self._question_requests.get(request_id)
+        if pending is not None and session_id and pending.session_id != session_id:
+            return QuestionResponseResult(
+                False, "Question request belongs to another session", False
+            )
         if pending is None:
             # A duplicate reply after the SSE form.replied/cancelled event is
             # idempotently successful; there is nothing left to mutate.
@@ -1970,7 +1992,13 @@ class OpencodeProvider(BaseSDKProvider):
         self._answer_parts.setdefault(part_id, []).append(text)
 
     def _turn_scope(self, messages: list[Any]) -> list[Mapping[str, Any]]:
-        """Return rows projected after this turn's user row."""
+        """Return this turn's projected rows through its first idle boundary.
+
+        V2 can append another user/assistant turn to the same session while a
+        recovery poll is in flight. The first idle message after our admitted
+        user row is the authoritative end of this execution; everything after
+        it belongs to a later turn and must not leak into the current result.
+        """
         anchor = -1
         for index, message in enumerate(messages):
             if not isinstance(message, Mapping):
@@ -1986,7 +2014,15 @@ class OpencodeProvider(BaseSDKProvider):
             anchor = index
         if self._user_message_id and anchor < 0:
             return []
-        return [message for message in messages[anchor + 1:] if isinstance(message, Mapping)]
+        scoped: list[Mapping[str, Any]] = []
+        for message in messages[anchor + 1:]:
+            if not isinstance(message, Mapping):
+                continue
+            scoped.append(message)
+            info = message.get("info")
+            if isinstance(info, Mapping) and info.get("type") == "idle":
+                break
+        return scoped
 
     def _turn_messages(self, messages: list[Any]) -> list[Mapping[str, Any]]:
         """Return assistant messages projected after this turn's user row."""
@@ -2018,8 +2054,15 @@ class OpencodeProvider(BaseSDKProvider):
         for message in self._turn_scope(messages):
             info = message.get("info")
             if isinstance(info, Mapping) and info.get("type") == "idle":
-                if info.get("outcome") == "failed":
+                outcome = str(info.get("outcome") or "")
+                if outcome in {"succeeded", "failed", "interrupted"}:
+                    self._poll_idle_outcome = outcome
+                if outcome == "failed":
                     self._poll_error = self._poll_error or "OpenCode execution failed"
+                elif outcome == "interrupted":
+                    self._poll_error = (
+                        self._poll_error or "OpenCode execution was interrupted"
+                    )
         for message in self._turn_messages(messages):
             info = message.get("info")
             if not isinstance(info, Mapping):
@@ -2087,21 +2130,31 @@ class OpencodeProvider(BaseSDKProvider):
                     and str(message["info"].get("id") or "") == self._user_message_id
                     for message in messages
                 )
+                if user_seen:
+                    self._session_handover_context = ""
                 running = self._turn_has_running_tools(messages)
-                idle_failed = any(
-                    isinstance(message.get("info"), Mapping)
-                    and message["info"].get("type") == "idle"
-                    and message["info"].get("outcome") == "failed"
-                    for message in self._turn_scope(messages)
+                idle_outcome = next(
+                    (
+                        str(message["info"].get("outcome") or "")
+                        for message in reversed(self._turn_scope(messages))
+                        if isinstance(message.get("info"), Mapping)
+                        and message["info"].get("type") == "idle"
+                        and str(message["info"].get("outcome") or "")
+                        in {"succeeded", "failed", "interrupted"}
+                    ),
+                    "",
                 )
                 quiesced = (
                     user_seen
                     and not running
-                    and active_ids is not None
-                    and session_id not in active_ids
                     and (
-                        (bool(current) and current == signature)
-                        or idle_failed
+                        idle_outcome in {"succeeded", "failed", "interrupted"}
+                        or (
+                            active_ids is not None
+                            and session_id not in active_ids
+                            and bool(current)
+                            and current == signature
+                        )
                     )
                 )
                 signature = current or signature
@@ -2113,6 +2166,10 @@ class OpencodeProvider(BaseSDKProvider):
                     self._turn_recovered_via_poll = True
                     return
             if time.monotonic() >= deadline:
+                self._poll_error = (
+                    self._poll_error
+                    or "OpenCode turn recovery timed out before a terminal result"
+                )
                 return
             await asyncio.sleep(_OPENCODE_RECOVERY_POLL_S)
 
@@ -2429,7 +2486,8 @@ class OpencodeProvider(BaseSDKProvider):
         session_id = str(props.get("sessionID") or "")
         if not request_id or not session_id:
             return []
-        if request_id in self._permission_requests:
+        existing = self._permission_requests.get(request_id)
+        if existing is not None and existing.session_id == session_id:
             return []
         action = str(props.get("action") or "tool").strip()
         detail = str(props.get("message") or "").strip()
@@ -2480,6 +2538,7 @@ class OpencodeProvider(BaseSDKProvider):
             tool_name=label,
             tool_input=detail[:400],
             request_id=request_id,
+            session_id=session_id,
         )]
 
     def _question_event(self, form: Mapping[str, Any]) -> list[StreamEvent]:
@@ -2489,7 +2548,8 @@ class OpencodeProvider(BaseSDKProvider):
         fields = form.get("fields")
         if not request_id or not session_id or not isinstance(fields, list):
             return []
-        if request_id in self._question_requests:
+        existing = self._question_requests.get(request_id)
+        if existing is not None and existing.session_id == session_id:
             return []
         visible = [
             item for item in fields
@@ -2562,6 +2622,7 @@ class OpencodeProvider(BaseSDKProvider):
             tool_input=json.dumps({"questions": questions}, ensure_ascii=False),
             tool_use_id=request_id,
             request_id=request_id,
+            session_id=session_id,
         )]
 
     async def _resolve_model(
@@ -2622,7 +2683,12 @@ class OpencodeProvider(BaseSDKProvider):
         system = compose_system(instructions, runtime)
         if self._session_handover_context:
             system = compose_system(system, self._session_handover_context)
-        body = self._prompt_body(request, system=system)
+        message_id = f"msg_{secrets.token_hex(12)}"
+        body = {**self._prompt_body(request, system=system), "id": message_id}
+        # Anchor recovery to our own id before the request leaves the process.
+        # V2 reconciles duplicate prompt ids, so a retry after an ambiguous
+        # transport failure cannot create a second execution.
+        self._user_message_id = message_id
 
         error: str = ""
         saw_output = False
@@ -2633,19 +2699,23 @@ class OpencodeProvider(BaseSDKProvider):
         # hold, poll the message list until output quiesces and replay settled
         # parts through the same accumulator (its `_emitted` bookkeeping makes
         # the replay idempotent). Mirrors conduit's poll-backstop design.
+        prompt_attempted = False
         prompt_accepted = False
         prompt_rejected = False
+        prompt_receipt_error = ""
         terminal_seen = False
 
         async def _pump_once() -> AsyncGenerator[StreamEvent, None]:
             """One SSE subscription, pumped until idle or premature close."""
-            nonlocal prompt_accepted, prompt_rejected, error, saw_output, terminal_seen
+            nonlocal prompt_attempted, prompt_accepted, prompt_rejected
+            nonlocal prompt_receipt_error, error, saw_output, terminal_seen
             async with client.stream("GET", "/api/event") as stream:
                 stream.raise_for_status()
                 # Subscribe before prompting: opencode starts emitting as soon
                 # as the prompt is accepted, and a late subscriber loses the
                 # opening deltas.
                 if not prompt_accepted:
+                    prompt_attempted = True
                     response = await client.post(
                         f"/api/session/{session_id}/prompt", json=body
                     )
@@ -2657,11 +2727,21 @@ class OpencodeProvider(BaseSDKProvider):
                     try:
                         admitted = _data(response.json())
                     except (TypeError, ValueError) as exc:
-                        prompt_rejected = True
-                        error = error or f"OpenCode returned an invalid prompt receipt: {exc}"
+                        prompt_receipt_error = (
+                            f"OpenCode returned an invalid prompt receipt: {exc}"
+                        )
                         return
-                    if isinstance(admitted, Mapping):
-                        self._user_message_id = str(admitted.get("id") or "")
+                    admitted_id = (
+                        str(admitted.get("id") or "")
+                        if isinstance(admitted, Mapping)
+                        else ""
+                    )
+                    if admitted_id != message_id:
+                        prompt_receipt_error = (
+                            "OpenCode returned an invalid prompt receipt: "
+                            f"expected message id {message_id}"
+                        )
+                        return
                     # Once accepted, the replacement session owns the handover.
                     self._session_handover_context = ""
                     prompt_accepted = True
@@ -2726,8 +2806,9 @@ class OpencodeProvider(BaseSDKProvider):
                     async for converted in _pump_once():
                         yield converted
                 except httpx.HTTPError as exc:
-                    if not prompt_accepted:
-                        # The turn never started; nothing to recover.
+                    if not prompt_attempted:
+                        # The event subscription failed before a prompt could be
+                        # admitted; there is no ambiguous server-side work.
                         yield ResultEvent(
                             type="result",
                             result=f"OpenCode connection failed: {exc}",
@@ -2735,6 +2816,8 @@ class OpencodeProvider(BaseSDKProvider):
                             is_error=True,
                         )
                         return
+                    # A prompt POST may have committed before its response was
+                    # lost. Retry the same V2 message id, then reconcile by id.
                 if prompt_rejected or terminal_seen:
                     break
                 if self._stop_requested == session_id:
@@ -2748,7 +2831,7 @@ class OpencodeProvider(BaseSDKProvider):
             degraded_final = False
             if (
                 not terminal_seen
-                and prompt_accepted
+                and prompt_attempted
                 and not prompt_rejected
                 and self._stop_requested != session_id
             ):
@@ -2763,6 +2846,8 @@ class OpencodeProvider(BaseSDKProvider):
                     yield converted
                 degraded_final = not self._turn_recovered_via_poll
                 error = error or self._poll_error
+                if not self._turn_recovered_via_poll:
+                    error = error or prompt_receipt_error
         finally:
             register_handle(None)
 

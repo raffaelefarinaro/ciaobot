@@ -458,6 +458,8 @@ def event_to_json(event: StreamEvent) -> dict | None:
             payload["parent_tool_use_id"] = event.parent_tool_use_id
         if event.request_id:
             payload["request_id"] = event.request_id
+        if event.session_id:
+            payload["session_id"] = event.session_id
         touches: list[dict] = []
         if event.file_touches:
             touches = [
@@ -501,13 +503,16 @@ def event_to_json(event: StreamEvent) -> dict | None:
             payload["quota"] = event.quota
         return payload
     if isinstance(event, PermissionRequestEvent):
-        return {
+        payload = {
             "type": "permission_request",
             "tool_name": event.tool_name,
             "tool_input": event.tool_input,
             "message": event.message,
             "request_id": event.request_id,
         }
+        if event.session_id:
+            payload["session_id"] = event.session_id
+        return payload
     if isinstance(event, ModelCapabilityQuestionEvent):
         return {
             "type": "model_capability_question",
@@ -665,6 +670,14 @@ class ChatStream:
             except asyncio.QueueFull:
                 logger.warning("Chat stream subscriber queue full, dropping event")
 
+    def publish_live(self, payload: dict) -> None:
+        """Fan out an ephemeral control event without adding it to replay."""
+        for queue in list(self._subs):
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                logger.warning("Chat stream subscriber queue full, dropping event")
+
     def deny_tool_use(self, tool_use_id: str) -> None:
         """Retract the file card for a tool call that was refused.
 
@@ -683,7 +696,7 @@ class ChatStream:
                 ev.pop("file_touches", None)
         self.publish({"type": "tool_denied", "tool_use_id": tool_use_id})
 
-    def resolve_permission(self, request_id: str) -> bool:
+    def resolve_permission(self, request_id: str, session_id: str = "") -> bool:
         """Drop a previously-published ``permission_request`` from replay.
 
         Subscribers that connect after a permission has been answered
@@ -704,13 +717,18 @@ class ChatStream:
             if not (
                 ev.get("type") == "permission_request"
                 and ev.get("request_id") == request_id
+                and (not session_id or ev.get("session_id") == session_id)
             )
         ]
         removed = len(self._events) < before
-        self.publish({"type": "permission_resolved", "request_id": request_id})
+        self.publish_live({
+            "type": "permission_resolved",
+            "request_id": request_id,
+            "session_id": session_id,
+        })
         return removed
 
-    def resolve_question(self, request_id: str) -> bool:
+    def resolve_question(self, request_id: str, session_id: str = "") -> bool:
         """Remove a resolved native question from replay and notify clients."""
         if not request_id:
             return False
@@ -722,10 +740,15 @@ class ChatStream:
                 ev.get("type") == "tool_use"
                 and ev.get("tool_name") == "AskUserQuestion"
                 and ev.get("request_id") == request_id
+                and (not session_id or ev.get("session_id") == session_id)
             )
         ]
         removed = len(self._events) < before
-        self.publish({"type": "question_resolved", "request_id": request_id})
+        self.publish_live({
+            "type": "question_resolved",
+            "request_id": request_id,
+            "session_id": session_id,
+        })
         return removed
 
     def open_capability(self, request_id: str) -> bool:

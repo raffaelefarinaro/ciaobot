@@ -384,6 +384,7 @@ export type WsEvent =
       tool_use_id?: string;
       parent_tool_use_id?: string;
       request_id?: string;
+      session_id?: string;
       // Set by the backend when the tool mutates a file on disk. The PWA
       // renders this as a standalone inline preview card instead of folding
       // it into the generic _activity row. Path may be workspace-relative
@@ -403,15 +404,16 @@ export type WsEvent =
   // never carries it. The partial text still renders, but the turn is not an
   // answer, so it must not raise an unread badge on a backgrounded tab.
   | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; stopped?: boolean; fallback_final?: boolean; sent_at?: string; completed_at?: string; duration_ms?: number }
-  | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
+  | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string; session_id?: string }
   | {
       type: 'permission_response_result';
       request_id: string;
+      session_id?: string;
       ok: boolean;
       error?: string;
       retryable?: boolean;
     }
-  | { type: 'permission_resolved'; request_id: string }
+  | { type: 'permission_resolved'; request_id: string; session_id?: string }
   // The selected model cannot see the attached images; the engine asks the
   // user to pick a vision-capable model before dispatching. Answered via a
   // `capability_response` client message (action switch | picker | cancel).
@@ -437,12 +439,13 @@ export type WsEvent =
   | {
       type: 'question_response_result';
       request_id: string;
+      session_id?: string;
       ok: boolean;
-      state: 'answered' | 'cancelled';
+      state: 'answered' | 'cancelled' | 'rejected';
       error?: string;
       retryable?: boolean;
     }
-  | { type: 'question_resolved'; request_id: string }
+  | { type: 'question_resolved'; request_id: string; session_id?: string }
   | { type: 'queued'; id?: string; text: string; images?: string[] }
   | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[] }> }
   | { type: 'error'; message: string }
@@ -531,6 +534,7 @@ export interface InAppToast {
 // at which point the client sends a `permission_response` on the chat WS.
 export interface PendingPermission {
   request_id: string
+  session_id?: string
   tool_name: string
   tool_input: string
   message: string

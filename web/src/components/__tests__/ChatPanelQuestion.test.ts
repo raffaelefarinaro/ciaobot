@@ -68,6 +68,7 @@ type QuestionSeed = {
   multiSelect?: boolean
   allowOther?: boolean
   requestId?: string
+  sessionId?: string
   options?: Array<{ label: string; value?: string; description?: string }>
 }
 
@@ -80,6 +81,7 @@ function makeQuestion(seed: QuestionSeed = {}) {
     allowOther: seed.allowOther ?? true,
     isSecret: false,
     requestId: seed.requestId ?? '',
+    sessionId: seed.sessionId || undefined,
     options: seed.options ?? [
       { label: 'Refactor first', description: 'clean up before adding' },
       { label: 'Ship the feature', description: '' },
@@ -181,6 +183,31 @@ describe('AskUserQuestion keyboard shortcuts', () => {
     wrapper.unmount()
   })
 
+  test('shows V2 validation only after a field has been touched', async () => {
+    const question = {
+      ...makeQuestion({ requestId: 'form-1' }),
+      required: true,
+      minLength: 3,
+    }
+    const { wrapper } = await mountLayout({ questions: [question] })
+    const other = wrapper.find('input.question-other')
+
+    expect(wrapper.find('.question-validation').exists()).toBe(false)
+    expect(wrapper.find('.question-card-actions .primary').attributes('disabled')).toBeDefined()
+
+    await other.trigger('blur')
+    expect(wrapper.find('.question-validation').text()).toContain('required')
+
+    await other.setValue('a')
+    expect(wrapper.find('.question-validation').text()).toContain('at least 3')
+
+    await other.setValue('abc')
+    expect(wrapper.find('.question-validation').exists()).toBe(false)
+    expect(wrapper.find('.question-card-actions .primary').attributes('disabled')).toBeUndefined()
+
+    wrapper.unmount()
+  })
+
   test('badges stop at the first question, which is the only one bound', async () => {
     const second = { ...makeQuestion(), id: 'q1', question: 'Then what?' }
     const { wrapper } = await mountLayout({ questions: [makeQuestion(), second] })
@@ -211,6 +238,7 @@ describe('AskUserQuestion keyboard shortcuts', () => {
     const { wrapper, store } = await mountLayout({
       questions: [makeQuestion({
         requestId: 'form-1',
+        sessionId: 'ses_1',
         options: [{ label: 'Continue', value: 'continue_wire' }],
       })],
     })
@@ -225,6 +253,7 @@ describe('AskUserQuestion keyboard shortcuts', () => {
       'form-1',
       { q0: ['continue_wire'] },
       'reply',
+      'ses_1',
     )
 
     wrapper.unmount()

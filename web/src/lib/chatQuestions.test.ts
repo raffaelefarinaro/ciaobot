@@ -2,6 +2,8 @@ import { describe, expect, test } from 'vitest'
 import {
   parseCapabilityQuestion,
   parseQuestions,
+  questionAnswerError,
+  questionAnswerIsValid,
   questionIsActive,
   questionsSignature,
   type ActiveQuestion,
@@ -48,6 +50,11 @@ describe('parseQuestions', () => {
     expect(qs[0].header).toBe('Files')
     expect(qs[0].multiSelect).toBe(true)
     expect(qs[0].options).toEqual([{ label: 'a.md', value: 'a.md', description: '' }])
+
+    const v2 = parseQuestions(JSON.stringify({
+      questions: [{ id: 'tags', type: 'multiselect', options: [{ value: 'a' }, { value: 'b' }] }],
+    }))
+    expect(v2[0].multiSelect).toBe(true)
   })
 
   test('falls back to the request id carried in the payload', () => {
@@ -92,6 +99,49 @@ describe('questionIsActive', () => {
   })
 })
 
+describe('questionAnswerIsValid', () => {
+  const base: ActiveQuestion = {
+    id: 'q', question: 'Value?', header: '', multiSelect: false,
+    allowOther: true, isSecret: false, requestId: 'r', type: 'string', required: true,
+    options: [],
+  }
+
+  test('enforces string and pattern constraints', () => {
+    const question = { ...base, minLength: 3, maxLength: 8, pattern: '^[A-Z]+$' }
+    expect(questionAnswerError(question, { selected: new Set(), other: 'ab' })).toContain('at least')
+    expect(questionAnswerError(question, { selected: new Set(), other: 'abcdefghi' })).toContain('at most')
+    expect(questionAnswerError(question, { selected: new Set(), other: 'lower' })).toContain('format')
+    expect(questionAnswerIsValid(question, { selected: new Set(), other: 'ABCDE' })).toBe(true)
+  })
+
+  test('enforces numeric range and integer constraints', () => {
+    const question = { ...base, type: 'integer', minimum: 1, maximum: 5 }
+    expect(questionAnswerError(question, { selected: new Set(), other: '0' })).toContain('at least')
+    expect(questionAnswerError(question, { selected: new Set(), other: '3.5' })).toContain('whole')
+    expect(questionAnswerIsValid(question, { selected: new Set(), other: '3' })).toBe(true)
+  })
+
+  test('checks item counts and closed wire values', () => {
+    const question: ActiveQuestion = {
+      ...base,
+      multiSelect: true,
+      type: 'multiselect',
+      custom: false,
+      minItems: 1,
+      maxItems: 2,
+      options: [{ label: 'One', value: 'one', description: '' }],
+    }
+    expect(questionAnswerError(question, { selected: new Set(), other: '' })).toContain('at least')
+    expect(questionAnswerError(question, { selected: new Set(['other']), other: '' })).toContain('available')
+    expect(questionAnswerIsValid(question, { selected: new Set(['one']), other: '' })).toBe(true)
+  })
+
+  test('allows explicitly empty optional fields', () => {
+    expect(questionAnswerIsValid({ ...base, required: false }, undefined)).toBe(true)
+    expect(questionAnswerIsValid({ ...base, multiSelect: true, type: 'multiselect', minItems: 0, required: true }, undefined)).toBe(true)
+  })
+})
+
 describe('questionsSignature', () => {
   const base: ActiveQuestion = {
     id: 'q1', question: 'Which?', header: 'H', multiSelect: false,
@@ -105,6 +155,13 @@ describe('questionsSignature', () => {
 
   test('prefers the provider request id', () => {
     expect(questionsSignature([{ ...base, requestId: 'r9' }])).toBe('rid:r9')
+  })
+
+  test('scopes a reused request id to its provider session', () => {
+    const first = { ...base, requestId: 'reused', sessionId: 'ses_old' }
+    const second = { ...base, requestId: 'reused', sessionId: 'ses_new' }
+    expect(questionsSignature([first])).toBe('rid:ses_old:reused')
+    expect(questionsSignature([second])).toBe('rid:ses_new:reused')
   })
 
   test('falls back to the question content when there is no request id', () => {

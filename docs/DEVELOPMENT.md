@@ -468,7 +468,18 @@ lifecycle comes from `/api/session/active` rather than the previous execution's
 `Session.Info.outcome`. When changing `ciao/providers/opencode.py`, replay the
 sanitized V2 fixtures and run a tiny real turn against the installed OpenCode
 2.x binary; route renames alone are insufficient because V2 also changed
-permissions, forms, prompts, and projected message shapes.
+permissions, forms, prompts, and projected message shapes. Keep V2 internal
+credential resources covered in both absolute and workspace-relative spellings
+when a custom runtime root is configured. Keep form constraints and explicit
+empty-versus-cancel semantics in the provider/PWA contract. Native form and
+permission cards stay mounted until a matching `(chat_id, session_id,
+request_id)` response is acknowledged. The PWA keeps complete response frames
+in memory only (never localStorage), queues them across closed or failed
+sockets, and retries them on reconnect; a timeout makes the card retryable but
+does not discard the queued frame. Backend state is cleared only after a typed
+V2 success or an authoritative stale result. Resolution events are ephemeral
+for attached tabs, while the persisted chat snapshot reconciles tabs that were
+disconnected.
 
 ## DAG-style schedules (maintainers)
 

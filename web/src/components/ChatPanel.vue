@@ -718,13 +718,14 @@
         <div class="question-options">
           <button
             v-for="(opt, oi) in q.options"
-            :key="`${opt.value || opt.label}-${oi}`"
+            :key="`${opt.value ?? opt.label}-${oi}`"
             type="button"
             class="question-option"
-            :class="{ selected: isQuestionOptionSelected(qi, opt.value || opt.label) }"
+            :class="{ selected: isQuestionOptionSelected(qi, opt.value ?? opt.label) }"
             :aria-keyshortcuts="questionOptionShortcut(qi, oi) || undefined"
             :disabled="questionSubmitting"
-            @click="toggleQuestionOption(qi, opt.value || opt.label, q.multiSelect)"
+            @blur="markQuestionTouched(qi)"
+            @click="toggleQuestionOption(qi, opt.value ?? opt.label, q.multiSelect)"
           >
             <span class="question-option-main">
               <!-- Keyboard hint, not part of the label: only rendered where the
@@ -743,13 +744,25 @@
         </div>
         <input
           v-if="q.allowOther && isQuestionActive(qi, q)"
-          :type="q.isSecret ? 'password' : 'text'"
+          :type="q.isSecret ? 'password' : questionInputType(q)"
           class="question-other"
           placeholder="Other (free text)"
           :disabled="questionSubmitting"
+          :minlength="q.minLength"
+          :maxlength="q.maxLength"
+          :pattern="q.pattern"
+          :min="q.minimum"
+          :max="q.maximum"
+          :step="q.type === 'integer' ? 1 : undefined"
+          :aria-invalid="Boolean(questionValidationMessage(q, qi))"
           :value="questionAnswers[qi]?.other || ''"
+          @blur="markQuestionTouched(qi)"
           @input="setQuestionOther(qi, ($event.target as HTMLInputElement).value)"
         />
+        <p
+          v-if="questionValidationMessage(q, qi)"
+          class="question-validation"
+        >{{ questionValidationMessage(q, qi) }}</p>
         </div>
       </template>
       <div v-if="questionError" class="question-card-error">{{ questionError }}</div>
@@ -832,17 +845,17 @@
           <button
             class="btn-deny"
             :aria-keyshortcuts="permissionShortcut('deny') || undefined"
-             :disabled="permissionSubmitting"
-            @click="store.respondPermission(chat.chat_id, p.request_id, false, 'User denied')"
+             :disabled="permissionSubmittingFor(p.request_id, p.session_id)"
+            @click="store.respondPermission(chat.chat_id, p.request_id, false, 'User denied', p.session_id || '')"
           ><span v-if="permissionShortcut('deny')" class="permission-key" aria-hidden="true">{{ permissionShortcut('deny') }}</span>Deny</button>
           <button
             class="btn-approve"
             :aria-keyshortcuts="permissionShortcut('approve') || undefined"
-             :disabled="permissionSubmitting"
-            @click="store.respondPermission(chat.chat_id, p.request_id, true)"
+             :disabled="permissionSubmittingFor(p.request_id, p.session_id)"
+            @click="store.respondPermission(chat.chat_id, p.request_id, true, '', p.session_id || '')"
           ><span v-if="permissionShortcut('approve')" class="permission-key" aria-hidden="true">{{ permissionShortcut('approve') }}</span>Approve</button>
         </div>
-        <div v-if="permissionError" class="question-card-error">{{ permissionError }}</div>
+        <div v-if="permissionErrorFor(p.request_id, p.session_id)" class="question-card-error">{{ permissionErrorFor(p.request_id, p.session_id) }}</div>
       </div>
     </div>
 
@@ -1181,7 +1194,7 @@ import {
   escapeCssAttrValue,
   highlightCommentText,
 } from '../lib/commentHighlight'
-import { questionIsActive, type ActiveQuestion } from '../lib/chatQuestions'
+import { questionAnswerError, questionAnswerIsValid, questionIsActive, type ActiveQuestion } from '../lib/chatQuestions'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import {
   useMentionPicker,
@@ -2141,8 +2154,19 @@ const permissionSubmission = computed(() => {
   const id = store.activeChatId
   return id ? store.permissionSubmissions[id] : undefined
 })
-const permissionSubmitting = computed(() => permissionSubmission.value?.pending === true)
-const permissionError = computed(() => permissionSubmission.value?.error || '')
+function permissionSubmittingFor(requestId: string, sessionId = '') {
+  const submission = permissionSubmission.value
+  return submission?.requestId === requestId
+    && (!sessionId || !submission.sessionId || submission.sessionId === sessionId)
+    && submission.pending === true
+}
+function permissionErrorFor(requestId: string, sessionId = '') {
+  const submission = permissionSubmission.value
+  return submission?.requestId === requestId
+    && (!sessionId || !submission.sessionId || submission.sessionId === sessionId)
+    ? submission.error
+    : ''
+}
 
 // The backend's `message` field is almost always the templated
 // "Approve use of {tool_name}?", which just repeats the tool-name badge shown
@@ -2202,7 +2226,9 @@ const activeQuestions = computed(() => {
 
 const questionSubmission = computed(() => {
   const id = store.activeChatId
-  return id ? store.questionSubmissions[id] : undefined
+  const submission = id ? store.questionSubmissions[id] : undefined
+  const requestId = activeQuestions.value[0]?.requestId
+  return submission && requestId === submission.requestId ? submission : undefined
 })
 const questionSubmitting = computed(() => questionSubmission.value?.pending === true)
 const questionError = computed(() => questionSubmission.value?.error || '')
@@ -2236,12 +2262,26 @@ const questionCardVisible = computed(() =>
 
 type QuestionAnswer = { selected: Set<string>; other: string }
 const questionAnswers = ref<Record<number, QuestionAnswer>>({})
+const questionTouched = ref<Record<number, boolean>>({})
 
 // Reset per-question selections whenever the active chat changes or the
 // model fires a fresh AskUserQuestion. Watching the array reference catches
 // both "new chat" and "new questions in same chat" without us touching the
-// answers map by hand.
-watch(activeQuestions, () => { questionAnswers.value = {} })
+// answers or validation state by hand.
+watch(activeQuestions, () => {
+  questionAnswers.value = {}
+  questionTouched.value = {}
+})
+
+function markQuestionTouched(i: number) {
+  if (!questionTouched.value[i]) questionTouched.value = { ...questionTouched.value, [i]: true }
+}
+
+function questionValidationMessage(question: ActiveQuestion, index: number): string | null {
+  return questionTouched.value[index]
+    ? questionAnswerError(question, questionAnswers.value[index])
+    : null
+}
 
 function ensureAnswer(i: number): QuestionAnswer {
   let a = questionAnswers.value[i]
@@ -2273,6 +2313,16 @@ function setQuestionOther(i: number, value: string) {
   const question = activeQuestions.value[i]
   if (question && !question.multiSelect) a.selected.clear()
   questionAnswers.value = { ...questionAnswers.value, [i]: { ...a } }
+}
+
+function questionInputType(q: ActiveQuestion): string {
+  if (q.isSecret) return 'password'
+  if (q.type === 'number' || q.type === 'integer') return 'number'
+  if (q.format === 'email') return 'email'
+  if (q.format === 'uri') return 'url'
+  if (q.format === 'date') return 'date'
+  if (q.format === 'date-time') return 'datetime-local'
+  return 'text'
 }
 
 function isQuestionOptionSelected(i: number, label: string): boolean {
@@ -2307,11 +2357,23 @@ function handlePermissionShortcut(e: KeyboardEvent): boolean {
   if (!pendingApprovals.value.length) return false
   const first = pendingApprovals.value[0]
   if (e.key === '1') {
-    store.respondPermission(chat.value.chat_id, first.request_id, false, 'User denied')
+    store.respondPermission(
+      chat.value.chat_id,
+      first.request_id,
+      false,
+      'User denied',
+      first.session_id || '',
+    )
     return true
   }
   if (e.key === '2') {
-    store.respondPermission(chat.value.chat_id, first.request_id, true)
+    store.respondPermission(
+      chat.value.chat_id,
+      first.request_id,
+      true,
+      '',
+      first.session_id || '',
+    )
     return true
   }
   return false
@@ -2349,25 +2411,21 @@ function handleQuestionShortcut(e: KeyboardEvent): boolean {
   if (!/^[1-9]$/.test(e.key)) return false
   const opt = q.options[Number(e.key) - 1]
   if (!opt) return false
-  toggleQuestionOption(0, opt.value || opt.label, q.multiSelect)
+  toggleQuestionOption(0, opt.value ?? opt.label, q.multiSelect)
   return true
 }
 
-// Block Send answer until every question has at least one option picked
-// or non-empty "Other" text. Without this, tapping Send with no selection
-// would route an empty answer through submitQuestionAnswers and the
-// handler would label it "(no answer)" (line below), which is the bug this
-// guard fixes.
+// Block Send answer until every active field is present and satisfies the
+// provider's V2 constraints. Optional fields may remain empty; non-empty
+// values still need to be valid before the request leaves the browser.
 const allQuestionsAnswered = computed(() => {
   const qs = activeQuestions.value
   if (!qs.length) return false
   const answers = questionAnswerMap()
-  const activeRequired = qs.filter(q => questionIsActive(q, answers, qs))
-    .filter(q => q.required !== false)
-  return activeRequired.every((q) => {
-    const values = answers[q.id] || []
-    return values.length > 0
-  })
+  return qs.every((q, index) => (
+    !questionIsActive(q, answers, qs)
+      || questionAnswerIsValid(q, questionAnswers.value[index])
+  ))
 })
 
 // Prefer the model's header/question; fall back to "Question N" so an empty
@@ -2401,8 +2459,19 @@ function submitQuestionAnswers() {
     lines.push(`**${questionPromptLabel(q, i)}**: ${answer}`)
   }
   const requestId = qs[0]?.requestId || ''
+  const sessionId = qs[0]?.sessionId || ''
   if (requestId) {
-    store.respondQuestion(chat.value.chat_id, requestId, nativeAnswers, 'reply')
+    if (sessionId) {
+      store.respondQuestion(
+        chat.value.chat_id,
+        requestId,
+        nativeAnswers,
+        'reply',
+        sessionId,
+      )
+    } else {
+      store.respondQuestion(chat.value.chat_id, requestId, nativeAnswers, 'reply')
+    }
     return
   }
   const text = lines.join('\n')
@@ -2415,8 +2484,10 @@ function dismissQuestions() {
   const id = store.activeChatId
   if (!id) return
   const requestId = activeQuestions.value[0]?.requestId || ''
+  const sessionId = activeQuestions.value[0]?.sessionId || ''
   if (requestId) {
-    store.respondQuestion(id, requestId, {}, 'cancel')
+    if (sessionId) store.respondQuestion(id, requestId, {}, 'cancel', sessionId)
+    else store.respondQuestion(id, requestId, {}, 'cancel')
   } else {
     // Claude picker has no round-trip; remember it as resolved so a stale
     // server snapshot can't rebuild it after dismissal.
@@ -6291,11 +6362,43 @@ details[open] > .activity-summary::before {
   font-size: 12px;
   line-height: 1.4;
 }
+.question-validation {
+  margin: 0;
+  color: var(--error);
+  font-size: 12px;
+  line-height: 1.35;
+}
 .question-option:disabled,
 .question-other:disabled,
 .question-card-dismiss:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+/* Native question controls are frequently completed one-handed on a phone.
+   Keep their full hit areas at the shared touch minimum while leaving the
+   denser desktop controls unchanged. The narrow-width companion covers a
+   resized desktop window, where a touch screen may still report a fine
+   pointer. */
+@media (pointer: coarse), (max-width: 768px) {
+  .question-card-dismiss {
+    display: grid;
+    place-items: center;
+    min-width: var(--touch);
+    min-height: var(--touch);
+    margin: -9px -10px -9px 0;
+    padding: 0;
+  }
+  .question-option,
+  .question-other,
+  .question-card-actions .btn-sm {
+    min-height: var(--touch);
+  }
+  .question-option { justify-content: center; }
+  .question-other {
+    padding: 10px 12px;
+    font-size: 16px;
+  }
 }
 
 /* Pending Auto-mode permission prompts. Sticks above the input until the

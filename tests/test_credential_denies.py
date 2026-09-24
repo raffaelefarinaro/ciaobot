@@ -86,6 +86,28 @@ def test_a_relocated_runtime_root_reaches_opencode_too(tmp_path: Path) -> None:
     assert f"{moved}/**" in patterns
 
 
+def test_opencode_denies_include_relative_aliases_for_an_internal_runtime_root(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    moved = workspace / "var" / "state"
+    patterns = {
+        rule["resource"]
+        for rule in opencode_credential_deny_rules(moved, workspace)
+    }
+    assert "var/state" in patterns
+    assert "var/state/**" in patterns
+
+    _agent, rules = mode_settings(
+        "bypass",
+        runtime_root=moved,
+        workspace_root=workspace,
+    )
+    resources = {rule["resource"] for rule in rules}
+    assert "var/state" in resources
+    assert "var/state/**" in resources
+
+
 def test_the_configured_runtime_root_is_denied_for_a_workspace(tmp_path: Path) -> None:
     """End to end: a non-default `CIAO_RUNTIME_ROOT` lands in the denylist."""
     moved = tmp_path / "var" / "state"

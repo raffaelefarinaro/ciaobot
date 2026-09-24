@@ -79,13 +79,17 @@ rather than file paths, so those search actions require an explicit approval
 card in every mode (including `bypass`) to prevent silent enumeration of
 credential-bearing paths. In every mode, including Bypass, credential-path
 denies (`**/.env`, `**/.runtime/**`, `**/secrets/**`, plus the resolved
-`CIAO_RUNTIME_ROOT`) are appended last for OpenCode's native file tools only:
-`read`, `edit`, `write`, `patch`, `glob`, `grep` and `list`. They do not cover
-`shell`, because a shell command cannot be path-scoped by a glob. In Manual
-and Auto a shell command such as `cat .env` still raises an approval card; in
-Bypass it runs without one, so Bypass does not protect those files from shell
-access. Each `ask` surfaces an approval card in the chat that the operator
-approves or denies.
+`CIAO_RUNTIME_ROOT`) are appended last for OpenCode's V2 native file/search
+actions. When the runtime root is inside the session location, the rules also
+include its workspace-relative spelling because V2 internal resources are
+relative. They do not cover `shell`, because a shell command cannot be
+path-scoped by a glob. In Manual and Auto a shell command such as `cat .env`
+still raises an approval card; in Bypass it runs without one, so Bypass does
+not protect those files from shell access. Each `ask` surfaces an approval card
+in the chat that the operator approves or denies. Native form cards validate
+required, scalar, length, item-count, format, and pattern constraints before
+submission; cards remain mounted until the server acknowledges delivery and
+queue a response across a dropped chat socket.
 
 The `opencode-auto-permissions` plugin was written for OpenCode 1 and does not
 load under V2, so it cannot provide automatic review here. Use a

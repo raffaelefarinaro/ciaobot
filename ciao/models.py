@@ -206,6 +206,7 @@ class ToolUseEvent(StreamEvent):
     # Set for provider-native structured questions that must be answered
     # inside the active turn (provider-native request_user_input).
     request_id: str = ""
+    session_id: str = ""
     file_touches: list | None = None
 
 
@@ -280,6 +281,7 @@ class PermissionRequestEvent(StreamEvent):
     tool_name: str = ""
     tool_input: str = ""
     request_id: str = ""
+    session_id: str = ""
 
 
 @dataclass(slots=True)
