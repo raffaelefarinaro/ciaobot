@@ -75,6 +75,7 @@ test.describe('workspace shortcuts', () => {
       if (label) reached.add(label.split('\n').pop() as string)
     }
 
+    // "Today" is the visible label for the home route.
     for (const item of ['today', 'automations', 'memory', 'settings']) {
       expect(reached, `"${item}" should be reachable by Tab`).toContain(item)
     }

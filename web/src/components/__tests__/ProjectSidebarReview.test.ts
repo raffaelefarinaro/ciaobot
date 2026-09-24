@@ -9,7 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import { flushPromises, mount } from '@vue/test-utils'
+import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ProjectSidebar from '../ProjectSidebar.vue'
 import { useProjectStore } from '../../stores/projects'
@@ -17,7 +17,6 @@ import { useProposalsStore } from '../../stores/proposals'
 import { useVaultReviewStore } from '../../stores/vaultReview'
 import { useMemoryMapStore } from '../../stores/memoryMap'
 import type { ProposalRow, VaultReviewCandidate } from '../../lib/types'
-import { api } from '../../lib/api'
 
 const EVIDENCE: VaultReviewCandidate['evidence'] = {
   backlinks: [], outbound_links: [], bridge: false, duplicate_group: [],
@@ -82,6 +81,8 @@ describe('ProjectSidebar review section', () => {
     const wrapper = await mountSidebar()
 
     expect(wrapper.get('a[href="/memory"] .nav-item-badge--count').text()).toBe('4')
+    // The workspace scope is one dropdown at the top of the rail now, not a
+    // per-mode row of pills.
     const workspaceTrigger = wrapper.get('.workspace-scope-trigger')
     expect(workspaceTrigger.text()).toContain('Personal')
     await workspaceTrigger.trigger('click')
@@ -166,11 +167,13 @@ describe('ProjectSidebar review section', () => {
 
     const wrapper = await mountSidebar()
 
-    const workspaceTrigger = wrapper.get('.workspace-scope-trigger')
+    const reviewButton = wrapper.findAll('.view-toggle button')[1]!
     // Three proposals in `personal` plus two notes to revisit.
-    expect(workspaceTrigger.get('.badge').text()).toBe('5')
-    expect(workspaceTrigger.attributes('aria-label'))
-      .toBe('Workspace: Personal — 5 items need attention')
+    expect(reviewButton.find('.view-count').text()).toBe('5')
+    // And it names its scope, so it cannot be read as the rail's all-workspace
+    // tally sitting a few pixels above it.
+    expect(reviewButton.attributes('aria-label'))
+      .toBe('Review — 5 waiting on a decision in Personal')
     expect(wrapper.get('a[href="/memory"]').attributes('aria-label'))
       .toBe('memory — 4 suggested memories across all workspaces')
   })
@@ -187,7 +190,7 @@ describe('ProjectSidebar review section', () => {
 
     const wrapper = await mountSidebar()
 
-    expect(wrapper.get('.workspace-scope-trigger .badge').text()).toBe('3')
+    expect(wrapper.findAll('.view-toggle button')[1]!.find('.view-count').text()).toBe('3')
   })
 
   it('says the retirement queue is still loading rather than reporting zero', async () => {
@@ -196,10 +199,6 @@ describe('ProjectSidebar review section', () => {
     // contradiction this column exists to avoid.
     const mm = useMemoryMapStore()
     mm.reviewTab = 'retirement'
-    vi.mocked(api.get).mockImplementation((url: string) => {
-      if (url.includes('/api/vault/review')) return new Promise(() => {})
-      return Promise.resolve({ rows: [] })
-    })
 
     const wrapper = await mountSidebar()
 
@@ -211,10 +210,10 @@ describe('ProjectSidebar review section', () => {
   it('reports the retirement queue as a failure rather than as empty', async () => {
     const mm = useMemoryMapStore()
     mm.reviewTab = 'retirement'
-    vi.mocked(api.get).mockRejectedValueOnce(new Error('Could not load retirement candidates'))
+    const vaultReview = useVaultReviewStore()
+    vaultReview.error = 'Could not load retirement candidates'
 
     const wrapper = await mountSidebar()
-    await flushPromises()
 
     expect(wrapper.text()).toContain('could not load the retirement queue')
     expect(wrapper.text()).not.toContain('Loading candidates…')
@@ -241,22 +240,6 @@ describe('ProjectSidebar review section', () => {
     expect(stats[0]).toContain('to revisit')
     expect(stats[1]).toContain('1')
     expect(stats[1]).toContain('retired')
-  })
-
-  it('uses the main-pane mode and does not duplicate Review/Map in the sidebar', async () => {
-    const mm = useMemoryMapStore()
-    mm.view = 'review'
-    const wrapper = await mountSidebar()
-
-    expect(wrapper.find('.view-toggle').exists()).toBe(false)
-    expect(wrapper.text()).toContain('Suggested memories')
-    expect(wrapper.text()).not.toContain('Trace connections')
-
-    mm.view = 'graph'
-    await wrapper.vm.$nextTick()
-    expect(wrapper.text()).toContain('Vault')
-    expect(wrapper.text()).toContain('Trace connections')
-    expect(wrapper.text()).not.toContain('Suggested memories')
   })
 
   it('does not render the review section for other modes', async () => {

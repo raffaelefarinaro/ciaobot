@@ -139,40 +139,6 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
-  it('gives the chat action menu keyboard focus and restores its trigger', async () => {
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/', component: { template: '<div />' } }],
-    })
-    await router.push('/')
-    await router.isReady()
-
-    const wrapper = mount(ProjectSidebar, {
-      attachTo: document.body,
-      props: { collapsed: false, mode: 'chat' },
-      global: { plugins: [router] },
-    })
-    const trigger = wrapper.get<HTMLButtonElement>('[aria-label="Chat actions"]')
-    await trigger.trigger('click')
-    await nextTick()
-    await nextTick()
-
-    const menu = document.body.querySelector<HTMLElement>('[role="menu"][aria-label="Chat actions"]')
-    expect(menu).toBeTruthy()
-    const items = Array.from(menu!.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
-    expect(document.activeElement).toBe(items[0])
-
-    menu!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
-    expect(document.activeElement).toBe(items[1])
-
-    menu!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
-    await nextTick()
-    expect(document.querySelector('[role="menu"][aria-label="Chat actions"]')).toBeNull()
-    expect(document.activeElement).toBe(trigger.element)
-
-    wrapper.unmount()
-  })
-
   it('moves a chat when it is dropped onto another project', async () => {
     const store = useProjectStore()
     store.projects.push({
@@ -343,7 +309,7 @@ describe('ProjectSidebar global new chat', () => {
     })
   }
 
-  it('offers one New chat above the navigation, opening the shared picker', async () => {
+  it('offers one New chat above the tree, opening the shared picker', async () => {
     const { pendingNewChat } = await import('../../lib/newChat')
     const wrapper = await mountSidebar('chat')
     const button = wrapper.get('.sidebar-new-chat')

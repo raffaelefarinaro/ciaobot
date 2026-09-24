@@ -22,6 +22,63 @@
         <!-- The wordmark used to sit here, between the toggle and these icons.
              It is `BrandMark` in the pane header now, where it is centred and
              does not have to share the sidebar's width. -->
+        <!-- One workspace scope for the whole rail. It used to be repeated as a
+             per-mode row of pills (chat, automations, memory), which said the
+             same thing in three places and pushed each mode's own content down
+             the column. Selecting a workspace here commits the scope for
+             whichever mode is open and keeps the 1-9 shortcuts. -->
+        <div v-if="store.workspaceOptions.length" ref="workspaceScopeEl" class="workspace-scope">
+          <button
+            ref="workspaceScopeTrigger"
+            type="button"
+            class="workspace-scope-trigger"
+            :data-workspace-color="colorForWorkspace(store.workspaceOptions.find(item => item.name === store.activeWorkspace))"
+            :aria-label="workspaceActionCount(store.activeWorkspace) ? `Workspace: ${workspaceLabel(store.activeWorkspace)} — ${workspaceActionCount(store.activeWorkspace)} items need attention` : `Workspace: ${workspaceLabel(store.activeWorkspace)}`"
+            :aria-haspopup="hasMultipleWorkspaces ? 'menu' : undefined"
+            :aria-expanded="hasMultipleWorkspaces ? workspaceScopeOpen : undefined"
+            :aria-controls="hasMultipleWorkspaces ? 'workspace-scope-menu' : undefined"
+            :aria-keyshortcuts="workspaceShortcut(store.activeWorkspace) || undefined"
+            :disabled="!hasMultipleWorkspaces"
+            @click="toggleWorkspaceMenu"
+            @keydown.down.prevent="openWorkspaceMenu"
+          >
+            <span v-if="workspaceShortcut(store.activeWorkspace)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(store.activeWorkspace) }}</span>
+            <span class="workspace-scope-dot" aria-hidden="true" />
+            <span class="workspace-scope-name">{{ workspaceLabel(store.activeWorkspace) }}</span>
+            <span v-if="workspaceActionCount(store.activeWorkspace)" class="badge">{{ workspaceActionCount(store.activeWorkspace) }}</span>
+            <svg v-if="hasMultipleWorkspaces" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" aria-hidden="true">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
+
+          <div
+            v-if="hasMultipleWorkspaces && workspaceScopeOpen"
+            id="workspace-scope-menu"
+            ref="workspaceScopeMenu"
+            class="workspace-scope-menu"
+            role="menu"
+            aria-label="Choose workspace"
+            @keydown="onWorkspaceMenuKeydown"
+          >
+            <button
+              v-for="workspace in store.workspaceOptions"
+              :key="workspace.name"
+              type="button"
+              role="menuitem"
+              class="workspace-scope-option"
+              :class="{ active: workspace.name === store.activeWorkspace }"
+              :data-workspace-color="colorForWorkspace(workspace)"
+              :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
+              @click="selectWorkspaceScope(workspace.name)"
+            >
+              <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
+              <span class="workspace-scope-dot" aria-hidden="true" />
+              <span class="workspace-scope-name">{{ workspaceLabel(workspace.name) }}</span>
+              <span v-if="workspaceActionCount(workspace.name)" class="badge">{{ workspaceActionCount(workspace.name) }}</span>
+            </button>
+          </div>
+        </div>
+
         <nav class="nav-links" aria-label="Primary navigation">
           <router-link
             to="/"
@@ -30,8 +87,8 @@
               'nav-item--active': mode === 'chat' || mode === 'project',
               'nav-item--working': isAnyChatWorking
             }"
-            title="chats"
-            :aria-label="store.attentionChatCount > 0 ? `chats — ${store.attentionChatCount} need attention` : (isAnyChatWorking ? 'chats (assistant is working)' : 'chats')"
+            title="Today"
+            :aria-label="store.attentionChatCount > 0 ? `Today — ${store.attentionChatCount} chat${store.attentionChatCount === 1 ? '' : 's'} need${store.attentionChatCount === 1 ? 's' : ''} attention` : (isAnyChatWorking ? 'Today (assistant is working)' : 'Today')"
           >
             <span class="nav-item-icon" aria-hidden="true">
               <!-- Stacked message lines: sharper, more "log-window" than a speech bubble -->
@@ -47,7 +104,7 @@
                 class="nav-item-badge nav-item-badge--count"
               >{{ store.attentionChatCount }}</span>
             </span>
-            <span class="nav-item-label" aria-hidden="true">chats</span>
+            <span class="nav-item-label" aria-hidden="true">Today</span>
           </router-link>
           <router-link
             to="/schedules"
@@ -130,6 +187,23 @@
             <span class="nav-item-label" aria-hidden="true">settings</span>
           </router-link>
         </nav>
+
+        <!-- One global New chat, directly under the navigation and above the
+             scope it belongs to. It opens the same shared project picker as
+             everywhere else, so the sidebar never grows a second
+             project-selection path. Project-local "+" buttons stay, because
+             they preselect their own project. -->
+        <button
+          v-if="!mode || mode === 'chat' || mode === 'project'"
+          type="button"
+          class="sidebar-new-chat"
+          aria-haspopup="dialog"
+          :aria-label="`New chat in ${workspaceLabel(store.activeWorkspace)}`"
+          @click="chooseNewChat(store.activeWorkspace)"
+        >
+          <span class="sidebar-new-chat-plus" aria-hidden="true">+</span>
+          <span>New chat</span>
+        </button>
       </template>
     </div>
 
@@ -137,31 +211,6 @@
          the create action sits in the footer like the chat sidebar's, so both
          modes put "make a new one" in the same place. -->
     <template v-if="!collapsed && (mode === 'schedules')">
-      <div v-if="hasMultipleWorkspaces" class="workspace-toggle">
-        <button
-          v-for="workspace in store.workspaceOptions"
-          :key="workspace.name"
-          :class="{ active: store.activeWorkspace === workspace.name }"
-          :aria-pressed="store.activeWorkspace === workspace.name"
-          :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
-          :data-workspace-color="colorForWorkspace(workspace)"
-          :title="workspaceShortcut(workspace.name) ? `Switch to ${workspaceLabel(workspace.name)} (${workspaceShortcut(workspace.name)})` : undefined"
-          @click="selectAutomationWorkspace(workspace.name)"
-        >
-          <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
-          <!-- Wrapped, not a bare text node: the buttons are nowrap so a long
-               workspace name needs a shrinkable element to ellipse inside, or it
-               overflows into its neighbour. The button's title carries the full
-               name. -->
-          <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
-          <span
-            v-if="missedCountFor(workspace.name) > 0"
-            class="badge badge--missed"
-            :title="`${missedCountFor(workspace.name)} missed`"
-            :aria-label="`${missedCountFor(workspace.name)} missed`"
-          >{{ missedCountFor(workspace.name) }}</span>
-        </button>
-      </div>
       <div ref="schedulesListEl" class="schedules-list">
         <template v-if="taskStore.loading">
           <div class="mm-loading-heading" role="status" aria-live="polite">
@@ -335,33 +384,10 @@
       </div>
     </template>
 
-    <!-- The workspace toggle covers review as well as the graph: scoping the
-         proposal queue is the same act as scoping the map, and the review view
-         had no sidebar at all, so the workspace was buried in a heading per
-         group instead of living where every other page keeps it. -->
+    <!-- Workspace scope now lives once at the top of the rail. This mode keeps
+         its own Memory/Review switcher, which is about what the memory page
+         shows rather than which workspace it is scoped to. -->
     <template v-if="!collapsed && (mode === 'memory' || mode === 'proposals')">
-      <div v-if="hasMultipleWorkspaces" class="workspace-toggle">
-        <button
-          v-for="workspace in store.workspaceOptions"
-          :key="workspace.name"
-          :class="{ active: store.activeWorkspace === workspace.name }"
-          :aria-pressed="store.activeWorkspace === workspace.name"
-          :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
-          :data-workspace-color="colorForWorkspace(workspace)"
-          :title="workspaceShortcut(workspace.name) ? `Switch to ${workspaceLabel(workspace.name)} (${workspaceShortcut(workspace.name)})` : undefined"
-          @click="store.switchWorkspace(workspace.name, { transition: false })"
-        >
-           <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
-           <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
-           <span
-             v-if="proposals.scopedRows(workspace.name).length > 0"
-             class="badge"
-             :title="`${proposals.scopedRows(workspace.name).length} items to review`"
-             :aria-label="`${proposals.scopedRows(workspace.name).length} items to review`"
-           >{{ proposals.scopedRows(workspace.name).length }}</span>
-         </button>
-      </div>
-
       <!-- The Memory/Review switcher lives here rather than in the pane
            header: picking what the memory page shows is the same act as
            scoping it to a workspace, and this keeps every memory control in
@@ -743,45 +769,6 @@
     </template>
 
     <template v-if="!collapsed && (!mode || mode === 'chat' || mode === 'project')">
-      <!-- Workspace toggle -->
-      <div v-if="hasMultipleWorkspaces" class="workspace-toggle">
-        <button
-          v-for="workspace in store.workspaceOptions"
-          :key="workspace.name"
-          :class="{ active: store.activeWorkspace === workspace.name }"
-          :aria-pressed="store.activeWorkspace === workspace.name"
-          :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
-          :data-workspace-color="colorForWorkspace(workspace)"
-          :title="workspaceShortcut(workspace.name) ? `Switch to ${workspaceLabel(workspace.name)} (${workspaceShortcut(workspace.name)})` : undefined"
-          @click="store.switchWorkspace(workspace.name)"
-        >
-          <!-- Shortcut badge comes from workspaceShortcut(), which also backs the
-               aria-keyshortcuts on this button and returns '' past the 9th
-               workspace. Marks follow the signal grammar: needs-you outranks
-               working, and unread is a separate count. -->
-          <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
-          <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
-          <span
-            v-if="store.workspaceNeedsInput(workspace.name) > 0"
-            class="workspace-status-dot"
-            title="A chat needs your answer"
-            aria-label="A chat needs your answer"
-          />
-          <span
-            v-else-if="store.workspaceIsStreaming(workspace.name)"
-            class="workspace-status-ring"
-            title="A chat is working"
-            aria-label="A chat is working"
-          ><span class="workspace-status-core" aria-hidden="true" /></span>
-          <span
-            v-if="store.workspaceUnread(workspace.name) > 0"
-            class="badge"
-            :title="`${store.workspaceUnread(workspace.name)} unread chats`"
-            :aria-label="`${store.workspaceUnread(workspace.name)} unread chats`"
-          >{{ store.workspaceUnread(workspace.name) }}</span>
-        </button>
-      </div>
-
       <!-- Scrollable area for chats/projects -->
       <div class="chats-scroll-area">
         <template v-if="!store.bootstrapped && store.projects.length === 0">
@@ -929,7 +916,8 @@
                   class="add-chat-btn"
                   :class="{ 'add-chat-btn--creating': store.creatingChatProjectIds[project.project_id] }"
                   :disabled="store.creatingChatProjectIds[project.project_id]"
-                  @click.stop="addChat(project.project_id)"
+                  aria-haspopup="dialog"
+                  @click.stop="chooseNewChat(project.workspace, project.project_id)"
                   title="New chat"
                   :aria-label="`New chat in ${project.name}`"
                 >{{ store.creatingChatProjectIds[project.project_id] ? '...' : '+' }}</button>
@@ -1196,7 +1184,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import {
   DropdownMenuContent,
   DropdownMenuItem,
@@ -1226,6 +1214,7 @@ import { kindLabel as reviewKindLabel } from '../lib/proposalKinds'
 import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
 import { startFileDiscussion } from '../lib/fileDiscussion'
+import { openNewChatPicker } from '../lib/newChat'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
@@ -1281,6 +1270,12 @@ onMounted(() => {
   // never been opened. Both store initializers are idempotent.
   housekeeping.init()
   void proposals.ensureLoaded()
+  void vaultReview.ensureLoaded(store.activeWorkspace)
+  document.addEventListener('click', closeWorkspaceMenuOnOutside)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', closeWorkspaceMenuOnOutside)
 })
 
 // The unlinked list is the one section that can run to hundreds of entries on a
@@ -1479,6 +1474,81 @@ function promptTitle(prompt: string): string {
 // With a single workspace the toggle is pure noise — hide it and let the
 // content fill the space.
 const hasMultipleWorkspaces = computed(() => store.workspaceOptions.length > 1)
+const workspaceScopeOpen = ref(false)
+const workspaceScopeEl = ref<HTMLElement | null>(null)
+const workspaceScopeTrigger = ref<HTMLButtonElement | null>(null)
+const workspaceScopeMenu = ref<HTMLElement | null>(null)
+
+// Review + retirement work waiting in a workspace, used only as the scope
+// trigger's attention badge. `retirementScoped` is zero for other workspaces,
+// so their count is the proposals queue alone.
+function workspaceActionCount(workspace: string): number {
+  const retirement = vaultReview.loadedWorkspace === workspace ? vaultReview.candidates.length : 0
+  return proposals.scopedRows(workspace).length + retirement + missedCountFor(workspace)
+}
+
+function openWorkspaceMenu(): void {
+  if (!hasMultipleWorkspaces.value) return
+  workspaceScopeOpen.value = true
+  void nextTick(() => {
+    workspaceScopeMenu.value
+      ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
+      ?.focus()
+  })
+}
+
+function closeWorkspaceMenu(restoreFocus = false): void {
+  if (!workspaceScopeOpen.value) return
+  workspaceScopeOpen.value = false
+  if (restoreFocus) void nextTick(() => workspaceScopeTrigger.value?.focus())
+}
+
+function toggleWorkspaceMenu(): void {
+  if (!hasMultipleWorkspaces.value) return
+  if (workspaceScopeOpen.value) closeWorkspaceMenu(true)
+  else openWorkspaceMenu()
+}
+
+function selectWorkspaceScope(workspace: string): void {
+  closeWorkspaceMenu(true)
+  if (props.mode === 'schedules') {
+    void selectAutomationWorkspace(workspace)
+    return
+  }
+  void store.switchWorkspace(workspace, { transition: false })
+}
+
+function onWorkspaceMenuKeydown(event: KeyboardEvent): void {
+  const items = Array.from(workspaceScopeMenu.value?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])
+  if (!items.length) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    closeWorkspaceMenu(true)
+    return
+  }
+  if (event.key === 'Tab') {
+    closeWorkspaceMenu(false)
+    return
+  }
+  const current = items.indexOf(document.activeElement as HTMLButtonElement)
+  let next = current
+  if (event.key === 'Home') next = 0
+  else if (event.key === 'End') next = items.length - 1
+  else if (current < 0) next = event.key === 'ArrowUp' ? items.length - 1 : 0
+  else if (event.key === 'ArrowDown') next = (current + 1) % items.length
+  else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length
+  else return
+  event.preventDefault()
+  items[next]?.focus()
+}
+
+function closeWorkspaceMenuOnOutside(event: MouseEvent): void {
+  if (!workspaceScopeOpen.value) return
+  const target = event.target as Node | null
+  if (target && workspaceScopeEl.value?.contains(target)) return
+  closeWorkspaceMenu(false)
+}
 
 // Schedule list split: one-offs first (sorted by datetime), then recurring.
 const workspaceSchedules = computed(() =>
@@ -2008,9 +2078,14 @@ async function confirmDeleteProject(id: string) {
   await store.deleteProject(id)
 }
 
-async function addChat(projectId: string) {
+// One shared project picker for every visible New action. The project-local "+"
+// preselects its own project; the global New chat above the tree opens the same
+// dialog on the active workspace.
+async function chooseNewChat(workspace: string, preferredProjectId?: string) {
+  const projectId = await openNewChatPicker({ workspace, projectId: preferredProjectId })
+  if (!projectId) return
   expandedProjects.add(projectId)
-  await store.createChat(projectId)
+  await store.newChatInProject(projectId)
 }
 
 function startRenameChat(chatId: string) {
@@ -2341,6 +2416,37 @@ async function confirmDeleteChat(chatId: string) {
   max-width: 80px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.sidebar-new-chat {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  box-sizing: border-box;
+  width: calc(100% - 2 * var(--space-2));
+  min-height: var(--touch);
+  margin: var(--space-2) var(--space-2) 0;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--fg);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+}
+
+.sidebar-new-chat:hover {
+  border-color: var(--border-strong);
+  background: var(--bg);
+}
+
+.sidebar-new-chat-plus {
+  color: var(--accent);
+  font-size: 20px;
+  line-height: 1;
 }
 
 .nav-links {
@@ -2992,6 +3098,105 @@ async function confirmDeleteChat(chatId: string) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* One workspace scope for the whole rail. */
+.workspace-scope {
+  position: relative;
+  z-index: 40;
+  margin: 0 var(--space-2) var(--space-2);
+}
+
+.workspace-scope-trigger,
+.workspace-scope-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--touch);
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+}
+
+.workspace-scope-trigger {
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  cursor: pointer;
+}
+
+.workspace-scope-trigger:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.workspace-scope-trigger:not(:disabled):hover,
+.workspace-scope-trigger[aria-expanded="true"] {
+  border-color: var(--border-strong);
+  background: var(--bg3);
+}
+
+.workspace-scope-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.workspace-scope-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+
+.workspace-scope-trigger > svg {
+  margin-left: auto;
+  flex: none;
+  color: var(--fg2);
+}
+
+.workspace-scope-trigger .badge,
+.workspace-scope-option .badge {
+  margin-left: auto;
+}
+
+.workspace-scope-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  left: 0;
+  z-index: 50;
+  overflow: hidden;
+  padding: var(--space-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  box-shadow: 0 1rem 2.5rem rgb(0 0 0 / 38%);
+}
+
+.workspace-scope-option {
+  padding: 0 var(--space-2);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.workspace-scope-option:hover,
+.workspace-scope-option:focus-visible,
+.workspace-scope-option.active {
+  border-color: var(--border);
+  background: var(--bg3);
+}
+
+.workspace-scope-option.active {
+  color: var(--accent);
 }
 
 @media (prefers-reduced-motion: reduce) {

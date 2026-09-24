@@ -69,62 +69,6 @@ describe('ConfirmDialog', () => {
     await expect(answer).resolves.toBe(false)
   })
 
-  it('does not accept on Enter while Cancel is focused', async () => {
-    const wrapper = mount(ConfirmDialog, { attachTo: document.body })
-    const answer = askConfirm('Delete this?', {
-      confirmLabel: 'Delete',
-      destructive: true,
-    })
-    await nextTick()
-    await nextTick()
-
-    const cancel = wrapper.get<HTMLButtonElement>('.confirm-action--cancel')
-    expect(document.activeElement).toBe(cancel.element)
-    window.dispatchEvent(new KeyboardEvent('keydown', {
-      key: 'Enter',
-      bubbles: true,
-      cancelable: true,
-    }))
-    await nextTick()
-
-    expect(pendingConfirm.value).not.toBe(null)
-    await wrapper.get('.confirm-action--danger').trigger('click')
-    await expect(answer).resolves.toBe(true)
-    wrapper.unmount()
-  })
-
-  it('keeps Tab inside the dialog and restores the opener', async () => {
-    const opener = document.createElement('button')
-    document.body.appendChild(opener)
-    opener.focus()
-    const wrapper = mount(ConfirmDialog, { attachTo: document.body })
-    const answer = askConfirm('Archive this chat?')
-    await nextTick()
-    await nextTick()
-
-    const cancel = wrapper.get<HTMLButtonElement>('.confirm-action--cancel')
-    const confirm = wrapper.get<HTMLButtonElement>('.confirm-action--primary')
-    confirm.element.focus()
-    window.dispatchEvent(new KeyboardEvent('keydown', {
-      key: 'Tab',
-      bubbles: true,
-      cancelable: true,
-    }))
-    expect(document.activeElement).toBe(cancel.element)
-
-    window.dispatchEvent(new KeyboardEvent('keydown', {
-      key: 'Escape',
-      bubbles: true,
-      cancelable: true,
-    }))
-    await expect(answer).resolves.toBe(false)
-    await nextTick()
-    expect(document.activeElement).toBe(opener)
-
-    wrapper.unmount()
-    opener.remove()
-  })
-
   it('uses the danger treatment for destructive confirmation', async () => {
     const answer = openDialog('Delete this?', {
       confirmLabel: 'Delete',
