@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -105,6 +106,29 @@ async def test_respond_permission_ignores_stale_reply_for_a_superseded_request(
 
 
 @pytest.mark.asyncio
+async def test_stale_persisted_question_is_cleared_without_a_provider(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="stale form")
+    chat.pending_question = json.dumps({
+        "request_id": "form-1",
+        "questions": [{"id": "q1", "question": "Continue?"}],
+    })
+
+    result = await pcm.respond_question(
+        chat.chat_id,
+        request_id="form-1",
+        answers={},
+        action="cancel",
+    )
+
+    assert result.ok is True
+    assert chat.pending_question == ""
+
+
+@pytest.mark.asyncio
 async def test_respond_permission_returns_false_when_no_provider(tmp_path: Path) -> None:
     """A permission reply for a chat with no provider yet must be a no-op."""
     pcm = _make_manager(tmp_path)
@@ -167,3 +191,48 @@ async def test_respond_permission_strips_buffered_event_from_active_stream(
     assert all(
         ev.get("type") != "permission_request" for ev in replay
     ), f"buffered permission_request leaked into replay: {replay}"
+
+
+@pytest.mark.asyncio
+async def test_denial_retracts_the_tool_card_before_v2_consumes_the_request(
+    tmp_path: Path,
+) -> None:
+    """A V2 permission id can differ from the tool-call id it gates."""
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+
+    class _Provider:
+        def tool_use_id_for_request(self, _request_id: str) -> str:
+            return "call-1"
+
+        async def send_permission_response(
+            self, _request_id: str, _approved: bool, _reason: str = ""
+        ) -> bool:
+            # The real adapter removes its pending map before returning.
+            return True
+
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=_Provider())
+    stream = ChatStream("hi")
+    pcm._broker.register(chat.chat_id, stream)
+    stream.publish({
+        "type": "tool_use",
+        "tool_name": "write",
+        "tool_use_id": "call-1",
+        "file_touch": {"file_path": "notes.md", "action": "created"},
+    })
+
+    result = await pcm.respond_permission(
+        chat.chat_id, request_id="permission-1", approved=False
+    )
+    assert result.ok is True
+    events = stream.buffered_events()
+    assert any(
+        event.get("type") == "tool_denied"
+        and event.get("tool_use_id") == "call-1"
+        for event in events
+    )
+    tool_event = next(event for event in events if event.get("type") == "tool_use")
+    assert "file_touch" not in tool_event

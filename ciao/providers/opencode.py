@@ -723,8 +723,8 @@ def _legacy_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
             "info": {
                 key: value
                 for key, value in message.items()
-                if key not in {"type"}
-            },
+                if key != "type"
+            } | {"type": message_type},
             "parts": [],
         }
     if message_type != "assistant":

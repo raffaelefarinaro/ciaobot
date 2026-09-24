@@ -67,7 +67,8 @@ class MemoryStorage {
 type QuestionSeed = {
   multiSelect?: boolean
   allowOther?: boolean
-  options?: Array<{ label: string; description?: string }>
+  requestId?: string
+  options?: Array<{ label: string; value?: string; description?: string }>
 }
 
 function makeQuestion(seed: QuestionSeed = {}) {
@@ -78,7 +79,7 @@ function makeQuestion(seed: QuestionSeed = {}) {
     multiSelect: seed.multiSelect ?? false,
     allowOther: seed.allowOther ?? true,
     isSecret: false,
-    requestId: '',
+    requestId: seed.requestId ?? '',
     options: seed.options ?? [
       { label: 'Refactor first', description: 'clean up before adding' },
       { label: 'Ship the feature', description: '' },
@@ -202,6 +203,29 @@ describe('AskUserQuestion keyboard shortcuts', () => {
     expect(optionButtons(wrapper)[0].classes()).toContain('selected')
     expect(switchWorkspace).not.toHaveBeenCalled()
     expect(store.activeWorkspace).toBe('personal')
+
+    wrapper.unmount()
+  })
+
+  test('a digit selection submits the V2 wire value, not the display label', async () => {
+    const { wrapper, store } = await mountLayout({
+      questions: [makeQuestion({
+        requestId: 'form-1',
+        options: [{ label: 'Continue', value: 'continue_wire' }],
+      })],
+    })
+    const respond = vi.spyOn(store, 'respondQuestion').mockReturnValue(true)
+
+    pressKey('1')
+    await nextTick()
+    await wrapper.find('.question-card-actions .primary').trigger('click')
+
+    expect(respond).toHaveBeenCalledWith(
+      CHAT_ID,
+      'form-1',
+      { q0: ['continue_wire'] },
+      'reply',
+    )
 
     wrapper.unmount()
   })

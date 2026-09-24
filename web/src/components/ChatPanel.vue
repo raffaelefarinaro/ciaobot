@@ -2340,7 +2340,7 @@ function handleQuestionShortcut(e: KeyboardEvent): boolean {
   if (!/^[1-9]$/.test(e.key)) return false
   const opt = q.options[Number(e.key) - 1]
   if (!opt) return false
-  toggleQuestionOption(0, opt.label, q.multiSelect)
+  toggleQuestionOption(0, opt.value || opt.label, q.multiSelect)
   return true
 }
 

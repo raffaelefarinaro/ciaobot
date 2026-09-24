@@ -507,6 +507,13 @@ def test_v2_flat_messages_normalize_at_the_provider_boundary():
     assert normalized["parts"][2]["tool"] == "shell"
 
 
+def test_v2_idle_messages_keep_the_recovery_discriminator():
+    normalized = _legacy_message({"id": "idle_1", "type": "idle", "outcome": "failed"})
+    assert normalized is not None
+    assert normalized["info"]["type"] == "idle"
+    assert normalized["info"]["outcome"] == "failed"
+
+
 # ── error sanitization ──────────────────────────────────────────────────
 
 

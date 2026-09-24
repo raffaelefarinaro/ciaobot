@@ -6328,6 +6328,14 @@ class ProjectChatManager:
                 False, "Permission provider is unavailable", False
             )
 
+        # V2 removes the pending permission from its in-memory map as soon as
+        # the reply is acknowledged. Capture the source tool-call id before
+        # awaiting the provider so a denial can still retract its file card.
+        tool_use_id = ""
+        resolver = getattr(provider, "tool_use_id_for_request", None)
+        if callable(resolver):
+            tool_use_id = resolver(request_id)
+
         responder = getattr(provider, "send_permission_response", None)
         if callable(responder):
             result = responder(request_id, approved, reason)
@@ -6379,50 +6387,15 @@ class ProjectChatManager:
             if not approved:
                 # The refused call never ran, so retract any file card it
                 # already painted. Custom adapters may use a request id that
-                # differs from the tool id, so resolve it before retracting.
-                resolver = getattr(provider, "tool_use_id_for_request", None)
-                retract_id = resolver(request_id) if callable(resolver) else ""
-                stream.deny_tool_use(retract_id or request_id)
+                # differs from the tool id, so use the id captured before the
+                # provider consumed its pending-request entry.
+                stream.deny_tool_use(tool_use_id or request_id)
         if stale:
             return QuestionResponseResult(True)
         return response
 
-    async def respond_question(
-        self,
-        chat_id: str,
-        *,
-        request_id: str,
-        answers: dict[str, list[str]],
-        action: str = "reply",
-    ) -> QuestionResponseResult:
-        """Deliver a native question reply/cancel and wait for the provider."""
-        provider_service = self._providers.get(chat_id)
-        if provider_service is None or provider_service.provider is None:
-            return QuestionResponseResult(
-                False, "Question provider is unavailable", False
-            )
-        responder = getattr(
-            provider_service.provider, "send_question_response", None
-        )
-        if not callable(responder):
-            return QuestionResponseResult(
-                False, "Question provider is unavailable", False
-            )
-        result = responder(
-            request_id,
-            answers,
-            cancel=action == "cancel",
-        )
-        if inspect.isawaitable(result):
-            result = await result
-        response = (
-            result
-            if isinstance(result, QuestionResponseResult)
-            else QuestionResponseResult(bool(result))
-        )
-        if not response.ok:
-            return response
-
+    def _clear_question_state(self, chat_id: str, request_id: str) -> None:
+        """Resolve a native question card after success or a stale reply."""
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.resolve_question(request_id)
@@ -6438,6 +6411,52 @@ class ProjectChatManager:
             }:
                 chat.pending_question = ""
                 self._save()
+
+    async def respond_question(
+        self,
+        chat_id: str,
+        *,
+        request_id: str,
+        answers: dict[str, list[str]],
+        action: str = "reply",
+    ) -> QuestionResponseResult:
+        """Deliver a native question reply/cancel and wait for the provider.
+
+        A persisted card can outlive the provider process (for example after a
+        server restart). In that case there is no live V2 form left to answer;
+        clear the stale card so it cannot wedge every subsequent composer send.
+        """
+        provider_service = self._providers.get(chat_id)
+        if provider_service is None or provider_service.provider is None:
+            self._clear_question_state(chat_id, request_id)
+            return QuestionResponseResult(True)
+        responder = getattr(
+            provider_service.provider, "send_question_response", None
+        )
+        if not callable(responder):
+            self._clear_question_state(chat_id, request_id)
+            return QuestionResponseResult(True)
+        result = responder(
+            request_id,
+            answers,
+            cancel=action == "cancel",
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        response = (
+            result
+            if isinstance(result, QuestionResponseResult)
+            else QuestionResponseResult(bool(result))
+        )
+        if response.ok:
+            self._clear_question_state(chat_id, request_id)
+            return response
+        if not response.retryable and response.error == "OpenCode is not connected":
+            # The provider process is gone, so this is a stale persisted form,
+            # not a form validation failure. Let the user continue with a new
+            # turn instead of requiring a manual New Session reset.
+            self._clear_question_state(chat_id, request_id)
+            return QuestionResponseResult(True)
         return response
 
     def respond_capability(
