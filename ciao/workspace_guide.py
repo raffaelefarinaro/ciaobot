@@ -407,11 +407,7 @@ def migrate_root(root: Path | str) -> str:
                     return True
             return False
 
-        if (
-            _regions_live(agents_text)
-            and not _regions_live(legacy_text)
-            and not legacy_is_link
-        ):
+        if _regions_live(agents_text) and not _regions_live(legacy_text):
             # Fold the legacy body into the live agents file: same file
             # dance as below, with the text roles swapped. The backup holds
             # the folded side, so it names the legacy file this time.
@@ -464,6 +460,14 @@ def migrate_root(root: Path | str) -> str:
 
 def migrate_config(config: object) -> dict[str, str]:
     """Migrate every agent root this install owns. Returns root -> action.
+
+    The target seam is deliberate. Before the workspace re-rooting,
+    :meth:`~ciao.config.CiaoConfig.agent_root_targets` returns the install root
+    because it is the shared agent root. After the re-rooting it returns only
+    the per-workspace roots, because ``workspace_reroot`` has moved the shared
+    guide and the install root is no longer an agent root. Do not add the raw
+    install path independently: it may be repository metadata or a stale parent
+    guide, and renaming either would not make it a valid agent-root migration.
 
     Never raises: a guide that cannot be moved is still readable through
     :func:`guide_path`'s legacy fallback, so a failure here degrades to "not

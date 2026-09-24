@@ -762,8 +762,11 @@ class CiaoConfig:
 
         One target before the re-rooting — the install root itself, unnamed,
         because that is where the single set of provider assets lives. One per
-        workspace afterwards, because each root then owns its own ``CLAUDE.md``,
-        ``.claude/``, ``skills/`` and mirrors.
+        workspace afterwards, because each root then owns its own ``AGENTS.md``,
+        ``.claude/``, ``skills/`` and mirrors. The install root is intentionally
+        absent after that transition: ``workspace_reroot`` moves the shared
+        guide into the primary root, and a root-level guide is no longer an
+        agent asset to rename or sync.
 
         The seam for anything inspecting or listing agent assets. Reading
         ``workspace_root`` directly still finds the install root's stale
