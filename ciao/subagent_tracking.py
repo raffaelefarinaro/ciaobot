@@ -150,9 +150,9 @@ class SubagentInfo:
     # CLI-owned Monitor / background Bash / workflow tasks (no transcript,
     # identified by toolUseResult.taskId).
     kind: str = "agent"
-    # Raw <status> from the CLI's <task-notification> ("stopped" maps to
-    # "completed" in `status`). Kept so the wake prompt can distinguish the
-    # CLI's synthetic "no completion record" case.
+    # Raw <status> from the CLI's <task-notification> (the normalized `status`
+    # keeps a neutral "stopped" terminal state). Kept so the wake prompt can
+    # distinguish the CLI's synthetic "no completion record" case.
     raw_status: str = ""
     # First 200 chars of the dispatch command (Monitor / background Bash), so
     # a wake prompt can name the log or output file to check.
