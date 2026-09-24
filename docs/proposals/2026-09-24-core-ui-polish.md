@@ -3,15 +3,24 @@
 ## Resume block
 
 - Status: approved
-- Current checkpoint: C3 (Today slice delivered)
-- Next action: Extend the approved Quiet Workbench composition from Today into the remaining surfaces (chat header/focus, sidebar shell polish) if wanted; otherwise close at the verified Today slice
+- Current checkpoint: C4 (rebased onto `origin/develop`, installed, verified)
+- Next action: none pending; the workbench is rebased onto the latest `develop` (post-reka-ui migration), green, and installed as `Ciaobot.app`
 - Blocker: none
-- Verified on this slice: `npm run build`, `npm run lint` (0 errors), `npm test` (116 files / 1,490 tests), `npx playwright test` (12 tests), plus dark/light and 1440px/420px browser inspection of the Today workbench
-- Worktree state: the prior frontend pass is uncommitted and unpushed; this follow-up will not change production source until the new direction is approved; unrelated user-owned files remain preserved
+- Verified on this slice: `npm run build`, `npm run lint` (0 errors), `npm test` (118 files / 1,550 tests), `npx playwright test` (12 tests), plus light/dark and 1440px/420px browser inspection of the Today workbench and chat project control
+- Installed build (2026-09-24): `~/Applications/Ciaobot.app` from this branch's runtime + Tauri build; engine `0.18.1` reachable on :8443, workspace `/Users/raffaelefarinaro/repos/ciao` preserved, desktop shell running, no tracebacks in the boot window
+- Branch: `raffaelefarinaro/core-ui-workbench` (two commits on top of `origin/develop` `300f436d`); uncommitted work is limited to transient capture artifacts and a throwaway `web/shot.mjs`
 - Implementation repository: `/Users/raffaelefarinaro/repos/ciaobot`
 - Generated plan output: `docs/proposals/2026-09-24-core-ui-polish.md`
 - Visual companions: `docs/proposals/ciaobot-workbench-prototypes.html` (self-contained interactive comparison; A inspected at 1440px and 420px, B/C inspected at 1440px, and the light theme toggle was exercised)
-- Verified on: 2026-09-24 against `PRODUCT.md`, `DESIGN.md`, `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `web/README.md`, the current `web/src` implementation, the synthetic PWA fixture, the prior browser captures, and the user-provided UI reference images in the current turn.
+- Verified on: 2026-09-24 against `PRODUCT.md`, `DESIGN.md`, `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `web/README.md`, the current `web/src` implementation, the synthetic PWA fixture, the prior browser captures, and the user-provided UI reference images.
+
+### Rebase notes (2026-09-24, post reka-ui migration)
+
+Upstream had moved 40 commits ahead and migrated the overlays and sidebar menus to `reka-ui` (`ConfirmDialog`, `PromptDialog`, `NewChatPicker`, `FileViewerModal`, `ProjectSidebar`). Resolution rule applied:
+
+- Keep upstream's `reka-ui` focus/menu plumbing and its upstream test suites for those files; drop the hand-rolled `useModalFocus` usage that reka supersedes there.
+- Re-apply the workbench pieces the merge would otherwise drop: the sidebar's single global New chat and one workspace scope dropdown (replacing the three per-mode workspace toggles), the `Today` nav label, and the `FileViewerModal` iframe title + coarse-pointer targets.
+- `useModalFocus` remains used by `ChatPanel` and `MemoryMapView`, which upstream did not migrate.
 
 This block is the handoff contract. A future agent should read it first, then read the current checkpoint and open questions before editing source.
 
