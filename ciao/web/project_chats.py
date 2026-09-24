@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
 import logging
 import mimetypes
@@ -92,7 +93,7 @@ from ciao.models import (
 )
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.providers.claude import get_session_info
-from ciao.providers.opencode import OpencodeProvider
+from ciao.providers.opencode import OpencodeProvider, QuestionResponseResult
 from ciao.schedules import ScheduleEntry, ScheduleStore
 from ciao.sessions import StateStore
 from ciao.subagent_tracking import SubagentInfo
@@ -3078,7 +3079,7 @@ class ProjectChatManager:
         """Drop provider-side session blobs/threads for abandoned chats.
 
         Claude deletes the SDK JSONL blob. OpenCode deletes its persisted
-        session through ``DELETE /session/{id}``.
+        session through ``DELETE /api/session/{id}``.
         Provider cleanup is fail-open: the Ciaobot archive remains durable even
         when an external provider is unavailable.
 
@@ -6306,33 +6307,64 @@ class ProjectChatManager:
         except Exception:
             logger.exception("notify_question_cb failed for %s", chat_id)
 
-    def respond_permission(
+    async def respond_permission(
         self,
         chat_id: str,
         *,
         request_id: str,
         approved: bool,
         reason: str = "",
-    ) -> bool:
-        """Deliver the user's allow/deny answer to the provider's gate.
+    ) -> QuestionResponseResult:
+        """Deliver an allow/deny answer and wait for provider acknowledgement.
 
-        Returns True if the answer matched a pending prompt. False means the
-        chat has no provider yet, or the request id is stale (late tap after
-        the turn ended, duplicate delivery, etc.). Either case is benign;
-        the caller just ignores the reply.
-
-        Also strips the buffered ``permission_request`` from the active
-        broker stream so a later reconnect (chat reopened, second tab,
-        flaky network) doesn't replay the prompt as a phantom approval
-        card. We do this even when the gate has nothing pending: stale
-        replies still indicate the user has dealt with the prompt, and
-        the buffered event should not pop back up.
+        Native V2 permission replies are transactional: the PWA keeps the card
+        retryable until OpenCode acknowledges the session-scoped request. The
+        legacy Claude gate remains supported as a local boolean seam.
         """
-        # Clear the persisted attention flag only if it still names this
-        # request — a stale/duplicate reply for an already-superseded prompt
-        # must not wipe out a newer pending one.
+        provider_service = self._providers.get(chat_id)
+        provider = provider_service.provider if provider_service is not None else None
+        if provider_service is None or provider is None:
+            return QuestionResponseResult(
+                False, "Permission provider is unavailable", False
+            )
+
+        responder = getattr(provider, "send_permission_response", None)
+        if callable(responder):
+            result = responder(request_id, approved, reason)
+            if inspect.isawaitable(result):
+                result = await result
+        else:
+            # Claude's SDK exposes a local PermissionGate rather than the V2
+            # session-scoped HTTP response endpoint.
+            gate = getattr(provider, "permission_gate")
+            result = gate.answer(request_id, approved=approved, reason=reason)
+
+        native_result = isinstance(result, QuestionResponseResult)
+        response = (
+            result
+            if native_result
+            else QuestionResponseResult(
+                bool(result),
+                "" if result else "Permission request was not acknowledged",
+                False,
+            )
+        )
+        # Only a native OpenCode response can prove that a request is stale.
+        # A false result from Claude's local gate means that no matching future
+        # was found, but the persisted card must remain retryable.
+        native_stale = (
+            native_result
+            and not response.ok
+            and not response.retryable
+            and response.error == "Permission request is no longer active"
+        )
+        legacy_stale = not native_result and not response.ok
+        stale = native_stale or legacy_stale
+        if not response.ok and not stale:
+            return response
+
         chat = self._chats.get(chat_id)
-        if chat is not None and chat.pending_permission:
+        if chat is not None and chat.pending_permission and not legacy_stale:
             try:
                 stored = json.loads(chat.pending_permission)
             except (TypeError, json.JSONDecodeError):
@@ -6341,11 +6373,6 @@ class ProjectChatManager:
                 chat.pending_permission = ""
                 self._save()
 
-        provider_service = self._providers.get(chat_id)
-        provider = provider_service.provider if provider_service is not None else None
-
-        # Strip from replay buffer first so even a stale-id reply (gate
-        # already drained on turn teardown) cleans up the recorded event.
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.resolve_permission(request_id)
@@ -6353,45 +6380,65 @@ class ProjectChatManager:
                 # The refused call never ran, so retract any file card it
                 # already painted. Custom adapters may use a request id that
                 # differs from the tool id, so resolve it before retracting.
-                # Done before the provider is told, so the mapping is still
-                # there to look up.
                 resolver = getattr(provider, "tool_use_id_for_request", None)
                 retract_id = resolver(request_id) if callable(resolver) else ""
                 stream.deny_tool_use(retract_id or request_id)
+        if stale:
+            return QuestionResponseResult(True)
+        return response
 
-        if provider_service is None or provider is None:
-            return False
-        # Provider adapters may expose custom permission handling.
-        if hasattr(provider, "send_permission_response"):
-            return cast(bool, provider.send_permission_response(request_id, approved))
-        # permission_gate is defined on the concrete SDK providers, not on
-        # BaseProvider; access via getattr to keep the type checker happy.
-        gate = getattr(provider, "permission_gate")
-        return cast(bool, gate.answer(request_id, approved=approved, reason=reason))
-
-    def respond_question(
+    async def respond_question(
         self,
         chat_id: str,
         *,
         request_id: str,
         answers: dict[str, list[str]],
-    ) -> bool:
-        """Deliver an answer to a provider-native user-input request."""
+        action: str = "reply",
+    ) -> QuestionResponseResult:
+        """Deliver a native question reply/cancel and wait for the provider."""
         provider_service = self._providers.get(chat_id)
         if provider_service is None or provider_service.provider is None:
-            return False
+            return QuestionResponseResult(
+                False, "Question provider is unavailable", False
+            )
         responder = getattr(
             provider_service.provider, "send_question_response", None
         )
         if not callable(responder):
-            return False
-        accepted = bool(responder(request_id, answers))
-        if accepted:
-            chat = self._chats.get(chat_id)
-            if chat is not None:
+            return QuestionResponseResult(
+                False, "Question provider is unavailable", False
+            )
+        result = responder(
+            request_id,
+            answers,
+            cancel=action == "cancel",
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        response = (
+            result
+            if isinstance(result, QuestionResponseResult)
+            else QuestionResponseResult(bool(result))
+        )
+        if not response.ok:
+            return response
+
+        stream = self._broker.get(chat_id)
+        if stream is not None:
+            stream.resolve_question(request_id)
+        chat = self._chats.get(chat_id)
+        if chat is not None and chat.pending_question:
+            try:
+                stored = json.loads(chat.pending_question)
+            except (TypeError, json.JSONDecodeError):
+                stored = {}
+            if not isinstance(stored, dict) or stored.get("request_id") in {
+                None,
+                request_id,
+            }:
                 chat.pending_question = ""
                 self._save()
-        return accepted
+        return response
 
     def respond_capability(
         self,

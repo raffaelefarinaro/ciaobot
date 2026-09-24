@@ -80,7 +80,7 @@ def test_no_runtime_root_leaves_only_the_name_based_patterns() -> None:
 
 def test_a_relocated_runtime_root_reaches_opencode_too(tmp_path: Path) -> None:
     moved = tmp_path / "var" / "state"
-    patterns = {rule["pattern"] for rule in opencode_credential_deny_rules(moved)}
+    patterns = {rule["resource"] for rule in opencode_credential_deny_rules(moved)}
 
     assert str(moved) in patterns
     assert f"{moved}/**" in patterns
@@ -152,29 +152,23 @@ def test_the_denies_come_after_the_wildcard_allow(mode: str) -> None:
     wildcard_allow = next(
         i
         for i, rule in enumerate(rules)
-        if rule["pattern"] == "*" and rule["permission"] == "*" and rule["action"] == "allow"
+        if rule["resource"] == "*" and rule["action"] == "*" and rule["effect"] == "allow"
     )
-    first_deny = next(
-        i for i, rule in enumerate(rules) if rule["action"] == "deny"
-    )
+    first_deny = next(i for i, rule in enumerate(rules) if rule["effect"] == "deny")
     assert first_deny > wildcard_allow
 
 
 def test_the_opencode_denies_cover_the_same_paths_as_claude() -> None:
     """One source of truth: the two providers cannot drift apart on coverage."""
     rules = opencode_credential_deny_rules()
-    assert {rule["pattern"] for rule in rules} == set(CREDENTIAL_DENY_PATTERNS)
-    assert {rule["permission"] for rule in rules} == set(
+    assert {rule["resource"] for rule in rules} == set(CREDENTIAL_DENY_PATTERNS)
+    assert {rule["action"] for rule in rules} == set(
         OPENCODE_CREDENTIAL_DENY_PERMISSIONS
     )
-    assert all(rule["action"] == "deny" for rule in rules)
+    assert all(rule["effect"] == "deny" for rule in rules)
 
 
-def test_bash_is_deliberately_not_claimed_to_be_covered() -> None:
-    """The denies are path globs; no shell rule can be path-scoped.
-
-    Pinned so a future edit that adds a `bash` entry has to revisit the
-    docstrings that tell operators the shell is NOT covered.
-    """
-    assert "bash" not in OPENCODE_CREDENTIAL_DENY_PERMISSIONS
+def test_shell_is_deliberately_not_claimed_to_be_covered() -> None:
+    """The denies are path globs; no shell rule can be path-scoped."""
+    assert "shell" not in OPENCODE_CREDENTIAL_DENY_PERMISSIONS
     assert not any(rule.startswith("Bash(") for rule in credential_path_deny_rules())

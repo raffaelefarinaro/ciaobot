@@ -938,9 +938,9 @@ def test_opencode_manual_and_plan_modes_add_no_allow_rules(mode: str) -> None:
     from ciao.providers.opencode import mode_settings
 
     _agent, rules = mode_settings(mode)  # type: ignore[arg-type]
-    bash_patterns = " ".join(r.get("pattern", "") for r in rules if r.get("permission") == "bash")
-    assert "ciao schedule create" not in bash_patterns
-    assert "ciao memory update" not in bash_patterns
+    resources = " ".join(str(rule.get("resource") or "") for rule in rules)
+    assert "ciao schedule create" not in resources
+    assert "ciao memory update" not in resources
 
 
 def test_opencode_auto_mode_keeps_every_ciao_command_gated() -> None:
@@ -949,9 +949,9 @@ def test_opencode_auto_mode_keeps_every_ciao_command_gated() -> None:
     from ciao.providers.opencode import mode_settings
 
     _agent, rules = mode_settings("auto")
-    bash = [r for r in rules if r.get("permission") == "bash"]
-    assert not any(r.get("pattern", "").startswith("ciao ") for r in bash)
-    assert bash[0] == {"permission": "bash", "pattern": "*", "action": "ask"}
+    shell = [r for r in rules if r.get("action") == "shell"]
+    assert not any(str(r.get("resource") or "").startswith("ciao ") for r in shell)
+    assert shell[0] == {"action": "shell", "resource": "*", "effect": "ask"}
 
 
 @pytest.mark.asyncio

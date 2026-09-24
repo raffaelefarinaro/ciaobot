@@ -34,8 +34,8 @@ describe('parseQuestions', () => {
       requestId: 'req-7',
     })
     expect(qs[0].options).toEqual([
-      { label: 'develop', description: 'default' },
-      { label: 'main', description: '' },
+      { label: 'develop', value: 'develop', description: 'default' },
+      { label: 'main', value: 'main', description: '' },
     ])
   })
 
@@ -46,7 +46,7 @@ describe('parseQuestions', () => {
     expect(qs[0].question).toBe('Pick some')
     expect(qs[0].header).toBe('Files')
     expect(qs[0].multiSelect).toBe(true)
-    expect(qs[0].options).toEqual([{ label: 'a.md', description: '' }])
+    expect(qs[0].options).toEqual([{ label: 'a.md', value: 'a.md', description: '' }])
   })
 
   test('falls back to the request id carried in the payload', () => {

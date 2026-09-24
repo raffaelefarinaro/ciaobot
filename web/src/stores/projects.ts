@@ -235,8 +235,14 @@ export const useProjectStore = defineStore('projects', () => {
   const queuedMessages = ref<Record<string, QueuedMessage[]>>({})
   // Pending Auto-mode permission prompts keyed by chat_id. The chat bubble
   // renders Approve/Deny buttons for each entry; clicking sends a
-  // `permission_response` on the per-chat WS and pops the entry optimistically.
+  // `permission_response` on the per-chat WS and waits for the provider ack.
   const pendingPermissions = ref<Record<string, PendingPermission[]>>({})
+  const permissionSubmissions = ref<Record<string, {
+    requestId: string
+    pending: boolean
+    error: string
+    retryable: boolean
+  }>>({})
   // Per-project "new chat is being created" flag so UI can disable buttons
   // and prevent double-clicks while the POST is in flight.
   const creatingChatProjectIds = ref<Record<string, boolean>>({})
@@ -269,20 +275,23 @@ export const useProjectStore = defineStore('projects', () => {
   // by project makes a second call join the first instead of double-posting.
   const pendingChatCreations: Record<string, Promise<ChatInfo>> = {}
   // the tool call with empty answers, so the PWA renders its own picker above
-  // the composer. Cleared the next time the user sends a message (their reply
-  // implicitly answers, regardless of whether they clicked an option).
+  // the composer. Native V2 forms remain active until an acknowledged
+  // reply/cancel; legacy cards without a request id are cleared by the next
+  // ordinary message.
   const activeQuestions = ref<Record<string, ActiveQuestion[]>>({})
+  const questionSubmissions = ref<Record<string, {
+    requestId: string
+    pending: boolean
+    error: string
+    retryable: boolean
+  }>>({})
 
   // Signatures of AskUserQuestion pickers the user has already answered or
-  // dismissed this session, keyed by chat. Clearing `activeQuestions` on send
-  // is only client-side and optimistic; the server clears the persisted
-  // `pending_question` a beat later (native accept, or the next turn). Any
-  // `/api/chats` poll or WS reconnect in that window (`reconcileChatList`
-  // overwrites `chats.value` with the server snapshot, then `loadMessages` runs
-  // `rebuildPendingQuestion`) would otherwise resurrect the answered picker —
-  // and because `rebuildPendingQuestion` bails when a picker is already live, a
-  // later clean snapshot never removes it, so the card sticks. Remembering the
-  // resolved signature lets `rebuildPendingQuestion` refuse the stale rebuild.
+  // dismissed this session, keyed by chat. Native cards remain visible until
+  // the server acknowledges reply/cancel; the signature prevents a reconnect
+  // snapshot from resurrecting a card after that acknowledgement. Legacy
+  // provider cards without a request id are still cleared optimistically on
+  // the next ordinary message.
   const resolvedQuestions = ref<Record<string, Set<string>>>({})
 
   // Record the currently-active picker for `chatId` as resolved. Reads the live
@@ -291,6 +300,42 @@ export const useProjectStore = defineStore('projects', () => {
     const sig = questionsSignature(activeQuestions.value[chatId])
     if (!sig) return
     ;(resolvedQuestions.value[chatId] ||= new Set<string>()).add(sig)
+  }
+
+  function clearPermission(chatId: string, requestId: string) {
+    const list = pendingPermissions.value[chatId]
+    if (list) {
+      const next = list.filter(p => p.request_id !== requestId)
+      if (next.length) pendingPermissions.value[chatId] = next
+      else delete pendingPermissions.value[chatId]
+    }
+    delete permissionSubmissions.value[chatId]
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (chat?.pending_permission) {
+      try {
+        const stored = JSON.parse(chat.pending_permission) as { request_id?: string }
+        if (!stored.request_id || stored.request_id === requestId) chat.pending_permission = ''
+      } catch {
+        chat.pending_permission = ''
+      }
+    }
+  }
+
+  function clearQuestion(chatId: string, requestId = '') {
+    markResolvedQuestion(chatId)
+    delete activeQuestions.value[chatId]
+    delete questionSubmissions.value[chatId]
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (chat?.pending_question) {
+      try {
+        const stored = JSON.parse(chat.pending_question) as { request_id?: string }
+        if (!requestId || !stored.request_id || stored.request_id === requestId) {
+          chat.pending_question = ''
+        }
+      } catch {
+        if (!requestId) chat.pending_question = ''
+      }
+    }
   }
 
   // ── Image-capability questions ────────────────────────────────────────
@@ -3987,14 +4032,21 @@ export const useProjectStore = defineStore('projects', () => {
     onSent?: () => void,
     _deferredAttempt = 0,
   ): boolean {
-    // Any send implicitly answers (or dismisses) a pending AskUserQuestion
-    // picker — the model already got an empty tool result and is reading
-    // this turn for the actual answer. Clear the local chat's persisted
-    // pending_question too, so a loadMessages racing this send (WS reconnect,
-    // reconciliation) doesn't rebuild the picker from a now-stale value.
+    // A native V2 form owns the turn until its reply/cancel is acknowledged.
+    // Do not silently dismiss it by sending an unrelated composer message.
+    if (activeQuestions.value[chatId]?.some(q => q.requestId)) {
+      pushToast({
+        chat_id: chatId,
+        title: 'Answer the open question first',
+        body: 'The model is waiting for the highlighted question before it can continue.',
+        variant: 'error',
+      })
+      return false
+    }
+    // Claude's legacy picker has no request id and is intentionally dismissed
+    // by the next ordinary message.
     if (activeQuestions.value[chatId]) {
-      markResolvedQuestion(chatId)
-      delete activeQuestions.value[chatId]
+      clearQuestion(chatId)
     }
     // A send also implicitly dismisses any open image-capability question:
     // the user is re-sending through the normal path (e.g. after opening the
@@ -4219,54 +4271,52 @@ export const useProjectStore = defineStore('projects', () => {
     approved: boolean,
     reason = '',
   ) {
-    // Pop the bubble optimistically so rapid-tapping the same button
-    // doesn't double-send. If the WS is dead, the server resolves its
-    // pending future on disconnect via `cancel_all`.
-    const list = pendingPermissions.value[chatId]
-    if (list) {
-      const next = list.filter(p => p.request_id !== requestId)
-      if (next.length) {
-        pendingPermissions.value[chatId] = next
-      } else {
-        delete pendingPermissions.value[chatId]
-        delete activeQuestions.value[chatId]
-      }
+    permissionSubmissions.value[chatId] = {
+      requestId,
+      pending: true,
+      error: '',
+      retryable: true,
     }
-    // Clear the persisted attention flag optimistically too, so a
-    // GET /api/chats refresh that lands before the server's own clear
-    // round-trips doesn't resurrect the card via rebuildPendingPermission.
-    const chat = chats.value.find(c => c.chat_id === chatId)
-    if (chat?.pending_permission) chat.pending_permission = ''
     const ws = sockets.value[chatId]
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(
-        JSON.stringify({
-          type: 'permission_response',
-          request_id: requestId,
-          approved,
-          reason,
-        }),
-      )
+      ws.send(JSON.stringify({
+        type: 'permission_response',
+        request_id: requestId,
+        approved,
+        reason,
+      }))
+      return true
     }
+    permissionSubmissions.value[chatId].pending = false
+    permissionSubmissions.value[chatId].error = 'Chat connection is down; retry when it reconnects.'
+    return false
   }
 
   function respondQuestion(
     chatId: string,
     requestId: string,
     answers: Record<string, string[]>,
+    action: 'reply' | 'cancel' = 'reply',
   ) {
-    markResolvedQuestion(chatId)
-    delete activeQuestions.value[chatId]
-    const chat = chats.value.find(c => c.chat_id === chatId)
-    if (chat?.pending_question) chat.pending_question = ''
+    questionSubmissions.value[chatId] = {
+      requestId,
+      pending: true,
+      error: '',
+      retryable: true,
+    }
     const ws = sockets.value[chatId]
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: 'question_response',
         request_id: requestId,
+        action,
         answers,
       }))
+      return true
     }
+    questionSubmissions.value[chatId].pending = false
+    questionSubmissions.value[chatId].error = 'Chat connection is down; retry when it reconnects.'
+    return false
   }
 
   function respondCapability(
@@ -4711,6 +4761,7 @@ export const useProjectStore = defineStore('projects', () => {
             // memory for this chat (keeps the set from growing and avoids a
             // reused native request id being wrongly suppressed).
             delete resolvedQuestions.value[chatId]
+            delete questionSubmissions.value[chatId]
             activeQuestions.value[chatId] = qs
             // Nudge the user when the tab is backgrounded so they don't
             // miss a question that the model needs answered.
@@ -4780,6 +4831,29 @@ export const useProjectStore = defineStore('projects', () => {
           streamingTimeline.value[chatId] = timeline.filter(
             e => !(e.kind === 'filecard' && e.tool_use_id === event.tool_use_id),
           )
+        }
+        break
+      }
+
+      case 'question_response_result': {
+        const submission = questionSubmissions.value[chatId]
+        if (!submission || submission.requestId !== event.request_id) break
+        if (event.ok) {
+          clearQuestion(chatId, event.request_id)
+        } else {
+          questionSubmissions.value[chatId] = {
+            ...submission,
+            pending: false,
+            error: event.error || 'OpenCode rejected the answer; retry the form.',
+            retryable: event.retryable !== false,
+          }
+        }
+        break
+      }
+
+      case 'question_resolved': {
+        if (activeQuestions.value[chatId]?.some(q => q.requestId === event.request_id)) {
+          clearQuestion(chatId, event.request_id)
         }
         break
       }
@@ -5047,6 +5121,27 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
 
+      case 'permission_response_result': {
+        const submission = permissionSubmissions.value[chatId]
+        if (!submission || submission.requestId !== event.request_id) break
+        if (event.ok) {
+          clearPermission(chatId, event.request_id)
+        } else {
+          permissionSubmissions.value[chatId] = {
+            ...submission,
+            pending: false,
+            error: event.error || 'The permission reply failed; retry the request.',
+            retryable: event.retryable !== false,
+          }
+        }
+        break
+      }
+
+      case 'permission_resolved': {
+        clearPermission(chatId, event.request_id)
+        break
+      }
+
       case 'permission_request': {
         // Auto mode classifier escalated: model wants to run a tool, pop the
         // Approve/Deny bubble. Keep a visible timeline line too so the user
@@ -5056,6 +5151,7 @@ export const useProjectStore = defineStore('projects', () => {
         const list = pendingPermissions.value[chatId] || []
         // Dedup by request_id in case the server replays it on reconnect.
         if (!list.some(p => p.request_id === event.request_id)) {
+          delete permissionSubmissions.value[chatId]
           pendingPermissions.value[chatId] = [
             ...list,
             {
@@ -5110,7 +5206,7 @@ export const useProjectStore = defineStore('projects', () => {
     // State
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
-    projectStreaming, backgroundAgents, backgroundRuns, runningSubagents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
+    projectStreaming, backgroundAgents, backgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable, chatPanelsMounted,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,

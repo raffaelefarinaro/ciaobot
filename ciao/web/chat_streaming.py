@@ -38,6 +38,7 @@ from ciao.models import (
     ToolUseEvent,
 )
 from ciao.provider_service import ProviderService, capabilities_for
+from ciao.providers.opencode import QuestionResponseResult
 from ciao.sessions import StateStore
 from ciao.transcripts import (
     TranscriptStore,
@@ -126,14 +127,14 @@ class ChatStreamingHost(Protocol):
 
     def _notify_question(self, chat_id: str, question_json: str) -> None: ...
 
-    def respond_permission(
+    async def respond_permission(
         self,
         chat_id: str,
         *,
         request_id: str,
         approved: bool,
         reason: str = "",
-    ) -> bool: ...
+    ) -> QuestionResponseResult: ...
 
     def _arm_retry(
         self,
@@ -442,7 +443,7 @@ class ChatStreaming:
                         if isinstance(event, PermissionRequestEvent):
                             self._host._notify_permission(chat_id, event)
                             if unattended:
-                                self._host.respond_permission(
+                                await self._host.respond_permission(
                                     chat_id,
                                     request_id=event.request_id,
                                     approved=False,

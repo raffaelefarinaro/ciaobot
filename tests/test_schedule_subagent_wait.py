@@ -145,15 +145,11 @@ async def test_await_opencode_subagents_uses_child_lifecycle(
     chat.provider = "opencode"
 
     def child_tree(status: str) -> list[dict]:
-        # opencode sessions carry no status field; the last assistant message's
-        # `time` record marks a turn still in flight (created, no completed).
-        messages = [
-            {"info": {"role": "user"}, "parts": []},
-            {"info": {"role": "assistant", "time": {"created": 1}}, "parts": []},
-        ]
-        if status == "completed":
-            messages[1]["info"]["time"] = {"created": 1, "completed": 2}
-        return [{"info": {"id": "opencode-child"}, "messages": messages}]
+        return [{
+            "info": {"id": "opencode-child"},
+            "messages": [],
+            "active": status == "running",
+        }]
 
     read = AsyncMock(side_effect=[child_tree("running"), child_tree("completed")])
     monkeypatch.setattr(OpencodeProvider, "read_collab_tree", read)

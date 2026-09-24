@@ -4,7 +4,17 @@
 // `activeCapabilityQuestions`, `resolvedQuestions`) stays in
 // `stores/projects.ts`, which owns when a card appears and when it is cleared.
 
-export type ActiveQuestionOption = { label: string; description?: string }
+export type QuestionWhen = {
+  key: string
+  op: 'eq' | 'neq'
+  value: unknown
+}
+
+export type ActiveQuestionOption = {
+  label: string
+  value?: string
+  description?: string
+}
 
 export type ActiveQuestion = {
   id: string
@@ -14,6 +24,18 @@ export type ActiveQuestion = {
   allowOther: boolean
   isSecret: boolean
   requestId: string
+  type?: string
+  required?: boolean
+  when?: QuestionWhen[]
+  format?: string
+  pattern?: string
+  minLength?: number
+  maxLength?: number
+  minimum?: number
+  maximum?: number
+  minItems?: number
+  maxItems?: number
+  custom?: boolean
   options: ActiveQuestionOption[]
 }
 
@@ -58,6 +80,26 @@ export function questionsSignature(qs: ActiveQuestion[] | undefined): string {
  * rebuild from a chat's persisted `pending_question`. Returns [] on anything
  * unparseable so callers can fall through to the generic trace path.
  */
+export function questionIsActive(
+  question: ActiveQuestion,
+  answers: Record<string, string[]>,
+): boolean {
+  for (const condition of question.when || []) {
+    const values = answers[condition.key]
+    if (!values) return false
+    const expected = condition.value
+    const expectedText = typeof expected === 'string' ? expected : String(expected)
+    const includes = values.includes(expectedText)
+    const equal = question.type === 'multiselect'
+      ? includes
+      : values.length === 1 && values[0] === expectedText
+    if ((condition.op === 'eq' && !equal) || (condition.op === 'neq' && equal)) {
+      return false
+    }
+  }
+  return true
+}
+
 export function parseQuestions(
   toolInput: string | null | undefined,
   requestId = '',
@@ -80,6 +122,10 @@ export function parseQuestions(
         allowOther: true,
         isSecret: false,
         requestId: resolvedRequestId,
+        type: 'string',
+        required: true,
+        when: [],
+        custom: true,
         options: [],
       }]
     }
@@ -100,9 +146,24 @@ export function parseQuestions(
           : Boolean(q.isOther) || !Array.isArray(q.options) || q.options.length === 0,
         isSecret: Boolean(q.isSecret),
         requestId: resolvedRequestId,
+        type: type || (q.multiSelect ? 'multiselect' : 'string'),
+        required: q.required === undefined ? true : Boolean(q.required),
+        when: Array.isArray(q.when)
+          ? (q.when as QuestionWhen[]).filter(c => c && typeof c.key === 'string')
+          : [],
+        format: q.format ? String(q.format) : undefined,
+        pattern: q.pattern ? String(q.pattern) : undefined,
+        minLength: typeof q.minLength === 'number' ? q.minLength : undefined,
+        maxLength: typeof q.maxLength === 'number' ? q.maxLength : undefined,
+        minimum: typeof q.minimum === 'number' ? q.minimum : undefined,
+        maximum: typeof q.maximum === 'number' ? q.maximum : undefined,
+        minItems: typeof q.minItems === 'number' ? q.minItems : undefined,
+        maxItems: typeof q.maxItems === 'number' ? q.maxItems : undefined,
+        custom: Boolean(q.custom),
         options: Array.isArray(q.options)
           ? (q.options as Array<Record<string, unknown>>).map(o => ({
               label: String(o.label ?? o.value ?? ''),
+              value: String(o.value ?? o.label ?? ''),
               description: o.description ? String(o.description) : '',
             }))
           : [],

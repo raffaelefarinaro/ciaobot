@@ -63,16 +63,17 @@ async def test_respond_permission_forwards_to_provider_gate(tmp_path: Path) -> N
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
-    ok = pcm.respond_permission(
+    ok = await pcm.respond_permission(
         chat.chat_id, request_id="tool-1", approved=True, reason=""
     )
-    assert ok is True
+    assert ok.ok is True
 
     result = await pending
     assert isinstance(result, PermissionResultAllow)
 
 
-def test_respond_permission_clears_matching_pending_permission(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_respond_permission_keeps_matching_pending_without_ack(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("General", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="t")
@@ -80,12 +81,14 @@ def test_respond_permission_clears_matching_pending_permission(tmp_path: Path) -
         "request_id": "req-1", "tool_name": "Bash", "message": "Approve use of Bash?", "tool_input": "",
     })
 
-    pcm.respond_permission(chat.chat_id, request_id="req-1", approved=True, reason="")
+    await pcm.respond_permission(chat.chat_id, request_id="req-1", approved=True, reason="")
 
-    assert pcm._chats[chat.chat_id].pending_permission == ""
+    # No provider acknowledgement means the persisted card stays retryable.
+    assert pcm._chats[chat.chat_id].pending_permission != ""
 
 
-def test_respond_permission_ignores_stale_reply_for_a_superseded_request(
+@pytest.mark.asyncio
+async def test_respond_permission_ignores_stale_reply_for_a_superseded_request(
     tmp_path: Path,
 ) -> None:
     """A late reply for an already-superseded prompt must not wipe a newer one."""
@@ -96,7 +99,7 @@ def test_respond_permission_ignores_stale_reply_for_a_superseded_request(
         "request_id": "req-2", "tool_name": "Bash", "message": "Approve use of Bash?", "tool_input": "",
     })
 
-    pcm.respond_permission(chat.chat_id, request_id="req-1", approved=True, reason="")
+    await pcm.respond_permission(chat.chat_id, request_id="req-1", approved=True, reason="")
 
     assert json.loads(pcm._chats[chat.chat_id].pending_permission)["request_id"] == "req-2"
 
@@ -105,8 +108,8 @@ def test_respond_permission_ignores_stale_reply_for_a_superseded_request(
 async def test_respond_permission_returns_false_when_no_provider(tmp_path: Path) -> None:
     """A permission reply for a chat with no provider yet must be a no-op."""
     pcm = _make_manager(tmp_path)
-    ok = pcm.respond_permission("no-such-chat", request_id="x", approved=True, reason="")
-    assert ok is False
+    ok = await pcm.respond_permission("no-such-chat", request_id="x", approved=True, reason="")
+    assert ok.ok is False
 
 
 @pytest.mark.asyncio
@@ -116,10 +119,11 @@ async def test_respond_permission_unknown_request_id_returns_false(tmp_path: Pat
     chat = pcm.create_chat(project.project_id, title="t")
     pcm._get_provider(chat.chat_id)  # instantiate gate
 
-    ok = pcm.respond_permission(
+    ok = await pcm.respond_permission(
         chat.chat_id, request_id="never-asked", approved=True, reason=""
     )
-    assert ok is False
+    # A stale id is already settled; acknowledge it so clients clear the card.
+    assert ok.ok is True
 
 
 @pytest.mark.asyncio
@@ -155,7 +159,7 @@ async def test_respond_permission_strips_buffered_event_from_active_stream(
     pcm._get_provider(chat.chat_id)
 
     # Stale reply (gate has nothing pending) — should still strip the buffer.
-    pcm.respond_permission(
+    await pcm.respond_permission(
         chat.chat_id, request_id="tool-99", approved=True, reason=""
     )
 

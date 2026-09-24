@@ -104,7 +104,7 @@ _AGENT_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
 # opencode projections. Skills and instructions need none: opencode discovers
 # `.claude/skills/<name>/SKILL.md`, `.agents/skills/<name>/SKILL.md`,
-# `AGENTS.md`, and `CLAUDE.md` natively (verified against opencode 1.18).
+# and `AGENTS.md` natively (verified against OpenCode 2.0.16).
 # Only commands, subagents, and MCP servers need generated files.
 #
 # Markdown carries its marker as an HTML comment under the frontmatter; JSON
