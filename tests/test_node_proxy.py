@@ -386,7 +386,7 @@ async def test_websocket_proxy_drains_simultaneous_forwarding_failures(caplog) -
 async def test_websocket_proxy_treats_expected_remote_close_as_normal(
     close_code: int, caplog
 ) -> None:
-    close = Close(close_code, "")
+    close = Close(close_code, "host closed")
     close_error = (
         ConnectionClosedOK(close, close, True)
         if close_code in {1000, 1001}
@@ -426,7 +426,46 @@ async def test_websocket_proxy_treats_expected_remote_close_as_normal(
 
     assert not any(record.levelname == "WARNING" for record in caplog.records)
     websocket.send_json.assert_not_awaited()
-    websocket.close.assert_not_awaited()
+    websocket.close.assert_awaited_once_with(code=close_code, reason="host closed")
+
+
+@pytest.mark.asyncio
+async def test_websocket_proxy_closes_client_when_remote_iterator_ends() -> None:
+    class ClosedRemote:
+        close_code = 1000
+        close_reason = "host finished"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def send(self, message: str) -> None:
+            raise AssertionError("send should not run")
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    websocket = AsyncMock()
+    websocket.url.path = "/ws/chat/chat-1"
+    websocket.url.query = ""
+    websocket.app.state.node_state_manager = None
+    pending_receive = asyncio.get_running_loop().create_future()
+
+    async def wait_for_disconnect():
+        await pending_receive
+
+    websocket.receive_text.side_effect = wait_for_disconnect
+
+    with patch("websockets.connect", return_value=ClosedRemote()):
+        await proxy_websocket(websocket, "http://10.0.0.5:8443")
+
+    websocket.send_json.assert_not_awaited()
+    websocket.close.assert_awaited_once_with(code=1000, reason="host finished")
 
 
 @pytest.mark.asyncio

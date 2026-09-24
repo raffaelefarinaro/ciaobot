@@ -471,6 +471,34 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
             target_ws_url,
             additional_headers=extra_headers or None,
         ) as remote_ws:
+            downstream_close_started = False
+
+            async def close_downstream(
+                close_code: int | None = None,
+                close_reason: str | None = None,
+            ) -> None:
+                """Relay a host close to the browser without masking teardown."""
+                nonlocal downstream_close_started
+                if downstream_close_started:
+                    return
+                downstream_close_started = True
+
+                if close_code is None:
+                    close_code = getattr(remote_ws, "close_code", None)
+                if not isinstance(close_code, int):
+                    close_code = 1000
+                if close_reason is None:
+                    close_reason = getattr(remote_ws, "close_reason", None)
+                if not isinstance(close_reason, str):
+                    close_reason = ""
+
+                try:
+                    await websocket.close(code=close_code, reason=close_reason)
+                except (WebSocketDisconnect, RuntimeError):
+                    # The browser can disconnect while the host is closing.
+                    # There is no downstream socket left to notify in that case.
+                    return
+
             async def forward_client_to_remote():
                 try:
                     while True:
@@ -482,11 +510,16 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                     # that is no longer connected.
                     return
                 except ConnectionClosed as exc:
+                    close = exc.rcvd
                     if not isinstance(exc, ConnectionClosedOK) and (
-                        exc.rcvd is None
-                        or exc.rcvd.code not in _EXPECTED_REMOTE_CLOSE_CODES
+                        close is None
+                        or close.code not in _EXPECTED_REMOTE_CLOSE_CODES
                     ):
                         raise
+                    if close is not None:
+                        await close_downstream(close.code, close.reason)
+                    else:
+                        await close_downstream()
                     return
 
             async def forward_remote_to_client():
@@ -501,12 +534,18 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                     # healthy. As above, this is a normal teardown.
                     return
                 except ConnectionClosed as exc:
+                    close = exc.rcvd
                     if not isinstance(exc, ConnectionClosedOK) and (
-                        exc.rcvd is None
-                        or exc.rcvd.code not in _EXPECTED_REMOTE_CLOSE_CODES
+                        close is None
+                        or close.code not in _EXPECTED_REMOTE_CLOSE_CODES
                     ):
                         raise
+                    if close is not None:
+                        await close_downstream(close.code, close.reason)
+                    else:
+                        await close_downstream()
                     return
+                await close_downstream()
 
             task1 = asyncio.create_task(forward_client_to_remote())
             task2 = asyncio.create_task(forward_remote_to_client())
