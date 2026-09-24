@@ -24,6 +24,7 @@ export type ActiveQuestion = {
   allowOther: boolean
   isSecret: boolean
   requestId: string
+  sessionId?: string
   type?: string
   required?: boolean
   when?: QuestionWhen[]
@@ -70,7 +71,10 @@ export type CapabilityQuestion = {
 export function questionsSignature(qs: ActiveQuestion[] | undefined): string {
   if (!qs || !qs.length) return ''
   const rid = qs[0]?.requestId
-  if (rid) return `rid:${rid}`
+  if (rid) {
+    const sessionId = qs[0]?.sessionId
+    return `rid:${sessionId ? `${sessionId}:` : ''}${rid}`
+  }
   return `q:${qs.map(q => `${q.id}${q.question}`).join('')}`
 }
 
@@ -231,12 +235,14 @@ export function questionAnswerIsValid(
 export function parseQuestions(
   toolInput: string | null | undefined,
   requestId = '',
+  sessionId = '',
 ): ActiveQuestion[] {
   if (!toolInput) return []
   try {
     const parsed = JSON.parse(toolInput)
     if (!Array.isArray(parsed?.questions)) return []
     const resolvedRequestId = requestId || String(parsed?.request_id ?? '')
+    const resolvedSessionId = sessionId || String(parsed?.session_id ?? '')
     if (parsed.questions.length === 0) {
       // Some provider turns emit the AskUserQuestion tool
       // with an empty questions array. Do not silently demote that event to
@@ -250,6 +256,7 @@ export function parseQuestions(
         allowOther: true,
         isSecret: false,
         requestId: resolvedRequestId,
+        sessionId: resolvedSessionId || undefined,
         type: 'string',
         required: true,
         when: [],
@@ -275,6 +282,7 @@ export function parseQuestions(
           : Boolean(q.isOther) || !Array.isArray(q.options) || q.options.length === 0,
         isSecret: Boolean(q.isSecret),
         requestId: resolvedRequestId,
+        sessionId: resolvedSessionId || undefined,
         type: type || (q.multiSelect ? 'multiselect' : 'string'),
         required: q.required === undefined ? true : Boolean(q.required),
         when: Array.isArray(q.when)

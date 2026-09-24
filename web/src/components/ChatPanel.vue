@@ -845,17 +845,17 @@
           <button
             class="btn-deny"
             :aria-keyshortcuts="permissionShortcut('deny') || undefined"
-             :disabled="permissionSubmitting"
-            @click="store.respondPermission(chat.chat_id, p.request_id, false, 'User denied')"
+             :disabled="permissionSubmittingFor(p.request_id, p.session_id)"
+            @click="store.respondPermission(chat.chat_id, p.request_id, false, 'User denied', p.session_id || '')"
           ><span v-if="permissionShortcut('deny')" class="permission-key" aria-hidden="true">{{ permissionShortcut('deny') }}</span>Deny</button>
           <button
             class="btn-approve"
             :aria-keyshortcuts="permissionShortcut('approve') || undefined"
-             :disabled="permissionSubmitting"
-            @click="store.respondPermission(chat.chat_id, p.request_id, true)"
+             :disabled="permissionSubmittingFor(p.request_id, p.session_id)"
+            @click="store.respondPermission(chat.chat_id, p.request_id, true, '', p.session_id || '')"
           ><span v-if="permissionShortcut('approve')" class="permission-key" aria-hidden="true">{{ permissionShortcut('approve') }}</span>Approve</button>
         </div>
-        <div v-if="permissionError" class="question-card-error">{{ permissionError }}</div>
+        <div v-if="permissionErrorFor(p.request_id, p.session_id)" class="question-card-error">{{ permissionErrorFor(p.request_id, p.session_id) }}</div>
       </div>
     </div>
 
@@ -2154,8 +2154,19 @@ const permissionSubmission = computed(() => {
   const id = store.activeChatId
   return id ? store.permissionSubmissions[id] : undefined
 })
-const permissionSubmitting = computed(() => permissionSubmission.value?.pending === true)
-const permissionError = computed(() => permissionSubmission.value?.error || '')
+function permissionSubmittingFor(requestId: string, sessionId = '') {
+  const submission = permissionSubmission.value
+  return submission?.requestId === requestId
+    && (!sessionId || !submission.sessionId || submission.sessionId === sessionId)
+    && submission.pending === true
+}
+function permissionErrorFor(requestId: string, sessionId = '') {
+  const submission = permissionSubmission.value
+  return submission?.requestId === requestId
+    && (!sessionId || !submission.sessionId || submission.sessionId === sessionId)
+    ? submission.error
+    : ''
+}
 
 // The backend's `message` field is almost always the templated
 // "Approve use of {tool_name}?", which just repeats the tool-name badge shown
@@ -2215,7 +2226,9 @@ const activeQuestions = computed(() => {
 
 const questionSubmission = computed(() => {
   const id = store.activeChatId
-  return id ? store.questionSubmissions[id] : undefined
+  const submission = id ? store.questionSubmissions[id] : undefined
+  const requestId = activeQuestions.value[0]?.requestId
+  return submission && requestId === submission.requestId ? submission : undefined
 })
 const questionSubmitting = computed(() => questionSubmission.value?.pending === true)
 const questionError = computed(() => questionSubmission.value?.error || '')
@@ -2344,11 +2357,23 @@ function handlePermissionShortcut(e: KeyboardEvent): boolean {
   if (!pendingApprovals.value.length) return false
   const first = pendingApprovals.value[0]
   if (e.key === '1') {
-    store.respondPermission(chat.value.chat_id, first.request_id, false, 'User denied')
+    store.respondPermission(
+      chat.value.chat_id,
+      first.request_id,
+      false,
+      'User denied',
+      first.session_id || '',
+    )
     return true
   }
   if (e.key === '2') {
-    store.respondPermission(chat.value.chat_id, first.request_id, true)
+    store.respondPermission(
+      chat.value.chat_id,
+      first.request_id,
+      true,
+      '',
+      first.session_id || '',
+    )
     return true
   }
   return false
@@ -2434,8 +2459,19 @@ function submitQuestionAnswers() {
     lines.push(`**${questionPromptLabel(q, i)}**: ${answer}`)
   }
   const requestId = qs[0]?.requestId || ''
+  const sessionId = qs[0]?.sessionId || ''
   if (requestId) {
-    store.respondQuestion(chat.value.chat_id, requestId, nativeAnswers, 'reply')
+    if (sessionId) {
+      store.respondQuestion(
+        chat.value.chat_id,
+        requestId,
+        nativeAnswers,
+        'reply',
+        sessionId,
+      )
+    } else {
+      store.respondQuestion(chat.value.chat_id, requestId, nativeAnswers, 'reply')
+    }
     return
   }
   const text = lines.join('\n')
@@ -2448,8 +2484,10 @@ function dismissQuestions() {
   const id = store.activeChatId
   if (!id) return
   const requestId = activeQuestions.value[0]?.requestId || ''
+  const sessionId = activeQuestions.value[0]?.sessionId || ''
   if (requestId) {
-    store.respondQuestion(id, requestId, {}, 'cancel')
+    if (sessionId) store.respondQuestion(id, requestId, {}, 'cancel', sessionId)
+    else store.respondQuestion(id, requestId, {}, 'cancel')
   } else {
     // Claude picker has no round-trip; remember it as resolved so a stale
     // server snapshot can't rebuild it after dismissal.

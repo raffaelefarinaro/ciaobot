@@ -155,19 +155,39 @@ async def ws_chat(websocket: WebSocket) -> None:
                 # provider acknowledgement is sent back as a result event; the
                 # client keeps the card retryable until that acknowledgement.
                 request_id = str(msg.get("request_id", ""))
-                approved = bool(msg.get("approved", False))
+                raw_approved = msg.get("approved")
+                session_id = str(msg.get("session_id") or "").strip()
                 reason = str(msg.get("reason", ""))
+                if request_id and not isinstance(raw_approved, bool):
+                    try:
+                        await websocket.send_json({
+                            "type": "permission_response_result",
+                            "request_id": request_id,
+                            **({"session_id": session_id} if session_id else {}),
+                            "ok": False,
+                            "error": "Permission approval must be a JSON boolean.",
+                            "retryable": False,
+                        })
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
+                    continue
                 if request_id:
+                    permission_payload = {
+                        "request_id": request_id,
+                        "approved": bool(raw_approved),
+                        "reason": reason,
+                    }
+                    if session_id:
+                        permission_payload["session_id"] = session_id
                     result = await pcm.respond_permission(
                         chat_id,
-                        request_id=request_id,
-                        approved=approved,
-                        reason=reason,
+                        **permission_payload,
                     )
                     try:
                         await websocket.send_json({
                             "type": "permission_response_result",
                             "request_id": request_id,
+                            "session_id": session_id,
                             "ok": result.ok,
                             "error": result.error,
                             "retryable": result.retryable,
@@ -178,6 +198,7 @@ async def ws_chat(websocket: WebSocket) -> None:
 
             if msg_type == "question_response":
                 request_id = str(msg.get("request_id", "")).strip()
+                session_id = str(msg.get("session_id") or "").strip()
                 raw_answers = msg.get("answers")
                 answers: dict[str, list[str]] = {}
                 if isinstance(raw_answers, dict):
@@ -192,6 +213,7 @@ async def ws_chat(websocket: WebSocket) -> None:
                         await websocket.send_json({
                             "type": "question_response_result",
                             "request_id": request_id,
+                            **({"session_id": session_id} if session_id else {}),
                             "ok": False,
                             "state": "rejected",
                             "error": "Question action must be reply or cancel.",
@@ -201,16 +223,22 @@ async def ws_chat(websocket: WebSocket) -> None:
                         break
                     continue
                 if request_id:
+                    question_payload = {
+                        "request_id": request_id,
+                        "answers": answers,
+                        "action": action,
+                    }
+                    if session_id:
+                        question_payload["session_id"] = session_id
                     result = await pcm.respond_question(
                         chat_id,
-                        request_id=request_id,
-                        answers=answers,
-                        action=action,
+                        **question_payload,
                     )
                     try:
                         await websocket.send_json({
                             "type": "question_response_result",
                             "request_id": request_id,
+                            **({"session_id": session_id} if session_id else {}),
                             "ok": result.ok,
                             "state": "cancelled" if action == "cancel" else "answered",
                             "error": result.error,

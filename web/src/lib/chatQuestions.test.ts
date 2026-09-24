@@ -157,6 +157,13 @@ describe('questionsSignature', () => {
     expect(questionsSignature([{ ...base, requestId: 'r9' }])).toBe('rid:r9')
   })
 
+  test('scopes a reused request id to its provider session', () => {
+    const first = { ...base, requestId: 'reused', sessionId: 'ses_old' }
+    const second = { ...base, requestId: 'reused', sessionId: 'ses_new' }
+    expect(questionsSignature([first])).toBe('rid:ses_old:reused')
+    expect(questionsSignature([second])).toBe('rid:ses_new:reused')
+  })
+
   test('falls back to the question content when there is no request id', () => {
     const sig = questionsSignature([base])
     expect(sig.startsWith('q:')).toBe(true)

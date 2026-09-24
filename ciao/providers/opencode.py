@@ -1837,9 +1837,13 @@ class OpencodeProvider(BaseSDKProvider):
 
     # ------------------------------------------------------------ permissions
 
-    def tool_use_id_for_request(self, request_id: str) -> str:
+    def tool_use_id_for_request(
+        self, request_id: str, session_id: str = ""
+    ) -> str:
         pending = self._permission_requests.get(request_id)
-        return pending.tool_use_id if pending is not None else ""
+        if pending is None or (session_id and pending.session_id != session_id):
+            return ""
+        return pending.tool_use_id
 
     async def _reply_permission(
         self, pending: _PendingRequest, reply: str, message: str = ""
@@ -1869,9 +1873,18 @@ class OpencodeProvider(BaseSDKProvider):
         )
 
     async def send_permission_response(
-        self, request_id: str, approved: bool, message: str = ""
+        self,
+        request_id: str,
+        approved: bool,
+        message: str = "",
+        *,
+        session_id: str = "",
     ) -> QuestionResponseResult:
         pending = self._permission_requests.get(request_id)
+        if pending is not None and session_id and pending.session_id != session_id:
+            return QuestionResponseResult(
+                False, "Permission request belongs to another session", False
+            )
         if pending is None or self._client is None:
             return QuestionResponseResult(False, "Permission request is no longer active", False)
         result = await self._reply_permission(
@@ -1932,6 +1945,7 @@ class OpencodeProvider(BaseSDKProvider):
         answers: Mapping[str, Sequence[str]],
         *,
         cancel: bool = False,
+        session_id: str = "",
     ) -> QuestionResponseResult:
         """Reply to or explicitly cancel a V2 form.
 
@@ -1940,6 +1954,10 @@ class OpencodeProvider(BaseSDKProvider):
         so the caller can keep the card retryable when V2 rejects it.
         """
         pending = self._question_requests.get(request_id)
+        if pending is not None and session_id and pending.session_id != session_id:
+            return QuestionResponseResult(
+                False, "Question request belongs to another session", False
+            )
         if pending is None:
             # A duplicate reply after the SSE form.replied/cancelled event is
             # idempotently successful; there is nothing left to mutate.
@@ -2432,7 +2450,8 @@ class OpencodeProvider(BaseSDKProvider):
         session_id = str(props.get("sessionID") or "")
         if not request_id or not session_id:
             return []
-        if request_id in self._permission_requests:
+        existing = self._permission_requests.get(request_id)
+        if existing is not None and existing.session_id == session_id:
             return []
         action = str(props.get("action") or "tool").strip()
         detail = str(props.get("message") or "").strip()
@@ -2483,6 +2502,7 @@ class OpencodeProvider(BaseSDKProvider):
             tool_name=label,
             tool_input=detail[:400],
             request_id=request_id,
+            session_id=session_id,
         )]
 
     def _question_event(self, form: Mapping[str, Any]) -> list[StreamEvent]:
@@ -2492,7 +2512,8 @@ class OpencodeProvider(BaseSDKProvider):
         fields = form.get("fields")
         if not request_id or not session_id or not isinstance(fields, list):
             return []
-        if request_id in self._question_requests:
+        existing = self._question_requests.get(request_id)
+        if existing is not None and existing.session_id == session_id:
             return []
         visible = [
             item for item in fields
@@ -2565,6 +2586,7 @@ class OpencodeProvider(BaseSDKProvider):
             tool_input=json.dumps({"questions": questions}, ensure_ascii=False),
             tool_use_id=request_id,
             request_id=request_id,
+            session_id=session_id,
         )]
 
     async def _resolve_model(

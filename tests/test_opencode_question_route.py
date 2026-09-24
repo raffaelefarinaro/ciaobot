@@ -26,6 +26,10 @@ class _Manager:
         self.calls.append(payload)
         return QuestionResponseResult(True)
 
+    async def respond_permission(self, _chat_id: str, **payload):
+        self.calls.append(payload)
+        return QuestionResponseResult(True)
+
 
 def _app(manager: _Manager) -> Starlette:
     app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
@@ -94,3 +98,41 @@ def test_question_response_rejects_a_missing_or_unknown_action() -> None:
     assert result["state"] == "rejected"
     assert result["retryable"] is False
     assert manager.calls == []
+
+
+def test_permission_response_requires_a_json_boolean() -> None:
+    manager = _Manager()
+    with TestClient(_app(manager)).websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_json({
+            "type": "permission_response",
+            "request_id": "permission-1",
+            "approved": "false",
+        })
+        result = ws.receive_json()
+
+    assert result["ok"] is False
+    assert result["retryable"] is False
+    assert "JSON boolean" in result["error"]
+    assert manager.calls == []
+
+
+def test_permission_response_forwards_a_boolean_verdict_and_session() -> None:
+    manager = _Manager()
+    with TestClient(_app(manager)).websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_json({
+            "type": "permission_response",
+            "request_id": "permission-1",
+            "session_id": "ses_1",
+            "approved": False,
+            "reason": "User denied",
+        })
+        result = ws.receive_json()
+
+    assert result["ok"] is True
+    assert result["session_id"] == "ses_1"
+    assert manager.calls == [{
+        "request_id": "permission-1",
+        "session_id": "ses_1",
+        "approved": False,
+        "reason": "User denied",
+    }]

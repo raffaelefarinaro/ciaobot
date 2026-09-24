@@ -174,8 +174,9 @@ describe('permission card keyboard shortcuts', () => {
     expect(event.defaultPrevented).toBe(true)
     // Permission cards stay visible until the server acknowledges V2.
     expect(store.pendingPermissions[CHAT_ID]).toHaveLength(1)
-    expect(store.permissionSubmissions[CHAT_ID]?.pending).toBe(false)
-    expect(store.permissionSubmissions[CHAT_ID]?.error).toContain('connection')
+    expect(store.permissionSubmissions[CHAT_ID]?.pending).toBe(true)
+    expect(store.permissionSubmissions[CHAT_ID]?.queued).toBe(true)
+    expect(store.permissionSubmissions[CHAT_ID]?.error).toBe('')
     expect(switchWorkspace).not.toHaveBeenCalled()
     expect(store.activeWorkspace).toBe('personal')
 
@@ -192,8 +193,9 @@ describe('permission card keyboard shortcuts', () => {
     expect(event.defaultPrevented).toBe(true)
     // Permission cards stay visible until the server acknowledges V2.
     expect(store.pendingPermissions[CHAT_ID]).toHaveLength(1)
-    expect(store.permissionSubmissions[CHAT_ID]?.pending).toBe(false)
-    expect(store.permissionSubmissions[CHAT_ID]?.error).toContain('connection')
+    expect(store.permissionSubmissions[CHAT_ID]?.pending).toBe(true)
+    expect(store.permissionSubmissions[CHAT_ID]?.queued).toBe(true)
+    expect(store.permissionSubmissions[CHAT_ID]?.error).toBe('')
     expect(switchWorkspace).not.toHaveBeenCalled()
 
     wrapper.unmount()
@@ -205,7 +207,7 @@ describe('permission card keyboard shortcuts', () => {
 
     pressKey('1')
     await nextTick()
-    expect(respondPermission).toHaveBeenCalledWith(CHAT_ID, 'approval-1', false, 'User denied')
+    expect(respondPermission).toHaveBeenCalledWith(CHAT_ID, 'approval-1', false, 'User denied', '')
 
     wrapper.unmount()
   })
@@ -234,7 +236,7 @@ describe('permission card keyboard shortcuts', () => {
     pressKey('1')
     await nextTick()
     // With no question open the permission card handles it.
-    expect(respondPermission).toHaveBeenCalledWith(CHAT_ID, 'approval-1', false, 'User denied')
+    expect(respondPermission).toHaveBeenCalledWith(CHAT_ID, 'approval-1', false, 'User denied', '')
 
     wrapper.unmount()
   })

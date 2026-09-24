@@ -68,6 +68,7 @@ type QuestionSeed = {
   multiSelect?: boolean
   allowOther?: boolean
   requestId?: string
+  sessionId?: string
   options?: Array<{ label: string; value?: string; description?: string }>
 }
 
@@ -80,6 +81,7 @@ function makeQuestion(seed: QuestionSeed = {}) {
     allowOther: seed.allowOther ?? true,
     isSecret: false,
     requestId: seed.requestId ?? '',
+    sessionId: seed.sessionId || undefined,
     options: seed.options ?? [
       { label: 'Refactor first', description: 'clean up before adding' },
       { label: 'Ship the feature', description: '' },
@@ -236,6 +238,7 @@ describe('AskUserQuestion keyboard shortcuts', () => {
     const { wrapper, store } = await mountLayout({
       questions: [makeQuestion({
         requestId: 'form-1',
+        sessionId: 'ses_1',
         options: [{ label: 'Continue', value: 'continue_wire' }],
       })],
     })
@@ -250,6 +253,7 @@ describe('AskUserQuestion keyboard shortcuts', () => {
       'form-1',
       { q0: ['continue_wire'] },
       'reply',
+      'ses_1',
     )
 
     wrapper.unmount()

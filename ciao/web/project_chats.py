@@ -6262,15 +6262,24 @@ class ProjectChatManager:
         """
         chat = self._chats.get(chat_id)
         if chat is not None:
-            payload = json.dumps(
-                {
-                    "request_id": event.request_id,
-                    "tool_name": event.tool_name,
-                    "message": event.message,
-                    "tool_input": event.tool_input,
-                },
-                ensure_ascii=False,
+            provider_service = self._providers.get(chat_id)
+            session_id = str(
+                getattr(
+                    getattr(provider_service, "provider", None),
+                    "current_session_id",
+                    "",
+                )
+                or ""
             )
+            permission_payload: dict[str, object] = {
+                "request_id": event.request_id,
+                "tool_name": event.tool_name,
+                "message": event.message,
+                "tool_input": event.tool_input,
+            }
+            if session_id:
+                permission_payload["session_id"] = session_id
+            payload = json.dumps(permission_payload, ensure_ascii=False)
             if chat.pending_permission != payload:
                 chat.pending_permission = payload
                 self._save()
@@ -6295,6 +6304,16 @@ class ProjectChatManager:
             return ""
         value = payload.get("request_id")
         return "" if value is None else str(value)
+
+    @staticmethod
+    def _pending_response_record(raw: str) -> dict[str, object]:
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def _notify_question(self, chat_id: str, question_json: str) -> None:
         """Fire the configured question notification callback, if any.
@@ -6332,6 +6351,30 @@ class ProjectChatManager:
         except Exception:
             logger.exception("notify_question_cb failed for %s", chat_id)
 
+    def _clear_permission_state(
+        self,
+        chat_id: str,
+        request_id: str,
+        session_id: str = "",
+    ) -> bool:
+        """Clear only the persisted/live permission identified by the reply."""
+        chat = self._chats.get(chat_id)
+        cleared = False
+        if chat is not None and chat.pending_permission:
+            stored = self._pending_response_record(chat.pending_permission)
+            stored_request = str(stored.get("request_id") or "")
+            stored_session = str(stored.get("session_id") or "")
+            request_matches = bool(stored_request) and stored_request == request_id
+            session_matches = not session_id or not stored_session or stored_session == session_id
+            if request_matches and session_matches:
+                chat.pending_permission = ""
+                self._save()
+                cleared = True
+        stream = self._broker.get(chat_id)
+        if stream is not None:
+            stream.resolve_permission(request_id, session_id)
+        return cleared
+
     async def respond_permission(
         self,
         chat_id: str,
@@ -6339,6 +6382,7 @@ class ProjectChatManager:
         request_id: str,
         approved: bool,
         reason: str = "",
+        session_id: str = "",
     ) -> QuestionResponseResult:
         """Deliver an allow/deny answer and wait for provider acknowledgement.
 
@@ -6346,12 +6390,37 @@ class ProjectChatManager:
         retryable until OpenCode acknowledges the session-scoped request. The
         legacy Claude gate remains supported as a local boolean seam.
         """
+        chat = self._chats.get(chat_id)
+        stored = self._pending_response_record(
+            chat.pending_permission if chat is not None else ""
+        )
+        stored_request = str(stored.get("request_id") or "")
+        stored_session = str(stored.get("session_id") or "")
+        if stored_request and stored_request != request_id:
+            # The submitting tab is stale, but a newer permission owns the
+            # persisted slot and must remain untouched.
+            return QuestionResponseResult(True)
+        if session_id and stored_session and session_id != stored_session:
+            return QuestionResponseResult(True)
+        expected_session = session_id or stored_session or str(
+            getattr(chat, "session_id", "") or ""
+        )
+
         provider_service = self._providers.get(chat_id)
         provider = provider_service.provider if provider_service is not None else None
         if provider_service is None or provider is None:
             return QuestionResponseResult(
-                False, "Permission provider is unavailable", False
+                False, "Permission provider is unavailable; retry when it reconnects", True
             )
+        provider_session = str(getattr(provider, "current_session_id", "") or "")
+        if (
+            expected_session
+            and provider_session
+            and isinstance(provider, OpencodeProvider)
+            and provider_session != expected_session
+        ):
+            self._clear_permission_state(chat_id, request_id, expected_session)
+            return QuestionResponseResult(True)
 
         # V2 removes the pending permission from its in-memory map as soon as
         # the reply is acknowledged. Capture the source tool-call id before
@@ -6359,11 +6428,20 @@ class ProjectChatManager:
         tool_use_id = ""
         resolver = getattr(provider, "tool_use_id_for_request", None)
         if callable(resolver):
-            tool_use_id = resolver(request_id)
+            tool_use_id = (
+                resolver(request_id, expected_session)
+                if isinstance(provider, OpencodeProvider)
+                else resolver(request_id)
+            )
 
         responder = getattr(provider, "send_permission_response", None)
         if callable(responder):
-            result = responder(request_id, approved, reason)
+            if isinstance(provider, OpencodeProvider):
+                result = responder(
+                    request_id, approved, reason, session_id=expected_session
+                )
+            else:
+                result = responder(request_id, approved, reason)
             if inspect.isawaitable(result):
                 result = await result
         else:
@@ -6373,6 +6451,12 @@ class ProjectChatManager:
             result = gate.answer(request_id, approved=approved, reason=reason)
 
         native_result = isinstance(result, QuestionResponseResult)
+        if isinstance(provider, OpencodeProvider) and not native_result:
+            return QuestionResponseResult(
+                False,
+                "OpenCode returned an invalid permission acknowledgement",
+                True,
+            )
         response = (
             result
             if native_result
@@ -6396,46 +6480,42 @@ class ProjectChatManager:
         if not response.ok and not stale:
             return response
 
-        chat = self._chats.get(chat_id)
-        if chat is not None and chat.pending_permission and not legacy_stale:
-            try:
-                stored = json.loads(chat.pending_permission)
-            except (TypeError, json.JSONDecodeError):
-                stored = {}
-            if not isinstance(stored, dict) or stored.get("request_id") == request_id:
-                chat.pending_permission = ""
-                self._save()
+        self._clear_permission_state(chat_id, request_id, expected_session)
 
         stream = self._broker.get(chat_id)
-        if stream is not None:
-            stream.resolve_permission(request_id)
-            if not approved:
-                # The refused call never ran, so retract any file card it
-                # already painted. Custom adapters may use a request id that
-                # differs from the tool id, so use the id captured before the
-                # provider consumed its pending-request entry.
-                stream.deny_tool_use(tool_use_id or request_id)
+        if stream is not None and not approved:
+            # The refused call never ran, so retract any file card it already
+            # painted. Custom adapters may use a request id that differs from
+            # the tool id, so use the id captured before the provider consumed
+            # its pending-request entry.
+            stream.deny_tool_use(tool_use_id or request_id)
         if stale:
             return QuestionResponseResult(True)
         return response
 
-    def _clear_question_state(self, chat_id: str, request_id: str) -> None:
-        """Resolve a native question card after success or a stale reply."""
-        stream = self._broker.get(chat_id)
-        if stream is not None:
-            stream.resolve_question(request_id)
+    def _clear_question_state(
+        self,
+        chat_id: str,
+        request_id: str,
+        session_id: str = "",
+    ) -> bool:
+        """Clear only the persisted/live form identified by the reply."""
         chat = self._chats.get(chat_id)
+        cleared = False
         if chat is not None and chat.pending_question:
-            try:
-                stored = json.loads(chat.pending_question)
-            except (TypeError, json.JSONDecodeError):
-                stored = {}
-            if not isinstance(stored, dict) or stored.get("request_id") in {
-                None,
-                request_id,
-            }:
+            stored = self._pending_response_record(chat.pending_question)
+            stored_request = str(stored.get("request_id") or "")
+            stored_session = str(stored.get("session_id") or "")
+            request_matches = bool(stored_request) and stored_request == request_id
+            session_matches = not session_id or not stored_session or stored_session == session_id
+            if request_matches and session_matches:
                 chat.pending_question = ""
                 self._save()
+                cleared = True
+        stream = self._broker.get(chat_id)
+        if stream is not None:
+            stream.resolve_question(request_id, session_id)
+        return cleared
 
     async def respond_question(
         self,
@@ -6444,60 +6524,74 @@ class ProjectChatManager:
         request_id: str,
         answers: dict[str, list[str]],
         action: str = "reply",
+        session_id: str = "",
     ) -> QuestionResponseResult:
-        """Deliver a native question reply/cancel and wait for the provider.
-
-        A persisted card can outlive the provider process (for example after a
-        server restart). In that case there is no live V2 form left to answer;
-        clear the stale card so it cannot wedge every subsequent composer send.
-        """
-        provider_service = self._providers.get(chat_id)
-        if provider_service is None or provider_service.provider is None:
-            self._clear_question_state(chat_id, request_id)
-            return QuestionResponseResult(True)
+        """Deliver one native V2 form response and await its acknowledgement."""
         chat = self._chats.get(chat_id)
-        provider_session = str(
-            getattr(provider_service.provider, "current_session_id", "") or ""
+        stored = self._pending_response_record(
+            chat.pending_question if chat is not None else ""
         )
+        stored_request = str(stored.get("request_id") or "")
+        stored_session = str(stored.get("session_id") or "")
+        if stored_request and stored_request != request_id:
+            # Settle only the stale submitter. A newer form keeps both the
+            # persisted backend state and the other tab's card.
+            return QuestionResponseResult(True)
+        if session_id and stored_session and session_id != stored_session:
+            return QuestionResponseResult(True)
+        expected_session = session_id or stored_session or str(
+            getattr(chat, "session_id", "") or ""
+        )
+
+        provider_service = self._providers.get(chat_id)
+        provider = provider_service.provider if provider_service is not None else None
+        if provider is None:
+            return QuestionResponseResult(
+                False,
+                "OpenCode form provider is unavailable; retry when it reconnects",
+                True,
+            )
+        provider_session = str(getattr(provider, "current_session_id", "") or "")
         if (
-            chat is not None
-            and chat.session_id
+            expected_session
             and provider_session
-            and provider_session != chat.session_id
+            and isinstance(provider, OpencodeProvider)
+            and provider_session != expected_session
         ):
-            # A reused form id from a prior session is authoritative stale
-            # state. Do not let it mutate the live provider request or clear a
-            # newer card persisted under the same chat.
-            self._clear_question_state(chat_id, request_id)
+            self._clear_question_state(chat_id, request_id, expected_session)
             return QuestionResponseResult(True)
-        responder = getattr(
-            provider_service.provider, "send_question_response", None
-        )
+
+        responder = getattr(provider, "send_question_response", None)
         if not callable(responder):
-            self._clear_question_state(chat_id, request_id)
-            return QuestionResponseResult(True)
+            return QuestionResponseResult(
+                False,
+                "OpenCode form responder is unavailable; retry when it reconnects",
+                True,
+            )
         result = responder(
             request_id,
             answers,
             cancel=action == "cancel",
+            session_id=expected_session,
         )
         if inspect.isawaitable(result):
             result = await result
-        response = (
-            result
-            if isinstance(result, QuestionResponseResult)
-            else QuestionResponseResult(bool(result))
-        )
-        if response.ok:
-            self._clear_question_state(chat_id, request_id)
-            return response
-        if not response.retryable and response.error == "OpenCode is not connected":
-            # The provider process is gone, so this is a stale persisted form,
-            # not a form validation failure. Let the user continue with a new
-            # turn instead of requiring a manual New Session reset.
-            self._clear_question_state(chat_id, request_id)
+        if not isinstance(result, QuestionResponseResult):
+            return QuestionResponseResult(
+                False,
+                "OpenCode returned an invalid form acknowledgement",
+                True,
+            )
+        if result.ok:
+            self._clear_question_state(chat_id, request_id, expected_session)
+            return result
+        if (
+            not result.retryable
+            and result.error == "Question request is no longer active"
+        ):
+            self._clear_question_state(chat_id, request_id, expected_session)
             return QuestionResponseResult(True)
-        return response
+        return result
 
     def respond_capability(
         self,

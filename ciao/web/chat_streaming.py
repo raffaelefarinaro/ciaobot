@@ -137,6 +137,7 @@ class ChatStreamingHost(Protocol):
         request_id: str,
         approved: bool,
         reason: str = "",
+        session_id: str = "",
     ) -> QuestionResponseResult: ...
 
     def _arm_retry(
@@ -390,6 +391,21 @@ class ChatStreaming:
                         unattended=run_unattended,
                     ):
                         payload = event_to_json(event)
+                        if payload and isinstance(
+                            event,
+                            (PermissionRequestEvent, ToolUseEvent),
+                        ):
+                            provider_service = self._host._providers.get(chat_id)
+                            provider_session = str(
+                                getattr(
+                                    getattr(provider_service, "provider", None),
+                                    "current_session_id",
+                                    "",
+                                )
+                                or ""
+                            )
+                            if provider_session:
+                                payload["session_id"] = provider_session
                         if payload:
                             apply_file_touches_to_payload(
                                 payload,
@@ -446,7 +462,7 @@ class ChatStreaming:
                         if isinstance(event, PermissionRequestEvent):
                             self._host._notify_permission(chat_id, event)
                             if unattended:
-                                await self._host.respond_permission(
+                                permission_result = await self._host.respond_permission(
                                     chat_id,
                                     request_id=event.request_id,
                                     approved=False,
@@ -454,21 +470,50 @@ class ChatStreaming:
                                         "Scheduled runs cannot wait for "
                                         "interactive approval."
                                     ),
+                                    session_id=event.session_id,
                                 )
+                                if not permission_result.ok and permission_result.retryable:
+                                    logger.warning(
+                                        "unattended permission deny was not acknowledged; retrying",
+                                        extra={"chat_id": chat_id, "request_id": event.request_id},
+                                    )
+                                    permission_result = await self._host.respond_permission(
+                                        chat_id,
+                                        request_id=event.request_id,
+                                        approved=False,
+                                        reason=(
+                                            "Scheduled runs cannot wait for "
+                                            "interactive approval."
+                                        ),
+                                        session_id=event.session_id,
+                                    )
+                                if not permission_result.ok:
+                                    logger.error(
+                                        "unattended permission deny failed",
+                                        extra={
+                                            "chat_id": chat_id,
+                                            "request_id": event.request_id,
+                                            "error": permission_result.error,
+                                        },
+                                    )
                         if (
                             isinstance(event, ToolUseEvent)
                             and event.tool_name == "AskUserQuestion"
                             and event.tool_input.strip()
                         ):
                             question_payload = event.tool_input
-                            if event.request_id:
+                            question_session_id = str((payload or {}).get("session_id") or "")
+                            if event.request_id or question_session_id:
                                 try:
                                     parsed_question = json.loads(event.tool_input)
                                 except (TypeError, json.JSONDecodeError):
                                     parsed_question = {"questions": []}
                                 if not isinstance(parsed_question, dict):
                                     parsed_question = {"questions": []}
-                                parsed_question["request_id"] = event.request_id
+                                if event.request_id:
+                                    parsed_question["request_id"] = event.request_id
+                                if question_session_id:
+                                    parsed_question["session_id"] = question_session_id
                                 question_payload = json.dumps(
                                     parsed_question, ensure_ascii=False
                                 )
@@ -819,7 +864,6 @@ class ChatStreaming:
             if current_turn_index is not None:
                 self.discard_turn_perf(chat_id, current_turn_index)
             if chat_meta is not None:
-                permission_pending = bool(chat_meta.pending_permission)
                 chat_meta.last_response = last_assistant_text[
                     -chat_service._PROVIDER_HANDOVER_MAX_CHARS :
                 ]
@@ -829,13 +873,14 @@ class ChatStreaming:
                     else "question"
                     if chat_meta.pending_question
                     else "permission"
-                    if permission_pending
+                    if chat_meta.pending_permission
                     else "success"
                     if last_assistant_text.strip()
                     else "empty"
                 )
-                if permission_pending:
-                    chat_meta.pending_permission = ""
+                # A terminal SSE frame is not proof that a native V2 permission
+                # was delivered. Keep the persisted card until the response
+                # endpoint returns success or an authoritative stale result.
                 self._host._save()
             stream.finish()
             self._host._broker.clear(chat_id, stream)

@@ -2371,6 +2371,305 @@ describe('provider-neutral input state', () => {
     })
   })
 
+  test('keeps a native permission card across a terminal stream frame', () => {
+    const store = useProjectStore()
+    const chatId = 'permission-survives-result'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Approval',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'auto',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+      pending_permission: JSON.stringify({
+        request_id: 'permission-live',
+        session_id: 'session-1',
+      }),
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'permission_request',
+      request_id: 'permission-live',
+      session_id: 'session-1',
+      tool_name: 'shell',
+      tool_input: 'echo ok',
+      message: 'Approve?',
+    }) })
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'result',
+      text: '',
+      is_error: false,
+      effective_model: 'gpt-test',
+      usage: {},
+      session_id: 'session-1',
+    }) })
+
+    expect(store.pendingPermissions[chatId]?.[0]?.request_id).toBe('permission-live')
+  })
+
+  test('queues a permission verdict while the socket is down and flushes it on reconnect', () => {
+    const store = useProjectStore()
+    const chatId = 'queued-permission'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Queued approval',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'auto',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+      pending_permission: JSON.stringify({
+        request_id: 'permission-1',
+        session_id: 'session-1',
+      }),
+    }]
+    store.pendingPermissions[chatId] = [{
+      request_id: 'permission-1',
+      session_id: 'session-1',
+      tool_name: 'shell',
+      tool_input: 'echo ok',
+      message: 'Approve?',
+      received_at: Date.now(),
+    }]
+
+    expect(store.respondPermission(chatId, 'permission-1', false, 'User denied')).toBe(false)
+    expect(store.permissionSubmissions[chatId]?.queued).toBe(true)
+    expect(store.pendingPermissions[chatId]).toHaveLength(1)
+
+    store.connectWs(chatId)
+    const sent = fakeSockets[0].send.mock.calls.map(([raw]) => JSON.parse(String(raw)))
+    expect(sent).toContainEqual({
+      type: 'permission_response',
+      request_id: 'permission-1',
+      session_id: 'session-1',
+      approved: false,
+      reason: 'User denied',
+    })
+    expect(store.permissionSubmissions[chatId]?.queued).toBe(false)
+
+    fakeSockets[0].onmessage?.({ data: JSON.stringify({
+      type: 'permission_response_result',
+      request_id: 'permission-1',
+      session_id: 'session-1',
+      ok: true,
+    }) })
+    expect(store.pendingPermissions[chatId]).toBeUndefined()
+  })
+
+  test('reconciles settled native cards from the authoritative chat snapshot', async () => {
+    const store = useProjectStore()
+    const chatId = 'snapshot-reconcile'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Snapshot',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'auto',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+      pending_permission: JSON.stringify({
+        request_id: 'permission-snapshot',
+        session_id: 'session-1',
+      }),
+      pending_question: JSON.stringify({
+        request_id: 'form-snapshot',
+        session_id: 'session-1',
+        questions: [{ id: 'choice', question: 'Continue?' }],
+      }),
+    }]
+    store.pendingPermissions[chatId] = [{
+      request_id: 'permission-snapshot',
+      session_id: 'session-1',
+      tool_name: 'shell',
+      tool_input: 'echo ok',
+      message: 'Approve?',
+      received_at: Date.now(),
+    }]
+    store.activeQuestions[chatId] = [{
+      id: 'choice',
+      question: 'Continue?',
+      header: '',
+      multiSelect: false,
+      allowOther: true,
+      isSecret: false,
+      requestId: 'form-snapshot',
+      sessionId: 'session-1',
+      options: [],
+    }]
+    apiGet.mockResolvedValue([])
+
+    await store.loadMessages(chatId)
+    expect(store.pendingPermissions[chatId]).toHaveLength(1)
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+
+    store.chats[0].pending_permission = ''
+    store.chats[0].pending_question = ''
+    await store.loadMessages(chatId)
+    expect(store.pendingPermissions[chatId]).toBeUndefined()
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+  })
+
+  test('keeps answers and queued delivery state when the broker replays the same form', () => {
+    const store = useProjectStore()
+    const chatId = 'replayed-form'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Replayed form',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'normal',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const event = {
+      type: 'tool_use',
+      tool_name: 'AskUserQuestion',
+      request_id: 'form-1',
+      session_id: 'session-1',
+      tool_input: JSON.stringify({
+        questions: [{ id: 'choice', question: 'Choose?', header: 'Choice' }],
+      }),
+    }
+    socket.onmessage?.({ data: JSON.stringify(event) })
+    const firstReference = store.activeQuestions[chatId]
+    expect(store.respondQuestion(chatId, 'form-1', { choice: ['yes'] })).toBe(true)
+
+    socket.onmessage?.({ data: JSON.stringify(event) })
+
+    expect(store.activeQuestions[chatId]).toBe(firstReference)
+    expect(store.questionSubmissions[chatId]?.requestId).toBe('form-1')
+    expect(store.questionSubmissions[chatId]?.pending).toBe(true)
+  })
+
+  test('ignores stale success frames when a provider reuses a request id in a new session', () => {
+    const store = useProjectStore()
+    const chatId = 'reused-request-session'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Session scoped',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'normal',
+      session_id: 'ses_new',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    store.pendingPermissions[chatId] = [{
+      request_id: 'reused',
+      session_id: 'ses_new',
+      tool_name: 'shell',
+      tool_input: 'echo new',
+      message: 'Approve new?',
+      received_at: Date.now(),
+    }]
+    store.permissionSubmissions[chatId] = {
+      requestId: 'reused',
+      sessionId: 'ses_new',
+      approved: true,
+      reason: '',
+      pending: true,
+      queued: false,
+      error: '',
+      retryable: true,
+    }
+    store.activeQuestions[chatId] = [{
+      id: 'choice',
+      question: 'Continue?',
+      header: 'Choice',
+      multiSelect: false,
+      allowOther: true,
+      isSecret: false,
+      requestId: 'reused',
+      sessionId: 'ses_new',
+      options: [],
+      type: 'string',
+      required: true,
+    }]
+    store.questionSubmissions[chatId] = {
+      requestId: 'reused',
+      sessionId: 'ses_new',
+      action: 'reply',
+      answers: { choice: ['yes'] },
+      pending: true,
+      queued: false,
+      error: '',
+      retryable: true,
+    }
+
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'permission_response_result', request_id: 'reused', session_id: 'ses_old', ok: true,
+    }) })
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'question_response_result', request_id: 'reused', session_id: 'ses_old', ok: true,
+    }) })
+
+    expect(store.pendingPermissions[chatId]?.[0]?.session_id).toBe('ses_new')
+    expect(store.activeQuestions[chatId]?.[0]?.sessionId).toBe('ses_new')
+  })
+
+  test('accepts the same request id again after the provider changes session', () => {
+    const store = useProjectStore()
+    const chatId = 'new-session-same-request'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'New session form',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'normal',
+      session_id: 'ses_new',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const event = (sessionId: string) => ({
+      type: 'tool_use',
+      tool_name: 'AskUserQuestion',
+      request_id: 'reused',
+      session_id: sessionId,
+      tool_input: JSON.stringify({
+        questions: [{ id: 'choice', question: 'Continue?' }],
+      }),
+    })
+
+    socket.onmessage?.({ data: JSON.stringify(event('ses_old')) })
+    store.questionSubmissions[chatId] = {
+      requestId: 'reused',
+      sessionId: 'ses_old',
+      action: 'reply',
+      answers: {},
+      pending: true,
+      queued: false,
+      error: '',
+      retryable: true,
+    }
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'question_response_result',
+      request_id: 'reused',
+      session_id: 'ses_old',
+      ok: true,
+    }) })
+    socket.onmessage?.({ data: JSON.stringify(event('ses_new')) })
+
+    expect(store.activeQuestions[chatId]?.[0]?.sessionId).toBe('ses_new')
+  })
+
   test('queues a native form response while the socket is down and flushes it on reconnect', () => {
     const store = useProjectStore()
     const chatId = 'queued-form'

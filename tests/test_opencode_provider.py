@@ -918,6 +918,35 @@ def test_permission_without_session_is_ignored(tmp_path):
     assert provider._permission_requests == {}
 
 
+def test_reused_permission_id_in_a_new_session_replaces_the_old_request(tmp_path):
+    provider = _provider(tmp_path)
+    first = {**LIVE_PERMISSION, "sessionID": "ses_old", "source": {"id": "call_old"}}
+    second = {**LIVE_PERMISSION, "sessionID": "ses_new", "source": {"id": "call_new"}}
+
+    _convert(provider, "permission.asked", first)
+    events = _convert(provider, "permission.asked", second)
+
+    assert isinstance(events[0], PermissionRequestEvent)
+    assert events[0].session_id == "ses_new"
+    assert provider._permission_requests["per_live1"].session_id == "ses_new"
+    assert provider.tool_use_id_for_request("per_live1", "ses_old") == ""
+    assert provider.tool_use_id_for_request("per_live1", "ses_new") == "call_new"
+
+
+@pytest.mark.asyncio
+async def test_permission_reply_rejects_a_different_session(tmp_path):
+    provider, client = _armed_provider(tmp_path)
+    _convert(provider, "permission.asked", LIVE_PERMISSION)
+
+    result = await provider.send_permission_response(
+        "per_live1", True, session_id="ses_other"
+    )
+
+    assert result.ok is False
+    assert client.calls == []
+    assert "per_live1" in provider._permission_requests
+
+
 def test_form_becomes_an_ask_user_question_card(tmp_path):
     provider = _provider(tmp_path)
     events = _convert(
@@ -976,6 +1005,50 @@ def test_form_custom_false_is_preserved_for_the_pwa(tmp_path):
         }},
     )
     assert json.loads(events[0].tool_input)["questions"][0]["isOther"] is False
+
+
+def test_reused_form_id_in_a_new_session_replaces_the_old_request(tmp_path):
+    provider = _provider(tmp_path)
+    form = {
+        "id": "frm_reused",
+        "title": "Choice",
+        "fields": [{"key": "value", "title": "Value", "type": "string"}],
+    }
+    _convert(
+        provider,
+        "form.created",
+        {"form": {**form, "sessionID": "ses_old"}},
+    )
+    events = _convert(
+        provider,
+        "form.created",
+        {"form": {**form, "sessionID": "ses_new"}},
+    )
+
+    assert events[0].session_id == "ses_new"
+    assert provider._question_requests["frm_reused"].session_id == "ses_new"
+
+
+@pytest.mark.asyncio
+async def test_form_reply_rejects_a_different_session(tmp_path):
+    provider, client = _armed_provider(tmp_path)
+    _convert(
+        provider,
+        "form.created",
+        {"form": {
+            "id": "frm_session",
+            "sessionID": "ses_1",
+            "fields": [{"key": "value", "title": "Value", "type": "string"}],
+        }},
+    )
+
+    result = await provider.send_question_response(
+        "frm_session", {"value": ["ok"]}, session_id="ses_other"
+    )
+
+    assert result.ok is False
+    assert client.calls == []
+    assert "frm_session" in provider._question_requests
 
 
 def test_form_values_are_coerced_to_v2_field_types():
