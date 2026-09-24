@@ -258,6 +258,133 @@ async def test_poll_recovery_settles_an_output_free_terminal_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["failed", "interrupted"])
+async def test_poll_recovery_treats_error_idle_outcomes_as_terminal_errors(
+    outcome, tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+    messages = [
+        {"id": "msg_u2", "type": "user", "text": "hi"},
+        {"id": f"idle_{outcome}", "type": "idle", "outcome": outcome},
+    ]
+    client = _RecoveryClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=messages,
+    )
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    result = events[-1]
+    assert result.is_error is True
+    assert (
+        "OpenCode execution was interrupted" in result.result
+        if outcome == "interrupted"
+        else "OpenCode execution failed" in result.result
+    )
+
+
+@pytest.mark.asyncio
+async def test_poll_recovery_accepts_output_free_succeeded_idle(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+    messages = [
+        {"id": "msg_u2", "type": "user", "text": "hi"},
+        {"id": "idle_ok", "type": "idle", "outcome": "succeeded"},
+    ]
+    client = _RecoveryClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=messages,
+    )
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    result = events[-1]
+    assert result.is_error is False
+    assert result.result == ""
+    assert result.fallback_final is False
+    assert provider._turn_recovered_via_poll is True
+
+
+@pytest.mark.asyncio
+async def test_poll_recovery_timeout_is_an_error_not_an_empty_success(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+    client = _RecoveryClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=[{"id": "msg_u2", "type": "user", "text": "hi"}],
+    )
+    _wire(provider, monkeypatch, client)
+    monkeypatch.setattr("ciao.providers.opencode._OPENCODE_RECOVERY_WINDOW_S", 0.0)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    result = events[-1]
+    assert result.is_error is True
+    assert "recovery timed out" in result.result
+    assert result.fallback_final is True
+    assert provider._turn_recovered_via_poll is False
+
+
+@pytest.mark.asyncio
+async def test_poll_recovery_stops_at_this_turns_idle_boundary(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+    messages = [
+        {"id": "msg_u2", "type": "user", "text": "ours"},
+        {
+            "id": "msg_ours", "type": "assistant",
+            "content": [{"type": "text", "text": "OURS"}],
+        },
+        {"id": "idle_ours", "type": "idle", "outcome": "succeeded"},
+        {"id": "msg_u3", "type": "user", "text": "later"},
+        {
+            "id": "msg_later", "type": "assistant",
+            "content": [{"type": "text", "text": "LATER TURN"}],
+        },
+    ]
+    client = _RecoveryClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=messages,
+    )
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    texts = "".join(event.text for event in events if event.type == "text")
+    assert texts == "OURS"
+    assert events[-1].result == "OURS"
+
+
+@pytest.mark.asyncio
 async def test_failure_before_prompt_still_hard_fails(tmp_path, monkeypatch) -> None:
     provider = _provider(tmp_path)
     client = _RecoveryClient(

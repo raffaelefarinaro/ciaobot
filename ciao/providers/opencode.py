@@ -1266,6 +1266,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._answer_parts.clear()
         self._effective_model = ""
         self._turn_recovered_via_poll = False
+        self._poll_idle_outcome: str = ""
         self._poll_error: str = ""
         self._stop_requested = None
 
@@ -1991,7 +1992,13 @@ class OpencodeProvider(BaseSDKProvider):
         self._answer_parts.setdefault(part_id, []).append(text)
 
     def _turn_scope(self, messages: list[Any]) -> list[Mapping[str, Any]]:
-        """Return rows projected after this turn's user row."""
+        """Return this turn's projected rows through its first idle boundary.
+
+        V2 can append another user/assistant turn to the same session while a
+        recovery poll is in flight. The first idle message after our admitted
+        user row is the authoritative end of this execution; everything after
+        it belongs to a later turn and must not leak into the current result.
+        """
         anchor = -1
         for index, message in enumerate(messages):
             if not isinstance(message, Mapping):
@@ -2007,7 +2014,15 @@ class OpencodeProvider(BaseSDKProvider):
             anchor = index
         if self._user_message_id and anchor < 0:
             return []
-        return [message for message in messages[anchor + 1:] if isinstance(message, Mapping)]
+        scoped: list[Mapping[str, Any]] = []
+        for message in messages[anchor + 1:]:
+            if not isinstance(message, Mapping):
+                continue
+            scoped.append(message)
+            info = message.get("info")
+            if isinstance(info, Mapping) and info.get("type") == "idle":
+                break
+        return scoped
 
     def _turn_messages(self, messages: list[Any]) -> list[Mapping[str, Any]]:
         """Return assistant messages projected after this turn's user row."""
@@ -2039,8 +2054,15 @@ class OpencodeProvider(BaseSDKProvider):
         for message in self._turn_scope(messages):
             info = message.get("info")
             if isinstance(info, Mapping) and info.get("type") == "idle":
-                if info.get("outcome") == "failed":
+                outcome = str(info.get("outcome") or "")
+                if outcome in {"succeeded", "failed", "interrupted"}:
+                    self._poll_idle_outcome = outcome
+                if outcome == "failed":
                     self._poll_error = self._poll_error or "OpenCode execution failed"
+                elif outcome == "interrupted":
+                    self._poll_error = (
+                        self._poll_error or "OpenCode execution was interrupted"
+                    )
         for message in self._turn_messages(messages):
             info = message.get("info")
             if not isinstance(info, Mapping):
@@ -2109,20 +2131,28 @@ class OpencodeProvider(BaseSDKProvider):
                     for message in messages
                 )
                 running = self._turn_has_running_tools(messages)
-                idle_failed = any(
-                    isinstance(message.get("info"), Mapping)
-                    and message["info"].get("type") == "idle"
-                    and message["info"].get("outcome") == "failed"
-                    for message in self._turn_scope(messages)
+                idle_outcome = next(
+                    (
+                        str(message["info"].get("outcome") or "")
+                        for message in reversed(self._turn_scope(messages))
+                        if isinstance(message.get("info"), Mapping)
+                        and message["info"].get("type") == "idle"
+                        and str(message["info"].get("outcome") or "")
+                        in {"succeeded", "failed", "interrupted"}
+                    ),
+                    "",
                 )
                 quiesced = (
                     user_seen
                     and not running
-                    and active_ids is not None
-                    and session_id not in active_ids
                     and (
-                        (bool(current) and current == signature)
-                        or idle_failed
+                        idle_outcome in {"succeeded", "failed", "interrupted"}
+                        or (
+                            active_ids is not None
+                            and session_id not in active_ids
+                            and bool(current)
+                            and current == signature
+                        )
                     )
                 )
                 signature = current or signature
@@ -2134,6 +2164,10 @@ class OpencodeProvider(BaseSDKProvider):
                     self._turn_recovered_via_poll = True
                     return
             if time.monotonic() >= deadline:
+                self._poll_error = (
+                    self._poll_error
+                    or "OpenCode turn recovery timed out before a terminal result"
+                )
                 return
             await asyncio.sleep(_OPENCODE_RECOVERY_POLL_S)
 
