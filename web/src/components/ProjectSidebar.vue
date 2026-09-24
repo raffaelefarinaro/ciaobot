@@ -420,7 +420,7 @@
             :key="cat.key"
             class="mm-chip"
             :class="{ off: !mm.activeCats.has(cat.key) }"
-            @click="mm.toggleCategory(cat.key)"
+            role="button" tabindex="0" @click="mm.toggleCategory(cat.key)" @keydown.enter.prevent="mm.toggleCategory(cat.key)" @keydown.space.prevent="mm.toggleCategory(cat.key)"
           >
             <span class="dot" :style="{ background: cat.color }" />
             <span class="label">{{ cat.label }}</span>
@@ -432,7 +432,7 @@
         <template v-if="mm.mostConnected.length">
           <h3>Most connected</h3>
           <div class="mm-link-list">
-            <div v-for="n in mm.mostConnected" :key="n.id" class="mm-link-item" @click="mm.requestFocus(n.id)">
+            <div v-for="n in mm.mostConnected" :key="n.id" class="mm-link-item" role="button" tabindex="0" @click="mm.requestFocus(n.id)" @keydown.enter.prevent="mm.requestFocus(n.id)" @keydown.space.prevent="mm.requestFocus(n.id)">
               <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
               <span class="label">{{ n.title }}</span>
               <span class="cnt">{{ n.degree }}</span>
@@ -469,7 +469,7 @@
               :key="n.id"
               class="mm-link-item"
               title="No note links to this one"
-              @click="mm.requestFocus(n.id)"
+              role="button" tabindex="0" @click="mm.requestFocus(n.id)" @keydown.enter.prevent="mm.requestFocus(n.id)" @keydown.space.prevent="mm.requestFocus(n.id)"
             >
               <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
               <span class="label">{{ n.title }}</span>
@@ -507,7 +507,7 @@
               :key="n.id"
               class="mm-link-item"
               :title="`Unverified for ${n.ageDays ?? '?'} days — click to open it in the map`"
-              @click="mm.requestFocus(n.id)"
+              role="button" tabindex="0" @click="mm.requestFocus(n.id)" @keydown.enter.prevent="mm.requestFocus(n.id)" @keydown.space.prevent="mm.requestFocus(n.id)"
             >
               <span class="dot mm-dot--stale" />
               <span class="label">{{ n.title }}</span>
@@ -533,7 +533,7 @@
               class="mm-link-item"
               :class="{ current: mm.selectedId === n.id }"
               title="Centre the map here"
-              @click="mm.requestFocus(n.id)"
+              role="button" tabindex="0" @click="mm.requestFocus(n.id)" @keydown.enter.prevent="mm.requestFocus(n.id)" @keydown.space.prevent="mm.requestFocus(n.id)"
             >
               <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
               <span class="label">{{ n.title }}</span>

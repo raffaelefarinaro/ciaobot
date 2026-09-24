@@ -4903,31 +4903,38 @@ a.btn-secondary {
 
 .instance-toggle {
   display: flex;
-  gap: 0;
+  gap: 2px;
+  padding: 2px;
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid var(--border);
   margin-top: 0;
   width: 100%;
 }
+/* A quiet segmented control: the current choice is a raised tile, not an
+   accent fill - the accent stays reserved for each section's one action. */
 .toggle-btn {
   flex: 1;
-  min-height: var(--touch);
-  padding: 10px 16px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--fg2);
   font-size: var(--text-sm);
   font-weight: 600;
-  border: none;
-  cursor: pointer;
-  background: var(--bg);
-  color: var(--fg);
   transition: background 0.15s, color 0.15s;
 }
-.toggle-btn:not(:last-child) {
-  border-right: 1px solid var(--border);
+.toggle-btn:hover:not(:disabled) {
+  color: var(--fg);
 }
 .toggle-btn.active {
-  background: var(--accent);
-  color: var(--on-accent);
+  background: var(--bg3);
+  color: var(--fg);
+}
+@media (pointer: coarse) {
+  .toggle-btn { min-height: var(--touch); }
 }
 .toggle-btn:disabled {
   opacity: 0.6;
@@ -6019,9 +6026,11 @@ a.btn-secondary {
   margin-top: 0;
   width: 100%;
 }
+.font-scale-row {
+  justify-content: flex-end;
+}
 .font-scale-row .btn-small {
-  flex: 1 1 0;
-  min-width: 0;
+  flex: 0 0 auto;
 }
 .font-scale-display {
   font-size: var(--text-base);
