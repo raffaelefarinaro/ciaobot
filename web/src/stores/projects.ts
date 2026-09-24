@@ -4265,6 +4265,7 @@ export const useProjectStore = defineStore('projects', () => {
     requestId: string,
     answers: Record<string, string[]>,
     cancel = false,
+    submitted = false,
   ) {
     const questions = activeQuestions.value[chatId]
     if (!questions?.length) return false
@@ -4281,6 +4282,7 @@ export const useProjectStore = defineStore('projects', () => {
           request_id: requestId,
           answers,
           cancel,
+          ...(submitted ? { submitted: true } : {}),
         }))
       } catch {
         return false

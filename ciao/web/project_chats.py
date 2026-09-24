@@ -8372,6 +8372,7 @@ class ProjectChatManager:
         request_id: str,
         answers: dict[str, list[str]],
         cancel: bool = False,
+        submitted: bool = False,
     ) -> bool:
         """Deliver a native question/form answer and acknowledge real success."""
         provider_service = self._providers.get(chat_id)
@@ -8381,16 +8382,19 @@ class ProjectChatManager:
         responder = getattr(provider, "send_question_response_async", None)
         if callable(responder):
             try:
-                if cancel:
+                if cancel or submitted:
                     try:
-                        delivered = bool(await responder(request_id, answers, cancel=True))
+                        delivered = bool(await responder(
+                            request_id, answers, cancel=cancel, submitted=submitted
+                        ))
                     except TypeError as exc:
                         # Preserve compatibility with older custom adapters that
-                        # predate the explicit cancel flag; an empty answer map is
+                        # predate the explicit form flags; an empty answer map is
                         # their historical cancellation signal.
-                        if "cancel" not in str(exc):
+                        message = str(exc)
+                        if "cancel" not in message and "submitted" not in message:
                             raise
-                        delivered = bool(await responder(request_id, {}))
+                        delivered = bool(await responder(request_id, {} if cancel else answers))
                 else:
                     delivered = bool(await responder(request_id, answers))
             except asyncio.CancelledError:
@@ -8430,6 +8434,7 @@ class ProjectChatManager:
         request_id: str,
         answers: dict[str, list[str]],
         cancel: bool = False,
+        submitted: bool = False,
     ) -> bool:
         """Deliver an answer to a provider-native user-input request."""
         provider_service = self._providers.get(chat_id)
@@ -8444,6 +8449,7 @@ class ProjectChatManager:
                         request_id=request_id,
                         answers=answers,
                         cancel=cancel,
+                        submitted=submitted,
                     )
                 )
             except RuntimeError:

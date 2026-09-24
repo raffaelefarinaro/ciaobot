@@ -327,6 +327,21 @@ async def test_v2_form_distinguishes_submit_with_no_optional_scalar_from_cancel(
     provider._event_to_stream({
         "type": "form.created",
         "data": {"form": {
+            "id": "frm_submitted_empty", "sessionID": "ses_v2", "fields": [
+                {"key": "text", "type": "string", "required": False, "minLength": 2},
+            ],
+        }},
+    })
+    assert await provider.send_question_response_async(
+        "frm_submitted_empty", {}, submitted=True
+    ) is True
+    assert client.post_calls[-1] == (
+        "/api/session/ses_v2/form/frm_submitted_empty/reply", {"answer": {}}
+    )
+
+    provider._event_to_stream({
+        "type": "form.created",
+        "data": {"form": {
             "id": "frm_cancel_scalar", "sessionID": "ses_v2", "fields": [
                 {"key": "amount", "type": "number", "required": False},
             ],
@@ -523,6 +538,27 @@ async def test_v2_message_reads_follow_cursor_pages() -> None:
         "/api/session/ses_v2/message?order=asc",
         "/api/session/ses_v2/message?cursor=cursor-2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_v2_message_reads_all_cursor_pages_without_a_page_cap() -> None:
+    client = _V2Client()
+    page_count = 40
+    for index in range(page_count):
+        path = (
+            "/api/session/ses_v2/message?order=asc"
+            if index == 0
+            else f"/api/session/ses_v2/message?cursor=cursor-{index}"
+        )
+        client.responses[path] = {
+            "data": [{"id": f"msg-{index}", "type": "user", "text": str(index)}],
+            "cursor": {
+                "next": f"cursor-{index + 1}" if index + 1 < page_count else None,
+            },
+        }
+    messages = await _read_message_list(client, "ses_v2", "v2")
+    assert len(messages) == page_count
+    assert len(client.get_calls) == page_count
 
 
 @pytest.mark.asyncio

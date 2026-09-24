@@ -181,11 +181,15 @@ async def ws_chat(websocket: WebSocket) -> None:
                             ]
                         elif values is not None:
                             answers[str(question_id)] = [str(values)]
-                cancel_value = msg.get("cancel", False)
-                cancel = cancel_value is True or (
-                    isinstance(cancel_value, str)
-                    and cancel_value.strip().lower() in {"1", "true", "yes"}
-                )
+                def _flag(name: str) -> bool:
+                    value = msg.get(name, False)
+                    return value is True or (
+                        isinstance(value, str)
+                        and value.strip().lower() in {"1", "true", "yes"}
+                    )
+
+                cancel = _flag("cancel")
+                submitted = _flag("submitted")
                 delivered = False
                 if request_id:
                     delivered = await pcm.respond_question_async(
@@ -193,6 +197,7 @@ async def ws_chat(websocket: WebSocket) -> None:
                         request_id=request_id,
                         answers=answers,
                         cancel=cancel,
+                        submitted=submitted,
                     )
                 try:
                     await websocket.send_json({

@@ -766,9 +766,20 @@
           :type="q.isSecret ? 'password' : questionInputType(q)"
           class="question-other"
           :placeholder="q.placeholder || (q.required === false ? 'Optional (free text)' : 'Other (free text)')"
+          :minlength="q.minLength"
+          :maxlength="q.maxLength"
+          :pattern="q.pattern"
+          :min="q.minimum"
+          :max="q.maximum"
+          :step="q.type === 'integer' ? 1 : undefined"
+          :aria-invalid="Boolean(questionAnswerError(q, questionAnswers[qi]))"
           :value="questionAnswers[qi]?.other || ''"
           @input="ensureAnswer(qi).other = ($event.target as HTMLInputElement).value"
         />
+        <p
+          v-if="questionAnswerError(q, questionAnswers[qi])"
+          class="question-validation"
+        >{{ questionAnswerError(q, questionAnswers[qi]) }}</p>
         </div>
       </template>
       <div class="question-card-actions">
@@ -1208,6 +1219,9 @@ import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import { subagentPath, shortAgentId } from '../lib/subagentIds'
 import {
+  questionAnswerError,
+  questionAnswerIsValid,
+  questionEmptyAnswerAllowed,
   questionIsVisible,
   type ActiveQuestion,
   type QuestionAnswerState,
@@ -2402,27 +2416,15 @@ function handleQuestionShortcut(e: KeyboardEvent): boolean {
   return true
 }
 
-// Block Send answer until every question has at least one option picked
-// or non-empty "Other" text. Without this, tapping Send with no selection
-// would route an empty answer through submitQuestionAnswers and the
-// handler would label it "(no answer)" (line below), which is the bug this
-// guard fixes.
+// Block Send answer until every visible field is present and satisfies the
+// provider's V2 constraints. Optional fields may remain empty; their explicit
+// empty values are handled separately by the submit path.
 const allQuestionsAnswered = computed(() => {
   const qs = activeQuestions.value
   if (!visibleQuestionIndexes.value.length) return false
   for (let i = 0; i < qs.length; i++) {
     if (!questionIsVisible(qs[i], qs, questionAnswers.value)) continue
-    const a = questionAnswers.value[i]
-    if (qs[i].type === 'external') {
-      if (a?.external !== true) return false
-      continue
-    }
-    // Optional V2 fields may intentionally remain empty. Required legacy
-    // AskUserQuestion fields retain the old all-fields-required behavior.
-    if (qs[i].required === false) continue
-    const picked = a && a.selected.size > 0
-    const other = !!(a && a.other && a.other.trim())
-    if (!picked && !other) return false
+    if (!questionAnswerIsValid(qs[i], questionAnswers.value[i])) return false
   }
   return true
 })
@@ -2465,7 +2467,9 @@ function submitQuestionAnswers() {
     // default win), but the key's presence distinguishes this submit from the
     // explicit Cancel action.
     if (!parts.length && q.required === false) {
-      nativeAnswers[q.id] = q.multiSelect ? [] : ['']
+      if (questionEmptyAnswerAllowed(q)) {
+        nativeAnswers[q.id] = q.multiSelect ? [] : ['']
+      }
     } else {
       nativeAnswers[q.id] = parts
     }
@@ -2474,7 +2478,7 @@ function submitQuestionAnswers() {
   }
   const requestId = qs[0]?.requestId || ''
   if (requestId) {
-    store.respondQuestion(chat.value.chat_id, requestId, nativeAnswers)
+    store.respondQuestion(chat.value.chat_id, requestId, nativeAnswers, false, true)
     questionAnswers.value = {}
     return
   }
@@ -6387,6 +6391,12 @@ details[open] > .activity-summary::before {
   color: var(--fg);
 }
 .question-other:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+.question-validation {
+  margin: -2px 0 0;
+  color: var(--error);
+  font-size: 12px;
+  line-height: 1.35;
+}
 .question-card-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* Pending Auto-mode permission prompts. Sticks above the input until the

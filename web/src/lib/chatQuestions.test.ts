@@ -2,6 +2,9 @@ import { describe, expect, test } from 'vitest'
 import {
   parseCapabilityQuestion,
   parseQuestions,
+  questionAnswerError,
+  questionAnswerIsValid,
+  questionEmptyAnswerAllowed,
   questionIsVisible,
   questionsSignature,
   type ActiveQuestion,
@@ -86,11 +89,13 @@ describe('parseQuestions', () => {
         { id: 'detail', type: 'string', required: false, when: [{ key: 'show', op: 'eq', value: 'yes' }] },
         { id: 'link', type: 'external', url: 'https://example.test/auth' },
         { id: 'secret', type: 'string', hidden: true, required: true },
+        { id: 'code', type: 'string', pattern: '^[A-Z]{3}$', minLength: 3, maxLength: 3 },
       ],
     }))
     expect(qs[1]).toMatchObject({ required: false, when: [{ key: 'show', op: 'eq', value: 'yes' }] })
     expect(qs[2]).toMatchObject({ type: 'external', url: 'https://example.test/auth' })
     expect(qs[3]).toMatchObject({ hidden: true, required: true })
+    expect(qs[4]).toMatchObject({ pattern: '^[A-Z]{3}$', minLength: 3, maxLength: 3 })
     const withDefault = parseQuestions(JSON.stringify({
       questions: [{ id: 'choice', type: 'string', default: 'yes', options: [{ value: 'yes', label: 'Yes' }] }],
     }))
@@ -118,6 +123,24 @@ describe('parseQuestions', () => {
     expect(questionIsVisible(closedCondition[1], closedCondition, {
       0: { selected: new Set<string>(), other: '' },
     })).toBe(false)
+  })
+
+  test('validates V2 scalar and item constraints before submit', () => {
+    const qs = parseQuestions(JSON.stringify({ questions: [
+      { id: 'code', type: 'string', pattern: '^[A-Z]{3}$', minLength: 3, maxLength: 3 },
+      { id: 'amount', type: 'number', minimum: 2, maximum: 4, required: true },
+      { id: 'tags', type: 'multiselect', options: [
+        { value: 'a', label: 'A' }, { value: 'b', label: 'B' },
+      ], minItems: 2, maxItems: 2 },
+    ] }))
+    expect(questionAnswerError(qs[0], { selected: new Set(), other: 'abc' })).toMatch(/format/)
+    expect(questionAnswerIsValid(qs[0], { selected: new Set(), other: 'ABC' })).toBe(true)
+    expect(questionAnswerIsValid(qs[1], { selected: new Set(), other: '1' })).toBe(false)
+    expect(questionAnswerIsValid(qs[1], { selected: new Set(), other: '3' })).toBe(true)
+    expect(questionAnswerIsValid(qs[2], { selected: new Set(['A']), other: '' })).toBe(false)
+    expect(questionAnswerIsValid(qs[2], { selected: new Set(['A', 'B']), other: '' })).toBe(true)
+    expect(questionAnswerIsValid(qs[2], { selected: new Set(['A', 'B']), other: 'extra' })).toBe(false)
+    expect(questionEmptyAnswerAllowed(qs[0])).toBe(false)
   })
 })
 

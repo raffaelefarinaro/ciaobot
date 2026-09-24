@@ -426,9 +426,10 @@ routes, and cursor pagination for messages and child sessions. Its supported
 prompt body has only `text`/`files`; core and runtime instructions therefore
 travel in a delimited text preamble, which is a documented API limitation and
 not a native system role. Keep V2 form metadata (required, hidden, `when`,
-external URLs, and optional empty values) intact through `ToolUseEvent` and
-`chatQuestions.ts`; keep Cancel distinct from a submitted empty optional
-answer. Permission/form responses are asynchronous HTTP
+external URLs, optional empty values, and scalar/length/item/pattern
+constraints) intact through `ToolUseEvent` and `chatQuestions.ts`; validate
+those constraints before enabling Send, and keep Cancel distinct from a
+submitted empty optional answer. Permission/form responses are asynchronous HTTP
 operations: await the provider result before clearing the server-side pending
 state, and preserve a retryable PWA card when the result is negative. For V2
 security tests, remember that internal resources are workspace-relative and

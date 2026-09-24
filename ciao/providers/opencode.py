@@ -79,6 +79,26 @@ ApiVersion = Literal["v1", "v2"]
 
 _API_VERSION_ATTR = "_ciao_opencode_api_version"
 _V2_CHILD_LIMIT = 1000
+# Cursor pagination is bounded so a broken or malicious server cannot make a
+# history/recovery read loop forever. Reaching the bound is an explicit error;
+# silently returning the pages read so far would make a recovered turn look
+# complete while dropping its newest messages.
+_V2_MAX_CURSOR_PAGES = 1000
+_V2_TERMINAL_OUTCOMES = frozenset({
+    "success",
+    "succeeded",
+    "completed",
+    "complete",
+    "ok",
+    "done",
+    "failed",
+    "failure",
+    "error",
+    "interrupted",
+    "cancelled",
+    "canceled",
+    "stopped",
+})
 
 
 class _UnsupportedApiVersion(RuntimeError):
@@ -376,24 +396,25 @@ _OPENCODE_RECOVERY_POLL_S = 2.5
 
 
 def _opencode_messages_signature(messages: list[Any]) -> str:
-    """Return a stable, lifecycle-aware signature for a message snapshot.
+    """Return a stable, lifecycle-aware signature for assistant output.
 
-    Text length alone is not quiescence: a tool part has no text, so a running
-    tool and its completed result looked identical and recovery could replay a
-    settled call.  Include assistant/message identity, tool status, and a
-    bounded fingerprint of tool input/output/error payloads.  The values are
-    deliberately represented by shape/length rather than copied into the
-    signature, keeping credentials out of diagnostics and memory-heavy tool
-    results out of the comparison string.
+    A user-only projection is deliberately an empty signature.  During a
+    reconnect it is common to observe the accepted prompt before the first
+    assistant row; treating that stable projection as a finished turn would
+    manufacture a blank success.  Only assistant rows participate in the
+    quiescence detector.  Within those rows, include identity, tool status, and
+    a bounded fingerprint of tool input/output/error payloads so a running
+    tool cannot look like its completed result.
     """
-    pieces: list[str] = [f"messages:{len(messages)}"]
+    pieces: list[str] = []
     for message in messages:
         if not isinstance(message, Mapping):
             continue
         info = message.get("info")
-        role = str(info.get("role") or "") if isinstance(info, Mapping) else ""
-        message_id = str(info.get("id") or "") if isinstance(info, Mapping) else ""
-        pieces.append(f"message:{role}:{message_id}")
+        if not isinstance(info, Mapping) or info.get("role") != "assistant":
+            continue
+        message_id = str(info.get("id") or "")
+        pieces.append(f"message:assistant:{message_id}")
         parts = message.get("parts")
         if not isinstance(parts, list):
             continue
@@ -1034,6 +1055,19 @@ def _normalize_v2_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
 
     message_type = str(message.get("type") or "")
     message_id = str(message.get("id") or "")
+    if message_type == "idle":
+        # V2 projects the terminal execution marker as a message row.  It is
+        # not an assistant answer, but retaining it is essential after an SSE
+        # drop: the row is the only durable proof that the turn ended (and, on
+        # failure, why it ended).  Dropping it made recovery indistinguishable
+        # from a user-only projection.
+        info: dict[str, Any] = {
+            key: value for key, value in message.items() if key != "type"
+        }
+        info["id"] = message_id
+        info["type"] = "idle"
+        return {"info": info, "parts": []}
+
     if message_type == "user":
         text = str(message.get("text") or "")
         parts: list[dict[str, Any]] = []
@@ -1119,7 +1153,12 @@ def _normalize_messages(payload: object, version: ApiVersion) -> list[Any]:
 async def _read_message_list(
     client: Any, session_id: str, version: ApiVersion
 ) -> list[Any]:
-    """Read a complete V1/V2 session message list, following V2 cursors."""
+    """Read a complete V1/V2 session message list, following V2 cursors.
+
+    V2 history can exceed any small page-count assumption.  Continue until the
+    server returns no next cursor (or repeats one); a bounded cursor would
+    silently drop the newest page and corrupt recovery/handover history.
+    """
     if version == "v1":
         response = await client.get(_message_path(client, session_id, version))
         response.raise_for_status()
@@ -1128,7 +1167,9 @@ async def _read_message_list(
     messages: list[Any] = []
     cursor: str | None = None
     seen_cursors: set[str] = set()
-    for _ in range(32):
+    pages = 0
+    while True:
+        pages += 1
         if cursor is None:
             path = _message_path(client, session_id, version)
         else:
@@ -1150,8 +1191,15 @@ async def _read_message_list(
                 cursor_info = unwrapped.get("cursor") if isinstance(unwrapped, Mapping) else None
             if isinstance(cursor_info, Mapping):
                 next_cursor = cursor_info.get("next")
-        if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+        if not isinstance(next_cursor, str) or not next_cursor:
             break
+        if next_cursor in seen_cursors:
+            raise RuntimeError("opencode message pagination returned a repeated cursor")
+        if pages >= _V2_MAX_CURSOR_PAGES:
+            raise RuntimeError(
+                "opencode message pagination exceeded "
+                f"{_V2_MAX_CURSOR_PAGES} pages"
+            )
         seen_cursors.add(next_cursor)
         cursor = next_cursor
     return _normalize_messages(messages, version)
@@ -1160,12 +1208,18 @@ async def _read_message_list(
 async def _read_v2_child_sessions(
     client: Any, parent_id: str
 ) -> list[dict[str, Any]]:
-    """Read all V2 child sessions, following the session-list cursor."""
+    """Read all V2 child sessions, following the session-list cursor.
+
+    The repeated/absent cursor guard is the termination condition; do not
+    impose a small page cap that could omit a valid child session.
+    """
     children: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     cursor: str | None = None
     seen_cursors: set[str] = set()
-    for _ in range(32):
+    pages = 0
+    while True:
+        pages += 1
         # The V2 cursor already carries the original parent/filter/order
         # query.  Send it alone on continuation pages; repeating ``parentID``
         # or ``limit`` is not part of the cursor contract.
@@ -1179,6 +1233,9 @@ async def _read_v2_child_sessions(
             response.raise_for_status()
             raw = response.json()
         except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+            # A normal auxiliary read failure degrades to an empty collab
+            # tree.  Cursor exhaustion/repetition is raised below instead of
+            # being silently converted into a partial child list.
             break
         page = _unwrap_data(raw)
         if isinstance(page, list):
@@ -1200,15 +1257,104 @@ async def _read_v2_child_sessions(
                 cursor_info = unwrapped.get("cursor") if isinstance(unwrapped, Mapping) else None
             if isinstance(cursor_info, Mapping):
                 next_cursor = cursor_info.get("next")
-        if (
-            not isinstance(next_cursor, str)
-            or not next_cursor
-            or next_cursor in seen_cursors
-        ):
+        if not isinstance(next_cursor, str) or not next_cursor:
             break
+        if next_cursor in seen_cursors:
+            raise RuntimeError("opencode child-session pagination returned a repeated cursor")
+        if pages >= _V2_MAX_CURSOR_PAGES:
+            raise RuntimeError(
+                "opencode child-session pagination exceeded "
+                f"{_V2_MAX_CURSOR_PAGES} pages"
+            )
         seen_cursors.add(next_cursor)
         cursor = next_cursor
     return children
+
+
+def _v2_active_state(value: object) -> bool | None:
+    """Interpret one value in the V2 active-session response."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        state = value.strip().lower()
+        if state in {"running", "active", "started", "in_progress", "in-progress"}:
+            return True
+        if state in {"idle", "stopped", "completed", "succeeded", "failed", "cancelled"}:
+            return False
+        return None
+    if isinstance(value, Mapping):
+        state = value.get("type") or value.get("status") or value.get("state")
+        if state is None:
+            # A session-keyed object with no explicit state is an active entry
+            # in the V2 shape; absence of the key is what carries the meaning.
+            return True
+        return _v2_active_state(state)
+    return None
+
+
+async def _read_v2_active_sessions(client: Any) -> set[str] | None:
+    """Read V2's active-session map, or ``None`` when it is unavailable.
+
+    A missing activity endpoint is different from an authoritative empty map:
+    the former cannot prove quiescence, while the latter can.  Recovery uses
+    that distinction to avoid turning a user-only snapshot into a successful
+    turn.  The parser accepts the small response-shape variations emitted by
+    V2 point releases (mapping keyed by session id, a list of session objects,
+    or an ``active``/``sessions`` wrapper).
+    """
+    try:
+        response = await client.get("/api/session/active")
+        status = int(getattr(response, "status_code", 200))
+        if status >= 400:
+            return None
+        raw = response.json()
+    except (httpx.HTTPError, TypeError, ValueError, AttributeError):
+        return None
+
+    value = _unwrap_data(raw)
+    if isinstance(value, Mapping):
+        # Unwrap the common named containers before interpreting the entries.
+        for key in ("sessions", "active", "items"):
+            nested = value.get(key)
+            if isinstance(nested, (Mapping, list)):
+                value = nested
+                break
+        if isinstance(value, Mapping):
+            # A single session object is also a valid response in older builds.
+            session_id = str(value.get("sessionID") or value.get("id") or "")
+            if session_id:
+                state = _v2_active_state(value)
+                return {session_id} if state is True else set()
+            active: set[str] = set()
+            for key, state in value.items():
+                if str(key) in {"data", "cursor", "meta"}:
+                    continue
+                if _v2_active_state(state) is True:
+                    active.add(str(key))
+            return active
+        if isinstance(value, list):
+            active = set()
+            for item in value:
+                if isinstance(item, str):
+                    active.add(item)
+                    continue
+                if not isinstance(item, Mapping):
+                    continue
+                session_id = str(item.get("sessionID") or item.get("id") or "")
+                if session_id and _v2_active_state(item) is True:
+                    active.add(session_id)
+            return active
+    if isinstance(value, list):
+        active = set()
+        for item in value:
+            if isinstance(item, str):
+                active.add(item)
+            elif isinstance(item, Mapping):
+                session_id = str(item.get("sessionID") or item.get("id") or "")
+                if session_id and _v2_active_state(item) is True:
+                    active.add(session_id)
+        return active
+    return None
 
 
 def _v2_model_ref(provider_id: str, model_id: str, variant: str = "") -> dict[str, str]:
@@ -1263,6 +1409,30 @@ def _v2_prompt_body(
     if files:
         body["files"] = files
     return body
+
+
+def _prompt_message_id(payload: object) -> str:
+    """Extract the admitted user-message id from a V2 prompt receipt.
+
+    V2 point releases have returned both a direct message object and a wrapper
+    containing ``message``.  Keep this deliberately small and permissive: the
+    id is an anchor for recovery, not a response schema we should reject a
+    server for lacking.  V1 responses may be empty and are ignored by the
+    caller.
+    """
+    value = _unwrap_data(payload)
+    if not isinstance(value, Mapping):
+        return ""
+    for key in ("id", "messageID", "message_id", "userMessageID", "user_message_id"):
+        candidate = value.get(key)
+        if candidate not in (None, ""):
+            return str(candidate)
+    for key in ("message", "prompt", "user"):
+        nested = value.get(key)
+        nested_id = _prompt_message_id(nested)
+        if nested_id:
+            return nested_id
+    return ""
 
 
 def _v2_model_rows(payload: object) -> list[dict[str, Any]]:
@@ -1431,6 +1601,10 @@ class OpencodeProvider(BaseSDKProvider):
         self._part_types: dict[str, str] = {}
         self._user_message_id: str = ""
         self._usage: dict[str, str] = {}
+        # The last model-call usage snapshot is kept separately from the
+        # turn aggregate.  It is the value used for context-window occupancy
+        # after a recovered V2 turn.
+        self._context_usage: dict[str, str] = {}
         self._cost: float | None = None
         # Visible assistant text, accumulated per part so the terminal
         # ResultEvent can carry the turn's answer. `record_turn`
@@ -1471,6 +1645,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._answer_parts.clear()
         self._effective_model = ""
         self._turn_recovered_via_poll = False
+        self._poll_error = ""
         self._stop_requested = None
 
     # ---------------------------------------------------------------- server
@@ -2249,6 +2424,7 @@ class OpencodeProvider(BaseSDKProvider):
         answers: Mapping[str, Sequence[str]],
         *,
         cancel: bool = False,
+        submitted: bool = False,
     ) -> bool:
         pending = self._question_requests.get(request_id)
         if pending is None or self._client is None:
@@ -2260,7 +2436,7 @@ class OpencodeProvider(BaseSDKProvider):
             )
         if version == "v2" and pending.form:
             answer = self._form_answer(pending, answers)
-            if not answer and not answers:
+            if not answer and not answers and not submitted:
                 return await self._deliver_question_reply(
                     pending, {"_cancel": True}
                 )
@@ -2280,6 +2456,7 @@ class OpencodeProvider(BaseSDKProvider):
         answers: Mapping[str, Sequence[str]],
         *,
         cancel: bool = False,
+        submitted: bool = False,
     ) -> bool:
         pending = self._question_requests.get(request_id)
         if pending is None or self._client is None:
@@ -2292,7 +2469,7 @@ class OpencodeProvider(BaseSDKProvider):
             return True
         if version == "v2" and pending.form:
             answer = self._form_answer(pending, answers)
-            if not answer and not answers:
+            if not answer and not answers and not submitted:
                 asyncio.create_task(
                     self._deliver_question_reply(pending, {"_cancel": True})
                 )

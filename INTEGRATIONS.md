@@ -53,7 +53,9 @@ The PWA submits optional fields with an explicit empty value where the V2
 schema permits one (or an empty multiselect list). Numeric/boolean and closed
 option blanks are omitted from the typed V2 answer so the server default
 remains authoritative, while the Cancel button sends an explicit cancel
-action; a submitted empty answer is never confused with cancellation.
+action; a submitted empty answer is never confused with cancellation. V2
+minimum/maximum, length, item-count, and pattern constraints are carried into
+the PWA and checked before Send is enabled.
 Model discovery uses V2's flat `/api/model` catalog. V1 routes and payloads
 remain supported for older servers. V2 model selections should be qualified
 `provider/model` IDs; an unqualified ID is treated as no explicit V2 model

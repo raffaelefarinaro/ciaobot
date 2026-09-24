@@ -30,6 +30,7 @@ export type ActiveQuestion = {
   url?: string
   format?: string
   placeholder?: string
+  pattern?: string
   default?: string | number | boolean | string[]
   minimum?: number
   maximum?: number
@@ -172,6 +173,7 @@ export function parseQuestions(
         url: q.url ? String(q.url) : undefined,
         format: q.format ? String(q.format) : undefined,
         placeholder: q.placeholder ? String(q.placeholder) : undefined,
+        pattern: q.pattern ? String(q.pattern) : undefined,
         default: q.default as ActiveQuestion['default'],
         minimum: numeric('minimum'),
         maximum: numeric('maximum'),
@@ -190,6 +192,106 @@ export type QuestionAnswerState = {
   selected: Set<string>
   other: string
   external?: boolean
+}
+
+function questionValues(question: ActiveQuestion, state: QuestionAnswerState | undefined): string[] {
+  const values = [...(state?.selected ?? [])].map(
+    label => question.optionValues?.[label] ?? label,
+  )
+  const other = state?.other.trim() ?? ''
+  if (other) values.push(other)
+  return values
+}
+
+/** Return a user-facing reason why a field cannot be submitted yet. */
+export function questionAnswerError(
+  question: ActiveQuestion,
+  state: QuestionAnswerState | undefined,
+): string | null {
+  if (question.type === 'external') {
+    return state?.external === true ? null : 'Acknowledge the external step to continue.'
+  }
+
+  const values = questionValues(question, state)
+  if (!values.length) {
+    return question.required === false ? null : 'This field is required.'
+  }
+
+  if (question.multiSelect || question.type === 'multiselect' || question.type === 'multi_select') {
+    if (question.minItems !== undefined && values.length < question.minItems) {
+      return `Choose at least ${question.minItems} item${question.minItems === 1 ? '' : 's'}.`
+    }
+    if (question.maxItems !== undefined && values.length > question.maxItems) {
+      return `Choose at most ${question.maxItems} item${question.maxItems === 1 ? '' : 's'}.`
+    }
+    return null
+  }
+
+  const value = values[0] ?? ''
+  if (question.type === 'number' || question.type === 'integer') {
+    const number = Number(value)
+    if (!Number.isFinite(number)) return 'Enter a valid number.'
+    if (question.type === 'integer' && !Number.isInteger(number)) return 'Enter a whole number.'
+    if (question.minimum !== undefined && number < question.minimum) {
+      return `Enter a number of at least ${question.minimum}.`
+    }
+    if (question.maximum !== undefined && number > question.maximum) {
+      return `Enter a number no greater than ${question.maximum}.`
+    }
+    return null
+  }
+
+  if (question.type === 'boolean') {
+    const normalized = value.trim().toLowerCase()
+    if (!['true', 'false', '1', '0', 'yes', 'no', 'on', 'off'].includes(normalized)) {
+      return 'Choose Yes or No.'
+    }
+    return null
+  }
+
+  if (question.type === 'string' || question.type === undefined) {
+    if (question.minLength !== undefined && value.length < question.minLength) {
+      return `Use at least ${question.minLength} character${question.minLength === 1 ? '' : 's'}.`
+    }
+    if (question.maxLength !== undefined && value.length > question.maxLength) {
+      return `Use at most ${question.maxLength} character${question.maxLength === 1 ? '' : 's'}.`
+    }
+    if (question.pattern) {
+      try {
+        if (!new RegExp(question.pattern).test(value)) return 'Enter a value in the requested format.'
+      } catch {
+        return 'This field has an invalid format.'
+      }
+    }
+  }
+  return null
+}
+
+export function questionAnswerIsValid(
+  question: ActiveQuestion,
+  state: QuestionAnswerState | undefined,
+): boolean {
+  return questionAnswerError(question, state) === null
+}
+
+/** Whether an empty optional value can be represented without violating the form schema. */
+export function questionEmptyAnswerAllowed(question: ActiveQuestion): boolean {
+  if (question.multiSelect || question.type === 'multiselect' || question.type === 'multi_select') {
+    return (question.minItems ?? 0) <= 0
+  }
+  if (question.type === 'string' || question.type === undefined) {
+    if (question.options.length > 0 && !question.allowOther) return false
+    if ((question.minLength ?? 0) > 0) return false
+    if (question.pattern) {
+      try {
+        return new RegExp(question.pattern).test('')
+      } catch {
+        return false
+      }
+    }
+    return true
+  }
+  return false
 }
 
 /** Whether a V2 form field is active under the current answer map. */
