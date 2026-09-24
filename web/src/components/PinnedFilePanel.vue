@@ -6,26 +6,25 @@
     <PaneHeader :brand="false" @open-sidebar="$emit('close')">
       <template #title>
         <div class="header-left">
-          <button class="close-btn desktop-only" @click="$emit('close')" title="Unpin file">&times;</button>
+          <button class="btn-icon close-btn desktop-only" @click="$emit('close')" title="Unpin file" aria-label="Unpin file">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+          </button>
           <div class="header-breadcrumb">
             <span class="chat-title" :title="filePath">{{ basename }}</span>
+            <span v-if="docDir" class="pfp-dir" :title="docDir">{{ docDir }}</span>
           </div>
         </div>
       </template>
       <template #actions>
+        <!-- Edit is the panel's one text action; the rest stay quiet icons. -->
         <button
           v-if="(kind === 'text' || (kind === 'html' && htmlView === 'code' && sourceLoaded)) && !isEditingText"
-          class="btn-icon"
+          class="pfp-edit-btn"
           @click="startEditingText"
           title="Edit"
           aria-label="Edit"
           :disabled="loading || !!error"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
-            <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"></path>
-          </svg>
-        </button>
+        >Edit</button>
         <button
           class="btn-icon"
           :class="{ ok: refreshed }"
@@ -287,17 +286,15 @@
           @mouseleave="onPopoverLeave"
           @keydown="onPfpKeydown"
         >
-          <div class="pfp-pop-header">
-            <span class="pfp-sidebar-card-line" v-if="commentLineLabel(popoverComment)">{{ commentLineLabel(popoverComment) }}</span>
-            <div class="pfp-sidebar-card-actions pfp-pop-actions">
-              <button class="pfp-sidebar-card-edit" @click.stop="editFromPopover(popoverComment)" title="Edit">✎</button>
-              <button class="pfp-sidebar-card-remove" @click.stop="deleteFromPopover(popoverComment.id)" title="Delete">×</button>
-            </div>
-          </div>
+          <div v-if="commentLineLabel(popoverComment)" class="pfp-pop-quote">{{ fileBasenameForPop }} · line {{ commentLineLabel(popoverComment) }}</div>
           <div v-if="popoverComment.images?.length" class="pfp-sidebar-card-images">
             <img v-for="img in popoverComment.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="card-image-thumb" @click.stop />
           </div>
           <div class="pfp-sidebar-card-note">{{ popoverComment.comment }}</div>
+          <div class="pfp-pop-actions">
+            <button type="button" class="pfp-sidebar-card-edit" @click.stop="editFromPopover(popoverComment)">Edit</button>
+            <button type="button" class="pfp-sidebar-card-remove" @click.stop="deleteFromPopover(popoverComment.id)">Delete</button>
+          </div>
         </div>
       </FocusScope>
 
@@ -311,7 +308,7 @@
         type="button"
         :title="isCsv ? 'Comment on this cell' : 'Comment on this selection'"
       >
-        <span class="pfp-comment-trigger-icon">💬</span>
+        <svg class="pfp-comment-trigger-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z" /></svg>
         Comment
       </button>
     </div>
@@ -442,6 +439,7 @@ const basename = computed(() => {
   const idx = p.lastIndexOf('/')
   return idx === -1 ? p : p.slice(idx + 1)
 })
+const fileBasenameForPop = computed(() => basename.value)
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(cleanPath.value))
 const isCsv = computed(() => isCsvPath(cleanPath.value))
 
@@ -1388,21 +1386,40 @@ defineExpose({ isBusyAuthoring })
 }
 
 .close-btn {
-  background: none;
-  border: none;
   color: var(--fg2);
-  cursor: pointer;
-  font-size: 20px;
-  padding: 0 4px;
-  line-height: 1;
-  font-family: var(--font);
-  min-width: 30px;
-  min-height: 30px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
 }
 .close-btn:hover { color: var(--fg); }
+
+/* The file's folder, muted after its name: where it lives, not a second title. */
+.pfp-dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pfp-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.pfp-edit-btn:hover:not(:disabled) { border-color: var(--border-strong); }
+.pfp-edit-btn:disabled { cursor: default; opacity: 0.55; }
+@media (pointer: coarse) {
+  .pfp-edit-btn { min-height: var(--touch); }
+}
 
 .header-breadcrumb {
   display: flex;
@@ -1418,12 +1435,12 @@ defineExpose({ isBusyAuthoring })
      and a literal here stopped answering the Appearance font-scale setting —
      so raising the scale grew the chat title and left this one behind. */
   font-size: var(--text-lg);
-  font-weight: 600;
+  font-weight: 650;
   color: var(--fg);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  flex: 1;
+  flex: 0 1 auto;
 }
 
 .desktop-only { display: inline-flex; }
@@ -1443,10 +1460,15 @@ defineExpose({ isBusyAuthoring })
 .pfp-body {
   flex: 1;
   overflow: auto;
-  padding: 14px 20px 20px;
+  /* A document, not a code pane: generous margins and, for prose, a
+     readable measure (see .pfp-md). */
+  padding: 28px 32px 48px;
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+@media (max-width: 700px) {
+  .pfp-body { padding: 20px 16px 40px; }
 }
 .pfp-body-csv {
   overflow: hidden !important;
@@ -1531,7 +1553,7 @@ defineExpose({ isBusyAuthoring })
 }
 .pfp-pre {
   margin: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -1547,7 +1569,7 @@ defineExpose({ isBusyAuthoring })
   padding: 0 4px;
 }
 .pre-line.comment-highlight {
-  background: rgba(250, 204, 21, 0.18);
+  background: color-mix(in srgb, var(--accent2) 22%, transparent);
   cursor: pointer;
 }
 
@@ -1603,7 +1625,7 @@ defineExpose({ isBusyAuthoring })
 }
 .pfp-meta-name {
   color: var(--fg2);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   margin-left: 4px;
 }
@@ -1626,7 +1648,7 @@ defineExpose({ isBusyAuthoring })
   padding: 1px 6px;
   border: 1px solid var(--border);
   border-radius: 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 .pfp-meta-summary {
   margin: 2px 0 0;
@@ -1653,7 +1675,7 @@ defineExpose({ isBusyAuthoring })
   padding: 1px 6px;
   border: 1px solid var(--border);
   border-radius: 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 .pfp-meta-extra {
   margin: 8px 0 0;
@@ -1677,25 +1699,33 @@ defineExpose({ isBusyAuthoring })
 
 .pfp-md {
   font-size: var(--text-base);
-  line-height: 1.6;
-  max-width: 100%;
+  line-height: 1.65;
+  /* Readable measure for prose; code and tables keep their own scroll. */
+  width: 100%;
+  max-width: 680px;
 }
+/* Same violet as chat comments: one colour means "you left a note here". */
 .pfp-md :deep(.comment-highlight) {
-  background: rgba(250, 204, 21, 0.18);
-  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent2) 26%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent2) 70%, transparent);
+  border-radius: 2px;
   padding: 0 1px;
   cursor: pointer;
-  /* Animate the colour transition so the pulse fade-back feels natural. */
   transition: background-color 220ms ease-out, box-shadow 220ms ease-out;
+}
+.pfp-md :deep(.comment-highlight:hover) {
+  background: color-mix(in srgb, var(--accent2) 40%, transparent);
 }
 .pfp-md :deep(.comment-highlight.comment-pulse) {
   animation: pfp-comment-pulse 1s ease-out 1;
 }
 @keyframes pfp-comment-pulse {
-  0%   { background: rgba(250, 204, 21, 0.18); box-shadow: 0 0 0 0 rgba(250, 204, 21, 0); }
-  20%  { background: rgba(250, 204, 21, 0.55); box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.45); }
-  60%  { background: rgba(250, 204, 21, 0.40); box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.20); }
-  100% { background: rgba(250, 204, 21, 0.18); box-shadow: 0 0 0 0 rgba(250, 204, 21, 0); }
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent2) 0%, transparent); }
+  25%  { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent2) 35%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent2) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pfp-md :deep(.comment-highlight.comment-pulse) { animation: none; }
 }
 .pfp-md :deep(p) { margin: 0.6em 0; }
 .pfp-md :deep(:first-child) { margin-top: 0; }
@@ -1947,8 +1977,32 @@ defineExpose({ isBusyAuthoring })
 }
 .pfp-sidebar-card-note {
   color: var(--fg);
+  line-height: 1.45;
   word-break: break-word;
   white-space: pre-wrap;
+}
+.pfp-pop-quote {
+  margin-bottom: 4px;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+}
+.pfp-pop-actions .pfp-sidebar-card-edit,
+.pfp-pop-actions .pfp-sidebar-card-remove {
+  min-height: 28px;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+}
+.pfp-pop-actions .pfp-sidebar-card-edit:hover,
+.pfp-pop-actions .pfp-sidebar-card-remove:hover {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+@media (pointer: coarse) {
+  .pfp-pop-actions .pfp-sidebar-card-edit,
+  .pfp-pop-actions .pfp-sidebar-card-remove { min-height: var(--touch); }
 }
 .pfp-sidebar-draft-images {
   display: flex;
@@ -2028,18 +2082,22 @@ defineExpose({ isBusyAuthoring })
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
-  background: var(--error);
-  color: white;
+  min-height: 30px;
+  padding: 0 10px;
   border: none;
-  border-radius: 999px;
+  border-radius: 8px;
+  background: var(--fg);
+  color: var(--bg);
   cursor: pointer;
   font-size: var(--text-sm);
   font-weight: 600;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 8px 20px rgb(0 0 0 / 25%);
 }
 .pfp-comment-trigger:hover { filter: brightness(1.08); }
-.pfp-comment-trigger-icon { font-size: var(--text-sm); line-height: 1; }
+.pfp-comment-trigger-icon { flex: none; }
+@media (pointer: coarse) {
+  .pfp-comment-trigger { min-height: var(--touch); }
+}
 
 /* Header "💬 N" pill: toggles the comment drawer. */
 .pfp-comments-toggle {
@@ -2068,23 +2126,22 @@ defineExpose({ isBusyAuthoring })
   z-index: 32;
   width: 280px;
   max-width: calc(100% - 16px);
-  background: var(--bg);
-  border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--accent, #60a5fa);
-  border-radius: 8px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
-  padding: 10px 12px;
   box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg2);
+  box-shadow: 0 14px 36px rgb(0 0 0 / 28%);
+  font-size: var(--text-sm);
 }
 .pfp-pop-header {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-bottom: 6px;
+  display: none;
 }
 .pfp-pop-actions {
-  opacity: 1 !important;
-  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
 }
 
 /* Sidebar draft composer: sits between header and the scrollable list. */

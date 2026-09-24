@@ -190,10 +190,10 @@ describe('composer focus on opening a chat', () => {
     const { wrapper } = await mountLayout()
 
     const empty = wrapper.get('.chat-empty-state')
-    expect(empty.text()).toContain('What should Ciao work on?')
+    expect(empty.text()).toContain('Start with a request')
     expect(empty.text()).toContain('General')
 
-    const starter = empty.get('.chat-empty-starters .btn-small')
+    const starter = empty.get('.chat-empty-starters .chat-empty-starter')
     await starter.trigger('click')
     await nextTick()
     expect(wrapper.get<HTMLTextAreaElement>('textarea.chat-input').element.value).toContain('Review the latest project notes')

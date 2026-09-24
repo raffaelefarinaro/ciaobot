@@ -6,9 +6,8 @@
       :aria-expanded="Boolean(open)"
       @click="emit('toggle')"
     >
-      <span class="trace-chevron">{{ open ? '▾' : '▸' }}</span>
-      <AppIcon class="trace-icon" name="activity" :size="14" />
-      <span class="trace-label">Activity</span>
+      <svg class="trace-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
+      <span class="trace-label">{{ durationMs ? `Worked for ${formatDuration(durationMs)}` : 'Activity' }}</span>
       <span class="trace-meta">
         <span
           v-for="part in traceSummaryMetaParts(steps, subs)"
@@ -21,59 +20,74 @@
       </span>
       <span class="sr-only">, {{ open ? 'expanded' : 'collapsed' }}</span>
     </button>
+    <!-- The turn as a step timeline: one row per thought, note, tool batch or
+         file, each with its kind's glyph on a shared left rule. -->
     <div v-if="open" class="trace-body" @click="emit('body-click', $event)">
       <template v-for="(step, j) in steps" :key="j">
-        <div v-if="step.tool_name === '_activity'" class="trace-tools">
-          <div
-            v-for="(line, k) in activityLines(step.content)"
-            :key="k"
-            class="activity-line"
-            :class="{ subagent: isSubagentLine(line) }"
-            v-html="renderActivityLine(line)"
-          ></div>
-        </div>
-        <button
-          v-else-if="step.tool_name === '_filecard'"
-          type="button"
-          class="file-card"
-          @click="emit('open-file', step.file_path || step.content)"
-          :title="step.file_path || step.content"
-        >
-          <AppIcon class="file-card-icon" :name="fileCardIcon(step.file_path || step.content)" :size="18" />
-          <span class="file-card-main">
-            <span class="file-card-name">{{ fileCardBasename(step.file_path || step.content) }}</span>
-            <span class="file-card-meta">
-              <span class="file-card-action">{{ step.action || 'touched' }}</span>
-              <span v-if="fileCardDirname(step.file_path || step.content)" class="file-card-dir"> · {{ fileCardDirname(step.file_path || step.content) }}</span>
-            </span>
-          </span>
-          <span class="file-card-chevron" aria-hidden="true">&#8599;</span>
-        </button>
-        <div v-else-if="step.tool_name === '_thinking'" class="thinking-block">
-          <button
-            type="button"
-            class="thinking-toggle"
-            :aria-expanded="thinkingExpanded"
-            @click.stop="emit('toggle-thinking')"
-          >
-            <span aria-hidden="true">{{ thinkingExpanded ? '▾' : '▸' }}</span>
-            <span>{{ thinkingExpanded ? 'Thinking' : 'Thinking (collapsed)' }}</span>
-          </button>
-          <div v-if="thinkingExpanded" class="trace-text trace-thinking">
-            <button
-              v-if="step.lazy && typeof step.i === 'number'"
-              type="button"
-              class="thinking-load"
-              @click.stop="emit('expand-step', step)"
-            >
-              Load full reasoning…
-            </button>
-            <div v-else v-html="renderMarkdown(step.content)"></div>
+        <div v-if="step.tool_name === '_activity'" class="trace-step trace-step--tool">
+          <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 4 4-4 4M11 16h8" /></svg></span>
+          <div class="trace-tools">
+            <div
+              v-for="(line, k) in activityLines(step.content)"
+              :key="k"
+              class="activity-line"
+              :class="{ subagent: isSubagentLine(line) }"
+              v-html="renderActivityLine(line)"
+            ></div>
           </div>
         </div>
-        <div v-else class="trace-text" v-html="renderMarkdown(step.content)"></div>
+        <div v-else-if="step.tool_name === '_filecard'" class="trace-step trace-step--file">
+          <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l3 3v15H6z" /></svg></span>
+          <button
+            type="button"
+            class="file-card"
+            @click="emit('open-file', step.file_path || step.content)"
+            :title="step.file_path || step.content"
+          >
+            <AppIcon class="file-card-icon" :name="fileCardIcon(step.file_path || step.content)" :size="16" />
+            <span class="file-card-main">
+              <span class="file-card-name">{{ fileCardVerb(step.action) }} {{ fileCardBasename(step.file_path || step.content) }}</span>
+              <span class="file-card-meta">
+                <span class="file-card-action">{{ step.action || 'touched' }}</span>
+                <span v-if="fileCardDirname(step.file_path || step.content)" class="file-card-dir"> · {{ fileCardDirname(step.file_path || step.content) }}</span>
+              </span>
+            </span>
+            <span class="file-card-chevron" aria-hidden="true">&#8599;</span>
+          </button>
+        </div>
+        <div v-else-if="step.tool_name === '_thinking'" class="trace-step trace-step--thought">
+          <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9V16h7v-2.1A6 6 0 0 0 12 3z" /></svg></span>
+          <div class="thinking-block">
+            <button
+              type="button"
+              class="thinking-toggle"
+              :aria-expanded="thinkingExpanded"
+              @click.stop="emit('toggle-thinking')"
+            >
+              <span>{{ thinkingExpanded ? 'Thought' : 'Thought (collapsed)' }}</span>
+            </button>
+            <div v-if="thinkingExpanded" class="trace-text trace-thinking">
+              <button
+                v-if="step.lazy && typeof step.i === 'number'"
+                type="button"
+                class="thinking-load"
+                @click.stop="emit('expand-step', step)"
+              >
+                Load full reasoning…
+              </button>
+              <div v-else v-html="renderMarkdown(step.content)"></div>
+            </div>
+          </div>
+        </div>
+        <div v-else class="trace-step trace-step--note">
+          <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z" /></svg></span>
+          <div class="trace-text" v-html="renderMarkdown(step.content)"></div>
+        </div>
       </template>
-      <SubagentPanel v-if="subs?.length" :subagents="subs" :chat-id="chatId" />
+      <div v-if="subs?.length" class="trace-step trace-step--subagent">
+        <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3" /><path d="M6 20a6 6 0 0 1 12 0" /></svg></span>
+        <SubagentPanel :subagents="subs" :chat-id="chatId" />
+      </div>
       <div v-if="outputs?.length" class="answer-outputs answer-outputs--trace">
         <button
           type="button"
@@ -135,6 +149,7 @@ import {
   type TraceOutput,
 } from '../lib/chatActivity'
 import type { ChatMessage, SubagentTranscript } from '../lib/types'
+import { formatDuration } from '../lib/time'
 
 defineProps<{
   /** The turn's intermediate assistant text and tool calls, in order. */
@@ -157,7 +172,17 @@ defineProps<{
   renderMarkdown: (text: string) => string
   /** ChatPanel's file-path linkifier for a single activity line. */
   renderActivityLine: (line: string) => string
+  /** Wall-clock length of the turn, from its closing bubble's meta, when known. */
+  durationMs?: number
 }>()
+
+// The file row's verb, from the tool's recorded action.
+function fileCardVerb(action?: string): string {
+  const value = (action || '').toLowerCase()
+  if (value.startsWith('creat') || value === 'new' || value.startsWith('writ')) return 'Wrote'
+  if (value.startsWith('edit') || value.startsWith('modif') || value.startsWith('updat')) return 'Edited'
+  return 'Touched'
+}
 
 const emit = defineEmits<{
   toggle: []

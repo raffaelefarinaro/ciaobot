@@ -25,23 +25,12 @@
         @mouseleave="onPopoverLeave"
         @keydown="onKeydown"
       >
-        <div class="pop-header">
-          <div class="pop-actions">
-            <button class="pop-btn-edit" @click.stop="onEdit" title="Edit">✎</button>
-            <button class="pop-btn-remove" @click.stop="onDelete" title="Delete">×</button>
-          </div>
-        </div>
-        <div v-if="comment.images?.length" class="pop-images">
-          <img
-            v-for="img in comment.images"
-            :key="img"
-            :src="`/api/images/${img}`"
-            :alt="img"
-            class="pop-thumb"
-            @click.stop
-          />
-        </div>
+        <div v-if="comment.selection" class="pop-quote">“{{ comment.selection.length > 60 ? `${comment.selection.slice(0, 57)}…` : comment.selection }}”</div>
         <div class="pop-note">{{ comment.comment }}</div>
+        <div class="pop-actions">
+          <button type="button" class="pop-btn-edit" @click.stop="onEdit">Edit</button>
+          <button type="button" class="pop-btn-remove" @click.stop="onDelete">Delete</button>
+        </div>
       </div>
     </FocusScope>
   </Teleport>
@@ -66,7 +55,7 @@ import { useViewportHeight } from '../composables/useViewportHeight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import { onViewportChange, viewportWidth } from '../lib/viewport'
 
-type ChatComment = { id: string; comment: string; images?: string[] }
+type ChatComment = { id: string; comment: string; selection?: string; images?: string[] }
 
 const emit = defineEmits<{
   (e: 'edit', comment: ChatComment): void
@@ -235,53 +224,64 @@ defineExpose({ show, close, clearPendingClose, onTargetOver, onTargetOut, pinFro
   position: fixed;
   inset: 0;
   z-index: 40;
-  background: rgba(0, 0, 0, 0.32);
+  background: color-mix(in srgb, var(--bg) 40%, transparent);
 }
 .pop {
   position: fixed;
   z-index: 41;
   width: 280px;
   max-width: calc(100vw - 16px);
-  background: var(--bg);
-  border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--accent, #60a5fa);
-  border-radius: 8px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
-  padding: 8px 12px 10px;
   box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg2);
+  box-shadow: 0 14px 36px rgb(0 0 0 / 28%);
+  font-size: var(--text-sm);
 }
-.pop-header {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  margin-bottom: 2px;
+.pop-quote {
+  margin-bottom: 4px;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+.pop-note {
+  margin: 0;
+  color: var(--fg);
+  line-height: 1.45;
+  word-break: break-word;
 }
 .pop-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 12px;
+  margin-top: 6px;
 }
 .pop-btn-edit,
 .pop-btn-remove {
-  background: transparent;
-  border: none;
-  color: var(--fg2);
-  font-size: 13px;
-  line-height: 1;
-  width: var(--touch);
-  height: var(--touch);
+  min-height: 28px;
   padding: 0;
-  border-radius: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
   cursor: pointer;
 }
 .pop-btn-edit:hover,
-.pop-btn-remove:hover,
+.pop-btn-remove:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
 .pop-btn-edit:focus-visible,
 .pop-btn-remove:focus-visible {
-  background: var(--bg2);
-  color: var(--fg);
   outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+@media (pointer: coarse) {
+  .pop-btn-edit,
+  .pop-btn-remove { min-height: var(--touch); }
 }
 .pop-images {
   display: flex;
@@ -296,10 +296,5 @@ defineExpose({ show, close, clearPendingClose, onTargetOver, onTargetOut, pinFro
   border-radius: 4px;
   border: 1px solid var(--border);
   background: var(--bg);
-}
-.pop-note {
-  margin: 0;
-  color: var(--fg);
-  word-break: break-word;
 }
 </style>

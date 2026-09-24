@@ -43,6 +43,19 @@ describe('ChatTurnActivity', () => {
     expect(wrapper.find('.trace-body').exists()).toBe(false)
   })
 
+  it('names the turn by how long it worked when the duration is known', () => {
+    expect(mountRow({ durationMs: 100000 }).get('button.trace-summary').text()).toContain('Worked for')
+    expect(mountRow().get('button.trace-summary').text()).toContain('Activity')
+  })
+
+  it('labels a written file by its action', () => {
+    const wrapper = mountRow({
+      open: true,
+      steps: [step({ tool_name: '_filecard', file_path: 'notes/plan.md', action: 'created' })],
+    })
+    expect(wrapper.get('.trace-step--file .file-card-name').text()).toBe('Wrote plan.md')
+  })
+
   it('renders the body through the markdown renderer it was handed', () => {
     const wrapper = mountRow({ open: true })
 
