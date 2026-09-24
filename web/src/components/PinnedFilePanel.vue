@@ -2203,4 +2203,18 @@ defineExpose({ isBusyAuthoring })
     max-width: none;
   }
 }
+@media (pointer: coarse) {
+  .image-btn-sm,
+  .pfp-comment-trigger {
+    min-width: var(--touch);
+    min-height: var(--touch);
+  }
+
+  .draft-image-remove {
+    box-sizing: content-box;
+    top: -12px;
+    right: -12px;
+    padding: 14px;
+  }
+}
 </style>

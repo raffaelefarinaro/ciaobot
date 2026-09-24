@@ -13,7 +13,7 @@ colors:
   surface-elevated: "#23264a"
   text: "#e8e8f0"
   text-muted: "#b4b4c4"
-  text-subtle: "#7a7a90"
+  text-subtle: "#8f90a8"
   border: "#2e3258"
   border-strong: "#3a3f70"
   success: "#4caf50"
@@ -28,6 +28,7 @@ colors:
   light-surface-interactive: "#e6e8f4"
   light-text: "#1a1a2e"
   light-text-muted: "#5f607d"
+  light-text-subtle: "#66687f"
   light-border: "#d2d4e3"
 typography:
   fontFamilySans: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Segoe UI', Roboto, sans-serif"
@@ -112,20 +113,11 @@ components:
 
 Ciaobot is a focused control surface for a personal AI assistant. Its visual identity combines the precision of a developer console with the warmth needed for daily conversation. It should feel capable, private, calm, and direct—not corporate, ornamental, or like a generic chatbot.
 
-The PWA is information-dense but not cramped. Monospaced typography, compact labels, restrained animation, and a deep indigo foundation establish the console character. A warm pink accent supplies personality and orientation. The interface must remain understandable without color, animation, hover, or prior knowledge of its icons.
+The PWA is information-dense but not cramped. A system sans carries prose and controls, monospace is reserved for technical metadata and terminal cues, restrained animation and a deep indigo foundation establish the console character, and a warm pink accent supplies personality and orientation. The interface must remain understandable without color, animation, hover, or prior knowledge of its icons.
 
-The home screen ("jump back in") is the primary entry point: it shows the
-selected workspace's active chats sorted into recency tiers with key-badge
-navigation, unread and needs-input signals, and a "+ new" project entry.
-Switching workspaces swaps the home content instead of adding a column — one
-workspace at a time is what makes the switch mean something. Within the lane,
-chats carrying a needs-your-input question or decision tier first; an explicit
-unread tier sits between working and quiet; long-idle chats fade into the
-quiet tier rather than disappearing. Rescue lanes for stale or unknown
-workspaces stack beneath the selected workspace's lane; arrow-key navigation
-follows that visual order, using up/down between stacked lanes and left/right
-within a lane. Signals are shape-and-text-first (tier labels, badges,
-weight, dots) so no tier relies on color alone.
+The home screen (Today / "Jump back in") is the primary entry point and uses the Workbench composition: one outcome-first intake composer leads a readable request column, and the review summary for memory proposals, knowledge upkeep, and active automations sits beside it as a quiet rail on wide panes. Below that, the selected workspace's chats follow in this explicit order: **Needs you**, **Working**, **Unread**, and **Earlier**. Switching workspaces swaps the home content instead of adding a column — one workspace at a time is what makes the switch mean something. Rescue lanes for stale or unknown workspaces stack beneath the selected workspace's lane; arrow-key navigation follows that visual order, using up/down between stacked lanes and left/right within a lane. Signals are shape-and-text-first (tier labels, badges, weight, dots) so no tier relies on color alone. On panes narrower than 980px the rail drops below the request column rather than compressing it.
+
+Core product work follows one visible model: **request → run → output → durable knowledge**. The transcript remains the reasoning surface. A conditional Work details drawer adds Context, Activity, and Output without forcing a permanent multi-column IDE layout. Project is the context envelope; Memory Review is the durable-knowledge inbox; Graph/List are deeper exploration modes.
 
 `Ciaobot.app` owns the macOS Dock window, native menu-bar item, and
 notifications. Desktop preferences live in the tray itself rather than a
@@ -154,7 +146,7 @@ Dark mode is the primary visual expression. It uses layered indigo surfaces inst
 - **Violet (`#6a47b8`):** A secondary accent for selected filters, contextual information, and supporting distinctions. It must not compete with the primary action.
 - **Background (`#1a1a2e`):** The deepest application canvas.
 - **Surfaces (`#1f2240`, `#23264a`, `#2a2e54`):** Cards, elevated controls, hover, and pressed states. Prefer tonal separation and borders over large shadows.
-- **Text (`#e8e8f0`):** Primary content. Muted text uses `#b4b4c4`; `#7a7a90` is reserved for genuinely nonessential metadata and disabled states.
+- **Text (`#e8e8f0`):** Primary content. Muted dark text uses `#b4b4c4`; `#8f90a8` is the AA-compliant tertiary token for metadata and secondary controls. In light mode the tertiary token is `#66687f`; never reuse the old washed-out `#8e90a8` value for meaningful text.
 - **Semantic colors:** Green communicates success, orange caution or recoverable risk, and red destructive actions or errors. Never use semantic colors decoratively.
 
 Light mode keeps the same hierarchy with a soft lavender canvas, white surfaces, crisp crimson accent, and slate text. It is an adaptation of the same system, not a separate aesthetic.
@@ -177,7 +169,7 @@ Respect the user-controlled font scale. Truncate compact navigation labels only 
 
 The PWA is mobile-first and safe-area aware. Desktop uses a persistent project sidebar beside the active workspace. Narrow screens use an overlay sidebar and full-width panels, with secondary actions moving into menus or sheets before titles are sacrificed.
 
-Use the 4px-based spacing scale deliberately: 4px for internal micro-spacing, 8px between closely related controls, 12–16px for component rhythm, and 24–32px between major groups. Long-form surfaces stay readable on wide screens: settings cards are capped at `min(100%, 1040px)`, while the home screen and automations pages are full-bleed by design.
+Use the 4px-based spacing scale deliberately: 4px for internal micro-spacing, 8px between closely related controls, 12–16px for component rhythm, and 24–32px between major groups. Long-form surfaces stay readable on wide screens: settings cards are capped at `min(100%, 1040px)`; the home intake/review column is capped near 920px; project, Memory, and Automations use the available pane width but keep conversational rows within a readable measure.
 
 All interactive targets are at least 44×44px on touch layouts. Compact visual glyphs may sit inside a larger hit area. Honor device safe areas, virtual keyboards, standalone PWA chrome, and browser zoom. Do not disable pinch zoom or text scaling.
 
@@ -187,7 +179,7 @@ Long or implementation-oriented content must not dominate a mobile page. Collaps
 
 Hierarchy comes primarily from tonal layers, one-pixel borders, and spacing. Cards sit on the page background; inputs may use the deeper canvas; modals and popovers use the elevated surface. Use stronger borders for focus and separation before adding shadows.
 
-Shadows are reserved for content that genuinely floats above another interaction layer: mobile drawers, menus, modals, and toasts. Keep them soft and dark. A subtle low-opacity grain may texture the page background, but it must never reduce legibility or imply disabled content.
+Shadows are reserved for content that genuinely floats above another interaction layer: mobile drawers, menus, modals, and toasts. Keep them soft and dark. The normal application surface stays clean; CRT grain is reserved for startup, update, and native terminal surfaces where it carries product meaning. Visible thin scrollbars remain available in bounded data regions so scrollability never becomes an invisible assumption.
 
 ## Shapes
 
@@ -204,7 +196,7 @@ Borders are structural, not decorative. Active navigation is marked by a slim pi
 - **Data tables:** Compact tables should fit their content instead of stretching across a message. At narrow widths, preserve readable row labels and contain horizontal overflow in a visibly focused, keyboard-scrollable region.
 - **Canvas surfaces:** A canvas may own direct-manipulation gestures (drag-to-pan, drag-to-move) only where it captures the pointer and scopes `touch-action` to itself; page scroll, browser zoom, and text selection stay available everywhere else. Every canvas action needs an equivalent native control — a named button or list row — because a canvas is not keyboard accessible. Never rely on a modifier click or hover alone to reach an action.
 - **Inputs and composer:** Inputs use the deep background, visible border, pink focus ring, and plain-language labels. The chat composer remains the strongest persistent interaction affordance.
-- **Badges and status:** Badges are compact supporting signals, never the sole explanation. The PWA rail places global attention counts on the destination icons: chats needing attention on chats, queued proposals on memory. Workspace toggles show the section's scoped count. Running, unread, failed, and disabled states need accessible text equivalents.
+- **Badges and status:** Badges are compact supporting signals, never the sole explanation. The PWA rail places global attention counts on the destination icons: chats needing attention on Today, queued proposals on Memory. Workspace toggles show the section's scoped count. Running, unread, failed, and disabled states need accessible text equivalents.
 - **Menus and sheets:** Overflow menus contain secondary and destructive actions when horizontal space is constrained. Mobile modals become edge-to-edge sheets and honor safe areas.
 - **Onboarding:** Spotlight backdrops suppress competing content. Skip is visibly actionable but secondary; Back and Next meet the same touch-target requirements as the rest of the app.
 - **Tray:** Follow native macOS menu typography, spacing, disabled-state, and confirmation conventions. Keep the menu concise: open Ciao, server status/recovery, unread chats, and essential utilities. Badge counts reflect the full unread total even when the quick list is capped.

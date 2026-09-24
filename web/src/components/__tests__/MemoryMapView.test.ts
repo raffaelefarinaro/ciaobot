@@ -94,8 +94,9 @@ describe('MemoryMapView keyboard and touch access', () => {
   async function mountGraph() {
     const wrapper = await mountView()
     await flushPromises()
-    await nextTick()
     const mm = useMemoryMapStore()
+    mm.view = 'graph'
+    await nextTick()
     const a = mm.nodes.find(n => n.id === 'a')!
     const b = mm.nodes.find(n => n.id === 'b')!
     a.x = 0; a.y = 0; a.vx = 0; a.vy = 0

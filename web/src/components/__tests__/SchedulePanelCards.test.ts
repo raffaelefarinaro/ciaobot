@@ -71,6 +71,8 @@ async function mountPanel(schedule = makeSchedule()): Promise<VueWrapper> {
 
   const store = useTaskStore()
   store.schedules = [schedule]
+  store.schedulesLoaded = true
+  store.scheduleLoadError = ''
   store.fetchSchedules = vi.fn(async () => {})
   store.fetchModels = vi.fn(async () => {})
   store.updateSchedule = vi.fn(async () => schedule)

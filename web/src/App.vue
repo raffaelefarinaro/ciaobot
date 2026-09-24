@@ -315,7 +315,7 @@ watch(showStartup, (show) => {
   /* Text */
   --fg: #e8e8f0;
   --fg2: #b4b4c4;       /* lifted from #a0a0b0 for legibility on small screens */
-  --fg3: #7a7a90;
+  --fg3: #8f90a8;
   /* Accent */
   --accent: #ff4d6d;    /* warmer pink for contrast on dark */
   --accent-strong: #ff2e54;
@@ -380,7 +380,7 @@ watch(showStartup, (show) => {
   /* Text */
   --fg: #1a1a2e;        /* dark slate text matching dark bg */
   --fg2: #5f607d;       /* medium-dark slate */
-  --fg3: #8e90a8;       /* lighter slate */
+  --fg3: #66687f;       /* readable secondary metadata */
   /* Accent */
   --accent: #d81b60;    /* crisp pink/crimson for white bg */
   --accent-strong: #b00d46;
@@ -462,18 +462,30 @@ html.keyboard-open {
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-/* Hide scrollbars globally but keep scroll behavior. Applies to every
-   scrollable element in the PWA (chat transcript, sidebar, settings,
-   modals, etc.). Chrome/Safari/Edge via ::-webkit-scrollbar, Firefox via
-   scrollbar-width, legacy Edge via -ms-overflow-style. */
+/* Keep scroll affordances visible. Quiet by default, stronger at the edges of
+   bounded data regions, but never mistaken for disabled content. */
 * {
-  scrollbar-width: none;      /* Firefox */
-  -ms-overflow-style: none;   /* IE / legacy Edge */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+  -ms-overflow-style: scrollbar;
 }
 *::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-  display: none;              /* WebKit (Chrome, Safari, new Edge) */
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 2px solid transparent;
+  border-radius: var(--radius-pill);
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--fg3);
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 html, body {
@@ -492,24 +504,6 @@ body {
   /* Keep browser zoom available for accessibility. Individual controls use
      touch-action: manipulation to avoid delayed/double activation. */
   touch-action: auto;
-}
-
-/* Subtle CRT-style grain. Fixed, behind all content, no pointer events.
-   Inline SVG noise tile keeps it zero-asset. */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  opacity: 0.025;
-  mix-blend-mode: screen;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.6 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
-  background-size: 160px 160px;
-}
-:root.theme-light body::before {
-  mix-blend-mode: multiply;
-  opacity: 0.015;
 }
 
 #ciao-app {
@@ -929,7 +923,7 @@ input:focus, textarea:focus, select:focus {
   color: var(--error) !important;
 }
 
-@media (max-width: 768px) {
+@media (pointer: coarse) {
   .btn-small,
   .btn-primary,
   .btn-chip,

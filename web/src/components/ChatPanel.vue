@@ -2,11 +2,11 @@
   <div class="chat-panel" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
     <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
-    <!-- Header. No page tag: the breadcrumb below already reads
-         `workspace / project / title`, so a "chat" marker beside it would name
-         what the breadcrumb and the transcript underneath it both already say.
-         This is also the most crowded header in the app, so the room goes to the
-         breadcrumb and the action icons instead. -->
+    <!-- Header. No page tag: the project context control below and the chat
+         title already name this surface, so a "chat" marker beside them would
+         repeat what the transcript underneath already says. This is also the
+         most crowded header in the app, so the room goes to those two pieces
+         and the action icons. -->
     <!-- No brand mark here. This is the densest header in the app - breadcrumb,
          model picker, agent pill, archive - and the centred wordmark was
          squeezing the chat title down to a few characters. The breadcrumb
@@ -31,31 +31,26 @@
             </svg>
           </button>
           <div class="header-breadcrumb" ref="breadcrumbRef">
-            <!-- Workspace and project are one thing - the scope the chat sits in -
-                 so they share a wrapper. Wrapping them together is what lets the
-                 narrow header put the scope on one quiet line above the title:
-                 as three loose flex items they broke into three lines at three
-                 different sizes, with the workspace the largest text in the
-                 header and the title the smallest.
-                 The workspace was only ever implied here, through --accent. This
-                 is the screen where you are deepest inside one, so it says so -
-                 with its number key, which is otherwise only discoverable in
-                 the sidebar. -->
-            <span v-if="hasScopeCrumb" class="breadcrumb-scope">
-              <span
-                v-if="workspaceCrumb"
-                class="breadcrumb-workspace"
-                :data-workspace-color="workspaceCrumb.color"
-                :title="`Workspace ${workspaceCrumb.name} (press ${workspaceCrumb.key})`"
-              >{{ workspaceCrumb.name }}</span>
-              <span v-if="workspaceCrumb && projectCrumb" class="breadcrumb-separator">/</span>
-              <span
-                v-if="projectCrumb"
+            <!-- The project is the context envelope for this chat. The workspace
+                 is already the sidebar's scope, so repeating it here would add
+                 a second, competing location cue. The control opens the durable
+                 project context and its file list without leaving the chat. -->
+            <div v-if="projectCrumb" class="breadcrumb-scope">
+              <button
+                type="button"
                 class="breadcrumb-project"
-                @click.stop="toggleContext"
                 :class="{ active: showContext }"
-              >{{ projectCrumb }}</span>
-            </span>
+                :aria-expanded="showContext"
+                aria-controls="project-context-popup"
+                aria-label="Open project context"
+                @click.stop="toggleContext"
+              >
+                <span>{{ projectCrumb }}</span>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" aria-hidden="true">
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+            </div>
             <input
               v-if="editingTitle"
               class="title-input"
@@ -70,10 +65,18 @@
             <!-- Project context popup -->
             <div
               v-if="showContext"
+              id="project-context-popup"
               class="context-popup"
+              role="dialog"
+              aria-label="Project context"
               @click.stop
+              @keydown.esc.stop.prevent="closeContext"
             >
               <div class="context-popup-body">
+                <div class="context-popup-section context-popup-baseline">
+                  <span class="label-eyebrow">Baseline sent with this chat</span>
+                  <p>Project context and the workspace guide are included with every message. Memory notes are retrieved only when relevant.</p>
+                </div>
                 <div v-if="project?.vault_doc_path" class="context-popup-section">
                   <span class="label-eyebrow">Project</span>
                   <p v-if="project.context" class="context-description">{{ project.context }}</p>
@@ -132,6 +135,24 @@
           <span class="bg-agents-dot" aria-hidden="true"></span>
           {{ store.activeBackgroundAgents }} agent{{ store.activeBackgroundAgents === 1 ? '' : 's' }}
         </span>
+        <button
+          ref="inspectorTrigger"
+          type="button"
+          class="btn-icon work-inspector-trigger"
+          :class="{ active: inspectorOpen }"
+          :aria-expanded="inspectorOpen"
+          aria-controls="chat-work-inspector"
+          aria-label="Work details"
+          title="Work details"
+          @click="openInspector"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="miter" aria-hidden="true">
+            <rect x="4" y="3" width="16" height="18" rx="2" />
+            <line x1="9" y1="8" x2="15" y2="8" />
+            <line x1="9" y1="12" x2="15" y2="12" />
+            <line x1="9" y1="16" x2="13" y2="16" />
+          </svg>
+        </button>
         <div class="model-picker-wrap" ref="modelPickerRef">
           <button
             class="model-picker-btn touch-hit mobile-only"
@@ -238,7 +259,7 @@
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
-    <div class="messages" ref="messagesEl" :aria-busy="store.messageHistoryLoading" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
+    <div class="messages" :class="{ 'messages--empty': !blockingHistoryLoad && renderItems.length === 0 && !inputText.trim() }" ref="messagesEl" :aria-busy="store.messageHistoryLoading" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <div class="messages-content">
       <Transition name="history-loading">
         <!-- Placeholder for the transcript, in the transcript's own shape: a
@@ -276,6 +297,32 @@
           </div>
         </div>
       </Transition>
+      <section
+        v-if="!blockingHistoryLoad && renderItems.length === 0 && !inputText.trim()"
+        class="chat-empty-state"
+        aria-labelledby="chat-empty-title"
+      >
+        <span class="chat-empty-mark" aria-hidden="true">›</span>
+        <span class="chat-empty-kicker">
+          New conversation<span v-if="project?.name"> · {{ project.name }}</span>
+        </span>
+        <h2 id="chat-empty-title">What should Ciao work on?</h2>
+        <p>Describe the outcome. Ciao will use this project's context, keep the reasoning here, and make durable results easy to review.</p>
+        <button
+          type="button"
+          class="btn-small chat-empty-knowledge"
+          @click="openProjectKnowledge"
+        >What Ciao knows about this project</button>
+        <div class="chat-empty-starters" aria-label="Suggested first requests">
+          <button
+            v-for="starter in starterPrompts"
+            :key="starter"
+            type="button"
+            class="btn-small"
+            @click="useStarterPrompt(starter)"
+          >{{ starter }}</button>
+        </div>
+      </section>
       <template v-if="!blockingHistoryLoad">
       <template v-for="(item, i) in renderItems" :key="item.key">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped.
@@ -679,6 +726,114 @@
       />
       </div>
     </div>
+
+    <aside
+      v-if="inspectorOpen"
+      id="chat-work-inspector"
+      ref="inspectorPanel"
+      class="chat-work-inspector"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="chat-work-inspector-title"
+    >
+      <header class="chat-work-inspector-header">
+        <div>
+          <span class="chat-work-inspector-kicker">Conversation</span>
+          <h2 id="chat-work-inspector-title">Work details</h2>
+        </div>
+        <button
+          ref="inspectorCloseButton"
+          type="button"
+          class="btn-icon"
+          aria-label="Close work details"
+          title="Close"
+          @click="inspectorOpen = false"
+        >×</button>
+      </header>
+
+      <div class="chat-work-tabs" role="tablist" aria-label="Work detail sections">
+        <button
+          v-for="(tab, index) in inspectorTabs"
+          :id="`work-tab-${tab.key}`"
+          :key="tab.key"
+          type="button"
+          role="tab"
+          :aria-selected="inspectorTab === tab.key"
+          :aria-controls="`work-panel-${tab.key}`"
+          :tabindex="inspectorTab === tab.key ? 0 : -1"
+          @click="inspectorTab = tab.key"
+          @keydown="onInspectorTabKeydown($event, index)"
+        >{{ tab.label }}</button>
+      </div>
+
+      <section
+        v-if="inspectorTab === 'context'"
+        id="work-panel-context"
+        class="chat-work-panel"
+        role="tabpanel"
+        aria-labelledby="work-tab-context"
+      >
+        <span class="chat-work-label">Injected with each message</span>
+        <h3>{{ project?.name || 'General' }}</h3>
+        <p class="chat-work-copy">{{ project?.context || 'No project context has been added yet.' }}</p>
+        <p class="chat-work-note">The workspace guide is loaded alongside this project context. Memory notes are retrieved only when relevant to the request.</p>
+        <div class="chat-work-facts">
+          <div>
+            <span>Automations</span>
+            <strong>{{ contextRelations.length }}</strong>
+          </div>
+          <div>
+            <span>Background agents</span>
+            <strong>{{ store.activeBackgroundAgents }}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section
+        v-else-if="inspectorTab === 'activity'"
+        id="work-panel-activity"
+        class="chat-work-panel"
+        role="tabpanel"
+        aria-labelledby="work-tab-activity"
+      >
+        <span class="chat-work-label">Run state</span>
+        <div class="chat-work-status-list">
+          <div v-for="row in inspectorStatusRows" :key="row.label" class="chat-work-status-row">
+            <span>{{ row.label }}</span>
+            <strong :class="row.tone">{{ row.value }}</strong>
+          </div>
+        </div>
+        <p class="chat-work-note">Tool steps stay collapsed in the transcript. This panel is the quick status surface; open Activity on a turn for its full sequence.</p>
+      </section>
+
+      <section
+        v-else
+        id="work-panel-output"
+        class="chat-work-panel"
+        role="tabpanel"
+        aria-labelledby="work-tab-output"
+      >
+        <span class="chat-work-label">Files produced or changed</span>
+        <div v-if="inspectorOutputs.length" class="chat-work-output-list">
+          <button
+            v-for="output in inspectorOutputs"
+            :key="`${output.action}:${output.file_path}`"
+            type="button"
+            class="chat-work-output"
+            @click="openInspectorFile(output.file_path)"
+          >
+            <span class="chat-work-output-icon" aria-hidden="true">↗</span>
+            <span class="chat-work-output-name">{{ fileCardBasename(output.file_path) }}</span>
+            <span class="chat-work-output-action">{{ output.action }}</span>
+          </button>
+        </div>
+        <div v-else class="chat-work-empty">
+          <strong>No files yet</strong>
+          <p>Created and modified files will collect here without burying the conversation.</p>
+        </div>
+      </section>
+    </aside>
+
       <!-- Scroll-to-bottom floats inside the scroll area so it tracks the
            composer height: .chat-with-sidebar ends at the top of the input
            bar, so bottom:12px stays 12px above the composer even when the
@@ -1157,11 +1312,11 @@ import ChatTurnActivity from './ChatTurnActivity.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { recordSentPrompt } from '../lib/chatDrafts'
+import { useModalFocus } from '../composables/useModalFocus'
 import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, Schedule, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
-import { colorForWorkspace } from '../lib/workspaceColors'
 import { ARCHIVE_ACTION_LABEL, ARCHIVE_CONFIRM_MESSAGE } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
 import { linkifyText } from '../lib/filePaths'
@@ -1296,6 +1451,18 @@ const composer = useChatComposer({
 const inputText = composer.draft
 const inputEl = composer.input
 const dragOver = composer.dragOver
+const starterPrompts = [
+  'Review the latest project notes and flag what needs a decision',
+  'Turn the current research into a concise briefing',
+]
+
+async function useStarterPrompt(prompt: string) {
+  if (inputText.value.trim()) return
+  inputText.value = prompt
+  await nextTick()
+  autoResize()
+  inputEl.value?.focus()
+}
 const {
   autoResize,
   handleDrop,
@@ -1740,29 +1907,89 @@ async function toggleScheduleEnabled(s: Schedule) {
 }
 const project = computed(() => store.activeProject)
 
-// Workspace crumb: name, accent and the 1-9 shortcut that selects it. The index
-// comes from workspaceOptions so it always matches the sidebar pill and the home
-// lane badge for the same workspace.
-const workspaceCrumb = computed(() => {
-  const name = project.value?.workspace
-  if (!name) return null
-  const index = store.workspaceOptions.findIndex(w => w.name === name)
-  if (index < 0) return null
-  return {
-    name: name.split(/[-_\s]+/).filter(Boolean).join(' '),
-    color: colorForWorkspace(store.workspaceOptions[index]),
-    key: index < 9 ? String(index + 1) : '',
+const inspectorOpen = ref(false)
+const inspectorTrigger = ref<HTMLButtonElement | null>(null)
+const inspectorTab = ref<'context' | 'activity' | 'output'>('context')
+const inspectorPanel = ref<HTMLElement | null>(null)
+const inspectorCloseButton = ref<HTMLButtonElement | null>(null)
+const inspectorTabs = [
+  { key: 'context' as const, label: 'Context' },
+  { key: 'activity' as const, label: 'Activity' },
+  { key: 'output' as const, label: 'Output' },
+]
+const inspectorOutputs = computed<TraceOutput[]>(() => {
+  const seen = new Set<string>()
+  const outputs: TraceOutput[] = []
+  for (const item of renderItems.value) {
+    if (item.kind !== 'trace' && item.kind !== 'assistant') continue
+    for (const output of item.outputs ?? []) {
+      const key = `${output.action}:${output.file_path}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      outputs.push(output)
+    }
   }
+  return outputs
 })
-// 'General' is the implicit project every workspace has, so naming it in the
-// breadcrumb would say nothing.
+const inspectorStatusRows = computed(() => {
+  const chatId = chat.value?.chat_id
+  const questions = chatId ? (store.activeQuestions[chatId]?.length ?? 0) : 0
+  const permissions = chatId ? (store.pendingPermissions[chatId]?.length ?? 0) : 0
+  const working = chatId ? store.isChatStreaming(chatId) : false
+  return [
+    { label: 'Current state', value: working ? 'Working' : 'Idle', tone: working ? 'working' : '' },
+    { label: 'Background agents', value: String(store.activeBackgroundAgents), tone: '' },
+    { label: 'Pending questions', value: String(questions), tone: questions ? 'attention' : '' },
+    { label: 'Waiting permissions', value: String(permissions), tone: permissions ? 'attention' : '' },
+  ]
+})
+const inspectorActive = computed(() => inspectorOpen.value)
+function openInspector() {
+  inspectorTrigger.value?.focus()
+  inspectorOpen.value = true
+}
+function openProjectKnowledge() {
+  inspectorTab.value = 'context'
+  openInspector()
+}
+function onInspectorTabKeydown(event: KeyboardEvent, index: number) {
+  let next = index
+  if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+    next = (index + 1) % inspectorTabs.length
+  } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+    next = (index - 1 + inspectorTabs.length) % inspectorTabs.length
+  } else if (event.key === 'Home') {
+    next = 0
+  } else if (event.key === 'End') {
+    next = inspectorTabs.length - 1
+  } else {
+    return
+  }
+  event.preventDefault()
+  inspectorTab.value = inspectorTabs[next].key
+  void nextTick(() => document.getElementById(`work-tab-${inspectorTabs[next].key}`)?.focus())
+}
+useModalFocus(inspectorPanel, inspectorActive, {
+  initialFocus: inspectorCloseButton,
+  onEscape: () => { inspectorOpen.value = false },
+})
+
+async function openInspectorFile(path: string) {
+  inspectorOpen.value = false
+  await nextTick()
+  openFileCard(path)
+}
+
+watch(() => chat.value?.chat_id, () => {
+  inspectorOpen.value = false
+})
+
+// The workspace is already the sidebar's scope. The chat header repeats only
+// the project, and only when it adds information beyond the implicit General.
 const projectCrumb = computed(() => {
   const name = project.value?.name
   return name && name !== 'General' ? name : null
 })
-// Whether there is a scope line at all - it decides both the wrapper and the
-// separator that joins the scope to the chat title.
-const hasScopeCrumb = computed(() => !!workspaceCrumb.value || !!projectCrumb.value)
 const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])
 const providerModels = ref<Record<string, string[]>>({})
 const providerDefaults = ref<Record<string, string>>({})
@@ -1841,19 +2068,33 @@ function toggleContext() {
   showContext.value = !showContext.value
 }
 
-// Close popup when clicking outside
+function closeContext() {
+  showContext.value = false
+  const projectButton = breadcrumbRef.value
+    ?.querySelector<HTMLButtonElement>('.breadcrumb-project')
+  if (projectButton) projectButton.focus()
+  else void nextTick(() => {
+    breadcrumbRef.value
+      ?.querySelector<HTMLButtonElement>('.breadcrumb-project')
+      ?.focus()
+  })
+}
+
+// Close popup when clicking outside. Keep the listener for the whole open
+// state: a once-listener is consumed by the first click *inside* the popup,
+// which left a second outside click unable to close it.
 function onDocumentClick(e: MouseEvent) {
   if (!showContext.value) return
-  const target = e.target as HTMLElement
-  if (breadcrumbRef.value && !breadcrumbRef.value.contains(target)) {
-    showContext.value = false
+  const target = e.target as Node | null
+  if (target && breadcrumbRef.value && !breadcrumbRef.value.contains(target)) {
+    closeContext()
   }
 }
 watch(showContext, (open) => {
-  if (open) {
-    window.addEventListener('click', onDocumentClick, { once: true })
-  }
+  if (open) window.addEventListener('click', onDocumentClick)
+  else window.removeEventListener('click', onDocumentClick)
 })
+onBeforeUnmount(() => window.removeEventListener('click', onDocumentClick))
 
 interface ContextProjectFile {
   path: string
@@ -4376,8 +4617,8 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
-  width: 36px;
-  height: 36px;
+  width: var(--touch);
+  height: var(--touch);
   border-radius: 50%;
   background: var(--bg3);
   color: var(--fg);
@@ -4441,15 +4682,11 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   row-gap: 0;
 }
 
-/* Workspace and project together: where this chat lives, as a quiet eyebrow
-   above the title rather than a third of one shared line. Sharing the line cost
-   the title most of its width — this is the densest header in the app, and a
-   chat title is the one string in it nothing else can stand in for, so it was
-   the string that ellipsed. Stacked, the title gets the full row and the scope
-   still reads as scope, now by size and colour instead of by position.
-   Not a flex row itself but inline text, so the whole scope ellipses as one
-   string when the header runs out of room instead of each crumb truncating on
-   its own. */
+/* The project is a quiet context eyebrow above the title rather than a third
+   of one shared line. Sharing the line cost the title most of its width — this
+   is the densest header in the app, and a chat title is the one string in it
+   nothing else can stand in for, so it was the string that ellipsed. Stacked,
+   the title gets the full row and the control still reads as context. */
 .breadcrumb-scope {
   flex: 1 1 100%;
   font-size: var(--text-xs);
@@ -4460,45 +4697,44 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   text-overflow: ellipsis;
 }
 
-/* No divider between scope and title: they no longer share a line, and the
-   line break is the separator. */
-
-/* Hue is workspace identity, so the crumb is tinted by data-workspace-color
-   rather than inheriting whatever the active accent happens to be. */
-.breadcrumb-workspace {
-  color: var(--accent);
-}
-
-@media (max-width: 600px) {
-  /* The chat title is what matters on a phone; the crumb is orientation. */
-  .breadcrumb-workspace { display: none; }
-  .breadcrumb-workspace + .breadcrumb-separator { display: none; }
-  /* A chat in the implicit General project has no project crumb, so hiding the
-     workspace empties the scope. Drop the wrapper rather than leave a blank
-     eyebrow line above the title. */
-  .breadcrumb-scope:not(:has(.breadcrumb-project)) {
-    display: none;
-  }
-}
-
+/* The project is an explicit context control, not passive breadcrumb text. */
 .breadcrumb-project {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+  min-height: 28px;
+  padding: 2px var(--space-1);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
   color: var(--fg2);
+  font: inherit;
   cursor: pointer;
-  transition: color 120ms var(--ease);
 }
 
-.breadcrumb-project:hover {
+.breadcrumb-project > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.breadcrumb-project svg {
+  flex: none;
+  color: var(--fg3);
+}
+
+.breadcrumb-project:hover,
+.breadcrumb-project.active {
+  border-color: var(--border);
+  background: var(--bg3);
   color: var(--accent);
 }
 
-.breadcrumb-separator {
-  color: var(--fg3);
-  user-select: none;
-  /* Inside the scope the separator is inline text, so it needs its own breathing
-     room; the one that joins the scope to the title is a flex item and gets it
-     from the row's column-gap. */
-  margin: 0 0.3em;
-  flex-shrink: 0;
+.breadcrumb-project:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 /* Compact project context popup, positioned below the breadcrumb.
    Replaces the old inline panel that pushed messages down. */
@@ -4522,6 +4758,18 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   gap: 12px;
   max-height: 360px;
   overflow-y: auto;
+}
+
+.context-popup-baseline {
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.context-popup-baseline p {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.5;
 }
 
 .context-popup-section {
@@ -4662,6 +4910,96 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
      against `.messages` (no explicit height) to 0 in some engines and left
      short/streaming chats stuck at the top with dead space below. */
   margin-top: auto;
+}
+
+.messages--empty .messages-content {
+  flex: 1;
+  justify-content: center;
+  margin-top: 0;
+}
+
+.chat-empty-state {
+  width: min(100%, 680px);
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-4);
+  text-align: left;
+}
+
+.chat-empty-mark {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg2));
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 22px;
+  line-height: 1;
+}
+
+.chat-empty-kicker {
+  display: block;
+  margin-bottom: var(--space-2);
+  color: var(--fg2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.chat-empty-state h2 {
+  margin: 0;
+  color: var(--fg);
+  font-size: clamp(26px, 4vw, 38px);
+  line-height: 1.12;
+  letter-spacing: -0.035em;
+  text-wrap: balance;
+}
+
+.chat-empty-state > p {
+  max-width: 60ch;
+  margin: var(--space-3) 0 0;
+  color: var(--fg2);
+  font-size: var(--text-base);
+  line-height: 1.6;
+}
+
+.chat-empty-knowledge {
+  align-self: flex-start;
+  margin-top: var(--space-4);
+  color: var(--accent);
+}
+
+.chat-empty-starters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+@media (max-width: 600px) {
+  .chat-empty-state {
+    padding: var(--space-4) var(--space-2);
+  }
+
+  .chat-empty-state h2 {
+    font-size: 28px;
+  }
+
+  .chat-empty-starters {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .chat-empty-starters .btn-small {
+    width: 100%;
+    justify-content: flex-start;
+    text-align: left;
+  }
 }
 
 /* The stack sits where the transcript sits: bottom-pinned, full width, same
@@ -4807,7 +5145,8 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   gap: 2px;
   min-width: 0;
   width: 100%;
-  max-width: 100%;
+  max-width: 1040px;
+  margin-inline: auto;
   position: relative;
 }
 
@@ -5600,11 +5939,12 @@ details[open] > .activity-summary::before {
 
 .image-preview-remove {
   position: absolute;
-  top: -6px;
-  right: -6px;
+  top: -12px;
+  right: -12px;
+  box-sizing: content-box;
   width: 18px;
   height: 18px;
-  padding: 0;
+  padding: 13px;
   border: none;
   border-radius: 50%;
   background: var(--bg3);
@@ -5616,6 +5956,7 @@ details[open] > .activity-summary::before {
 }
 
 .image-ref-chip {
+  min-height: var(--touch);
   padding: 2px 6px;
   font-size: 11px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -5698,10 +6039,12 @@ details[open] > .activity-summary::before {
   text-overflow: ellipsis;
 }
 .comment-chip-remove {
+  box-sizing: content-box;
   flex-shrink: 0;
   width: 18px;
   height: 18px;
-  padding: 0;
+  padding: 13px;
+  margin: -13px;
   border: none;
   border-radius: 50%;
   background: transparent;
@@ -6899,6 +7242,194 @@ details[open] > .activity-summary::before {
 .chat-with-sidebar > .messages {
   flex: 1;
   min-width: 0;
+}
+
+.chat-work-inspector {
+  position: absolute;
+  z-index: 55;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(390px, 100%);
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border-strong);
+  background: var(--bg2);
+  box-shadow: -1rem 0 3rem rgb(0 0 0 / 28%);
+  animation: chat-inspector-in 190ms var(--ease);
+}
+
+@keyframes chat-inspector-in {
+  from { opacity: 0; transform: translateX(18px); }
+  to { opacity: 1; transform: none; }
+}
+
+.chat-work-inspector-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-work-inspector-kicker,
+.chat-work-label {
+  display: block;
+  color: var(--fg2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.chat-work-inspector-header h2 {
+  margin: var(--space-1) 0 0;
+  color: var(--fg);
+  font-size: var(--text-lg);
+  letter-spacing: -0.02em;
+}
+
+.chat-work-inspector-header .btn-icon {
+  font-size: 20px;
+}
+
+.chat-work-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-work-tabs button {
+  min-height: var(--touch);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.chat-work-tabs button[aria-selected="true"] {
+  border-color: var(--border-strong);
+  background: var(--bg3);
+  color: var(--fg);
+}
+
+.chat-work-panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4);
+}
+
+.chat-work-panel h3 {
+  margin: var(--space-2) 0 0;
+  color: var(--fg);
+  font-size: var(--text-lg);
+  letter-spacing: -0.025em;
+}
+
+.chat-work-copy,
+.chat-work-note {
+  margin: var(--space-3) 0 0;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.chat-work-facts,
+.chat-work-status-list {
+  margin-top: var(--space-5);
+  border-top: 1px solid var(--border);
+}
+
+.chat-work-facts > div,
+.chat-work-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: var(--touch);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+}
+
+.chat-work-facts strong,
+.chat-work-status-row strong {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-work-status-row strong.working { color: var(--accent); }
+.chat-work-status-row strong.attention { color: var(--warning); }
+
+.chat-work-output-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.chat-work-output {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--touch);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-work-output:hover { border-color: var(--border-strong); background: var(--bg3); }
+.chat-work-output-icon { color: var(--accent); }
+.chat-work-output-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-work-output-action { color: var(--fg2); font-family: var(--font-mono); font-size: var(--text-xs); }
+
+.chat-work-empty {
+  margin-top: var(--space-4);
+  padding: var(--space-4);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--fg2);
+}
+
+.chat-work-empty strong { color: var(--fg); }
+.chat-work-empty p { margin: var(--space-2) 0 0; line-height: 1.5; }
+
+@media (max-width: 600px) {
+  .chat-work-inspector {
+    top: auto;
+    left: 0;
+    width: 100%;
+    max-height: min(76dvh, 680px);
+    border-top: 1px solid var(--border-strong);
+    border-left: 0;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    box-shadow: 0 -1rem 3rem rgb(0 0 0 / 34%);
+    animation-name: chat-inspector-sheet-in;
+  }
+
+  @keyframes chat-inspector-sheet-in {
+    from { opacity: 0; transform: translateY(18px); }
+    to { opacity: 1; transform: none; }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-work-inspector { animation: none; }
 }
 /* Inline text highlights inside message bubbles. Use :deep() because
  * highlight spans are inserted via DOM manipulation in applyHighlights()

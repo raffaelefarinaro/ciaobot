@@ -381,6 +381,56 @@ describe('ProjectView tabs', () => {
   })
 })
 
+describe('ProjectView progressive actions', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.restoreAllMocks()
+  })
+
+  it('uses a complete keyboard menu contract and restores its trigger', async () => {
+    seed()
+    const wrapper = await mountView({ attach: true })
+    try {
+      const trigger = wrapper.get<HTMLButtonElement>('[aria-label="Project actions"]')
+      trigger.element.focus()
+      await trigger.trigger('click')
+      await nextTick()
+
+      const item = wrapper.get<HTMLButtonElement>('[role="menuitem"]')
+      expect(document.activeElement).toBe(item.element)
+      await item.trigger('keydown', { key: 'Escape' })
+      await nextTick()
+      expect(wrapper.find('[role="menu"]').exists()).toBe(false)
+      expect(document.activeElement).toBe(trigger.element)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('resets context editing when two projects have the same context', async () => {
+    const store = seed()
+    store.projects[0].context = 'Shared context'
+    store.projects.push({
+      project_id: 'project-2',
+      name: 'Second project',
+      workspace: 'personal',
+      context: 'Shared context',
+      is_auto: false,
+    } as typeof store.projects[number])
+    const wrapper = await mountView()
+
+    await wrapper.get('.project-context-card').get('button').trigger('click')
+    await wrapper.get('textarea').setValue('Draft for the first project')
+    await wrapper.setProps({ projectId: 'project-2' })
+    await nextTick()
+
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.get('.context-display').text()).toContain('Shared context')
+    await wrapper.get('.project-context-card').get('button').trigger('click')
+    expect(wrapper.get<HTMLTextAreaElement>('textarea').element.value).toBe('Shared context')
+  })
+})
+
 // Rule S6: an empty list must not claim absence when the fetch never resolved.
 describe('ProjectView automations load state', () => {
   beforeEach(() => {
@@ -391,6 +441,8 @@ describe('ProjectView automations load state', () => {
   it('says it is loading rather than claiming there are none', async () => {
     seed()
     const taskStore = useTaskStore()
+    taskStore.scheduleLoading = true
+    taskStore.schedulesLoaded = false
     vi.spyOn(taskStore, 'fetchSchedules').mockReturnValue(new Promise(() => {}))
 
     const wrapper = await mountView()
@@ -405,6 +457,9 @@ describe('ProjectView automations load state', () => {
   it('reports a failed load rather than claiming there are none', async () => {
     seed()
     const taskStore = useTaskStore()
+    taskStore.scheduleLoading = false
+    taskStore.schedulesLoaded = false
+    taskStore.scheduleLoadError = 'offline'
     vi.spyOn(taskStore, 'fetchSchedules').mockRejectedValue(new Error('offline'))
 
     const wrapper = await mountView()
@@ -416,6 +471,10 @@ describe('ProjectView automations load state', () => {
 
   it('reports a real zero once the load resolves', async () => {
     seed()
+    const taskStore = useTaskStore()
+    taskStore.scheduleLoading = false
+    taskStore.schedulesLoaded = true
+    taskStore.scheduleLoadError = ''
     const wrapper = await mountView()
     await wrapper.get('[data-tab="schedules"]').trigger('click')
 

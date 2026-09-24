@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import VaultReviewPanel from '../VaultReviewPanel.vue'
 import { useVaultReviewStore } from '../../stores/vaultReview'
 import { useProjectStore } from '../../stores/projects'
@@ -72,7 +72,7 @@ async function settle() {
   }
 }
 
-function buttonByText(wrapper: ReturnType<typeof mount>, text: string) {
+function buttonByText(wrapper: VueWrapper | DOMWrapper<Element>, text: string) {
   const found = wrapper.findAll('button').find(b => b.text() === text)
   if (!found) throw new Error(`button "${text}" not found`)
   return found
@@ -377,6 +377,41 @@ describe('VaultReviewPanel', () => {
     expect(title).toBe('Retire Mo?')
     expect(seed).toContain('Do not edit, move, or delete anything')
     expect(seed).not.toContain('should link to it')
+    wrapper.unmount()
+  })
+
+  it('shows a retryable load error instead of claiming the queue is empty', async () => {
+    apiGet
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({ candidates: [], trashed: [], cleared: [] })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const alert = wrapper.get('[role="alert"]')
+    expect(alert.text()).toContain('Could not load notes to revisit')
+    expect(alert.text()).toContain('offline')
+    expect(wrapper.text()).not.toContain('Nothing to revisit')
+
+    await alert.get('button').trigger('click')
+    await flushPromises()
+    expect(apiGet).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('Nothing to revisit')
+    wrapper.unmount()
+  })
+
+  it('keeps the last successful rows visible when a refresh fails', async () => {
+    apiGet
+      .mockResolvedValueOnce({ candidates: [candidate()], trashed: [], cleared: [] })
+      .mockRejectedValueOnce(new Error('still offline'))
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    await buttonByText(wrapper, 'refresh').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('.vr-row')).toHaveLength(1)
+    expect(wrapper.get('[role="status"]').text()).toContain('Showing the last successful load')
+    expect(wrapper.text()).not.toContain('Nothing to revisit')
     wrapper.unmount()
   })
 

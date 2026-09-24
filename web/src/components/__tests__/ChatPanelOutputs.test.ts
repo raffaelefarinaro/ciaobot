@@ -242,6 +242,29 @@ describe('ChatPanel Outputs section', () => {
     expect(wrapper.find('.outputs-list').exists()).toBe(false)
   })
 
+  it('deduplicates repeated action/path pairs in the Work inspector', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      ...turnWithOutputs(),
+      {
+        role: 'system' as const,
+        tool_name: '_filecard',
+        content: 'Workspace/cover-letter.md',
+        file_path: 'Workspace/cover-letter.md',
+        action: 'edited',
+        timestamp: '2026-09-20T09:01:00Z',
+      },
+    ]
+    await flushPromises()
+
+    await wrapper.get('.work-inspector-trigger').trigger('click')
+    await wrapper.get('#work-tab-output').trigger('click')
+    const rows = wrapper.findAll('.chat-work-output')
+    expect(rows).toHaveLength(2)
+    expect(new Set(rows.map(row => row.get('.chat-work-output-action').text())).size).toBe(2)
+    wrapper.unmount()
+  })
+
   it('opens the file viewer from a row link, as the old pill did', async () => {
     const { wrapper, store } = await mountPanel()
     const viewer = useFileViewerStore()

@@ -400,4 +400,22 @@ defineExpose({ focus, toggleDictation })
     max-width: none;
   }
 }
+@media (pointer: coarse) {
+  .compose-attach,
+  .compose-btn,
+  .compose-voice :deep(.voice-btn),
+  .voice-transcribing {
+    min-width: var(--touch);
+    min-height: var(--touch);
+    width: var(--touch);
+    height: var(--touch);
+  }
+
+  .compose-image-remove {
+    box-sizing: content-box;
+    top: -12px;
+    right: -12px;
+    padding: 14px;
+  }
+}
 </style>

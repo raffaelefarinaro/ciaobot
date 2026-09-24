@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, nextTick } from 'vue'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { api } from '../../lib/api'
 import type { ChatInfo, ProjectInfo, Schedule } from '../../lib/types'
@@ -135,6 +135,7 @@ async function mountPanel(
   })
 
   const wrapper = shallowMount(ChatPanel, {
+    attachTo: document.body,
     global: {
       plugins: [pinia],
       stubs: {
@@ -302,58 +303,55 @@ describe('ChatPanel action dock', () => {
 })
 
 
-describe('ChatPanel workspace breadcrumb', () => {
+describe('ChatPanel project context breadcrumb', () => {
   beforeEach(() => {
     Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
   })
   afterEach(() => vi.restoreAllMocks())
 
-  // The number badge is gone: it existed to teach the 1-9 shortcut, and it does
-  // that on the home lanes and the sidebar pills where pressing the key visibly
-  // does something. In a chat header there is nothing to switch, so it read as a
-  // number with no referent. The shortcut survives in the tooltip.
-  it('names the workspace and hues it, without a number badge', async () => {
+  it('shows the project as an explicit context control and hides the workspace', async () => {
     const { wrapper } = await mountPanel()
-    const crumb = wrapper.find('.breadcrumb-workspace')
-    expect(crumb.exists()).toBe(true)
-    expect(crumb.text()).toBe('personal')
-    expect(crumb.attributes('data-workspace-color')).toBe('emerald')
-    expect(wrapper.find('.breadcrumb-key').exists()).toBe(false)
-    expect(crumb.attributes('title')).toContain('press 1')
+    expect(wrapper.find('.breadcrumb-workspace').exists()).toBe(false)
+    const project = wrapper.get('.breadcrumb-project')
+    expect(project.element.tagName).toBe('BUTTON')
+    expect(project.text()).toContain('Upwordo')
+    expect(project.attributes('aria-expanded')).toBe('false')
+    expect(project.attributes('aria-controls')).toBe('project-context-popup')
+
+    await project.trigger('click')
+    expect(project.attributes('aria-expanded')).toBe('true')
+    const popup = wrapper.get('#project-context-popup')
+    expect(popup.text()).toContain('Baseline sent with this chat')
+    expect(popup.text()).toContain('Memory notes are retrieved only when relevant.')
+
+    await popup.trigger('keydown.esc')
+    await nextTick()
+    expect(wrapper.find('#project-context-popup').exists()).toBe(false)
+    expect(document.activeElement).toBe(project.element)
     wrapper.unmount()
   })
 
-  // Workspace and project are one unit - the scope the chat sits in - so they
-  // share a wrapper, with one divider between them and none after: the scope is
-  // an eyebrow on its own line, so the line break separates it from the title.
-  it('groups workspace and project into one scope crumb above the title', async () => {
+  it('keeps outside-click closing active after a click inside the context popup', async () => {
     const { wrapper } = await mountPanel()
-    const scope = wrapper.find('.breadcrumb-scope')
-    expect(scope.exists()).toBe(true)
-    expect(scope.find('.breadcrumb-workspace').text()).toBe('personal')
-    expect(scope.find('.breadcrumb-project').text()).toBe('Upwordo')
-    // The one divider is inside the scope; none dangles before the title.
-    expect(wrapper.findAll('.breadcrumb-separator').length).toBe(1)
-    expect(wrapper.findAll('.breadcrumb-separator--title').length).toBe(0)
+    const project = wrapper.get('.breadcrumb-project')
+    await project.trigger('click')
+    await wrapper.get('#project-context-popup').trigger('click')
+    document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await nextTick()
+
+    expect(wrapper.find('#project-context-popup').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  // 'General' is the project every workspace has implicitly, so naming it in the
-  // breadcrumb says nothing. The scope keeps the workspace and loses the divider
-  // that would otherwise dangle after it.
-  it('drops the project crumb for the implicit General project', async () => {
+  it('drops the project control for the implicit General project', async () => {
     const { wrapper } = await mountPanel(store => {
       store.projects = [{ ...store.projects[0], name: 'General' }]
     })
     expect(wrapper.find('.breadcrumb-project').exists()).toBe(false)
-    expect(wrapper.find('.breadcrumb-scope .breadcrumb-workspace').text()).toBe('personal')
-    expect(wrapper.findAll('.breadcrumb-separator').length).toBe(0)
+    expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  // The close control is one of the header's icon buttons, not a `&times;`
-  // character: same 18px icon in the same box as the actions across the header,
-  // which is what keeps it on their line and at their size.
   it('closes the chat from a labelled icon button', async () => {
     const { wrapper } = await mountPanel()
     const close = wrapper.find('.close-btn')

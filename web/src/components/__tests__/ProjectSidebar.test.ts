@@ -95,7 +95,7 @@ describe('ProjectSidebar chat actions', () => {
 
     const chatsLink = wrapper.get('a[href="/"]')
     expect(chatsLink.get('.nav-item-badge--count').text()).toBe('1')
-    expect(chatsLink.attributes('aria-label')).toBe('chats — 1 need attention')
+    expect(chatsLink.attributes('aria-label')).toBe('Today — 1 chat needs attention')
 
     wrapper.unmount()
   })
@@ -135,6 +135,40 @@ describe('ProjectSidebar chat actions', () => {
       title: 'Chat ID copied',
       body: chatId,
     })
+
+    wrapper.unmount()
+  })
+
+  it('gives the chat action menu keyboard focus and restores its trigger', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat' },
+      global: { plugins: [router] },
+    })
+    const trigger = wrapper.get<HTMLButtonElement>('[aria-label="Chat actions"]')
+    await trigger.trigger('click')
+    await nextTick()
+    await nextTick()
+
+    const menu = document.body.querySelector<HTMLElement>('[role="menu"][aria-label="Chat actions"]')
+    expect(menu).toBeTruthy()
+    const items = Array.from(menu!.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+    expect(document.activeElement).toBe(items[0])
+
+    menu!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+    expect(document.activeElement).toBe(items[1])
+
+    menu!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await nextTick()
+    expect(document.querySelector('[role="menu"][aria-label="Chat actions"]')).toBeNull()
+    expect(document.activeElement).toBe(trigger.element)
 
     wrapper.unmount()
   })
@@ -271,6 +305,65 @@ describe('ProjectSidebar chat actions', () => {
     expect(wrapper.findAll('.subagent-item')).toHaveLength(0)
     expect(wrapper.findAll('.chat-item')).toHaveLength(1)
 
+    wrapper.unmount()
+  })
+})
+
+describe('ProjectSidebar global new chat', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    const store = useProjectStore()
+    store.workspaces = [{
+      name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '',
+    }]
+    store.activeWorkspace = 'personal'
+    store.projects = [{
+      project_id: 'project-1', name: 'General', workspace: 'personal', context: '',
+      created_at: '2026-07-29T00:00:00Z', order: 0, vault_folder: 'general', is_auto: true,
+    }]
+    store.chats = []
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  async function mountSidebar(mode: 'chat' | 'memory') {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+    return mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode },
+      global: { plugins: [router] },
+    })
+  }
+
+  it('offers one New chat above the navigation, opening the shared picker', async () => {
+    const { pendingNewChat } = await import('../../lib/newChat')
+    const wrapper = await mountSidebar('chat')
+    const button = wrapper.get('.sidebar-new-chat')
+
+    expect(button.attributes('aria-haspopup')).toBe('dialog')
+    expect(button.attributes('aria-label')).toBe('New chat in Personal')
+    expect(button.text()).toContain('New chat')
+
+    await button.trigger('click')
+    // The shared picker is the one project-selection path; the sidebar just
+    // opens it in the active workspace rather than growing its own selector.
+    expect(pendingNewChat.value?.options).toEqual({ workspace: 'personal', projectId: undefined })
+    pendingNewChat.value?.resolve(null)
+    await nextTick()
+    wrapper.unmount()
+  })
+
+  it('hides the global New chat in modes without a project tree', async () => {
+    const wrapper = await mountSidebar('memory')
+    expect(wrapper.find('.sidebar-new-chat').exists()).toBe(false)
     wrapper.unmount()
   })
 })

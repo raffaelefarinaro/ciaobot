@@ -198,12 +198,20 @@ watch(projectItems, () => {
 
 watch(picker, async value => {
   if (!value) return
-  // Every open starts from where the user actually is, not from whatever
-  // workspace the previous open happened to end on.
-  previewWorkspace.value = store.activeWorkspace
-  selected.value = projectItems.value[0]?.id ?? ''
+  // Every open starts from the caller's intended context, not from whatever
+  // workspace/project the previous open happened to end on. A project-scoped
+  // New still opens the shared picker, but that project is preselected.
+  const requestedProject = value.options.projectId
+  const requestedWorkspace = value.options.workspace
+  previewWorkspace.value = requestedWorkspace || store.activeWorkspace
+  selected.value = projectItems.value.some(item => item.id === requestedProject)
+    ? requestedProject!
+    : projectItems.value[0]?.id ?? ''
   await nextTick()
-  focusItem(0)
+  // Focus the requested project, not always the first row: a project-scoped New
+  // still opens the shared picker, but its own project is what Enter confirms.
+  const selectedIndex = projectItems.value.findIndex(item => item.id === selected.value)
+  itemButtons.value[selectedIndex >= 0 ? selectedIndex : 0]?.focus()
 })
 
 onBeforeUnmount(() => {

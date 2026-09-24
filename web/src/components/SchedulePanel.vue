@@ -8,7 +8,7 @@
     <PaneHeader v-else page-tag="automations" @open-sidebar="emit('open-sidebar')">
       <template #title>
         <div class="header-left">
-          <button class="close-btn desktop-only" @click="closeSchedule" title="Close">&times;</button>
+          <button class="btn-icon close-btn desktop-only" @click="closeSchedule" title="Close" aria-label="Close automation">&times;</button>
           <span v-if="schedule" class="pane-title">{{ schedule.title || promptTitle(schedule.prompt) }}</span>
           <span v-else-if="showNew" class="pane-title">New automation</span>
         </div>
@@ -52,6 +52,20 @@
       </template>
     </PaneHeader>
 
+    <div
+      v-if="store.schedulesLoaded && store.scheduleLoadError"
+      class="schedule-stale"
+      role="status"
+    >
+      <span>Could not refresh automations. Showing the last successful load.</span>
+      <button
+        type="button"
+        class="btn-small"
+        :disabled="store.scheduleLoading"
+        @click="refreshSchedules"
+      >{{ store.scheduleLoading ? 'Retrying…' : 'Retry' }}</button>
+    </div>
+
     <!-- New automation form -->
     <div v-if="showNew" class="scroll-body">
       <details class="field-info field-info--block">
@@ -82,6 +96,23 @@
         </div>
       </details>
       <NewScheduleForm @created="onCreated" />
+    </div>
+
+    <div
+      v-else-if="store.scheduleLoadError && !store.schedulesLoaded"
+      class="schedule-load-state schedule-load-state--error"
+      role="alert"
+    >
+      <p>Could not load automations. {{ store.scheduleLoadError }}</p>
+      <button type="button" class="btn-small" @click="refreshSchedules">Retry</button>
+    </div>
+
+    <div
+      v-else-if="!store.schedulesLoaded"
+      class="schedule-load-state"
+      role="status"
+    >
+      Loading automations…
     </div>
 
     <!-- Detail -->
@@ -149,8 +180,8 @@
           <div v-else class="card-form">
             <div class="form-grid">
               <div class="form-group">
-                <label>Repeats</label>
-                <select v-model="editData.frequency">
+                <label :for="`${uid}-frequency`">Repeats</label>
+                <select :id="`${uid}-frequency`" v-model="editData.frequency">
                   <option value="daily">Daily</option>
                   <option value="weekly">Weekly</option>
                   <option value="monthly">Monthly</option>
@@ -159,12 +190,12 @@
                 </select>
               </div>
               <div v-if="editData.frequency === 'interval'" class="form-group">
-                <label>Every (minutes)</label>
-                <input v-model.number="editData.interval_minutes" type="number" min="1" />
+                <label :for="`${uid}-interval`">Every (minutes)</label>
+                <input :id="`${uid}-interval`" v-model.number="editData.interval_minutes" type="number" min="1" />
               </div>
               <div v-if="editShowsTimeOfDay" class="form-group">
-                <label>Time</label>
-                <input v-model="editData.time" type="time" :aria-invalid="cardEditBlocked || undefined" />
+                <label :for="`${uid}-time`">Time</label>
+                <input :id="`${uid}-time`" v-model="editData.time" type="time" :aria-invalid="cardEditBlocked || undefined" />
                 <!-- Switching an interval entry to a wall-clock cadence leaves
                      this empty; without a time the automation would save as
                      enabled and never fire. -->
@@ -173,8 +204,8 @@
                 </p>
               </div>
               <div v-if="editShowsTimeOfDay" class="form-group">
-                <label>Timezone</label>
-                <select v-model="editData.timezone">
+                <label :for="`${uid}-timezone`">Timezone</label>
+                <select :id="`${uid}-timezone`" v-model="editData.timezone">
                   <option value="Europe/Zurich">Europe/Zurich</option>
                   <option value="Europe/Rome">Europe/Rome</option>
                   <option value="UTC">UTC</option>
@@ -185,8 +216,8 @@
               </div>
             </div>
             <div v-if="editData.frequency === 'weekly'" class="form-group">
-              <label>Days</label>
-              <div class="days-row">
+              <label :id="`${uid}-days-label`">Days</label>
+              <div class="days-row" role="group" :aria-labelledby="`${uid}-days-label`">
                 <label v-for="d in allDays" :key="d" class="checkbox-pill" :class="{ active: editData.days_of_week.includes(d) }">
                   <input type="checkbox" :value="d" v-model="editData.days_of_week" hidden />
                   {{ d }}
@@ -194,8 +225,8 @@
               </div>
             </div>
             <div v-if="editData.frequency === 'monthly'" class="form-group">
-              <label>Day of month</label>
-              <input v-model.number="editData.day_of_month" type="number" min="1" max="31" placeholder="1-31" />
+              <label :for="`${uid}-day-of-month`">Day of month</label>
+              <input :id="`${uid}-day-of-month`" v-model.number="editData.day_of_month" type="number" min="1" max="31" placeholder="1-31" />
             </div>
             <div class="card-actions">
               <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
@@ -524,7 +555,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, useId, watch } from 'vue'
 import { bindsFixedChat, contextBindsFixedChat, scheduleSupportsAutoArchive } from '../lib/scheduleBinding'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/tasks'
@@ -545,6 +576,7 @@ const emit = defineEmits<{ (e: 'created'): void; (e: 'open-sidebar'): void; (e: 
 const route = useRoute()
 const router = useRouter()
 const store = useTaskStore()
+const uid = useId()
 const projectStore = useProjectStore()
 
 const allDays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
@@ -603,6 +635,7 @@ function onEditKeydown(event: KeyboardEvent) {
 
 onMounted(() => {
   if (!store.models) store.fetchModels()
+  if (!store.schedulesLoaded) refreshSchedules()
   pollTimer = window.setInterval(refreshSchedules, 30_000)
   document.addEventListener('visibilitychange', onVisibilityChange)
   document.addEventListener('keydown', onEditKeydown, true)
@@ -1314,6 +1347,41 @@ function closeSchedule() {
   min-width: 0;
 }
 
+.schedule-stale,
+.schedule-load-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: var(--space-3) var(--space-4) 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 8%, var(--bg2));
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.schedule-load-state {
+  flex: 1;
+  margin: var(--space-4);
+  background: var(--bg2);
+}
+
+.schedule-load-state--error {
+  border-color: color-mix(in srgb, var(--error) 46%, var(--border));
+}
+
+.schedule-stale .btn-small,
+.schedule-load-state .btn-small {
+  flex: none;
+}
+
+.schedule-load-state p {
+  margin: 0;
+}
+
 
 .scroll-body {
   flex: 1;
@@ -1770,6 +1838,13 @@ function closeSchedule() {
 }
 .header-menu button:hover { background: var(--bg3); }
 .header-menu button.danger { color: var(--error); }
+
+@container chat-pane (max-width: 820px) {
+  .header-actions .desktop-only { display: none; }
+  .mobile-primary,
+  .mobile-overflow { display: inline-flex; }
+  .close-btn.desktop-only { display: inline-flex; }
+}
 
 @media (max-width: 768px) {
   .desktop-only,

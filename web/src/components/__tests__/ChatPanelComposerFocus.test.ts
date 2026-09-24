@@ -13,6 +13,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
+import { writeChatDraft } from '../../lib/chatDrafts'
 
 const apiGet = vi.hoisted(() => vi.fn(() => Promise.reject(new Error('no server'))))
 const apiPost = vi.hoisted(() => vi.fn(() => Promise.resolve({})))
@@ -44,7 +45,6 @@ const CommentPopoverStub = vi.hoisted(() => ({
     show: () => {},
   },
 }))
-vi.mock('../PaneHeader.vue', () => ({ default: NoopStub }))
 vi.mock('../VoiceRecorder.vue', () => ({ default: NoopStub }))
 vi.mock('../SubagentPanel.vue', () => ({ default: NoopStub }))
 vi.mock('../ModelSelector.vue', () => ({ default: NoopStub }))
@@ -183,6 +183,76 @@ describe('composer focus on opening a chat', () => {
     const composer = wrapper.find('textarea.chat-input')
     expect(composer.exists()).toBe(true)
     expect(document.activeElement).toBe(composer.element)
+    wrapper.unmount()
+  })
+
+  test('gives an empty chat a useful first-action state', async () => {
+    const { wrapper } = await mountLayout()
+
+    const empty = wrapper.get('.chat-empty-state')
+    expect(empty.text()).toContain('What should Ciao work on?')
+    expect(empty.text()).toContain('General')
+
+    const starter = empty.get('.chat-empty-starters .btn-small')
+    await starter.trigger('click')
+    await nextTick()
+    expect(wrapper.get<HTMLTextAreaElement>('textarea.chat-input').element.value).toContain('Review the latest project notes')
+    wrapper.unmount()
+  })
+
+  test('opens the project knowledge context from an empty chat', async () => {
+    const { wrapper } = await mountLayout()
+
+    await wrapper.get('.chat-empty-knowledge').trigger('click')
+    await nextTick()
+    const inspector = wrapper.get('.chat-work-inspector')
+    expect(inspector.get('#work-panel-context').text()).toContain('Injected with each message')
+    expect(inspector.get('#work-panel-context').text()).toContain('Memory notes are retrieved only when relevant')
+    wrapper.unmount()
+  })
+  test('keeps a persisted unsent draft instead of offering starter prompts', async () => {
+    writeChatDraft(CHAT_ID, 'Keep this unsent request', undefined, {
+      projectId: 'project-1',
+      workspace: 'personal',
+    })
+    const { wrapper } = await mountLayout()
+
+    expect(wrapper.find('.chat-empty-state').exists()).toBe(false)
+    expect(wrapper.get<HTMLTextAreaElement>('textarea.chat-input').element.value)
+      .toBe('Keep this unsent request')
+    wrapper.unmount()
+  })
+
+  test('opens the work inspector as a focus-contained detail surface', async () => {
+    const { wrapper } = await mountLayout()
+
+    await wrapper.get('.work-inspector-trigger').trigger('click')
+    await nextTick()
+    const inspector = wrapper.get('.chat-work-inspector')
+    expect(inspector.attributes('role')).toBe('dialog')
+    expect(inspector.get('button[aria-label="Close work details"]').element).toBe(document.activeElement)
+
+    const tabs = inspector.findAll('[role="tab"]')
+    const contextTab = tabs[0].element as HTMLElement
+    contextTab.focus()
+    await tabs[0].trigger('keydown', { key: 'ArrowRight' })
+    await nextTick()
+    expect(inspector.get('#work-panel-activity').text()).toContain('Current state')
+    expect(document.activeElement).toBe(inspector.findAll('[role="tab"]')[1].element)
+
+    await inspector.findAll('[role="tab"]')[1].trigger('keydown', { key: 'End' })
+    await nextTick()
+    expect(inspector.get('#work-panel-output').text()).toContain('No files yet')
+    expect(document.activeElement).toBe(inspector.findAll('[role="tab"]')[2].element)
+
+    await inspector.findAll('[role="tab"]')[2].trigger('keydown', { key: 'Home' })
+    await nextTick()
+    expect(inspector.find('#work-panel-context').exists()).toBe(true)
+
+    pressKey('Escape')
+    await flushPromises()
+    expect(wrapper.find('.chat-work-inspector').exists()).toBe(false)
+    expect(document.activeElement).toBe(wrapper.get('.work-inspector-trigger').element)
     wrapper.unmount()
   })
 

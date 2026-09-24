@@ -2,6 +2,37 @@
   <div class="memory-map">
     <PaneHeader page-tag="memory" @open-sidebar="emit('open-sidebar')" />
 
+    <section class="memory-mode-intro" aria-labelledby="memory-mode-title">
+      <div class="memory-mode-copy">
+        <span>{{ mm.view === 'review' ? 'Review' : 'Knowledge map' }}</span>
+        <h1 id="memory-mode-title">
+          {{ mm.view === 'review' ? 'Review what Ciao learned' : 'Explore your second brain' }}
+        </h1>
+        <p>
+          {{ mm.view === 'review'
+            ? 'Accept, edit, or reject durable memory with its source and consequence in view.'
+            : 'See how notes connect, find stale knowledge, and open the source whenever a connection needs context.' }}
+        </p>
+      </div>
+      <div class="memory-mode-actions" role="group" aria-label="Memory mode">
+        <button
+          type="button"
+          :class="{ active: mm.view === 'review' }"
+          :aria-pressed="mm.view === 'review'"
+          @click="mm.view = 'review'"
+        >
+          Review
+          <span v-if="proposals.rows.length" class="memory-mode-count">{{ proposals.rows.length }}</span>
+        </button>
+        <button
+          type="button"
+          :class="{ active: mm.view !== 'review' }"
+          :aria-pressed="mm.view !== 'review'"
+          @click="setMapView('graph')"
+        >Map</button>
+      </div>
+    </section>
+
     <div v-if="mm.view === 'review'" class="mm-review-wrap">
       <!-- One navigation level for everything Review holds. It used to be two:
            Proposals/Retirements here, then Queue/History inside the proposal
@@ -147,7 +178,7 @@
           <!-- Path endpoints for the current focus, mirrored from the list/detail
                controls so a keyboard user can also set them without leaving the
                canvas. Shown only while a focus exists. -->
-          <div v-if="mm.selectedNode" class="mm-path-controls" role="group" aria-label="Path finder for the focused note">
+          <div v-if="mm.selectedNode" class="mm-path-controls" role="group" aria-label="Trace connections from the focused note">
             <span class="mm-path-controls-label">{{ mm.selectedNode.title }}</span>
             <button
               v-for="s in PATH_SLOTS"
@@ -260,7 +291,14 @@
         </div>
 
       </div>
-      <aside v-if="mm.selectedNode" class="mm-detail">
+      <aside
+        v-if="mm.selectedNode"
+        ref="detailPanel"
+        class="mm-detail"
+        role="dialog"
+        :aria-modal="isNarrow ? 'true' : undefined"
+        :aria-label="`Details for ${mm.selectedNode.title}`"
+      >
         <div
           class="mm-detail-resizer"
           @mousedown="startDetailDrag"
@@ -268,6 +306,7 @@
           aria-hidden="true"
         ></div>
         <button
+          ref="detailCloseButton"
           type="button"
           class="mm-detail-close"
           title="Close (Esc)"
@@ -284,7 +323,7 @@
              canvas describe a gesture a touch or keyboard user cannot perform,
              and a note's path endpoints have to be settable from whichever
              surface actually opened it. -->
-        <div class="mm-detail-path-controls" role="group" aria-label="Path finder for this note">
+        <div class="mm-detail-path-controls" role="group" aria-label="Trace connections from this note">
           <button
             v-for="s in PATH_SLOTS"
             :key="s.slot"
@@ -308,7 +347,12 @@
           class="mm-detail-review-link"
           @click="openRetirementReview"
         >Review for retirement →</button>
-        <button type="button" class="mm-detail-path" @click="openNoteFile(mm.selectedNode.id)">{{ mm.selectedNode.id }}</button>
+        <button
+          type="button"
+          class="mm-detail-path"
+          :aria-label="`Open ${mm.selectedNode.title}`"
+          @click="openNoteFile(mm.selectedNode.id)"
+        >{{ mm.selectedNode.id }}</button>
 
         <div class="mm-detail-section mm-detail-preview">
           <h4>Content</h4>
@@ -410,6 +454,7 @@ import {
   type MemoryGraphNode,
 } from '../stores/memoryMap'
 import { askConfirm } from '../lib/confirm'
+import { useModalFocus } from '../composables/useModalFocus'
 import { isLightTheme } from '../lib/theme'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import TabBar, { type TabSpec } from './TabBar.vue'
@@ -472,6 +517,14 @@ const isDraggingDetail = ref(false)
 // (and hides the panel). Only apply the persisted width above the desktop
 // breakpoint so a phone never reserves a 220-560px column for a hidden panel.
 const isNarrow = ref(window.innerWidth <= 900)
+const detailPanel = ref<HTMLElement | null>(null)
+const detailCloseButton = ref<HTMLButtonElement | null>(null)
+const narrowDetailOpen = computed(() => isNarrow.value && Boolean(mm.selectedNode))
+useModalFocus(detailPanel, narrowDetailOpen, {
+  initialFocus: detailCloseButton,
+  onEscape: closeDetail,
+  restoreFocus: false,
+})
 function onResizeNarrow() { isNarrow.value = window.innerWidth <= 900 }
 if (typeof window !== 'undefined') window.addEventListener('resize', onResizeNarrow)
 const detailBodyStyle = computed(() => {
@@ -1495,20 +1548,12 @@ function openRetirementReview() {
 // keeps this to one GET.
 //
 // `immediate` matters: `mm.view` lives in the store, so remounting this
-// component while it already reads 'review' (arriving at /proposals from a
-// page that unmounted us, after the sidebar set the view) makes the seeding
-// assignment a no-op and a plain watcher would never fire — leaving both tab
-// badges at 0 until the user clicks Retirement.
-//
-// The seeding runs FIRST so `immediate` sees the view this mount will
-// actually show. Registering the watcher first instead fires it against the
-// previous mount's leftover 'review' (landing on /memory by URL or the back
-// button), paying for both of the app's heaviest reads a line before the
-// seeding switches to 'graph'.
-// `mm.mapView`, not a literal 'graph': the drawing is a remembered preference
-// now, so arriving at /memory from anywhere restores the one last used instead
-// of snapping every visit back to the canvas.
-mm.view = router.currentRoute.value.path.startsWith('/proposals') ? 'review' : mm.mapView
+// component while it already reads 'review' makes a plain watcher sufficient
+// for the data prefetch. A proposal deep link always selects Review; otherwise
+// a deliberate return to Graph/List is remembered, while the first visit stays
+// on Review so durable decisions remain the landing task.
+if (router.currentRoute.value.path.startsWith('/proposals')) mm.view = 'review'
+else if (mm.view !== 'review') mm.view = mm.mapView
 watch(() => mm.view, (view) => {
   if (view === 'review') {
     void proposals.ensureLoaded()
@@ -1710,6 +1755,111 @@ onBeforeUnmount(() => {
   height: 100%;
   min-height: 0;
 }
+
+.memory-mode-intro {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.memory-mode-copy {
+  min-width: 0;
+  max-width: 760px;
+}
+
+.memory-mode-copy > span {
+  color: var(--fg2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.memory-mode-copy h1 {
+  margin: var(--space-1) 0 0;
+  color: var(--fg);
+  font-size: clamp(22px, 3vw, 30px);
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+
+.memory-mode-copy p {
+  max-width: 68ch;
+  margin: var(--space-2) 0 0;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.memory-mode-actions {
+  display: flex;
+  flex: none;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+}
+
+.memory-mode-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-width: 6.5rem;
+  min-height: var(--touch);
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.memory-mode-actions button.active {
+  border-color: var(--border-strong);
+  background: var(--bg3);
+  color: var(--fg);
+}
+
+.memory-mode-count {
+  display: grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 700px) {
+  .memory-mode-intro {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .memory-mode-copy p {
+    display: none;
+  }
+
+  .memory-mode-actions button {
+    flex: 1;
+  }
+}
 /* The Review surface holds all four sections — two queues waiting on a
    decision and two records of decisions already made — under one tab bar. */
 .mm-review-wrap {
@@ -1760,8 +1910,26 @@ onBeforeUnmount(() => {
 }
 @media (max-width: 900px) {
   .mm-body.mm-body--detail-open { grid-template-columns: 1fr; }
-  .mm-detail { display: none; }
+  .mm-detail {
+    position: fixed;
+    z-index: 900;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    max-height: min(78dvh, 640px);
+    padding: var(--space-5) var(--space-4) calc(var(--space-4) + var(--safe-bottom));
+    border: 1px solid var(--border-strong);
+    border-bottom: 0;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    box-shadow: 0 -1rem 3rem rgb(0 0 0 / 34%);
+    animation: mm-detail-sheet-in 200ms var(--ease);
+  }
   .mm-detail-resizer { display: none; }
+}
+@keyframes mm-detail-sheet-in {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: none; }
 }
 
 .mm-detail {
@@ -1816,8 +1984,8 @@ onBeforeUnmount(() => {
   color: var(--fg3);
   font-size: 18px;
   line-height: 1;
-  width: 24px;
-  height: 24px;
+  width: var(--touch);
+  height: var(--touch);
   cursor: pointer;
   border-radius: var(--radius-sm);
 }
@@ -2196,8 +2364,11 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--border);
   background: var(--bg);
 }
-.mm-seg--sm button { padding: 4px 10px; font-size: var(--text-xs); }
+.mm-seg--sm button {
+  min-width: 48px;
+  min-height: var(--touch); padding: 4px 10px; font-size: var(--text-xs); }
 .mm-toggle {
+  min-height: var(--touch);
   background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--fg2); font-family: var(--font); font-size: var(--text-xs); padding: 4px 10px; cursor: pointer;
 }

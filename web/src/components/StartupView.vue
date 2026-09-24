@@ -283,6 +283,7 @@ function pad(n: number): string {
   animation: fadeIn 500ms var(--ease);
 }
 .startup-skip {
+  min-height: var(--touch);
   margin-left: auto;
   background: none;
   border: 1px solid var(--border);

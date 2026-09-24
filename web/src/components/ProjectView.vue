@@ -3,7 +3,7 @@
     <PaneHeader page-tag="project" @open-sidebar="emit('open-sidebar')">
       <template #title>
         <div class="header-left">
-          <button class="close-btn desktop-only" @click="$emit('close')" title="Close">&times;</button>
+          <button class="btn-icon close-btn desktop-only" @click="$emit('close')" title="Close" aria-label="Close project">&times;</button>
           <input
             v-if="editingName"
             class="title-input"
@@ -23,38 +23,54 @@
           class="btn-small"
           @click="doComplete"
         >Complete</button>
-        <button
+        <div
           v-if="!project.vault_folder && !project.is_auto"
-          class="btn-small danger"
-          @click="doDelete"
-        >Delete</button>
+          ref="projectActionsEl"
+          class="project-actions"
+        >
+          <button
+            ref="projectActionsTrigger"
+            type="button"
+            class="btn-icon"
+            aria-label="Project actions"
+            aria-haspopup="menu"
+            aria-controls="project-actions-menu"
+            :aria-expanded="actionsOpen"
+            @click="toggleProjectActions"
+          >•••</button>
+          <div
+            v-if="actionsOpen"
+            id="project-actions-menu"
+            ref="projectActionsMenu"
+            class="project-actions-menu"
+            role="menu"
+            aria-label="Project actions"
+            @keydown="onProjectActionsKeydown"
+          >
+            <button type="button" role="menuitem" class="danger" @click="doDelete">Delete project</button>
+          </div>
+        </div>
       </template>
     </PaneHeader>
 
-    <!-- Counts only, ordered by urgency. "Created" used to sit here as a date
-         styled like a metric, while the count that matters - how many chats want
-         you - was missing entirely. Dates moved to the caption below. -->
-    <div class="project-stats">
-      <div class="stat" :class="{ 'stat--hot': needsInputCount > 0 }">
-        <div class="stat-value">{{ needsInputCount }}</div>
-        <div class="stat-label">Need you</div>
-      </div>
-      <div class="stat">
-        <div class="stat-value">{{ workingCount }}</div>
-        <div class="stat-label">Working</div>
-      </div>
-      <div class="stat">
-        <div class="stat-value">{{ totalUnread }}</div>
-        <div class="stat-label">Unread</div>
-      </div>
-      <div class="stat">
-        <div class="stat-value">{{ activeChats.length }}</div>
-        <div class="stat-label">Active</div>
-      </div>
+    <div class="project-stats" aria-label="Project activity">
+      <span class="project-stat" :class="{ 'project-stat--hot': needsInputCount > 0 }">
+        <strong>{{ needsInputCount }}</strong> need you
+      </span>
+      <span class="project-stat">
+        <strong>{{ workingCount }}</strong> working
+      </span>
+      <span class="project-stat">
+        <strong>{{ totalUnread }}</strong> unread
+      </span>
+      <span class="project-stat">
+        <strong>{{ activeChats.length }}</strong> active
+      </span>
     </div>
-    <p class="project-caption">
-      created {{ formatDate(project.created_at) }}
-      <template v-if="archivedChats.length"> · {{ archivedChats.length }} archived</template>
+    <p v-if="project.created_at || archivedChats.length" class="project-caption">
+      <template v-if="project.created_at">Created {{ formatDate(project.created_at) }}</template>
+      <template v-if="project.created_at && archivedChats.length"> · </template>
+      <template v-if="archivedChats.length">{{ archivedChats.length }} archived</template>
     </p>
 
     <TabBar
@@ -75,31 +91,47 @@
       :aria-labelledby="tabId('overview')"
       tabindex="0"
     >
-    <section class="card">
+    <section class="card project-context-card">
       <div class="card-header">
-        <h3>project context</h3>
+        <h3>Project context</h3>
         <div class="card-actions">
           <span v-if="contextStatus" class="status" :class="contextStatus">{{ contextStatusLabel }}</span>
           <button
+            v-if="!editingContext"
+            type="button"
             class="btn-small"
-            :disabled="!contextDirty || contextSaving"
-            @click="saveContext"
-          >{{ contextSaving ? 'Saving...' : 'Save' }}</button>
+            @click="startEditContext"
+          >Edit context</button>
+          <template v-else>
+            <button type="button" class="btn-small" :disabled="contextSaving" @click="cancelContextEdit">Cancel</button>
+            <button
+              type="button"
+              class="btn-small btn-primary"
+              :disabled="!contextDirty || contextSaving"
+              @click="saveContext"
+            >{{ contextSaving ? 'Saving…' : 'Save' }}</button>
+          </template>
         </div>
       </div>
+      <label v-if="editingContext" class="sr-only" :for="`${uid}-project-context`">Project context</label>
       <textarea
+        v-if="editingContext"
+        :id="`${uid}-project-context`"
         v-model="contextDraft"
         class="context-textarea"
-        placeholder="Describe what this project is about."
-        rows="8"
+        placeholder="Describe the outcome, constraints, and useful sources for this project."
+        rows="6"
       ></textarea>
+      <p v-else class="context-display" :class="{ 'context-display--empty': !project.context }">
+        {{ project.context || 'No project context yet. Add the outcome, constraints, and sources Ciao should keep in mind.' }}
+      </p>
       <!-- Saving writes this into the canonical doc's `description:`
            frontmatter, and a doc edit flows back here. Say so, or the write
            into a vault file is invisible from the button that causes it. -->
       <p class="context-hint">
-        sent with every message.
+        Sent with every message.
         <template v-if="project.vault_doc_path">
-          saved to <button class="link-btn" @click="openContextDoc">{{ project.vault_doc_path }}</button>
+          Saved to <button class="link-btn" @click="openContextDoc">{{ project.vault_doc_path }}</button>
         </template>
       </p>
     </section>
@@ -110,12 +142,14 @@
         <button class="btn-small" @click="newChat">+ New chat</button>
       </div>
       <div v-if="activeChats.length" class="chat-list">
-        <div
+        <button
           v-for="chat in activeChats"
           :key="chat.chat_id"
+          type="button"
           class="chat-row"
           :class="{ remote: chat.local === false }"
-          @click="chat.local !== false && openChat(chat.chat_id)"
+          :disabled="chat.local === false"
+          @click="openChat(chat.chat_id)"
           :title="chat.local === false ? 'This chat lives on another instance' : ''"
         >
           <div class="chat-row-main">
@@ -133,7 +167,7 @@
             <span class="dot">·</span>
             <span>{{ formatRelative(chatActivity(chat), { suffix: true, absoluteAfterDays: 7 }) }}</span>
           </div>
-        </div>
+        </button>
       </div>
       <div v-else class="empty-row">// no active chats in this project</div>
     </section>
@@ -172,8 +206,9 @@
 
       <div v-if="markdownFiles.length" class="file-group">
         <div class="file-group-label">Markdown</div>
-        <div
+        <button
           v-for="f in markdownFiles"
+          type="button"
           :key="f.path"
           class="file-row"
           @click="openFile(f)"
@@ -181,13 +216,14 @@
           <AppIcon class="file-icon" name="doc" :size="18" />
           <span class="file-name">{{ f.path }}</span>
           <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
-        </div>
+        </button>
       </div>
 
       <div v-if="imageFiles.length" class="file-group">
         <div class="file-group-label">Images</div>
-        <div
+        <button
           v-for="f in imageFiles"
+          type="button"
           :key="f.path"
           class="file-row"
           @click="openFile(f)"
@@ -200,13 +236,14 @@
           />
           <span class="file-name">{{ f.path }}</span>
           <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
-        </div>
+        </button>
       </div>
 
       <div v-if="otherFiles.length" class="file-group">
         <div class="file-group-label">Other</div>
-        <div
+        <button
           v-for="f in otherFiles"
+          type="button"
           :key="f.path"
           class="file-row"
           @click="openFile(f)"
@@ -214,7 +251,7 @@
           <AppIcon class="file-icon" name="file" :size="18" />
           <span class="file-name">{{ f.path }}</span>
           <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
-        </div>
+        </button>
       </div>
     </section>
 
@@ -223,12 +260,14 @@
         <h3>archived ({{ archivedChats.length }})</h3>
       </div>
       <div class="chat-list">
-        <div
+        <button
           v-for="chat in pagedArchivedChats"
           :key="chat.chat_id"
+          type="button"
           class="chat-row archived"
           :class="{ clickable: chat.archive_path, tidying: store.chatIsPostprocessing(chat.chat_id) }"
-          @click="chat.archive_path && openArchive(chat)"
+          :disabled="!chat.archive_path"
+          @click="openArchive(chat)"
         >
           <div class="chat-row-main">
             <span class="chat-name">{{ chat.title }}</span>
@@ -253,7 +292,7 @@
             <span class="dot">·</span>
             <span>{{ formatDate(chat.created_at) }}</span>
           </div>
-        </div>
+        </button>
       </div>
       <div v-if="archivedChats.length > ARCHIVED_PER_PAGE" class="pagination">
         <button
@@ -307,9 +346,16 @@
             <span>next {{ automationTimestamp(schedule.next_run) }}</span>
           </span>
         </button>
+        <div v-if="taskStore.scheduleLoadError" class="automation-stale" role="status">
+          Could not refresh automations. Showing the last successful load.
+          <button type="button" class="btn-small" @click="loadAutomations">Retry</button>
+        </div>
       </div>
       <div v-else-if="schedulesState === 'loading'" class="empty-row">// loading automations…</div>
-      <div v-else-if="schedulesState === 'error'" class="empty-row">// could not load automations</div>
+      <div v-else-if="schedulesState === 'error'" class="empty-row" role="alert">
+        // could not load automations
+        <button type="button" class="btn-small" @click="loadAutomations">Retry</button>
+      </div>
       <div v-else class="empty-row">// no automations deliver prompts to this project</div>
     </section>
   </div>
@@ -317,7 +363,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, useId } from 'vue'
+import { ref, computed, watch, onBeforeUnmount, onMounted, nextTick, useId } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
@@ -328,6 +374,7 @@ import { formatRelative } from '../lib/relativeTime'
 import { chatActivityTimestamp } from '../lib/homeLanes'
 import { postprocessFailed, postprocessLabel, postprocessSummary } from '../lib/postprocessView'
 import { colorForWorkspace } from '../lib/workspaceColors'
+import { openNewChatPicker } from '../lib/newChat'
 import PaneHeader from './PaneHeader.vue'
 import ChatSignals from './ChatSignals.vue'
 import AppIcon from './AppIcon.vue'
@@ -381,16 +428,10 @@ const projectSchedules = computed(() =>
   ),
 )
 
-// The task store is filled by ChatLayout's fire-and-forget fetch, so an empty
-// list here could mean "none", "still loading" or "the request failed" — three
-// different answers that all rendered as "no automations". Track the load so the
-// panel can say which, and so a tab omits a count it cannot vouch for.
-const automationLoad = ref<'loading' | 'ready' | 'error'>('loading')
-
 function automationState(count: number): 'list' | 'loading' | 'error' | 'none' {
   if (count > 0) return 'list'
-  if (automationLoad.value === 'loading') return 'loading'
-  if (automationLoad.value === 'error') return 'error'
+  if (taskStore.scheduleLoadError) return 'error'
+  if (taskStore.scheduleLoading || !taskStore.schedulesLoaded) return 'loading'
   return 'none'
 }
 const schedulesState = computed(() => automationState(projectSchedules.value.length))
@@ -406,9 +447,8 @@ const scheduleCount = computed(() =>
 async function loadAutomations(): Promise<void> {
   try {
     await taskStore.fetchSchedules()
-    automationLoad.value = 'ready'
   } catch {
-    automationLoad.value = 'error'
+    // The shared task store retains the error and the last successful snapshot.
   }
 }
 const activeChats = computed(() =>
@@ -521,13 +561,70 @@ async function saveName() {
 }
 
 // ── Context edit ───────────────────────────────────────────────────────
+const editingContext = ref(false)
+const actionsOpen = ref(false)
+const projectActionsEl = ref<HTMLElement | null>(null)
+const projectActionsTrigger = ref<HTMLButtonElement | null>(null)
+const projectActionsMenu = ref<HTMLElement | null>(null)
+
+function closeProjectActions(restoreFocus = false) {
+  if (!actionsOpen.value) return
+  actionsOpen.value = false
+  if (restoreFocus) void nextTick(() => projectActionsTrigger.value?.focus())
+}
+
+function toggleProjectActions() {
+  if (actionsOpen.value) {
+    closeProjectActions(true)
+    return
+  }
+  actionsOpen.value = true
+  void nextTick(() => {
+    projectActionsMenu.value?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
+  })
+}
+
+function onProjectActionsKeydown(event: KeyboardEvent) {
+  const items = Array.from(projectActionsMenu.value?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])
+  if (!items.length) return
+  const current = items.indexOf(document.activeElement as HTMLButtonElement)
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    closeProjectActions(true)
+    return
+  }
+  if (event.key === 'Tab') {
+    closeProjectActions(false)
+    return
+  }
+  let next = current
+  if (event.key === 'ArrowDown') next = (current + 1) % items.length
+  else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length
+  else if (event.key === 'Home') next = 0
+  else if (event.key === 'End') next = items.length - 1
+  else return
+  event.preventDefault()
+  items[next]?.focus()
+}
+
+function closeProjectActionsOnOutside(event: MouseEvent) {
+  if (!actionsOpen.value) return
+  if (event.target instanceof Node && projectActionsEl.value?.contains(event.target)) return
+  closeProjectActions(false)
+}
 const contextDraft = ref('')
 const contextSaving = ref(false)
 const contextStatus = ref<'' | 'saved' | 'error'>('')
 
 watch(
-  () => project.value?.context,
-  (ctx) => { contextDraft.value = ctx || '' },
+  () => [props.projectId, project.value?.context] as const,
+  ([, ctx]) => {
+    contextDraft.value = ctx || ''
+    editingContext.value = false
+    editingName.value = false
+    closeProjectActions(false)
+  },
   { immediate: true }
 )
 
@@ -538,16 +635,34 @@ const contextStatusLabel = computed(() => {
   return ''
 })
 
+function startEditContext() {
+  if (!project.value) return
+  contextDraft.value = project.value.context || ''
+  contextStatus.value = ''
+  editingContext.value = true
+}
+
+function cancelContextEdit() {
+  if (!project.value || contextSaving.value) return
+  contextDraft.value = project.value.context || ''
+  contextStatus.value = ''
+  editingContext.value = false
+}
+
 async function saveContext() {
   if (!project.value || !contextDirty.value) return
+  const projectId = project.value.project_id
+  const context = contextDraft.value
   contextSaving.value = true
   contextStatus.value = ''
   try {
-    await store.updateProject(project.value.project_id, { context: contextDraft.value })
+    await store.updateProject(projectId, { context })
+    if (project.value?.project_id !== projectId) return
     contextStatus.value = 'saved'
+    editingContext.value = false
     setTimeout(() => { if (contextStatus.value === 'saved') contextStatus.value = '' }, 2000)
   } catch {
-    contextStatus.value = 'error'
+    if (project.value?.project_id === projectId) contextStatus.value = 'error'
   } finally {
     contextSaving.value = false
   }
@@ -556,8 +671,13 @@ async function saveContext() {
 // ── Actions ────────────────────────────────────────────────────────────
 async function newChat() {
   if (!project.value) return
-  const c = await store.createChat(project.value.project_id)
-  router.push(`/chat/${c.chat_id}`)
+  const projectId = await openNewChatPicker({
+    workspace: project.value.workspace,
+    projectId: project.value.project_id,
+  })
+  if (!projectId) return
+  const chat = await store.newChatInProject(projectId)
+  if (chat) router.push(`/chat/${chat.chat_id}`)
 }
 
 function openChat(chatId: string) {
@@ -571,6 +691,7 @@ function openArchive(chat: { archive_path?: string }) {
 
 async function doComplete() {
   if (!project.value) return
+  closeProjectActions(false)
   if (!await askConfirm(`Complete "${project.value.name}"? This will move the vault entry to completed/ and remove the project from the PWA.`, {
     title: 'Complete project',
     confirmLabel: 'Complete project',
@@ -581,6 +702,9 @@ async function doComplete() {
 
 async function doDelete() {
   if (!project.value) return
+  closeProjectActions(false)
+  await nextTick()
+  projectActionsTrigger.value?.focus()
   if (!await askConfirm('Delete this project and archive all its chats?', {
     title: 'Delete project',
     confirmLabel: 'Delete project',
@@ -747,7 +871,13 @@ async function reloadAll() {
   archivedPage.value = 0
   await Promise.all([loadFiles(), loadAutomations()])
 }
-onMounted(reloadAll)
+onMounted(() => {
+  document.addEventListener('click', closeProjectActionsOnOutside)
+  void reloadAll()
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('click', closeProjectActionsOnOutside)
+})
 // Re-fetch when the user navigates between projects without unmounting
 // the component (Vue keeps it alive across :projectId changes).
 watch(() => props.projectId, async () => {
@@ -822,6 +952,44 @@ watch(() => props.projectId, async () => {
   border-radius: 4px;
 }
 
+.project-actions {
+  position: relative;
+}
+
+.project-actions-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  min-width: 10rem;
+  padding: var(--space-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  box-shadow: 0 0.75rem 2rem rgb(0 0 0 / 28%);
+}
+
+.project-actions-menu button {
+  width: 100%;
+  min-height: var(--touch);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-actions-menu button:hover {
+  background: var(--bg3);
+}
+
+.project-actions-menu .danger {
+  color: var(--error);
+}
+
 .btn-small.danger {
   border-color: var(--error);
   color: var(--error);
@@ -829,43 +997,31 @@ watch(() => props.projectId, async () => {
 .btn-small.danger:hover { background: var(--error); color: white; }
 
 .project-stats {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 10px;
-}
-
-.stat {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 10px 12px;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  padding: var(--space-2) var(--space-1);
+  border-bottom: 1px solid var(--border);
 }
 
-/* Only the urgent tile carries the accent, so a glance answers "does anything
-   here want me?" before any number is read. */
-.stat--hot {
-  border-left: 2px solid var(--accent);
+.project-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  color: var(--fg2);
+  font-size: var(--text-sm);
 }
 
-.stat--hot .stat-value {
-  color: var(--accent);
-}
-
-.stat-value {
-  font-size: var(--text-lg);
-  font-weight: 700;
+.project-stat strong {
   color: var(--fg);
+  font-size: var(--text-base);
   font-variant-numeric: tabular-nums;
 }
 
-.stat-label {
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  color: var(--fg2);
+.project-stat--hot,
+.project-stat--hot strong {
+  color: var(--accent);
 }
 
 .project-caption {
@@ -901,12 +1057,11 @@ watch(() => props.projectId, async () => {
 }
 
 .card-header h3 {
-  font-size: 13px;
-  font-weight: 700;
   margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  color: var(--fg2);
+  color: var(--fg);
+  font-size: var(--text-base);
+  font-weight: 650;
+  letter-spacing: 0;
 }
 
 .card-hint {
@@ -924,6 +1079,23 @@ watch(() => props.projectId, async () => {
 .status { font-size: 11px; color: var(--fg2); }
 .status.saved { color: var(--success); }
 .status.error { color: var(--error); }
+
+.project-context-card {
+  gap: var(--space-3);
+}
+
+.context-display {
+  margin: 0;
+  max-width: 75ch;
+  color: var(--fg);
+  font-size: var(--text-base);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.context-display--empty {
+  color: var(--fg2);
+}
 
 .context-textarea {
   width: 100%;
@@ -960,8 +1132,15 @@ watch(() => props.projectId, async () => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  width: 100%;
+  min-height: var(--touch);
   padding: 8px 4px;
+  border: 0;
   border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   gap: 12px;
 }
@@ -1017,6 +1196,7 @@ watch(() => props.projectId, async () => {
 }
 .chat-row.remote { opacity: 0.5; cursor: default; }
 .chat-row.remote:hover { background: transparent; }
+.chat-row:disabled { opacity: 0.55; }
 
 .pagination {
   display: flex;
@@ -1088,6 +1268,21 @@ watch(() => props.projectId, async () => {
    two-line sliver. No token expresses "minimum card body height". */
 .automation-card { min-height: 180px; }
 .automation-list { display: flex; flex-direction: column; }
+.automation-stale {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 8%, var(--bg2));
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+.automation-stale .btn-small { flex: none; }
 .automation-row {
   display: flex;
   flex-direction: column;
@@ -1199,9 +1394,16 @@ watch(() => props.projectId, async () => {
 .file-row {
   display: flex;
   align-items: center;
+  width: 100%;
+  min-height: var(--touch);
   gap: 10px;
   padding: 6px 4px;
+  border: 0;
   border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   min-width: 0;
 }
@@ -1243,7 +1445,7 @@ watch(() => props.projectId, async () => {
 }
 
 @media (max-width: 768px) {
-  .project-stats { grid-template-columns: repeat(2, 1fr); }
+  .project-stats { gap: var(--space-1) var(--space-3); }
   .file-meta { display: none; }
   .automation-row-meta { display: block; line-height: 1.5; }
   .automation-row-meta .dot { margin: 0 var(--space-1); }

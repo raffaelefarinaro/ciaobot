@@ -55,6 +55,11 @@ function seedChain() {
 }
 
 describe('visibility', () => {
+  test('opens in review before graph exploration', () => {
+    const mm = useMemoryMapStore()
+    expect(mm.view).toBe('review')
+  })
+
   test('the whole vault is visible by default — there is no local scope', () => {
     const mm = seedChain()
     expect(mm.visibleNodes).toHaveLength(5)

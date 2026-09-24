@@ -14,7 +14,7 @@
     <div v-if="hasTitle" class="header-title">
       <slot name="title" />
     </div>
-    <div class="header-center">
+    <div class="header-center" :class="{ 'header-center--with-title': hasTitle }">
       <BrandMark v-if="brand" />
       <!-- Which view this is. Styled as a quiet marker, never as a heading: it
            answers "where am I", it is not the subject of the page, so it stays at
@@ -140,6 +140,39 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   .header-center :deep(.brand) { font-size: var(--text-sm); }
   .header-center :deep(.brand-label) { min-width: 5ch; }
 }
+
+/* A title plus three text actions needs the full pane. Hide the duplicate
+   centre mark first; pages without their own title keep it as the compact
+   reload affordance on tablet-sized panes. */
+@container chat-pane (max-width: 899px) {
+  .header-center--with-title :deep(.brand) { display: none; }
+}
+
+/* The expanded sidebar already carries the product mark. On a wide pane,
+   trade the duplicate centre wordmark for the current destination; on narrow
+   panes the mark remains the compact reload affordance described above. */
+@container chat-pane (min-width: 900px) {
+  .header-center :deep(.brand) { display: none; }
+  .header-center:not(.header-center--with-title) .page-tag {
+    position: static;
+    width: auto;
+    height: auto;
+    margin: 0;
+    padding: var(--space-1) var(--space-2);
+    overflow: visible;
+    clip: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    background: var(--bg2);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    font-weight: 650;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+}
+
 /* Kept in the document, not on the screen. The page now names itself next to
    its own nav icon in the sidebar, which is where it was asked for, so a second
    copy here beside the wordmark was the same fact twice. It stays rendered

@@ -125,7 +125,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
    * sidebar next to the workspace toggle, so this state is shared between
    * `ProjectSidebar` (the buttons) and `MemoryMapView` (the surfaces).
    */
-  const view = ref<'graph' | 'list' | 'review'>('graph')
+  const view = ref<'graph' | 'list' | 'review'>('review')
   /**
    * Which rendering the map surface uses. Graph and list are two drawings of
    * one thing — the same notes, the same workspace, the same filters — so the

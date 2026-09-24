@@ -88,6 +88,19 @@ describe('NewChatPicker', () => {
     expect(await settle(answer)).toBe('p-home')
   })
 
+  it('opens on a requested workspace with its requested project selected', async () => {
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
+    const answer = openNewChatPicker({ workspace: 'client', projectId: 'p-shipping' })
+    await nextTick()
+    await nextTick()
+
+    expect(labels()).toEqual(['General', 'Shipping'])
+    expect(wrapper.get('.newchat-option--active').text()).toContain('Shipping')
+    expect(document.activeElement).toBe(wrapper.findAll('.newchat-option')[1].element)
+    press('Enter')
+    expect(await settle(answer)).toBe('p-shipping')
+  })
+
   it('a number key switches the workspace and swaps the project list', async () => {
     wrapper = mount(NewChatPicker, { attachTo: document.body })
     const answer = openNewChatPicker()

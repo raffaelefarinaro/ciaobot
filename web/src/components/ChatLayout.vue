@@ -47,7 +47,7 @@
           />
           <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-            <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader page-tag="today" @open-sidebar="sidebarCollapsed = false" />
             <div class="home-boot-body">
               <!-- Skeleton of the home screen this will become (lane header
                    with the face+status row inside it, housekeeping tile, chat
@@ -80,7 +80,7 @@
                homepage behind it after closing a chat would just duplicate the
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-            <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader page-tag="today" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
               <!-- The glanceable status (face + summary) lives inside the active
                    workspace's lane header now (HomeRecentChats.vue), right under
@@ -107,19 +107,27 @@
                   </button>
                 </div>
               </div>
-              <HousekeepingStrip />
-              <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
-              <div v-if="showGlobalNewChatActions" class="empty-actions">
-                <button
-                  v-for="action in generalWorkspaceActions"
-                  :key="action.workspace"
-                  class="btn-primary"
-                  :data-workspace-color="action.color"
-                  :disabled="action.isCreating"
-                  @click="createWorkspaceChat(action)"
-                >
-                  {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
-                </button>
+              <div class="home-workbench">
+                <div class="home-main">
+                  <HomeIntake />
+                  <HousekeepingStrip />
+                  <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
+                  <div v-if="showGlobalNewChatActions" class="empty-actions">
+                    <button
+                      v-for="action in generalWorkspaceActions"
+                      :key="action.workspace"
+                      class="btn-primary"
+                      :data-workspace-color="action.color"
+                      :disabled="action.isCreating"
+                      @click="chooseNewChat(action.workspace)"
+                    >
+                      {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
+                    </button>
+                  </div>
+                </div>
+                <div class="home-rail">
+                  <HomeReviewSummary />
+                </div>
               </div>
             </div>
           </div>
@@ -169,7 +177,7 @@
         />
         <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-          <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader page-tag="today" @open-sidebar="sidebarCollapsed = false" />
           <div class="home-boot-body">
             <!-- Same skeleton as the split-view copy above; only one is ever
                  mounted, so the two must stay identical. -->
@@ -200,7 +208,7 @@
              homepage behind it after closing a chat would just duplicate the
              same list. Hide the empty-state whenever the mobile sidebar is open. -->
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-          <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader page-tag="today" @open-sidebar="sidebarCollapsed = false" />
           <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
             <!-- The glanceable status (face + summary) lives inside the active
                  workspace's lane header now (HomeRecentChats.vue), right under
@@ -227,21 +235,29 @@
                 </button>
               </div>
             </div>
-            <HousekeepingStrip />
-            <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
-            <div v-if="showGlobalNewChatActions" class="empty-actions">
-              <button
-                v-for="action in generalWorkspaceActions"
-                :key="action.workspace"
-                class="btn-primary"
-                :data-workspace-color="action.color"
-                :disabled="action.isCreating"
-                @click="createWorkspaceChat(action)"
-              >
-                {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
-              </button>
+            <div class="home-workbench">
+              <div class="home-main">
+                <HomeIntake />
+                <HousekeepingStrip />
+                <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
+                <div v-if="showGlobalNewChatActions" class="empty-actions">
+                  <button
+                    v-for="action in generalWorkspaceActions"
+                    :key="action.workspace"
+                    class="btn-primary"
+                    :data-workspace-color="action.color"
+                    :disabled="action.isCreating"
+                    @click="chooseNewChat(action.workspace)"
+                  >
+                    {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
+                  </button>
+                </div>
               </div>
-                      </div>
+              <div class="home-rail">
+                <HomeReviewSummary />
+              </div>
+            </div>
+          </div>
         </div>
       </template>
     </div>
@@ -253,7 +269,7 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
-import { pendingNewChat } from '../lib/newChat'
+import { openNewChatPicker, pendingNewChat } from '../lib/newChat'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskStore } from '../stores/tasks'
 import { useMemoryMapStore } from '../stores/memoryMap'
@@ -277,6 +293,8 @@ import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
+import HomeIntake from './HomeIntake.vue'
+import HomeReviewSummary from './HomeReviewSummary.vue'
 import HousekeepingStrip from './HousekeepingStrip.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
@@ -620,19 +638,16 @@ if (typeof document !== 'undefined') {
   )
 }
 
-async function createWorkspaceChat(action: { workspace: string; projectId: string; isCreating: boolean }) {
-  if (!action.projectId || action.isCreating) return
-  await store.switchWorkspace(action.workspace)
-  await store.createChat(action.projectId)
+async function chooseNewChat(workspace = store.activeWorkspace, projectId?: string) {
+  const selectedProject = await openNewChatPicker({ workspace, projectId })
+  if (!selectedProject) return
+  await store.newChatInProject(selectedProject)
 }
 
-// Cmd+T (Desktop) / Option+N (Web/PWA): show the new-chat picker, which drills
-// workspace → project and resolves to the chosen project's id.
+// Cmd+T (Desktop) / Option+N (Web/PWA) and every visible New action use the
+// same project picker.
 async function handleNewChatShortcut() {
-  const { openNewChatPicker } = await import('../lib/newChat')
-  const projectId = await openNewChatPicker()
-  if (!projectId) return
-  await store.newChatInProject(projectId)
+  await chooseNewChat()
 }
 const activePinKey = computed(() => {
   return store.activeChatId || currentProjectId.value
@@ -1255,7 +1270,6 @@ onBeforeUnmount(() => {
   gap: var(--space-2);
   padding: var(--space-3);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--border-strong);
   border-radius: var(--radius);
 }
 
@@ -1359,6 +1373,10 @@ onBeforeUnmount(() => {
   justify-content: flex-start;
   padding-top: var(--space-2);
   text-align: left;
+}
+
+.empty-state > .home-intake {
+  order: -1;
 }
 
 .empty-home-header {
@@ -1480,6 +1498,73 @@ onBeforeUnmount(() => {
 }
 .empty-actions .btn-primary {
   width: 100%;
+}
+
+/* Workbench composition (prototype A): the request column keeps the readable
+   measure, and the review summary moves into a quiet side rail on wide panes
+   instead of stacking another full-width band under the prompt. */
+.home-workbench {
+  width: 100%;
+  max-width: 1240px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 300px);
+  align-items: start;
+  gap: var(--space-5);
+}
+
+.home-main {
+  min-width: 0;
+  /* The lane list already caps its own width; this keeps the intake and chat
+     list on the same left edge inside the workbench grid. */
+  display: flex;
+  flex-direction: column;
+}
+
+.home-workbench .home-main > .home-intake,
+.home-workbench .home-main > .empty-actions {
+  width: 100%;
+  max-width: none;
+}
+
+.home-rail {
+  position: sticky;
+  top: var(--space-2);
+  width: 100%;
+  margin: 0;
+}
+
+.home-rail :deep(.home-review-summary) {
+  width: 100%;
+  margin-bottom: 0;
+}
+
+.home-rail :deep(.home-review-heading) {
+  display: block;
+}
+
+.home-rail :deep(.home-review-heading p) {
+  margin-top: var(--space-1);
+  text-align: left;
+}
+
+.home-rail :deep(.home-review-grid) {
+  grid-template-columns: 1fr;
+}
+
+.home-rail :deep(.home-review-item) {
+  min-height: 0;
+}
+
+@media (max-width: 980px) {
+  .home-workbench {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-4);
+  }
+
+  .home-rail {
+    position: static;
+  }
 }
 
 .sidebar-backdrop {

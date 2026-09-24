@@ -153,7 +153,7 @@ describe('HomeRecentChats lanes and tiers', () => {
     const wrapper = await mountHome()
     const labels = wrapper.findAll('.home-tier-label').map(n => n.text())
     expect(labels).toContain('needs you')
-    expect(labels).toContain('quiet')
+    expect(labels).toContain('earlier')
     expect(labels.some(l => l === l.toUpperCase() && /[A-Z]/.test(l))).toBe(false)
   })
 
@@ -596,103 +596,26 @@ describe('the lane header line', () => {
   })
 })
 
-describe('HomeRecentChats new-chat project picker', () => {
+describe('HomeRecentChats new-chat entry', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.restoreAllMocks()
     if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
   })
 
-  it('keeps "+ new" one click to General and offers the rest behind the caret', async () => {
+  it('delegates every New action to the shared project picker', async () => {
     const wrapper = await mountHome()
     const lane = wrapper.find('[data-lane-key="personal"]')
+    const button = lane.get('.home-lane-new')
 
-    await lane.find('.home-lane-new').trigger('click')
-    expect(wrapper.emitted('new-workspace-chat')?.[0]).toEqual([
-      { workspace: 'personal', projectId: 'personal-general', isCreating: false },
-    ])
-
-    await lane.find('.home-lane-new-caret').trigger('click')
-    // General leads: it is what the plain button creates in.
-    expect(lane.findAll('.home-lane-project-option').map(n => n.text())).toEqual([
-      'General',
-      'Personal project',
-    ])
-    wrapper.unmount()
-  })
-
-  it('creates in the picked project and closes the menu', async () => {
-    const wrapper = await mountHome()
-    const lane = wrapper.find('[data-lane-key="personal"]')
-    await lane.find('.home-lane-new-caret').trigger('click')
-
-    const options = lane.findAll('.home-lane-project-option')
-    await options[1].trigger('click')
-
-    expect(wrapper.emitted('new-workspace-chat')?.[0]).toEqual([
-      { workspace: 'personal', projectId: 'personal-project', isCreating: false },
-    ])
+    expect(button.attributes('aria-haspopup')).toBe('dialog')
     expect(lane.find('.home-lane-project-menu').exists()).toBe(false)
+    await button.trigger('click')
+    expect(wrapper.emitted('choose-new-chat')?.[0]).toEqual(['personal'])
     wrapper.unmount()
   })
 
-  // Hover does not exist on a phone, so the caret is dimmed rather than hidden
-  // and has to stay reachable by keyboard: Esc must hand focus back rather than
-  // dropping it on the body.
-  it('closes on Escape and returns focus to the caret', async () => {
-    const wrapper = await mountHome()
-    const lane = wrapper.find('[data-lane-key="personal"]')
-    const caret = lane.find('.home-lane-new-caret')
-    await caret.trigger('click')
-    await nextTick()
-
-    await lane.find('.home-lane-project-menu').trigger('keydown.esc')
-    await nextTick()
-
-    expect(lane.find('.home-lane-project-menu').exists()).toBe(false)
-    expect(document.activeElement).toBe(caret.element)
-    wrapper.unmount()
-  })
-
-  // ChatLayout binds arrows on window to roam the chat grid, and defers to any
-  // key a nested popup already consumed. The menu therefore has to mark arrows
-  // handled, or focus lands on a chat card while the menu stays open — and
-  // Enter then opens an unrelated chat.
-  it('marks arrow keys handled so the chat grid does not roam', async () => {
-    const wrapper = await mountHome()
-    const lane = wrapper.find('[data-lane-key="personal"]')
-    await lane.find('.home-lane-new-caret').trigger('click')
-    await nextTick()
-
-    const options = lane.findAll('.home-lane-project-option')
-    expect(document.activeElement).toBe(options[0].element)
-
-    const seen: KeyboardEvent[] = []
-    const spy = (event: Event) => seen.push(event as KeyboardEvent)
-    window.addEventListener('keydown', spy)
-    await lane.find('.home-lane-project-menu').trigger('keydown.down')
-    window.removeEventListener('keydown', spy)
-
-    expect(document.activeElement).toBe(options[1].element)
-    expect(seen.at(-1)?.defaultPrevented).toBe(true)
-    wrapper.unmount()
-  })
-
-  it('returns focus to the caret after picking a project', async () => {
-    const wrapper = await mountHome()
-    const lane = wrapper.find('[data-lane-key="personal"]')
-    const caret = lane.find('.home-lane-new-caret')
-    await caret.trigger('click')
-    await nextTick()
-
-    await lane.findAll('.home-lane-project-option')[1].trigger('click')
-    await nextTick()
-
-    expect(document.activeElement).toBe(caret.element)
-    wrapper.unmount()
-  })
-
-  it('hides the caret when the workspace has only one project', async () => {
+  it('keeps the same New action when the workspace has one project', async () => {
     const store = seedChats()
     store.projects = store.projects.filter(
       project => project.project_id !== 'personal-project',
@@ -706,9 +629,9 @@ describe('HomeRecentChats new-chat project picker', () => {
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
 
-    const lane = wrapper.find('[data-lane-key="personal"]')
-    expect(lane.find('.home-lane-new').exists()).toBe(true)
-    expect(lane.find('.home-lane-new-caret').exists()).toBe(false)
+    const button = wrapper.get('[data-lane-key="personal"] .home-lane-new')
+    await button.trigger('click')
+    expect(wrapper.emitted('choose-new-chat')?.[0]).toEqual(['personal'])
     wrapper.unmount()
   })
 })

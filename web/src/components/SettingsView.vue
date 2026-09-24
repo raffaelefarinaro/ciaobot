@@ -4648,6 +4648,7 @@ a.btn-secondary {
 }
 .toggle-btn {
   flex: 1;
+  min-height: var(--touch);
   padding: 10px 16px;
   font-size: var(--text-sm);
   font-weight: 600;

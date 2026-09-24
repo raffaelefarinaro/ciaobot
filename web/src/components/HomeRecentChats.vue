@@ -31,60 +31,17 @@
               </template>
               <span class="home-lane-status-text" aria-live="polite">{{ laneStatusText(lane) }}</span>
             </div>
-            <div v-if="lane.newAction" class="home-lane-new-split">
-              <button
-                type="button"
-                class="home-lane-new"
-                :class="{ 'home-lane-new--split': lane.projects.length > 1, 'home-lane-new--creating': lane.newAction.isCreating }"
-                :data-workspace-color="lane.color"
-                :disabled="lane.newAction.isCreating"
-                :aria-label="`New chat in ${lane.label || 'workspace'}`"
-                @click="emit('new-workspace-chat', lane.newAction)"
-              ><span v-if="lane.newAction.isCreating" class="home-lane-new-spinner" aria-hidden="true" /><span>{{ lane.newAction.isCreating ? 'Creating…' : '+ new' }}</span></button>
-              <!-- Dimmed at rest rather than hover-revealed: the PWA is used on
-                   phones, where there is no hover, so a hover-only affordance is
-                   simply missing. Hover and focus bring it up to full strength. -->
-              <button
-                v-if="lane.projects.length > 1"
-                type="button"
-                class="home-lane-new-caret"
-                :data-workspace-color="lane.color"
-                :disabled="lane.newAction.isCreating"
-                :aria-label="`Choose a project for a new chat in ${lane.label || 'workspace'}`"
-                aria-haspopup="menu"
-                :aria-expanded="openProjectLane === lane.key"
-                @click="toggleProjectMenu(lane)"
-                @keydown.down.prevent="openProjectMenu(lane)"
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                     stroke-width="3" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
-                  <polyline points="6 9 12 15 18 9" />
-                </svg>
-              </button>
-              <!-- prevent, not stop: ChatLayout's window-level handler defers to
-                   any key a nested popup already consumed, which is the same
-                   contract ModelSelector relies on for Esc. Stopping propagation
-                   here would make this menu the one popup playing by its own
-                   rules. -->
-              <div
-                v-if="openProjectLane === lane.key"
-                class="home-lane-project-menu"
-                role="menu"
-                @keydown.esc.prevent="closeProjectMenu({ restoreFocus: true })"
-                @keydown.down.prevent="moveProjectMenuFocus(1)"
-                @keydown.up.prevent="moveProjectMenuFocus(-1)"
-              >
-                <button
-                  v-for="project in lane.projects"
-                  :key="project.project_id"
-                  type="button"
-                  role="menuitem"
-                  class="home-lane-project-option"
-                  :disabled="Boolean(store.creatingChatProjectIds[project.project_id])"
-                  @click="createChatInProject(lane, project.project_id)"
-                >{{ project.name }}</button>
-              </div>
-            </div>
+            <button
+              v-if="lane.newAction && lane.workspace"
+              type="button"
+              class="home-lane-new"
+              :class="{ 'home-lane-new--creating': lane.newAction.isCreating }"
+              :data-workspace-color="lane.color"
+              :disabled="lane.newAction.isCreating"
+              :aria-label="`Choose a project for a new chat in ${lane.label || 'workspace'}`"
+              aria-haspopup="dialog"
+              @click="emit('choose-new-chat', lane.workspace)"
+            ><span v-if="lane.newAction.isCreating" class="home-lane-new-spinner" aria-hidden="true" /><span>{{ lane.newAction.isCreating ? 'Creating…' : '+ new' }}</span></button>
           </div>
         </header>
 
@@ -244,7 +201,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import type { ChatInfo, ProjectInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
@@ -258,7 +215,7 @@ import ChatSignals from './ChatSignals.vue'
 type NewWorkspaceChatAction = { workspace: string; projectId: string; isCreating: boolean }
 
 const emit = defineEmits<{
-  'new-workspace-chat': [action: NewWorkspaceChatAction]
+  'choose-new-chat': [workspace: string]
 }>()
 
 const store = useProjectStore()
@@ -272,7 +229,6 @@ const hasHomeActivity = computed(() => (
 ))
 const lanesEl = ref<HTMLElement | null>(null)
 const laneElements = ref<Record<string, HTMLElement>>({})
-const openProjectLane = ref<string | null>(null)
 // Chats whose insights retry is in flight, so the button shows a busy state.
 const retryingChats = ref<Record<string, boolean>>({})
 
@@ -287,17 +243,6 @@ async function retryInsightsFor(chatId: string): Promise<void> {
     retryingChats.value[chatId] = false
   }
 }
-
-function closeProjectMenuOnOutsideClick(event: MouseEvent): void {
-  if (!openProjectLane.value) return
-  const target = event.target as Node | null
-  const lane = laneElements.value[openProjectLane.value]
-  if (target && lane?.contains(target)) return
-  closeProjectMenu()
-}
-
-onMounted(() => document.addEventListener('click', closeProjectMenuOnOutsideClick))
-onBeforeUnmount(() => document.removeEventListener('click', closeProjectMenuOnOutsideClick))
 
 interface HomeLane {
   key: string
@@ -541,81 +486,12 @@ function projectsFor(workspace: string | null): ProjectInfo[] {
     })
 }
 
-function openProjectMenu(lane: HomeLane): void {
-  openProjectLane.value = lane.key
-  void nextTick(() => {
-    projectMenuItems()[0]?.focus()
-  })
-}
-
-function toggleProjectMenu(lane: HomeLane): void {
-  if (openProjectLane.value === lane.key) {
-    closeProjectMenu({ restoreFocus: true })
-    return
-  }
-  openProjectMenu(lane)
-}
-
-function closeProjectMenu(options: { restoreFocus?: boolean } = {}): void {
-  const laneKey = openProjectLane.value
-  openProjectLane.value = null
-  if (!laneKey || !options.restoreFocus) return
-  // Esc and re-clicking the caret must not drop focus to the document body,
-  // which would strand a keyboard user at the top of the page.
-  void nextTick(() => {
-    const lane = laneElements.value[laneKey]
-    lane?.querySelector<HTMLElement>('.home-lane-new-caret')?.focus()
-  })
-}
-
-// Only one menu is ever open, and it lives inside its lane — which laneElements
-// already tracks for arrow-key roaming and the outside-click test. A second ref
-// registry just for the menu would be a parallel lifecycle to keep in sync.
-function projectMenuItems(): HTMLElement[] {
-  const laneKey = openProjectLane.value
-  const lane = laneKey ? laneElements.value[laneKey] : null
-  if (!lane) return []
-  return Array.from(
-    lane.querySelectorAll<HTMLElement>('.home-lane-project-option:not([disabled])'),
-  )
-}
-
-function moveProjectMenuFocus(step: number): void {
-  const items = projectMenuItems()
-  if (!items.length) return
-  const current = items.indexOf(document.activeElement as HTMLElement)
-  const next = (current + step + items.length) % items.length
-  items[next]?.focus()
-}
-
-function createChatInProject(lane: HomeLane, projectId: string): void {
-  if (!lane.workspace) return
-  // restoreFocus for the same reason Esc does it: the menu item being clicked
-  // is the focused element, so unmounting it drops focus on <body>. Creating a
-  // chat usually navigates away, but it can fail or be slow, and a keyboard
-  // user must not be left at the top of the document either way.
-  closeProjectMenu({ restoreFocus: true })
-  emit('new-workspace-chat', {
-    workspace: lane.workspace,
-    projectId,
-    isCreating: Boolean(store.creatingChatProjectIds[projectId]),
-  })
-}
-
 function tierEntries(lane: HomeLane): Array<{ key: HomeTierKey; label: string; chats: ChatInfo[] }> {
   return [
     { key: 'needsYou', label: 'needs you', chats: lane.tiers.needsYou },
-    // A finished-but-unread chat has something to read, which needs as much
-    // attention right now as a still-running chat needs none - so it outranks
-    // working. It sits ahead of quiet for the same reason it was pulled out
-    // of quiet in the first place: calling it quiet contradicted the unread
-    // badge the sidebar showed for the very same chat.
-    { key: 'unread', label: 'unread', chats: lane.tiers.unread },
     { key: 'working', label: 'working', chats: lane.tiers.working },
-    // Older chats are listed inline with quiet rather than split behind a
-    // disclosure. The age opacity ramp still dims them, so "old" stays legible
-    // without a separate section and a count the user has to expand to read.
-    { key: 'quiet', label: 'quiet', chats: [...lane.tiers.quiet, ...lane.tiers.older] },
+    { key: 'unread', label: 'unread', chats: lane.tiers.unread },
+    { key: 'quiet', label: 'earlier', chats: [...lane.tiers.quiet, ...lane.tiers.older] },
   ]
 }
 
@@ -1001,6 +877,7 @@ defineExpose({ onArrow })
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  min-width: var(--touch, 44px);
   min-height: var(--touch, 44px);
   padding-inline: 7px;
   border: 1px dashed var(--accent);

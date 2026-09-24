@@ -156,6 +156,7 @@
               :src="`/api/workspace-binary?path=${encodeURIComponent(store.path)}&t=${store.loadToken}`"
               width="100%"
               height="100%"
+              :title="`Preview of ${basename}`"
               style="border: none; flex: 1; min-height: 500px; display: block; border-radius: 4px;"
             ></iframe>
             <HtmlArtifactViewer
@@ -2510,6 +2511,28 @@ watch(
     right: 8px;
     width: auto;
     max-width: none;
+  }
+}
+
+/* Coarse-pointer targets: the visible marks are small, the hit areas are not. */
+@media (pointer: coarse) {
+  .image-btn-sm,
+  .fv-comment-trigger {
+    min-width: var(--touch);
+    min-height: var(--touch);
+  }
+
+  .fv-sidebar-card-remove,
+  .fv-sidebar-card-edit {
+    width: var(--touch);
+    height: var(--touch);
+  }
+
+  .draft-image-remove {
+    box-sizing: content-box;
+    top: -12px;
+    right: -12px;
+    padding: 14px;
   }
 }
 

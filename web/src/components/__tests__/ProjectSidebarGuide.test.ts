@@ -17,6 +17,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { flushPromises, mount } from '@vue/test-utils'
 import ProjectSidebar from '../ProjectSidebar.vue'
 import { useProjectStore } from '../../stores/projects'
+import { useMemoryMapStore } from '../../stores/memoryMap'
 
 vi.mock('../../lib/api', () => ({
   api: { get: vi.fn().mockResolvedValue({ rows: [] }), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
@@ -74,6 +75,9 @@ describe('ProjectSidebar workspace guide card', () => {
     store.activeWorkspace = 'work'
     store.projects = []
     store.chats = []
+    // The sidebar follows the main pane's Memory mode; the guide belongs to
+    // the graph/map context, not the Review queue.
+    useMemoryMapStore().view = 'graph'
   })
 
   afterEach(() => {
@@ -85,6 +89,9 @@ describe('ProjectSidebar workspace guide card', () => {
   it('asks for the active workspace guide before any bare basename', async () => {
     const fetchMock = stubWorkspaceFile({ 'work/AGENTS.md': guideFile('A note') })
     const wrapper = await mountSidebar()
+    if (wrapper.get('.mm-memory-details-toggle').attributes('aria-expanded') === 'false') {
+      await wrapper.get('.mm-memory-details-toggle').trigger('click')
+    }
 
     expect(guidePaths(fetchMock)[0]).toBe('work/AGENTS.md')
     expect(guidePaths(fetchMock)).not.toContain('AGENTS.md')
@@ -94,6 +101,9 @@ describe('ProjectSidebar workspace guide card', () => {
   it('still finds a pre-migration CLAUDE.md, after AGENTS.md', async () => {
     const fetchMock = stubWorkspaceFile({ 'work/CLAUDE.md': guideFile('A note') })
     const wrapper = await mountSidebar()
+    if (wrapper.get('.mm-memory-details-toggle').attributes('aria-expanded') === 'false') {
+      await wrapper.get('.mm-memory-details-toggle').trigger('click')
+    }
 
     // AGENTS.md is asked for first and 404s; the legacy name still resolves,
     // so an install that has not run the guide migration keeps its card.
@@ -114,6 +124,9 @@ describe('ProjectSidebar workspace guide card', () => {
       return original(input)
     })
     const wrapper = await mountSidebar()
+    if (wrapper.get('.mm-memory-details-toggle').attributes('aria-expanded') === 'false') {
+      await wrapper.get('.mm-memory-details-toggle').trigger('click')
+    }
 
     expect(wrapper.find('.guide-card-title').text()).toContain('work/CLAUDE.md')
     expect(wrapper.text()).not.toContain('HTTP 503')
@@ -125,6 +138,9 @@ describe('ProjectSidebar workspace guide card', () => {
       'personal/AGENTS.md': guideFile('Personal note'),
     })
     const wrapper = await mountSidebar()
+    if (wrapper.get('.mm-memory-details-toggle').attributes('aria-expanded') === 'false') {
+      await wrapper.get('.mm-memory-details-toggle').trigger('click')
+    }
     const store = useProjectStore()
     store.activeWorkspace = 'personal'
     await flushPromises()
@@ -136,6 +152,9 @@ describe('ProjectSidebar workspace guide card', () => {
   it('falls back to the bare basename only when the qualified path is missing', async () => {
     const fetchMock = stubWorkspaceFile({ 'AGENTS.md': guideFile('Root note') })
     const wrapper = await mountSidebar()
+    if (wrapper.get('.mm-memory-details-toggle').attributes('aria-expanded') === 'false') {
+      await wrapper.get('.mm-memory-details-toggle').trigger('click')
+    }
 
     expect(guidePaths(fetchMock).slice(0, 2)).toEqual(['work/AGENTS.md', 'work/CLAUDE.md'])
     expect(wrapper.find('.guide-card-title').text()).toContain('AGENTS.md')
@@ -144,6 +163,9 @@ describe('ProjectSidebar workspace guide card', () => {
   it('counts an impossible calendar date as malformed, not valid', async () => {
     stubWorkspaceFile({ 'work/AGENTS.md': guideFile('Expires soon [expires: 2026-02-30]') })
     const wrapper = await mountSidebar()
+    if (wrapper.get('.mm-memory-details-toggle').attributes('aria-expanded') === 'false') {
+      await wrapper.get('.mm-memory-details-toggle').trigger('click')
+    }
 
     expect(wrapper.find('.guide-card-regions').text()).toContain('1 malformed tag')
   })
@@ -151,6 +173,9 @@ describe('ProjectSidebar workspace guide card', () => {
   it('accepts a real calendar date', async () => {
     stubWorkspaceFile({ 'work/AGENTS.md': guideFile('Expires soon [expires: 2026-02-28]') })
     const wrapper = await mountSidebar()
+    if (wrapper.get('.mm-memory-details-toggle').attributes('aria-expanded') === 'false') {
+      await wrapper.get('.mm-memory-details-toggle').trigger('click')
+    }
 
     expect(wrapper.find('.guide-card-regions').text()).not.toContain('malformed')
   })
@@ -169,6 +194,9 @@ describe('ProjectSidebar workspace guide card', () => {
       return original(input)
     })
     const wrapper = await mountSidebar()
+    if (wrapper.get('.mm-memory-details-toggle').attributes('aria-expanded') === 'false') {
+      await wrapper.get('.mm-memory-details-toggle').trigger('click')
+    }
 
     expect(wrapper.text()).not.toContain('another workspace')
     expect(guidePaths(fetchMock)).not.toContain('AGENTS.md')

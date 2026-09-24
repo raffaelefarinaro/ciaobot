@@ -64,6 +64,45 @@ describe('vaultReview store', () => {
     expect(store.loadedWorkspace).toBe('personal')
   })
 
+  it('keeps load failures separate from action failures and preserves the last snapshot', async () => {
+    get.mockResolvedValueOnce({ candidates: [candidate()], trashed: [] })
+    const store = useVaultReviewStore()
+    await store.fetch('personal')
+
+    get.mockRejectedValueOnce(new Error('offline'))
+    await store.fetch('personal', { force: true })
+
+    expect(store.loadError).toBe('offline')
+    expect(store.error).toBe('')
+    expect(store.loadedWorkspace).toBe('personal')
+    expect(store.candidates).toHaveLength(1)
+
+    post.mockRejectedValueOnce(new Error('action failed'))
+    await store.trash('personal', 'cid1')
+    expect(store.error).toBe('action failed')
+    expect(store.loadError).toBe('offline')
+  })
+
+  it('clears a stale-load warning when a mutation returns a fresh queue', async () => {
+    get.mockResolvedValueOnce({ candidates: [candidate()], trashed: [] })
+    const store = useVaultReviewStore()
+    await store.fetch('personal')
+    get.mockRejectedValueOnce(new Error('offline'))
+    await store.fetch('personal', { force: true })
+    expect(store.loadError).toBe('offline')
+
+    post.mockResolvedValueOnce({
+      ok: true,
+      candidates: [candidate({ candidate_id: 'next-candidate' })],
+      trashed: [],
+      cleared: [],
+      result: null,
+    })
+    expect(await store.decide('personal', 'abc123abc123abc123abc123', 'keep')).toBe(true)
+    expect(store.loadError).toBe('')
+    expect(store.candidates[0]?.candidate_id).toBe('next-candidate')
+  })
+
   it('ensureLoaded skips the request when the workspace is already loaded', async () => {
     // The endpoint scans every note in the vault three times, and the two
     // callers fire on every mount and every Memory Map view change. `fetch`
@@ -337,6 +376,38 @@ describe('vaultReview store', () => {
     // The reason is read off this call's own answer, so a result about
     // another row can only mean the engine answered about something else.
     expect(store.notice).toBe('')
+  })
+
+  it('keeps the newest returned queue when concurrent POSTs finish out of order', async () => {
+    const other = 'zzz999zzz999zzz999zzz999'
+    let settleFirst!: (value: unknown) => void
+    let settleSecond!: (value: unknown) => void
+    post.mockImplementationOnce(() => new Promise(resolve => { settleFirst = resolve }))
+    post.mockImplementationOnce(() => new Promise(resolve => { settleSecond = resolve }))
+    const store = useVaultReviewStore()
+    store.loadedWorkspace = 'personal'
+    store.candidates = [candidate()]
+
+    const first = store.decide('personal', ID, 'keep')
+    const second = store.decide('personal', other, 'keep')
+    settleSecond({
+      ok: true,
+      result: null,
+      candidates: [candidate({ candidate_id: 'newest' })],
+      trashed: [],
+      cleared: [],
+    })
+    await second
+    settleFirst({
+      ok: true,
+      result: null,
+      candidates: [candidate({ candidate_id: 'older' })],
+      trashed: [],
+      cleared: [],
+    })
+    await first
+
+    expect(store.candidates.map(row => row.candidate_id)).toEqual(['newest'])
   })
 
   it('reads its own POST answer when two decisions are in flight', async () => {

@@ -20,11 +20,15 @@ test.describe('workspace shortcuts', () => {
   test('digits follow the visible sidebar order', async ({ page }) => {
     await boot(page)
 
-    // The badges are what the user reads, so they are what the test asserts on.
-    await expect(page.locator('button[aria-keyshortcuts="1"]').first()).toContainText('Alpha')
-    await expect(page.locator('button[aria-keyshortcuts="2"]').first()).toContainText('Beta')
-    await expect(page.locator('button[aria-keyshortcuts="3"]').first()).toContainText('Gamma')
-    await expect(activeWorkspaceButton(page)).toContainText('Alpha')
+    // The scope control and its menu are the visible workspace order.
+    const scope = activeWorkspaceButton(page)
+    await expect(scope).toContainText('Alpha')
+    await scope.click()
+    const menu = page.getByRole('menu', { name: 'Choose workspace' })
+    const options = menu.getByRole('menuitem')
+    await expect(options.nth(0)).toContainText('Alpha')
+    await expect(options.nth(1)).toContainText('Beta')
+    await expect(options.nth(2)).toContainText('Gamma')
 
     await page.keyboard.press('3')
     await expect(activeWorkspaceButton(page)).toContainText('Gamma')
@@ -71,7 +75,7 @@ test.describe('workspace shortcuts', () => {
       if (label) reached.add(label.split('\n').pop() as string)
     }
 
-    for (const item of ['chats', 'automations', 'memory', 'settings']) {
+    for (const item of ['today', 'automations', 'memory', 'settings']) {
       expect(reached, `"${item}" should be reachable by Tab`).toContain(item)
     }
   })

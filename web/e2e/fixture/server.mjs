@@ -17,7 +17,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { acceptUpgrade } from './ws.mjs'
-import { WORKSPACES, PROJECTS, CHATS, PROPOSALS, snapshotFrame } from './data.mjs'
+import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, PROPOSALS, MEMORY_NODES, MEMORY_EDGES, snapshotFrame } from './data.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const STATIC_ROOT = path.resolve(here, '../../../ciao/web/static')
@@ -76,12 +76,12 @@ const GET_ROUTES = {
   // /api/projects, /api/chats and /api/schedules are bare arrays, not envelopes.
   '/api/projects': () => PROJECTS,
   '/api/chats': () => CHATS,
-  '/api/schedules': () => [],
+  '/api/schedules': () => SCHEDULES,
   '/api/subagents/running': () => ({ chats: {} }),
   '/api/housekeeping': () => ({ actions: [] }),
   '/api/proposals': () => ({ rows: PROPOSALS }),
   '/api/proposals/history': () => ({ rows: [], total: 0, truncated: false, limit: 200, at_max: true }),
-  '/api/vault/graph': () => ({ workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: [], edges: [] }),
+  '/api/vault/graph': () => ({ workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: MEMORY_NODES, edges: MEMORY_EDGES }),
   '/api/vault/review': () => ({ candidates: [], trashed: [], cleared: [] }),
   '/api/models': () => ({
     models: ['synthetic-model'],

@@ -27,6 +27,15 @@ const projectStore = useProjectStore()
 const fileViewer = useFileViewerStore()
 
 const workspace = computed(() => projectStore.activeWorkspace)
+const hasCurrentSnapshot = computed(() =>
+  Boolean(workspace.value) && store.loadedWorkspace === workspace.value,
+)
+const visibleCandidates = computed(() => hasCurrentSnapshot.value ? store.candidates : [])
+const visibleTrashed = computed(() => hasCurrentSnapshot.value ? store.trashed : [])
+const visibleCleared = computed(() => hasCurrentSnapshot.value ? store.cleared : [])
+const showInitialLoading = computed(() => store.loading && !hasCurrentSnapshot.value)
+const showInitialError = computed(() => !store.loading && !hasCurrentSnapshot.value && Boolean(store.loadError))
+const showStaleError = computed(() => hasCurrentSnapshot.value && Boolean(store.loadError))
 
 // Failures go to the app's error toast, matching ProposalReviewPanel: an
 // inline banner would sit above the list with no way to dismiss it.
@@ -304,10 +313,10 @@ function clearedDate(note: VaultClearedNote): string {
     <header class="vr-head">
       <p class="vr-summary">
         <template v-if="props.section === 'trash'">
-          <strong>{{ store.trashed.length }}</strong> retired {{ store.trashed.length === 1 ? 'note' : 'notes' }} in {{ workspace }}
+          <strong>{{ visibleTrashed.length }}</strong> retired {{ visibleTrashed.length === 1 ? 'note' : 'notes' }} in {{ workspace }}
         </template>
         <template v-else>
-          <strong>{{ store.candidates.length }}</strong> to revisit in {{ workspace }}
+          <strong>{{ visibleCandidates.length }}</strong> to revisit in {{ workspace }}
         </template>
       </p>
       <button
@@ -317,6 +326,16 @@ function clearedDate(note: VaultClearedNote): string {
         @click="refresh"
       >{{ store.loading ? 'loading…' : 'refresh' }}</button>
     </header>
+
+    <div v-if="showStaleError" class="vr-load-state vr-load-state--stale" role="status">
+      <span>Could not refresh this list. Showing the last successful load.</span>
+      <button
+        type="button"
+        class="btn-small"
+        :disabled="store.loading"
+        @click="refresh"
+      >{{ store.loading ? 'Retrying…' : 'Retry' }}</button>
+    </div>
 
     <template v-if="props.section !== 'trash'">
       <!-- One sentence, then the mechanism folded away. The paragraph this
@@ -348,15 +367,19 @@ function clearedDate(note: VaultClearedNote): string {
         </div>
       </details>
 
-      <p v-if="store.loading && !store.candidates.length" class="vr-empty" role="status">Loading candidates…</p>
-      <p v-else-if="!store.candidates.length" class="vr-empty">
+      <p v-if="showInitialLoading" class="vr-empty" role="status">Loading candidates…</p>
+      <div v-else-if="showInitialError" class="vr-load-state vr-load-state--error" role="alert">
+        <span>Could not load notes to revisit. {{ store.loadError }}</span>
+        <button type="button" class="btn-small" @click="refresh">Retry</button>
+      </div>
+      <p v-else-if="hasCurrentSnapshot && !visibleCandidates.length" class="vr-empty">
         Nothing to revisit. A note turns up here when it has gone a long time
         unchecked, nothing links to it, or it looks like a duplicate of another note.
       </p>
 
-      <ul v-else class="vr-rows">
+      <ul v-else-if="visibleCandidates.length" class="vr-rows">
         <li
-          v-for="candidate in store.candidates"
+          v-for="candidate in visibleCandidates"
           :key="candidate.candidate_id"
           class="vr-row"
           :class="{ 'vr-row--busy': store.isBusy(candidate.candidate_id) }"
@@ -426,9 +449,9 @@ function clearedDate(note: VaultClearedNote): string {
            a row by mistake to getting it back — and the note `keep` cannot
            stamp, the one with no frontmatter, is the likeliest mistake. Closed
            by default: it is a correction, not part of the pass. -->
-      <details v-if="store.cleared.length" class="vr-cleared">
+      <details v-if="visibleCleared.length" class="vr-cleared">
         <summary class="vr-cleared-summary">
-          Recently cleared ({{ store.cleared.length }})
+          Recently cleared ({{ visibleCleared.length }})
         </summary>
         <p class="vr-hint vr-cleared-hint">
           Notes you marked <strong>Still true</strong>. They stay out of the queue until
@@ -436,7 +459,7 @@ function clearedDate(note: VaultClearedNote): string {
         </p>
         <ul class="vr-rows">
           <li
-            v-for="note in store.cleared"
+            v-for="note in visibleCleared"
             :key="note.candidate_id"
             class="vr-row"
             :class="{ 'vr-row--busy': store.isBusy(note.candidate_id) }"
@@ -466,13 +489,18 @@ function clearedDate(note: VaultClearedNote): string {
         Notes you retired. They stay here until you say otherwise — nothing is removed
         on a timer. Restore is one click; deleting for good asks first.
       </p>
-      <p v-if="!store.trashed.length" class="vr-empty">
+      <p v-if="showInitialLoading" class="vr-empty" role="status">Loading retired notes…</p>
+      <div v-else-if="showInitialError" class="vr-load-state vr-load-state--error" role="alert">
+        <span>Could not load retired notes. {{ store.loadError }}</span>
+        <button type="button" class="btn-small" @click="refresh">Retry</button>
+      </div>
+      <p v-else-if="hasCurrentSnapshot && !visibleTrashed.length" class="vr-empty">
         Nothing retired yet. A note you retire from <strong>Notes to revisit</strong>
         waits here until you restore it or delete it for good.
       </p>
-      <ul v-else class="vr-rows">
+      <ul v-else-if="visibleTrashed.length" class="vr-rows">
         <li
-          v-for="note in store.trashed"
+          v-for="note in visibleTrashed"
           :key="note.candidate_id"
           class="vr-row"
           :class="{ 'vr-row--busy': store.isBusy(note.candidate_id) }"
@@ -606,6 +634,32 @@ function clearedDate(note: VaultClearedNote): string {
 
 .vr-cleared-hint {
   margin: var(--space-2) 0 var(--space-3);
+}
+
+.vr-load-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.vr-load-state--error {
+  border-color: color-mix(in srgb, var(--error) 46%, var(--border));
+}
+
+.vr-load-state--stale {
+  background: color-mix(in srgb, var(--warning) 8%, var(--bg2));
+}
+
+.vr-load-state .btn-small {
+  flex: none;
 }
 
 .vr-error {
@@ -771,6 +825,11 @@ function clearedDate(note: VaultClearedNote): string {
 @media (max-width: 640px) {
   .vr-row {
     grid-template-columns: 1fr;
+  }
+
+  .vr-load-state {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 </style>

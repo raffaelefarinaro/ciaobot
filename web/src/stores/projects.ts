@@ -1340,7 +1340,11 @@ export const useProjectStore = defineStore('projects', () => {
   // Cmd+T picker: open a fresh, empty chat in the chosen project, switching to
   // its workspace first if needed. Returns the created chat, or undefined when
   // the project could not be found.
-  async function newChatInProject(projectId: string): Promise<ChatInfo | undefined> {
+  async function newChatInProject(
+    projectId: string,
+    initialText = '',
+    title = DEFAULT_CHAT_TITLE,
+  ): Promise<ChatInfo | undefined> {
     const project = projects.value.find(p => p.project_id === projectId)
     if (!project) {
       pushErrorToast('Cannot open a new chat', 'No project found to create the chat in.')
@@ -1355,7 +1359,9 @@ export const useProjectStore = defineStore('projects', () => {
     activeWorkspace.value = project.workspace
     persistState()
     try {
-      return await createChat(project.project_id)
+      return initialText
+        ? await createChat(project.project_id, title, initialText)
+        : await createChat(project.project_id)
     } catch (err) {
       // The switch is committed before the POST, so a rejected creation used
       // to leave the app scoped to the new workspace while still showing (and

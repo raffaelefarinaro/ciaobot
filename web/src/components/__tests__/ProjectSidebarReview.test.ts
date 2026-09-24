@@ -9,13 +9,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import ProjectSidebar from '../ProjectSidebar.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useProposalsStore } from '../../stores/proposals'
 import { useVaultReviewStore } from '../../stores/vaultReview'
 import { useMemoryMapStore } from '../../stores/memoryMap'
 import type { ProposalRow, VaultReviewCandidate } from '../../lib/types'
+import { api } from '../../lib/api'
 
 const EVIDENCE: VaultReviewCandidate['evidence'] = {
   backlinks: [], outbound_links: [], bridge: false, duplicate_group: [],
@@ -80,16 +82,38 @@ describe('ProjectSidebar review section', () => {
     const wrapper = await mountSidebar()
 
     expect(wrapper.get('a[href="/memory"] .nav-item-badge--count').text()).toBe('4')
-    const workspaceToggle = wrapper.findAll('.workspace-toggle').find(toggle => !toggle.classes().includes('view-toggle'))
-    expect(workspaceToggle).toBeTruthy()
-    expect(workspaceToggle!.findAll('button')[0].text()).toContain('3')
-    expect(workspaceToggle!.findAll('button')[1].text()).toContain('1')
+    const workspaceTrigger = wrapper.get('.workspace-scope-trigger')
+    expect(workspaceTrigger.text()).toContain('Personal')
+    await workspaceTrigger.trigger('click')
+    const workspaceOptions = wrapper.findAll('.workspace-scope-option')
+    expect(workspaceOptions[0].text()).toContain('3')
+    expect(workspaceOptions[1].text()).toContain('1')
 
     const stats = wrapper.findAll('.mm-stat').map(s => s.text())
     expect(stats[0]).toContain('3')       // shown
     expect(stats[0]).toContain('of 3')
     expect(stats[2]).toContain('1')       // the work row
     expect(stats[2]).toContain('other workspaces')
+  })
+
+  it('opens the workspace scope as a keyboard menu and restores focus', async () => {
+    const wrapper = await mountSidebar()
+    const trigger = wrapper.get<HTMLButtonElement>('.workspace-scope-trigger')
+
+    await trigger.trigger('click')
+    await nextTick()
+    const menu = wrapper.get('.workspace-scope-menu')
+    const options = menu.findAll<HTMLButtonElement>('[role="menuitem"]')
+    expect(document.activeElement).toBe(options[0].element)
+
+    await menu.trigger('keydown', { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(options[1].element)
+
+    await menu.trigger('keydown', { key: 'Escape' })
+    await nextTick()
+    expect(wrapper.find('.workspace-scope-menu').exists()).toBe(false)
+    expect(document.activeElement).toBe(trigger.element)
+    wrapper.unmount()
   })
 
   it('offers a kind row per kind, counted over the scope', async () => {
@@ -142,13 +166,11 @@ describe('ProjectSidebar review section', () => {
 
     const wrapper = await mountSidebar()
 
-    const reviewButton = wrapper.findAll('.view-toggle button')[1]!
+    const workspaceTrigger = wrapper.get('.workspace-scope-trigger')
     // Three proposals in `personal` plus two notes to revisit.
-    expect(reviewButton.find('.view-count').text()).toBe('5')
-    // And it names its scope, so it cannot be read as the rail's all-workspace
-    // tally sitting a few pixels above it.
-    expect(reviewButton.attributes('aria-label'))
-      .toBe('Review — 5 waiting on a decision in Personal')
+    expect(workspaceTrigger.get('.badge').text()).toBe('5')
+    expect(workspaceTrigger.attributes('aria-label'))
+      .toBe('Workspace: Personal — 5 items need attention')
     expect(wrapper.get('a[href="/memory"]').attributes('aria-label'))
       .toBe('memory — 4 suggested memories across all workspaces')
   })
@@ -165,7 +187,7 @@ describe('ProjectSidebar review section', () => {
 
     const wrapper = await mountSidebar()
 
-    expect(wrapper.findAll('.view-toggle button')[1]!.find('.view-count').text()).toBe('3')
+    expect(wrapper.get('.workspace-scope-trigger .badge').text()).toBe('3')
   })
 
   it('says the retirement queue is still loading rather than reporting zero', async () => {
@@ -174,6 +196,10 @@ describe('ProjectSidebar review section', () => {
     // contradiction this column exists to avoid.
     const mm = useMemoryMapStore()
     mm.reviewTab = 'retirement'
+    vi.mocked(api.get).mockImplementation((url: string) => {
+      if (url.includes('/api/vault/review')) return new Promise(() => {})
+      return Promise.resolve({ rows: [] })
+    })
 
     const wrapper = await mountSidebar()
 
@@ -185,10 +211,10 @@ describe('ProjectSidebar review section', () => {
   it('reports the retirement queue as a failure rather than as empty', async () => {
     const mm = useMemoryMapStore()
     mm.reviewTab = 'retirement'
-    const vaultReview = useVaultReviewStore()
-    vaultReview.error = 'Could not load retirement candidates'
+    vi.mocked(api.get).mockRejectedValueOnce(new Error('Could not load retirement candidates'))
 
     const wrapper = await mountSidebar()
+    await flushPromises()
 
     expect(wrapper.text()).toContain('could not load the retirement queue')
     expect(wrapper.text()).not.toContain('Loading candidates…')
@@ -215,6 +241,22 @@ describe('ProjectSidebar review section', () => {
     expect(stats[0]).toContain('to revisit')
     expect(stats[1]).toContain('1')
     expect(stats[1]).toContain('retired')
+  })
+
+  it('uses the main-pane mode and does not duplicate Review/Map in the sidebar', async () => {
+    const mm = useMemoryMapStore()
+    mm.view = 'review'
+    const wrapper = await mountSidebar()
+
+    expect(wrapper.find('.view-toggle').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Suggested memories')
+    expect(wrapper.text()).not.toContain('Trace connections')
+
+    mm.view = 'graph'
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).toContain('Vault')
+    expect(wrapper.text()).toContain('Trace connections')
+    expect(wrapper.text()).not.toContain('Suggested memories')
   })
 
   it('does not render the review section for other modes', async () => {

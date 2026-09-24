@@ -106,7 +106,7 @@ describe('PaneHeader brand and page tag', () => {
     const columns = Array.from(wrapper.get('.pane-header').element.children)
       .map(el => el.className)
       .filter(name => !name.includes('header-hamburger'))
-    expect(columns).toEqual(['header-title', 'header-center', 'header-trail'])
+    expect(columns).toEqual(['header-title', 'header-center header-center--with-title', 'header-trail'])
     expect(wrapper.findAll('.brand')).toHaveLength(1)
     expect(wrapper.get('.header-center').find('.brand').exists()).toBe(true)
     wrapper.unmount()
@@ -182,7 +182,7 @@ describe('page tag per view', () => {
     vi.restoreAllMocks()
   })
 
-  it('tags the home screen "home" and gives it no separate title', async () => {
+  it('tags the home screen "today" and gives it no separate title', async () => {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [{ path: '/', component: EmptyStub }],
@@ -218,7 +218,7 @@ describe('page tag per view', () => {
     await flushPromises()
     await nextTick()
 
-    expect(seen).toEqual([{ pageTag: 'home', brand: true }])
+    expect(seen).toEqual([{ pageTag: 'today', brand: true }])
     wrapper.unmount()
   })
 })

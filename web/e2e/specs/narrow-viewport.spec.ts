@@ -28,6 +28,16 @@ test.describe('narrow viewport', () => {
       overflow,
       `document scrolls ${overflow}px past the viewport; widest unclipped: ${JSON.stringify(culprits)}`,
     ).toBeLessThanOrEqual(0)
+
+    const form = await page.locator('.home-intake-form').boundingBox()
+    expect(form).not.toBeNull()
+    const controls = page.locator('.home-intake-form input, .home-intake-form textarea, .home-intake-form select, .home-intake-form button')
+    for (const control of await controls.all()) {
+      const box = await control.boundingBox()
+      expect(box).not.toBeNull()
+      expect(box!.x).toBeGreaterThanOrEqual(form!.x - 1)
+      expect(box!.x + box!.width).toBeLessThanOrEqual(form!.x + form!.width + 1)
+    }
   })
 
   test('an open chat does not scroll sideways at 390px', async ({ page }) => {
@@ -40,25 +50,57 @@ test.describe('narrow viewport', () => {
     ).toBeLessThanOrEqual(0)
   })
 
-  test('icon-only controls still hit the 44px touch minimum', async ({ page }) => {
-    // The open chat is where the icon-only controls live (hamburger, close,
-    // model picker, archive); the home view has one.
+  test('visible controls hit the 44px touch minimum', async ({ page }) => {
+    async function assertTouchTargets() {
+      const boxes = await page.locator([
+        'button:visible',
+        'a:visible',
+        'input:visible',
+        'select:visible',
+        'textarea:visible',
+        '[role="button"]:visible',
+        '[role="link"]:visible',
+      ].join(', ')).evaluateAll((els) =>
+        els.map((el) => {
+          const r = el.getBoundingClientRect()
+          return {
+            name: (el.getAttribute('aria-label') || el.textContent || el.getAttribute('placeholder') || '').trim().replace(/\s+/g, ' ').slice(0, 70),
+            cls: String(el.className).slice(0, 60),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+          }
+        }),
+      )
+      expect(boxes.length, 'no touch targets were measured').toBeGreaterThanOrEqual(4)
+      const small = boxes.filter((box) => box.w < 44 || box.h < 44)
+      expect(small, `controls below the 44px touch minimum: ${JSON.stringify(small)}`).toEqual([])
+    }
+
+    await boot(page)
+    await assertTouchTargets()
+
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await assertTouchTargets()
+  })
 
-    // `.btn-icon` and `.touch-hit` are the two utilities App.vue declares as
-    // enforcing `--touch: 44px`. Measuring them in a real browser is the only
-    // way to know the rule survived a component-level override.
-    const boxes = await page.locator('.btn-icon:visible, .touch-hit:visible').evaluateAll((els) =>
-      els.map((el) => {
-        const r = el.getBoundingClientRect()
-        return { cls: String(el.className).slice(0, 60), w: Math.round(r.width), h: Math.round(r.height) }
-      }),
-    )
-    // Without this the test would keep passing if a refactor renamed the
-    // utilities and the selector started matching nothing at all.
-    expect(boxes.length, 'no touch targets were measured').toBeGreaterThanOrEqual(4)
+  test('project actions stay visible on a wide touch viewport', async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 768 })
+    await boot(page, '/project/alpha-notes', 'text=Project context')
+    const action = page.locator('.project-header .project-actions-btn').first()
+    await expect(action).toBeVisible()
+    expect(await action.evaluate((element) => getComputedStyle(element).opacity)).toBe('1')
+  })
 
-    const small = boxes.filter((box) => box.w < 44 || box.h < 44)
-    expect(small, `controls below the 44px touch minimum: ${JSON.stringify(small)}`).toEqual([])
+  test('a selected memory note opens an actionable sheet on a phone', async ({ page }) => {
+    await boot(page, '/memory', 'text=Review what Ciao learned')
+    await page.getByRole('button', { name: 'Map', exact: true }).click()
+    await page.getByRole('button', { name: 'List', exact: true }).click()
+    await page.getByRole('button', { name: 'Open Launch decision' }).click()
+
+    const detail = page.getByRole('dialog', { name: 'Details for Launch decision' })
+    await expect(detail).toBeVisible()
+    await expect(detail.getByRole('button', { name: 'Open Launch decision' })).toBeVisible()
+    await detail.getByRole('button', { name: 'Close note detail' }).click()
+    await expect(detail).toBeHidden()
   })
 })
