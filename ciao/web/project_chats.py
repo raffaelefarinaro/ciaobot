@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import mimetypes
 import copy
 import os
@@ -16,7 +15,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Optional, cast
 
@@ -66,7 +65,13 @@ import yaml
 from ciao import job_runs, subagent_tracking
 from ciao.subagent_tracking import SubagentInfo
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
-from ciao.config import BridgeConfig
+from ciao.config import (
+    CLAUDE_MODELS,
+    GWS_DEFAULT_PROFILE,
+    MAX_IMAGE_SIZE_BYTES,
+    MAX_VOICE_SIZE_BYTES,
+    BridgeConfig,
+)
 from ciao.context.capsule import (
     build_context_capsule,
     context_digest as stable_context_digest,
@@ -231,8 +236,6 @@ _BACKGROUND_WAKE_TAIL_LINES = 50
 # than starting a new conversation — the same path a token rotation already
 # takes (ciao/providers/opencode.py::_ensure_server,
 # ciao/providers/claude.py::_ensure_connected).
-# Overridable per install with ``CIAO_PROVIDER_IDLE_TIMEOUT`` (read in
-# ``__init__``, so a test can set it before constructing a manager).
 _PROVIDER_IDLE_TIMEOUT_SECONDS = 900.0
 # How often the sweep runs. Well under the timeout so a provider is reclaimed
 # within roughly one interval of becoming eligible, and far above any per-turn
@@ -249,33 +252,6 @@ _PROVIDER_REAP_INTERVAL_SECONDS = 120.0
 # then the reference is dropped with an ERROR naming the chat, and the sweep
 # does NOT report it as reclaimed.
 _PROVIDER_DISCONNECT_MAX_ATTEMPTS = 3
-
-
-def _positive_env_seconds(name: str, default: float) -> float:
-    """A finite, positive float from the environment, or the default.
-
-    A zero, negative, non-finite or unparseable override falls back rather
-    than raising: this only tunes a background sweep, and a typo in an env var
-    must not stop the app from starting. Three values in particular are worth
-    naming, because ``float()`` accepts two of them happily and each breaks
-    the sweep differently: ``0`` busy-loops it, ``nan`` makes the sleep timer
-    never come due (every comparison against it is False), and ``inf`` as the
-    idle timeout means nothing is ever old enough to reclaim.
-    """
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning("Ignoring non-numeric %s=%r; using %s", name, raw, default)
-        return default
-    if not math.isfinite(value) or value <= 0:
-        logger.warning(
-            "Ignoring non-positive or non-finite %s=%r; using %s", name, raw, default
-        )
-        return default
-    return value
 
 
 _ANTHROPIC_MODEL_BUCKETS = {"work", "anthropic"}
@@ -631,12 +607,8 @@ class ProjectChatManager:
         # counts for or be inherited by a recycled chat id.
         self._provider_disconnect_failures: dict[str, int] = {}
         self._provider_reaper: asyncio.Task | None = None
-        self._provider_idle_timeout = _positive_env_seconds(
-            "CIAO_PROVIDER_IDLE_TIMEOUT", _PROVIDER_IDLE_TIMEOUT_SECONDS
-        )
-        self._provider_reap_interval = _positive_env_seconds(
-            "CIAO_PROVIDER_REAP_INTERVAL", _PROVIDER_REAP_INTERVAL_SECONDS
-        )
+        self._provider_idle_timeout = _PROVIDER_IDLE_TIMEOUT_SECONDS
+        self._provider_reap_interval = _PROVIDER_REAP_INTERVAL_SECONDS
         # Fold turn journals left behind by a crashed process into their
         # transcripts as is_partial turns before anything reads history.
         try:
@@ -677,7 +649,7 @@ class ProjectChatManager:
         # that chat.
         self.clear_notifications_cb: Optional[Callable[[str], None]] = None
         # Per-chat pending push tasks. Pushes are scheduled with a short
-        # delay (CIAO_PUSH_DELAY_SECONDS, default 30s) so that reading the
+        # delay (30s) so that reading the
         # chat on any device within the window suppresses the buzz. New
         # replies to the same chat cancel the previous timer and start a
         # new one (coalesce rapid replies into a single push).
@@ -778,12 +750,7 @@ class ProjectChatManager:
             self._loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
         except RuntimeError:
             self._loop = None
-        try:
-            self._push_delay_seconds = max(
-                0, int(os.environ.get("CIAO_PUSH_DELAY_SECONDS", "30"))
-            )
-        except ValueError:
-            self._push_delay_seconds = 30
+        self._push_delay_seconds = 30
         self._load()
         self._migrate_remove_claude_code_cli_project()
         self._migrate_drop_qn_prefix()
@@ -3921,7 +3888,10 @@ class ProjectChatManager:
             "vault_root": config.vault_root,
             "proposal_vault_root": proposal_vault_root,
             "guide_path": guide_path,
-            "trajectories_enabled": bool(job.inputs.get("trajectories_enabled", True)),
+            "trajectories_enabled": bool(
+                getattr(config, "trajectories_enabled", True)
+            )
+            and bool(job.inputs.get("trajectories_enabled", True)),
             "memory_proposals_enabled": bool(
                 job.inputs.get("memory_proposals_enabled", True)
             ),
@@ -4176,17 +4146,33 @@ class ProjectChatManager:
                 self._archive_jobs[job.chat_id] = job
                 self._overlay_job_postprocess(job.chat_id, job)
                 continue
-            if not job.resumable():
+            resumable = job.resumable()
+            if not getattr(self._config, "insights_enabled", True):
+                resumable = [
+                    name
+                    for name in resumable
+                    if name not in (
+                        "insights",
+                        "project_doc_update",
+                        "memory_proposals",
+                    )
+                ]
+            if not getattr(self._config, "trajectories_enabled", True):
+                resumable = [name for name in resumable if name != "trajectory"]
+            if not resumable:
+                self._archive_jobs[job.chat_id] = job
                 self._overlay_job_postprocess(job.chat_id, job)
                 continue
             self._archive_jobs[job.chat_id] = job
-            self._begin_postprocess(job.chat_id, list(job.resumable()))
+            self._begin_postprocess(job.chat_id, list(resumable))
 
             async def _guarded(
-                job: Any = job, inputs: dict[str, Any] = inputs
+                job: Any = job,
+                inputs: dict[str, Any] = inputs,
+                stages: list[str] = list(resumable),
             ) -> None:
                 async with semaphore:
-                    await self._run_job(job.chat_id, job, inputs)
+                    await self._run_job(job.chat_id, job, inputs, stages=stages)
 
             task = asyncio.create_task(
                 self._tracked_postprocess(job.chat_id, _guarded())
@@ -4222,7 +4208,7 @@ class ProjectChatManager:
             and outcome.session_id != ""
         )
         run_insights = bool(
-            getattr(config, "insights_enabled", False) and outcome.filtered_jsonl
+            getattr(config, "insights_enabled", True) and outcome.filtered_jsonl
         )
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -5224,7 +5210,7 @@ class ProjectChatManager:
 
         A valid id is a tier alias (``haiku``/``sonnet``/``opus``/``fable``),
         which every provider resolves against its own catalog, or a member of
-        ``config.claude_models``.
+        ``ciao.config.CLAUDE_MODELS``.
 
         Providers that discover their own catalog (opencode) are exempt:
         that catalog is async, so this synchronous validator has nothing to
@@ -5239,13 +5225,11 @@ class ProjectChatManager:
             return
         if is_tier(model):
             return
-        allowed = list(self._config.claude_models)
-        if model in allowed:
+        if model in CLAUDE_MODELS:
             return
-        sample = ", ".join(allowed[:8]) if allowed else "(none configured)"
         raise UnknownModelError(
             f"Unknown model '{model}' for provider '{provider or 'default'}' "
-            f"(configured models: {sample})"
+            f"(configured models: {', '.join(CLAUDE_MODELS)})"
         )
 
     def _thinking_level_for_chat(self, chat: ChatInfo) -> str:
@@ -5286,7 +5270,7 @@ class ProjectChatManager:
         except (AttributeError, ValueError, OSError):
             logger.debug("could not resolve the agent vault root for %r", workspace)
         env["GWS_PROFILE"] = self._workspace_gws_profile(workspace)
-        env["CIAO_ACTIVE_WORKSPACE"] = workspace or self._config.gws_default_profile
+        env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
         env["CIAO_LEGACY_ENTITY_WORKSPACE"] = (
             self._config.legacy_entity_workspace()
         )
@@ -8883,7 +8867,7 @@ class ProjectChatManager:
                 logger.info("Schedule attention classifier %s", note)
             try:
                 from ciao.providers.oneshot import run_oneshot
-                from ciao.insights import _insights_timeout_s, is_context_overflow
+                from ciao.insights import _DEFAULT_TIMEOUT_S, is_context_overflow
 
                 # Same env-tunable budget as the insights job: a slow local
                 # model can take minutes on a successful call,
@@ -8894,7 +8878,7 @@ class ProjectChatManager:
                     system_prompt=system_prompt,
                     model=model,
                     env=env,
-                    timeout_s=_insights_timeout_s(),
+                    timeout_s=_DEFAULT_TIMEOUT_S,
                     provider=classifier_provider,
                     cwd=self._config.workspace_root,
                 )
@@ -9518,7 +9502,7 @@ class ProjectChatManager:
                 f"Dictation is unavailable: {dictation_unavailable_reason()}."
             )
         try:
-            transcriber = AppleDictationTranscriber(self._config.transcription_locale)
+            transcriber = AppleDictationTranscriber()
             text = await transcriber.transcribe(audio_path)
             # Repair dictation surface errors with the on-device model. Fail-open:
             # any failure returns the raw transcript unchanged.
@@ -9547,9 +9531,7 @@ class ProjectChatManager:
                 "the Ciaobot one-line installer."
             )
         try:
-            speaker = SystemSpeaker(
-                self._config.tts_local_voice, self._config.transcription_locale
-            )
+            speaker = SystemSpeaker(self._config.tts_local_voice)
             audio = await speaker.speak(spoken)
         except Exception as exc:
             raise ValueError(f"Read-aloud failed: {exc}") from exc
@@ -9563,7 +9545,7 @@ class ProjectChatManager:
         target = self._config.media_root / f"web_voice_{chat_service._uuid8()}{ext}"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        if len(data) > self._config.max_voice_size_bytes:
+        if len(data) > MAX_VOICE_SIZE_BYTES:
             target.unlink(missing_ok=True)
             raise ValueError("Voice file too large")
         return target
@@ -9770,7 +9752,7 @@ class ProjectChatManager:
         target = self._config.media_root / ref
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        if len(data) > self._config.max_image_size_bytes:
+        if len(data) > MAX_IMAGE_SIZE_BYTES:
             target.unlink(missing_ok=True)
             raise ValueError("Image too large")
         mime = mimetypes.guess_type(filename)[0] or f"image/{ext.lstrip('.')}"

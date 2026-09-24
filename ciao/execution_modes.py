@@ -92,9 +92,9 @@ def harness_skill_overrides() -> dict[str, str]:
 # an agent asked to inspect some *other* project's ``.env`` is refused too.
 #
 # ``.env.*`` is deliberately NOT here. This repo ships ``.env.example`` and the
-# release pipeline copies it (``ciao/public_release.py``), and the two existing
-# ``.env.*`` guards in this codebase both carve the template names out
-# (``git_sync._protected_path``, ``local_session.py``) — a template is not a
+# release pipeline copies it (``ciao/public_release.py``), and the existing
+# ``.env.*`` guards in this codebase carve the template names out
+# (``local_session.py``, ``public_release.py``) — a template is not a
 # secret is an established convention here. A glob deny cannot express "all of
 # ``.env.*`` except these four", and since this list is prepended outside the
 # workspace extras there would be no operator opt-out either. The credential

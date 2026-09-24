@@ -614,6 +614,8 @@ export interface ModelsResponse {
 export interface RoutineSettings {
   // Overrides as stored; empty string = automatic default.
   insights_model: string
+  insights_enabled?: boolean
+  trajectories_enabled?: boolean
 
   critique_models: string
   // Per-provider default model for new chats; a missing entry = the provider's
@@ -690,21 +692,7 @@ export interface ProviderConnection {
 }
 
 export interface ProviderConfigSettings {
-  keys: Record<string, {
-    label: string
-    description: string
-    configured: boolean
-    auth_method?: string
-  }>
-  service_keys?: Record<string, {
-    label: string
-    description: string
-    configured: boolean
-    auth_method?: string
-  }>
   connections?: Record<string, ProviderConnection>
-  requires_restart: boolean
-  env_path: string
 }
 
 export interface GwsIntegrationProfile {

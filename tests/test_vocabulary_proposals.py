@@ -527,14 +527,13 @@ def test_case_variant_of_alias_type_is_safe_rename_not_promotion(tmp_path: Path)
 
 
 def test_established_tag_tier_uses_configured_threshold(tmp_path: Path, monkeypatch):
-    """VOCAB_PROMOTION_THRESHOLD must drive the established-tag tier in
+    """The promotion threshold must drive the established-tag tier in
     VOCABULARY.md, not just the promotion proposals — one value classifies
     both, so a six-use tag with threshold 10 is neither established in the
     vocabulary nor a promotion candidate."""
     from ciao import vault_index as vi_mod
 
-    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "10")
-    assert vi_mod.promotion_threshold() == 10
+    monkeypatch.setattr(vi_mod, "DEFAULT_PROMOTION_THRESHOLD", 10)
 
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -560,7 +559,7 @@ def test_emerging_tier_upper_bound_tracks_configured_threshold(tmp_path: Path, m
     VOCABULARY.md entirely."""
     from ciao import vault_index as vi_mod
 
-    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "10")
+    monkeypatch.setattr(vi_mod, "DEFAULT_PROMOTION_THRESHOLD", 10)
     vault = tmp_path / "vault"
     vault.mkdir()
     for i in range(6):
@@ -599,19 +598,6 @@ def test_migration_renames_case_variant_of_canonical(tmp_path: Path):
     summary = migrate_vault_vocabulary(vault, apply=False)
     assert summary["unresolved"] == {}
     assert any(c["from"] == "Note" and c["to"] == "note" for c in summary["planned"])
-
-
-def test_promotion_threshold_rejects_one(tmp_path: Path, monkeypatch):
-    """A threshold of 1 would classify every one-use tag as both candidate and
-    established and describe an impossible emerging range; it must be rejected
-    in favor of the default."""
-    from ciao import vault_index as vi_mod
-
-    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "1")
-    assert vi_mod.promotion_threshold() == vi_mod.DEFAULT_PROMOTION_THRESHOLD
-    # A threshold of 2 is accepted.
-    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "2")
-    assert vi_mod.promotion_threshold() == 2
 
 
 def test_audit_preserves_empty_shared_vault_stamp(tmp_path: Path):

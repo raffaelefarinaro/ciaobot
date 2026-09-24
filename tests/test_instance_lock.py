@@ -58,7 +58,7 @@ async def test_startup_persists_normalized_registry_only_after_lock(
     )
 
     def persist() -> None:
-        assert events == ["lock", "import"]
+        assert events == ["lock", "import", "gws"]
         events.append("persist")
 
     config.persist_workspace_registry = persist
@@ -70,6 +70,13 @@ async def test_startup_persists_normalized_registry_only_after_lock(
 
     config.import_legacy_workspaces_env = import_legacy
 
+    def import_legacy_gws() -> list[str]:
+        assert events == ["lock", "import"]
+        events.append("gws")
+        return []
+
+    config.import_legacy_gws_profile_env = import_legacy_gws
+
     async def run_server_locked(_config) -> int:
         events.append("run")
         return 0
@@ -79,4 +86,4 @@ async def test_startup_persists_normalized_registry_only_after_lock(
     monkeypatch.setattr(main, "_run_server_locked", run_server_locked)
 
     assert await main._async_main() == 0
-    assert events == ["lock", "import", "persist", "run", "unlock"]
+    assert events == ["lock", "import", "gws", "persist", "run", "unlock"]

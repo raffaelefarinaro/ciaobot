@@ -151,7 +151,14 @@ def apply_app_settings_overlay(config: CiaoConfig) -> None:
 
     runtime_env = os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
     runtime_root = Path(runtime_env) if runtime_env else config.state_path.parent
-    AppSettingsStore(runtime_root / "app_settings.json").apply_to_config(config)
+    store = AppSettingsStore(runtime_root / "app_settings.json")
+    store.migrate_legacy_insights_enabled(
+        getattr(config, "legacy_insights_disabled", None)
+    )
+    store.migrate_legacy_trajectories_enabled(
+        getattr(config, "legacy_trajectories_disabled", None)
+    )
+    store.apply_to_config(config)
 
 
 SYSTEM_PROMPT = """You are an adversarial reviewer. The user is about to ship the artifact below and wants you to find what's wrong with it before anyone else does. Be sharp, specific, and honest. Don't hedge, don't flatter, and don't pad with generic best-practice advice that doesn't apply to this artifact.
@@ -393,8 +400,6 @@ async def async_main(argv: list[str] | None = None) -> int:
         config,
         override=(
             args.models
-            or os.environ.get("CIAO_REVIEW_MODELS", "")
-            or os.environ.get("CIAO_ADVERSARIAL_MODELS", "")
         ),
     )
     if not models:

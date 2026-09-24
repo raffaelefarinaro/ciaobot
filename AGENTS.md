@@ -7,6 +7,10 @@ Before changing code:
 - Read `web/README.md` before changing the PWA.
 - Read [`DESIGN.md`](DESIGN.md) before changing the PWA or tray UI, and keep its tokens and interaction principles aligned with the implementation.
 - Keep changes scoped and covered by tests.
+- Avoid new environment variables. Hardcode a sensible default as a
+  constant; if a value truly must vary per user, make it a Settings option
+  instead. Add an env var only when nothing else can work (secrets,
+  install paths, test isolation), and document it in `INTEGRATIONS.md`.
 - Do not commit secrets, private workspace data, or operator credentials.
 
 Project shape:

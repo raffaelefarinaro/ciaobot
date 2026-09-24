@@ -172,8 +172,9 @@ REGISTRY: tuple[JobSpec, ...] = (
     # they actually execute.
     JobSpec("insights", "Session insights", "content",
             "Extracts durable insights from an archived session transcript.", True, True,
-            trigger="When a chat is archived.",
+            trigger="When a chat is archived and Automatic session insights is on.",
             pipeline_label="When you archive a chat"),
+
     JobSpec("project_doc_update", "Project doc update", "content",
             "Folds a session's decisions and open loops into the project document.",
             True, True,
@@ -182,12 +183,13 @@ REGISTRY: tuple[JobSpec, ...] = (
             step_condition="if the chat belongs to a real project"),
     JobSpec("trajectory", "Trajectory capture", "content",
             "Records a structured trajectory of the session for skill mining.", False, True,
-            trigger="When a chat is archived. Feeds Skill reflection.",
+            trigger="When a chat is archived and Automatic trajectory capture is on.",
             step_of="insights",
             # Runs in a `finally`, so a failed extraction still leaves a
             # trajectory; and `run_archive_postprocess` writes one directly
-            # when insights is off or the chat is under the size gate.
-            step_condition="always — also runs standalone"),
+            # when trajectory capture is enabled and insights is off, or when
+            # the chat is under the size gate.
+            step_condition="when enabled — also runs standalone"),
     JobSpec("memory_proposals", "Memory proposals", "content",
             "Proposes durable facts from a session's insights.", False, True,
             trigger=(
@@ -212,9 +214,6 @@ REGISTRY: tuple[JobSpec, ...] = (
             "Runs one command in a tracked subprocess and wakes the chat that "
             "started it.", False, True,
             trigger="When a chat starts one with the background_run_start tool."),
-    JobSpec("startup_sync", "Startup git sync", "system",
-            "Commits and pulls the workspace on server startup.", False, False,
-            trigger="On server startup."),
     JobSpec("vault_index", "Vault index refresh", "system",
             "Regenerates each agent root's INDEX.md and VOCABULARY.md from frontmatter.",
             False, False,
@@ -248,7 +247,7 @@ REGISTRY: tuple[JobSpec, ...] = (
             one_time=True),
     JobSpec("backfill_insights", "Insights backfill", "system",
             "Runs session insights over every archive that is missing them.", True, True,
-            trigger="On server startup, and on demand from this page.",
+            trigger="On server startup when enabled, and on demand from this page.",
             parent="insights"),
 )
 
@@ -259,15 +258,14 @@ REGISTRY: tuple[JobSpec, ...] = (
 RETIRED_JOBS: frozenset[str] = frozenset({
     "pwa_rebuild",       # startup PWA rebuild phase, removed
     "insights_backfill",  # renamed to backfill_insights
+    "startup_sync",      # opt-in startup git pull, removed
 })
 
 # StartupTracker phase name -> registry job id (phases not listed are skipped,
 # e.g. the connect_* health checks, which are not automations).
 STARTUP_PHASE_JOBS: dict[str, str] = {
-    "sync_workspace": "startup_sync",
     "refresh_vault_index": "vault_index",
     "update_skills": "skills_update",
-    "backfill_insights": "backfill_insights",
 }
 
 

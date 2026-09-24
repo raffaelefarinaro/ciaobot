@@ -764,8 +764,6 @@ async function doFinish() {
       // inspects the chosen folder — empty scaffolds a fresh vault at
       // memory-vault/, existing notes are adapted in place by the
       // onboarding agent.
-      // push_contact is intentionally omitted: Web Push works out of the box
-      // with a default VAPID subject; no email is collected during setup.
       port: Number(port.value),
       python: python.value || undefined,
       password: password.value,

@@ -95,7 +95,7 @@ def _client(
             Route(
                 "/api/settings/providers",
                 provider_config_settings,
-                methods=["GET", "PATCH"],
+                methods=["GET"],
             ),
             Route(
                 "/api/integrations/gws",
@@ -486,38 +486,24 @@ def test_workspace_color_defaults_persists_and_validates(tmp_path):
 def test_provider_config_offers_no_api_keys(tmp_path, monkeypatch):
     """Settings -> Models & providers has no key fields left to type into.
 
-    Every provider authenticates through its own CLI, so both key maps are
-    empty and a PATCH naming any key is rejected rather than silently written.
+    Every provider authenticates through its own CLI, so the route is
+    read-only and reports connection rows only.
     """
     monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
     env_path = tmp_path / ".env"
     env_path.write_text(
-        "PWA_AUTH_TOKEN=t\nCIAO_PUSH_CONTACT=mailto:owner@example.com\nANTHROPIC_API_KEY=sk-anthropic\n",
+        "PWA_AUTH_TOKEN=t\nANTHROPIC_API_KEY=sk-anthropic\n",
         encoding="utf-8",
     )
     client, _config, _pcm = _client(tmp_path, {"ANTHROPIC_API_KEY": "sk-anthropic"})
 
     data = client.get("/api/settings/providers").json()
-    assert data["keys"] == {}
-    # service_keys is empty since voice moved on-device: OPENAI_API_KEY was
-    # the only entry, and nothing in the app reads it any more.
-    assert data["service_keys"] == {}
-    assert "auto_update_github_skills" not in data
+    # Only the CLI connection rows: every provider signs in through its own
+    # CLI, so there are no API keys to report or edit.
+    assert set(data) == {"connections"}
     assert "sk-anthropic" not in json.dumps(data)
-    # The connection rows survive: they are how a provider is signed in.
     assert set(data["connections"]) == {"claude", "opencode"}
-
-    resp = client.patch(
-        "/api/settings/providers",
-        json={"keys": {"OPENROUTER_API_KEY": "sk-or"}},
-    )
-    assert resp.status_code == 400
-
-    resp = client.patch(
-        "/api/settings/providers",
-        json={},
-    )
-    assert resp.status_code == 200
+    assert client.patch("/api/settings/providers", json={}).status_code == 405
 
 
 def test_gws_integration_reports_profile_status_and_usage(tmp_path, monkeypatch):

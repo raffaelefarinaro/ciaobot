@@ -15,8 +15,8 @@ class FakeConfig:
     def __init__(self) -> None:
         self.insights_model_override = ""
         self.insights_model = "sonnet"
-
-        self.transcription_locale = "en-US"
+        self.insights_enabled = True
+        self.trajectories_enabled = True
         self.tts_local_voice = "af_heart"
         self.critique_models = ""
         # Per-provider default models / thinking / routine models; no
@@ -29,6 +29,101 @@ class FakeConfig:
 def test_load_missing_file_gives_defaults(tmp_path):
     store = AppSettingsStore(tmp_path / "app_settings.json")
     assert store.settings == AppSettings()
+    assert store.settings.insights_enabled is True
+
+
+def test_insights_enabled_persists_and_applies(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    config = FakeConfig()
+
+    store.update({"insights_enabled": False})
+    store.apply_to_config(config)
+
+    assert config.insights_enabled is False
+    assert json.loads(path.read_text())["insights_enabled"] is False
+    assert AppSettingsStore(path).settings.insights_enabled is False
+
+    store.update({"insights_enabled": True})
+    assert json.loads(path.read_text())["insights_enabled"] is True
+
+
+def test_insights_enabled_rejects_non_boolean(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    with pytest.raises(ValueError, match="must be a boolean"):
+        store.update({"insights_enabled": "false"})
+
+
+def test_trajectories_enabled_persists_and_applies(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    config = FakeConfig()
+
+    store.update({"trajectories_enabled": False})
+    store.apply_to_config(config)
+
+    assert config.trajectories_enabled is False
+    assert json.loads(path.read_text())["trajectories_enabled"] is False
+    assert AppSettingsStore(path).settings.trajectories_enabled is False
+
+    store.update({"trajectories_enabled": True})
+    assert json.loads(path.read_text())["trajectories_enabled"] is True
+
+
+def test_trajectories_enabled_rejects_non_boolean(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    with pytest.raises(ValueError, match="must be a boolean"):
+        store.update({"trajectories_enabled": "false"})
+
+
+def test_legacy_insights_opt_out_migrates_once(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+
+    assert store.migrate_legacy_insights_enabled(True) is False
+    assert json.loads(path.read_text())["insights_enabled"] is False
+    assert store.migrate_legacy_insights_enabled(False) is None
+    assert json.loads(path.read_text())["insights_enabled"] is False
+
+
+def test_explicit_insights_setting_wins_over_legacy_migration(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text(json.dumps({"insights_enabled": True}))
+    store = AppSettingsStore(path)
+
+    assert store.migrate_legacy_insights_enabled(True) is None
+    assert store.settings.insights_enabled is True
+
+
+def test_legacy_trajectory_opt_out_migrates_once(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+
+    assert store.migrate_legacy_trajectories_enabled(True) is False
+    assert json.loads(path.read_text())["trajectories_enabled"] is False
+    assert store.migrate_legacy_trajectories_enabled(False) is None
+    assert json.loads(path.read_text())["trajectories_enabled"] is False
+
+
+def test_explicit_trajectory_setting_wins_over_legacy_migration(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text(json.dumps({"trajectories_enabled": True}))
+    store = AppSettingsStore(path)
+
+    assert store.migrate_legacy_trajectories_enabled(True) is None
+    assert store.settings.trajectories_enabled is True
+
+
+def test_both_legacy_privacy_opt_outs_migrate_together(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+
+    assert store.migrate_legacy_insights_enabled(True) is False
+    assert store.migrate_legacy_trajectories_enabled(True) is False
+    assert json.loads(path.read_text()) == {
+        "insights_enabled": False,
+        "trajectories_enabled": False,
+    }
 
 
 def test_load_ignores_unknown_keys_and_non_strings(tmp_path):
@@ -38,11 +133,15 @@ def test_load_ignores_unknown_keys_and_non_strings(tmp_path):
             {
                 "bogus": "x",
                 "insights_model": 42,
+                "insights_enabled": "false",
+                "trajectories_enabled": "false",
             }
         )
     )
     store = AppSettingsStore(path)
     assert store.settings.insights_model == ""
+    assert store.settings.insights_enabled is True
+    assert store.settings.trajectories_enabled is True
 
 
 def test_load_corrupt_file_gives_defaults(tmp_path):
@@ -55,7 +154,11 @@ def test_update_persists_and_roundtrips(tmp_path):
     path = tmp_path / "app_settings.json"
     store = AppSettingsStore(path)
     store.update({"insights_model": "gemma4:12b-it-qat", "ignored": "x"})
-    assert json.loads(path.read_text()) == {"insights_model": "gemma4:12b-it-qat"}
+    assert json.loads(path.read_text()) == {
+        "insights_enabled": True,
+        "trajectories_enabled": True,
+        "insights_model": "gemma4:12b-it-qat",
+    }
     # Fresh instance sees the persisted value.
     assert AppSettingsStore(path).settings.insights_model == "gemma4:12b-it-qat"
 
@@ -72,16 +175,14 @@ def test_apply_overlays_and_clear_restores_defaults(tmp_path):
     store = AppSettingsStore(tmp_path / "app_settings.json")
     config = FakeConfig()
 
-    store.update({"insights_model": "gemma4:12b-it-qat", "transcription_locale": "it-IT"})
+    store.update({"insights_model": "gemma4:12b-it-qat"})
     store.apply_to_config(config)
     assert config.insights_model_override == "gemma4:12b-it-qat"
-    assert config.transcription_locale == "it-IT"
 
-    # Clearing restores the env-backed default captured on first apply.
-    store.update({"insights_model": "", "transcription_locale": ""})
+    # Clearing restores the default captured on first apply.
+    store.update({"insights_model": ""})
     store.apply_to_config(config)
     assert config.insights_model_override == ""
-    assert config.transcription_locale == "en-US"
 
 
 def test_tts_overrides_apply_and_clear(tmp_path):
@@ -132,6 +233,8 @@ def test_provider_routine_models_persist_and_apply(tmp_path):
     assert config.provider_default_thinking == {"claude": "high"}
     path = tmp_path / "app_settings.json"
     assert json.loads(path.read_text()) == {
+        "insights_enabled": True,
+        "trajectories_enabled": True,
         "provider_insights_models": {"opencode": "anthropic/claude-sonnet-4-6"},
         "provider_default_thinking": {"claude": "high"},
     }

@@ -6,7 +6,6 @@ import asyncio
 import contextlib
 import errno
 import functools
-import hashlib
 import json
 import logging
 import mimetypes
@@ -46,7 +45,14 @@ from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueReceiptUnavailable
 from ciao.web.document_conversion import is_anydoc_document
 from ciao.native_sessions import live_sessions_for_workspace
-from ciao.config import WorkspaceConfig
+from ciao.config import (
+    CLAUDE_MODELS,
+    GWS_DEFAULT_PROFILE,
+    MAX_IMAGE_SIZE_BYTES,
+    MAX_VOICE_SIZE_BYTES,
+    RESTART_EXIT_CODE,
+    WorkspaceConfig,
+)
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
@@ -58,7 +64,7 @@ from ciao.workspaces import (
 )
 # Kept as an alias: several call sites predate the shared module.
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
-from ciao.tool_path import login_shell_path, resolve_tool
+from ciao.tool_path import resolve_tool
 from ciao.providers.opencode import OpencodeProvider
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.schedules import (
@@ -137,13 +143,6 @@ async def _read_upload_limited(upload, max_bytes: int) -> bytes:
 
 _STATS_CACHE_PATH = Path.home() / ".claude" / "stats-cache.json"
 
-# Provider API keys editable from Settings. Empty: every provider authenticates
-# through its own CLI (`ciao auth <provider>`), so there is no key to type here.
-_PROVIDER_KEY_META: dict[str, dict[str, str]] = {}
-# Keys Ciaobot itself consumes, as opposed to provider logins. Empty since
-# voice moved on-device: OPENAI_API_KEY lived here for cloud transcription and
-# speech, and nothing else in the app ever read it.
-_SERVICE_KEY_META: dict[str, dict[str, str]] = {}
 # Labels and example chips for the two account names that predate the account
 # registry. Nothing creates them any more — a fresh install starts with no
 # Google account — but an install that already has one keeps its wording.
@@ -791,54 +790,10 @@ def _write_env_values(path: Path, updates: dict[str, str]) -> None:
     write_private_text(path, "\n".join(out).rstrip() + "\n")
 
 
-def _read_env_value(path: Path, key: str) -> str:
-    for line in _read_env_lines(path):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in line:
-            continue
-        env_key, value = line.split("=", 1)
-        if env_key.strip() == key:
-            return value.strip().strip("'\"")
-    return ""
-
-
-def _provider_key_auth_method(config, key: str, providers: dict) -> str:
-    """Return how a provider key is authenticated: 'api_key', 'oauth', or 'missing'.
-
-    ``providers`` is the already-computed ``setup_status()`` result for this
-    request; reusing it avoids re-running the Claude CLI credential probe a
-    second time per request.
-    """
-    env_value = os.environ.get(key, "").strip()
-    if env_value:
-        return "api_key"
-    file_value = _read_env_value(_env_path(config), key)
-    if file_value:
-        return "api_key"
-    if key == "ANTHROPIC_API_KEY" and providers.get("claude", {}).get("auth") == "oauth":
-        return "oauth"
-    return "missing"
-
-
 def _provider_config_payload(config) -> dict:
     providers = setup_status(config, env=os.environ).get("providers", {})
 
-    def key_payload(meta_by_key: dict) -> dict:
-        keys = {}
-        for key, meta in meta_by_key.items():
-            auth_method = _provider_key_auth_method(config, key, providers)
-            keys[key] = {
-                **meta,
-                "configured": auth_method != "missing",
-                "auth_method": auth_method,
-            }
-        return keys
-
     return {
-        "keys": key_payload(_PROVIDER_KEY_META),
-        "service_keys": key_payload(_SERVICE_KEY_META),
-        "requires_restart": True,
-        "env_path": str(_env_path(config)),
         # Each row carries its own labels so the Settings card does not have to
         # map provider ids to names; a new provider gets a correct card for
         # free instead of falling through to another provider's label.
@@ -931,60 +886,8 @@ async def provider_connection_action(request: Request) -> JSONResponse:
     return JSONResponse({"error": "unsupported action"}, status_code=404)
 
 
-def _apply_provider_key_updates(config, updates: dict[str, str]) -> None:
-    """Push edited service keys into the process env.
-
-    No provider key reaches the live config: every provider authenticates
-    through its own CLI, so there is nothing here to re-point.
-    """
-    for key, value in updates.items():
-        value = value.strip()
-        if value:
-            os.environ[key] = value
-        else:
-            os.environ.pop(key, None)
-
-
 async def provider_config_settings(request: Request) -> JSONResponse:
     config = request.app.state.config
-    if request.method == "GET":
-        return JSONResponse(await asyncio.to_thread(_provider_config_payload, config))
-    try:
-        body = await request.json()
-    except ValueError:
-        return JSONResponse({"error": "invalid JSON"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "expected object"}, status_code=400)
-    updates = {}
-    if "keys" in body:
-        if not isinstance(body["keys"], dict):
-            return JSONResponse({"error": "keys must be an object"}, status_code=400)
-        key_updates = {str(key): str(value) for key, value in body["keys"].items()}
-        supported_keys = set(_PROVIDER_KEY_META) | set(_SERVICE_KEY_META)
-        unsupported = sorted(set(key_updates) - supported_keys)
-        if unsupported:
-            return JSONResponse(
-                {"error": f"unsupported provider key(s): {', '.join(unsupported)}"},
-                status_code=400,
-            )
-        updates.update(key_updates)
-
-    _write_env_values(_env_path(config), updates)
-    provider_key_changes = {
-        k: v for k, v in updates.items()
-        if k in _PROVIDER_KEY_META or k in _SERVICE_KEY_META
-    }
-    _apply_provider_key_updates(config, provider_key_changes)
-    if provider_key_changes:
-        async def _do_restart():
-            await asyncio.sleep(0.5)
-            fn = getattr(request.app.state, "request_restart", None)
-            if callable(fn):
-                fn(config.restart_exit_code)
-            else:
-                from ciao.signals import RestartRequested
-                raise RestartRequested(config.restart_exit_code)
-        asyncio.create_task(_do_restart())
     return JSONResponse(await asyncio.to_thread(_provider_config_payload, config))
 
 
@@ -1158,7 +1061,7 @@ def _gws_integration_payload(config) -> dict:
     names = _gws_profile_names(config)
     # An operator default that names no existing account is not a default the
     # UI should advertise; workspaces then show "No Google account" instead.
-    default_profile = str(getattr(config, "gws_default_profile", "") or "").strip()
+    default_profile = GWS_DEFAULT_PROFILE
     if default_profile not in names:
         default_profile = ""
     return {
@@ -1382,7 +1285,7 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
             pkce_store.consume(flow_id, profile)
         # Refresh the cached token-validity state so the Settings UI clears
         # the "Login expired" banner immediately instead of waiting up to
-        # ``CIAO_GWS_HEALTH_INTERVAL`` seconds. Mirrors gws_relogin_status.
+        # for the next periodic check. Mirrors gws_relogin_status.
         monitor = getattr(request.app.state, "gws_health_monitor", None)
         if monitor is not None:
             try:
@@ -1985,7 +1888,7 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
         else:
             for path in image_paths:
                 try:
-                    if path.stat().st_size > request.app.state.config.max_image_size_bytes:
+                    if path.stat().st_size > MAX_IMAGE_SIZE_BYTES:
                         raise ValueError("image too large")
                     host_image_refs.append(
                         pcm.save_image_upload(path.read_bytes(), path.name).path.name
@@ -2052,7 +1955,7 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                     # Per-file, like the host branch above: one unreadable
                     # screenshot must not turn the whole drop into a 502.
                     try:
-                        if path.stat().st_size > request.app.state.config.max_image_size_bytes:
+                        if path.stat().st_size > MAX_IMAGE_SIZE_BYTES:
                             errors.append({"filename": path.name, "error": "image too large"})
                             continue
                         data = path.read_bytes()
@@ -3051,7 +2954,7 @@ async def chat_voice(request: Request) -> JSONResponse:
 
     try:
         data = await _read_upload_limited(
-            upload, request.app.state.config.max_voice_size_bytes
+            upload, MAX_VOICE_SIZE_BYTES
         )
         path = pcm.save_voice_upload(data, filename)
     except ValueError as exc:
@@ -3123,7 +3026,7 @@ async def chat_images(request: Request) -> JSONResponse:
         filename = getattr(upload, "filename", "image.jpg") or "image.jpg"
         try:
             data = await _read_upload_limited(
-                upload, request.app.state.config.max_image_size_bytes
+                upload, MAX_IMAGE_SIZE_BYTES
             )
             attachment = pcm.save_image_upload(data, filename)
             results.append({
@@ -4500,7 +4403,6 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
     times out on slow local backends). The stored Settings → Models choice is
     left alone.
     """
-    import asyncio
     from ciao.job_runs import track
     from ciao.insights import backfill_insights_task, format_backfill_summary
 
@@ -4509,8 +4411,19 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:  # noqa: BLE001 — empty body means "use the configured model"
         body = {}
-    model = (body or {}).get("model")
+    body = body if isinstance(body, dict) else {}
+    model = body.get("model")
     model = model.strip() if isinstance(model, str) else ""
+    force = body.get("force") is True
+    if not getattr(config, "insights_enabled", True) and not force:
+        return JSONResponse(
+            {"error": "session insights are disabled in Settings"},
+            status_code=409,
+        )
+    coordinator = getattr(request.app.state, "backfill_coordinator", None)
+    if coordinator is None:
+        return JSONResponse({"error": "backfill coordinator unavailable"}, status_code=503)
+    chat_workspaces = request.app.state.project_chat_manager.chat_workspaces()
 
     async def _run_backfill():
         async with track(
@@ -4521,19 +4434,26 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
                 config,
                 mode="both",
                 model_override=model,
-                chat_workspaces=request.app.state.project_chat_manager.chat_workspaces(),
+                manual=True,
+                force=force,
+                chat_workspaces=chat_workspaces,
             )
             handle.extra.update(result)
             summary = format_backfill_summary(result)
             handle.extra["summary"] = summary
             if model:
                 handle.extra["model_override"] = model
+            if force:
+                handle.extra["forced"] = True
             if result["errors"]:
                 handle.status = "error"
                 handle.error = summary
 
-    asyncio.create_task(_run_backfill())
-    return JSONResponse({"status": "started", "model": model}, status_code=202)
+    coordinator.submit(_run_backfill)
+    return JSONResponse(
+        {"status": "queued", "model": model, "forced": force},
+        status_code=202,
+    )
 
 
 async def create_schedule(request: Request) -> JSONResponse:
@@ -4835,15 +4755,15 @@ async def list_models(request: Request) -> JSONResponse:
     model_reasoning_levels = opencode_reasoning_levels
     # Claude Code serves one upstream, so its models are a single list rather
     # than the work/personal split the routing-backend era needed.
-    claude_models = list(config.claude_models)
+    claude_models = list(CLAUDE_MODELS)
     claude_default = (
         config.claude_default_model
         if config.claude_default_model in claude_models
-        else (claude_models[0] if claude_models else "")
+        else claude_models[0]
     )
 
     return JSONResponse({
-        "models": config.claude_models,
+        "models": list(CLAUDE_MODELS),
         "default": config.claude_default_model,
         "provider_models": {
             "claude": claude_models,
@@ -4883,6 +4803,7 @@ def _routines_payload(config, app_settings) -> dict:
         apple_dictation_available,
         apple_speech_available,
         dictation_unavailable_reason,
+        system_locale,
         system_voices,
     )
 
@@ -4911,6 +4832,8 @@ def _routines_payload(config, app_settings) -> dict:
     return {
         # Overrides as stored ("" = automatic default).
         "insights_model": s.insights_model,
+        "insights_enabled": config.insights_enabled,
+        "trajectories_enabled": config.trajectories_enabled,
 
         "critique_models": s.critique_models,
         # Per-provider default model for new chats, as stored (missing =
@@ -4939,7 +4862,7 @@ def _routines_payload(config, app_settings) -> dict:
         "apple_model_available": native_sidecar.apple_model_available(),
         "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
         "transcription": {
-            "locale": config.transcription_locale,
+            "locale": system_locale(),
             # On-device dictation needs macOS 26+, the installed app, and a
             # dictation language. Settings hides the local option entirely when
             # it cannot run, and shows the reason when the user asks.
@@ -4955,7 +4878,7 @@ def _routines_payload(config, app_settings) -> dict:
         },
         # Grouped options for the routine model selectors.
         "model_options": {
-            "anthropic": list(config.claude_models),
+            "anthropic": list(CLAUDE_MODELS),
         },
         "backends": {
             "anthropic": True,
@@ -5343,9 +5266,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             },
             status_code=400,
         )
-    # Optional: an empty push contact makes Web Push use the localhost
-    # placeholder subject (ciao.main.DEFAULT_PUSH_SUBJECT).
-    push_contact = str(body.get("push_contact", "")).strip()
     try:
         port = int(body.get("port") or config.pwa_port)
     except (TypeError, ValueError):
@@ -5404,7 +5324,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
                 workspace,
                 auth_token=password,
                 auth_required=True,
-                push_contact=push_contact,
                 vault_root=str(body.get("vault_root", "")).strip() or None,
                 vault_mode=vault_mode,
                 workspace_name=workspace_name,
@@ -5453,7 +5372,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if restart:
         restart_fn = getattr(request.app.state, "request_restart", None)
         if callable(restart_fn):
-            restart_fn(0 if handoff else config.restart_exit_code)
+            restart_fn(0 if handoff else RESTART_EXIT_CODE)
 
     return JSONResponse({
         "ok": True,
@@ -5812,7 +5731,7 @@ async def admin_restart(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "restart unavailable"}, status_code=503)
 
     async def after_response() -> None:
-        restart(request.app.state.config.restart_exit_code)
+        restart(RESTART_EXIT_CODE)
 
     return JSONResponse(
         {"ok": True, "steps": [{"step": "restart", "ok": True, "output": "Waiting for active chat work to drain"}]},
@@ -5996,9 +5915,9 @@ async def admin_deploy(request: Request) -> JSONResponse:
                 logger.exception("deploy: desktop install and relaunch failed")
         fn = getattr(request.app.state, "request_restart", None)
         if callable(fn):
-            fn(config.restart_exit_code)
+            fn(RESTART_EXIT_CODE)
         else:
-            raise RestartRequested(config.restart_exit_code)
+            raise RestartRequested(RESTART_EXIT_CODE)
 
     asyncio.create_task(_do_restart())
     steps.append({
@@ -6248,7 +6167,7 @@ async def admin_status(request: Request) -> JSONResponse:
     return JSONResponse({
         "cost": state.bot_state.cost,
         "branch": branch,
-        "models": config.claude_models,
+        "models": list(CLAUDE_MODELS),
         "default_model": config.claude_default_model,
         "default_mode": config.claude_mode,
     })

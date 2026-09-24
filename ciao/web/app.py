@@ -348,7 +348,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Models & Status
         Route("/api/models", list_models, methods=["GET"]),
         Route("/api/settings/routines", settings_routines, methods=["GET", "PATCH"]),
-        Route("/api/settings/providers", provider_config_settings, methods=["GET", "PATCH"]),
+        Route("/api/settings/providers", provider_config_settings, methods=["GET"]),
         Route(
             "/api/settings/providers/{provider}/{action}",
             provider_connection_action,

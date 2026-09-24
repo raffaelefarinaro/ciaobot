@@ -1,7 +1,6 @@
 """Timeout-safe git subprocess spawning shared by the git helpers.
 
-``git_sync`` and ``local_session`` both run git in the background and both
-need the same thing on timeout: kill git *and* whatever it forked, reap the
+``local_session`` runs git in the background and needs one thing on timeout: kill git *and* whatever it forked, reap the
 child, and tear the pipes down.
 
 The naive version — ``proc.kill()`` then return — leaks two file descriptors

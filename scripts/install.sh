@@ -6,7 +6,7 @@ set -eu
 # __VERIFIER_SHA256__ with the checksum of the native verifier built from this
 # repository before uploading the script as install.sh.
 
-repo=${CIAO_GITHUB_REPO:-raffaelefarinaro/ciaobot}
+repo=raffaelefarinaro/ciaobot
 # A private mirror can override the release download root for explicit
 # versions. Archive signatures are still verified against the embedded public
 # key, so changing the transport endpoint does not bypass authenticity checks.

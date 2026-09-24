@@ -287,9 +287,8 @@ def test_a_tracked_guide_is_renamed_without_dirtying_the_tree(tmp_path: Path) ->
 
     `ciao setup` commits the guide, so `Path.rename` left `T AGENTS.md` /
     `D CLAUDE.md` behind. `workspace_reroot.apply` refuses to run against
-    uncommitted tracked changes and nothing else commits them
-    (`auto_sync_on_start` is off by default), so the re-root was refused on
-    every later boot over a rename Ciaobot performed itself.
+    uncommitted tracked changes and nothing else commits them, so the re-root
+    was refused on every later boot over a rename Ciaobot performed itself.
     """
     _git(tmp_path, "init", "-q", ".")
     (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
