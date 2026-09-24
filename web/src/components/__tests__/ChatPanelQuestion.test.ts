@@ -313,6 +313,24 @@ describe('AskUserQuestion keyboard shortcuts', () => {
     wrapper.unmount()
   })
 
+  test('scalar option and Other replace each other', async () => {
+    const { wrapper } = await mountLayout({ questions: [makeQuestion()] })
+    const other = wrapper.find('input.question-other')
+
+    await other.setValue('custom answer')
+    await nextTick()
+    pressKey('1')
+    await nextTick()
+    expect((other.element as HTMLInputElement).value).toBe('')
+    expect(optionButtons(wrapper).filter(b => b.classes().includes('selected'))).toHaveLength(1)
+
+    await other.setValue('custom again')
+    await nextTick()
+    expect(optionButtons(wrapper).filter(b => b.classes().includes('selected'))).toHaveLength(0)
+
+    wrapper.unmount()
+  })
+
   test('Enter submits a single-select answer once an option is picked', async () => {
     const { wrapper, store } = await mountLayout({ questions: [makeQuestion()] })
     const sendMessage = vi.spyOn(store, 'sendMessage').mockImplementation(() => true)

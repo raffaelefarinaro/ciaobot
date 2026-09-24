@@ -748,7 +748,7 @@
           placeholder="Other (free text)"
           :disabled="questionSubmitting"
           :value="questionAnswers[qi]?.other || ''"
-          @input="ensureAnswer(qi).other = ($event.target as HTMLInputElement).value"
+          @input="setQuestionOther(qi, ($event.target as HTMLInputElement).value)"
         />
         </div>
       </template>
@@ -2261,8 +2261,18 @@ function toggleQuestionOption(i: number, label: string, multi: boolean) {
   } else {
     a.selected.clear()
     a.selected.add(label)
+    // A scalar V2 field cannot submit both a predefined option and Other.
+    a.other = ''
   }
   // Force reactivity since Set mutations aren't tracked.
+  questionAnswers.value = { ...questionAnswers.value, [i]: { ...a } }
+}
+
+function setQuestionOther(i: number, value: string) {
+  const a = ensureAnswer(i)
+  a.other = value
+  const question = activeQuestions.value[i]
+  if (question && !question.multiSelect) a.selected.clear()
   questionAnswers.value = { ...questionAnswers.value, [i]: { ...a } }
 }
 

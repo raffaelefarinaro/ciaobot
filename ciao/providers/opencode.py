@@ -961,7 +961,7 @@ def _form_option_values(field: Mapping[str, Any]) -> list[str]:
     if not isinstance(options, list):
         return []
     return [
-        str(option.get("value") or "")
+        str(option.get("value"))
         for option in options
         if isinstance(option, Mapping) and option.get("value") is not None
     ]
@@ -1032,6 +1032,8 @@ def _form_field_active(
 
 def _validate_form_field(field: Mapping[str, Any], values: Sequence[str]) -> FormValue:
     kind = str(field.get("type") or "string")
+    if kind != "multiselect" and len(values) > 1:
+        raise _FormValidationError("Choose one answer")
     value = _form_answer_value(kind, values)
     if value is None:
         raise _FormValidationError("The answer has an invalid value")
@@ -1139,11 +1141,17 @@ def _validate_form_answer(
         # The PWA sends display labels for legacy cards and wire values for V2.
         # Prefer an exact option value, then map a legacy label to its value.
         option_map = {
-            str(option.get("label") or ""): str(option.get("value") or "")
+            str(option.get("label") or ""): str(option.get("value"))
             for option in (field.get("options") or [])
             if isinstance(option, Mapping)
         }
-        mapped_values = [option_map.get(item, item) for item in values]
+        option_values = set(_form_option_values(field))
+        # A wire value may also be another option's display label. Prefer an
+        # exact value match before applying the legacy label-to-value map.
+        mapped_values = [
+            item if item in option_values else option_map.get(item, item)
+            for item in values
+        ]
         answer[question_id] = _validate_form_field(field, mapped_values)
     return answer
 
@@ -2079,13 +2087,21 @@ class OpencodeProvider(BaseSDKProvider):
                     for message in messages
                 )
                 running = self._turn_has_running_tools(messages)
+                idle_failed = any(
+                    isinstance(message.get("info"), Mapping)
+                    and message["info"].get("type") == "idle"
+                    and message["info"].get("outcome") == "failed"
+                    for message in self._turn_scope(messages)
+                )
                 quiesced = (
                     user_seen
-                    and bool(current)
                     and not running
                     and active_ids is not None
                     and session_id not in active_ids
-                    and current == signature
+                    and (
+                        (bool(current) and current == signature)
+                        or idle_failed
+                    )
                 )
                 signature = current or signature
                 self._restore_turn_metadata(messages)

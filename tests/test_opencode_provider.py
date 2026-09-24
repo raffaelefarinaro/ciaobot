@@ -990,6 +990,35 @@ async def test_form_reply_honors_conditions_and_external_fields(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_form_reply_prefers_an_exact_wire_value_over_a_label_collision(tmp_path):
+    provider, client = _armed_provider(tmp_path)
+    _convert(
+        provider,
+        "form.created",
+        {"form": {
+            "id": "frm_collision", "sessionID": "ses_1", "title": "Choice",
+            "fields": [{
+                "key": "choice", "title": "Choice", "type": "string", "custom": True,
+                "options": [
+                    {"value": "1", "label": "One"},
+                    {"value": "2", "label": "1"},
+                ],
+            }],
+        }},
+    )
+
+    result = await provider.send_question_response(
+        "frm_collision", {"choice": ["1"]}
+    )
+
+    assert result.ok is True
+    assert client.calls == [(
+        "/api/session/ses_1/form/frm_collision/reply",
+        {"answer": {"choice": "1"}},
+    )]
+
+
+@pytest.mark.asyncio
 async def test_required_invalid_form_input_stays_pending(tmp_path):
     provider, client = _armed_provider(tmp_path)
     _convert(
@@ -1070,6 +1099,9 @@ def test_v2_form_validation_covers_typed_constraints():
         _validate_form_field(
             {"type": "multiselect", "minItems": 1, "custom": True}, []
         )
+    with pytest.raises(ValueError, match="Choose one answer"):
+        _validate_form_field({"type": "string", "custom": True}, ["option", "other"])
+
 
 
 # ── permission.asked surfaces a card ────────────────────────────────────

@@ -229,6 +229,35 @@ async def test_exhausted_reconnects_reconcile_via_message_poll(
 
 
 @pytest.mark.asyncio
+async def test_poll_recovery_settles_an_output_free_terminal_failure(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+    messages = [
+        {"id": "msg_u2", "type": "user", "text": "hi"},
+        {"id": "idle_failed", "type": "idle", "outcome": "failed"},
+    ]
+    client = _RecoveryClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=messages,
+    )
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    result = events[-1]
+    assert result.is_error is True
+    assert "OpenCode execution failed" in result.result
+    assert client.get_calls.count("/api/session/s1/message") <= 2
+
+
+@pytest.mark.asyncio
 async def test_failure_before_prompt_still_hard_fails(tmp_path, monkeypatch) -> None:
     provider = _provider(tmp_path)
     client = _RecoveryClient(
