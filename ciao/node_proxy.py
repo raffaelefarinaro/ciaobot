@@ -85,6 +85,7 @@ RESPONSE_STRIP_HEADERS: set[str] = {"set-cookie"}
 _NO_CACHE = "no-cache, no-store, must-revalidate"
 
 _PROXY_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
+_EXPECTED_REMOTE_CLOSE_CODES = {1000, 1001, 4004}
 
 # One pooled client for every non-streaming proxied request. Building a fresh
 # AsyncClient per call meant a new TCP connect (plus TLS handshake) for each
@@ -446,6 +447,7 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
     """Proxy a WebSocket connection to the host node."""
     import asyncio
     import websockets
+    from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 
     clean_url = active_peer_url.rstrip("/")
     if clean_url.startswith("https://"):
@@ -479,6 +481,13 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                     # forwarder without reporting a host failure to a client
                     # that is no longer connected.
                     return
+                except ConnectionClosed as exc:
+                    if not isinstance(exc, ConnectionClosedOK) and (
+                        exc.rcvd is None
+                        or exc.rcvd.code not in _EXPECTED_REMOTE_CLOSE_CODES
+                    ):
+                        raise
+                    return
 
             async def forward_remote_to_client():
                 try:
@@ -491,7 +500,13 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                     # The local browser disconnected while the host was still
                     # healthy. As above, this is a normal teardown.
                     return
-                raise OSError("host WebSocket closed")
+                except ConnectionClosed as exc:
+                    if not isinstance(exc, ConnectionClosedOK) and (
+                        exc.rcvd is None
+                        or exc.rcvd.code not in _EXPECTED_REMOTE_CLOSE_CODES
+                    ):
+                        raise
+                    return
 
             task1 = asyncio.create_task(forward_client_to_remote())
             task2 = asyncio.create_task(forward_remote_to_client())
@@ -507,8 +522,14 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
             # still receive host keepalives but its sends no longer reach the
             # host, leaving this socket open makes the composer paint phantom
             # optimistic messages with no visible connection error.
-            for t in done:
-                t.result()
+            forwarding_errors: list[BaseException] = []
+            for task in done:
+                try:
+                    task.result()
+                except BaseException as exc:
+                    forwarding_errors.append(exc)
+            if forwarding_errors:
+                raise forwarding_errors[0]
     except Exception as exc:
         logger.warning("Client WebSocket proxy to host %s failed: %s", target_ws_url, exc)
         try:
