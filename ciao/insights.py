@@ -29,14 +29,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ciao import fact_candidates, job_runs, native_sidecar
+from ciao import job_runs, native_sidecar
 from ciao.memory_policy import UNATTENDED_MARKER as _UNATTENDED_MARKER
 
 if TYPE_CHECKING:
@@ -53,8 +52,8 @@ def resolve_insights_model(
     """Pick the model for session-insights extraction.
 
     When the operator has not set an explicit override (Settings → Models →
-    Session insights = Automatic), use the workspace's default model. Scripts
-    without workspace context fall back to ``config.insights_model``.
+    Session insights = Automatic), use the workspace/provider default model.
+    Scripts without either context fall back to ``config.insights_model``.
 
     ``provider``, when given, is the chat's actual provider; it is passed
     through to ``default_model_for_workspace`` so an opencode chat in a
@@ -63,7 +62,7 @@ def resolve_insights_model(
     """
     if config.insights_model_override:
         return config.insights_model_override
-    if workspace is not None:
+    if workspace is not None or provider is not None:
         return config.default_model_for_workspace(workspace, provider)
     return config.insights_model
 
@@ -112,7 +111,7 @@ _TRUNCATE_TOOLS = frozenset({"Read", "Glob", "Grep", "WebFetch", "WebSearch"})
 # The insights model is operator-chosen and may be a slow local/cloud GGUF:
 # measured end-to-end calls on such a backend run 214-253s, so the old flat
 # 120s budget turned tail latency into a guaranteed TimeoutError and the job
-# failed ~79% of the time. Generous by default, tunable for fast models.
+# failed ~79% of the time. Generous on purpose.
 _DEFAULT_TIMEOUT_S = 600.0
 
 # Per-transcript input ceiling. Long sessions otherwise exceed the model's
@@ -292,46 +291,10 @@ def _entity_notes_block(
     )
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning("Ignoring invalid %s=%r; using %s", name, raw, default)
-        return default
-    return value if value > 0 else default
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning("Ignoring invalid %s=%r; using %s", name, raw, default)
-        return default
-    return value if value > 0 else default
-
-
-def _insights_timeout_s() -> float:
-    return _env_float("CIAO_INSIGHTS_TIMEOUT_S", _DEFAULT_TIMEOUT_S)
-
-
-def _max_input_chars() -> int:
-    return _env_int("CIAO_INSIGHTS_MAX_INPUT_CHARS", _DEFAULT_MAX_INPUT_CHARS)
-
-
-def _backfill_ceiling() -> int:
-    """Most archives one un-limited backfill run will process.
-
-    A safety bound, not a preference: the callers that pass no limit (startup
-    and the Settings button) would otherwise issue one model call per archive
-    in the whole vault from a single click.
-    """
-    return _env_int("CIAO_INSIGHTS_BACKFILL_MAX", 200)
+# Most archives one un-limited backfill run will process. A safety bound, not
+# a preference: the callers that pass no limit (startup and the Settings
+# button) would otherwise issue one model call per archive in the whole vault.
+_BACKFILL_MAX = 200
 
 
 _EXPLICIT_MEMORY_INTENT = re.compile(
@@ -395,7 +358,7 @@ async def _apple_prefilter_skips(
         verdict = await native_sidecar.respond(
             fitted,
             instructions=_PREGATE_SYSTEM_PROMPT,
-            timeout=_insights_timeout_s(),
+            timeout=_DEFAULT_TIMEOUT_S,
         )
         return verdict.strip().upper().startswith("NO")
     except native_sidecar.SidecarError:
@@ -491,7 +454,7 @@ def _fit_transcript(filtered_jsonl: str, *, reserve: int = 0) -> tuple[str, int]
     fitting (the known-context block) — the oversized-input rejection is
     deliberately not retried, so the first call must already be within budget.
     """
-    budget = max(0, _max_input_chars() - reserve)
+    budget = max(0, _DEFAULT_MAX_INPUT_CHARS - reserve)
     if len(filtered_jsonl) <= budget:
         return filtered_jsonl, 0
     lines = filtered_jsonl.splitlines()
@@ -599,18 +562,16 @@ async def call_with_retry(
             logger.info("Apple FoundationModels is unavailable; not retrying: %s", exc)
             return RetryOutcome("", detail, 1, "apple-unavailable")
         if check_context_overflow and is_context_overflow(exc):
-            # Only the JSONL path fits its payload to CIAO_INSIGHTS_MAX_INPUT_CHARS,
-            # so naming that variable on a text-mode overflow sends the operator
-            # to a setting that does nothing for it. Both messages end at the
-            # remedy that always applies.
+            # Only the JSONL path fits its payload to the input budget, so only
+            # that message names it. Both end at the remedy that always applies.
             if budget_applies:
                 logger.error(
                     "%s input still exceeds the model's context window (%s); "
-                    "not retrying. Lower CIAO_INSIGHTS_MAX_INPUT_CHARS "
-                    "(currently %d) or pick a model with a larger window.",
+                    "not retrying. The transcript was already trimmed to %d "
+                    "chars; pick a model with a larger window.",
                     label,
                     exc,
-                    _max_input_chars(),
+                    _DEFAULT_MAX_INPUT_CHARS,
                 )
             else:
                 logger.error(
@@ -723,10 +684,7 @@ Rules:
   vault root: [Mo](./People/Mo.md). Do NOT use [[bracketed-wikilinks]] and do NOT wrap the link in backticks, quotes, or other formatting.
 """ + _FINAL_STATEMENT_RULE
 
-# The Markdown output contract. Split from the rules above so the structured
-# mode can reuse the grounding rules *verbatim* and swap only the shape of the
-# answer: the two modes must never drift on what counts as a durable fact or
-# on what has to be cited, only on how the model hands it back.
+# The Markdown output contract, kept apart from the grounding rules above.
 _INSIGHTS_SECTION_SCHEMA = """
 ## Errors
 - <what failed> -> <how it was resolved, or "unresolved">. Only a failure whose fix is worth remembering. [idx=N] <tag>
@@ -754,118 +712,6 @@ _INSIGHTS_SECTION_SCHEMA = """
 """
 
 _INSIGHTS_SYSTEM_PROMPT = _INSIGHTS_RULES + _INSIGHTS_SECTION_SCHEMA
-
-# The section order the Markdown contract above states, reused when candidate
-# records are rendered back to that shape. Stated once so a structured
-# extraction produces the same section order a Markdown one does.
-INSIGHTS_SECTIONS = (
-    "Errors",
-    "User corrections",
-    "New entities",
-    "Decisions",
-    "Reusable snippets",
-    "Open loops",
-    "Vault changes",
-)
-
-# The structured output contract. It restates only the *shape* of the answer:
-# every grounding rule — what counts as durable, what must be cited, which
-# turns may be extracted from — is `_INSIGHTS_RULES`, unchanged, so the
-# evidence gate downstream sees the same claims either way.
-_STRUCTURED_OUTPUT_CONTRACT = """
-Return ONLY a JSON array. No Markdown, no prose, no code fence, no trailing
-commentary. Each element is one fact candidate:
-
-  {
-    "text": "<the bullet exactly as the section schema would phrase it, on ONE
-             line, without the [idx=N] citation and without the destination
-             tag - both are fields below. Keep an [as-of: YYYY-MM-DD] or
-             [expires: YYYY-MM-DD] tag inline here as well as in its field.>",
-    "section": "<Errors | User corrections | New entities | Decisions |
-                 Reusable snippets | Open loops | Vault changes>",
-    "destination": "<memory | profile | project | people | learnings | review>",
-    "payload": "<the person's name when destination is people; the Known
-                 projects name when destination is project and it is not this
-                 chat's own project; else \\"\\">",
-    "source_message_ids": [<the indices the citation rule requires, as
-                            integers, starting at 1; never 0>],
-    "evidence_excerpt": "<a short span copied verbatim from one cited turn
-                         that states this fact, or \\"\\">",
-    "as_of": "<YYYY-MM-DD, or \\"\\">",
-    "expires": "<YYYY-MM-DD, or \\"\\">",
-    "attended": <true when a cited turn is one the user actually typed,
-                 false when every cited turn is assistant output or an
-                 automation turn>
-  }
-
-Every rule above still applies to each element: the same durability bar, the
-same citation requirement, the same refusal to extract from unattended turns
-or from a maintenance session's own operating instructions. A fact you cannot
-cite is a fact you do not emit.
-
-Return an empty array `[]` when the session carries no durable signal - never
-an object, never the word "none", never an explanatory sentence.
-"""
-
-_STRUCTURED_SYSTEM_PROMPT = _INSIGHTS_RULES + _STRUCTURED_OUTPUT_CONTRACT
-
-
-# ── Structured extraction: opt-in, and only where it is supported ─────────
-
-# Runtimes whose models are asked for JSON candidate rows. Deliberately a
-# short allowlist rather than "everything that is not Apple": structured
-# output is a *model* capability that varies by provider and by the upstream
-# an opencode profile happens to point at, and a provider that cannot hold the
-# contract must degrade to Markdown rather than fail an archive. Widen it per
-# deployment with ``CIAO_INSIGHTS_STRUCTURED_PROVIDERS``.
-_DEFAULT_STRUCTURED_PROVIDERS = frozenset({"claude"})
-
-_TRUTHY = frozenset({"1", "true", "yes", "y", "on"})
-
-
-def _structured_providers() -> frozenset[str]:
-    raw = os.environ.get("CIAO_INSIGHTS_STRUCTURED_PROVIDERS", "").strip()
-    if not raw:
-        return _DEFAULT_STRUCTURED_PROVIDERS
-    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
-
-
-def structured_extraction_enabled(config: Any) -> bool:
-    """Whether the operator asked for structured extraction at all.
-
-    Off by default: the Markdown contract is what every archive on disk was
-    produced under, and turning a new extraction shape on for everyone would
-    change what the archive auto-save writes without anyone asking for it.
-    ``CIAO_INSIGHTS_STRUCTURED`` overrides the config field either way.
-    """
-    raw = os.environ.get("CIAO_INSIGHTS_STRUCTURED", "").strip().lower()
-    if raw:
-        return raw in _TRUTHY
-    return bool(getattr(config, "insights_structured", False))
-
-
-def structured_unsupported_reason(
-    model: str, provider: str, *, text_mode: bool = False
-) -> str:
-    """Why this call cannot run structured, or "" when it can.
-
-    A reason string rather than a boolean because the caller records it: a
-    fallback to Markdown is a normal outcome, but an operator who switched
-    structured extraction on and keeps getting Markdown needs to see which
-    check refused it.
-    """
-    if text_mode:
-        # Text mode reads the rendered archive, which has no `idx` numbering;
-        # its prompt forbids `[idx=N]` outright. Asking that path for cited
-        # candidate rows would ask for citations that cannot exist.
-        return "text-mode extraction has no transcript indices to cite"
-    if native_sidecar.is_apple_model(model):
-        return "the on-device model has no structured-output contract"
-    runtime = (provider or "claude").strip().lower()
-    if runtime not in _structured_providers():
-        return f"provider {runtime!r} is not on the structured-output allowlist"
-    return ""
-
 
 def filter_session_jsonl(
     workspace_root: Path,
@@ -1056,9 +902,13 @@ async def extract_and_append(
     provider: str = "claude",
     project_doc_path: str = "",
     text_mode: bool = False,
+    force: bool = False,
     guide_path: Path | None = None,
-) -> None:
+) -> Any:
     """Run the post-archive pipeline for one archive (stage-resumable).
+
+    Returns the in-memory job, so a caller can read how the insights stage
+    settled (succeeded, skipped for lack of signal, or failed).
 
     This is a thin, backward-compatible wrapper over
     :func:`run_archive_pipeline`. It builds an in-memory
@@ -1098,10 +948,23 @@ async def extract_and_append(
         provider=provider,
         project_doc_path=project_doc_path,
         text_mode=text_mode,
+        force=force,
         guide_path=guide_path,
     )
-    job.inputs = {k: v for k, v in inputs.items() if k not in ("guide_path", "workspace_root", "vault_root", "proposal_vault_root")}
+    job.inputs = {
+        key: value
+        for key, value in inputs.items()
+        if key
+        not in (
+            "force",
+            "guide_path",
+            "workspace_root",
+            "vault_root",
+            "proposal_vault_root",
+        )
+    }
     await run_archive_pipeline(job, inputs)
+    return job
 
 
 def _pipeline_inputs(
@@ -1120,6 +983,7 @@ def _pipeline_inputs(
     provider: str,
     project_doc_path: str,
     text_mode: bool,
+    force: bool,
     guide_path: Path | None,
 ) -> dict[str, Any]:
     """The resolved per-run inputs a stage needs, frozen once per invocation.
@@ -1145,6 +1009,7 @@ def _pipeline_inputs(
         "provider": provider,
         "project_doc_path": project_doc_path,
         "text_mode": text_mode,
+        "force": force,
         "guide_path": guide_path,
     }
 
@@ -1229,16 +1094,25 @@ async def run_archive_pipeline(
 
     job.started = True
     config = inputs["config"]
+    if not getattr(config, "insights_enabled", True) and not inputs.get("force"):
+        order = [
+            name
+            for name in order
+            if name not in ("insights", "project_doc_update", "memory_proposals")
+        ]
+        if not order:
+            return job
     model = str(inputs.get("model") or "")
     provider = str(inputs.get("provider") or "claude")
     filtered_jsonl = str(inputs.get("filtered_jsonl") or "")
     session_id = str(inputs.get("session_id") or "")
     workspace_root = inputs.get("workspace_root")
-    vault_root = inputs.get("vault_root")
     proposal_vault_root = inputs["proposal_vault_root"]
     guide_path = inputs.get("guide_path")
     trajectory_meta = dict(inputs.get("trajectory_meta") or {})
-    trajectories_enabled = bool(inputs.get("trajectories_enabled", True))
+    trajectories_enabled = bool(inputs.get("trajectories_enabled", True)) and bool(
+        getattr(config, "trajectories_enabled", True)
+    )
     memory_proposals_enabled = bool(inputs.get("memory_proposals_enabled", True))
     project_doc_path = str(inputs.get("project_doc_path") or "")
     text_mode = bool(inputs.get("text_mode", False))
@@ -1354,56 +1228,8 @@ async def run_archive_pipeline(
                             ),
                         )
                     )
-                    # Structured extraction is opt-in *and* capability-gated.
-                    # Off, or refused by the gate, the Markdown contract runs
-                    # exactly as before — a provider that cannot return
-                    # candidate rows degrades to the path it has always used
-                    # instead of failing the archive.
-                    use_structured = False
-                    if structured_extraction_enabled(config):
-                        refusal = structured_unsupported_reason(
-                            effective_model,
-                            effective_provider,
-                            text_mode=text_mode,
-                        )
-                        if refusal:
-                            run.extra["structured_fallback"] = refusal
-                            logger.info(
-                                "Structured insights unavailable (%s); "
-                                "falling back to the Markdown extraction path",
-                                refusal,
-                            )
-                        else:
-                            use_structured = True
-                    run.extra["extraction"] = (
-                        "structured" if use_structured
-                        else "text" if text_mode
-                        else "markdown"
-                    )
-                    if use_structured:
-                        (
-                            extracted,
-                            model_error,
-                            parse_errors,
-                        ) = await _run_structured_model_with_retry(
-                            filtered_jsonl=filtered_jsonl,
-                            model=effective_model,
-                            provider=effective_provider,
-                            cwd=workspace_root,
-                            context_block=context_block,
-                        )
-                        if parse_errors:
-                            # Rows that survived as `[review]` candidates. The
-                            # count is the point: a model quietly drifting off
-                            # the contract looks like a sudden taste for
-                            # review rows unless the run row says otherwise.
-                            run.extra["structured_parse_errors"] = parse_errors[:5]
-                            logger.warning(
-                                "Structured insights: %d unreadable row(s) in %s",
-                                len(parse_errors),
-                                archive_path.name,
-                            )
-                    elif text_mode:
+                    run.extra["extraction"] = "text" if text_mode else "markdown"
+                    if text_mode:
                         extracted, model_error = await _run_text_model_with_retry(
                             archive_path=archive_path,
                             model=effective_model,
@@ -1720,6 +1546,8 @@ async def retry_insights_for_chat(
     wrote one (the pipeline's trajectory step runs in a ``finally``), and the
     insights section this retry appends is what memory curation reads.
     """
+    if not getattr(config, "insights_enabled", True):
+        return False
     effective_model = model or resolve_insights_model(config, workspace or None, provider)
     await extract_and_append(
         archive_path=archive_path,
@@ -1872,7 +1700,7 @@ async def _run_model_with_retry(
         budget = max(0, native_sidecar.APPLE_MAX_INPUT_CHARS - reserve)
     else:
         payload, dropped = _fit_transcript(filtered_jsonl, reserve=reserve)
-        budget = max(0, _max_input_chars() - reserve)
+        budget = max(0, _DEFAULT_MAX_INPUT_CHARS - reserve)
     if dropped:
         logger.info(
             "Insights transcript over the %d-char budget; dropped %d oldest line(s)",
@@ -1927,7 +1755,7 @@ async def _call_text_model(
         return await native_sidecar.respond(
             _text_user_prompt(apple_body, context_block),
             instructions=_TEXT_MODE_SYSTEM_PROMPT,
-            timeout=_insights_timeout_s(),
+            timeout=_DEFAULT_TIMEOUT_S,
         )
     from ciao.providers.oneshot import run_oneshot
 
@@ -1935,7 +1763,7 @@ async def _call_text_model(
         _text_user_prompt(body, context_block),
         system_prompt=_TEXT_MODE_SYSTEM_PROMPT,
         model=model,
-        timeout_s=_insights_timeout_s(),
+        timeout_s=_DEFAULT_TIMEOUT_S,
         cwd=cwd,
         provider=provider,
     )
@@ -2008,7 +1836,7 @@ async def _call_model(
             "</transcript>\nNow extract durable signal using the required section "
             "schema. Return Markdown sections only; never return JSON or a recap.",
             instructions=_INSIGHTS_SYSTEM_PROMPT,
-            timeout=_insights_timeout_s(),
+            timeout=_DEFAULT_TIMEOUT_S,
         )
 
     from ciao.providers.oneshot import run_oneshot
@@ -2024,133 +1852,11 @@ async def _call_model(
     kwargs: dict[str, Any] = {
         "system_prompt": _INSIGHTS_SYSTEM_PROMPT,
         "model": model,
-        "timeout_s": _insights_timeout_s(),
+        "timeout_s": _DEFAULT_TIMEOUT_S,
     }
     if provider != "claude":
         kwargs.update({"provider": provider, "cwd": cwd})
     return await run_oneshot(user_prompt, **kwargs)
-
-
-async def _call_structured_model(
-    filtered_jsonl: str,
-    model: str,
-    *,
-    provider: str = "claude",
-    cwd: Path | None = None,
-    context_block: str = "",
-) -> str:
-    """Ask for fact candidate rows as JSON. Returns the raw, unparsed answer.
-
-    No Apple branch and no provider fan-out: `structured_unsupported_reason`
-    has already refused every runtime this contract is not offered to, so a
-    call that reaches here is one the allowlist admitted.
-    """
-    from ciao.providers.oneshot import run_oneshot
-
-    user_prompt = (
-        context_block
-        + "Below is a coding-agent session transcript as line-oriented JSON.\n"
-        "Each line is one message with a numeric `idx` you must cite.\n"
-        "Return the fact candidates as the JSON array the system prompt "
-        "specifies, and nothing else.\n\n"
-        f"{filtered_jsonl}"
-    )
-
-    kwargs: dict[str, Any] = {
-        "system_prompt": _STRUCTURED_SYSTEM_PROMPT,
-        "model": model,
-        "timeout_s": _insights_timeout_s(),
-    }
-    if provider != "claude":
-        kwargs.update({"provider": provider, "cwd": cwd})
-    return await run_oneshot(user_prompt, **kwargs)
-
-
-def _reviewable(candidate: fact_candidates.FactCandidate) -> fact_candidates.FactCandidate:
-    """Fold a row's parse error into the text a reviewer will actually read.
-
-    `candidates_from_structured` keeps the error on the record, but the record
-    is rendered to a Markdown bullet and the bullet is all the review queue and
-    the archive ever show. Without this the queue would carry a bare
-    "(unreadable candidate row 3)" with no way to tell what was wrong with it.
-    """
-    if not candidate.parse_error:
-        return candidate
-    reason = candidate.parse_error.strip()[:160]
-    return replace(candidate, text=f"{candidate.text} - unreadable structured row: {reason}")
-
-
-async def _run_structured_model_with_retry(
-    *,
-    filtered_jsonl: str,
-    model: str,
-    provider: str = "claude",
-    cwd: Path | None = None,
-    context_block: str = "",
-) -> tuple[str, str, list[str]]:
-    """Run structured extraction and render it back to the archive's shape.
-
-    Returns ``(insights_markdown, error, parse_errors)``. The Markdown is the
-    same ``## Session insights`` body the Markdown path produces, so nothing
-    downstream — the append, the project fold, the proposals router, the
-    evidence gate — has to know which mode produced it. What changes is that
-    the section is rendered from validated candidate records rather than
-    trusted as free text.
-
-    Three outcomes the caller has to keep apart:
-
-    * **Nothing to say.** An empty answer, or an explicit ``[]``, is "no
-      durable signal in this session" — exactly as in Markdown mode. It is not
-      an error and it saves nothing.
-    * **Readable, wholly or partly.** Rows that parse become candidates; rows
-      that do not come back as ``[review]`` bullets carrying their parse
-      error, so an unreadable row is queued for a human instead of dropped.
-      ``parse_errors`` reports them so the run row can say how many.
-    * **Unreadable as a whole.** A non-empty answer that is not a JSON array
-      of rows is an explicit failure, not an empty save: the stage fails and
-      stays retryable rather than settling as "this session had nothing".
-      Falling back to Markdown here would hide a provider that has started
-      returning prose from a contract it accepted.
-    """
-    reserve = len(context_block)
-    payload, dropped = _fit_transcript(filtered_jsonl, reserve=reserve)
-    if dropped:
-        logger.info(
-            "Structured insights transcript over the %d-char budget; "
-            "dropped %d oldest line(s)",
-            max(0, _max_input_chars() - reserve),
-            dropped,
-        )
-
-    async def call() -> str:
-        return await _call_structured_model(
-            payload, model, provider=provider, cwd=cwd, context_block=context_block
-        )
-
-    outcome = await call_with_retry(
-        call, label="Insights structured call", model=model
-    )
-    if outcome.error:
-        return "", outcome.error, []
-    if not outcome.output.strip():
-        return "", "", []
-
-    candidates, errors = fact_candidates.candidates_from_structured(outcome.output)
-    if not candidates:
-        if errors:
-            detail = "; ".join(errors[:3])
-            return (
-                "",
-                f"structured extraction returned no readable candidates: {detail}",
-                errors,
-            )
-        return "", "", []
-
-    body = fact_candidates.render_insights_markdown(
-        [_reviewable(candidate) for candidate in candidates],
-        sections=INSIGHTS_SECTIONS,
-    )
-    return body, "", errors
 
 
 UUID_RE = re.compile(
@@ -2166,16 +1872,120 @@ UUID_RE = re.compile(
 SESSION_ID_RE = re.compile(rf"{UUID_RE.pattern}|ses_[A-Za-z0-9]+")
 
 
+_CHECKED_LEDGER_NAME = "insights_checked.json"
+
+
+class _CheckedArchives:
+    """Archives a backfill already sent and found to hold no durable signal.
+
+    Such an archive never gets a ``## Session insights`` section, so without
+    this record every backfill (one runs on each server start) would pick it
+    again and pay the same model call for the same empty answer. Keyed by path
+    with the file's mtime: an archive that changes since it was checked is
+    checked again.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._dirty = False
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raw = {}
+        self._entries: dict[str, int] = {
+            str(k): int(v) for k, v in raw.items() if isinstance(v, int)
+        } if isinstance(raw, dict) else {}
+
+    @staticmethod
+    def _mtime(archive: Path) -> int | None:
+        try:
+            return archive.stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def is_checked(self, archive: Path) -> bool:
+        mtime = self._mtime(archive)
+        return mtime is not None and self._entries.get(str(archive)) == mtime
+
+    def mark(self, archive: Path) -> None:
+        mtime = self._mtime(archive)
+        if mtime is not None:
+            self._entries[str(archive)] = mtime
+            self._dirty = True
+
+    def save(self) -> None:
+        if not self._dirty:
+            return
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._entries, indent=1, sort_keys=True), encoding="utf-8")
+            tmp.replace(self._path)
+        except OSError:
+            logger.warning("Could not record checked archives in %s", self._path, exc_info=True)
+
+
+def _archive_path_key(path: Path, workspace_root: Path) -> Path:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = workspace_root / candidate
+    try:
+        return candidate.resolve()
+    except OSError:
+        return candidate.absolute()
+
+
+def _unfinished_archive_paths(
+    runtime_root: Path, workspace_root: Path, *, manual: bool = False
+) -> set[Path]:
+    from ciao.archive_jobs import PIPELINE_STAGES, RUNNING, list_jobs
+
+    claimed: set[Path] = set()
+    for job in list_jobs(runtime_root):
+        if not job.archive_path or job.tombstoned:
+            continue
+        if manual:
+            active = any(
+                job.status_of(name) == RUNNING for name in PIPELINE_STAGES
+            )
+            if not active and not job.resumable():
+                continue
+        elif not job.unfinished():
+            continue
+        claimed.add(_archive_path_key(Path(job.archive_path), workspace_root))
+    return claimed
+
+
+class BackfillCoordinator:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    def submit(
+        self, run: Callable[[], Awaitable[Any]]
+    ) -> asyncio.Task[None]:
+        async def _serialized() -> None:
+            async with self._lock:
+                await run()
+
+        task = asyncio.create_task(_serialized())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+
 def _empty_backfill_stats() -> dict[str, int]:
     return {
         "total_discovered": 0,
         "already_done": 0,
+        "deferred": 0,
         "eligible": 0,
         "to_process": 0,
         "processed": 0,
         "success": 0,
         "skipped": 0,
         "gated": 0,
+        "no_signal": 0,
         "errors": 0,
     }
 
@@ -2187,16 +1997,24 @@ def format_backfill_summary(stats: dict[str, int]) -> str:
     processed = stats.get("processed", 0)
     success = stats.get("success", 0)
     skipped = stats.get("skipped", 0)
+    deferred = stats.get("deferred", 0)
     errors = stats.get("errors", 0)
 
     if selected == 0:
         if total == 0:
             return "No archived chats found."
+        if deferred:
+            noun = "archive" if deferred == 1 else "archives"
+            return f"{deferred} {noun} deferred to active post-processing."
         return f"No archives needed backfill ({stats.get('already_done', 0)} already complete)."
 
     summary = f"Processed {processed}/{selected}: {success} succeeded, {skipped} skipped"
+    if deferred:
+        summary += f", {deferred} deferred"
     if stats.get("gated"):
         summary += f", {stats['gated']} gated (no durable signal)"
+    if stats.get("no_signal"):
+        summary += f", {stats['no_signal']} with no durable signal"
     if errors:
         summary += f", {errors} errors"
     return summary + "."
@@ -2287,6 +2105,8 @@ async def backfill_insights_task(
     concurrency: int = 2,
     workspace: str = "",
     model_override: str = "",
+    manual: bool = False,
+    force: bool = False,
     agent_root: Path | None = None,
     chat_workspaces: Mapping[str, str] | None = None,
 ) -> dict[str, int]:
@@ -2294,7 +2114,10 @@ async def backfill_insights_task(
 
     *model_override* runs this pass with an explicit model instead of the
     configured one, without changing the stored setting — the retry path when
-    the configured insights model keeps failing.
+    the configured insights model keeps failing. *manual* marks an explicit
+    operator run, which may recover blocked or attempt-exhausted manifests while
+    still yielding to live or automatically resumable work. *force* permits one
+    explicit manual run while automatic session insights are disabled.
 
     *chat_workspaces* maps chat id to workspace, and is required to scope a
     run with *workspace*: an archive's path names the chat that wrote it, not
@@ -2307,6 +2130,9 @@ async def backfill_insights_task(
     single root finds no blob for chats that ran anywhere else.
     """
     stats = _empty_backfill_stats()
+    manual = manual or force
+    if not getattr(config, "insights_enabled", True) and not force:
+        return stats
     # Archives live under the promoted logs root (see main.py:transcript_root),
     # which is <vault_root>/Logs before the re-rooting and <install>/Logs after
     # it. `config.logs_root` is the one place that distinction is made.
@@ -2330,6 +2156,8 @@ async def backfill_insights_task(
         if config.workspace_root not in search_roots:
             search_roots.append(config.workspace_root)
     project_dirs = [(r, _claude_projects_dir(r)) for r in search_roots]
+    runtime_root = Path(config.state_path).parent
+    _checked = _CheckedArchives(runtime_root / _CHECKED_LEDGER_NAME)
 
     by_chat = dict(chat_workspaces or {})
     if workspace and not by_chat:
@@ -2340,7 +2168,7 @@ async def backfill_insights_task(
         )
         workspace = ""
 
-    def _discover() -> tuple[list[tuple[Path, str, Path | None]], int, int]:
+    def _discover() -> tuple[list[tuple[Path, str, Path | None]], int, int, int]:
         """Walk the archive tree and decide what needs backfilling.
 
         Runs off the loop: this globs the whole archive directory and reads
@@ -2351,12 +2179,16 @@ async def backfill_insights_task(
         event loop, where it would stall every request for its duration.
         """
         found: list[tuple[Path, str, Path | None]] = []
+        claimed = _unfinished_archive_paths(
+            runtime_root, config.workspace_root, manual=manual
+        )
         # Sorted for a deterministic order (oldest first / alphabetic).
         # All providers (claude and opencode) — the previous
         # `*/claude/*.md` made opencode transcripts invisible to
         # backfill and to the scheduled insights run.
         archives = sorted(base.glob("*/*/*.md"))
         done = 0
+        deferred = 0
         for md in archives:
             # Cheap filters first. _has_insights_section reads the whole file,
             # so a workspace-scoped run must not pay for every archive in the
@@ -2372,6 +2204,15 @@ async def backfill_insights_task(
             if _has_insights_section(md):
                 done += 1
                 continue
+            if _checked.is_checked(md):
+                # Already sent once and found to hold nothing worth keeping;
+                # sending it again would cost the same call for the same answer.
+                done += 1
+                continue
+
+            if _archive_path_key(md, config.workspace_root) in claimed:
+                deferred += 1
+                continue
 
             jsonl_root = next(
                 (r for r, d in project_dirs if (d / f"{session_id}.jsonl").exists()),
@@ -2383,20 +2224,21 @@ async def backfill_insights_task(
                 found.append((md, session_id, jsonl_root))
             elif jsonl_root is None and mode in {"both", "text"}:
                 found.append((md, session_id, None))
-        return found, len(archives), done
+        return found, len(archives), done, deferred
 
     if not base.exists():
         logger.info("Vault directory %s does not exist, skipping backfill", base)
         return stats
 
-    todo, discovered, already_done = await asyncio.to_thread(_discover)
+    todo, discovered, already_done, deferred = await asyncio.to_thread(_discover)
     stats["total_discovered"] = discovered
     stats["already_done"] = already_done
+    stats["deferred"] = deferred
 
     stats["eligible"] = len(todo)
     if limit > 0:
         todo = todo[:limit]
-    elif len(todo) > _backfill_ceiling():
+    elif len(todo) > _BACKFILL_MAX:
         # limit=0 means "no caller-supplied limit", which is what the startup
         # job and the Settings button both pass. Until the archive path was
         # fixed this function found nothing, so nobody had run it against a
@@ -2404,12 +2246,12 @@ async def backfill_insights_task(
         # workspace that is hours of runtime and a large bill. Cap it, and
         # record the cap in the stats so the job report says how many were
         # left rather than implying it processed everything.
-        ceiling = _backfill_ceiling()
+        ceiling = _BACKFILL_MAX
         stats["capped_at"] = ceiling
         stats["remaining_after_cap"] = len(todo) - ceiling
         logger.info(
             "Backfill capped at %d of %d eligible archives "
-            "(raise CIAO_INSIGHTS_BACKFILL_MAX, or pass an explicit limit, to change)",
+            "(pass an explicit limit to change)",
             ceiling,
             len(todo),
         )
@@ -2444,13 +2286,41 @@ async def backfill_insights_task(
     ) -> str:
         async with sem:
             try:
-                insights_model = model_override or resolve_insights_model(config)
+                if _archive_path_key(archive_path, config.workspace_root) in (
+                    _unfinished_archive_paths(
+                        runtime_root, config.workspace_root, manual=manual
+                    )
+                ):
+                    return "deferred"
+                from ciao import provider_registry
+
+                chat_id = archive_path.parent.parent.name
+                archive_workspace = by_chat.get(chat_id, "")
+                provider = archive_path.parent.name
+                if not provider_registry.is_provider(provider):
+                    logger.warning(
+                        "Backfill skipped unknown archive provider %r in %s",
+                        provider,
+                        archive_path,
+                    )
+                    return "error"
+                provider_insights_models = (
+                    getattr(config, "provider_insights_models", {}) or {}
+                )
+                insights_model = (
+                    model_override
+                    or provider_insights_models.get(provider, "")
+                    or resolve_insights_model(
+                        config, archive_workspace or None, provider
+                    )
+                )
                 if jsonl_root is not None:
                     filtered = filter_session_jsonl(
                         config.workspace_root, session_id, agent_root=jsonl_root
                     )
                     if not filtered:
                         logger.warning("Session JSONL empty or filtered to nothing for %s", archive_path)
+                        _checked.mark(archive_path)
                         return "skipped"
                     if await _apple_prefilter_skips(
                         filtered,
@@ -2462,8 +2332,9 @@ async def backfill_insights_task(
                             "On-device prefilter found no durable signal in %s; skipping extraction",
                             archive_path.name,
                         )
+                        _checked.mark(archive_path)
                         return "gated"
-                    await extract_and_append(
+                    job = await extract_and_append(
                         archive_path=archive_path,
                         filtered_jsonl=filtered,
                         config=config,
@@ -2472,18 +2343,27 @@ async def backfill_insights_task(
                         workspace_root=config.workspace_root,
                         vault_root=config.vault_root,
                         proposal_vault_root=(
-                            config.workspace_vault_root(workspace)
-                            if workspace and config.workspace(workspace) is not None
+                            config.workspace_vault_root(archive_workspace)
+                            if archive_workspace
+                            and config.workspace(archive_workspace) is not None
                             else None
                         ),
                         guide_path=(
-                            guide_path(config.agent_root(workspace))
-                            if workspace and config.workspace(workspace) is not None
+                            guide_path(config.agent_root(archive_workspace))
+                            if archive_workspace
+                            and config.workspace(archive_workspace) is not None
                             else None
                         ),
                         trajectories_enabled=getattr(config, "trajectories_enabled", True),
+                        provider=provider,
+                        force=force,
                     )
                     if not _has_insights_section(archive_path):
+                        from ciao.archive_jobs import SKIPPED
+
+                        if job.status_of("insights") == SKIPPED:
+                            _checked.mark(archive_path)
+                            return "no_signal"
                         return "error"
                     logger.info("Backfilled [full] insights for %s", archive_path.name)
                     return "success"
@@ -2496,7 +2376,7 @@ async def backfill_insights_task(
                         f"{body}"
                     )
                     effective_model, text_provider, note = _resolve_insights_call(
-                        config, insights_model
+                        config, insights_model, provider=provider
                     )
 
                     async def run_text_extract():
@@ -2519,14 +2399,14 @@ async def backfill_insights_task(
                             return await native_sidecar.respond(
                                 apple_prompt,
                                 instructions=_TEXT_MODE_SYSTEM_PROMPT,
-                                timeout=_insights_timeout_s(),
+                                timeout=_DEFAULT_TIMEOUT_S,
                             )
                         from ciao.providers.oneshot import run_oneshot
                         return await run_oneshot(
                             user_prompt,
                             system_prompt=_TEXT_MODE_SYSTEM_PROMPT,
                             model=effective_model,
-                            timeout_s=_insights_timeout_s(),
+                            timeout_s=_DEFAULT_TIMEOUT_S,
                             cwd=config.workspace_root,
                             provider=text_provider,
                         )
@@ -2559,6 +2439,10 @@ async def backfill_insights_task(
                         _append_section(archive_path, output)
                         logger.info("Backfilled [text] insights for %s", archive_path.name)
                         return "success"
+                    if not outcome.error:
+                        # The model answered, with nothing to extract.
+                        _checked.mark(archive_path)
+                        return "no_signal"
                     return "error"
             except Exception:
                 logger.exception("Failed backfilling insights for %s", archive_path)
@@ -2574,7 +2458,12 @@ async def backfill_insights_task(
             stats["skipped"] += 1
         elif result == "gated":
             stats["gated"] += 1
+        elif result == "no_signal":
+            stats["no_signal"] += 1
+        elif result == "deferred":
+            stats["deferred"] += 1
         else:
             stats["errors"] += 1
+    _checked.save()
     logger.info("Backfill task completed.")
     return stats

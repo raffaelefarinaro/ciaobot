@@ -61,12 +61,10 @@ def test_safe_request_does_not_require_origin() -> None:
     assert resp.status_code == 200
 
 
-def _origin_req(headers: dict[str, str], allowed: tuple[str, ...] = ()) -> object:
-    cfg = SimpleNamespace(pwa_allowed_origins=allowed)
+def _origin_req(headers: dict[str, str]) -> object:
     return SimpleNamespace(
         headers={k.lower(): v for k, v in headers.items()},
         url=SimpleNamespace(hostname=None, port=None),
-        app=SimpleNamespace(state=SimpleNamespace(config=cfg)),
     )
 
 
@@ -93,14 +91,6 @@ def test_same_origin_accepts_proxy_forwarded_host() -> None:
     assert _same_origin(req, "https://app.example") is True
     # A genuine cross-origin still fails even with the forwarded host present.
     assert _same_origin(req, "https://evil.example") is False
-
-
-def test_same_origin_accepts_configured_allowlist() -> None:
-    from ciao.web.auth import _same_origin
-
-    req = _origin_req({"host": "localhost"}, allowed=("app.example",))
-    assert _same_origin(req, "https://app.example") is True
-    assert _same_origin(req, "https://other.example") is False
 
 
 def _auth_client() -> TestClient:

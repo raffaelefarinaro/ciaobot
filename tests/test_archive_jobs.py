@@ -37,7 +37,7 @@ INSIGHTS_STAMP = "<!-- ciao:session-insights -->"
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
 
-def _config(tmp_path: Path, *, insights_enabled: bool = True) -> CiaoConfig:
+def _config(tmp_path: Path) -> CiaoConfig:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     return CiaoConfig(
@@ -45,12 +45,11 @@ def _config(tmp_path: Path, *, insights_enabled: bool = True) -> CiaoConfig:
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
-        insights_enabled=insights_enabled,
     )
 
 
-def _manager(tmp_path: Path, *, insights_enabled: bool = True) -> ProjectChatManager:
-    config = _config(tmp_path, insights_enabled=insights_enabled)
+def _manager(tmp_path: Path) -> ProjectChatManager:
+    config = _config(tmp_path)
     runtime = config.state_path.parent
     return ProjectChatManager(
         config,
@@ -790,40 +789,81 @@ def test_proposals_empty_archive_is_still_success(tmp_path: Path) -> None:
     assert job.status_of("memory_proposals") == aj.SUCCEEDED
 
 
-def test_insights_disabled_settles_both_dependent_stages_skipped(
-    tmp_path: Path,
+def test_live_archive_does_not_plan_insights_while_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With extraction disabled, the fold and proposals are not left pending.
-
-    They were intentionally never planned (there is no insights text to consume);
-    leaving them pending made the manifest read `incomplete` and offered a retry
-    for stages that can never run for this chat.
-    """
-    archive = _archive(tmp_path)
-    manager = _manager(tmp_path, insights_enabled=False)
+    manager = _manager(tmp_path)
+    manager._config.insights_enabled = False
+    manager._config.trajectories_enabled = False
     project = manager.create_project("Work", workspace="work")
-    chat = manager.create_chat(project.project_id, title="A chat")
+    chat = manager.create_chat(project.project_id, title="A private chat")
+    archive = _archive(tmp_path)
     chat.archived = True
     chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
 
-    async def drive() -> object:
-        manager.run_archive_postprocess(
-            chat.chat_id,
-            ArchiveOutcome(
-                path=archive, session_id="sess-1", turn_count=1,
-                filtered_jsonl="line",
-            ),
-            chat,
-            project,
+    async def fail_call(*args: object, **kwargs: object) -> str:
+        raise AssertionError("disabled live insights must not call the model")
+
+    monkeypatch.setattr(insights, "_call_model", fail_call)
+    manager.run_archive_postprocess(
+        chat.chat_id,
+        ArchiveOutcome(archive, "sess-private", 1, '{"idx":1}'),
+        chat,
+        project,
+    )
+
+    job = aj.load_job(
+        manager._runtime_root,
+        aj.new_job_id(chat.chat_id, chat.archive_path),
+    )
+    assert job is None
+    assert "## Session insights" not in archive.read_text(encoding="utf-8")
+
+
+def test_forced_pipeline_runs_while_insights_are_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    config.insights_enabled = False
+    archive = _archive(tmp_path)
+
+    async def fake_call(*args: object, **kwargs: object) -> str:
+        return "## Decisions\n- explicit request\n"
+
+    monkeypatch.setattr(insights, "_call_model", fake_call)
+    asyncio.run(
+        insights.extract_and_append(
+            archive_path=archive,
+            filtered_jsonl='{"role":"user","content":"Remember this"}',
+            config=config,
+            model="haiku",
+            trajectories_enabled=False,
+            memory_proposals_enabled=False,
+            force=True,
         )
-        await asyncio.sleep(0)
-        return manager._archive_jobs[chat.chat_id]
+    )
 
-    job = asyncio.run(drive())
-    assert job.status_of("insights") == aj.SKIPPED
-    assert job.status_of("project_doc_update") == aj.SKIPPED
-    assert job.status_of("memory_proposals") == aj.SKIPPED
+    assert "## Decisions\n- explicit request" in archive.read_text(encoding="utf-8")
 
+
+def test_disabled_insights_leaves_model_stages_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    config.insights_enabled = False
+    archive = _archive(tmp_path)
+    job = _job(tmp_path, archive)
+    inputs = _job_inputs(tmp_path, archive, config=config)
+
+    async def fail_call(*args: object, **kwargs: object) -> str:
+        raise AssertionError("disabled insights must not call the model")
+
+    monkeypatch.setattr(insights, "_call_text_model", fail_call)
+    asyncio.run(insights.run_archive_pipeline(job, inputs))
+
+    assert job.status_of("insights") == aj.PENDING
+    assert "## Session insights" not in archive.read_text(encoding="utf-8")
 
 
 # ── Idempotency: no duplicates on retry ───────────────────────────────────
@@ -1202,6 +1242,59 @@ def test_startup_resume_resets_an_interrupted_final_attempt(tmp_path: Path) -> N
     reloaded.reset_failed(include_blocked=True)
     assert reloaded.stage("insights").attempts == 0
     assert "insights" in reloaded.resumable()
+
+
+def test_startup_resume_defers_insights_while_disabled(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    manager._config.insights_enabled = False
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+    inputs = _job_inputs(tmp_path, archive, chat_id=chat.chat_id)
+    job = manager._new_job_for_chat(chat, inputs)
+    job.mark("trajectory", aj.SKIPPED, "not configured")
+    job.save()
+
+    started = asyncio.run(manager.resume_interrupted_jobs(max_concurrency=1))
+
+    assert started == 0
+    reloaded = aj.load_job(manager._runtime_root, job.job_id)
+    assert reloaded is not None
+    assert reloaded.status_of("insights") == aj.PENDING
+    assert "## Session insights" not in archive.read_text(encoding="utf-8")
+
+
+def test_startup_resume_defers_trajectory_capture_while_disabled(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+    manager._config.trajectories_enabled = False
+    project = manager.create_project("Work", workspace="work")
+    chat = manager.create_chat(project.project_id, title="A chat")
+    archive = _archive(tmp_path)
+    chat.archived = True
+    chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        chat_id=chat.chat_id,
+        trajectories_enabled=True,
+    )
+    job = manager._new_job_for_chat(chat, inputs)
+    for stage in ("insights", "project_doc_update", "memory_proposals"):
+        job.mark(stage, aj.SKIPPED, "not under test")
+    job.save()
+
+    started = asyncio.run(manager.resume_interrupted_jobs(max_concurrency=1))
+
+    assert started == 0
+    reloaded = aj.load_job(manager._runtime_root, job.job_id)
+    assert reloaded is not None
+    assert reloaded.status_of("trajectory") == aj.PENDING
 
 
 def test_startup_resume_blocks_a_missing_archive(tmp_path: Path) -> None:

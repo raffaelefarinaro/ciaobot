@@ -57,7 +57,7 @@ The screenshot shows the selected **workspace** at the top of the sidebar, the *
 
 Memory is stored as ordinary Markdown in your workspace. You can read it in Ciaobot, Obsidian, a text editor, Claude Code, opencode, or any other tool that works with files.
 
-When you archive a conversation, Ciaobot extracts decisions, useful learnings, and other durable facts. Confident facts are filed automatically; uncertain ones become proposals for you to review. This lets your second brain grow from the work you actually do without making the vault a proprietary database.
+When you archive a conversation, Ciaobot extracts decisions, useful learnings, and other durable facts. Confident facts are filed automatically; uncertain ones become proposals for you to review. Turn **Automatic session insights** off in Settings → Automations to stop model processing for new and archived chats, or turn off **Automatic trajectory capture** to stop structured trajectory records; explicit run actions remain available for one-time requests. This lets your second brain grow from the work you actually do without making the vault a proprietary database.
 
 If you want to understand the extraction and memory pipeline in detail, point your agent to [`docs/MEMORY_DESIGN.md`](https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/MEMORY_DESIGN.md) and ask it to explain the relevant parts.
 

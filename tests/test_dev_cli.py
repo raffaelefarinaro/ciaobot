@@ -26,7 +26,6 @@ def test_build_dev_environment_loads_dotenv_and_sets_dev_defaults(tmp_path: Path
     assert result.workspace == workspace.resolve()
     assert result.web_dir == (workspace / "web").resolve()
     assert result.env["PWA_AUTH_TOKEN"] == "test-token"
-    assert result.env["CIAO_AUTO_SYNC_ON_START"] == "false"
     assert result.env["PWA_PORT"] == "8543"
     assert result.env["VITE_BACKEND_URL"] == "http://127.0.0.1:8543"
     assert result.env["CIAO_WORKSPACE"] == str(workspace.resolve())

@@ -244,7 +244,7 @@ def _rewrite_queue_single(
             source="pwa",
             workspace=workspace,
             vault_root=vault_root,
-        ) as _receipt:
+        ):
             queue_after = "\n".join(lines).rstrip() + "\n"
             write_queue_atomically(queue, queue_after)
     return True
@@ -960,11 +960,7 @@ async def _promote_region_row(
 
     def _usage() -> dict[str, Any]:
         try:
-            status = memory_status(
-                guide,
-                memory_char_limit=int(getattr(config, "memory_char_limit", 3000)),
-                user_char_limit=int(getattr(config, "user_char_limit", 1375)),
-            )
+            status = memory_status(guide)
         except Exception:  # noqa: BLE001 — usage is advisory reporting only
             return {}
         if not isinstance(status, dict):
@@ -1229,7 +1225,6 @@ def _region_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
     from ciao.memory_proposals import _promotable_text
     from ciao.memory_receipts import content_revision
     from ciao.memory_tool import (
-        ensure_regions,
         read_region,
         resolve_region as _resolve,
         serialize_entries,

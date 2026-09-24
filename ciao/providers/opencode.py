@@ -245,17 +245,7 @@ def opencode_default_model(config: object) -> str:
 
 
 def resolve_opencode_binary(env: Mapping[str, str] | None = None) -> str | None:
-    """Absolute path to the opencode CLI, or None when it is not installed.
-
-    ``env`` is an *overlay* of per-request overrides, not a whole environment:
-    ``_ensure_server`` passes ``AgentRequest.extra_env``, which is built from
-    workspace settings and never carries ``CIAO_OPENCODE_BIN``. Reading the
-    overlay *instead of* the process environment therefore silently ignored an
-    exported ``CIAO_OPENCODE_BIN`` on every chat turn — even though the
-    not-installed error tells the operator to set exactly that variable. Layer
-    the overlay on top of ``os.environ`` so the override works from either
-    side, with the per-request value still winning.
-    """
+    """Absolute path to the opencode CLI, or None when it is not installed."""
     source: Mapping[str, str] = {**os.environ, **env} if env else os.environ
     explicit = str(source.get("CIAO_OPENCODE_BIN", "")).strip()
     if explicit:
@@ -904,10 +894,11 @@ class OpencodeProvider(BaseSDKProvider):
                 return self._client
             await self.disconnect()
 
-        binary = resolve_opencode_binary(request.extra_env or None)
+        binary = resolve_opencode_binary(request.extra_env)
         if not binary:
             raise FileNotFoundError(
-                "opencode CLI not found. Install it, or set CIAO_OPENCODE_BIN."
+                "opencode CLI not found. Install it, make sure it is on your login shell PATH, "
+                "or set CIAO_OPENCODE_BIN."
             )
 
         lock = _server_start_lock(self.workspace_root)
@@ -2403,15 +2394,13 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def opencode_login_status(
-    env: Mapping[str, str] | None = None, *, timeout: float = 5.0
-) -> dict[str, Any]:
+def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
     """Bounded, credential-free opencode install/auth status for Settings."""
     import subprocess
 
     from ciao.setup_status import _provider
 
-    binary = resolve_opencode_binary(env)
+    binary = resolve_opencode_binary()
     if not binary:
         return _provider(
             name="opencode",

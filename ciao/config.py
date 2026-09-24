@@ -65,6 +65,7 @@ _REROOTED_CACHE: dict[str, bool] = {}
 # Runtime-root file recording that the retired ``CIAO_WORKSPACES`` variable
 # was imported into ``workspaces.json``. Its presence makes the import one-shot.
 LEGACY_WORKSPACES_IMPORT_MARKER = "workspaces-env-imported.json"
+LEGACY_GWS_PROFILE_IMPORT_MARKER = "gws-profile-env-imported.json"
 
 # Keys ``from_env`` has injected into ``os.environ`` from a workspace ``.env``.
 #
@@ -362,9 +363,7 @@ def _looks_like_workspace_dir(path: Path) -> bool:
         return False
 
 
-def _bootstrap_registry(
-    vault_root: Path | None = None, *, gws_default_profile: str = "personal"
-) -> dict[str, WorkspaceConfig]:
+def _bootstrap_registry(vault_root: Path | None = None) -> dict[str, WorkspaceConfig]:
     """The registry an install gets before it has one, read off the vault.
 
     This is the bootstrap default, not a fallback — nothing else seeds a registry
@@ -402,7 +401,7 @@ def _bootstrap_registry(
         )
     if not names:
         names = ["personal"]
-    profile = gws_default_profile or "personal"
+    profile = GWS_DEFAULT_PROFILE
     return {
         name: WorkspaceConfig(
             name=name,
@@ -459,6 +458,21 @@ def _read_or_create_secret(path: Path) -> str:
     return token
 
 
+# The exit code that asks `scripts/run-ciao.sh` (and `ciao run`) to restart in
+# place. Fixed: the shell loop hardcodes the same number.
+RESTART_EXIT_CODE = 75
+
+# Google account a workspace falls back to when it links none.
+GWS_DEFAULT_PROFILE = "personal"
+
+# Upload size caps for chat attachments.
+MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
+MAX_VOICE_SIZE_BYTES = 25 * 1024 * 1024
+
+# Anthropic model aliases offered in the picker; the first is the default.
+CLAUDE_MODELS = ("opus", "sonnet", "haiku", "fable")
+
+
 @dataclass(slots=True)
 class CiaoConfig:
     """Environment-backed configuration."""
@@ -470,12 +484,6 @@ class CiaoConfig:
     # Real installs get this from ``from_env``, which defaults it to True (see
     # there); the field default only covers configs built directly in code.
     pwa_auth_required: bool = False
-    # Extra origins accepted for state-changing HTTP + WebSocket handshakes when
-    # the app is reached under a host it doesn't bind to (reverse proxy / tunnel
-    # / host alias). Bare hostnames or full origins; from CIAO_ALLOWED_ORIGINS.
-    # A proxy-supplied X-Forwarded-Host is honored too (browsers can't forge it
-    # on a handshake, so it's safe against cross-site WS hijacking).
-    pwa_allowed_origins: tuple[str, ...] = ()
     dev_mode: bool = False
     # Path to the Ciaobot source checkout for developer-only deploy/restart
     # workflows. Packaged apps update the app bundle atomically instead. From
@@ -484,18 +492,11 @@ class CiaoConfig:
     vault_mode: str = "scratch"
     bootstrap_mode: bool = False
     vault_root: Path = Path("memory-vault")
-    max_image_size_bytes: int = 10 * 1024 * 1024
-    max_voice_size_bytes: int = 25 * 1024 * 1024
-    # BCP-47 language for the on-device voice engines. Dictation needs a
-    # matching language installed in System Settings → Keyboard → Dictation;
-    # the synthesizer uses it to choose a voice.
-    transcription_locale: str = "en-US"
     # macOS voice identifier or name for read-aloud. Empty means "the best
-    # installed voice for transcription_locale" -- the right default when the
+    # installed voice for the Mac's language (ciao.voice.system_locale)" -- the right default when the
     # available voices differ on every machine.
     tts_local_voice: str = ""
-    claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku", "fable"])
-    claude_default_model: str = "opus"
+    claude_default_model: str = CLAUDE_MODELS[0]
     # Per-workspace default models and tool denylists live on the WorkspaceConfig
     # in this registry, set through `workspaces.json`. The former top-level
     # `*_personal` / `*_work` pairs are gone: they existed only to furnish the
@@ -508,6 +509,9 @@ class CiaoConfig:
     # still sets it. Never used as a workspace source; server startup imports
     # it into ``.runtime/workspaces.json`` once and then ignores it.
     legacy_workspaces_env: str = field(default="", repr=False)
+    legacy_gws_profile: str = field(default="", repr=False)
+    legacy_insights_disabled: bool | None = field(default=None, repr=False)
+    legacy_trajectories_disabled: bool | None = field(default=None, repr=False)
     claude_mode: BridgeMode = "auto"
     # Per-provider default execution (permission) mode for new chats, set from
     # the PWA Settings → Models & providers tab (runtime settings store). A missing
@@ -523,61 +527,35 @@ class CiaoConfig:
     # Per-provider session-insights model, set from the PWA Settings → Models
     # tab. A missing entry uses the provider's balanced default.
     provider_insights_models: dict[str, str] = field(default_factory=dict)
-    restart_exit_code: int = 75
-    # Secure by default: only an explicit affirmative value (``true``/``1``/
-    # ``yes``/``on``) runs ``git pull --rebase`` on boot; unset, blank, or
-    # unrecognized values stay disabled. This must stay equal to the
-    # ``CIAO_AUTO_SYNC_ON_START`` fallback in ``from_env`` below.
-    auto_sync_on_start: bool = False
-    auto_vault_index: bool = True
     pwa_port: int = 8443
     # The server binds all interfaces by default so the PWA is reachable over
     # LAN and Tailscale; the dashboard password + login rate limit are the
     # access control. Set ``PWA_HOST=127.0.0.1`` in ``.env`` for loopback-only.
     # This must stay equal to the ``PWA_HOST`` fallback in ``from_env`` below.
     pwa_host: str = "0.0.0.0"
-    gws_default_profile: str = "personal"
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab. Empty means the provider's own default applies.
     opencode: OpencodeSettings = field(default_factory=OpencodeSettings)
-    # Post-archive insights extraction: when a chat is archived, run the raw
-    # Claude Code session JSONL through a fast cheap model and append a
-    # `## Session insights` section to the archived markdown.
-    insights_enabled: bool = True
     # Fallback when session insights run without workspace context (e.g.
     # ``scripts/backfill_insights.py``). Live archives use
     # :func:`ciao.insights.resolve_insights_model` instead.
     insights_model: str = "sonnet"
+    insights_enabled: bool = True
     # Operator override for the insights model, set from the PWA Settings →
-    # Models tab (runtime settings store) or ``CIAO_INSIGHTS_MODEL``.
+    # Models tab (runtime settings store).
     # Empty = automatic routing: the workspace's sonnet-tier model.
     insights_model_override: str = ""
-    # Asynchronously backfill missing insights on server startup.
-    # Enable with ``CIAO_INSIGHTS_BACKFILL_ON_STARTUP=1``.
-    insights_backfill_on_startup: bool = False
-    # Ask the extraction model for fact candidate v1 rows as JSON instead of
-    # Markdown, and render the archive's `## Session insights` section from the
-    # parsed records. Opt-in (``CIAO_INSIGHTS_STRUCTURED=1``) and additionally
-    # gated on the runtime: a provider that cannot hold the contract falls back
-    # to the Markdown path rather than failing the archive
-    # (``ciao.insights.structured_unsupported_reason``).
-    insights_structured: bool = False
     # Trajectory capture: when a chat is archived, also write a structured
     # JSON record of skills loaded, tools used, errors, decisions, and the
     # outcome to ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``. The
-    # weekly ``ciao.skill_evolution`` pass mines this directory.
-    # Disable with ``CIAO_TRAJECTORIES_DISABLED=1``.
+    # weekly ``ciao.skill_evolution`` pass mines this directory. The operator
+    # setting is persisted by AppSettingsStore and migrated from the retired
+    # CIAO_TRAJECTORIES_DISABLED value.
     trajectories_enabled: bool = True
 
     # Comma-separated list of models for the adversarial_review MCP tool.
     # Empty string defaults to the script's built-in panel.
     critique_models: str = ""
-    # Advisory caps for the ``ciao:memory`` / ``ciao:profile`` regions in
-    # the workspace CLAUDE.md. Loaded natively by each provider's guide
-    # loader at session start; edited with Edit on the guide.
-    # See ``ciao/memory_tool.py``.
-    memory_char_limit: int = 3000
-    user_char_limit: int = 1375
 
     def __post_init__(self) -> None:
         self.workspace_root = Path(self.workspace_root).expanduser().resolve()
@@ -588,10 +566,7 @@ class CiaoConfig:
             vault_root = self.workspace_root / vault_root
         self.vault_root = vault_root.resolve()
         if not self.workspaces:
-            self.workspaces = _bootstrap_registry(
-                self.vault_root,
-                gws_default_profile=self.gws_default_profile,
-            )
+            self.workspaces = _bootstrap_registry(self.vault_root)
         self._workspace_registry_changed = self._normalize_workspace_vault_roots()
         # Migrate pre-existing workspaces onto the allowlist now, so deny
         # resolution never sees a ``None`` allowlist on a workspace that existed
@@ -787,8 +762,11 @@ class CiaoConfig:
 
         One target before the re-rooting — the install root itself, unnamed,
         because that is where the single set of provider assets lives. One per
-        workspace afterwards, because each root then owns its own ``CLAUDE.md``,
-        ``.claude/``, ``skills/`` and mirrors.
+        workspace afterwards, because each root then owns its own ``AGENTS.md``,
+        ``.claude/``, ``skills/`` and mirrors. The install root is intentionally
+        absent after that transition: ``workspace_reroot`` moves the shared
+        guide into the primary root, and a root-level guide is no longer an
+        agent asset to rename or sync.
 
         The seam for anything inspecting or listing agent assets. Reading
         ``workspace_root`` directly still finds the install root's stale
@@ -1147,6 +1125,76 @@ class CiaoConfig:
             registry_path,
         )
         return list(imported)
+
+    def import_legacy_gws_profile_env(self) -> list[str]:
+        profile = self.legacy_gws_profile.strip()
+        if not profile:
+            return []
+        runtime_root = self.state_path.parent
+        marker = runtime_root / LEGACY_GWS_PROFILE_IMPORT_MARKER
+        if marker.exists():
+            return []
+        registry_path = runtime_root / "workspaces.json"
+        if not registry_path.is_file():
+            return []
+        try:
+            entries = json.loads(registry_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return []
+        if not isinstance(entries, list) or not entries:
+            return []
+        from ciao.gws_auth import known_profiles
+
+        try:
+            if profile not in set(known_profiles(self)):
+                return []
+        except Exception:
+            return []
+        imported: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("gws_profile", "") or "").strip():
+                continue
+            name = str(entry.get("name", "") or "").strip()
+            workspace = self.workspaces.get(name)
+            if workspace is None or workspace.gws_profile.strip():
+                continue
+            entry["gws_profile"] = profile
+            imported.append(name)
+        if imported:
+            tmp = registry_path.with_suffix(".json.tmp")
+            try:
+                tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+                tmp.replace(registry_path)
+            except OSError:
+                logger.warning("Could not migrate the legacy GWS profile", exc_info=True)
+                return []
+            for name in imported:
+                self.workspaces[name].gws_profile = profile
+        try:
+            marker.write_text(
+                json.dumps(
+                    {
+                        "imported_at": datetime.now(UTC).isoformat(),
+                        "profile": profile,
+                        "workspaces": imported,
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            logger.warning("Could not record the legacy GWS profile migration", exc_info=True)
+        if imported:
+            logger.warning(
+                "GWS_PROFILE is no longer read; migrated %s to account %r once. "
+                "Google accounts are managed in Settings; remove GWS_PROFILE from .env.",
+                ", ".join(imported),
+                profile,
+            )
+        return imported
 
     def default_model_for_workspace(
         self, workspace: str | None, provider: str | None = None
@@ -1572,12 +1620,6 @@ class CiaoConfig:
                 if not _workspace_env(source):
                     source["CIAO_WORKSPACE"] = discovered_workspace
 
-        pwa_allowed_origins = tuple(
-            o.strip()
-            for o in source.get("CIAO_ALLOWED_ORIGINS", "").split(",")
-            if o.strip()
-        )
-
         pwa_auth_token = source.get("PWA_AUTH_TOKEN", "").strip()
         pwa_auth_required_raw = source.get("PWA_AUTH_REQUIRED", "").strip().lower()
         if pwa_auth_required_raw:
@@ -1646,13 +1688,7 @@ class CiaoConfig:
         except OSError:
             workspaces_json = ""
 
-        claude_models = _split_csv(source.get("CLAUDE_MODELS", "opus,sonnet,haiku,fable"))
-        claude_default_model = claude_models[0] if claude_models else "opus"
-        gws_default_profile = source.get("GWS_PROFILE", "personal").strip() or "personal"
-        workspaces = _parse_workspaces_json(workspaces_json) or _bootstrap_registry(
-            vault_root,
-            gws_default_profile=gws_default_profile,
-        )
+        workspaces = _parse_workspaces_json(workspaces_json) or _bootstrap_registry(vault_root)
 
         dev_mode_raw = source.get("CIAO_DEV_MODE", "").strip().lower()
         dev_mode = dev_mode_raw in {"true", "1", "yes", "y"}
@@ -1664,68 +1700,42 @@ class CiaoConfig:
         if vault_mode not in {"existing", "scratch"}:
             vault_mode = "scratch"
 
+        legacy_insights_raw = str(
+            source.get("CIAO_INSIGHTS_DISABLED", "") or ""
+        ).strip().lower()
+        legacy_insights_disabled = (
+            None
+            if not legacy_insights_raw
+            else legacy_insights_raw not in {"0", "false", "no", "off"}
+        )
+        legacy_trajectories_raw = str(
+            source.get("CIAO_TRAJECTORIES_DISABLED", "") or ""
+        ).strip().lower()
+        legacy_trajectories_disabled = (
+            None
+            if not legacy_trajectories_raw
+            else legacy_trajectories_raw not in {"0", "false", "no", "off"}
+        )
+
         return cls(
             pwa_auth_token=pwa_auth_token,
             workspace_root=workspace_root,
             state_path=state_path,
             media_root=media_root,
             pwa_auth_required=pwa_auth_required,
-            pwa_allowed_origins=pwa_allowed_origins,
             dev_mode=dev_mode,
             app_repo=app_repo,
             vault_mode=vault_mode,
             bootstrap_mode=bootstrap_mode,
             vault_root=vault_root,
-            max_image_size_bytes=int(
-                source.get("CIAO_MAX_IMAGE_BYTES", str(10 * 1024 * 1024))
-            ),
-            max_voice_size_bytes=int(
-                source.get("CIAO_MAX_VOICE_BYTES", str(25 * 1024 * 1024))
-            ),
-            transcription_locale=source.get("CIAO_TRANSCRIPTION_LOCALE", "").strip()
-            or "en-US",
-            tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip(),
-            claude_models=list(claude_models or ["opus", "sonnet", "haiku", "fable"]),
-            claude_default_model=claude_default_model,
             claude_mode="auto",
-            restart_exit_code=int(
-                source.get("CIAO_RESTART_EXIT_CODE", "75")
-            ),
-            auto_sync_on_start=source.get("CIAO_AUTO_SYNC_ON_START", "")
-            .strip()
-            .lower()
-            in {"true", "1", "yes", "y", "on"},
-            auto_vault_index=source.get("CIAO_AUTO_VAULT_INDEX", "true").strip().lower()
-            not in {"0", "false", "no", "off"},
             pwa_port=int(source.get("PWA_PORT", "8443")),
             pwa_host=(source.get("PWA_HOST") or "0.0.0.0").strip() or "0.0.0.0",
-            gws_default_profile=gws_default_profile,
             workspaces=workspaces,
             legacy_workspaces_env=str(source.get("CIAO_WORKSPACES", "") or "").strip(),
-            insights_enabled=source.get("CIAO_INSIGHTS_DISABLED", "").strip().lower()
-            in {"", "0", "false", "no", "off"},
-            insights_model_override=source.get("CIAO_INSIGHTS_MODEL", "").strip(),
-            insights_backfill_on_startup=source.get(
-                "CIAO_INSIGHTS_BACKFILL_ON_STARTUP", "false"
-            ).strip().lower()
-            not in {"0", "false", "no", "off"},
-            insights_structured=source.get(
-                "CIAO_INSIGHTS_STRUCTURED", "false"
-            ).strip().lower()
-            not in {"", "0", "false", "no", "off"},
-            trajectories_enabled=source.get(
-                "CIAO_TRAJECTORIES_DISABLED", ""
-            ).strip().lower()
-            in {"", "0", "false", "no", "off"},
-
-            critique_models=source.get("CIAO_REVIEW_MODELS", "").strip()
-            or source.get("CIAO_ADVERSARIAL_MODELS", "").strip(),
-            memory_char_limit=int(
-                source.get("CIAO_MEMORY_CHAR_LIMIT", "").strip() or "3000"
-            ),
-            user_char_limit=int(
-                source.get("CIAO_USER_CHAR_LIMIT", "").strip() or "1375"
-            ),
+            legacy_gws_profile=str(source.get("GWS_PROFILE", "") or "").strip(),
+            legacy_insights_disabled=legacy_insights_disabled,
+            legacy_trajectories_disabled=legacy_trajectories_disabled,
         )
 
 

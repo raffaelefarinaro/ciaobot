@@ -27,14 +27,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import uuid
 import warnings
 from dataclasses import dataclass
 import logging
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
-from urllib.parse import urlsplit
 from typing import Any, cast
 
 from claude_agent_sdk import (
@@ -147,8 +145,7 @@ def _is_connection_drop_text(text: str) -> bool:
 # A name-resolution / connect failure surfaces from the Claude CLI as a generic
 # "API Error: Unable to connect to API (ENOTFOUND)" with no host and no error
 # category, so an operator reading a failed schedule can't tell which endpoint
-# failed to resolve (the Anthropic API, a custom
-# ANTHROPIC_BASE_URL...) or whether it was DNS, a refused connection, a timeout,
+# failed to resolve or whether it was DNS, a refused connection, a timeout,
 # or auth. We know the endpoint the turn was pointed at, so annotate the error
 # with it and classify the failure. See issues #162 and #178. The annotation
 # Connection-error annotations are shared with the provider layer, so every
@@ -158,37 +155,16 @@ from ciao.providers.connect_errors import (  # noqa: E402
 )
 
 
-def _resolve_api_host(env: dict[str, str]) -> str:
-    """Hostname the spawned CLI will talk to for this turn.
-
-    Prefers the per-turn ``ANTHROPIC_BASE_URL`` override (a self-hosted gateway
-    routing) and falls back to the process env, then Anthropic's default.
-    """
-    base = (
-        env.get("ANTHROPIC_BASE_URL")
-        or os.environ.get("ANTHROPIC_BASE_URL")
-        or "https://api.anthropic.com"
-    )
-    try:
-        return urlsplit(base).hostname or ""
-    except ValueError:
-        return ""
+# Hostname named in connection-error annotations. Endpoint routing is Claude
+# Code's own configuration, so Ciaobot reports Anthropic's default.
+_API_HOST = "api.anthropic.com"
 
 # The claude-agent-sdk reads the CLI subprocess stdout into a bounded decode
 # buffer (default 1 MiB, ``_DEFAULT_MAX_BUFFER_SIZE``) and raises a fatal,
 # stream-killing error when a single JSON message exceeds it — typically a
 # large tool result or assistant content block. Raise the ceiling well above
-# the default so legitimately large messages don't abort the turn. Override
-# with ``CIAO_CLAUDE_MAX_BUFFER_BYTES`` for unusually large payloads.
-try:
-    _SDK_MAX_BUFFER_BYTES = (
-        int(os.environ.get("CIAO_CLAUDE_MAX_BUFFER_BYTES") or 0)
-        or 32 * 1024 * 1024
-    )
-    if _SDK_MAX_BUFFER_BYTES <= 0:
-        _SDK_MAX_BUFFER_BYTES = 32 * 1024 * 1024
-except ValueError:
-    _SDK_MAX_BUFFER_BYTES = 32 * 1024 * 1024
+# the default so legitimately large messages don't abort the turn.
+_SDK_MAX_BUFFER_BYTES = 32 * 1024 * 1024
 
 # Shown when even the raised buffer is exceeded (or any decode failure): the
 # SDK reader raises a fatal error that would otherwise kill the chat stream.
@@ -446,9 +422,8 @@ class ClaudeProvider(BaseSDKProvider):
         # the session is held by a background agent. The next connect
         # attempt re-resumes with ``--fork-session`` to branch a copy.
         self._fork_resume_next = False
-        # Hostname the CLI is pointed at for the in-flight turn, captured at
-        # connect time so a hostless connection error can name its endpoint.
-        self._api_host = ""
+        # Hostname a hostless connection error is annotated with.
+        self._api_host = _API_HOST
         # Runtime root: state_path.parent on CiaoConfig; fall back to
         # workspace_root/.runtime when config is absent (tests).
         runtime_root = Path(
@@ -477,9 +452,6 @@ class ClaudeProvider(BaseSDKProvider):
 
     async def _ensure_connected(self, request: AgentRequest) -> ClaudeSDKClient:
         requested_model = request.model
-        # Refresh every turn: a reused client can still change host if the
-        # chat's routing env changed, and errors annotate against this value.
-        self._api_host = _resolve_api_host(request.extra_env or {})
         if (
             self._client is not None
             and self._connected

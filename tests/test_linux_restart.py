@@ -19,7 +19,7 @@ def test_restart_requires_auth_and_calls_drain_hook_without_a_checkout():
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = SimpleNamespace(
-        restart_exit_code=75, pwa_auth_required=True, pwa_auth_token="restart-test",
+        pwa_auth_required=True, pwa_auth_token="restart-test",
     )
     calls = []
     app.state.request_restart = calls.append
@@ -38,12 +38,12 @@ def test_restart_requires_auth_and_calls_drain_hook_without_a_checkout():
 async def test_restart_hook_runs_only_after_response_is_sent():
     calls = []
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        config=SimpleNamespace(restart_exit_code=42), request_restart=calls.append,
+        config=SimpleNamespace(), request_restart=calls.append,
     )))
     response = await admin_restart(request)
     assert calls == []
     await response.background()
-    assert calls == [42]
+    assert calls == [75]
 
 
 @pytest.mark.parametrize("platform,dev_mode,expected", [
@@ -163,7 +163,7 @@ async def test_deploy_refuses_bundled_app_before_any_step(tmp_path, monkeypatch)
     calls: list = []
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         config=SimpleNamespace(
-            app_repo=str(_checkout(tmp_path)), workspace_root=tmp_path, restart_exit_code=75,
+            app_repo=str(_checkout(tmp_path)), workspace_root=tmp_path,
         ),
         local_session_manager=Manager(),
         request_restart=calls.append,

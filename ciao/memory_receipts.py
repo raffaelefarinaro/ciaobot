@@ -1558,7 +1558,6 @@ def _undo_region(
     source: str,
 ) -> dict[str, Any]:
     from ciao.memory_tool import guide_lock, read_region, release_guide_lock
-    from ciao.memory_tool import MemoryLockError
 
     guide = Path(str(receipt.get("guide", "")))
     region = str(receipt.get("region", ""))

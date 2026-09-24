@@ -46,8 +46,11 @@ For HTTPS reverse proxy hosting, set these values in the workspace `.env`:
 PWA_HOST=127.0.0.1
 PWA_PORT=8443
 PWA_AUTH_REQUIRED=true
-CIAO_ALLOWED_ORIGINS=bot.example.com
 ```
+
+The proxy must forward the public host as `X-Forwarded-Host` (nginx:
+`proxy_set_header X-Forwarded-Host $host;`), or WebSocket upgrades from the
+browser are rejected as cross-origin.
 
 Keep the generated `PWA_AUTH_TOKEN`. Authenticate provider CLIs as `ciaobot`,
 not root. The Claude SDK includes a Claude binary; `ciao auth claude --print-only`

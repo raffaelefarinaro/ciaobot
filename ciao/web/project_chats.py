@@ -6,7 +6,6 @@ import asyncio
 import copy
 import json
 import logging
-import math
 import mimetypes
 import os
 import re
@@ -67,7 +66,13 @@ import yaml
 from ciao import job_runs, subagent_tracking
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.archive_jobs import ArchiveJob
-from ciao.config import BridgeConfig
+from ciao.config import (
+    CLAUDE_MODELS,
+    GWS_DEFAULT_PROFILE,
+    MAX_IMAGE_SIZE_BYTES,
+    MAX_VOICE_SIZE_BYTES,
+    BridgeConfig,
+)
 from ciao.context.capsule import (
     build_context_capsule,
 )
@@ -114,6 +119,7 @@ from ciao.web.document_conversion import convert_document, is_anydoc_document
 from ciao.web.file_snapshots import SnapshotStore
 from ciao.web.subagent_watchers import (
     NUDGE_DECLINED,
+    NUDGE_REPORTED,
     NUDGE_SENT,
     NUDGE_SUPERSEDED,
     NudgeOutcome,
@@ -229,8 +235,6 @@ _BACKGROUND_WAKE_TAIL_LINES = 50
 # than starting a new conversation — the same path a token rotation already
 # takes (ciao/providers/opencode.py::_ensure_server,
 # ciao/providers/claude.py::_ensure_connected).
-# Overridable per install with ``CIAO_PROVIDER_IDLE_TIMEOUT`` (read in
-# ``__init__``, so a test can set it before constructing a manager).
 _PROVIDER_IDLE_TIMEOUT_SECONDS = 900.0
 # How often the sweep runs. Well under the timeout so a provider is reclaimed
 # within roughly one interval of becoming eligible, and far above any per-turn
@@ -247,33 +251,6 @@ _PROVIDER_REAP_INTERVAL_SECONDS = 120.0
 # then the reference is dropped with an ERROR naming the chat, and the sweep
 # does NOT report it as reclaimed.
 _PROVIDER_DISCONNECT_MAX_ATTEMPTS = 3
-
-
-def _positive_env_seconds(name: str, default: float) -> float:
-    """A finite, positive float from the environment, or the default.
-
-    A zero, negative, non-finite or unparseable override falls back rather
-    than raising: this only tunes a background sweep, and a typo in an env var
-    must not stop the app from starting. Three values in particular are worth
-    naming, because ``float()`` accepts two of them happily and each breaks
-    the sweep differently: ``0`` busy-loops it, ``nan`` makes the sleep timer
-    never come due (every comparison against it is False), and ``inf`` as the
-    idle timeout means nothing is ever old enough to reclaim.
-    """
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning("Ignoring non-numeric %s=%r; using %s", name, raw, default)
-        return default
-    if not math.isfinite(value) or value <= 0:
-        logger.warning(
-            "Ignoring non-positive or non-finite %s=%r; using %s", name, raw, default
-        )
-        return default
-    return value
 
 
 _ANTHROPIC_MODEL_BUCKETS = {"work", "anthropic"}
@@ -609,12 +586,8 @@ class ProjectChatManager:
         # counts for or be inherited by a recycled chat id.
         self._provider_disconnect_failures: dict[str, int] = {}
         self._provider_reaper: asyncio.Task | None = None
-        self._provider_idle_timeout = _positive_env_seconds(
-            "CIAO_PROVIDER_IDLE_TIMEOUT", _PROVIDER_IDLE_TIMEOUT_SECONDS
-        )
-        self._provider_reap_interval = _positive_env_seconds(
-            "CIAO_PROVIDER_REAP_INTERVAL", _PROVIDER_REAP_INTERVAL_SECONDS
-        )
+        self._provider_idle_timeout = _PROVIDER_IDLE_TIMEOUT_SECONDS
+        self._provider_reap_interval = _PROVIDER_REAP_INTERVAL_SECONDS
         # Fold turn journals left behind by a crashed process into their
         # transcripts as is_partial turns before anything reads history.
         try:
@@ -655,7 +628,7 @@ class ProjectChatManager:
         # that chat.
         self.clear_notifications_cb: Optional[Callable[[str], None]] = None
         # Per-chat pending push tasks. Pushes are scheduled with a short
-        # delay (CIAO_PUSH_DELAY_SECONDS, default 30s) so that reading the
+        # delay (30s) so that reading the
         # chat on any device within the window suppresses the buzz. New
         # replies to the same chat cancel the previous timer and start a
         # new one (coalesce rapid replies into a single push).
@@ -736,12 +709,7 @@ class ProjectChatManager:
             self._loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
         except RuntimeError:
             self._loop = None
-        try:
-            self._push_delay_seconds = max(
-                0, int(os.environ.get("CIAO_PUSH_DELAY_SECONDS", "30"))
-            )
-        except ValueError:
-            self._push_delay_seconds = 30
+        self._push_delay_seconds = 30
         self._load()
         self._migrate_remove_claude_code_cli_project()
         self._migrate_drop_qn_prefix()
@@ -4454,7 +4422,7 @@ class ProjectChatManager:
 
         A valid id is a tier alias (``haiku``/``sonnet``/``opus``/``fable``),
         which every provider resolves against its own catalog, or a member of
-        ``config.claude_models``.
+        ``ciao.config.CLAUDE_MODELS``.
 
         Providers that discover their own catalog (opencode) are exempt:
         that catalog is async, so this synchronous validator has nothing to
@@ -4469,13 +4437,11 @@ class ProjectChatManager:
             return
         if is_tier(model):
             return
-        allowed = list(self._config.claude_models)
-        if model in allowed:
+        if model in CLAUDE_MODELS:
             return
-        sample = ", ".join(allowed[:8]) if allowed else "(none configured)"
         raise UnknownModelError(
             f"Unknown model '{model}' for provider '{provider or 'default'}' "
-            f"(configured models: {sample})"
+            f"(configured models: {', '.join(CLAUDE_MODELS)})"
         )
 
     def _thinking_level_for_chat(self, chat: ChatInfo) -> str:
@@ -4516,7 +4482,7 @@ class ProjectChatManager:
         except (AttributeError, ValueError, OSError):
             logger.debug("could not resolve the agent vault root for %r", workspace)
         env["GWS_PROFILE"] = self._workspace_gws_profile(workspace)
-        env["CIAO_ACTIVE_WORKSPACE"] = workspace or self._config.gws_default_profile
+        env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
         env["CIAO_LEGACY_ENTITY_WORKSPACE"] = (
             self._config.legacy_entity_workspace()
         )
@@ -5944,7 +5910,8 @@ class ProjectChatManager:
 
 
     async def _nudge_synthesis_after_subagents(
-        self, chat_id: str, awaiting_user_answer: bool = False
+        self, chat_id: str, awaiting_user_answer: bool = False,
+        already_reported: bool = False,
     ) -> NudgeOutcome:
         """Ask the parent to post a final report once its subagents finish.
 
@@ -5953,8 +5920,9 @@ class ProjectChatManager:
         would otherwise stay on the interim "I'll report back" message. We
         inject a synthesis prompt on the persistent client; the between-turns
         drain (started alongside this watcher) consumes the resulting turn and
-        publishes it like any other reply. Returns True when the nudge reached
-        a live client, False otherwise (caller falls back to a plain push).
+        publishes it like any normal reply. Returns ``sent`` when the nudge
+        reached a live client, ``reported`` when the drain already owns a
+        completed report, and a declined/superseded outcome otherwise.
 
         ``awaiting_user_answer`` holds the nudge back when the parent ended its
         turn by asking the user a question: answering it is the user's move,
@@ -5965,9 +5933,11 @@ class ProjectChatManager:
         in the transcript; the finished agents are still surfaced by the
         ``chat_subagents_ready`` count dropping to zero and by the subagent
         panel refresh it triggers.
+
+        ``already_reported`` hands the parked announce to the drain without
+        injecting another prompt when the CLI resumed the parent itself and
+        the parent already wrote its report.
         """
-        if awaiting_user_answer:
-            return NUDGE_DECLINED
         provider = self._providers.get(chat_id)
         if provider is None or not provider.can_drain:
             return NUDGE_DECLINED
@@ -5985,6 +5955,10 @@ class ProjectChatManager:
             return NUDGE_SUPERSEDED
         chat = self._chats.get(chat_id)
         if chat is None:
+            return NUDGE_DECLINED
+        if already_reported:
+            return NUDGE_REPORTED
+        if awaiting_user_answer:
             return NUDGE_DECLINED
         prefix = self._build_prompt_prefix(chat)
         full_prompt = (
@@ -7055,7 +7029,7 @@ class ProjectChatManager:
                 f"Dictation is unavailable: {dictation_unavailable_reason()}."
             )
         try:
-            transcriber = AppleDictationTranscriber(self._config.transcription_locale)
+            transcriber = AppleDictationTranscriber()
             text = await transcriber.transcribe(audio_path)
             # Repair dictation surface errors with the on-device model. Fail-open:
             # any failure returns the raw transcript unchanged.
@@ -7084,9 +7058,7 @@ class ProjectChatManager:
                 "the Ciaobot one-line installer."
             )
         try:
-            speaker = SystemSpeaker(
-                self._config.tts_local_voice, self._config.transcription_locale
-            )
+            speaker = SystemSpeaker(self._config.tts_local_voice)
             audio = await speaker.speak(spoken)
         except Exception as exc:
             raise ValueError(f"Read-aloud failed: {exc}") from exc
@@ -7100,7 +7072,7 @@ class ProjectChatManager:
         target = self._config.media_root / f"web_voice_{chat_service._uuid8()}{ext}"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        if len(data) > self._config.max_voice_size_bytes:
+        if len(data) > MAX_VOICE_SIZE_BYTES:
             target.unlink(missing_ok=True)
             raise ValueError("Voice file too large")
         return target
@@ -7307,7 +7279,7 @@ class ProjectChatManager:
         target = self._config.media_root / ref
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        if len(data) > self._config.max_image_size_bytes:
+        if len(data) > MAX_IMAGE_SIZE_BYTES:
             target.unlink(missing_ok=True)
             raise ValueError("Image too large")
         mime = mimetypes.guess_type(filename)[0] or f"image/{ext.lstrip('.')}"

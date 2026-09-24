@@ -120,7 +120,7 @@ def test_events_for_unknown_chats_are_ignored(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     manager.attach_job_runs_publisher()
 
-    with jr.track_sync("startup_sync", "Startup git sync", category="system"):
+    with jr.track_sync("vault_index", "Vault index refresh", category="system"):
         pass
     with jr.track_sync("insights", "Session insights", extra={"chat_id": "ghost"}):
         pass

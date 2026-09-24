@@ -22,11 +22,6 @@ from ciao import __version__
 DEFAULT_GITHUB_REPO = "raffaelefarinaro/ciaobot"
 
 
-def _github_repo() -> str:
-    """Return the GitHub repo (owner/name) used for release lookups."""
-    return (os.environ.get("CIAO_GITHUB_REPO") or "").strip() or DEFAULT_GITHUB_REPO
-
-
 def latest_release_redirect_url(repo: str | None = None) -> str:
     """Return the public github.com URL that redirects to the latest release.
 
@@ -37,7 +32,7 @@ def latest_release_redirect_url(repo: str | None = None) -> str:
     resolves the latest *stable* (non-prerelease) release, matching the REST
     endpoint's semantics. No token is required.
     """
-    repo = (repo or _github_repo()).strip("/")
+    repo = (repo or DEFAULT_GITHUB_REPO).strip("/")
     return f"https://github.com/{repo}/releases/latest"
 
 
@@ -196,7 +191,7 @@ def package_changelog(
     returned newest-first. Any failure is reported via ``error`` and yields an
     empty commit list so the caller can still offer the update.
     """
-    repo = (repo or _github_repo()).strip("/")
+    repo = (repo or DEFAULT_GITHUB_REPO).strip("/")
     commits: list[dict[str, str]] = []
     error = ""
     compare_url = ""

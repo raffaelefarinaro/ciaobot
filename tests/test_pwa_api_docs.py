@@ -34,7 +34,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/workspace-open": "browser file-viewer Open-in-default-app button; only meaningful when the PWA talks to a local Ciao instance",
     "/api/workspaces": "browser workspaces list config",
     "/api/workspaces/{name}": "browser workspaces management endpoint",
-    "/api/settings/providers": "browser LLM providers configuration settings",
     "/api/settings/providers/{provider}/{action}": "browser-only handoff to provider CLI login, verification, or logout",
     "/api/admin/skills/add": "deprecated GitHub skill add; returns 410, replaced by /api/skills/import",
     "/api/skills/import": "browser skills import; uploads validated zip",

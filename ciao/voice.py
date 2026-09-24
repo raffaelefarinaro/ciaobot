@@ -25,13 +25,49 @@ phone or iPad talking to a Mac host is unaffected.
 
 from __future__ import annotations
 
+import functools
 import logging
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 from ciao import native_sidecar
 
 logger = logging.getLogger(__name__)
+
+# Fallback BCP-47 language for both on-device engines when the Mac's own
+# language cannot be read.
+TRANSCRIPTION_LOCALE = "en-US"
+
+_BCP47_RE = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
+
+
+@functools.lru_cache(maxsize=1)
+def system_locale() -> str:
+    """The Mac's preferred language as BCP-47 (e.g. ``it-IT``), else en-US.
+
+    Both on-device engines follow it: dictation matches it against the
+    installed dictation languages (System Settings → Keyboard → Dictation),
+    and the synthesizer picks a voice for it. Read from the first entry of
+    ``AppleLanguages``, falling back to ``AppleLocale``; anything unreadable
+    or off macOS is en-US.
+    """
+    if sys.platform != "darwin":
+        return TRANSCRIPTION_LOCALE
+    for key in ("AppleLanguages", "AppleLocale"):
+        try:
+            out: str = subprocess.run(
+                ["defaults", "read", "-g", key],
+                capture_output=True, text=True, timeout=2, check=False,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for token in re.findall(r'[A-Za-z0-9_@=-]+', out):
+            candidate: str = token.split("@", 1)[0].replace("_", "-")
+            if _BCP47_RE.match(candidate):
+                return candidate
+    return TRANSCRIPTION_LOCALE
 
 # The sidecar plumbing (locating the binary, probing, running a subcommand)
 # is shared with chat titles, so it lives in ciao/native_sidecar.py.
@@ -86,12 +122,12 @@ class AppleDictationTranscriber:
     system dictation, so there is no model to fetch and no first-run delay.
     """
 
-    def __init__(self, locale: str = "en-US") -> None:
+    def __init__(self, locale: str = "") -> None:
         if not apple_dictation_available():
             raise ValueError(
                 f"on-device dictation is unavailable: {dictation_unavailable_reason()}"
             )
-        self._locale = locale or "en-US"
+        self._locale = locale or system_locale()
 
     async def transcribe(self, path: Path) -> str:
         code, out, err = await _run_sidecar(
@@ -222,14 +258,14 @@ class SystemSpeaker:
 
     mime_type = "audio/wav"
 
-    def __init__(self, voice: str = "", locale: str = "en-US") -> None:
+    def __init__(self, voice: str = "", locale: str = "") -> None:
         if not apple_speech_available():
             raise ValueError(
                 "system speech synthesis is unavailable; "
                 "install Ciaobot with the one-line installer from the release page"
             )
         self._voice = (voice or "").strip()
-        self._locale = locale or "en-US"
+        self._locale = locale or system_locale()
 
     async def speak(self, text: str) -> bytes:
         """Synthesize one utterance; returns WAV bytes."""

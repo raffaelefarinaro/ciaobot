@@ -296,7 +296,7 @@ class ScheduleDispatcher:
                 logger.info("Schedule attention classifier %s", note)
             try:
                 from ciao.providers.oneshot import run_oneshot
-                from ciao.insights import _insights_timeout_s, is_context_overflow
+                from ciao.insights import _DEFAULT_TIMEOUT_S, is_context_overflow
 
                 # Same env-tunable budget as the insights job: a slow local
                 # model can take minutes on a successful call, so a hard 60s
@@ -307,7 +307,7 @@ class ScheduleDispatcher:
                     system_prompt=system_prompt,
                     model=model,
                     env=env,
-                    timeout_s=_insights_timeout_s(),
+                    timeout_s=_DEFAULT_TIMEOUT_S,
                     provider=classifier_provider,
                     cwd=self._host._config.workspace_root,
                 )

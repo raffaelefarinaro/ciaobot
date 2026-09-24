@@ -590,7 +590,10 @@ class ArchivePipeline:
             "vault_root": config.vault_root,
             "proposal_vault_root": proposal_vault_root,
             "guide_path": guide_path,
-            "trajectories_enabled": bool(job.inputs.get("trajectories_enabled", True)),
+            "trajectories_enabled": bool(
+                getattr(config, "trajectories_enabled", True)
+            )
+            and bool(job.inputs.get("trajectories_enabled", True)),
             "memory_proposals_enabled": bool(
                 job.inputs.get("memory_proposals_enabled", True)
             ),
@@ -849,17 +852,35 @@ class ArchivePipeline:
                 self._jobs[job.chat_id] = job
                 self._host._overlay_job_postprocess(job.chat_id, job)
                 continue
-            if not job.resumable():
+            resumable = job.resumable()
+            if not getattr(self._host._config, "insights_enabled", True):
+                resumable = [
+                    name
+                    for name in resumable
+                    if name not in (
+                        "insights",
+                        "project_doc_update",
+                        "memory_proposals",
+                    )
+                ]
+            if not getattr(self._host._config, "trajectories_enabled", True):
+                resumable = [name for name in resumable if name != "trajectory"]
+            if not resumable:
+                self._jobs[job.chat_id] = job
                 self._host._overlay_job_postprocess(job.chat_id, job)
                 continue
             self._jobs[job.chat_id] = job
-            self._host._begin_postprocess(job.chat_id, list(job.resumable()))
+            self._host._begin_postprocess(job.chat_id, list(resumable))
 
             async def _guarded(
-                job: ArchiveJob = job, inputs: dict[str, object] = inputs
+                job: ArchiveJob = job,
+                inputs: dict[str, object] = inputs,
+                stages: list[str] = list(resumable),
             ) -> None:
                 async with semaphore:
-                    await self._host._run_job(job.chat_id, job, inputs)
+                    await self._host._run_job(
+                        job.chat_id, job, inputs, stages=stages
+                    )
 
             task = asyncio.create_task(
                 self._host._tracked_postprocess(job.chat_id, _guarded())
@@ -895,7 +916,7 @@ class ArchivePipeline:
             and outcome.session_id != ""
         )
         run_insights = bool(
-            getattr(config, "insights_enabled", False) and outcome.filtered_jsonl
+            getattr(config, "insights_enabled", True) and outcome.filtered_jsonl
         )
         chat = self._host._chats.get(chat_id)
         if chat is None:

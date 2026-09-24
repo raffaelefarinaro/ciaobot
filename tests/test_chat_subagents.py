@@ -460,6 +460,185 @@ async def test_watch_subagent_completion_holds_nudge_on_pending_notification(
     assert ready_events[-1]["nudged"] is True
 
 
+async def test_watch_subagent_completion_hands_park_to_drain_when_parent_reported(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The CLI resumed the parent and it already wrote the report.
+
+    The watcher must not inject the synthesis nudge: it would only produce a
+    redundant "that was the report above" turn. The completion notification is
+    answered, so nothing is pending either.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("subagent-reported", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="subagent-reported-test")
+    chat.session_id = "sess-nudge-reported"
+    pcm._save()
+
+    session_path = tmp_path / "sess-nudge-reported.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+        *_dispatch_records("toolu_1", "agent-a"),
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": (
+                    "<task-notification>\n<task-id>agent-a</task-id>\n"
+                    "<status>completed</status>\n</task-notification>"
+                ),
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "All agents finished. Here is the full Zendesk report. What should I review?",
+                    }
+                ],
+            },
+        },
+    ]
+
+    def flush() -> None:
+        session_path.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+    flush()
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
+    )
+
+    steer_calls: list = []
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:
+            steer_calls.append(request)
+            return True
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    running_drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains[chat.chat_id] = running_drain  # type: ignore[assignment]
+
+    calls = _announce_spy(pcm)
+    token = pcm._park_result_announce(
+        chat.chat_id, project.project_id, "Title", "interim"
+    )
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    finally:
+        pcm._cancel_parked_announce_deadline(chat.chat_id)
+        running_drain.cancel()
+
+    assert steer_calls == []
+    assert calls == []
+    assert pcm._parked_announce_token(chat.chat_id) == token
+
+    class EmptyDrain:
+        can_drain = True
+
+        async def drain_events(self):
+            if False:
+                yield None
+
+    pcm._providers[chat.chat_id] = EmptyDrain()
+    await pcm._drain_between_turns(chat.chat_id, project.project_id)
+    assert calls == [
+        (chat.chat_id, project.project_id, "Title", "interim")
+    ]
+    assert pcm._parked_announce_token(chat.chat_id) is None
+
+
+async def test_watch_subagent_completion_nudges_when_report_is_interim(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A parent that answered with "waiting on the others" is still nudged.
+
+    The interim guard keeps the old behaviour: the reply is not a report, so
+    the synthesis nudge must still go out.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("subagent-interim-reply", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="subagent-interim-reply-test")
+    chat.session_id = "sess-nudge-interim-reply"
+    pcm._save()
+
+    session_path = tmp_path / "sess-nudge-interim-reply.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+        *_dispatch_records("toolu_1", "agent-a"),
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": (
+                    "<task-notification>\n<task-id>agent-a</task-id>\n"
+                    "<status>completed</status>\n</task-notification>"
+                ),
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Waiting on the other agent, will report back.",
+                    }
+                ],
+            },
+        },
+    ]
+
+    def flush() -> None:
+        session_path.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+    flush()
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
+    )
+
+    steer_calls: list = []
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:
+            steer_calls.append(request)
+            return True
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    running_drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains[chat.chat_id] = running_drain  # type: ignore[assignment]
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    finally:
+        running_drain.cancel()
+
+    assert len(steer_calls) == 1
+
+
 async def test_notification_grace_resets_between_windows(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -517,6 +696,25 @@ async def test_notification_grace_resets_between_windows(
             },
         }
 
+    def assistant_tool_use_record() -> dict:
+        # Closes the notification window without carrying prose, so the
+        # already-reported hold (notification_answered) stays clear and this
+        # test keeps measuring only the grace reset.
+        return {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_read",
+                        "name": "Read",
+                        "input": {"file_path": "report.md"},
+                    }
+                ],
+            },
+        }
+
     def notification(agent_id: str) -> dict:
         return {
             "type": "queue-operation",
@@ -546,7 +744,7 @@ async def test_notification_grace_resets_between_windows(
             flush()
         elif sleeps == 5:
             records.append({"type": "queue-operation", "operation": "dequeue"})
-            records.append(assistant_record("All agents finished. Here is the full report."))
+            records.append(assistant_tool_use_record())
             flush()
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
@@ -2099,7 +2297,10 @@ async def test_a_failed_nudge_is_not_retried_while_cli_tasks_hold_the_loop(
 
     attempts: list[bool] = []
 
-    async def failing_nudge(chat_id: str, *, awaiting_user_answer: bool = False) -> bool:
+    async def failing_nudge(
+        chat_id: str, *, awaiting_user_answer: bool = False,
+        already_reported: bool = False,
+    ) -> bool:
         attempts.append(awaiting_user_answer)
         return False
 
@@ -2281,6 +2482,40 @@ async def test_a_user_turn_taking_over_reports_supersession(
     assert (
         await pcm._nudge_synthesis_after_subagents(chat.chat_id)
     ) == NUDGE_SUPERSEDED
+
+
+@pytest.mark.asyncio
+async def test_an_existing_report_is_handed_to_the_drain(tmp_path: Path) -> None:
+    from ciao.web.project_chats import NUDGE_REPORTED
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("reported", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="reported-test")
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:
+            raise AssertionError("must not steer after the parent reported")
+
+    pcm._providers[chat.chat_id] = FakeProvider()
+    running_drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains[chat.chat_id] = running_drain
+    try:
+        assert (
+            await pcm._nudge_synthesis_after_subagents(
+                chat.chat_id, already_reported=True
+            )
+        ) == NUDGE_REPORTED
+        assert (
+            await pcm._nudge_synthesis_after_subagents(
+                chat.chat_id,
+                awaiting_user_answer=True,
+                already_reported=True,
+            )
+        ) == NUDGE_REPORTED
+    finally:
+        running_drain.cancel()
 
 
 @pytest.mark.asyncio
