@@ -14,12 +14,10 @@
 
 /** What SettingsView currently knows about `/api/node/status`. */
 export interface GwsNodeStatusKnowledge {
-  /** Whether the status fetch has settled (succeeded or failed). */
   loaded: boolean
-  /** Whether that fetch failed. */
   error: boolean
-  /** The resolved role. False (host-mode) until `loaded` is true. */
   isClient: boolean
+  stateValid: boolean
 }
 
 /**
@@ -33,11 +31,10 @@ export interface GwsNodeStatusKnowledge {
  */
 export function isGwsEngineHostEligible(
   hostname: string,
-  inDesktopApp: boolean,
+  _inDesktopApp: boolean,
   status: GwsNodeStatusKnowledge,
 ): boolean {
   const isLoopbackHost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
-  if ((!status.loaded || status.error) && !isLoopbackHost) return false
-  if (inDesktopApp && !status.isClient) return true
-  return !status.isClient && isLoopbackHost
+  if (!isLoopbackHost || !status.loaded || status.error || !status.stateValid || status.isClient) return false
+  return true
 }

@@ -2,6 +2,10 @@ import { describe, expect, test } from 'vitest'
 import {
   chatWsReconnectDelayMs,
   isHostConnectionUnavailableMessage,
+  isHostPolicyMessage,
+  isTerminalWsClose,
+  isWsAuthClose,
+  isWsPolicyClose,
   shouldReconnectActiveChatOnStreamingStarted,
 } from './chatWs'
 import { setListIndex } from './safeList'
@@ -45,6 +49,38 @@ describe('isHostConnectionUnavailableMessage', () => {
 
   test('does not match an ordinary error', () => {
     expect(isHostConnectionUnavailableMessage('Error: something else')).toBe(false)
+  })
+})
+
+describe('isHostPolicyMessage', () => {
+  test('recognizes proxy policy errors without classifying model errors', () => {
+    expect(isHostPolicyMessage('  Host WebSocket rejected the client connection  ')).toBe(true)
+    expect(isHostPolicyMessage('host redirect refused: location: https://evil.example')).toBe(true)
+    expect(isHostPolicyMessage('Error: provider failed')).toBe(false)
+  })
+})
+
+describe('isTerminalWsClose', () => {
+  test('does not retry authentication or policy failures', () => {
+    expect(isTerminalWsClose(4001)).toBe(true)
+    expect(isTerminalWsClose(4003)).toBe(true)
+    expect(isTerminalWsClose(4400)).toBe(true)
+  })
+
+  test('keeps transport and normal closes retryable', () => {
+    expect(isTerminalWsClose(1006)).toBe(false)
+    expect(isTerminalWsClose(4004)).toBe(false)
+    expect(isTerminalWsClose(undefined)).toBe(false)
+  })
+})
+
+describe('WebSocket close classification', () => {
+  test('separates authentication from local policy rejection', () => {
+    expect(isWsAuthClose(4001)).toBe(true)
+    expect(isWsAuthClose(4400)).toBe(true)
+    expect(isWsAuthClose(4003)).toBe(false)
+    expect(isWsPolicyClose(4003)).toBe(true)
+    expect(isWsPolicyClose(4001)).toBe(false)
   })
 })
 

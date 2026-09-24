@@ -414,7 +414,7 @@
         <p v-else-if="!loading" class="line line--hint">
           <span class="caret"></span>
         </p>
-        <div v-if="isClientLogin" class="client-bailout">
+        <div v-if="isClientLogin && canUseDeviceControls" class="client-bailout">
           <p class="line line--sys">
             Can’t reach the host or don’t have the password? Stop tunneling and use this machine as host again.
           </p>
@@ -437,6 +437,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import type { SetupStatus } from '../lib/types'
 import { errorMessage } from '../lib/errorMessage'
+import { isLoopbackPage, navigateToDevice } from '../lib/originNavigation'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { writeClipboard } from '../lib/codeCopy'
@@ -447,6 +448,7 @@ const error = ref('')
 const loading = ref(false)
 const clientHostUrl = ref('')
 const switchingToHost = ref(false)
+const canUseDeviceControls = isLoopbackPage()
 const isClientLogin = computed(() => Boolean(clientHostUrl.value))
 const loginModeHint = computed(() =>
   isClientLogin.value ? 'client · host password required' : 'auth required',
@@ -465,7 +467,7 @@ const loginTokenPlaceholder = computed(() =>
 )
 
 async function switchBackToHost() {
-  if (switchingToHost.value) return
+  if (!canUseDeviceControls || switchingToHost.value) return
   if (!await askConfirm(
     'Stop client mode and become host on this machine? Skips asking the remote to push (use this when the host is unreachable or you do not have the password).',
     {
@@ -477,16 +479,7 @@ async function switchBackToHost() {
   }
   switchingToHost.value = true
   error.value = ''
-  try {
-    await api.post('/api/node/handover', {
-      target_node_url: clientHostUrl.value,
-      force: true,
-    })
-    window.location.assign('/')
-  } catch (e) {
-    error.value = errorMessage(e, 'Failed to switch back to host')
-    switchingToHost.value = false
-  }
+  navigateToDevice()
 }
 
 // Setup Wizard states
@@ -821,7 +814,7 @@ onMounted(async () => {
     try {
       const startup = await fetch('/api/startup-status').then((r) => r.json())
       const role = String(startup?.node_role || '')
-      if (role === 'client' || role === 'standby') {
+      if (startup?.state_valid === true && (role === 'client' || role === 'standby')) {
         clientHostUrl.value = String(startup?.host_url || startup?.active_peer_url || '')
       }
     } catch {

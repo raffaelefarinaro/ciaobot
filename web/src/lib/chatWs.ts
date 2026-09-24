@@ -21,3 +21,23 @@ export function chatWsReconnectDelayMs(attempt: number): number {
 export function isHostConnectionUnavailableMessage(message: string): boolean {
   return message.trim().toLowerCase().startsWith('host ws unreachable')
 }
+
+export function isWsAuthClose(code: number | undefined): boolean {
+  return code === 4001 || code === 4400
+}
+
+export function isWsPolicyClose(code: number | undefined): boolean {
+  return code === 4003
+}
+
+/** Error text emitted by the client proxy when its peer rejects the socket. */
+export function isHostPolicyMessage(message: string): boolean {
+  const normalized = message.trim().toLowerCase()
+  return normalized.startsWith('host websocket rejected the client connection')
+    || normalized.startsWith('host redirect refused')
+    || normalized.startsWith('host refresh response refused')
+}
+
+export function isTerminalWsClose(code: number | undefined): boolean {
+  return isWsAuthClose(code) || isWsPolicyClose(code)
+}

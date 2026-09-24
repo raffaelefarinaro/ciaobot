@@ -11,10 +11,12 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 - `GET /?setup=<token>` is the local first-launch shortcut path. It is accepted only on `localhost`, `127.0.0.1`, or `::1`; when the token matches `.runtime/setup-token`, the server sets the same signed `ciao_session` cookie, deletes the token file, and redirects to `/`.
 - Production cookies are `Secure`, `SameSite=Lax`, and host-only (scoped to the exact host that served them).
 - `POST /api/auth/logout` clears the same host-only cookie.
-- All `/api/*` routes except `POST /api/auth`, `GET /api/startup-status`, `GET /api/active-chats`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. (`GET /api/setup/inspect-folder` is not middleware-exempt, but it only answers in bootstrap mode, where protection is off anyway.) All `/ws/*` routes require the signed session cookie.
+- All `/api/*` routes except `POST /api/auth`, `GET /api/auth/bridge`, `GET /api/auth/check`, `GET /api/startup-status`, `GET /api/active-chats`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. (`GET /api/setup/inspect-folder` is not middleware-exempt, but it only answers in bootstrap mode, where protection is off anyway.) All `/ws/*` routes require the signed session cookie.
+- In client mode, control-origin login/connect responses may include a one-time `/api/auth/bridge` URL. It is bound to the current host session, consumed once, answered only on the content origin, and redirects to a clean `/`; the host password/session never appears in the URL or browser response. `GET /device/return` issues the same bridge for a control-origin back navigation.
 - `POST /api/setup/finish` is only accepted in bootstrap mode from localhost with a matching browser origin/referer (off-localhost requests get a 403 pointing at `http://localhost:<port>`). Body: `workspace` (required — the root folder holding the vault plus app data), `vault_root` (optional, default `<workspace>/memory-vault`; absolute or `~` paths are honored for an existing notes folder elsewhere), `password` (required — the dashboard password, at least 4 characters; setup always enables protection), plus optional `vault_mode`, `workspace_name`, `push_contact`, `port`, `python`, `launch_agents_dir`, `app_dir`, and `restart`. It writes the real workspace config, ensures workspace and vault are (in) git repos, creates local launch artifacts, and asks the supervisor to restart into the configured workspace. When the chosen folder already contains nested workspace directories (`memory-vault/<name>/` with a `MEMORY.md` inside), those are adopted as the workspace registry and `workspace_name` is ignored.
 - `GET /api/setup/list-dirs`, `POST /api/setup/mkdir`, and `GET /api/setup/inspect-folder` back the setup wizard. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost). The folder picker (`list-dirs`, `mkdir`) lists directories only and never reads file contents. `inspect-folder?path=<dir>` returns `{mode: "scratch"|"existing", vault_root, existing_workspaces, has_env}` so the wizard can hide the "First Workspace" text field when nested workspaces are already present.
 - State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host. Missing headers are accepted for non-browser clients.
+- In client mode, remote content is served from `localhost`; local `/api/node/*`, `/api/device/*`, `/api/desktop-drop`, and `/device` controls are accepted only from a loopback peer at `127.0.0.1` with `X-Ciao-Local-Control: 1` on API requests. Cross-origin requests fail closed.
 - HTTP responses include baseline security headers, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
 - `POST /agent/v1/{op}` is the agent CLI's loopback transport (`ciao <noun> <verb>` inside a managed provider shell, see `docs/ARCHITECTURE.md` → `agent_surface.py` and `docs/AGENT_CLI.md`). It takes a scoped bearer capability (`CIAO_AGENT_TOKEN`) in an `Authorization: Bearer` header, runs the registered control-plane operation, and returns the same JSON envelope; it is not a browser or curl API and does not accept the session cookie.
 
@@ -25,6 +27,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/auth` | Login with `PWA_AUTH_TOKEN` |
 | POST | `/api/auth/logout` | Clear session cookie |
 | GET | `/api/auth/check` | Verify current session |
+| GET | `/api/auth/bridge` | Redeem a one-time control-to-content session bridge |
+| GET | `/device/return` | Issue a control-to-content session bridge and return to the app |
 | GET, POST | `/api/auth/settings` | Read protection state, or set/change the PWA password (cannot disable protection) |
 | GET | `/api/projects` | List projects |
 | POST | `/api/projects` | Create project |
@@ -35,7 +39,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/projects/completed/restore` | Restore a completed project to active |
 | GET, POST | `/api/projects/{project_id}/chats` | List or create project chats |
 | GET, POST | `/api/projects/{project_id}/files` | List or upload project files |
-| POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant (local node only) |
+| POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant; returns bounded opaque file references (local node/device origin only) |
 | GET | `/api/chats` | List all chats |
 | GET | `/api/menubar-chats` | Compact chat list for the `Ciaobot.app` tray |
 | GET | `/api/menubar-notifications` | Notification feed for the `Ciaobot.app` tray (`?after=<epoch>`, inclusive; includes read-clear controls and is proxied to the host in client mode) |
@@ -62,7 +66,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/voice` | Upload voice for transcription |
 | POST | `/api/chats/{chat_id}/speak` | Synthesize speech for a message; returns audio bytes |
 | POST | `/api/chats/{chat_id}/images` | Upload chat images |
-| POST | `/api/chats/{chat_id}/attachments` | Upload chat files; supported documents become Markdown in the active project folder |
+| POST | `/api/chats/{chat_id}/attachments` | Upload chat files; supported documents become Markdown in the active project folder; the browser receives bounded `file_refs`, not server paths |
 | GET | `/api/images/{ref}` | Read uploaded image blob |
 | GET | `/api/workspace-file` | Read allowed text file |
 | POST | `/api/workspace-file` | Write user-edited text file (allowlist + snapshot) |
@@ -342,13 +346,16 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projec
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/projects/$PID"
 ```
 
-Project file uploads are limited to 50 MB per file. File-list responses use
-workspace-relative viewer paths when the vault is nested under the workspace
-and absolute viewer paths when `CIAO_VAULT_ROOT` points elsewhere. Successful
-upload entries also include `absolute_path`, which the chat composer uses after
-a client uploads a dropped file to the host's active project folder. Saved-page
-`.mht`/`.mhtml` files are accepted as binary project attachments and served as
-downloads rather than executable inline content.
+Project and chat uploads are limited to 50 MB per file, 100 files per request,
+and 512 MB total. Project-file list responses use workspace-relative viewer
+paths when the vault is nested under the workspace and absolute viewer paths
+when `CIAO_VAULT_ROOT` points elsewhere. The project upload response exposes
+only a bounded relative `path` plus metadata; chat attachment and native-drop
+responses expose bounded `file_refs` (`ciao-drop:drop_<32 hex>`), never an
+absolute path. The server expands a reference only while building the provider
+prompt, so the browser never needs the host path. Saved-page `.mht`/`.mhtml`
+files are accepted as binary project attachments and served as downloads rather
+than executable inline content.
 
 **Chats**
 

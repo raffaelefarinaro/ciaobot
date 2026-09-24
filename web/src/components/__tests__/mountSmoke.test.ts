@@ -55,6 +55,7 @@ vi.mock('../../lib/api', () => {
     },
   }
   const responses: Record<string, unknown> = {
+    '/api/startup-status': { node_role: 'host', state_valid: true },
     '/api/settings': {},
     '/api/settings/providers': {
       connections: {

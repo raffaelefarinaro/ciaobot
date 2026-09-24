@@ -38,6 +38,8 @@ from ciao.web.agent_assets import (
 )
 from ciao.web.commands import list_commands_endpoint, rate_limits_endpoint
 from ciao.web.routes_auth import (
+    auth_bridge,
+    auth_bridge_issue,
     auth_check,
     auth_login,
     auth_logout,
@@ -228,6 +230,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     routes = [
         # Auth
         Route("/api/auth", auth_login, methods=["POST"]),
+        Route("/api/auth/bridge", auth_bridge, methods=["GET"]),
+        Route("/device/return", auth_bridge_issue, methods=["GET"]),
         Route("/api/auth/logout", auth_logout, methods=["POST"]),
         Route("/api/auth/check", auth_check, methods=["GET"]),
         Route("/api/auth/settings", auth_settings_get, methods=["GET"]),

@@ -2,19 +2,114 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
+import secrets
+import time
 from datetime import UTC, datetime
+from urllib.parse import quote
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse, Response
 
-from ciao.web.auth import SESSION_COOKIE, session_cookie_kwargs
+from ciao.web.auth import SESSION_COOKIE, is_loopback_client, session_cookie_kwargs
+from ciao.web.remote_boundary import (
+    content_url,
+    is_client_mode,
+    is_content_origin,
+    is_control_origin,
+)
 
 logger = logging.getLogger(__name__)
 
 _login_attempts: dict[str, list[tuple[float, int]]] = {}
 _MAX_LOGIN_ATTEMPTS = 10
 _LOGIN_WINDOW_SECONDS = 60
+_AUTH_BRIDGE_TTL_SECONDS = 60
+_AUTH_BRIDGE_MAX_TOKEN_LENGTH = 128
+
+
+def _auth_bridge_store(app) -> dict[str, tuple[float, str, str, str]]:
+    store = getattr(app.state, "auth_bridges", None)
+    if not isinstance(store, dict):
+        store = {}
+        app.state.auth_bridges = store
+    return store
+
+
+def _clear_auth_bridges(app) -> None:
+    _auth_bridge_store(app).clear()
+
+
+def _auth_bridge_binding(app) -> tuple[str, str, str] | None:
+    manager = getattr(app.state, "node_state_manager", None)
+    if manager is None:
+        return None
+    try:
+        if not manager.is_client():
+            return None
+        validity = getattr(manager, "is_valid", None)
+        if not callable(validity) or not validity():
+            return None
+        host_url = manager.get_host_url()
+        host_session = manager.get_host_session()
+        if not host_url or not host_session:
+            return None
+        digest = hashlib.sha256(host_session.encode("utf-8")).hexdigest()
+        return str(host_url), digest, str(getattr(manager, "node_id", ""))
+    except Exception:
+        return None
+
+
+def _mint_auth_bridge(app) -> str | None:
+    binding = _auth_bridge_binding(app)
+    if binding is None:
+        return None
+    store = _auth_bridge_store(app)
+    now = time.monotonic()
+    for token, record in list(store.items()):
+        if record[0] <= now:
+            store.pop(token, None)
+    while len(store) >= 32:
+        store.pop(next(iter(store)))
+    token = secrets.token_urlsafe(32)
+    store[hashlib.sha256(token.encode("ascii")).hexdigest()] = (now + _AUTH_BRIDGE_TTL_SECONDS, *binding)
+    return token
+
+
+def _consume_auth_bridge(app, token: str) -> bool:
+    if not token or len(token) > _AUTH_BRIDGE_MAX_TOKEN_LENGTH:
+        return False
+    store = _auth_bridge_store(app)
+    key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    record = store.pop(key, None)
+    if record is None or record[0] <= time.monotonic():
+        return False
+    return record[1:] == _auth_bridge_binding(app)
+
+
+def _auth_bridge_url(request: Request) -> str | None:
+    if not is_control_origin(request) or not is_loopback_client(request):
+        return None
+    token = _mint_auth_bridge(request.app)
+    if token is None:
+        return None
+    return f"{content_url(request, '/api/auth/bridge')}?token={quote(token, safe='')}"
+
+
+def client_session_response(request: Request, payload: dict) -> JSONResponse:
+    bridge_url = _auth_bridge_url(request)
+    response_payload = dict(payload)
+    if bridge_url:
+        response_payload["bridge_url"] = bridge_url
+    response = JSONResponse(response_payload)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    serializer = getattr(request.app.state, "serializer", None)
+    if serializer is not None:
+        signed = serializer.dumps({"user": "owner"})
+        response.set_cookie(SESSION_COOKIE, signed, **session_cookie_kwargs(request))
+    return response
 
 
 def _check_login_rate_limit(client_ip: str) -> bool:
@@ -60,6 +155,10 @@ async def _client_mode_login(request: Request, password: str) -> JSONResponse:
 
     node_mgr = request.app.state.node_state_manager
     host_url = node_mgr.get_host_url()
+    from ciao.node_state import peer_url_is_allowed
+
+    if host_url and not peer_url_is_allowed(host_url, str(request.url.scheme or "")):
+        return JSONResponse({"error": "Host transport is not allowed"}, status_code=400)
     if not host_url:
         return JSONResponse(
             {"error": "Client mode has no host URL configured"},
@@ -119,17 +218,50 @@ async def _client_mode_login(request: Request, password: str) -> JSONResponse:
             status_code=400,
         )
 
+    _clear_auth_bridges(request.app)
     node_mgr.set_host_session(host_session)
     # Keep a local session too so local AuthMiddleware stays happy if enabled.
-    signed = request.app.state.serializer.dumps({"user": "owner"})
-    response = JSONResponse(
+    return client_session_response(
+        request,
         {"ok": True, "mode": "client", "host_url": host_url},
     )
+
+
+async def auth_bridge(request: Request) -> Response:
+    if request.method.upper() != "GET":
+        return JSONResponse({"error": "method not allowed"}, status_code=405)
+    if not is_loopback_client(request) or not is_content_origin(request):
+        return JSONResponse({"error": "client session bridge is local-only"}, status_code=403)
+    token = request.query_params.get("token", "")
+    if not _consume_auth_bridge(request.app, token):
+        return JSONResponse({"error": "invalid or expired session bridge"}, status_code=401)
+    response = RedirectResponse(content_url(request, "/"), status_code=302)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    signed = request.app.state.serializer.dumps({"user": "owner"})
     response.set_cookie(SESSION_COOKIE, signed, **session_cookie_kwargs(request))
     return response
 
 
+async def auth_bridge_issue(request: Request) -> Response:
+    if not is_loopback_client(request) or not is_control_origin(request):
+        return JSONResponse({"error": "client session bridge is local-only"}, status_code=403)
+    bridge_url = _auth_bridge_url(request)
+    if bridge_url:
+        response = RedirectResponse(bridge_url, status_code=302)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+    if not is_client_mode(request):
+        response = RedirectResponse(content_url(request, "/"), status_code=302)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+    return JSONResponse({"error": "host session is required"}, status_code=401)
+
+
 async def auth_logout(request: Request) -> JSONResponse:
+    _clear_auth_bridges(request.app)
     node_mgr = getattr(request.app.state, "node_state_manager", None)
     if node_mgr is not None and node_mgr.is_client():
         node_mgr.set_host_session(None)
@@ -159,11 +291,21 @@ async def auth_check(request: Request) -> JSONResponse:
     node_mgr = getattr(request.app.state, "node_state_manager", None)
     if node_mgr is not None and node_mgr.is_client():
         host_url = node_mgr.get_host_url()
+        from ciao.node_state import peer_url_is_allowed
+
+        if host_url and not peer_url_is_allowed(host_url, str(request.url.scheme or "")):
+            return JSONResponse({"error": "Host transport is not allowed"}, status_code=400)
         if not host_url:
             return JSONResponse(
                 {"error": "client mode missing host", "client": True},
                 status_code=401,
             )
+        if getattr(config, "pwa_auth_required", False):
+            from ciao.web.auth import verify_session
+
+            serializer = getattr(request.app.state, "serializer", None)
+            if serializer is None or not verify_session(request, serializer):
+                return JSONResponse({"error": "client session required", "client": True}, status_code=401)
         if not node_mgr.get_host_session():
             # Legacy standby→client migrations have no stored session. If the
             # host does not require auth, allow the tunnel; otherwise ask for
@@ -171,7 +313,7 @@ async def auth_check(request: Request) -> JSONResponse:
             try:
                 import httpx
 
-                async with httpx.AsyncClient(timeout=3.0) as client:
+                async with httpx.AsyncClient(timeout=3.0, follow_redirects=False) as client:
                     res = await client.get(f"{host_url}/api/startup-status")
                     if res.status_code == 200:
                         payload = res.json() if res.headers.get("content-type", "").startswith("application/json") else {}

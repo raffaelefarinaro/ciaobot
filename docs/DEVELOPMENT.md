@@ -210,15 +210,16 @@ toggle; the log is always visible). Test both
 startup and update states when changing desktop startup or service lifecycle
 code. The shell's IPC surface is deliberately tiny: exactly two Tauri commands
 (`check_permission` / `request_permission`, backing the PWA's push-notification
-permission flow, declared for the main/update capability) — everything else
+permission flow, restricted to bundled local pages) — everything else
 about the desktop experience is driven from the tray in Rust, so remote page
 content has no other IPC surface to reach. Keep it that way — adding a command
 means re-introducing a bundled window to own it. Release builds require `TAURI_SIGNING_PRIVATE_KEY` and
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; Apple signing remains ad-hoc.
 The main window keeps Tauri's native drag/drop handler enabled so Finder paths
 are preserved. Rust creates a short-lived, single-use grant under the runtime
-root; the local `/api/desktop-drop` route consumes it and either returns host
-paths or transfers client files to the host project. Verify both a host
+root; the local `/api/desktop-drop` route on the device origin consumes it and
+transfers client files to the host project without exposing paths to page
+JavaScript. Verify both a host
 Finder-to-chat drop and a client-to-host transfer after changing this bridge.
 
 Read mutations are cross-device notification mutations too: the engine emits a
@@ -311,9 +312,23 @@ For workspace navigation changes, verify that unmodified `1`–`9` keys follow t
 On the home screen, also verify that it shows only the selected workspace's chats (switching workspaces swaps the content) and that arrow keys follow the rendered lane layout: up/down moves between stacked lanes, left/right moves within a lane.
 For sidebar chat-group changes, verify that a chat's subagent disclosure has a visible `aria-expanded` state, keeps a 44px touch target, hides and restores only its subagent rows, and automatically reopens when the open route is one of those subagents.
 For composer drag-and-drop changes, test both local host and remote client roles. Document drops preserve host sources and add Markdown companions; remote supported documents persist only Markdown through the dedicated chat endpoint:
-host paths must be absolute, while client files must upload into the active
-project on the host before returned original/Markdown paths are inserted. The
+host and client file drops return bounded opaque file references rather than
+absolute paths; the server expands a reference only when building the provider
+prompt. Client files upload into the active project on the host before the
+reference is returned. The
 generic ProjectView upload remains unchanged.
+
+For client-mode security changes, keep the two origins separate: proxied host
+content is served at `localhost`, while local node/device/drop controls are
+accepted only from a loopback peer at `127.0.0.1` with the
+`X-Ciao-Local-Control: 1` header. Do not add a local control route to a
+remote-content capability or
+follow a relay redirect. The focused boundary tests live in
+`tests/test_remote_boundary.py`; hostile artifact coverage is in
+`tests/test_workspace_html.py`. The split intentionally does not yet replace
+the host password/raw session protocol, confine broad file endpoints, isolate
+browser storage/service workers, or negotiate a versioned engine identity;
+those remain follow-up work for #546.
 
 ## Quality gates
 

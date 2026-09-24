@@ -44,7 +44,7 @@ export async function reloadWhenServerReady(timeoutMs = 120000): Promise<void> {
   // exempts it. The exits are the timeout check and the ready reload below.
   for (;;) {
     try {
-      const res = await fetch('/api/startup-status')
+      const res = await fetch('/api/startup-status', { redirect: 'manual' })
       if (res.ok) {
         const data = await res.json()
         if (!data.overall_ready) {

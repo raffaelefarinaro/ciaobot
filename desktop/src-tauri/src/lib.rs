@@ -16,6 +16,7 @@ use crate::{
 };
 use std::{
     env,
+    io::Read,
     net::{Ipv4Addr, SocketAddr, TcpStream},
     process::{Command, Stdio},
     sync::{Arc, Mutex, RwLock},
@@ -64,13 +65,48 @@ fn is_trusted_main_navigation(url: &url::Url, server_url: &url::Url) -> bool {
     if same_origin(url, server_url) {
         return true;
     }
+    if url.scheme() == server_url.scheme()
+        && url
+            .host_str()
+            .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1"))
+        && url.port_or_known_default() == server_url.port_or_known_default()
+    {
+        return true;
+    }
     cfg!(debug_assertions)
         && url.host_str().is_some_and(|host| host == "localhost")
         && url.port_or_known_default() == Some(1420)
 }
 
+fn safe_native_drop_error(error: &str) -> String {
+    let trimmed = error.trim();
+    for safe_prefix in [
+        "No files were dropped:",
+        "Too many files were dropped",
+        "Dropped item has no file name.",
+        "A dropped file name is too long.",
+        "Folders cannot be attached;",
+        "Dropped files are too large.",
+    ] {
+        if trimmed.starts_with(safe_prefix) {
+            return trimmed.chars().take(256).collect();
+        }
+    }
+    "Could not prepare the dropped file.".to_string()
+}
+
 fn browser_event_script(name: &str, detail: &serde_json::Value) -> String {
-    let name = serde_json::to_string(name).unwrap_or_else(|_| "\"ciao:native-drop-error\"".into());
+    let safe_name = if !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        name
+    } else {
+        "ciao:native-event"
+    };
+    let name = serde_json::to_string(safe_name).unwrap_or_else(|_| "\"ciao:native-event\"".into());
     let detail = serde_json::to_string(detail).unwrap_or_else(|_| "{}".into());
     format!("window.dispatchEvent(new CustomEvent({name}, {{ detail: {detail} }}));")
 }
@@ -84,6 +120,9 @@ const DROP_IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 // Bounds how much a single dropped file pulls into memory. A screenshot is
 // never close; a promise-backed drag of something else can be.
 const DROP_STAGING_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const DROP_MAX_FILES: usize = 100;
+const DROP_MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+const DROP_MAX_NAME_BYTES: usize = 255;
 
 // `SF_DATALESS`, from `sys/stat.h`. macOS sets it on a cloud file whose bytes
 // live only in the provider: `stat` reports the real size, `st_blocks` is 0, and
@@ -178,16 +217,34 @@ fn stage_dropped_file(
     }
     let name = path.file_name()?;
     let target_dir = staging_dir.join(index.to_string());
-    std::fs::create_dir_all(&target_dir).ok()?;
     let target = target_dir.join(name);
-    let data = std::fs::read(path).ok()?;
-    std::fs::write(&target, &data).ok()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).ok()?;
+    let result = (|| -> std::io::Result<std::path::PathBuf> {
+        std::fs::create_dir_all(&target_dir)?;
+        let mut source = std::fs::File::open(path)?;
+        let mut data = Vec::new();
+        source
+            .by_ref()
+            .take(DROP_STAGING_MAX_BYTES.saturating_add(1))
+            .read_to_end(&mut data)?;
+        if data.len() as u64 > DROP_STAGING_MAX_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "staged file exceeded the size limit",
+            ));
+        }
+        std::fs::write(&target, &data)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(target.clone())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_dir_all(&target_dir);
     }
-    Some(target)
+    result.ok()
 }
 
 fn create_desktop_drop_grant(
@@ -195,14 +252,33 @@ fn create_desktop_drop_grant(
     paths: &[std::path::PathBuf],
 ) -> Result<(String, Vec<String>), String> {
     if paths.is_empty() {
-        // wry's macOS drag-drop hands over an empty path list when the
-        // pasteboard carries no NSFilenames entries (a text or URL drag
-        // release does this). Writing a grant for it makes the server reject
-        // the follow-up import with "invalid desktop drop grant", a 400 the
-        // user cannot act on; surfacing the no-files condition here instead
-        // shows the real problem in the composer.
         return Err("No files were dropped: the drag did not contain file items.".to_string());
     }
+    if paths.len() > DROP_MAX_FILES {
+        return Err(format!(
+            "Too many files were dropped (maximum {DROP_MAX_FILES})."
+        ));
+    }
+    let mut total_bytes = 0u64;
+    for path in paths {
+        let name = path
+            .file_name()
+            .ok_or_else(|| "Dropped item has no file name.".to_string())?;
+        if name.to_string_lossy().len() > DROP_MAX_NAME_BYTES {
+            return Err("A dropped file name is too long.".to_string());
+        }
+        let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+        if !metadata.is_file() {
+            return Err("Folders cannot be attached; drop individual files instead.".to_string());
+        }
+        total_bytes = total_bytes
+            .checked_add(metadata.len())
+            .ok_or_else(|| "Dropped files are too large.".to_string())?;
+        if total_bytes > DROP_MAX_TOTAL_BYTES {
+            return Err("Dropped files are too large.".to_string());
+        }
+    }
+
     let grant_id = uuid::Uuid::new_v4().to_string();
     let grant_dir = runtime_root.join("desktop-drop-grants");
     std::fs::create_dir_all(&grant_dir).map_err(|error| error.to_string())?;
@@ -215,9 +291,6 @@ fn create_desktop_drop_grant(
                 .and_then(|modified| modified.elapsed().ok())
                 .is_some_and(|age| age > Duration::from_secs(10 * 60));
             if is_stale {
-                // `staged/` is a directory, so sweep both shapes. The server
-                // deletes a staged copy as soon as it holds the bytes; this is
-                // the backstop for a grant that was never consumed.
                 let stale_path = entry.path();
                 if stale_path.is_dir() {
                     let _ = std::fs::remove_dir_all(&stale_path);
@@ -228,41 +301,49 @@ fn create_desktop_drop_grant(
         }
     }
     let staging_dir = grant_dir.join("staged").join(&grant_id);
-    let paths = paths
-        .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            if needs_drop_staging(path)
-                && let Some(staged) = stage_dropped_file(&staging_dir, index, path)
-            {
-                return staged.to_string_lossy().into_owned();
-            }
-            path.to_string_lossy().into_owned()
-        })
-        .collect::<Vec<_>>();
     let grant_path = grant_dir.join(format!("{grant_id}.json"));
     let temp_path = grant_dir.join(format!(".{grant_id}.tmp"));
-    let created_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_secs();
-    let payload = serde_json::json!({
-        "created_at": created_at,
-        "paths": paths,
-    });
-    std::fs::write(
-        &temp_path,
-        serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| error.to_string())?;
+    let result = (|| -> Result<(String, Vec<String>), String> {
+        let staged_paths = paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                if needs_drop_staging(path)
+                    && let Some(staged) = stage_dropped_file(&staging_dir, index, path)
+                {
+                    return staged.to_string_lossy().into_owned();
+                }
+                path.to_string_lossy().into_owned()
+            })
+            .collect::<Vec<_>>();
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_secs();
+        let payload = serde_json::json!({
+            "created_at": created_at,
+            "paths": staged_paths,
+        });
+        std::fs::write(
+            &temp_path,
+            serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| error.to_string())?;
+        }
+        std::fs::rename(&temp_path, &grant_path).map_err(|error| error.to_string())?;
+        Ok((grant_id.clone(), staged_paths))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        let _ = std::fs::remove_file(&temp_path);
+        let _ = std::fs::remove_file(&grant_path);
     }
-    std::fs::rename(&temp_path, &grant_path).map_err(|error| error.to_string())?;
-    Ok((grant_id, paths))
+    result
 }
 
 fn notification_permission_state() -> String {
@@ -1108,9 +1189,15 @@ fn build_windows(
                         let detail = match create_desktop_drop_grant(&runtime_root, &paths) {
                             Ok((grant_id, paths)) => serde_json::json!({
                                 "grantId": grant_id,
-                                "paths": paths,
+                                "names": paths
+                                    .iter()
+                                    .filter_map(|path| std::path::Path::new(path).file_name())
+                                    .map(|name| name.to_string_lossy())
+                                    .collect::<Vec<_>>(),
                             }),
-                            Err(error) => serde_json::json!({ "error": error }),
+                            Err(error) => {
+                                serde_json::json!({ "error": safe_native_drop_error(&error) })
+                            }
                         };
                         let _ = window.eval(browser_event_script("ciao:native-file-drop", &detail));
                     });
@@ -1777,13 +1864,6 @@ fn check_permission(kind: permissions::PermissionKind) -> permissions::Permissio
     permissions::query(kind)
 }
 
-// Lets the homepage's update tile start the same update the tray's "Update"
-// item does, instead of only pointing the operator at a chat about it.
-#[tauri::command]
-fn trigger_app_update(app: AppHandle) {
-    confirm_and_run_full_update(&app);
-}
-
 // Async on purpose: a synchronous command would run the permission prompt's
 // blocking wait on the main thread and freeze every window and the tray until
 // the user answered it.
@@ -1797,8 +1877,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             check_permission,
-            request_permission,
-            trigger_app_update
+            request_permission
         ])
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_window(app, "main");
@@ -1881,10 +1960,11 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_log, browser_event_script, create_desktop_drop_grant, download_percent,
-        engine_already_current, engine_launch_action, flags_are_dataless, is_external_link,
-        is_trusted_main_navigation, needs_drop_staging, requires_confirmation,
-        should_show_main_window, should_stage, update_relaunch_script,
+        DROP_MAX_FILES, DROP_MAX_NAME_BYTES, append_log, browser_event_script,
+        create_desktop_drop_grant, download_percent, engine_already_current, engine_launch_action,
+        flags_are_dataless, is_external_link, is_trusted_main_navigation, needs_drop_staging,
+        requires_confirmation, safe_native_drop_error, should_show_main_window, should_stage,
+        update_relaunch_script,
     };
     use crate::service::ServiceResult;
 
@@ -1956,6 +2036,7 @@ mod tests {
         let server = url::Url::parse("http://localhost:8443/").unwrap();
         for allowed in [
             "http://localhost:8443/chat/example",
+            "http://127.0.0.1:8443/device",
             "tauri://localhost/startup.html",
             "http://tauri.localhost/startup.html",
         ] {
@@ -1976,7 +2057,19 @@ mod tests {
         }
     }
 
-    // A drop the server cannot read itself gets copied: images from the
+    #[test]
+    fn main_webview_does_not_downgrade_an_https_origin() {
+        let server = url::Url::parse("https://localhost:8443/").unwrap();
+        assert!(is_trusted_main_navigation(
+            &url::Url::parse("https://127.0.0.1:8443/device").unwrap(),
+            &server,
+        ));
+        assert!(!is_trusted_main_navigation(
+            &url::Url::parse("http://127.0.0.1:8443/device").unwrap(),
+            &server,
+        ));
+    }
+
     // NSIRD screenshot dir (permissions) and dataless File Provider files of
     // any type (the server's read would deadlock). A readable local
     // screenshot, and a non-image inside an NSIRD dir, both stay
@@ -2056,12 +2149,27 @@ mod tests {
     }
 
     #[test]
+    fn native_drop_errors_never_carry_filesystem_paths() {
+        assert_eq!(
+            safe_native_drop_error("No files were dropped: the drag did not contain file items."),
+            "No files were dropped: the drag did not contain file items."
+        );
+        assert_eq!(
+            safe_native_drop_error("open /Users/alice/secret.txt: permission denied"),
+            "Could not prepare the dropped file."
+        );
+    }
+
+    #[test]
     fn native_drop_grant_preserves_paths_and_escapes_browser_event_data() {
         let root = tempfile::tempdir().unwrap();
         let paths = vec![
             root.path().join("file with spaces.md"),
             root.path().join("quote-'\".txt"),
         ];
+        for path in &paths {
+            std::fs::write(path, b"drop").unwrap();
+        }
 
         let (grant_id, serialized_paths) = create_desktop_drop_grant(root.path(), &paths).unwrap();
         let grant_path = root
@@ -2074,15 +2182,38 @@ mod tests {
         assert_eq!(payload["paths"], serde_json::json!(serialized_paths));
         let script = browser_event_script(
             "ciao:native-file-drop",
-            &serde_json::json!({ "paths": serialized_paths }),
+            &serde_json::json!({
+                "grantId": grant_id,
+                "names": ["file with spaces.md", "quote-'\".txt"],
+            }),
         );
         assert!(
             script.starts_with("window.dispatchEvent(new CustomEvent(\"ciao:native-file-drop\"")
         );
         assert!(script.contains("\\\""));
+        assert!(!script.contains("\"paths\""));
+        assert!(!script.contains(&root.path().to_string_lossy().to_string()));
     }
 
-    // A drop with no file items (a text or URL drag release reaches the Drop
+    #[test]
+    fn native_drop_grant_rejects_unbounded_file_lists_and_names() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = (0..=DROP_MAX_FILES)
+            .map(|index| {
+                let path = root.path().join(format!("file-{index}.txt"));
+                std::fs::write(&path, b"x").unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let error = create_desktop_drop_grant(root.path(), &paths).unwrap_err();
+        assert!(error.contains("Too many files"));
+
+        let long_name = "x".repeat(DROP_MAX_NAME_BYTES + 1);
+        let long_path = root.path().join(long_name);
+        let error = create_desktop_drop_grant(root.path(), &[long_path]).unwrap_err();
+        assert!(error.contains("file name"));
+    }
+
     // event with an empty path list) must fail loudly at grant time instead of
     // writing a grant the server will reject as invalid after the fact.
     #[test]

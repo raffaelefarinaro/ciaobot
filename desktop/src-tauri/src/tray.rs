@@ -53,6 +53,9 @@ pub fn status_label(snapshot: &TraySnapshot) -> String {
         }
         return "Engine: client (no host)".into();
     }
+    if !matches!(role.as_str(), "host" | "active") {
+        return "Engine: role unavailable".into();
+    }
     if !snapshot.startup.overall_ready {
         return "Engine: starting…".into();
     }
@@ -61,7 +64,10 @@ pub fn status_label(snapshot: &TraySnapshot) -> String {
 
 pub fn is_client(snapshot: &TraySnapshot) -> bool {
     let role = snapshot.startup.node_role.to_ascii_lowercase();
-    matches!(role.as_str(), "client" | "standby")
+    // Unknown roles are client-like for menu purposes: expose the local
+    // disconnect/recovery action rather than host controls while state is
+    // unverifiable.
+    !matches!(role.as_str(), "host" | "active")
 }
 
 // The engine reports availability against the GitHub release tag, which ships
@@ -291,6 +297,16 @@ mod tests {
             ..TraySnapshot::default()
         };
         assert_eq!(status_label(&host), "Engine: host");
+        let unknown = TraySnapshot {
+            reachable: true,
+            startup: StartupStatus {
+                overall_ready: true,
+                node_role: "invalid".into(),
+                ..StartupStatus::default()
+            },
+            ..TraySnapshot::default()
+        };
+        assert_eq!(status_label(&unknown), "Engine: role unavailable");
     }
 
     #[test]
@@ -317,10 +333,18 @@ mod tests {
             },
             ..TraySnapshot::default()
         };
+        let unknown = TraySnapshot {
+            startup: StartupStatus {
+                node_role: "invalid".into(),
+                ..StartupStatus::default()
+            },
+            ..TraySnapshot::default()
+        };
 
         assert!(!is_client(&host));
         assert!(is_client(&client));
         assert!(is_client(&legacy_client));
+        assert!(is_client(&unknown));
     }
 
     #[test]

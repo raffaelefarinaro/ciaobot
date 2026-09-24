@@ -22,7 +22,8 @@ import logging
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from ciao.node_proxy import get_proxy_target_url, proxy_websocket
+from ciao.node_proxy import client_peer_required, get_proxy_target_url, proxy_websocket
+from ciao.web.remote_boundary import is_invalid_node_state
 from ciao.web.auth import authorize_websocket
 from ciao.web.chat_broker import ChatStream
 from ciao.web.connection_tracker import ConnectionTracker
@@ -75,6 +76,12 @@ async def _attach_streams(websocket: WebSocket, pcm, chat_id: str) -> None:
 async def ws_chat(websocket: WebSocket) -> None:
     """Per-chat streaming WebSocket."""
     if not await authorize_websocket(websocket):
+        return
+    if is_invalid_node_state(websocket):
+        await websocket.close(code=4003, reason="node state is invalid")
+        return
+    if client_peer_required(websocket):
+        await websocket.close(code=4003, reason="client has no valid host")
         return
 
     target_peer = get_proxy_target_url(websocket)
@@ -369,6 +376,12 @@ async def ws_events(websocket: WebSocket) -> None:
     can paint sidebar indicators without waiting for the next event.
     """
     if not await authorize_websocket(websocket):
+        return
+    if is_invalid_node_state(websocket):
+        await websocket.close(code=4003, reason="node state is invalid")
+        return
+    if client_peer_required(websocket):
+        await websocket.close(code=4003, reason="client has no valid host")
         return
 
     target_peer = get_proxy_target_url(websocket)

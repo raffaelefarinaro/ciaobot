@@ -105,7 +105,9 @@ async function startRecording() {
     }
     if (current === 'not_determined') {
       const requested = await requestDesktopPermission('microphone')
-      if (requested !== 'authorized') {
+      // A local/bundled page may not have the Tauri permission capability;
+      // fall back to the webview's normal getUserMedia consent in that case.
+      if (requested !== 'authorized' && requested !== null) {
         emit(
           'error',
           'Microphone access was denied. Open System Settings > Microphone, allow Ciaobot, then try again.',
