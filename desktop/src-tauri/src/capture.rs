@@ -13,9 +13,10 @@ fn http() -> &'static Client {
     CLIENT.get_or_init(|| {
         Client::builder()
             .timeout(POLL_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .pool_idle_timeout(Duration::from_secs(60))
             .build()
-            .unwrap_or_else(|_| Client::new())
+            .expect("static HTTP client")
     })
 }
 
@@ -66,7 +67,7 @@ pub struct Chat {
     pub needs_input: bool,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct StartupStatus {
     #[serde(default)]
     pub desktop_api_version: Option<u32>,
@@ -82,8 +83,23 @@ pub struct StartupStatus {
     pub latest_version: String,
 }
 
+impl Default for StartupStatus {
+    fn default() -> Self {
+        Self {
+            desktop_api_version: None,
+            overall_ready: false,
+            node_role: "host".into(),
+            active_peer_url: String::new(),
+            update_available: false,
+            latest_version: String::new(),
+        }
+    }
+}
+
 fn default_node_role() -> String {
-    "active".into()
+    // Missing role is not evidence of host mode. Keep the tray on the
+    // recovery/client-like path until a real status payload identifies it.
+    "invalid".into()
 }
 
 // The engine sends an explicit null for these when they do not apply (a host
@@ -154,12 +170,15 @@ fn force_disconnect_payload() -> Value {
 /// host. The endpoint is loopback-only and already supports unauthenticated
 /// force handover for exactly this recovery path.
 pub async fn disconnect_from_host(runtime: &RuntimeConfig) -> Result<(), String> {
-    let url = runtime
+    let mut url = runtime
         .server_url
         .join("api/node/handover")
         .map_err(|error| error.to_string())?;
+    url.set_host(Some("127.0.0.1"))
+        .map_err(|error| error.to_string())?;
     http()
         .post(url)
+        .header("X-Ciao-Local-Control", "1")
         .timeout(Duration::from_secs(30))
         .json(&force_disconnect_payload())
         .send()
@@ -292,6 +311,13 @@ mod tests {
         );
         // Back to needing a full run again, so alternating blips never flap.
         assert_eq!(tolerance.observe(None), None);
+    }
+
+    #[test]
+    fn startup_status_without_a_role_fails_closed() {
+        let status: StartupStatus =
+            serde_json::from_str(r#"{"overall_ready":true}"#).expect("payload parses");
+        assert_eq!(status.node_role, "invalid");
     }
 
     #[test]

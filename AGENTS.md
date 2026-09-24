@@ -18,6 +18,7 @@ Project shape:
 - PWA code lives in `web/`.
 - Generic package assets live in `ciao/stock/`.
 - User vaults and runtime data belong in a separate workspace, not in the public app repo.
+- Client-mode remote content is not a local-control origin: keep `/api/node/*`, `/api/device/*`, `/api/desktop-drop`, `/api/native/sessions`, and `/device` on the loopback device origin/capability path, and keep remote PWA content out of Tauri capabilities. The boundary audit is in `docs/REMOTE_BOUNDARY.md`.
 
 Verification:
 - Run focused tests for the changed behavior.

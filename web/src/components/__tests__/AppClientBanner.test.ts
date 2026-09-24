@@ -43,6 +43,7 @@ beforeEach(() => {
       overall_ready: true,
       phases: [],
       node_role: 'client',
+      state_valid: true,
       host_url: 'https://100.101.252.27:8443',
       has_host_session: true,
     }),

@@ -11,20 +11,82 @@
               This device is a <strong>client</strong>: tray and PWA tunnel to the host below,
               and automations run there, not here.
             </template>
+            <template v-else-if="nodeStatusUnknown">
+              This device's saved role could not be verified. Recovery is available from the
+              device controls, but host and client actions stay disabled.
+            </template>
             <template v-else>
               This device is the <strong>host</strong>: schedules, loops and vault writes run here.
             </template>
           </p>
         </div>
         <div v-if="nodeStatus" class="device-card-actions">
-          <span class="badge" :class="isClient ? 'badge--warn' : 'badge--success'">{{ roleLabel }}</span>
+          <span class="badge" :class="nodeStatusUnknown ? 'badge--warn' : isClient ? 'badge--warn' : 'badge--success'">{{ roleLabel }}</span>
         </div>
       </div>
 
       <div v-if="!nodeStatus" class="loading">Loading node status&hellip;</div>
       <template v-else>
+        <template v-if="nodeStatusUnknown">
+          <p class="hint hint--warn">Repair or replace the saved node state before using device controls.</p>
+          <div class="action-row">
+            <button
+              class="btn-danger btn-small"
+              @click="becomeHost(true)"
+              :disabled="nodePending !== null"
+              title="Discard the unverifiable role and make this device the host"
+            >
+              Force become host
+            </button>
+            <button
+              class="btn-small"
+              @click="showConnectForm = !showConnectForm"
+              :disabled="nodePending !== null"
+            >
+              {{ showConnectForm ? 'Cancel' : 'Connect as client…' }}
+            </button>
+          </div>
+          <template v-if="showConnectForm">
+            <p class="hint">
+              This replaces the unverifiable role with a confirmed client connection.
+              The host must have a PWA password.
+            </p>
+            <div class="device-form">
+              <label class="device-field">
+                <span class="device-field-label">Host URL</span>
+                <input
+                  v-model="hostUrlInput"
+                  type="text"
+                  class="device-input"
+                  placeholder="http://100.x.x.x:8443"
+                  @keyup.enter="connectAsClient"
+                />
+              </label>
+              <label class="device-field">
+                <span class="device-field-label">Host password</span>
+                <input
+                  v-model="hostPasswordInput"
+                  type="password"
+                  class="device-input"
+                  placeholder="Password set on the host"
+                  autocomplete="off"
+                  @keyup.enter="connectAsClient"
+                />
+              </label>
+              <div class="action-row">
+                <button
+                  class="btn-primary btn-small"
+                  @click="connectAsClient"
+                  :disabled="!hostUrlInput.trim() || !hostPasswordInput || nodePending !== null"
+                >
+                  {{ nodePending === 'connect' ? 'Connecting…' : 'Connect' }}
+                </button>
+              </div>
+            </div>
+          </template>
+        </template>
         <!-- Client: this device → host -->
-        <template v-if="isClient">
+        <template v-else-if="isClient">
           <div class="node-path" aria-label="Client connection">
             <div class="node-path-endpoint">
               <span class="node-path-label">this device</span>
@@ -246,12 +308,14 @@ import ConnectedClients from './ConnectedClients.vue'
 import { errorMessage, apiErrorMessage, errorPayload } from '../lib/errorMessage'
 import NodeAddresses from './NodeAddresses.vue'
 import { api } from '../lib/api'
+import { navigateToContent, replaceToContent } from '../lib/originNavigation'
 import { askConfirm } from '../lib/confirm'
 import type { NodeStatus, PackageStatus, PackageChangelog, PackageUpdateResult, ActionResult } from '../lib/types'
 
 // Every request in this panel targets a never-proxied route, so it keeps
 // working (and can disconnect) while the host is unreachable.
 const nodeStatus = ref<NodeStatus | null>(null)
+const nodeStatusError = ref(false)
 const localVersion = ref('')
 const localReady = ref(true)
 const nodePending = ref<string | null>(null)
@@ -260,6 +324,19 @@ const nodeActionError = ref(false)
 const hostUrlInput = ref('')
 const hostPasswordInput = ref('')
 const showConnectForm = ref(false)
+
+function clientBridgeTarget(result: ActionResult): string | null {
+  if (typeof result.bridge_url === 'string') return result.bridge_url
+  return window.location.hostname === '127.0.0.1' ? null : '/'
+}
+
+function navigateAfterAuth(result: ActionResult): boolean {
+  const target = clientBridgeTarget(result)
+  if (!target) return false
+  if (target.includes('/api/auth/bridge')) replaceToContent(target)
+  else navigateToContent(target)
+  return true
+}
 
 const packageStatus = ref<PackageStatus | null>(null)
 const packageLoading = ref(false)
@@ -273,7 +350,10 @@ const isClient = computed(() => {
   const role = nodeStatus.value?.role
   return role === 'client' || role === 'standby'
 })
-const roleLabel = computed(() => (isClient.value ? 'client' : 'host'))
+const nodeStatusUnknown = computed(
+  () => nodeStatusError.value || nodeStatus.value?.state_valid === false || nodeStatus.value?.role === 'invalid',
+)
+const roleLabel = computed(() => (nodeStatusUnknown.value ? 'unknown' : isClient.value ? 'client' : 'host'))
 const deviceName = computed(() => nodeStatus.value?.node_id || 'this machine')
 const hostUrl = computed(() => nodeStatus.value?.host_url || nodeStatus.value?.active_peer_url || '')
 const hostLabel = computed(() => {
@@ -286,18 +366,45 @@ const versionSkew = computed(() => {
   return Boolean(isClient.value && host && localVersion.value && host !== localVersion.value)
 })
 
+function parseNodeStatus(value: unknown): NodeStatus {
+  if (!value || typeof value !== 'object') throw new Error('invalid node status')
+  const data = value as Record<string, unknown>
+  const role = data.role
+  if (
+    typeof data.node_id !== 'string'
+    || !['host', 'client', 'active', 'standby', 'invalid'].includes(String(role))
+    || data.state_valid !== true
+  ) {
+    throw new Error('invalid node status')
+  }
+  return value as NodeStatus
+}
+
 async function fetchNodeStatus() {
   try {
-    nodeStatus.value = await api.get<NodeStatus>('/api/node/status')
+    nodeStatus.value = parseNodeStatus(await api.get<unknown>('/api/node/status'))
+    nodeStatusError.value = false
     if (isClient.value) showConnectForm.value = false
   } catch {
-    /* leave null; the panel still renders its explanation */
+    nodeStatus.value = {
+      node_id: '',
+      role: 'invalid',
+      mode: 'invalid',
+      state_valid: false,
+      active_since: null,
+      last_handover: null,
+      host_url: null,
+      active_peer_url: null,
+      has_host_session: false,
+      peers: [],
+    }
+    nodeStatusError.value = true
   }
 }
 
 async function fetchLocalEngine() {
   try {
-    const res = await fetch('/api/startup-status', { credentials: 'same-origin' })
+    const res = await fetch('/api/startup-status', { credentials: 'same-origin', redirect: 'manual' })
     if (!res.ok) return
     const data = await res.json()
     localVersion.value = String(data.version || '')
@@ -368,8 +475,10 @@ async function connectAsClient() {
     if (r?.ok) {
       hostPasswordInput.value = ''
       showConnectForm.value = false
-      // Full reload: the UI bundle itself now comes from the host.
-      window.location.assign('/')
+      if (!navigateAfterAuth(r)) {
+        nodeActionError.value = true
+        nodeActionResult.value = 'The client session bridge was not issued.'
+      }
       return
     }
     nodeActionError.value = true
@@ -389,9 +498,9 @@ async function reconnectHostSession() {
   nodeActionResult.value = ''
   nodeActionError.value = false
   try {
-    await api.post('/api/auth', { token: password })
+    const result = await api.post<ActionResult>('/api/auth', { token: password })
     hostPasswordInput.value = ''
-    window.location.assign('/')
+    if (!navigateAfterAuth(result)) throw new Error('The client session bridge was not issued.')
     return
   } catch (e) {
     nodeActionError.value = true

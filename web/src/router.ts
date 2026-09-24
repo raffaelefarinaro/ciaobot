@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
+import { deviceHref, isLoopbackPage } from './lib/originNavigation'
 
 export const routes: RouteRecordRaw[] = [
   {
@@ -98,6 +99,14 @@ export const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
+  if (to.path === '/device' || to.path.startsWith('/device/')) {
+    if (window.location.hostname !== '127.0.0.1') {
+      if (isLoopbackPage()) {
+        window.location.assign(deviceHref(to.fullPath))
+      }
+      return false
+    }
+  }
   if (to.meta.requiresAuth) {
     const { useAuthStore } = await import('./stores/auth')
     const auth = useAuthStore()

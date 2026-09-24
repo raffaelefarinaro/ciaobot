@@ -12,13 +12,23 @@
         <!-- Whose settings am I looking at? In client mode every card below is
              the host's, because the API calls behind them are tunneled. Say so
              once, at the top, and point at the one screen that is local. -->
-        <div v-if="isNodeClient" class="card scope-card">
+        <div v-if="nodeStatusUnknown" class="card scope-card">
+          <div class="settings-card-header">
+            <p class="section-title">connection role unavailable</p>
+            <p class="hint">
+              Ciaobot could not verify whether this browser is connected to a host. Settings actions
+              stay on this device until the connection is known.
+              <template v-if="canUseDeviceControls"> <a :href="deviceHref('/device')">Open the device panel</a>.</template>
+            </p>
+          </div>
+        </div>
+        <div v-else-if="isNodeClient" class="card scope-card">
           <div class="settings-card-header">
             <p class="section-title">you are viewing {{ hostScopeLabel }}</p>
             <p class="hint">
               This is the host's Settings, exactly as it looks on that machine. Changes here apply
               there, including the password and restarts.
-              <router-link to="/device">This device</router-link>
+              <template v-if="canUseDeviceControls"><a :href="deviceHref('/device')">This device</a></template>
               has its own panel for role, host connection and its local app version.
             </p>
           </div>
@@ -31,14 +41,14 @@
               <p class="section-title">app actions</p>
               <p class="hint">
                 Snapshot, sync, or restart
-                {{ isNodeClient ? `the host (${hostScopeLabel})` : 'this local Ciaobot instance' }}.
+                {{ isNodeClient ? `the host (${hostScopeLabel})` : nodeStatusUnknown ? 'the connected host (status unavailable)' : 'this local Ciaobot instance' }}.
               </p>
             </div>
             <div class="settings-card-header-actions">
-              <button class="btn-primary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
+              <button class="btn-primary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="nodeStatusUnknown || !!actionPending">
                 {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
               </button>
-              <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="!!actionPending" :title="localStatus?.restart_only ? 'Wait for active chats, then restart the installed server' : 'Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code'">
+              <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="nodeStatusUnknown || !!actionPending" :title="localStatus?.restart_only ? 'Wait for active chats, then restart the installed server' : 'Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code'">
                 {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
               </button>
             </div>
@@ -119,6 +129,9 @@
                   The password on {{ hostScopeLabel }} — the one you typed to open this client.
                   Changing it here keeps this device connected; other clients have to log in again.
                 </template>
+                <template v-else-if="nodeStatusUnknown">
+                  The connection role is unavailable, so this password cannot be safely attributed.
+                </template>
                 <template v-else>
                   Ciaobot is always password-protected — this is the password you type to open it,
                   and the one another device needs to connect as a client.
@@ -165,7 +178,7 @@
                 <button
                   class="btn-primary btn-small"
                   @click="saveAuthSettings"
-                  :disabled="authSettingsSaving || !canSaveAuthSettings"
+                  :disabled="nodeStatusUnknown || authSettingsSaving || !canSaveAuthSettings"
                 >
                   {{ authSettingsSaving ? 'Saving…' : 'Save password' }}
                 </button>
@@ -238,9 +251,12 @@
             <div>
               <p class="section-title">package update</p>
               <p class="hint">
-                <template v-if="isNodeClient && packageStatus?.mode !== 'bundled_app'">
+                <template v-if="nodeStatusUnknown">
+                  Update ownership is unknown until the connection role can be verified.
+                </template>
+                <template v-else-if="isNodeClient && packageStatus?.mode !== 'bundled_app'">
                   The version installed on {{ hostScopeLabel }}. Updating restarts the host.
-                  To upgrade this computer, open <router-link to="/device">this device</router-link>.
+                  <template v-if="canUseDeviceControls">To upgrade this computer, open <a :href="deviceHref('/device')">this device</a>.</template>
                 </template>
                 <template v-else-if="packageStatus?.mode === 'bundled_app'">
                   This bundled app updates through the Ciaobot menu-bar icon. Choose
@@ -255,7 +271,7 @@
               <button
                 :class="packageStatus.update_available ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
                 @click="openUpdatePanel"
-                :disabled="!packageStatus.update_available || packageUpdating || showUpdatePanel"
+                :disabled="nodeStatusUnknown || !packageStatus.update_available || packageUpdating || showUpdatePanel"
               >
                 {{ packageStatus.update_available
                     ? `Update to ${packageStatus.latest_version}`
@@ -294,7 +310,7 @@
                 </p>
               </template>
               <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doPackageUpdate" :disabled="packageUpdating">
+                <button class="btn-primary" @click="doPackageUpdate" :disabled="nodeStatusUnknown || packageUpdating">
                   {{ packageUpdating ? 'Updating&hellip;' : 'Update &amp; Restart' }}
                 </button>
                 <button class="btn-small" @click="showUpdatePanel = false" :disabled="packageUpdating">
@@ -382,10 +398,9 @@
           <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
         </div>
 
-        <!-- This device (role, host connection, local app). Rendered inline so it
-             behaves like every other tile here, instead of navigating to /device. -->
-        <div class="device-tile">
-          <DevicePanel />
+        <div v-if="canUseDeviceControls" class="device-tile">
+          <a class="btn-small" :href="deviceHref('/device')">Open this device</a>
+          <span class="hint">Role, host connection, and local app controls stay on the device origin.</span>
         </div>
 
         <!-- Open source. The face image on the right appears only while the
@@ -1789,6 +1804,7 @@
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
+import { deviceHref, isLoopbackPage } from '../lib/originNavigation'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
 import { formatTime, formatDuration } from '../lib/time'
 import { isApplePlatform, isDesktopApp } from '../lib/desktop'
@@ -1841,7 +1857,6 @@ import ModelSelector from './ModelSelector.vue'
 import SettingsAutomation from './settings/SettingsAutomation.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
-import DevicePanel from './DevicePanel.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import { isGwsEngineHostEligible } from '../lib/gwsEngineHost'
 import { useMcpServers } from '../composables/useMcpServers'
@@ -1849,6 +1864,7 @@ import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } fro
 
 // The tray owns package updates and native notifications in the desktop app.
 const inDesktopApp = isDesktopApp()
+const canUseDeviceControls = isLoopbackPage()
 // The web shortcuts bind altKey. Apple keyboards label that key Option (\u2325);
 // Windows and Linux keyboards label it Alt.
 const onApplePlatform = isApplePlatform()
@@ -2086,6 +2102,10 @@ async function fetchRoutines() {
 }
 
 async function saveRoutines(patch: Record<string, unknown>) {
+  if (nodeStatusUnknown.value) {
+    routinesResult.value = 'Connection role is unavailable; open This device before changing model settings.'
+    return
+  }
   routinesSaving.value = true
   routinesResult.value = ''
   try {
@@ -2604,6 +2624,7 @@ function gwsOnEngineHost(): boolean {
     loaded: nodeStatusLoaded.value,
     error: nodeStatusError.value,
     isClient: isNodeClient.value,
+    stateValid: !nodeStatusUnknown.value,
   })
 }
 
@@ -2936,6 +2957,10 @@ const healthFixPending = ref(false)
 const healthFixError = ref('')
 
 async function fixWorkspaceHealth() {
+  if (nodeStatusUnknown.value) {
+    healthFixError.value = 'Connection role is unavailable; open This device before changing the host.'
+    return
+  }
   healthFixPending.value = true
   healthFixError.value = ''
   try {
@@ -3712,6 +3737,10 @@ watch(() => projectStore.workspaceRegistryRevision, () => {
 
 
 async function doSnapshot(confirmWarnings = false) {
+  if (nodeStatusUnknown.value) {
+    actionResult.value = 'Connection role is unavailable; open This device before changing the host.'
+    return
+  }
   actionPending.value = 'snapshot'
   actionResult.value = ''
   deploySteps.value = []
@@ -3749,6 +3778,10 @@ function restartAndReload(message: string) {
 }
 
 async function doDeploy(confirmWarnings = false) {
+  if (nodeStatusUnknown.value) {
+    actionResult.value = 'Connection role is unavailable; open This device before restarting the host.'
+    return
+  }
   // Fail closed on unknown host state: with no status, restart_only reads as
   // false, and guessing deploy on a production Linux host would
   // snapshot/pull/rebuild an administrator-managed checkout. Re-check once;
@@ -3819,6 +3852,10 @@ async function doDeploy(confirmWarnings = false) {
 }
 
 async function fixDeployErrorInChat() {
+  if (nodeStatusUnknown.value) {
+    notifyFailed('Connection role unavailable', 'Open This device before starting a host chat.')
+    return
+  }
   let errorMsg = ''
   if (deploySteps.value.some(s => !s.ok)) {
     errorMsg = deploySteps.value
@@ -3877,6 +3914,10 @@ async function refreshDebugIssues() {
 }
 
 async function fixIssuesInChat() {
+  if (nodeStatusUnknown.value) {
+    notifyFailed('Connection role unavailable', 'Open This device before starting a host chat.')
+    return
+  }
   debugPending.value = true
   try {
     await refreshDebugIssues()
@@ -3948,6 +3989,11 @@ async function fetchAuthSettings() {
 }
 
 async function saveAuthSettings() {
+  if (nodeStatusUnknown.value) {
+    authSettingsError.value = true
+    authSettingsResult.value = 'Connection role is unavailable; open This device before changing the password.'
+    return
+  }
   if (!authSettings.value || !canSaveAuthSettings.value) return
   authSettingsSaving.value = true
   authSettingsResult.value = ''
@@ -3987,11 +4033,16 @@ const isNodeClient = computed(() => {
   return role === 'client' || role === 'standby'
 })
 
+const nodeStatusUnknown = computed(
+  () => nodeStatusError.value || !nodeStatus.value || nodeStatus.value.state_valid === false,
+)
+
 const connectedHostUrl = computed(
   () => nodeStatus.value?.host_url || nodeStatus.value?.active_peer_url || '',
 )
 
 const hostScopeLabel = computed(() => {
+  if (nodeStatusUnknown.value) return 'the connected host (status unavailable)'
   const named = nodeStatus.value?.host_node_id
   const url = connectedHostUrl.value
   if (named && url) return `${named} (${url})`
@@ -4000,10 +4051,27 @@ const hostScopeLabel = computed(() => {
 
 async function fetchNodeStatus() {
   try {
-    nodeStatus.value = await api.get<NodeStatus>('/api/node/status')
-    nodeStatusError.value = false
+    const data = await api.get<Record<string, unknown>>('/api/startup-status')
+    const rawRole = String(data.node_role || '')
+    const role = ['host', 'client', 'active', 'standby', 'invalid'].includes(rawRole)
+      ? rawRole as NodeStatus['role']
+      : 'invalid'
+    const stateValid = data.state_valid === true && role !== 'invalid'
+    nodeStatus.value = {
+      node_id: String(data.node_id || ''),
+      role,
+      mode: role === 'active' ? 'host' : role === 'standby' ? 'client' : role,
+      state_valid: stateValid,
+      active_since: null,
+      last_handover: null,
+      host_url: data.host_url ? String(data.host_url) : null,
+      active_peer_url: data.active_peer_url ? String(data.active_peer_url) : null,
+      has_host_session: Boolean(data.has_host_session),
+      peers: [],
+    }
+    nodeStatusError.value = !stateValid
   } catch {
-    /* leave null on failure: cards then read as host-mode, which is the default */
+    nodeStatus.value = null
     nodeStatusError.value = true
   } finally {
     nodeStatusLoaded.value = true
@@ -4011,6 +4079,10 @@ async function fetchNodeStatus() {
 }
 
 async function localHandback(confirmWarnings = false) {
+  if (nodeStatusUnknown.value) {
+    actionResult.value = 'Connection role is unavailable; open This device before syncing.'
+    return
+  }
   if (!confirmWarnings && !await askConfirm('Sync changes with the remote repository?', {
     title: 'Sync with remote',
     confirmLabel: 'Sync with remote',
@@ -4085,6 +4157,10 @@ async function openUpdatePanel() {
 }
 
 async function doPackageUpdate() {
+  if (nodeStatusUnknown.value) {
+    packageResult.value = 'Connection role is unavailable; open This device before updating.'
+    return
+  }
   packageUpdating.value = true
   packageResult.value = 'Updating Ciaobot and restarting...'
   try {

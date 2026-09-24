@@ -433,6 +433,7 @@ export type WsEvent =
   // connection state, not a chat/model failure, so the PWA renders one
   // reconnecting card instead of appending an error to conversation history.
   | { type: 'host_unreachable' }
+  | { type: 'auth_required'; message?: string }
   // Server is draining for restart; client should show RestartNotice, not
   // treat this as a chat failure.
   | { type: 'server_restarting'; message: string }
@@ -477,6 +478,7 @@ export type EventsWsMessage =
   // emits this on the proxied socket and closes. Delivered on /ws/events too,
   // which is the only socket open when no chat is on screen.
   | { type: 'host_unreachable' }
+  | { type: 'auth_required'; message?: string }
 
 export interface InAppToast {
   id: number
@@ -967,8 +969,9 @@ export interface NodePeer {
 
 export interface NodeStatus {
   node_id: string
-  role: 'host' | 'client' | 'active' | 'standby'
-  mode?: 'host' | 'client'
+  role: 'host' | 'client' | 'active' | 'standby' | 'invalid'
+  mode?: 'host' | 'client' | 'invalid'
+  state_valid?: boolean
   active_since: string | null
   last_handover: string | null
   host_url?: string | null

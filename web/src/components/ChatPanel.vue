@@ -487,7 +487,7 @@
       </template>
 
       <div
-        v-if="store.hostConnectionUnavailable"
+        v-if="store.hostConnectionUnavailable && canUseDeviceControls"
         class="host-connection-card"
         role="alert"
       >
@@ -1119,7 +1119,8 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useProjectStore } from '../stores/projects'
-import { errorMessage, apiErrorMessage } from '../lib/errorMessage'
+import { errorMessage } from '../lib/errorMessage'
+import { isLoopbackPage, navigateToDevice } from '../lib/originNavigation'
 import {
   isPostprocessing,
   postprocessFailed,
@@ -1289,10 +1290,11 @@ const {
 } = composer
 const isContinuing = ref(false)
 const becomingHost = ref(false)
+const canUseDeviceControls = isLoopbackPage()
 const hostHandoverError = ref('')
 
 async function disconnectAndBecomeHost() {
-  if (becomingHost.value) return
+  if (!canUseDeviceControls || becomingHost.value) return
   const confirmed = await askConfirm(
     'Disconnect from the unreachable host and make this device the host? Changes that exist only on the other host may not be synced.',
     {
@@ -1304,14 +1306,7 @@ async function disconnectAndBecomeHost() {
 
   becomingHost.value = true
   hostHandoverError.value = ''
-  try {
-    const result = await api.post<{ ok: boolean }>('/api/node/handover', { force: true })
-    if (!result.ok) throw new Error('Could not make this device the host')
-    window.location.assign('/')
-  } catch (e) {
-    hostHandoverError.value = apiErrorMessage(e, 'Could not make this device the host')
-    becomingHost.value = false
-  }
+  navigateToDevice()
 }
 
 // Ticks once a second while streaming so the live elapsed-time label in the

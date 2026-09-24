@@ -7,7 +7,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.node_state import NodeStateManager
+from ciao.node_state import NodeStateManager, peer_url_is_allowed
 from ciao.schedules import ScheduleEntry, ScheduleManager, ScheduleStore
 from ciao.web.routes_node import (
     node_connect_endpoint,
@@ -16,6 +16,15 @@ from ciao.web.routes_node import (
     node_peers_endpoint,
     node_status_endpoint,
 )
+
+
+def test_peer_url_validation_rejects_malformed_ports_and_downgrades() -> None:
+    assert peer_url_is_allowed("http://host:bad", "http") is False
+    assert peer_url_is_allowed("http://host:0", "http") is False
+    assert peer_url_is_allowed("http://host:", "http") is False
+    assert peer_url_is_allowed("http://host:8443", "https") is False
+    assert peer_url_is_allowed("http://host:8443", "wss") is False
+    assert peer_url_is_allowed("https://host:8443", "https") is True
 
 
 def test_node_state_manager_defaults(tmp_path: Path):
@@ -29,6 +38,69 @@ def test_node_state_manager_defaults(tmp_path: Path):
     assert status["mode"] == "host"
     assert status["active_since"] is not None
     assert isinstance(status["peers"], list)
+
+
+@pytest.mark.parametrize("content", ["{", "[]", "null", "{}", '{"role":"unknown"}', '{"peers":{}}'])
+def test_invalid_node_state_is_preserved_and_not_host(tmp_path: Path, content: str) -> None:
+    state = tmp_path / "node_state.json"
+    state.write_text(content, encoding="utf-8")
+
+    mgr = NodeStateManager(tmp_path)
+
+    assert mgr.get_role() == "invalid"
+    assert mgr.is_active() is False
+    assert mgr.is_client() is True
+    assert mgr.is_valid() is False
+    assert mgr.get_active_peer_url() is None
+    assert state.read_text(encoding="utf-8") == content
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"role":"client","host_url":"http://[bad","peers":[]}',
+        '{"role":"client","host_url":"http://host:8443","peers":[{"url":"http://[bad"}]}',
+    ],
+)
+def test_malformed_peer_urls_are_invalid_not_host(tmp_path: Path, content: str) -> None:
+    state = tmp_path / "node_state.json"
+    state.write_text(content, encoding="utf-8")
+
+    mgr = NodeStateManager(tmp_path)
+
+    assert mgr.get_role() == "invalid"
+    assert mgr.is_valid() is False
+    assert mgr.is_active() is False
+    assert mgr.is_client() is True
+    assert mgr.get_active_peer_url() is None
+
+
+def test_runtime_state_removal_cannot_turn_a_client_into_a_host(tmp_path: Path) -> None:
+    mgr = NodeStateManager(tmp_path)
+    mgr.connect_as_client("http://10.0.0.5:8443")
+    (tmp_path / "node_state.json").unlink()
+
+    assert mgr.get_role() == "invalid"
+    assert mgr.is_active() is False
+    assert mgr.is_client() is True
+
+
+def test_runtime_corruption_cannot_turn_a_client_into_a_host(tmp_path: Path) -> None:
+    mgr = NodeStateManager(tmp_path)
+    mgr.connect_as_client("http://10.0.0.5:8443")
+    state = tmp_path / "node_state.json"
+    state.write_text("{", encoding="utf-8")
+
+    assert mgr.get_role() == "invalid"
+    assert mgr.is_active() is False
+    assert mgr.is_client() is True
+    assert mgr.get_active_peer_url() is None
+
+
+def test_set_role_rejects_unknown_values(tmp_path: Path) -> None:
+    mgr = NodeStateManager(tmp_path)
+    with pytest.raises(ValueError):
+        mgr.set_role("unknown")
 
 
 def test_node_state_role_transitions(tmp_path: Path):

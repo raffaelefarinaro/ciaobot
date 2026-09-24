@@ -10,8 +10,8 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
-from ciao.web.routes_auth import auth_login, auth_logout
+from ciao.web.auth import AuthMiddleware, SESSION_COOKIE, make_serializer
+from ciao.web.routes_auth import auth_bridge, auth_bridge_issue, auth_login, auth_logout
 
 
 async def _ok(_request):
@@ -80,6 +80,14 @@ def test_same_origin_rejects_cross_origin() -> None:
 
     req = _origin_req({"host": "ciao.example"})
     assert _same_origin(req, "https://evil.example") is False
+
+
+def test_same_origin_rejects_an_explicit_port_mismatch() -> None:
+    from ciao.web.auth import _same_origin
+
+    req = _origin_req({"host": "ciao.example"})
+    assert _same_origin(req, "https://ciao.example:444") is False
+    assert _same_origin(req, "https://ciao.example") is True
 
 
 def test_same_origin_accepts_proxy_forwarded_host() -> None:
@@ -236,6 +244,7 @@ def _handover_app(host_url: str = "http://100.1.2.3:8443", host_session=None):
 
     node_mgr.get_host_url = lambda: state["host_url"]  # type: ignore[method-assign]
     node_mgr.get_host_session = lambda: state["host_session"]  # type: ignore[method-assign]
+    setattr(node_mgr, "is_client", lambda: state["role"] == "client")
     node_mgr.promote = promote  # type: ignore[method-assign]
     app.state.node_state_manager = node_mgr
     app.state.local_session_manager = None
@@ -246,11 +255,14 @@ def test_node_handover_bailout_allowed_from_loopback_without_session() -> None:
     """Stuck clients on /login must force-promote without a host session."""
     app, state = _handover_app()
 
-    client = TestClient(app, base_url="https://ciao.example", client=("127.0.0.1", 5555))
+    client = TestClient(app, base_url="http://127.0.0.1:8443", client=("127.0.0.1", 5555))
     resp = client.post(
         "/api/node/handover",
         json={"force": True},
-        headers={"Origin": "https://ciao.example"},
+        headers={
+            "Origin": "http://127.0.0.1:8443",
+            "X-Ciao-Local-Control": "1",
+        },
     )
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
@@ -261,13 +273,13 @@ def test_node_handover_rejects_remote_peer_without_session() -> None:
     """Force-promote is identity-less, so the network must not reach it."""
     app, state = _handover_app()
 
-    client = TestClient(app, base_url="https://ciao.example", client=("10.0.0.9", 5555))
+    client = TestClient(app, base_url="http://localhost:8443", client=("10.0.0.9", 5555))
     resp = client.post(
         "/api/node/handover",
         json={"force": True},
-        headers={"Origin": "https://ciao.example"},
+        headers={"Origin": "http://localhost:8443"},
     )
-    assert resp.status_code == 401
+    assert resp.status_code == 403
     assert state["role"] == "client"
 
 
@@ -275,9 +287,13 @@ def test_node_handover_ignores_a_spoofed_localhost_host_header() -> None:
     """The gate reads the peer address, not the caller-supplied Host header."""
     app, state = _handover_app()
 
-    client = TestClient(app, base_url="http://10.0.0.9:8443", client=("10.0.0.9", 5555))
-    resp = client.post("/api/node/handover", json={"force": True}, headers={"Host": "localhost"})
-    assert resp.status_code == 401
+    client = TestClient(app, base_url="http://localhost:8443", client=("10.0.0.9", 5555))
+    resp = client.post(
+        "/api/node/handover",
+        json={"force": True},
+        headers={"Host": "127.0.0.1:8443"},
+    )
+    assert resp.status_code == 403
     assert state["role"] == "client"
 
 
@@ -285,11 +301,14 @@ def test_node_handover_rejects_target_url_other_than_the_connected_host() -> Non
     """The demote call carries the host session, so the URL must not be free-form."""
     app, state = _handover_app(host_session="host-cookie")
 
-    client = TestClient(app, base_url="https://ciao.example", client=("127.0.0.1", 5555))
+    client = TestClient(app, base_url="http://127.0.0.1:8443", client=("127.0.0.1", 5555))
     resp = client.post(
         "/api/node/handover",
         json={"target_node_url": "http://attacker.example.com", "force": False},
-        headers={"Origin": "https://ciao.example"},
+        headers={
+            "Origin": "http://127.0.0.1:8443",
+            "X-Ciao-Local-Control": "1",
+        },
     )
     assert resp.status_code == 400
     assert "connected host" in resp.json()["error"]
@@ -299,13 +318,116 @@ def test_node_handover_rejects_target_url_other_than_the_connected_host() -> Non
 def test_node_handover_bailout_rejects_cross_origin() -> None:
     app, _state = _handover_app()
 
-    client = TestClient(app, base_url="https://ciao.example", client=("127.0.0.1", 5555))
+    client = TestClient(app, base_url="http://127.0.0.1:8443", client=("127.0.0.1", 5555))
     resp = client.post(
         "/api/node/handover",
         json={"force": True},
-        headers={"Origin": "https://evil.example"},
+        headers={
+            "Origin": "https://evil.example",
+            "X-Ciao-Local-Control": "1",
+        },
     )
     assert resp.status_code == 403
+
+
+def test_control_origin_login_bridges_one_client_session_to_content_origin(
+    tmp_path, monkeypatch
+) -> None:
+    import httpx
+    from urllib.parse import urlsplit
+
+    from ciao.node_state import NodeStateManager
+
+    serializer = make_serializer("test-secret")
+    app = Starlette(
+        routes=[
+            Route("/api/auth", auth_login, methods=["POST"]),
+            Route("/api/auth/bridge", auth_bridge, methods=["GET"]),
+            Route("/device/return", auth_bridge_issue, methods=["GET"]),
+        ],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    app.state.config = SimpleNamespace(
+        pwa_auth_required=True,
+        pwa_auth_token="local-token",
+        pwa_port=8443,
+    )
+    manager = NodeStateManager(tmp_path)
+    manager.connect_as_client("http://host.example:8443")
+    app.state.node_state_manager = manager
+
+    class Headers(dict):
+        def get_list(self, key: str) -> list[str]:
+            value = self.get(key)
+            return [value] if value else []
+
+    class Response:
+        status_code = 200
+        headers = Headers({"content-type": "application/json"})
+        cookies = {SESSION_COOKIE: "host-session"}
+        text = ""
+
+        def json(self):
+            return {"ok": True}
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json=None):
+            assert url == "http://host.example:8443/api/auth"
+            assert json == {"token": "host-password"}
+            return Response()
+
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    control = TestClient(
+        app,
+        base_url="http://127.0.0.1:8443",
+        client=("127.0.0.1", 5555),
+    )
+    login = control.post(
+        "/api/auth",
+        json={"token": "host-password"},
+        headers={
+            "Origin": "http://127.0.0.1:8443",
+            "X-Ciao-Local-Control": "1",
+        },
+    )
+
+    assert login.status_code == 200
+    bridge = urlsplit(str(login.json()["bridge_url"]))
+    assert bridge.scheme == "http"
+    assert bridge.hostname == "localhost"
+    assert bridge.path == "/api/auth/bridge"
+    assert "host-session" not in login.text
+
+    issued = control.get("/device/return", follow_redirects=False)
+    assert issued.status_code == 302
+    assert issued.headers["location"].startswith("http://localhost:8443/api/auth/bridge?token=")
+
+    content = TestClient(
+        app,
+        base_url="http://localhost:8443",
+        client=("127.0.0.1", 5555),
+    )
+    bridged = content.get(
+        f"{bridge.path}?{bridge.query}",
+        follow_redirects=False,
+    )
+    assert bridged.status_code == 302
+    assert bridged.headers["location"] == "http://localhost:8443/"
+    assert "ciao_session=" in bridged.headers["set-cookie"]
+    assert content.get(
+        f"{bridge.path}?{bridge.query}",
+        follow_redirects=False,
+    ).status_code == 401
 
 
 def test_menubar_chats_requires_loopback_or_session() -> None:

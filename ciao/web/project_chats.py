@@ -25,6 +25,10 @@ if TYPE_CHECKING:
 RESTART_DRAIN_MESSAGE = (
     "Ciaobot is waiting for active chats to finish before restarting"
 )
+_FILE_REF_PREFIX = "ciao-drop:"
+_FILE_REF_TTL_SECONDS = 10 * 60
+_FILE_REF_MAX_ENTRIES = 256
+_FILE_REF_PATTERN = re.compile(r"ciao-drop:(drop_[0-9a-f]{32})")
 
 
 class RestartDrainingError(RuntimeError):
@@ -578,6 +582,7 @@ class ProjectChatManager:
         self._path = path
         self._projects: dict[str, ProjectInfo] = {}
         self._chats: dict[str, ChatInfo] = {}
+        self._file_refs: dict[str, tuple[str, str, float]] = {}
         # Canonical-doc frontmatter memo, keyed by path -> ((mtime_ns, size),
         # (name, context)). Vault discovery re-reads every project doc on each
         # list_projects() call, so without this the sidebar would parse the
@@ -5464,7 +5469,7 @@ class ProjectChatManager:
         if not prefix:
             context_digest = ""
             context_session_id = ""
-        provider_prompt = prompt
+        provider_prompt = self.expand_file_refs(prompt, chat.chat_id)
         full_prompt = prefix + provider_prompt if prefix else provider_prompt
         final_display_prompt = prefix + display_prompt if prefix else display_prompt
 
@@ -9551,6 +9556,40 @@ class ProjectChatManager:
         return target
 
     # ── Project files ────────────────────────────────────────────────────
+
+    def _prune_file_refs(self) -> None:
+        now = time.time()
+        expired = [ref for ref, (_, _, expires_at) in self._file_refs.items() if expires_at <= now]
+        for ref in expired:
+            self._file_refs.pop(ref, None)
+        while len(self._file_refs) > _FILE_REF_MAX_ENTRIES:
+            self._file_refs.pop(next(iter(self._file_refs)))
+
+    def register_file_ref(self, chat_id: str, path: Path) -> str:
+        self._prune_file_refs()
+        ref = f"drop_{uuid.uuid4().hex}"
+        self._file_refs[ref] = (chat_id, str(Path(path).resolve()), time.time() + _FILE_REF_TTL_SECONDS)
+        return ref
+
+    def remove_file_refs(self, refs: list[str] | tuple[str, ...]) -> None:
+        for ref in refs:
+            self._file_refs.pop(ref, None)
+
+    def expand_file_refs(self, prompt: str, chat_id: str) -> str:
+        self._prune_file_refs()
+
+        def replace(match: re.Match[str]) -> str:
+            ref = match.group(1)
+            record = self._file_refs.get(ref)
+            if record is None or record[0] != chat_id:
+                return match.group(0)
+            path = Path(record[1])
+            if not path.is_file():
+                self._file_refs.pop(ref, None)
+                return match.group(0)
+            return str(path)
+
+        return _FILE_REF_PATTERN.sub(replace, prompt)
 
     def project_vault_dir(self, project_id: str) -> Path | None:
         """Return the resolved vault folder for a project, or None.

@@ -17,6 +17,7 @@ from ciao.node_proxy import (
     get_static_proxy_target,
     is_local_path,
     is_local_ui_path,
+    proxy_http_request,
     proxy_websocket,
 )
 from ciao.node_state import NodeStateManager
@@ -48,6 +49,7 @@ def test_password_settings_are_mirrored_not_local():
     assert is_local_path("/api/auth/settings") is False
     assert is_local_path("/api/auth") is True
     assert is_local_path("/api/auth/check") is True
+    assert is_local_path("/api/auth/bridge") is True
     assert is_local_path("/api/auth/logout") is True
 
 
@@ -101,10 +103,17 @@ def test_standby_proxy_middleware_routing(tmp_path: Path):
     app = Starlette(routes=routes, middleware=middleware)
     app.state.node_state_manager = mgr
 
-    client = TestClient(app)
+    control_client = TestClient(
+        app, base_url="http://127.0.0.1", client=("127.0.0.1", 5555)
+    )
+    content_client = TestClient(
+        app, base_url="http://localhost", client=("127.0.0.1", 5555)
+    )
 
     # Local endpoint should pass through to local handler
-    res_status = client.get("/api/node/status")
+    res_status = control_client.get(
+        "/api/node/status", headers={"X-Ciao-Local-Control": "1"}
+    )
     assert res_status.status_code == 200
     assert res_status.json()["source"] == "local_node_status"
 
@@ -114,7 +123,7 @@ def test_standby_proxy_middleware_routing(tmp_path: Path):
 
     with patch("httpx.AsyncClient.request", new_callable=AsyncMock) as mock_request:
         mock_request.side_effect = httpx.ConnectError("offline")
-        res_chats = client.get("/api/chats")
+        res_chats = content_client.get("/api/chats")
     assert res_chats.status_code == 503
     assert res_chats.json()["peer_unreachable"] is True
     assert res_chats.json().get("client") is True
@@ -134,6 +143,28 @@ def _client_app(tmp_path: Path, static_dir: Path) -> tuple[Starlette, NodeStateM
     )
     app.state.node_state_manager = mgr
     return app, mgr
+
+
+def test_client_without_a_peer_does_not_fall_through_to_local_api(tmp_path: Path) -> None:
+    mgr = NodeStateManager(tmp_path)
+    mgr.demote()
+
+    async def local_chats(request):
+        return JSONResponse({"source": "local"})
+
+    app = Starlette(
+        routes=[Route("/api/chats", local_chats)],
+        middleware=[Middleware(StandbyProxyMiddleware)],
+    )
+    app.state.node_state_manager = mgr
+    client = TestClient(
+        app,
+        base_url="http://localhost:8443",
+        client=("127.0.0.1", 5555),
+    )
+    response = client.get("/api/chats")
+    assert response.status_code == 503
+    assert response.json()["client"] is True
 
 
 def test_static_proxy_target_mirrors_host_bundle(tmp_path: Path, monkeypatch):
@@ -203,7 +234,7 @@ def test_client_serves_host_index_and_local_device_page(tmp_path: Path, monkeypa
     monkeypatch.setattr(web_app, "STATIC_DIR", static_dir)
 
     app, _mgr = _client_app(tmp_path / "state", static_dir)
-    client = TestClient(app)
+    client = TestClient(app, client=("127.0.0.1", 5555))
 
     host_response = httpx.Response(
         200,
@@ -278,6 +309,27 @@ def test_host_issued_session_cookie_is_captured_not_forwarded(tmp_path: Path, mo
 
 
 @pytest.mark.asyncio
+async def test_https_request_refuses_an_http_peer_before_sending_credentials() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "https",
+            "server": ("client.test", 443),
+            "path": "/api/chats",
+            "query_string": b"",
+            "headers": [],
+        }
+    )
+    app = Starlette()
+    request.scope["app"] = app
+    with patch("httpx.AsyncClient.request", new_callable=AsyncMock) as mock_request:
+        response = await proxy_http_request(request, "http://host.example:8443")
+    assert response.status_code == 503
+    mock_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_websocket_proxy_reports_host_connection_state() -> None:
     class FailingConnection:
         async def __aenter__(self):
@@ -331,6 +383,42 @@ async def test_websocket_proxy_reports_a_client_to_host_forwarding_failure() -> 
 
     websocket.send_json.assert_awaited_once_with({"type": "host_unreachable"})
     websocket.close.assert_awaited_once_with(code=4004)
+
+
+@pytest.mark.asyncio
+async def test_websocket_proxy_separates_auth_and_policy_failures() -> None:
+    class DeniedConnection:
+        def __init__(self, *, status: int | None = None, code: int | None = None):
+            self.status = status
+            self.code = code
+
+        async def __aenter__(self):
+            error = Exception("host rejected the socket")
+            if self.status is not None:
+                error.status_code = self.status  # type: ignore[attr-defined]
+            if self.code is not None:
+                error.code = self.code  # type: ignore[attr-defined]
+            raise error
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    for connection, expected_kind, expected_code in [
+        (DeniedConnection(status=401), "auth_required", 4001),
+        (DeniedConnection(code=4003), "error", 4003),
+    ]:
+        websocket = AsyncMock()
+        websocket.url.path = "/ws/events"
+        websocket.url.query = ""
+        websocket.app.state.node_state_manager = None
+        with patch("websockets.connect", return_value=connection):
+            await proxy_websocket(websocket, "http://10.0.0.5:8443")
+        websocket.send_json.assert_awaited_once()
+        assert websocket.send_json.await_args.args[0]["type"] == expected_kind
+        websocket.close.assert_awaited_once_with(
+            code=expected_code,
+            reason=websocket.send_json.await_args.args[0].get("message", "host rejected the client connection"),
+        )
 
 
 @pytest.mark.asyncio

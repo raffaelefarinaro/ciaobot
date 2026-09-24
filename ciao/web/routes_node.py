@@ -102,13 +102,17 @@ async def node_status_endpoint(request: Request) -> JSONResponse:
     if status.get("role") == "client" and status.get("host_url"):
         host_url = status["host_url"]
         try:
+            from ciao.node_state import peer_url_is_allowed
+
+            if not peer_url_is_allowed(str(host_url), str(request.url.scheme or "")):
+                raise ValueError("peer transport is not allowed")
             import httpx
             headers = {}
             session = node_mgr.get_host_session()
             if session:
                 from ciao.web.auth import SESSION_COOKIE
                 headers["cookie"] = f"{SESSION_COOKIE}={session}"
-            async with httpx.AsyncClient(timeout=2.0) as client:
+            async with httpx.AsyncClient(timeout=2.0, follow_redirects=False) as client:
                 res = await client.get(f"{host_url}/api/startup-status", headers=headers)
                 status["host_reachable"] = res.status_code == 200
                 status["active_peer_reachable"] = status["host_reachable"]
@@ -161,10 +165,10 @@ async def node_connect_endpoint(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    from ciao.node_state import _normalize_peer_url
+    from ciao.node_state import _normalize_peer_url, peer_url_is_allowed
 
     host_url = _normalize_peer_url(host_url)
-    if not host_url:
+    if not host_url or not peer_url_is_allowed(host_url, str(request.url.scheme or "")):
         return api_error("invalid host_url", 400)
 
     import httpx
@@ -255,7 +259,10 @@ async def node_connect_endpoint(request: Request) -> JSONResponse:
         )
 
     status = node_mgr.connect_as_client(host_url, host_session=host_session)
-    return JSONResponse({"ok": True, "status": status})
+    from ciao.web.routes_auth import _clear_auth_bridges, client_session_response
+
+    _clear_auth_bridges(request.app)
+    return client_session_response(request, {"ok": True, "status": status})
 
 
 async def node_handover_endpoint(request: Request) -> JSONResponse:
@@ -277,7 +284,7 @@ async def node_handover_endpoint(request: Request) -> JSONResponse:
     except Exception:
         body = {}
 
-    from ciao.node_state import _normalize_peer_url
+    from ciao.node_state import _normalize_peer_url, peer_url_is_allowed
 
     force = bool(body.get("force", False))
     host_url = node_mgr.get_host_url() or ""
@@ -285,6 +292,8 @@ async def node_handover_endpoint(request: Request) -> JSONResponse:
     if requested_url and _normalize_peer_url(requested_url) != _normalize_peer_url(host_url):
         return api_error("target_node_url does not match the connected host", 400)
     target_url = host_url.rstrip("/")
+    if target_url and not peer_url_is_allowed(target_url, str(request.url.scheme or "")):
+        return api_error("connected host transport is not allowed", 400)
     local_session = getattr(request.app.state, "local_session_manager", None)
 
     if target_url and not force:
@@ -296,7 +305,7 @@ async def node_handover_endpoint(request: Request) -> JSONResponse:
             session = node_mgr.get_host_session()
             if session:
                 headers["cookie"] = f"{SESSION_COOKIE}={session}"
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
                 res = await client.post(f"{target_url}/api/node/demote", headers=headers)
                 if res.status_code != 200:
                     return JSONResponse(
@@ -322,6 +331,9 @@ async def node_handover_endpoint(request: Request) -> JSONResponse:
     if local_session is not None:
         resync_result = await local_session.resync()
 
+    from ciao.web.routes_auth import _clear_auth_bridges
+
+    _clear_auth_bridges(request.app)
     status = node_mgr.promote()
     if resync_result:
         status["resync"] = resync_result

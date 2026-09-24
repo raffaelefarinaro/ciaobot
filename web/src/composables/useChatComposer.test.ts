@@ -291,30 +291,29 @@ describe('useChatComposer attachments', () => {
     expect(composer.dragOver.value).toBe(false)
   })
 
-  it('references a dropped file by absolute path when the agent runs on this machine', async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse({ node_role: 'host' })) as unknown as typeof fetch
+  it('uploads a dropped file and inserts only an opaque reference on the host', async () => {
+    const ref = `drop_${'a'.repeat(32)}`
+    const fetchImpl = vi.fn(async () => jsonResponse({ file_refs: [{ ref, name: 'notes.md' }] })) as unknown as typeof fetch
     const { composer } = makeComposer({ fetchImpl })
     attachTextarea(composer, '')
 
     await composer.handleDrop(dropEvent([textFile('notes.md', '/Users/me/notes.md')]))
 
-    expect(composer.draft.value).toBe('`/Users/me/notes.md` ')
-    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(String((fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain(`/api/chats/${CHAT_ID}/attachments?opaque=1`)
+    expect(composer.draft.value).toBe('`ciao-drop:drop_' + 'a'.repeat(32) + '` ')
   })
 
-  it('uploads a dropped file instead when the browser is on a client node', async () => {
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      if (String(input).includes('startup-status')) return jsonResponse({ node_role: 'client' })
-      return jsonResponse({ saved: [{ path: 'notes.md', vault_path: 'v/notes.md', original_path: 'v/notes.md' }] })
-    }) as unknown as typeof fetch
+  it('uploads a dropped file instead of exposing a browser path', async () => {
+    const ref = `drop_${'b'.repeat(32)}`
+    const fetchImpl = vi.fn(async () => jsonResponse({ file_refs: [{ ref, name: 'notes.md' }] })) as unknown as typeof fetch
     const { composer } = makeComposer({ fetchImpl })
     attachTextarea(composer, '')
 
     await composer.handleDrop(dropEvent([textFile('notes.md', '/Users/me/notes.md')]))
 
-    expect(String((fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[1][0]))
-      .toContain(`/api/chats/${CHAT_ID}/attachments`)
-    expect(composer.draft.value).toBe('`v/notes.md` ')
+    expect(String((fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain(`/api/chats/${CHAT_ID}/attachments?opaque=1`)
+    expect(composer.draft.value).toBe('`ciao-drop:drop_' + 'b'.repeat(32) + '` ')
+    expect(composer.draft.value).not.toContain('/Users/me')
   })
 
   it('reports an upload the project has no folder for', async () => {
@@ -331,9 +330,10 @@ describe('useChatComposer attachments', () => {
     expect(composer.draft.value).toBe('')
   })
 
-  it('imports a native desktop drop as paths plus pending image refs', async () => {
+  it('imports a native desktop drop as an opaque reference plus pending image refs', async () => {
+    const ref = `drop_${'c'.repeat(32)}`
     const fetchImpl = vi.fn(async () => jsonResponse({
-      attachments: [{ original_path: '/Users/me/a.pdf', markdown_path: '/Users/me/a.md' }],
+      file_refs: [{ ref, name: 'a.pdf' }],
       image_refs: ['img-1'],
     })) as unknown as typeof fetch
     const { composer, store } = makeComposer({ fetchImpl })
@@ -347,7 +347,7 @@ describe('useChatComposer attachments', () => {
     }))
     await vi.waitFor(() => expect(store.addPendingImageRefs).toHaveBeenCalled())
 
-    expect(composer.draft.value).toBe('`/Users/me/a.pdf` `/Users/me/a.md` ')
+    expect(composer.draft.value).toBe('`ciao-drop:drop_' + 'c'.repeat(32) + '` ')
     expect(store.addPendingImageRefs).toHaveBeenCalledWith(CHAT_ID, ['img-1'])
     expect(composer.dragOver.value).toBe(false)
   })

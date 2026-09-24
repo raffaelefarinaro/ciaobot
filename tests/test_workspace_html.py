@@ -215,6 +215,31 @@ def test_artifact_is_sandboxed_into_an_opaque_origin(workspace: Path) -> None:
     assert "allow-same-origin" not in csp
 
 
+def test_hostile_artifact_cannot_reach_tauri_or_local_controls(workspace: Path) -> None:
+    hostile = (
+        "<!doctype html><script>"
+        "fetch('/api/node/status');"
+        "window.__TAURI__?.core.invoke('trigger_app_update');"
+        "parent.postMessage({kind:'escape'}, '*');"
+        "</script>"
+    )
+    (workspace / "Workspace" / "hostile.html").write_text(hostile, encoding="utf-8")
+    client = _make_client(workspace)
+
+    response = client.get(
+        "/api/workspace-html", params={"path": "Workspace/hostile.html"}
+    )
+
+    assert response.status_code == 200
+    csp = response.headers["content-security-policy"]
+    assert "sandbox allow-scripts" in csp
+    assert "allow-same-origin" not in csp
+    assert "connect-src 'none'" in csp
+    assert "form-action 'none'" in csp
+    assert "frame-ancestors 'self'" in csp
+    assert "trigger_app_update" in response.text
+
+
 def test_artifact_cannot_reach_the_network(workspace: Path) -> None:
     client = _make_client(workspace)
     resp = client.get("/api/workspace-html", params={"path": "Workspace/dashboard.html"})

@@ -1,7 +1,7 @@
 <template>
   <div id="ciao-app" :data-workspace-color="workspaceColor">
     <div
-      v-if="clientMode && !onDevicePage"
+      v-if="(clientMode || clientStateUnknown) && !onDevicePage"
       class="client-mode-banner"
       :class="{ 'is-offline': hostUnreachable }"
       :role="hostUnreachable ? 'alert' : 'status'"
@@ -9,7 +9,20 @@
       <!-- The host can drop while no chat is open, and the per-chat card that
            announces it lives inside ChatPanel. This banner is the only piece of
            chrome present on every screen, so it carries the state too. -->
-      <span v-if="hostUnreachable">
+      <span v-if="projectStore.hostAuthRequired">
+        Host password required —
+        <a v-if="canUseDeviceControls" class="client-mode-banner-link" :href="contentHref('/login')">Log in again</a>.
+      </span>
+      <span v-else-if="clientStateUnknown">
+        Connection role unavailable — open
+        <a v-if="canUseDeviceControls" class="client-mode-banner-link" :href="deviceHref('/device')">This device</a>
+        to recover.
+      </span>
+      <span v-else-if="projectStore.hostPolicyBlocked">
+        Connection blocked by a local policy —
+        <a v-if="canUseDeviceControls" class="client-mode-banner-link" :href="deviceHref('/device')">Open this device</a>.
+      </span>
+      <span v-else-if="hostUnreachable">
         <span class="client-mode-banner-spinner" aria-hidden="true"></span>
         Can’t reach <code>{{ clientHostLabel }}</code> — reconnecting…
       </span>
@@ -20,6 +33,7 @@
       </span>
       <div class="client-mode-banner-actions">
         <button
+          v-if="canUseDeviceControls"
           type="button"
           class="client-mode-banner-link"
           :disabled="switchingToHost"
@@ -28,10 +42,11 @@
           {{ switchingToHost ? 'Switching…' : 'Switch to host' }}
         </button>
         <!-- The one screen that is about this computer, not the host. -->
-        <router-link
+        <a
+          v-if="canUseDeviceControls"
           class="client-mode-banner-link"
-          to="/device"
-        >This device</router-link>
+          :href="deviceHref('/device')"
+        >This device</a>
       </div>
     </div>
     <Transition name="fade">
@@ -59,7 +74,6 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import ConfirmDialog from './components/ConfirmDialog.vue'
-import { errorMessage } from './lib/errorMessage'
 import InAppToast from './components/InAppToast.vue'
 import NewChatPicker from './components/NewChatPicker.vue'
 import PromptDialog from './components/PromptDialog.vue'
@@ -67,6 +81,7 @@ import RestartNotice from './components/RestartNotice.vue'
 import StartupView from './components/StartupView.vue'
 import { askConfirm } from './lib/confirm'
 import { normalizeWorkspaceColor } from './lib/workspaceColors'
+import { contentHref, deviceHref, isLoopbackPage, navigateToDevice } from './lib/originNavigation'
 import { useProjectStore } from './stores/projects'
 
 interface Phase {
@@ -85,6 +100,8 @@ const serverVersion = ref('')
 const skipped = ref(false)
 const startupDone = ref(false)
 const clientMode = ref(false)
+const clientStateUnknown = ref(false)
+const canUseDeviceControls = isLoopbackPage()
 const clientHostUrl = ref('')
 const clientHasSession = ref(false)
 const switchingToHost = ref(false)
@@ -124,7 +141,7 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null
 let nodePollTimer: ReturnType<typeof setInterval> | null = null
 
 async function switchBackToHost() {
-  if (switchingToHost.value) return
+  if (!canUseDeviceControls || switchingToHost.value) return
   const confirmed = await askConfirm(
     'Stop client mode and become host on this machine? Changes that exist only on the other host may not be synced.',
     {
@@ -134,36 +151,16 @@ async function switchBackToHost() {
   )
   if (!confirmed) return
   switchingToHost.value = true
-  try {
-    const res = await fetch('/api/node/handover', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({
-        target_node_url: clientHostUrl.value,
-        force: true,
-      }),
-    })
-    if (!res.ok) {
-      const payload = await res.json().catch(() => ({}))
-      throw new Error((payload as { error?: string }).error || `HTTP ${res.status}`)
-    }
-    window.location.assign('/')
-  } catch (e) {
-    switchingToHost.value = false
-    // Not `window.alert`: the desktop webview shows no native dialog, so this
-    // failure was invisible there. See lib/prompt for the same constraint.
-    projectStore.pushErrorToast(
-      'Could not switch back to host',
-      errorMessage(e, 'The request failed.'),
-    )
-  }
+  navigateToDevice()
 }
 
 async function pollStartup() {
   try {
-    const res = await fetch('/api/startup-status')
-    if (!res.ok) return
+    const res = await fetch('/api/startup-status', { redirect: 'manual' })
+    if (!res.ok) {
+      clientStateUnknown.value = true
+      return
+    }
     const data = await res.json()
     if (data.version && serverVersion.value !== data.version) {
       serverVersion.value = data.version
@@ -181,24 +178,29 @@ async function pollStartup() {
     }
     refreshClientBanner(data)
   } catch {
-    // ignore fetch errors during startup
+    // A failed role probe is unknown, never evidence of host mode.
+    clientStateUnknown.value = true
   }
 }
 
 function refreshClientBanner(data: Record<string, unknown>) {
   const role = String(data.node_role || '')
-  clientMode.value = role === 'client' || role === 'standby'
+  clientStateUnknown.value = data.state_valid !== true || !['host', 'client', 'active', 'standby'].includes(role)
+  clientMode.value = !clientStateUnknown.value && (role === 'client' || role === 'standby')
   clientHostUrl.value = String(data.host_url || data.active_peer_url || '')
   clientHasSession.value = Boolean(data.has_host_session)
 }
 
 async function pollClientBanner() {
   try {
-    const res = await fetch('/api/startup-status')
-    if (!res.ok) return
+    const res = await fetch('/api/startup-status', { redirect: 'manual' })
+    if (!res.ok) {
+      clientStateUnknown.value = true
+      return
+    }
     refreshClientBanner(await res.json())
   } catch {
-    /* ignore */
+    clientStateUnknown.value = true
   }
 }
 

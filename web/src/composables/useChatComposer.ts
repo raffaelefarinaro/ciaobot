@@ -1,5 +1,5 @@
 import { ref, toValue, watch, nextTick, type MaybeRefOrGetter, type Ref } from 'vue'
-import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
+import { formatAttachedFilePath } from '../lib/chatAttachments'
 import { readChatDraft, readSentPromptHistory, writeChatDraft } from '../lib/chatDrafts'
 
 /**
@@ -40,29 +40,25 @@ export interface ChatComposerOptions {
   fetchImpl?: typeof fetch
 }
 
-type DroppedProjectFile = {
-  path: string
-  vault_path: string
-  absolute_path?: string
-  original_path?: string | null
-  markdown_path?: string | null
+type FileRef = {
+  ref: string
+  name?: string
 }
 
 type ProjectUploadResult = {
-  saved?: DroppedProjectFile[]
+  file_refs?: FileRef[]
   errors?: { filename: string; error: string }[]
   error?: string
 }
 
 export type NativeFileDropDetail = {
   grantId?: string
-  paths?: string[]
+  names?: string[]
   error?: string
 }
 
 type NativeFileDropResult = {
-  paths?: string[]
-  attachments?: { original_path?: string | null; markdown_path?: string | null }[]
+  file_refs?: FileRef[]
   image_refs?: string[]
   errors?: { filename: string; error: string }[]
   error?: string
@@ -108,6 +104,11 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
   let settingPromptHistoryText = false
 
   const chatId = () => toValue(options.chatId)
+
+  function fileRefText(ref: string | undefined): string | null {
+    if (!ref || !/^drop_[0-9a-f]{32}$/.test(ref)) return null
+    return formatAttachedFilePath(`ciao-drop:${ref}`)
+  }
 
   // Persist synchronously to avoid losing the last keystroke when switching
   // chats immediately after typing.
@@ -253,7 +254,13 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
       const response = await doFetch('/api/desktop-drop', {
         method: 'POST',
         credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(window.location.hostname === '127.0.0.1'
+            ? { 'X-Ciao-Local-Control': '1' }
+            : {}),
+        },
+        redirect: 'manual',
         body: JSON.stringify({
           grant_id: detail.grantId,
           project_id: toValue(options.projectId) || '',
@@ -267,11 +274,11 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
       for (const failure of result.errors || []) {
         store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
       }
-      const paths = (result.attachments || []).flatMap((entry) =>
-        [entry.original_path, entry.markdown_path].filter((path): path is string => Boolean(path)))
-      paths.push(...(result.paths || []))
-      if (paths.length) {
-        insertTextAtCursor(paths.map(formatAttachedFilePath).join(' '))
+      const refs = (result.file_refs || [])
+        .map((entry) => fileRefText(entry.ref))
+        .filter((value): value is string => Boolean(value))
+      if (refs.length) {
+        insertTextAtCursor(refs.join(' '))
       }
       store.addPendingImageRefs(chatId(), result.image_refs || [])
     } catch (error) {
@@ -295,33 +302,19 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     void importNativeFileDrop(detail)
   }
 
-  async function localDropNeedsUpload(): Promise<boolean> {
-    try {
-      // This endpoint is deliberately handled by the local node instead of the
-      // client proxy, so it reveals whether the browser and agent are on
-      // different computers.
-      const response = await doFetch('/api/startup-status', {
-        credentials: 'same-origin',
-      })
-      if (!response.ok) return true
-      const role = String((await response.json()).node_role || '')
-      return role === 'client' || role === 'standby'
-    } catch {
-      // Uploading is the safe fallback: a local-only path would be unusable if
-      // this browser turns out to be connected to a remote host.
-      return true
-    }
-  }
-
   async function uploadDroppedProjectFiles(files: File[]): Promise<string[]> {
     if (!toValue(options.vaultFolder)) {
       throw new Error('This project has no folder for uploaded files.')
     }
     const form = new FormData()
     files.forEach((file, index) => form.append(`file${index}`, file, file.name))
-    const response = await doFetch(`/api/chats/${chatId()}/attachments`, {
+    const response = await doFetch(`/api/chats/${encodeURIComponent(chatId())}/attachments?opaque=1`, {
       method: 'POST',
       credentials: 'same-origin',
+      headers: window.location.hostname === '127.0.0.1'
+        ? { 'X-Ciao-Local-Control': '1' }
+        : undefined,
+      redirect: 'manual',
       body: form,
     })
     const result = await response.json().catch(() => ({})) as ProjectUploadResult
@@ -331,11 +324,9 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     for (const failure of result.errors || []) {
       store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
     }
-    return (result.saved || []).flatMap((file) => {
-      const paths = [file.original_path, file.markdown_path]
-      return (paths.some(Boolean) ? paths : [file.absolute_path || file.vault_path])
-        .filter((path): path is string => Boolean(path))
-    })
+    return (result.file_refs || [])
+      .map((entry) => fileRefText(entry.ref))
+      .filter((value): value is string => Boolean(value))
   }
 
   async function handleDrop(e: DragEvent): Promise<void> {
@@ -343,8 +334,7 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     const dt = e.dataTransfer
     if (!dt) return
 
-    // Capture DataTransfer contents synchronously; browsers may invalidate the
-    // drag store once this event handler yields to the startup-status request.
+    // Capture DataTransfer contents synchronously before any async upload.
     const files: File[] = []
     const folders: { name: string; file: File | null }[] = []
     const items = Array.from(dt.items || [])
@@ -367,20 +357,9 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
 
     const imageFiles = files.filter(file => file.type.startsWith('image/'))
     const regularFiles = files.filter(file => !file.type.startsWith('image/'))
-    const paths: string[] = []
-    const needsUpload = regularFiles.length || folders.length
-      ? await localDropNeedsUpload()
-      : false
+    const refs: string[] = []
 
-    const unavailableFolders: string[] = []
-    for (const folder of folders) {
-      const nativePath = needsUpload || !folder.file
-        ? null
-        : nativeAbsoluteFilePath(folder.file)
-      if (nativePath) paths.push(nativePath)
-      else unavailableFolders.push(folder.name)
-    }
-    if (unavailableFolders.length) {
+    if (folders.length) {
       store.pushErrorToast(
         'Could not attach folder',
         'Drop individual files instead; remote clients and sandboxed browsers cannot expose an absolute folder path.',
@@ -388,26 +367,18 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     }
 
     if (regularFiles.length) {
-      const uploadFiles: File[] = []
-      for (const file of regularFiles) {
-        const nativePath = needsUpload ? null : nativeAbsoluteFilePath(file)
-        if (nativePath) paths.push(nativePath)
-        else uploadFiles.push(file)
-      }
-      if (uploadFiles.length) {
-        try {
-          paths.push(...await uploadDroppedProjectFiles(uploadFiles))
-        } catch (error) {
-          store.pushErrorToast(
-            'Could not attach file',
-            error instanceof Error ? error.message : String(error),
-          )
-        }
+      try {
+        refs.push(...await uploadDroppedProjectFiles(regularFiles))
+      } catch (error) {
+        store.pushErrorToast(
+          'Could not attach file',
+          error instanceof Error ? error.message : String(error),
+        )
       }
     }
 
-    if (paths.length) {
-      insertTextAtCursor(paths.map(formatAttachedFilePath).join(' '))
+    if (refs.length) {
+      insertTextAtCursor(refs.join(' '))
     }
     if (imageFiles.length) await store.uploadImages(chatId(), imageFiles)
   }
