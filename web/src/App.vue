@@ -665,7 +665,9 @@ a:not(.btn-small, .btn-primary, .btn-chip, .btn-icon):hover {
 .page-main { min-width: 0; }
 .page-rail {
   position: sticky;
-  top: var(--space-4);
+  /* 0, not a gap: inside a padded scroll body a non-zero sticky offset pushes
+     the rail below the main column's first heading before any scrolling. */
+  top: 0;
   min-width: 0;
   font-size: var(--text-sm);
 }

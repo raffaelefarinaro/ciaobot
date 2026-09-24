@@ -1849,9 +1849,6 @@ function closeSchedule() {
   gap: var(--space-6);
 }
 .ov-section { min-width: 0; }
-/* The shared rail is sticky at --space-4; inside this padded scroll body that
-   offset pushed its first heading below the main column's. */
-.page-rail { top: 0; }
 .rail-title--spaced { margin-top: var(--space-5); }
 .rail-note--attention { color: var(--warning); }
 .rail-runs { margin-top: var(--space-3); }
