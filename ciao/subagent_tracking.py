@@ -39,11 +39,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ciao.cli_envelopes import (
+    envelope_notification_fields,
+    envelope_notification_task_statuses,
     is_cli_envelope,
+    is_compact_summary,
     is_control_slash_command,
     is_interrupted_request_sentinel,
-    envelope_notification_fields,
     is_no_response_sentinel,
+    strip_injected_context,
 )
 
 logger = logging.getLogger(__name__)
@@ -137,7 +140,7 @@ class SubagentInfo:
     description: str = ""
     subagent_type: str = ""
     is_async: bool = False
-    # "running" | "completed" | "failed" | "" (unknown)
+    # "running" | "completed" | "failed" | "stopped" | "" (unknown)
     status: str = ""
     # 0-based index of the user turn that dispatched this agent, aligned with
     # the `turn_index` the /messages endpoint stamps on user bubbles. None
@@ -409,12 +412,12 @@ def _text_content(message: object) -> str:
     return ""
 
 
-def _is_countable_user_turn(content: str) -> bool:
-    # User-turn skip rules shared with the /messages renderer
-    # (ciao/web/transcript_service.py) via ciao/cli_envelopes.py: records
-    # matching these never render as user bubbles there, so they must not
-    # advance the turn counter here either or `turn_index` anchoring drifts.
-    text = content.strip()
+def _is_countable_user_turn(
+    content: str, record: object = None, *, compact_flagged: bool = False
+) -> bool:
+    if compact_flagged:
+        return False
+    text = strip_injected_context(content).strip()
     if not text:
         return False
     if is_control_slash_command(text):
@@ -424,6 +427,8 @@ def _is_countable_user_turn(content: str) -> bool:
     if is_interrupted_request_sentinel(text):
         return False
     if is_cli_envelope(text):
+        return False
+    if is_compact_summary(record, text):
         return False
     if is_synthesis_nudge(text):
         return False
@@ -507,8 +512,13 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     continue
                 else:
                     content = record.get("content")
-                    if isinstance(content, str) and _notification_fields(content):
-                        _apply_notification(state, content)
+                    normalized_content = (
+                        strip_injected_context(content)
+                        if isinstance(content, str)
+                        else ""
+                    )
+                    if normalized_content and _notification_fields(normalized_content):
+                        _apply_notification(state, normalized_content)
                         queue.append("queued")
                     else:
                         queue.append(None)
@@ -626,6 +636,7 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 continue
 
             content = _text_content(message)
+            normalized_content = strip_injected_context(content)
             if CLI_TASK_WAKE_PREFIX in content:
                 # Our own dead-CLI wake turn, recorded as the user prompt it
                 # was sent as. The server persists prompts with the
@@ -648,8 +659,8 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                         state.subagents[wake_id] = info
                     info.status = "lost"
                     info.raw_status = "lost"
-            if _notification_fields(content) is not None:
-                _apply_notification(state, content)
+            if _notification_fields(normalized_content) is not None:
+                _apply_notification(state, normalized_content)
                 # A notification landed as a user record. If no assistant
                 # record follows it, the CLI has not turned it into a reply
                 # yet — that is exactly the window where steering the nudge
@@ -667,7 +678,7 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 else:
                     queue.append("surfaced")
                 continue
-            if _is_countable_user_turn(content):
+            if _is_countable_user_turn(normalized_content, record):
                 user_idx += 1
 
     state.notification_pending = any(entry is not None for entry in queue)
@@ -687,29 +698,26 @@ def _tool_result_use_id(message: object) -> str:
 
 
 def _apply_notification(state: SessionSubagentState, content: str) -> None:
-    fields = _notification_fields(content)
-    if not fields:
-        return
-    task_id = _normalize_agent_id(fields.get("task-id", ""))
-    if not task_id:
-        return
-    raw_status = fields.get("status", "") or "completed"
-    status = raw_status
-    if status not in ("completed", "failed"):
-        # The CLI's vocabulary may grow; anything non-failed counts as done
-        # for "is it still running" purposes.
-        status = "failed" if "fail" in status or "error" in status else "completed"
-    info = state.subagents.get(task_id)
-    if info is None:
-        # Notification for an agent we never saw dispatched at parent level
-        # (e.g. an agent spawned by another subagent). Record it so the
-        # transcript endpoint can still attach a status.
-        state.subagents[task_id] = SubagentInfo(
-            agent_id=task_id,
-            is_async=True,
-            status=status,
-            raw_status=raw_status,
-        )
-    else:
-        info.status = status
-        info.raw_status = raw_status
+    """Settle every real task named by the leading notifications."""
+    for raw_id, raw_status in envelope_notification_task_statuses(content):
+        status_key = raw_status.strip().lower()
+        if status_key in {"completed", "success", "succeeded", "done"}:
+            status = "completed"
+        elif "fail" in status_key or "error" in status_key:
+            status = "failed"
+        else:
+            status = "stopped"
+        task_id = _normalize_agent_id(raw_id)
+        if not task_id:
+            continue
+        info = state.subagents.get(task_id)
+        if info is None:
+            state.subagents[task_id] = SubagentInfo(
+                agent_id=task_id,
+                is_async=True,
+                status=status,
+                raw_status=raw_status,
+            )
+        else:
+            info.status = status
+            info.raw_status = raw_status

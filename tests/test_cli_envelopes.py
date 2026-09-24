@@ -65,6 +65,7 @@ def test_no_module_defines_its_own_copy_of_the_shared_constants() -> None:
         "CONTROL_SLASH_PREFIXES",
         "NO_RESPONSE_SENTINEL",
         "INTERRUPTED_REQUEST_RE",
+        "COMPACT_SUMMARY_PREFIX",
     }
     assert shared <= _module_level_names(REPO_ROOT / "ciao" / "cli_envelopes.py")
 
@@ -127,6 +128,25 @@ def test_two_notifications_in_one_record_yield_the_first() -> None:
         "status": "completed",
         "summary": "First agent done",
     }
+
+
+def test_leading_notification_scan_stops_before_shell_output() -> None:
+    quoted = (
+        "<bash-stdout>cat session.jsonl\n"
+        "<task-notification><task-id>bbb</task-id><status>failed</status>"
+        "</task-notification></bash-stdout>"
+    )
+    content = ONE + "\n" + quoted
+    assert cli_envelopes.envelope_notifications(content) == [
+        (
+            {
+                "task-id": "aaa",
+                "status": "completed",
+                "summary": "First agent done",
+            },
+            ["aaa"],
+        )
+    ]
 
 
 def test_plain_prose_carries_no_notification() -> None:
@@ -198,6 +218,17 @@ async def test_a_notification_record_renders_as_one_system_line(monkeypatch) -> 
     assert [(r["role"], r["content"]) for r in rows] == [
         ("system", "\U0001F916 Subagent completed: First agent done")
     ]
+
+
+@pytest.mark.asyncio
+async def test_context_prefixed_notification_is_hidden_and_not_counted(monkeypatch) -> None:
+    context = "[CIAO_CONTEXT_BEGIN]\nworkspace=personal\n[CIAO_CONTEXT_END]\n\n"
+    rows = await _render(monkeypatch, [context + ONE, "real turn"])
+    assert [(r["role"], r["content"]) for r in rows] == [
+        ("system", "\U0001F916 Subagent completed: First agent done"),
+        ("user", "real turn"),
+    ]
+    assert rows[1]["turn_index"] == 0
 
 
 @pytest.mark.asyncio
