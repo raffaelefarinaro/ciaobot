@@ -336,8 +336,15 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   white-space: nowrap;
 }
 
+/* Shrink order when the row is tight: the note goes first, then the
+   provider chip; the project chip keeps its name longest. */
+.home-intake-project {
+  flex-shrink: 0;
+  max-width: 60%;
+}
+
 .home-intake-provider {
-  flex-shrink: 2;
+  flex-shrink: 1;
   cursor: default;
 }
 
@@ -350,6 +357,7 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
 }
 
 .home-intake-note {
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   color: var(--fg3);

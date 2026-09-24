@@ -359,7 +359,7 @@ function openItem(key: ReviewItem['key']) {
 
 /* Under the workbench's single-column break the rail sits below the request
    column with room to spare, so the rows lay out as three short tiles. */
-@media (max-width: 980px) and (min-width: 701px) {
+@container chat-pane (max-width: 940px) and (min-width: 701px) {
   .home-review-summary {
     padding-top: 0;
   }
@@ -378,7 +378,7 @@ function openItem(key: ReviewItem['key']) {
   }
 }
 
-@media (max-width: 700px) {
+@container chat-pane (max-width: 700px) {
   .home-review-summary {
     padding-top: 0;
   }

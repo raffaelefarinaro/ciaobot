@@ -1563,7 +1563,10 @@ onBeforeUnmount(() => {
   margin: 0;
 }
 
-@media (max-width: 980px) {
+/* Keyed to the pane, not the viewport: with the resizable sidebar open, a
+   1280px window leaves the pane well under 980px, and a viewport query kept
+   the rail beside a request column too narrow for its own chips. */
+@container chat-pane (max-width: 940px) {
   .home-workbench {
     grid-template-columns: minmax(0, 1fr);
     gap: 25px;
@@ -1575,7 +1578,7 @@ onBeforeUnmount(() => {
   }
 }
 
-@media (max-width: 700px) {
+@container chat-pane (max-width: 700px) {
   .home-workbench {
     padding-top: var(--space-3);
   }
