@@ -2216,6 +2216,10 @@ function questionAnswerMap(limit = activeQuestions.value.length): Record<string,
   const out: Record<string, string[]> = {}
   for (let i = 0; i < Math.min(limit, activeQuestions.value.length); i++) {
     const q = activeQuestions.value[i]
+    // Conditions are ordered: only answers from fields that are still active
+    // may control later fields. Keeping an old answer from a now-hidden field
+    // would leave chained dependent questions visible and submit stale data.
+    if (!questionIsActive(q, out, activeQuestions.value)) continue
     const answer = questionAnswers.value[i]
     const values = answer ? [...answer.selected] : []
     if (answer?.other?.trim()) values.push(answer.other.trim())

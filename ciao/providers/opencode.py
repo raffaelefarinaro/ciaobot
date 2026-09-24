@@ -1768,8 +1768,9 @@ class OpencodeProvider(BaseSDKProvider):
         payload: dict[str, Any] = {"agent": agent, "permissions": permissions}
         if replacement_metadata is not None:
             payload["metadata"] = dict(replacement_metadata)
-        if desired_model is not None:
-            payload["model"] = desired_model
+        new_session_model = desired_model or default_model
+        if new_session_model is not None:
+            payload["model"] = dict(new_session_model)
         response = await client.post("/api/session", json=payload)
         response.raise_for_status()
         session_payload = _data(response.json())

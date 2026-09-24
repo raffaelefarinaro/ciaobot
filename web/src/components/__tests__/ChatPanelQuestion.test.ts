@@ -230,6 +230,38 @@ describe('AskUserQuestion keyboard shortcuts', () => {
     wrapper.unmount()
   })
 
+  test('changing a controller hides chained dependent questions', async () => {
+    const q1 = makeQuestion({
+      options: [{ label: 'Yes', value: 'yes' }, { label: 'No', value: 'no' }],
+    })
+    const q2 = {
+      ...makeQuestion({ options: [{ label: 'X', value: 'x' }] }),
+      id: 'q2',
+      question: 'Second',
+      when: [{ key: 'q0', op: 'eq' as const, value: 'yes' }],
+    }
+    const q3 = {
+      ...makeQuestion(),
+      id: 'q3',
+      question: 'Third',
+      when: [{ key: 'q2', op: 'eq' as const, value: 'x' }],
+    }
+    const { wrapper } = await mountLayout({ questions: [q1, q2, q3] })
+
+    pressKey('1')
+    await nextTick()
+    expect(wrapper.findAll('.question-block')).toHaveLength(2)
+    await optionButtons(wrapper)[2].trigger('click')
+    await nextTick()
+    expect(wrapper.findAll('.question-block')).toHaveLength(3)
+
+    pressKey('2')
+    await nextTick()
+    expect(wrapper.findAll('.question-block')).toHaveLength(1)
+
+    wrapper.unmount()
+  })
+
   test('a digit past the last option is left alone', async () => {
     const { wrapper, store } = await mountLayout({ questions: [makeQuestion()] })
     const switchWorkspace = vi.spyOn(store, 'switchWorkspace')

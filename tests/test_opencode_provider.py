@@ -345,9 +345,14 @@ async def test_resume_rotates_when_session_permission_is_stale(tmp_path):
     assert "User: Earlier request" in provider._session_handover_context
     assert "Assistant: Earlier answer" in provider._session_handover_context
     assert request.prompt.startswith("[stable context]\n")
-    assert client.post_calls == [
-        ("/api/session", {"agent": "build", "permissions": expected})
-    ]
+    assert client.post_calls == [(
+        "/api/session",
+        {
+            "agent": "build",
+            "permissions": expected,
+            "model": {"id": "default-model", "providerID": "opencode"},
+        },
+    )]
 
 
 @pytest.mark.asyncio
@@ -395,6 +400,34 @@ async def test_session_passes_through_unqualified_model(tmp_path):
             "agent": "build",
             "permissions": mode_settings("normal")[1],
             "model": {"id": "sonnet", "providerID": "anthropic"},
+        },
+    )]
+
+
+@pytest.mark.asyncio
+async def test_new_default_session_applies_the_requested_thinking_variant(tmp_path):
+    provider = _provider(tmp_path)
+    client = _SessionClient(None)
+    provider._client = client  # type: ignore[assignment]
+    request = AgentRequest(
+        prompt="hello",
+        model="",
+        thinking_level="high",
+        mode="normal",
+        provider="opencode",
+    )
+
+    assert await provider._ensure_session(request) == "session-new"
+    assert client.post_calls == [(
+        "/api/session",
+        {
+            "agent": "build",
+            "permissions": mode_settings("normal")[1],
+            "model": {
+                "id": "default-model",
+                "providerID": "opencode",
+                "variant": "high",
+            },
         },
     )]
 
