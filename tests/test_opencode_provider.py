@@ -1975,6 +1975,70 @@ async def test_never_healthy_server_gets_startup_retries(tmp_path, monkeypatch):
     await provider.disconnect()
 
 
+@pytest.mark.asyncio
+async def test_contract_validation_retries_a_temporarily_empty_openapi_document(
+    tmp_path, monkeypatch
+):
+    provider = _provider(tmp_path)
+    attempts = 0
+
+    class Response:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            if isinstance(self._payload, Exception):
+                raise self._payload
+            return self._payload
+
+    class Client:
+        async def get(self, _path, *, timeout):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return Response(ValueError("empty response"))
+            return Response({"paths": {path: {} for path in REQUIRED_PATHS}})
+
+    async def no_wait(_delay):
+        return None
+
+    from ciao.providers.opencode import REQUIRED_PATHS
+
+    provider._client = Client()
+    monkeypatch.setattr("ciao.providers.opencode.asyncio.sleep", no_wait)
+    await provider._verify_contract()
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_contract_validation_still_fails_after_repeated_invalid_documents(
+    tmp_path, monkeypatch
+):
+    provider = _provider(tmp_path)
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            raise ValueError("empty response")
+
+    class Client:
+        async def get(self, _path, *, timeout):
+            return Response()
+
+    async def no_wait(_delay):
+        return None
+
+    provider._client = Client()
+    monkeypatch.setattr("ciao.providers.opencode.asyncio.sleep", no_wait)
+    with pytest.raises(RuntimeError, match="could not read the OpenCode API document"):
+        await provider._verify_contract()
+
+
 def test_health_failure_reason_says_what_the_poll_saw():
     """A wedged server must not trail a bare empty ``: `` in the error."""
     from ciao.providers.opencode import _health_failure_reason

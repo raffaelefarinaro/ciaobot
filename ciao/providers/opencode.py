@@ -141,6 +141,11 @@ _COLLAB_CACHE: dict[tuple[str, str], tuple[float, float, list[dict[str, Any]]]] 
 _SERVER_START_TIMEOUT = 30.0
 _SERVER_START_ATTEMPTS = 3
 _SERVER_START_RETRY_DELAYS = (0.25, 0.75)
+# `/api/info` can become healthy a moment before OpenCode finishes serving its
+# generated OpenAPI document. Retry that narrow readiness race, not an
+# incompatible (valid JSON) contract.
+_OPENAPI_READY_ATTEMPTS = 5
+_OPENAPI_READY_DELAY_S = 0.2
 _REQUEST_TIMEOUT = 30.0
 # Mid-turn SSE recovery: re-subscribe attempts after a dropped /event stream,
 # then a bounded message-poll window that replays settled parts idempotently.
@@ -1543,12 +1548,22 @@ class OpencodeProvider(BaseSDKProvider):
     async def _verify_contract(self) -> None:
         """Fail closed when the installed V2 build lacks required operations."""
         assert self._client is not None
-        try:
-            response = await self._client.get("/openapi.json", timeout=10.0)
-            response.raise_for_status()
-            spec = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise RuntimeError(f"could not read the OpenCode API document: {exc}") from exc
+        last_error: Exception | None = None
+        spec: Any = None
+        for attempt in range(_OPENAPI_READY_ATTEMPTS):
+            try:
+                response = await self._client.get("/openapi.json", timeout=10.0)
+                response.raise_for_status()
+                spec = response.json()
+                break
+            except (httpx.HTTPError, ValueError) as exc:
+                last_error = exc
+                if attempt + 1 < _OPENAPI_READY_ATTEMPTS:
+                    await asyncio.sleep(_OPENAPI_READY_DELAY_S)
+        else:
+            raise RuntimeError(
+                f"could not read the OpenCode API document: {last_error}"
+            ) from last_error
         missing = missing_required_paths(spec)
         if missing:
             raise RuntimeError(
