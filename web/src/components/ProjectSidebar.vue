@@ -845,97 +845,116 @@
             :key="project.project_id"
             class="project-group"
           >
-            <div
-              class="project-header"
-              :class="{
-                'is-system': project.is_auto,
-                'drag-over': isDragOverProject(project),
-                'dragging': dragProjectId === project.project_id,
-              }"
-              :draggable="isDraggable(project)"
-              @dragstart="onProjectDragStart(project, $event)"
-              @dragover.prevent="onProjectDragOver(project)"
-              @drop.prevent="onProjectDrop(project)"
-              @dragend="onProjectDragEnd"
-              @contextmenu.prevent="toggleProjectMenu($event, project)"
+            <DropdownMenuRoot
+              :open="projectMenu === project.project_id"
+              :modal="false"
+              @update:open="onProjectMenuOpenChange(project.project_id, $event)"
             >
-              <button
-                type="button"
-                class="project-icon"
-                @click="toggleProject(project.project_id)"
-                :title="expandedProjects.has(project.project_id) ? 'Collapse' : 'Expand'"
-                :aria-label="`${expandedProjects.has(project.project_id) ? 'Collapse' : 'Expand'} ${project.name}`"
-                :aria-expanded="expandedProjects.has(project.project_id)"
-              >{{ expandedProjects.has(project.project_id) ? '▾' : '▸' }}</button>
-              <button
-                type="button"
-                class="project-name"
-                :data-workspace-color="colorForProject(project.workspace)"
-                v-if="editingProject !== project.project_id"
-                @click="openProject(project.project_id)"
-                title="Open project page"
-              >
-                {{ project.name }}
-                <span v-if="project.is_auto" class="system-chip" title="Auto-managed project">auto</span>
-                <span
-                  v-if="store.projectNeedsInput(project.project_id) > 0"
-                  class="rollup-needs-dot"
-                  title="A chat in this project needs your answer"
-                  aria-label="A chat in this project needs your answer"
-                />
-                <span
-                  v-else-if="store.projectIsStreaming(project.project_id)"
-                  class="rollup-ring"
-                  title="A chat in this project is working"
-                  aria-label="A chat in this project is working"
-                ><span class="rollup-ring-core" aria-hidden="true" /></span>
-                <span
-                  v-if="store.projectUnread(project.project_id) > 0"
-                  class="badge"
-                  :title="`${store.projectUnread(project.project_id)} unread chats`"
-                  :aria-label="`${store.projectUnread(project.project_id)} unread chats`"
-                >{{ store.projectUnread(project.project_id) }}</span>
-              </button>
-              <input
-                v-else
-                class="edit-input"
-                :value="project.name"
-                @keyup.enter="finishEditProject($event, project.project_id)"
-                @keyup.escape="editingProject = null"
-                @blur="finishEditProject($event, project.project_id)"
-                ref="editInput"
-                autofocus
-              />
-              <button
-                class="add-chat-btn"
-                :class="{ 'add-chat-btn--creating': store.creatingChatProjectIds[project.project_id] }"
-                :disabled="store.creatingChatProjectIds[project.project_id]"
-                @click.stop="addChat(project.project_id)"
-                title="New chat"
-                :aria-label="`New chat in ${project.name}`"
-              >{{ store.creatingChatProjectIds[project.project_id] ? '...' : '+' }}</button>
-            </div>
-
-            <!-- Context menu (suppressed for system projects) - teleported to body -->
-            <Teleport to="body">
               <div
-                v-if="projectMenu === project.project_id && !project.is_auto"
-                class="context-menu-overlay"
-                @click.self="projectMenu = null"
+                class="project-header"
+                :class="{
+                  'is-system': project.is_auto,
+                  'drag-over': isDragOverProject(project),
+                  'dragging': dragProjectId === project.project_id,
+                }"
+                :draggable="isDraggable(project)"
+                @dragstart="onProjectDragStart(project, $event)"
+                @dragover.prevent="onProjectDragOver(project)"
+                @drop.prevent="onProjectDrop(project)"
+                @dragend="onProjectDragEnd"
+                @contextmenu.prevent="openProjectMenuAt($event, project)"
               >
-                <div
-                  class="context-menu"
-                  :style="{ top: projectMenuPos.top + 'px', left: projectMenuPos.left + 'px' }"
-                  @mouseleave="projectMenu = null"
+                <button
+                  type="button"
+                  class="project-icon"
+                  @click="toggleProject(project.project_id)"
+                  :title="expandedProjects.has(project.project_id) ? 'Collapse' : 'Expand'"
+                  :aria-label="`${expandedProjects.has(project.project_id) ? 'Collapse' : 'Expand'} ${project.name}`"
+                  :aria-expanded="expandedProjects.has(project.project_id)"
+                >{{ expandedProjects.has(project.project_id) ? '▾' : '▸' }}</button>
+                <button
+                  type="button"
+                  class="project-name"
+                  :data-workspace-color="colorForProject(project.workspace)"
+                  v-if="editingProject !== project.project_id"
+                  @click="openProject(project.project_id)"
+                  title="Open project page"
                 >
-                  <button @click="startEditProject(project.project_id)">Rename</button>
+                  {{ project.name }}
+                  <span v-if="project.is_auto" class="system-chip" title="Auto-managed project">auto</span>
+                  <span
+                    v-if="store.projectNeedsInput(project.project_id) > 0"
+                    class="rollup-needs-dot"
+                    title="A chat in this project needs your answer"
+                    aria-label="A chat in this project needs your answer"
+                  />
+                  <span
+                    v-else-if="store.projectIsStreaming(project.project_id)"
+                    class="rollup-ring"
+                    title="A chat in this project is working"
+                    aria-label="A chat in this project is working"
+                  ><span class="rollup-ring-core" aria-hidden="true" /></span>
+                  <span
+                    v-if="store.projectUnread(project.project_id) > 0"
+                    class="badge"
+                    :title="`${store.projectUnread(project.project_id)} unread chats`"
+                    :aria-label="`${store.projectUnread(project.project_id)} unread chats`"
+                  >{{ store.projectUnread(project.project_id) }}</span>
+                </button>
+                <input
+                  v-else
+                  class="edit-input"
+                  :value="project.name"
+                  @keyup.enter="finishEditProject($event, project.project_id)"
+                  @keyup.escape="editingProject = null"
+                  @blur="finishEditProject($event, project.project_id)"
+                  ref="editInput"
+                  autofocus
+                />
+                <DropdownMenuTrigger
+                  v-if="!project.is_auto"
+                  as-child
+                  :disabled="editingProject === project.project_id"
+                >
                   <button
-                    v-if="!project.vault_folder"
-                    @click="confirmDeleteProject(project.project_id)"
-                  >Delete</button>
-                </div>
+                    class="project-actions-btn"
+                    aria-label="Project actions"
+                    title="Rename or delete project"
+                    @click.stop
+                    @pointerdown="useProjectActionAnchor"
+                    @focus="useProjectActionAnchor"
+                  >&middot;&middot;&middot;</button>
+                </DropdownMenuTrigger>
+                <button
+                  class="add-chat-btn"
+                  :class="{ 'add-chat-btn--creating': store.creatingChatProjectIds[project.project_id] }"
+                  :disabled="store.creatingChatProjectIds[project.project_id]"
+                  @click.stop="addChat(project.project_id)"
+                  title="New chat"
+                  :aria-label="`New chat in ${project.name}`"
+                >{{ store.creatingChatProjectIds[project.project_id] ? '...' : '+' }}</button>
               </div>
-            </Teleport>
+
+              <DropdownMenuPortal>
+                <DropdownMenuContent
+                  class="context-menu"
+                  :reference="projectMenuReference"
+                  :side="projectMenuFromContext ? 'right' : 'bottom'"
+                  :align="projectMenuFromContext ? 'start' : 'end'"
+                  :side-offset="projectMenuFromContext ? 2 : 4"
+                  :collision-padding="8"
+                  :position-strategy="'fixed'"
+                  :update-position-strategy="'always'"
+                >
+                  <DropdownMenuItem as-child>
+                    <button @click="startEditProject(project.project_id)">Rename</button>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem v-if="!project.vault_folder" as-child>
+                    <button @click="confirmDeleteProject(project.project_id)">Delete</button>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenuPortal>
+            </DropdownMenuRoot>
 
             <!-- Chats in project -->
             <div v-if="expandedProjects.has(project.project_id)" class="chat-list">
@@ -943,58 +962,135 @@
                 v-for="chat in store.projectChats(project.project_id)"
                 :key="chat.chat_id"
               >
-                <div
-                  class="chat-item"
-                  :class="{
-                    active: chat.chat_id === store.activeChatId && !activeSubagentId,
-                    remote: chat.local === false,
-                    dragging: dragChatId === chat.chat_id,
-                  }"
-                  :draggable="chat.local !== false"
-                  @click="chat.local !== false && selectChat(chat.chat_id)"
-                  @keydown.enter.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
-                  @keydown.space.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
-                  @dragstart="onChatDragStart(chat, $event)"
-                  @dragend="onChatDragEnd"
-                  @contextmenu.prevent="toggleChatMenu($event, chat.chat_id)"
-                  role="link"
-                  :tabindex="chat.local === false ? -1 : 0"
-                  :aria-disabled="chat.local === false"
-                  :title="chat.local === false ? 'This chat lives on another instance' : 'Drag to move to another project'"
+                <DropdownMenuRoot
+                  :open="chatMenu === chat.chat_id"
+                  :modal="false"
+                  @update:open="onChatMenuOpenChange(chat.chat_id, $event)"
                 >
-                  <button
-                    v-if="subagentsFor(chat.chat_id).length"
-                    type="button"
-                    class="subagent-toggle"
-                    :aria-expanded="subagentsExpanded(chat.chat_id)"
-                    :aria-label="(subagentsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subagents for ' + chat.title"
-                    :title="(subagentsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subagents'"
-                    @click.stop="toggleSubagents(chat.chat_id)"
-                  >{{ subagentsExpanded(chat.chat_id) ? '▾' : '▸' }}</button>
-                  <span
-                    v-if="chat.title_status === 'pending'"
-                    class="title-shimmer"
-                    aria-label="Generating title"
-                    title="Generating title..."
-                  />
-                  <span
-                    v-else
-                    class="chat-title"
-                    :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
-                  >{{ chat.title }}</span>
-                  <ChatSignals
-                    :chat-id="chat.chat_id"
-                    density="row"
-                    :hue="colorForChat(chat)"
-                  />
-                  <span v-if="chat.local === false" class="remote-chip">remote</span>
-                  <button
-                    class="chat-actions-btn"
-                    aria-label="Chat actions"
-                    title="Copy ID, rename, move, archive, delete"
-                    @click.stop="toggleChatMenu($event, chat.chat_id)"
-                  >&middot;&middot;&middot;</button>
-                </div>
+                  <div
+                    class="chat-item"
+                    :class="{
+                      active: chat.chat_id === store.activeChatId && !activeSubagentId,
+                      remote: chat.local === false,
+                      dragging: dragChatId === chat.chat_id,
+                    }"
+                    :draggable="chat.local !== false"
+                    @click="chat.local !== false && selectChat(chat.chat_id)"
+                    @keydown.enter.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
+                    @keydown.space.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
+                    @dragstart="onChatDragStart(chat, $event)"
+                    @dragend="onChatDragEnd"
+                    @contextmenu.prevent="openChatMenuAt($event, chat.chat_id)"
+                    role="link"
+                    :tabindex="chat.local === false ? -1 : 0"
+                    :aria-disabled="chat.local === false"
+                    :title="chat.local === false ? 'This chat lives on another instance' : 'Drag to move to another project'"
+                  >
+                    <button
+                      v-if="subagentsFor(chat.chat_id).length"
+                      type="button"
+                      class="subagent-toggle"
+                      :aria-expanded="subagentsExpanded(chat.chat_id)"
+                      :aria-label="(subagentsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subagents for ' + chat.title"
+                      :title="(subagentsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subagents'"
+                      @click.stop="toggleSubagents(chat.chat_id)"
+                    >{{ subagentsExpanded(chat.chat_id) ? '▾' : '▸' }}</button>
+                    <span
+                      v-if="chat.title_status === 'pending'"
+                      class="title-shimmer"
+                      aria-label="Generating title"
+                      title="Generating title..."
+                    />
+                    <span
+                      v-else
+                      class="chat-title"
+                      :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
+                    >{{ chat.title }}</span>
+                    <ChatSignals
+                      :chat-id="chat.chat_id"
+                      density="row"
+                      :hue="colorForChat(chat)"
+                    />
+                    <span v-if="chat.local === false" class="remote-chip">remote</span>
+                    <DropdownMenuTrigger as-child>
+                      <button
+                        class="chat-actions-btn"
+                        aria-label="Chat actions"
+                        title="Copy ID, rename, move, archive, delete"
+                        @click.stop
+                        @pointerdown="useChatActionAnchor"
+                        @focus="useChatActionAnchor"
+                      >&middot;&middot;&middot;</button>
+                    </DropdownMenuTrigger>
+                  </div>
+
+                  <DropdownMenuPortal>
+                    <DropdownMenuContent
+                      class="context-menu"
+                      :reference="chatMenuReference"
+                      :side="chatMenuFromContext ? 'right' : 'bottom'"
+                      :align="chatMenuFromContext ? 'start' : 'end'"
+                      :side-offset="chatMenuFromContext ? 2 : 4"
+                      :collision-padding="8"
+                      :position-strategy="'fixed'"
+                      :update-position-strategy="'always'"
+                      aria-label="Chat actions"
+                    >
+                      <DropdownMenuItem as-child>
+                        <button @click="copyChatId(chatMenu!)">Copy chat ID</button>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem as-child>
+                        <button @click="startRenameChat(chatMenu!)">Rename</button>
+                      </DropdownMenuItem>
+                      <DropdownMenuSub
+                        v-if="moveTargets.length"
+                        v-model:open="moveSubmenu"
+                      >
+                        <DropdownMenuSubTrigger as-child>
+                          <button>Move to...</button>
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent
+                          class="context-menu"
+                          side="right"
+                          align="start"
+                          :side-offset="4"
+                          :collision-padding="8"
+                          :position-strategy="'fixed'"
+                          :update-position-strategy="'always'"
+                        >
+                          <DropdownMenuItem as-child>
+                            <button
+                              v-for="target in moveTargets"
+                              :key="target.project_id"
+                              @click="doMoveChat(target.project_id)"
+                            >{{ target.name }}</button>
+                          </DropdownMenuItem>
+                          <DropdownMenuItem as-child @select.prevent>
+                            <button class="context-menu-back" @click="moveSubmenu = false">← Back</button>
+                          </DropdownMenuItem>
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
+                      <DropdownMenuItem v-if="chatMenuChat?.retry?.status === 'pending'" as-child>
+                        <button @click="stopRetry(chatMenu!)">Stop trying</button>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem v-else as-child>
+                        <button @click="setRetry(chatMenu!)">Set to retry</button>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem v-if="chatMenuChat && !chatMenuChat.archived" as-child>
+                        <button @click="doMarkUnread(chatMenu!)">Mark unread</button>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem as-child>
+                        <button @click="doArchiveChat(chatMenu!)">
+                          {{ ARCHIVE_MENU_LABEL }}
+                        </button>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem as-child>
+                        <button @click="confirmDeleteChat(chatMenu!)">Delete</button>
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenuPortal>
+                </DropdownMenuRoot>
+
                 <!-- Subagents this chat has working right now. They are not
                      chats: the row opens a read-only view of the agent's own
                      transcript, and it disappears when the agent finishes
@@ -1025,42 +1121,6 @@
                   </RouterLink>
                 </template>
               </template>
-
-              <!-- Chat context menu - teleported to body -->
-              <Teleport to="body">
-                <div
-                  v-if="chatMenu && store.projectChats(project.project_id).some(c => c.chat_id === chatMenu)"
-                  class="context-menu-overlay"
-                  @click.self="closeChatMenus()"
-                >
-                  <div
-                    class="context-menu"
-                    :style="{ top: chatMenuPos.top + 'px', left: chatMenuPos.left + 'px' }"
-                  >
-                    <template v-if="!moveSubmenu">
-                      <button @click="copyChatId(chatMenu!)">Copy chat ID</button>
-                      <button @click="startRenameChat(chatMenu!)">Rename</button>
-                      <button v-if="moveTargets.length" @click="openMoveSubmenu()">Move to...</button>
-                      <button v-if="chatMenuChat?.retry?.status === 'pending'" @click="stopRetry(chatMenu!)">Stop trying</button>
-                      <button v-else @click="setRetry(chatMenu!)">Set to retry</button>
-                      <button v-if="chatMenuChat && !chatMenuChat.archived" @click="doMarkUnread(chatMenu!)">Mark unread</button>
-                      <button @click="doArchiveChat(chatMenu!)">
-                        {{ ARCHIVE_MENU_LABEL }}
-                      </button>
-                      <button @click="confirmDeleteChat(chatMenu!)">Delete</button>
-                    </template>
-                    <template v-else>
-                      <div class="context-menu-label">Move to project</div>
-                      <button
-                        v-for="target in moveTargets"
-                        :key="target.project_id"
-                        @click="doMoveChat(target.project_id)"
-                      >{{ target.name }}</button>
-                      <button class="context-menu-back" @click="moveSubmenu = false">← Back</button>
-                    </template>
-                  </div>
-                </div>
-              </Teleport>
             </div>
           </div>
         </div>
@@ -1137,6 +1197,16 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted } from 'vue'
+import {
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuPortal,
+  DropdownMenuRoot,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from 'reka-ui'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
@@ -1538,8 +1608,13 @@ const expandedProjects = reactive(new Set<string>())
 const collapsedSubagentParents = reactive(new Set<string>())
 const projectMenu = ref<string | null>(null)
 const chatMenu = ref<string | null>(null)
-const chatMenuPos = ref<{ top: number; left: number }>({ top: 0, left: 0 })
-const projectMenuPos = ref<{ top: number; left: number }>({ top: 0, left: 0 })
+type MenuReference = HTMLElement | { getBoundingClientRect: () => DOMRect }
+const projectMenuAnchor = ref<MenuReference | null>(null)
+const chatMenuAnchor = ref<MenuReference | null>(null)
+const projectMenuFromContext = ref(false)
+const chatMenuFromContext = ref(false)
+const projectMenuReference = computed(() => projectMenuAnchor.value ?? undefined)
+const chatMenuReference = computed(() => chatMenuAnchor.value ?? undefined)
 const moveSubmenu = ref(false)
 const editingProject = ref<string | null>(null)
 const renamingChat = ref<string | null>(null)
@@ -1581,45 +1656,88 @@ const moveTargets = computed<ProjectInfo[]>(() => {
     })
 })
 
-function menuPosition(rect: DOMRect, menuHeight = 184): { top: number; left: number } {
-  const top = rect.bottom + 4
-  const left = Math.max(8, rect.right - 160)
-  // If the menu would overflow the viewport bottom, flip it above the trigger
-  if (top + menuHeight > window.innerHeight) {
-    return { top: Math.max(8, rect.top - menuHeight - 4), left }
+function contextReference(event: MouseEvent): MenuReference {
+  const x = event.clientX
+  const y = event.clientY
+  return {
+    getBoundingClientRect: () => ({
+      x,
+      y,
+      left: x,
+      right: x,
+      top: y,
+      bottom: y,
+      width: 0,
+      height: 0,
+      toJSON: () => ({}),
+    } as DOMRect),
   }
-  return { top, left }
 }
 
-function toggleChatMenu(event: MouseEvent, chatId: string) {
-  if (chatMenu.value === chatId) {
-    chatMenu.value = null
+function onProjectMenuOpenChange(projectId: string, nextOpen: boolean): void {
+  if (nextOpen) {
+    projectMenu.value = projectId
     return
   }
-  const btn = event.currentTarget as HTMLElement
-  const rect = btn.getBoundingClientRect()
-  chatMenuPos.value = menuPosition(rect)
-  chatMenu.value = chatId
-}
-
-function toggleProjectMenu(event: MouseEvent, project: ProjectInfo) {
-  if (project.is_auto) { projectMenu.value = null; return }
-  if (projectMenu.value === project.project_id) {
+  if (projectMenu.value === projectId) {
     projectMenu.value = null
+    projectMenuAnchor.value = null
+    projectMenuFromContext.value = false
+  }
+}
+
+function onChatMenuOpenChange(chatId: string, nextOpen: boolean): void {
+  if (nextOpen) {
+    chatMenu.value = chatId
     return
   }
-  const el = event.currentTarget as HTMLElement
-  const rect = el.getBoundingClientRect()
-  projectMenuPos.value = menuPosition(rect, 80)
+  if (chatMenu.value === chatId) closeChatMenus()
+}
+
+function useProjectActionAnchor(): void {
+  projectMenuAnchor.value = null
+  projectMenuFromContext.value = false
+}
+
+function useChatActionAnchor(): void {
+  chatMenuAnchor.value = null
+  chatMenuFromContext.value = false
+}
+
+function openProjectMenuAt(event: MouseEvent, project: ProjectInfo): void {
+  if (project.is_auto) {
+    closeProjectMenu()
+    return
+  }
+  if (projectMenu.value === project.project_id) {
+    closeProjectMenu()
+    return
+  }
+  projectMenuAnchor.value = contextReference(event)
+  projectMenuFromContext.value = true
   projectMenu.value = project.project_id
 }
 
-function openMoveSubmenu() {
-  moveSubmenu.value = true
+function openChatMenuAt(event: MouseEvent, chatId: string): void {
+  if (chatMenu.value === chatId) {
+    closeChatMenus()
+    return
+  }
+  chatMenuAnchor.value = contextReference(event)
+  chatMenuFromContext.value = true
+  chatMenu.value = chatId
 }
 
-function closeChatMenus() {
+function closeProjectMenu(): void {
+  projectMenu.value = null
+  projectMenuAnchor.value = null
+  projectMenuFromContext.value = false
+}
+
+function closeChatMenus(): void {
   chatMenu.value = null
+  chatMenuAnchor.value = null
+  chatMenuFromContext.value = false
   moveSubmenu.value = false
 }
 
@@ -1868,7 +1986,7 @@ async function doRestore(cp: CompletedProject) {
 
 function startEditProject(id: string) {
   editingProject.value = id
-  projectMenu.value = null
+  closeProjectMenu()
 }
 
 async function finishEditProject(event: Event, id: string) {
@@ -1881,7 +1999,7 @@ async function finishEditProject(event: Event, id: string) {
 }
 
 async function confirmDeleteProject(id: string) {
-  projectMenu.value = null
+  closeProjectMenu()
   if (!await askConfirm('Delete this project and archive all its chats?', {
     title: 'Delete project',
     confirmLabel: 'Delete project',
@@ -1896,7 +2014,7 @@ async function addChat(projectId: string) {
 }
 
 function startRenameChat(chatId: string) {
-  chatMenu.value = null
+  closeChatMenus()
   const chat = store.chats.find(c => c.chat_id === chatId)
   renameValue.value = chat?.title || ''
   renamingChat.value = chatId
@@ -1925,12 +2043,12 @@ async function copyChatId(chatId: string) {
 }
 
 async function doMarkUnread(chatId: string) {
-  chatMenu.value = null
+  closeChatMenus()
   await store.markUnread(chatId)
 }
 
 async function doArchiveChat(chatId: string) {
-  chatMenu.value = null
+  closeChatMenus()
   // This path never asked for confirmation, unlike the chat header's archive
   // button, so archiving from the sidebar menu was a single misclick.
   if (!await askConfirm(ARCHIVE_CONFIRM_MESSAGE, {
@@ -1946,7 +2064,7 @@ async function doArchiveChat(chatId: string) {
 }
 
 async function setRetry(chatId: string) {
-  chatMenu.value = null
+  closeChatMenus()
   await store.loadMessages(chatId)
   const msgs = store.messages[chatId] || []
   const lastUser = [...msgs].reverse().find(m => m.role === 'user')
@@ -1965,12 +2083,12 @@ async function setRetry(chatId: string) {
 }
 
 async function stopRetry(chatId: string) {
-  chatMenu.value = null
+  closeChatMenus()
   await store.stopChatRetry(chatId)
 }
 
 async function confirmDeleteChat(chatId: string) {
-  chatMenu.value = null
+  closeChatMenus()
   if (!await askConfirm('Delete this chat permanently? It cannot be recovered.', {
     title: 'Delete chat',
     confirmLabel: 'Delete chat',
@@ -2676,6 +2794,31 @@ async function confirmDeleteChat(chatId: string) {
   cursor: not-allowed;
   opacity: 0.6;
 }
+
+/* Project actions use the same 44px affordance as chat actions. The explicit
+   trigger is what makes the context menu reachable by keyboard and touch;
+   right-click still uses the same Reka menu at the pointer. */
+.project-actions-btn {
+  flex-shrink: 0;
+  width: var(--touch);
+  height: var(--touch);
+  margin: -6px 0;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg2);
+  cursor: pointer;
+  font-size: calc(14px * var(--font-scale));
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 100ms var(--ease), background 100ms var(--ease);
+}
+.project-header:hover .project-actions-btn,
+.project-actions-btn:focus-visible,
+.project-actions-btn[data-state='open'] { opacity: 1; }
+.project-actions-btn:hover { color: var(--fg); background: var(--bg3); }
+@media (hover: none) { .project-actions-btn { opacity: 0.6; } }
 
 .chat-item {
   display: flex;
@@ -3574,17 +3717,22 @@ async function confirmDeleteChat(chatId: string) {
 .context-menu {
   position: fixed;
   min-width: 150px;
+  max-width: min(280px, calc(100vw - 16px));
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   z-index: 201;
   padding: 4px 0;
   box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  outline: none;
 }
 
 .context-menu button {
   display: block;
   width: 100%;
+  min-height: var(--touch);
   text-align: left;
   padding: 6px 16px;
   border: none;
@@ -3595,8 +3743,12 @@ async function confirmDeleteChat(chatId: string) {
   font-size: var(--text-base);
 }
 
-.context-menu button:hover {
+.context-menu button:hover,
+.context-menu button:focus-visible,
+.context-menu [data-highlighted] {
   background: var(--bg3);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .context-menu-label {

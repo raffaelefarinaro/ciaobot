@@ -52,9 +52,11 @@ export function useHoverPinPopover<T>(options: HoverPinPopoverOptions<T>): {
   onTargetOut: (event: MouseEvent) => void
   onPopoverEnter: () => void
   onPopoverLeave: () => void
+  reposition: () => void
 } {
   const closeDelayMs = options.closeDelayMs ?? 160
   const popover = ref<HoverPinPopover | null>(null)
+  const anchorEl = ref<HTMLElement | null>(null)
   const comment = computed(() => (popover.value ? options.findComment(popover.value.id) : null))
 
   let closeTimer: ReturnType<typeof setTimeout> | null = null
@@ -68,6 +70,7 @@ export function useHoverPinPopover<T>(options: HoverPinPopoverOptions<T>): {
 
   function close(): void {
     clearPendingClose()
+    anchorEl.value = null
     popover.value = null
   }
 
@@ -88,8 +91,24 @@ export function useHoverPinPopover<T>(options: HoverPinPopoverOptions<T>): {
     const anchor = options.anchorFor(el)
     if (!anchor) return
     clearPendingClose()
+    anchorEl.value = el
     if (pinned) options.onPin?.()
     popover.value = { id, top: anchor.top, left: anchor.left, pinned }
+  }
+
+  /**
+   * Re-run the injected anchor calculation without changing the open comment.
+   * Fixed overlays must follow a visual-viewport resize (iOS keyboard, rotation)
+   * instead of leaving a reachable-looking box behind the keyboard or off the
+   * side of a newly narrow viewport.
+   */
+  function reposition(): void {
+    const current = popover.value
+    const el = anchorEl.value
+    if (!current || !el) return
+    const anchor = options.anchorFor(el)
+    if (!anchor) return
+    popover.value = { ...current, top: anchor.top, left: anchor.left }
   }
 
   // Resolve the element for an event, ignoring moves that stay inside it.
@@ -134,5 +153,6 @@ export function useHoverPinPopover<T>(options: HoverPinPopoverOptions<T>): {
     onTargetOut,
     onPopoverEnter,
     onPopoverLeave,
+    reposition,
   }
 }
