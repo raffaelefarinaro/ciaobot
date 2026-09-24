@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -163,3 +164,85 @@ async def test_respond_permission_strips_buffered_event_from_active_stream(
     assert all(
         ev.get("type") != "permission_request" for ev in replay
     ), f"buffered permission_request leaked into replay: {replay}"
+
+
+@pytest.mark.asyncio
+async def test_async_permission_delivery_keeps_retry_state_until_success(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="async-permission")
+    chat.pending_permission = json.dumps({
+        "request_id": "req-async", "tool_name": "Bash", "message": "Approve?", "tool_input": "ls",
+    })
+    from ciao.web.chat_broker import ChatStream
+
+    stream = ChatStream("hi")
+    pcm._broker.register(chat.chat_id, stream)
+    stream.publish({
+        "type": "permission_request",
+        "request_id": "req-async",
+        "tool_name": "Bash",
+        "message": "Approve?",
+    })
+
+    class Provider:
+        ok = False
+
+        async def send_permission_response_async(self, request_id: str, approved: bool) -> bool:
+            return self.ok
+
+    provider = Provider()
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
+    assert await pcm.respond_permission_async(
+        chat.chat_id, request_id="req-async", approved=True
+    ) is False
+    assert chat.pending_permission
+    assert any(ev.get("request_id") == "req-async" for ev in stream.buffered_events())
+
+    provider.ok = True
+    assert await pcm.respond_permission_async(
+        chat.chat_id, request_id="req-async", approved=True
+    ) is True
+    assert chat.pending_permission == ""
+    assert all(ev.get("request_id") != "req-async" for ev in stream.buffered_events())
+
+
+@pytest.mark.asyncio
+async def test_async_question_delivery_keeps_retry_state_until_success(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="async-question")
+    chat.pending_question = json.dumps({"questions": [{"question": "Continue?"}]})
+    from ciao.web.chat_broker import ChatStream
+
+    stream = ChatStream("hi")
+    pcm._broker.register(chat.chat_id, stream)
+    stream.publish({
+        "type": "tool_use",
+        "tool_name": "AskUserQuestion",
+        "request_id": "form-async",
+        "tool_input": json.dumps({"questions": [{"question": "Continue?"}]}),
+    })
+
+    class Provider:
+        ok = False
+
+        async def send_question_response_async(
+            self, request_id: str, answers: dict[str, list[str]], *, cancel: bool = False
+        ) -> bool:
+            return self.ok
+
+    provider = Provider()
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
+    assert await pcm.respond_question_async(
+        chat.chat_id, request_id="form-async", answers={"q": ["yes"]}
+    ) is False
+    assert chat.pending_question
+    assert any(ev.get("request_id") == "form-async" for ev in stream.buffered_events())
+
+    provider.ok = True
+    assert await pcm.respond_question_async(
+        chat.chat_id, request_id="form-async", answers={"q": ["yes"]}
+    ) is True
+    assert chat.pending_question == ""
+    assert all(ev.get("request_id") != "form-async" for ev in stream.buffered_events())

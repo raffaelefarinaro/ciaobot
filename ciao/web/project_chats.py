@@ -6695,7 +6695,7 @@ class ProjectChatManager:
                                 # device gets the Approve/Deny prompt.
                                 self._notify_permission(chat_id, event)
                                 if unattended:
-                                    self.respond_permission(
+                                    await self.respond_permission_async(
                                         chat_id,
                                         request_id=event.request_id,
                                         approved=False,
@@ -8223,6 +8223,65 @@ class ProjectChatManager:
         except Exception:
             logger.exception("notify_question_cb failed for %s", chat_id)
 
+    async def respond_permission_async(
+        self,
+        chat_id: str,
+        *,
+        request_id: str,
+        approved: bool,
+        reason: str = "",
+    ) -> bool:
+        """Deliver an approval and clear its card only after delivery succeeds."""
+        provider_service = self._providers.get(chat_id)
+        provider = provider_service.provider if provider_service is not None else None
+        if provider is None:
+            return False
+        responder = getattr(provider, "send_permission_response_async", None)
+        retract_id = ""
+        if callable(responder):
+            # Capture the provider's tool id before the successful reply pops
+            # its pending-request record; denied calls are retracted by that
+            # stable id, not by the permission request id.
+            resolver = getattr(provider, "tool_use_id_for_request", None)
+            retract_id = resolver(request_id) if callable(resolver) else ""
+            try:
+                delivered = bool(await responder(request_id, approved))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — turn a delivery exception into retryable state
+                logger.exception("native permission response failed for %s", request_id)
+                return False
+        else:
+            legacy = getattr(provider, "send_permission_response", None)
+            if callable(legacy):
+                delivered = bool(legacy(request_id, approved))
+            else:
+                gate = getattr(provider, "permission_gate", None)
+                answer = getattr(gate, "answer", None)
+                if not callable(answer):
+                    return False
+                delivered = bool(answer(request_id, approved=approved, reason=reason))
+        if not delivered:
+            # Keep both the persisted attention flag and the broker event.  A
+            # transient HTTP failure must leave a retryable card in the UI.
+            return False
+
+        chat = self._chats.get(chat_id)
+        if chat is not None and chat.pending_permission:
+            try:
+                stored = json.loads(chat.pending_permission)
+            except (TypeError, json.JSONDecodeError):
+                stored = {}
+            if not isinstance(stored, dict) or stored.get("request_id") == request_id:
+                chat.pending_permission = ""
+                self._save()
+        stream = self._broker.get(chat_id)
+        if stream is not None:
+            stream.resolve_permission(request_id)
+            if not approved:
+                stream.deny_tool_use(retract_id or request_id)
+        return True
+
     def respond_permission(
         self,
         chat_id: str,
@@ -8245,6 +8304,26 @@ class ProjectChatManager:
         replies still indicate the user has dealt with the prompt, and
         the buffered event should not pop back up.
         """
+        provider_service = self._providers.get(chat_id)
+        provider = provider_service.provider if provider_service is not None else None
+        if provider is not None and callable(
+            getattr(provider, "send_permission_response_async", None)
+        ):
+            # Preserve the historical synchronous API for local callers, but do
+            # not clear the card before the provider's HTTP request completes.
+            try:
+                asyncio.create_task(
+                    self.respond_permission_async(
+                        chat_id,
+                        request_id=request_id,
+                        approved=approved,
+                        reason=reason,
+                    )
+                )
+            except RuntimeError:
+                return False
+            return True
+
         # Clear the persisted attention flag only if it still names this
         # request — a stale/duplicate reply for an already-superseded prompt
         # must not wipe out a newer pending one.
@@ -8286,15 +8365,90 @@ class ProjectChatManager:
         gate = getattr(provider, "permission_gate")
         return cast(bool, gate.answer(request_id, approved=approved, reason=reason))
 
+    async def respond_question_async(
+        self,
+        chat_id: str,
+        *,
+        request_id: str,
+        answers: dict[str, list[str]],
+        cancel: bool = False,
+    ) -> bool:
+        """Deliver a native question/form answer and acknowledge real success."""
+        provider_service = self._providers.get(chat_id)
+        provider = provider_service.provider if provider_service is not None else None
+        if provider is None:
+            return False
+        responder = getattr(provider, "send_question_response_async", None)
+        if callable(responder):
+            try:
+                if cancel:
+                    try:
+                        delivered = bool(await responder(request_id, answers, cancel=True))
+                    except TypeError as exc:
+                        # Preserve compatibility with older custom adapters that
+                        # predate the explicit cancel flag; an empty answer map is
+                        # their historical cancellation signal.
+                        if "cancel" not in str(exc):
+                            raise
+                        delivered = bool(await responder(request_id, {}))
+                else:
+                    delivered = bool(await responder(request_id, answers))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — turn a delivery exception into retryable state
+                logger.exception("native question response failed for %s", request_id)
+                return False
+        else:
+            legacy = getattr(provider, "send_question_response", None)
+            if not callable(legacy):
+                return False
+            delivered = bool(legacy(request_id, {} if cancel else answers))
+        if not delivered:
+            return False
+        chat = self._chats.get(chat_id)
+        if chat is not None and chat.pending_question:
+            try:
+                stored = json.loads(chat.pending_question)
+            except (TypeError, json.JSONDecodeError):
+                stored = {}
+            if (
+                not isinstance(stored, dict)
+                or not stored.get("request_id")
+                or stored.get("request_id") == request_id
+            ):
+                chat.pending_question = ""
+                self._save()
+        stream = self._broker.get(chat_id)
+        if stream is not None:
+            stream.resolve_question(request_id)
+        return True
+
     def respond_question(
         self,
         chat_id: str,
         *,
         request_id: str,
         answers: dict[str, list[str]],
+        cancel: bool = False,
     ) -> bool:
         """Deliver an answer to a provider-native user-input request."""
         provider_service = self._providers.get(chat_id)
+        provider = provider_service.provider if provider_service is not None else None
+        if provider is not None and callable(
+            getattr(provider, "send_question_response_async", None)
+        ):
+            try:
+                asyncio.create_task(
+                    self.respond_question_async(
+                        chat_id,
+                        request_id=request_id,
+                        answers=answers,
+                        cancel=cancel,
+                    )
+                )
+            except RuntimeError:
+                return False
+            return True
         if provider_service is None or provider_service.provider is None:
             return False
         responder = getattr(
@@ -8302,12 +8456,15 @@ class ProjectChatManager:
         )
         if not callable(responder):
             return False
-        accepted = bool(responder(request_id, answers))
+        accepted = bool(responder(request_id, {} if cancel else answers))
         if accepted:
             chat = self._chats.get(chat_id)
             if chat is not None:
                 chat.pending_question = ""
                 self._save()
+            stream = self._broker.get(chat_id)
+            if stream is not None:
+                stream.resolve_question(request_id)
         return accepted
 
     def respond_capability(

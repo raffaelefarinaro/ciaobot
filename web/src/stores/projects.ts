@@ -237,6 +237,11 @@ export const useProjectStore = defineStore('projects', () => {
   // renders Approve/Deny buttons for each entry; clicking sends a
   // `permission_response` on the per-chat WS and pops the entry optimistically.
   const pendingPermissions = ref<Record<string, PendingPermission[]>>({})
+  // Optimistic response state. The server sends an explicit result frame after
+  // the provider HTTP call; these snapshots let a failed V2 delivery put the
+  // card back instead of making it disappear permanently.
+  const permissionResponseSnapshots = new Map<string, { permission: PendingPermission; persisted: string }>()
+  const questionResponseSnapshots = new Map<string, { questions: ActiveQuestion[]; persisted: string }>()
   // Per-project "new chat is being created" flag so UI can disable buttons
   // and prevent double-clicks while the POST is in flight.
   const creatingChatProjectIds = ref<Record<string, boolean>>({})
@@ -4219,54 +4224,73 @@ export const useProjectStore = defineStore('projects', () => {
     approved: boolean,
     reason = '',
   ) {
-    // Pop the bubble optimistically so rapid-tapping the same button
-    // doesn't double-send. If the WS is dead, the server resolves its
-    // pending future on disconnect via `cancel_all`.
     const list = pendingPermissions.value[chatId]
-    if (list) {
-      const next = list.filter(p => p.request_id !== requestId)
-      if (next.length) {
-        pendingPermissions.value[chatId] = next
-      } else {
-        delete pendingPermissions.value[chatId]
-        delete activeQuestions.value[chatId]
+    const permission = list?.find(p => p.request_id === requestId)
+    if (!permission) return false
+    const ws = sockets.value[chatId]
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    const snapshot = {
+      permission,
+      persisted: chat?.pending_permission || '',
+    }
+    if (ws?.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(
+          JSON.stringify({
+            type: 'permission_response',
+            request_id: requestId,
+            approved,
+            reason,
+          }),
+        )
+      } catch {
+        return false
       }
     }
-    // Clear the persisted attention flag optimistically too, so a
-    // GET /api/chats refresh that lands before the server's own clear
-    // round-trips doesn't resurrect the card via rebuildPendingPermission.
-    const chat = chats.value.find(c => c.chat_id === chatId)
-    if (chat?.pending_permission) chat.pending_permission = ''
-    const ws = sockets.value[chatId]
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(
-        JSON.stringify({
-          type: 'permission_response',
-          request_id: requestId,
-          approved,
-          reason,
-        }),
-      )
+    permissionResponseSnapshots.set(requestId, snapshot)
+    // Pop optimistically so rapid taps cannot double-send. The matching
+    // result frame restores this snapshot if the provider HTTP call fails.
+    const next = list.filter(p => p.request_id !== requestId)
+    if (next.length) pendingPermissions.value[chatId] = next
+    else {
+      delete pendingPermissions.value[chatId]
+      delete activeQuestions.value[chatId]
     }
+    if (chat?.pending_permission) chat.pending_permission = ''
+    return true
   }
 
   function respondQuestion(
     chatId: string,
     requestId: string,
     answers: Record<string, string[]>,
+    cancel = false,
   ) {
+    const questions = activeQuestions.value[chatId]
+    if (!questions?.length) return false
+    const ws = sockets.value[chatId]
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    const snapshot = {
+      questions,
+      persisted: chat?.pending_question || '',
+    }
+    if (ws?.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({
+          type: 'question_response',
+          request_id: requestId,
+          answers,
+          cancel,
+        }))
+      } catch {
+        return false
+      }
+    }
+    questionResponseSnapshots.set(requestId, snapshot)
     markResolvedQuestion(chatId)
     delete activeQuestions.value[chatId]
-    const chat = chats.value.find(c => c.chat_id === chatId)
     if (chat?.pending_question) chat.pending_question = ''
-    const ws = sockets.value[chatId]
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'question_response',
-        request_id: requestId,
-        answers,
-      }))
-    }
+    return true
   }
 
   function respondCapability(
@@ -4546,6 +4570,55 @@ export const useProjectStore = defineStore('projects', () => {
     }
 
     switch (event.type) {
+      case 'permission_response_result': {
+        const snapshot = permissionResponseSnapshots.get(event.request_id)
+        if (!snapshot) break
+        if (event.ok) {
+          permissionResponseSnapshots.delete(event.request_id)
+          break
+        }
+        const list = pendingPermissions.value[chatId] || []
+        const has_current_permission = list.some(item => item.request_id !== event.request_id)
+        if (!list.some(item => item.request_id === event.request_id)) {
+          pendingPermissions.value[chatId] = [...list, snapshot.permission]
+        }
+        const chat = chats.value.find(c => c.chat_id === chatId)
+        if (chat && !has_current_permission && snapshot.persisted) {
+          chat.pending_permission = snapshot.persisted
+        }
+        pushToast({
+          chat_id: chatId,
+          title: 'Approval was not delivered',
+          body: 'The provider did not accept that response. Try again.',
+          variant: 'error',
+        })
+        break
+      }
+      case 'question_response_result': {
+        const snapshot = questionResponseSnapshots.get(event.request_id)
+        if (!snapshot) break
+        if (event.ok) {
+          questionResponseSnapshots.delete(event.request_id)
+          break
+        }
+        const has_current_question = Boolean(activeQuestions.value[chatId]?.length)
+        if (!has_current_question) {
+          activeQuestions.value[chatId] = snapshot.questions
+          const chat = chats.value.find(c => c.chat_id === chatId)
+          if (chat && snapshot.persisted) chat.pending_question = snapshot.persisted
+        }
+        // The optimistic send marked this signature resolved; a failed
+        // delivery makes it pending again, so a later chat reload must be
+        // allowed to rebuild the retryable card from persisted state.
+        resolvedQuestions.value[chatId]?.delete(questionsSignature(snapshot.questions))
+        pushToast({
+          chat_id: chatId,
+          title: 'Answer was not delivered',
+          body: 'The form is still waiting for a response. Try again.',
+          variant: 'error',
+        })
+        break
+      }
       case 'user_echo': {
         // Broker echoes the user prompt first, so a reconnecting client can
         // render the user turn without depending on /messages being ready.

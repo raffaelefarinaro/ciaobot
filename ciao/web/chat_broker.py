@@ -708,6 +708,22 @@ class ChatStream:
         ]
         return len(self._events) < before
 
+    def resolve_question(self, request_id: str) -> bool:
+        """Remove a settled AskUserQuestion/form tool event from replay."""
+        if not request_id:
+            return False
+        before = len(self._events)
+        self._events = [
+            ev
+            for ev in self._events
+            if not (
+                ev.get("type") == "tool_use"
+                and ev.get("request_id") == request_id
+                and ev.get("tool_name") == "AskUserQuestion"
+            )
+        ]
+        return len(self._events) < before
+
     def open_capability(self, request_id: str) -> bool:
         """Register an open capability question for ``request_id``.
 

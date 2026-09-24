@@ -2370,6 +2370,72 @@ describe('provider-neutral input state', () => {
       utilization: '0.2',
     })
   })
+
+  test('restores permission and form cards when delivery results fail', () => {
+    const store = useProjectStore()
+    const permissionChat = 'permission-retry'
+    const questionChat = 'question-retry'
+    store.chats = [
+      {
+        chat_id: permissionChat,
+        project_id: 'p1',
+        title: 'Permission',
+        model: 'gpt-test',
+        provider: 'opencode',
+        mode: 'normal',
+        session_id: 'thread-1',
+        created_at: '',
+        archived: false,
+      },
+      {
+        chat_id: questionChat,
+        project_id: 'p1',
+        title: 'Question',
+        model: 'gpt-test',
+        provider: 'opencode',
+        mode: 'normal',
+        session_id: 'thread-2',
+        created_at: '',
+        archived: false,
+      },
+    ]
+    store.connectWs(permissionChat)
+    store.connectWs(questionChat)
+    const permissionSocket = fakeSockets[0]
+    const questionSocket = fakeSockets[1]
+
+    permissionSocket.onmessage?.({ data: JSON.stringify({
+      type: 'permission_request',
+      request_id: 'perm-retry',
+      tool_name: 'shell',
+      message: 'Approve?',
+    }) })
+    expect(store.respondPermission(permissionChat, 'perm-retry', true)).toBe(true)
+    expect(store.pendingPermissions[permissionChat]).toBeUndefined()
+    permissionSocket.onmessage?.({ data: JSON.stringify({
+      type: 'permission_response_result', request_id: 'perm-retry', ok: false,
+    }) })
+    expect(store.pendingPermissions[permissionChat]?.[0]?.request_id).toBe('perm-retry')
+
+    store.activeQuestions[questionChat] = [{
+      id: 'optional',
+      question: 'Optional?',
+      header: 'Optional',
+      multiSelect: false,
+      allowOther: true,
+      isSecret: false,
+      requestId: 'form-retry',
+      options: [],
+      type: 'string',
+      required: false,
+    }]
+    expect(store.respondQuestion(questionChat, 'form-retry', { optional: [''] })).toBe(true)
+    expect(store.activeQuestions[questionChat]).toBeUndefined()
+    questionSocket.onmessage?.({ data: JSON.stringify({
+      type: 'question_response_result', request_id: 'form-retry', ok: false,
+    }) })
+    expect(store.activeQuestions[questionChat]?.[0]?.requestId).toBe('form-retry')
+  })
 })
 
 describe('image-capability questions', () => {

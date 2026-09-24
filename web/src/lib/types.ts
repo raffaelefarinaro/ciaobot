@@ -404,6 +404,8 @@ export type WsEvent =
   // answer, so it must not raise an unread badge on a backgrounded tab.
   | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; stopped?: boolean; fallback_final?: boolean; sent_at?: string; completed_at?: string; duration_ms?: number }
   | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
+  | { type: 'permission_response_result'; request_id: string; ok: boolean }
+  | { type: 'question_response_result'; request_id: string; ok: boolean }
   // The selected model cannot see the attached images; the engine asks the
   // user to pick a vision-capable model before dispatching. Answered via a
   // `capability_response` client message (action switch | picker | cancel).

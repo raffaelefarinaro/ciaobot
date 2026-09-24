@@ -420,6 +420,21 @@ exposes `memory_status`/`memory_update` without creating a second memory store.
 
 Edit canonical sources, not the generated `.claude/` or `.agents/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat); regenerate the `gws-*` skills through `ciao/release.py` rather than calling `gws generate-skills` by hand.
 
+The opencode adapter supports both server contracts. V2 uses `/api/info` and
+`/openapi.json`, `data`-wrapped responses, session-scoped permission/form
+routes, and cursor pagination for messages and child sessions. Its supported
+prompt body has only `text`/`files`; core and runtime instructions therefore
+travel in a delimited text preamble, which is a documented API limitation and
+not a native system role. Keep V2 form metadata (required, hidden, `when`,
+external URLs, and optional empty values) intact through `ToolUseEvent` and
+`chatQuestions.ts`; keep Cancel distinct from a submitted empty optional
+answer. Permission/form responses are asynchronous HTTP
+operations: await the provider result before clearing the server-side pending
+state, and preserve a retryable PWA card when the result is negative. For V2
+security tests, remember that internal resources are workspace-relative and
+that broad `glob`/`grep`/`list` queries are denied rather than treated as
+path-scoped; shell access remains an approval-mode limitation.
+
 ## DAG-style schedules (maintainers)
 
 Some packaged schedules are multi-step workflows (load state, gate, model call, write). For these, use `ciao.dag` rather than a long `async def`:

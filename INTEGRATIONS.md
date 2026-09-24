@@ -38,10 +38,47 @@ opencode is bring-your-own-provider: it authenticates against whichever model
 backends you connect (`opencode auth login`), and Ciaobot lists the models of
 the connected ones. Ciaobot runs one `opencode serve` process per active chat
 on an ephemeral loopback port protected by a per-process
-`OPENCODE_SERVER_PASSWORD`, and drives it over HTTP plus the `/event` SSE
-stream. Readiness verifies the operations Ciaobot needs against the server's
-own OpenAPI document at `/doc`, so a logged-in but incompatible build is
-reported as needing an update rather than half-working.
+`OPENCODE_SERVER_PASSWORD`, and drives it over HTTP plus the version-specific
+SSE stream. Readiness first reads V2 `/api/info` (with V1 `/global/health` as
+fallback), then verifies the operations Ciaobot needs against `/openapi.json`
+for V2 or `/doc` for V1. A logged-in but incompatible build is reported as
+needing an update rather than half-working.
+
+V2 deliberately changes the server contract: routes live under `/api`, JSON
+responses use a `{"data": ...}` envelope, prompts use
+`/api/session/{id}/prompt`, interrupts use `/interrupt`, and permission replies
+are session-scoped. V2 questions are represented as session forms, so Ciaobot
+maps form events to its question card and uses the form reply/cancel routes.
+The PWA submits optional fields with an explicit empty value where the V2
+schema permits one (or an empty multiselect list). Numeric/boolean and closed
+option blanks are omitted from the typed V2 answer so the server default
+remains authoritative, while the Cancel button sends an explicit cancel
+action; a submitted empty answer is never confused with cancellation.
+Model discovery uses V2's flat `/api/model` catalog. V1 routes and payloads
+remain supported for older servers. V2 model selections should be qualified
+`provider/model` IDs; an unqualified ID is treated as no explicit V2 model
+because V2's model reference requires a provider ID, so the server default is
+used.
+
+V2 does not expose the V1 `/session/{id}/children` route. Ciaobot uses the
+V2 session-list filter (`parentID` plus a bounded limit), follows every
+`cursor.next` page, and verifies each returned `parentID` before reading the
+child transcript, rather than guessing that a similarly titled session is a
+subagent. The V1 direct children route is still used when connected to V1.
+
+The V2 prompt schema has no V1 `system` or `parts` field. Ciaobot therefore
+uses the supported V2 `text`/`files` body and carries the same core/runtime
+context in a clearly delimited trusted-context preamble ahead of the user
+request. This preserves the standing instructions without sending an
+unsupported field, but it is still a user-text transport rather than a native
+system role; operators should not treat V2 prompt injection boundaries as
+equivalent to V1's system field. Model, agent, and permissions remain on the
+session.
+
+The V1 `opencode-auto-permissions` plugin does not run under V2 until its
+author ports it to the V2 plugin API. Native V2 permission cards still work,
+but automatic reviewer approval is unavailable on V2; do not treat the V1
+plugin installation as a V2 approval policy.
 
 Workspace assets need almost no projection: opencode discovers
 `.claude/skills/`, `.agents/skills/`, and `AGENTS.md` natively, so
@@ -58,8 +95,9 @@ flushes them as a fresh turn when the active one finishes. Fork, abort, tool
 approvals, structured questions, and
 background subagents (real child sessions) are all native. When a chat is
 archived, deleted, or reset, Ciaobot disconnects its server and then calls
-`DELETE /session/{id}` to reclaim the persisted opencode session; cleanup is
-fail-open if the provider is unavailable.
+the version-appropriate `DELETE /session/{id}` or `/api/session/{id}` endpoint
+to reclaim the persisted opencode session; cleanup is fail-open if the
+provider is unavailable.
 
 ### Auto mode (automatic permission review)
 
@@ -67,15 +105,20 @@ opencode chats follow the chat's permission mode (the per-provider default
 from Settings → Models & providers, Auto unless changed). In Auto the session
 permission ruleset is `allow` for every tool except `bash` (every shell
 command, including `ciao …` control-plane calls), which is routed to `ask`;
-Manual routes every tool to `ask` and Bypass allows everything. In every mode,
+Manual routes every tool to `ask` and Bypass allows everything. V2 receives
+the equivalent `shell`/`edit` action names. In every mode,
 including Bypass, credential-path denies (`**/.env`, `**/.runtime/**`,
 `**/secrets/**`, plus the resolved `CIAO_RUNTIME_ROOT`) are appended last for
 opencode's native file tools only: `read`, `edit`, `write`, `patch`, `glob`,
-`grep` and `list`. They do not cover `bash`, because a shell command cannot be
-path-scoped by a glob. In Manual and Auto a shell command such as `cat .env`
-still raises an approval card; in Bypass it runs without one, so Bypass does
-not protect those files from shell access. Each `ask` surfaces an
-approval card in the chat that the operator approves or denies.
+`grep` and `list`. V2 resolves internal file resources relative to the
+workspace, so it additionally denies the root spellings `.env`,
+`.runtime/**`, and `secrets/**`; a broad V2 `glob`, `grep`, or `list` query
+cannot be proven safe from a path glob and is denied outright. These rules do
+not cover `bash`, because a shell command cannot be path-scoped by a glob. In
+Manual and Auto a shell command such as `cat .env` still raises an approval
+card; in Bypass it runs without one, so Bypass does not protect those files
+from shell access. Each `ask` surfaces an approval card in the chat that the
+operator approves or denies.
 
 To get a Claude-Code/Codex-style **automatic** approval classifier instead of
 manual cards, install the [`opencode-auto-permissions`](https://github.com/hueyexe/opencode-auto-permissions)

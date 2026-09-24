@@ -706,19 +706,37 @@
         <span class="question-card-title">The model has a question</span>
         <button class="question-card-dismiss" @click="dismissQuestions" title="Dismiss">&times;</button>
       </div>
-      <div
-        v-for="(q, qi) in activeQuestions"
-        :key="qi"
-        class="question-block"
-      >
+      <template v-for="(q, qi) in activeQuestions" :key="qi">
+        <div
+          v-if="questionIsVisible(q, activeQuestions, questionAnswers)"
+          class="question-block"
+        >
         <div class="question-block-header">
           <span v-if="q.header" class="question-block-chip">{{ q.header }}</span>
           <span v-if="q.multiSelect" class="question-block-multi">multi-select</span>
+          <span class="question-block-required">{{ q.required === false ? 'optional' : 'required' }}</span>
         </div>
         <div v-if="q.question || !q.header" class="question-block-prompt">
           {{ questionPromptLabel(q, qi) }}
         </div>
-        <div class="question-options">
+        <div v-if="q.type === 'external'" class="question-external">
+          <a
+            v-if="safeQuestionUrl(q.url)"
+            :href="safeQuestionUrl(q.url)"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Open external step</a>
+          <span v-else class="question-external-invalid">External link unavailable</span>
+          <label class="question-external-check">
+            <input
+              type="checkbox"
+              :checked="questionAnswers[qi]?.external === true"
+              @change="toggleQuestionExternal(qi, ($event.target as HTMLInputElement).checked)"
+            />
+            <span>I completed this step</span>
+          </label>
+        </div>
+        <div v-else class="question-options">
           <button
             v-for="(opt, oi) in q.options"
             :key="opt.label"
@@ -744,14 +762,15 @@
           </button>
         </div>
         <input
-          v-if="q.allowOther"
-          :type="q.isSecret ? 'password' : 'text'"
+          v-if="q.allowOther && q.type !== 'external'"
+          :type="q.isSecret ? 'password' : questionInputType(q)"
           class="question-other"
-          placeholder="Other (free text)"
+          :placeholder="q.placeholder || (q.required === false ? 'Optional (free text)' : 'Other (free text)')"
           :value="questionAnswers[qi]?.other || ''"
           @input="ensureAnswer(qi).other = ($event.target as HTMLInputElement).value"
         />
-      </div>
+        </div>
+      </template>
       <div class="question-card-actions">
         <button class="btn-sm" type="button" @click="dismissQuestions">Cancel</button>
         <button class="btn-sm primary" type="button" :disabled="!allQuestionsAnswered" @click="submitQuestionAnswers">Send answer</button>
@@ -1188,6 +1207,11 @@ import { useChatComposer } from '../composables/useChatComposer'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import { subagentPath, shortAgentId } from '../lib/subagentIds'
+import {
+  questionIsVisible,
+  type ActiveQuestion,
+  type QuestionAnswerState,
+} from '../lib/chatQuestions'
 
 /** The footer facts for one turn: when it landed, how long it took, which
  *  model answered and what it cost. Collected across the turn's assistant
@@ -2192,21 +2216,63 @@ const activeQuestions = computed(() => {
   return store.activeQuestions[id] || []
 })
 
-// The card is only on screen when it wins the dock, or when the dock strip is
-// expanded behind a permission. Named because the keyboard shortcuts below key
-// off the same condition as the template: a hidden card must not eat digits.
-const questionCardVisible = computed(() =>
-  activeQuestions.value.length > 0 && (dockPrimary.value === 'question' || dockExpanded.value),
-)
-
-type QuestionAnswer = { selected: Set<string>; other: string }
+type QuestionAnswer = QuestionAnswerState
 const questionAnswers = ref<Record<number, QuestionAnswer>>({})
+
+const visibleQuestionIndexes = computed(() => activeQuestions.value
+  .map((question, index) => questionIsVisible(question, activeQuestions.value, questionAnswers.value) ? index : -1)
+  .filter(index => index >= 0))
+
+// The card is only on screen when it wins the dock, or when the dock strip is
+// expanded behind a permission. Hidden/inactive V2 fields alone are not a card.
+const questionCardVisible = computed(() =>
+  visibleQuestionIndexes.value.length > 0 && (dockPrimary.value === 'question' || dockExpanded.value),
+)
 
 // Reset per-question selections whenever the active chat changes or the
 // model fires a fresh AskUserQuestion. Watching the array reference catches
 // both "new chat" and "new questions in same chat" without us touching the
-// answers map by hand.
-watch(activeQuestions, () => { questionAnswers.value = {} })
+// answers map by hand. V2 defaults are applied as initial answers so a
+// conditional field can become visible before the user touches the form.
+function defaultQuestionAnswer(question: ActiveQuestion): QuestionAnswer | undefined {
+  if (question.default === undefined || question.type === 'external') return undefined
+  const answer: QuestionAnswer = { selected: new Set<string>(), other: '' }
+  const value = question.default
+  const optionLabel = (raw: string): string | undefined => {
+    const option = question.options.find(candidate =>
+      candidate.label === raw || question.optionValues?.[candidate.label] === raw,
+    )
+    return option?.label
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const raw = String(item)
+      const label = optionLabel(raw) ?? raw
+      if (question.multiSelect || question.options.length === 0) answer.selected.add(label)
+      else answer.other = label
+    }
+    return answer
+  }
+  const raw = String(value)
+  const label = optionLabel(raw)
+  if (label) {
+    answer.selected.add(label)
+  } else if (question.allowOther) {
+    answer.other = raw
+  } else {
+    return undefined
+  }
+  return answer
+}
+
+watch(activeQuestions, () => {
+  const defaults: Record<number, QuestionAnswer> = {}
+  activeQuestions.value.forEach((question, index) => {
+    const answer = defaultQuestionAnswer(question)
+    if (answer) defaults[index] = answer
+  })
+  questionAnswers.value = defaults
+}, { immediate: true })
 
 function ensureAnswer(i: number): QuestionAnswer {
   let a = questionAnswers.value[i]
@@ -2234,6 +2300,32 @@ function isQuestionOptionSelected(i: number, label: string): boolean {
   return questionAnswers.value[i]?.selected.has(label) ?? false
 }
 
+function toggleQuestionExternal(i: number, checked: boolean) {
+  const answer = ensureAnswer(i)
+  answer.external = checked
+  questionAnswers.value = { ...questionAnswers.value, [i]: { ...answer } }
+}
+
+function questionInputType(q: { isSecret?: boolean; format?: string; type?: string }): string {
+  if (q.isSecret) return 'password'
+  if (q.type === 'number' || q.type === 'integer') return 'number'
+  if (q.format === 'email') return 'email'
+  if (q.format === 'uri') return 'url'
+  if (q.format === 'date') return 'date'
+  if (q.format === 'date-time') return 'datetime-local'
+  return 'text'
+}
+
+function safeQuestionUrl(raw: string | undefined): string {
+  if (!raw) return ''
+  try {
+    const url = new URL(raw)
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : ''
+  } catch {
+    return ''
+  }
+}
+
 // Digit shortcuts cover the first question only -- the picker almost always
 // carries one, and a second block would need a second digit row with no way to
 // tell them apart. The badge is rendered from the same function so the hint can
@@ -2241,7 +2333,8 @@ function isQuestionOptionSelected(i: number, label: string): boolean {
 const MAX_QUESTION_SHORTCUTS = 9
 
 function questionOptionShortcut(qi: number, oi: number): string {
-  if (qi !== 0 || oi >= MAX_QUESTION_SHORTCUTS) return ''
+  const firstVisible = activeQuestions.value.findIndex(q => questionIsVisible(q, activeQuestions.value, questionAnswers.value))
+  if (qi !== firstVisible || oi >= MAX_QUESTION_SHORTCUTS) return ''
   return String(oi + 1)
 }
 
@@ -2284,8 +2377,9 @@ function handlePermissionShortcut(e: KeyboardEvent): boolean {
 // decides whether the card has a use for the key.
 function handleQuestionShortcut(e: KeyboardEvent): boolean {
   if (!questionCardVisible.value) return false
-  const q = activeQuestions.value[0]
-  if (!q) return false
+  const firstVisible = activeQuestions.value.findIndex(q => questionIsVisible(q, activeQuestions.value, questionAnswers.value))
+  if (firstVisible < 0) return false
+  const q = activeQuestions.value[firstVisible]
 
   if (e.key === 'Enter') {
     // Never steal Enter from a focused control: on Cancel/Send answer, or on
@@ -2295,7 +2389,7 @@ function handleQuestionShortcut(e: KeyboardEvent): boolean {
     if (e.target instanceof HTMLElement && e.target.closest('button, a, [role="button"]')) return false
     // Multi-select is a collection, not a choice: digits toggle and the
     // explicit Send answer ends it, so Enter stays a no-op there.
-    if (activeQuestions.value.some(other => other.multiSelect)) return false
+    if (visibleQuestionIndexes.value.some(index => activeQuestions.value[index]?.multiSelect)) return false
     if (!allQuestionsAnswered.value) return false
     submitQuestionAnswers()
     return true
@@ -2304,7 +2398,7 @@ function handleQuestionShortcut(e: KeyboardEvent): boolean {
   if (!/^[1-9]$/.test(e.key)) return false
   const opt = q.options[Number(e.key) - 1]
   if (!opt) return false
-  toggleQuestionOption(0, opt.label, q.multiSelect)
+  toggleQuestionOption(firstVisible, opt.label, q.multiSelect)
   return true
 }
 
@@ -2315,9 +2409,17 @@ function handleQuestionShortcut(e: KeyboardEvent): boolean {
 // guard fixes.
 const allQuestionsAnswered = computed(() => {
   const qs = activeQuestions.value
-  if (!qs.length) return false
+  if (!visibleQuestionIndexes.value.length) return false
   for (let i = 0; i < qs.length; i++) {
+    if (!questionIsVisible(qs[i], qs, questionAnswers.value)) continue
     const a = questionAnswers.value[i]
+    if (qs[i].type === 'external') {
+      if (a?.external !== true) return false
+      continue
+    }
+    // Optional V2 fields may intentionally remain empty. Required legacy
+    // AskUserQuestion fields retain the old all-fields-required behavior.
+    if (qs[i].required === false) continue
     const picked = a && a.selected.size > 0
     const other = !!(a && a.other && a.other.trim())
     if (!picked && !other) return false
@@ -2344,14 +2446,30 @@ function submitQuestionAnswers() {
   const nativeAnswers: Record<string, string[]> = {}
   for (let i = 0; i < qs.length; i++) {
     const q = qs[i]
+    if (!questionIsVisible(q, qs, questionAnswers.value)) continue
     const a = questionAnswers.value[i]
     const picked = a ? Array.from(a.selected) : []
     const other = (a?.other || '').trim()
     const parts: string[] = []
     if (picked.length) parts.push(...picked)
     if (other) parts.push(other)
+    if (q.type === 'external') {
+      if (a?.external) {
+        nativeAnswers[q.id] = ['acknowledged']
+        lines.push(`**${questionPromptLabel(q, i)}**: completed`)
+      }
+      continue
+    }
+    // Preserve an explicit empty optional answer. The provider omits scalar
+    // number/boolean blanks from the typed V2 answer (letting the server
+    // default win), but the key's presence distinguishes this submit from the
+    // explicit Cancel action.
+    if (!parts.length && q.required === false) {
+      nativeAnswers[q.id] = q.multiSelect ? [] : ['']
+    } else {
+      nativeAnswers[q.id] = parts
+    }
     const answer = parts.length ? parts.join(', ') : '(no answer)'
-    nativeAnswers[q.id] = parts
     lines.push(`**${questionPromptLabel(q, i)}**: ${answer}`)
   }
   const requestId = qs[0]?.requestId || ''
@@ -2370,14 +2488,15 @@ function dismissQuestions() {
   if (!id) return
   const requestId = activeQuestions.value[0]?.requestId || ''
   if (requestId) {
-    // respondQuestion records the resolution itself before clearing.
-    store.respondQuestion(id, requestId, {})
+    // respondQuestion records the resolution optimistically; a negative
+    // provider result restores the card for retry.
+    if (!store.respondQuestion(id, requestId, {}, true)) return
   } else {
     // Claude picker has no round-trip; remember it as resolved so a stale
     // server snapshot can't rebuild it after dismissal.
     store.markResolvedQuestion(id)
+    delete store.activeQuestions[id]
   }
-  delete store.activeQuestions[id]
   questionAnswers.value = {}
 }
 
@@ -6163,6 +6282,34 @@ details[open] > .activity-summary::before {
   color: var(--fg2);
   font-style: italic;
 }
+.question-block-required {
+  margin-left: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  color: var(--fg2);
+}
+.question-external {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+.question-external a {
+  color: var(--accent);
+  min-height: var(--touch);
+  display: inline-flex;
+  align-items: center;
+}
+.question-external-check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-height: var(--touch);
+  color: var(--fg);
+  font-size: 13px;
+}
+.question-external-check input { width: 18px; height: 18px; }
+.question-external-invalid { color: var(--warning, #ff9800); font-size: 12px; }
 .question-block-prompt {
   font-size: 13px;
   color: var(--fg);

@@ -20,7 +20,7 @@ ciao/                          Python backend (Starlette).
   config.py                    Env var loading, workspace config.
   providers/                   Claude Agent SDK, opencode HTTP server, and routing helpers.
     stdio_rpc.py               Async JSON-lines RPC process transport used by CLI app-server adapters.
-    opencode.py                opencode provider over per-chat `opencode serve` (ephemeral loopback port, scoped MCP token, OpenAPI-fail-closed readiness; mid-turn messages queue for the next turn).
+    opencode.py                opencode provider over per-chat `opencode serve` (ephemeral loopback port, scoped MCP token, OpenAPI-fail-closed readiness; V1/V2 API classification, data-envelope decoding, V2 forms/permissions, cursor-aware child reads, and lifecycle-aware SSE recovery; mid-turn messages queue for the next turn).
     oneshot.py                 Single-turn provider call (max_turns=1, no tools). Used by critique.py and routine-model automations.
   context/                     Provider-neutral per-turn context capsule (workspace, project, vault hints).
   observability/               Hooks: PreToolUse keeps Claude Bash jobs in the active turn. Runtime/entity context is built once in the request capsule.
@@ -422,6 +422,21 @@ than a per-turn heuristic hint. The managed SDK CLI owns background shell
 processes and stops them when the turn ends, while their terminal notification
 is delayed until a later turn resumes the session. Keeping these calls in the
 active turn makes the real shell result part of the same streamed response.
+
+The opencode adapter treats V1 and V2 as separate wire contracts. V2 probes
+`/api/info`, rejects unknown future major versions, verifies the `/api`
+OpenAPI document, unwraps `data` envelopes, and follows cursor pages for
+messages and child sessions. Because the supported V2 prompt endpoint has no
+native `system` field, the adapter carries the same core/runtime context in a
+marked text preamble; this is deliberately documented as a transport
+limitation. V2 form fields retain required/hidden/conditional/external
+metadata through the provider and PWA, and explicit empty optional values are
+sent as answers while Cancel remains a distinct action. Permission and
+form replies are acknowledged only after the provider HTTP request completes;
+the PWA restores the card on a failed result. Credential path rules include
+V2's workspace-relative root spellings, while broad V2 search/list actions are
+denied because their query resource cannot be safely scoped; shell access is
+still governed by approval mode and is not claimed as path-denied.
 
 ## Schedules and background automation
 

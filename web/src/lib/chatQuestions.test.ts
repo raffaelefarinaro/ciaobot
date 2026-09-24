@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 import {
   parseCapabilityQuestion,
   parseQuestions,
+  questionIsVisible,
   questionsSignature,
   type ActiveQuestion,
 } from './chatQuestions'
@@ -71,6 +72,52 @@ describe('parseQuestions', () => {
       questions: [{ question: 'q', isOther: false }],
     }))
     expect(noOptions[0].allowOther).toBe(true)
+    const optionalClosed = parseQuestions(JSON.stringify({
+      questions: [{ question: 'q', required: false, isOther: false, options: [{ label: 'a' }] }],
+    }))
+    expect(optionalClosed[0].allowOther).toBe(false)
+  })
+
+  test('preserves V2 hidden, conditional, external, and optional form metadata', () => {
+    const qs = parseQuestions(JSON.stringify({
+      form: { id: 'frm_1', title: 'Details' },
+      questions: [
+        { id: 'show', type: 'string', required: true, options: [{ value: 'yes', label: 'Yes' }] },
+        { id: 'detail', type: 'string', required: false, when: [{ key: 'show', op: 'eq', value: 'yes' }] },
+        { id: 'link', type: 'external', url: 'https://example.test/auth' },
+        { id: 'secret', type: 'string', hidden: true, required: true },
+      ],
+    }))
+    expect(qs[1]).toMatchObject({ required: false, when: [{ key: 'show', op: 'eq', value: 'yes' }] })
+    expect(qs[2]).toMatchObject({ type: 'external', url: 'https://example.test/auth' })
+    expect(qs[3]).toMatchObject({ hidden: true, required: true })
+    const withDefault = parseQuestions(JSON.stringify({
+      questions: [{ id: 'choice', type: 'string', default: 'yes', options: [{ value: 'yes', label: 'Yes' }] }],
+    }))
+    expect(withDefault[0].default).toBe('yes')
+    const answers = { 0: { selected: new Set(['Yes']), other: '' } }
+    expect(questionIsVisible(qs[1], qs, answers)).toBe(true)
+    expect(questionIsVisible(qs[3], qs, answers)).toBe(false)
+
+    const emptyCondition = parseQuestions(JSON.stringify({
+      questions: [
+        { id: 'source', type: 'multiselect', options: [{ value: 'yes', label: 'Yes' }] },
+        { id: 'dependent', type: 'string', when: [{ key: 'source', op: 'neq', value: 'yes' }] },
+      ],
+    }))
+    expect(questionIsVisible(emptyCondition[1], emptyCondition, {})).toBe(false)
+    expect(questionIsVisible(emptyCondition[1], emptyCondition, {
+      0: { selected: new Set<string>(), other: '' },
+    })).toBe(true)
+    const closedCondition = parseQuestions(JSON.stringify({
+      questions: [
+        { id: 'source', type: 'string', options: [{ value: 'yes', label: 'Yes' }], isOther: false },
+        { id: 'dependent', type: 'string', when: [{ key: 'source', op: 'neq', value: 'yes' }] },
+      ],
+    }))
+    expect(questionIsVisible(closedCondition[1], closedCondition, {
+      0: { selected: new Set<string>(), other: '' },
+    })).toBe(false)
   })
 })
 
@@ -78,6 +125,7 @@ describe('questionsSignature', () => {
   const base: ActiveQuestion = {
     id: 'q1', question: 'Which?', header: 'H', multiSelect: false,
     allowOther: true, isSecret: false, requestId: '', options: [],
+    type: 'string', required: true, hidden: false, when: [],
   }
 
   test('is empty for no picker', () => {
