@@ -2600,8 +2600,8 @@ async def chat_subagents(request: Request) -> JSONResponse:
     Each entry additionally carries dispatch metadata parsed from the parent
     session JSONL when available (see ciao/subagent_tracking.py):
     ``tool_use_id``, ``description``, ``subagent_type``, ``is_async``,
-    ``status`` ("running"/"completed"/"failed"), and ``turn_index`` — the
-    user turn that dispatched the agent, aligned with the ``turn_index``
+    ``status`` ("running"/"completed"/"failed"/"stopped"), and ``turn_index`` —
+    the user turn that dispatched the agent, aligned with the ``turn_index``
     stamped on user bubbles by /messages so the PWA can anchor the subagent
     panel to the right turn.
 

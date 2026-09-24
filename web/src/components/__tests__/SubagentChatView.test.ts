@@ -122,4 +122,18 @@ describe('SubagentChatView', () => {
     expect(wrapper.find('.running-spinner').exists()).toBe(true)
     wrapper.unmount()
   })
+
+  it('renders a stopped status as a terminal state without a spinner', async () => {
+    const store = useProjectStore()
+    store.subagents = {
+      [CHAT_ID]: [transcript({ status: 'stopped' })],
+    }
+
+    const wrapper = await mountView()
+
+    expect(wrapper.get('.status-chip').text()).toBe('stopped')
+    expect(wrapper.get('.status-chip').classes()).toContain('stopped')
+    expect(wrapper.find('.running-spinner').exists()).toBe(false)
+    wrapper.unmount()
+  })
 })

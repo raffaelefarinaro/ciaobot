@@ -88,6 +88,58 @@ def _notification(agent_id: str, status: str = "completed") -> str:
     )
 
 
+def _sweep_notification() -> str:
+    return (
+        "<task-notification>\n"
+        "<task-id>bvh026gyr</task-id>\n"
+        "<task-id>b09bu2tuo</task-id>\n"
+        "<task-id>beoljpdtx</task-id>\n"
+        "<task-id>__orphan_summary__:shell</task-id>\n"
+        "<status>stopped</status>\n"
+        "<summary>3 background shell command task(s) from the previous session "
+        "have no completion record. Task ids beginning with __orphan_summary "
+        "are internal scan markers, not tasks.</summary>\n"
+        "</task-notification>"
+    )
+
+
+def _bash_dispatch(tool_use_id: str, description: str) -> dict:
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": tool_use_id,
+                    "name": "Bash",
+                    "input": {
+                        "command": f"run {description}",
+                        "run_in_background": True,
+                    },
+                }
+            ],
+        },
+    }
+
+
+def _bash_result(tool_use_id: str, task_id: str) -> dict:
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": "Background command started.",
+                }
+            ],
+        },
+        "toolUseResult": {"taskId": task_id, "isAsync": True},
+    }
+
+
 def _monitor_dispatch(tool_use_id: str, description: str) -> dict:
     command = "tail -f /tmp/adoption_2026-08.log | grep -E --line-buffered \"FAILED|PASSED\""
     return {
@@ -604,6 +656,49 @@ def test_notification_answered_after_user_record_prose(tmp_path: Path) -> None:
     assert state.notification_pending is False
 
 
+def test_combined_notification_credits_every_agent(tmp_path: Path) -> None:
+    """One terminal response credits every agent in a combined prompt."""
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research A"),
+        _dispatch_result("toolu_1", "abc123"),
+        _assistant_dispatch("toolu_2", "Research B"),
+        _dispatch_result("toolu_2", "def456"),
+        _user_text(_notification("abc123") + "\n" + _notification("def456")),
+        _assistant_text("Both agents are ready. Here is the consolidated report."),
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.subagents["abc123"].status == "completed"
+    assert state.subagents["def456"].status == "completed"
+    assert state.notification_answered is True
+    assert state.notification_pending is False
+
+
+def test_combined_notification_through_queue_credits_every_agent(
+    tmp_path: Path,
+) -> None:
+    """The queued window also retains every combined agent identity."""
+    combined = _notification("abc123") + "\n" + _notification("def456")
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research A"),
+        _dispatch_result("toolu_1", "abc123"),
+        _assistant_dispatch("toolu_2", "Research B"),
+        _dispatch_result("toolu_2", "def456"),
+        {"type": "queue-operation", "operation": "enqueue", "content": combined},
+        {"type": "queue-operation", "operation": "dequeue"},
+        _user_text(combined),
+        _assistant_text("Both agents are ready. Here is the consolidated report."),
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.notification_answered is True
+    assert state.notification_pending is False
+
+
 def test_notification_answered_false_for_tool_use_only_assistant(
     tmp_path: Path,
 ) -> None:
@@ -900,8 +995,143 @@ def test_stopped_notification_keeps_raw_status(tmp_path: Path) -> None:
     ]
     state = parse_session_subagents(_write_session(tmp_path, records))
     info = state.subagents["bl7dzu4ku"]
-    assert info.status == "completed"
+    assert info.status == "stopped"
     assert info.raw_status == "stopped"
+
+
+def test_sweep_notification_settles_every_task_and_skips_marker(tmp_path: Path) -> None:
+    records = [_user_text("resume the previous session")]
+    task_ids = ("bvh026gyr", "b09bu2tuo", "beoljpdtx")
+    for index, task_id in enumerate(task_ids, 1):
+        tool_use_id = f"toolu_{index}"
+        records.extend([_bash_dispatch(tool_use_id, task_id), _bash_result(tool_use_id, task_id)])
+    records.append(_user_text(_sweep_notification()))
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert {state.subagents[task_id].status for task_id in task_ids} == {"stopped"}
+    assert {state.subagents[task_id].raw_status for task_id in task_ids} == {"stopped"}
+    assert "__orphan_summary__:shell" not in state.subagents
+    assert running_tasks(state) == []
+
+
+def test_concatenated_notifications_settle_each_task(tmp_path: Path) -> None:
+    records = [
+        _user_text("run both checks"),
+        _bash_dispatch("toolu_a", "a"),
+        _bash_result("toolu_a", "task-a"),
+        _bash_dispatch("toolu_b", "b"),
+        _bash_result("toolu_b", "task-b"),
+        _user_text(
+            "<task-notification><task-id>task-a</task-id>"
+            "<status>completed</status><summary>a</summary></task-notification>\n"
+            "<task-notification><task-id>task-b</task-id>"
+            "<status>failed</status><summary>b</summary></task-notification>"
+        ),
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.subagents["task-a"].status == "completed"
+    assert state.subagents["task-b"].status == "failed"
+    assert running_tasks(state) == []
+
+
+def test_shell_output_after_a_real_notification_does_not_settle_another_task(
+    tmp_path: Path,
+) -> None:
+    records = [
+        _user_text("inspect the session log"),
+        _bash_dispatch("toolu_real", "real"),
+        _bash_result("toolu_real", "real-task"),
+        _bash_dispatch("toolu_live", "live"),
+        _bash_result("toolu_live", "live-task"),
+        _user_text(
+            "<task-notification><task-id>real-task</task-id>"
+            "<status>completed</status><summary>real</summary></task-notification>\n"
+            "<bash-stdout>cat ~/.claude/projects/x/session.jsonl\n"
+            "<task-notification><task-id>live-task</task-id>"
+            "<status>failed</status><summary>quoted</summary></task-notification>"
+            "</bash-stdout>"
+        ),
+        _assistant_text("handled"),
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.subagents["real-task"].status == "completed"
+    assert state.subagents["live-task"].status == "running"
+    assert state.notification_pending is False
+
+
+def test_interleaved_task_statuses_do_not_overwrite_each_other(tmp_path: Path) -> None:
+    records = [
+        _user_text("run checks"),
+        _bash_dispatch("toolu_a", "a"),
+        _bash_result("toolu_a", "task-a"),
+        _bash_dispatch("toolu_b", "b"),
+        _bash_result("toolu_b", "task-b"),
+        _user_text(
+            "<task-notification>"
+            "<task-id>task-a</task-id><status>failed</status>"
+            "<task-id>task-b</task-id><status>completed</status>"
+            "</task-notification>"
+        ),
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.subagents["task-a"].status == "failed"
+    assert state.subagents["task-b"].status == "completed"
+
+
+def test_injected_context_does_not_change_notification_turn_counting(tmp_path: Path) -> None:
+    context = "[CIAO_CONTEXT_BEGIN]\nworkspace=personal\n[CIAO_CONTEXT_END]\n\n"
+    records = [
+        _user_text(context + _notification("quoted-task")),
+        _user_text("real next turn"),
+        _assistant_dispatch("toolu_next", "Next"),
+        _dispatch_result("toolu_next", "next-agent"),
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.subagents["next-agent"].turn_index == 0
+
+
+def test_prefixed_compact_recap_remains_skipped(tmp_path: Path) -> None:
+    records = [
+        _user_text("first real turn"),
+        _user_text("This session is being continued from a previous conversation."),
+        _user_text("second real turn"),
+        _assistant_dispatch("toolu_prefix", "After compact"),
+        _dispatch_result("toolu_prefix", "prefix-agent"),
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.subagents["prefix-agent"].turn_index == 1
+
+
+def test_flagged_compact_recap_does_not_advance_turn_index(tmp_path: Path) -> None:
+    records = [
+        _user_text("first real turn"),
+        {
+            "type": "user",
+            "isCompactSummary": True,
+            "message": {
+                "role": "user",
+                "content": "A continuation recap with wording the prefix does not match.",
+            },
+        },
+        _user_text("second real turn"),
+        _assistant_dispatch("toolu_compact", "After compact"),
+        _dispatch_result("toolu_compact", "compact-agent"),
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.subagents["compact-agent"].turn_index == 1
 
 
 def test_agent_and_task_counts_are_independent(tmp_path: Path) -> None:

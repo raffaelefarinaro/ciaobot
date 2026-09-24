@@ -342,7 +342,7 @@ export interface SubagentTranscript {
   description?: string
   subagent_type?: string
   is_async?: boolean
-  status?: 'running' | 'completed' | 'failed' | ''
+  status?: 'running' | 'completed' | 'failed' | 'stopped' | ''
   turn_index?: number
 }
 

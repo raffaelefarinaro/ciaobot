@@ -90,6 +90,15 @@ CONTROL_SLASH_PREFIXES = ("/model", "/mode")
 # don't render a literal "No response requested." bubble after every interrupt.
 NO_RESPONSE_SENTINEL = "No response requested."
 
+COMPACT_SUMMARY_PREFIX = "This session is being continued from a previous conversation"
+
+_CONTEXT_BLOCK_RE = re.compile(
+    r"^\[CIAO_CONTEXT_BEGIN\]\n.*?\n\[CIAO_CONTEXT_END\]\n\n",
+    re.DOTALL,
+)
+
+_TASK_ID_SENTINEL_PREFIX = "__orphan_summary"
+
 # Matches the Claude Agent SDK's own _SKIP_FIRST_PROMPT_PATTERN
 # ([Request interrupted by user[^\]]*]) so we cover every CLI variant, not
 # just the bare form. Steer/queue interrupts of an in-flight tool call produce
@@ -135,47 +144,139 @@ def is_interrupted_request_sentinel(content: str) -> bool:
     return bool(INTERRUPTED_REQUEST_RE.fullmatch(content.strip()))
 
 
-def task_notification_fields(content: str) -> dict[str, str] | None:
-    """Fields of the first ``<task-notification>`` anywhere in `content`.
+def strip_injected_context(content: str) -> str:
+    """Remove Ciaobot's leading context capsule from a CLI user record."""
+    stripped = content
+    while True:
+        nxt = _CONTEXT_BLOCK_RE.sub("", stripped, count=1)
+        if nxt == stripped:
+            break
+        stripped = nxt
+    return stripped or content
 
-    Does not ask whether `content` *is* a notification — use
-    :func:`envelope_notification_fields` for that. This one exists for a
-    caller that already knows what it is holding.
+
+def _flag_on(value: object, name: str) -> bool:
+    if isinstance(value, dict):
+        return bool(value.get(name))
+    return bool(getattr(value, name, False))
+
+
+def is_compact_summary(
+    record: object = None, content: str = "", *, flagged: bool = False
+) -> bool:
+    """True when ``record`` is a CLI post-compaction recap.
+
+    ``isCompactSummary`` is authoritative when present. The prefix remains a
+    fallback for records written before the CLI stamped them. The record may
+    be a raw JSONL dictionary or an SDK message object.
     """
-    m = TASK_NOTIFICATION_RE.search(content)
-    if not m:
-        return None
-    return {tag: text.strip() for tag, text in INNER_TAG_RE.findall(m.group(1))}
+    if isinstance(record, str) and not content:
+        content = record
+        record = None
+    if flagged or _flag_on(record, "isCompactSummary"):
+        return True
+    inner = (
+        record.get("message")
+        if isinstance(record, dict)
+        else getattr(record, "message", None)
+    )
+    if _flag_on(inner, "isCompactSummary"):
+        return True
+    return content.lstrip().startswith(COMPACT_SUMMARY_PREFIX)
+
+
+def _leading_task_notification_matches(content: str) -> list[re.Match[str]]:
+    matches: list[re.Match[str]] = []
+    previous_end: int | None = None
+    for match in TASK_NOTIFICATION_RE.finditer(content):
+        if previous_end is None:
+            if content[: match.start()].strip():
+                break
+        elif content[previous_end : match.start()].strip():
+            break
+        matches.append(match)
+        previous_end = match.end()
+    return matches
+
+
+def _fields_from_task_notification(body: str) -> dict[str, str]:
+    return {tag: text.strip() for tag, text in INNER_TAG_RE.findall(body)}
+
+
+def _real_task_ids(body: str) -> list[str]:
+    return [
+        text.strip()
+        for tag, text in INNER_TAG_RE.findall(body)
+        if tag == "task-id"
+        and text.strip()
+        and not text.strip().startswith(_TASK_ID_SENTINEL_PREFIX)
+    ]
+
+
+def task_notification_fields(content: str) -> dict[str, str] | None:
+    """Fields of the first ``<task-notification>`` anywhere in ``content``."""
+    match = TASK_NOTIFICATION_RE.search(content)
+    return _fields_from_task_notification(match.group(1)) if match else None
+
+
+def envelope_notifications(content: str) -> list[tuple[dict[str, str], list[str]]]:
+    """Return the leading notifications and their real task ids.
+
+    A record may concatenate notifications or repeat ``task-id`` tags for a
+    sweep. The scan stops at the first non-whitespace text after a match so a
+    later shell-output quote cannot be mistaken for another completion.
+    """
+    if opening_envelope_tag(content) != "task-notification":
+        return []
+    return [
+        (
+            _fields_from_task_notification(match.group(1)),
+            _real_task_ids(match.group(1)),
+        )
+        for match in _leading_task_notification_matches(content)
+    ]
+
+
+def _task_statuses_from_body(body: str, default_status: str) -> list[tuple[str, str]]:
+    pending: list[str] = []
+    current = default_status or "completed"
+    statuses: list[tuple[str, str]] = []
+    for tag, text in INNER_TAG_RE.findall(body):
+        value = text.strip()
+        if tag == "task-id":
+            if value and not value.startswith(_TASK_ID_SENTINEL_PREFIX):
+                pending.append(value)
+        elif tag == "status":
+            current = value or default_status or "completed"
+            statuses.extend((task_id, current) for task_id in pending)
+            pending.clear()
+    statuses.extend((task_id, current) for task_id in pending)
+    return statuses
+
+
+def envelope_notification_task_statuses(content: str) -> list[tuple[str, str]]:
+    """Return real task ids and their statuses from the leading notifications."""
+    if opening_envelope_tag(content) != "task-notification":
+        return []
+    out: list[tuple[str, str]] = []
+    for match in _leading_task_notification_matches(content):
+        body = match.group(1)
+        fields = _fields_from_task_notification(body)
+        default_status = fields.get("status", "") or "completed"
+        out.extend(_task_statuses_from_body(body, default_status))
+    return out
+
+
+def notification_task_ids(content: str) -> list[str]:
+    """Return every real task id in the leading notification run."""
+    return [
+        task_id
+        for _fields, task_ids in envelope_notifications(content)
+        for task_id in task_ids
+    ]
 
 
 def envelope_notification_fields(content: str) -> dict[str, str] | None:
-    """Fields of the notification `content` **is**, else None.
-
-    Known limits, deliberately left to #502 rather than fixed here: the field
-    dict is last-wins, so a sweep envelope naming several tasks yields only
-    its ``__orphan_summary`` marker, and only the FIRST notification in a
-    record is read. Widening either one re-opens the hazard described below
-    unless the scan is bounded to the leading run of notifications — that is
-    what #502 has to get right, with the reproduction for it.
-
-    A completion is a record the CLI wrote as a ``<task-notification>``
-    envelope, so it has to *open* with that tag. Text that merely carries the
-    grammar in its body is something else that happens to quote it, and both
-    readers get that wrong in the same expensive way if they only search:
-
-    * ``<bash-stdout>`` from a command that printed a session JSONL (``cat``,
-      ``grep task-notification``) flips a running agent to "failed" out of
-      shell output, and opens a synthesis-nudge window for a completion that
-      never happened;
-    * a human message quoting a notification ("why did this fail? …") does the
-      same, and is skipped by the turn counter while the renderer shows it as
-      a user bubble — which is exactly the ``turn_index`` drift this module
-      exists to prevent.
-
-    The body search stays unanchored *within* such a record: a notification
-    with anything appended after the closing tag is still a notification, and
-    only the first is read when the CLI concatenated several.
-    """
-    if opening_envelope_tag(content) != "task-notification":
-        return None
-    return task_notification_fields(content)
+    """Fields of the first leading notification ``content`` is, else None."""
+    notifications = envelope_notifications(content)
+    return notifications[0][0] if notifications else None
