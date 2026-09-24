@@ -1,9 +1,14 @@
 """Tests for Standby Remote Client API proxying."""
 
+import asyncio
+import gc
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
 import httpx
 import pytest
-from unittest.mock import AsyncMock, patch
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
+from websockets.frames import Close
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
@@ -301,8 +306,6 @@ async def test_websocket_proxy_reports_host_connection_state() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_proxy_reports_a_client_to_host_forwarding_failure() -> None:
-    import asyncio
-
     class BrokenRemote:
         async def __aenter__(self):
             return self
@@ -329,6 +332,265 @@ async def test_websocket_proxy_reports_a_client_to_host_forwarding_failure() -> 
     with patch("websockets.connect", return_value=BrokenRemote()):
         await proxy_websocket(websocket, "http://10.0.0.5:8443")
 
+    websocket.send_json.assert_awaited_once_with({"type": "host_unreachable"})
+    websocket.close.assert_awaited_once_with(code=4004)
+
+
+@pytest.mark.asyncio
+async def test_websocket_proxy_drains_simultaneous_forwarding_failures(caplog) -> None:
+    class BrokenRemote:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def send(self, message: str) -> None:
+            raise OSError("host send failed")
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise OSError("host receive failed")
+
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop_errors: list[dict] = []
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+
+    websocket = AsyncMock()
+    websocket.url.path = "/ws/chat/chat-1"
+    websocket.url.query = ""
+    websocket.app.state.node_state_manager = None
+    websocket.receive_text.return_value = "message"
+
+    try:
+        with caplog.at_level("WARNING", logger="ciao.node_proxy"):
+            with patch("websockets.connect", return_value=BrokenRemote()):
+                await proxy_websocket(websocket, "http://10.0.0.5:8443")
+        await asyncio.sleep(0)
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert loop_errors == []
+    assert "Client WebSocket proxy to host" in caplog.text
+    websocket.send_json.assert_awaited_once_with({"type": "host_unreachable"})
+    websocket.close.assert_awaited_once_with(code=4004)
+
+
+@pytest.mark.parametrize("close_code", [1000, 1001, 4004])
+@pytest.mark.asyncio
+async def test_websocket_proxy_treats_expected_remote_close_as_normal(
+    close_code: int, caplog
+) -> None:
+    close = Close(close_code, "host closed")
+    close_error = (
+        ConnectionClosedOK(close, close, True)
+        if close_code in {1000, 1001}
+        else ConnectionClosedError(close, close, True)
+    )
+
+    class ClosedRemote:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def send(self, message: str) -> None:
+            raise AssertionError("send should not run")
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise close_error
+
+    websocket = AsyncMock()
+    websocket.url.path = "/ws/chat/chat-1"
+    websocket.url.query = ""
+    websocket.app.state.node_state_manager = None
+    pending_receive = asyncio.get_running_loop().create_future()
+
+    async def wait_for_disconnect():
+        await pending_receive
+
+    websocket.receive_text.side_effect = wait_for_disconnect
+
+    with caplog.at_level("WARNING", logger="ciao.node_proxy"):
+        with patch("websockets.connect", return_value=ClosedRemote()):
+            await proxy_websocket(websocket, "http://10.0.0.5:8443")
+
+    assert not any(record.levelname == "WARNING" for record in caplog.records)
+    websocket.send_json.assert_not_awaited()
+    websocket.close.assert_awaited_once_with(code=close_code, reason="host closed")
+
+
+@pytest.mark.asyncio
+async def test_websocket_proxy_drains_both_forwarders_before_closing_client() -> None:
+    close = Close(1000, "host closed")
+    close_error = ConnectionClosedOK(close, close, True)
+    close_started = asyncio.Event()
+    close_completed = False
+
+    class ClosedRemote:
+        close_code = 1000
+        close_reason = "host closed"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def send(self, message: str) -> None:
+            raise close_error
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise close_error
+
+    websocket = AsyncMock()
+    websocket.url.path = "/ws/chat/chat-1"
+    websocket.url.query = ""
+    websocket.app.state.node_state_manager = None
+    websocket.receive_text.return_value = "message"
+
+    async def close_downstream(*, code: int, reason: str) -> None:
+        nonlocal close_completed
+        close_started.set()
+        # Let the other forwarder finish before the close await resumes. If the
+        # close happens inside a forwarder, the other task can complete first
+        # and cancel this await before it sends the close frame.
+        await asyncio.sleep(0)
+        close_completed = True
+
+    websocket.close.side_effect = close_downstream
+
+    with patch("websockets.connect", return_value=ClosedRemote()):
+        await proxy_websocket(websocket, "http://10.0.0.5:8443")
+
+    assert close_started.is_set()
+    assert close_completed
+    websocket.send_json.assert_not_awaited()
+    websocket.close.assert_awaited_once_with(code=1000, reason="host closed")
+
+
+@pytest.mark.asyncio
+async def test_websocket_proxy_relays_close_seen_by_client_forwarder() -> None:
+    close = Close(4004, "host unavailable")
+    close_error = ConnectionClosedError(close, close, True)
+
+    class ClosedRemote:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def send(self, message: str) -> None:
+            raise close_error
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+    websocket = AsyncMock()
+    websocket.url.path = "/ws/chat/chat-1"
+    websocket.url.query = ""
+    websocket.app.state.node_state_manager = None
+    websocket.receive_text.return_value = "message"
+
+    with patch("websockets.connect", return_value=ClosedRemote()):
+        await proxy_websocket(websocket, "http://10.0.0.5:8443")
+
+    websocket.send_json.assert_not_awaited()
+    websocket.close.assert_awaited_once_with(code=4004, reason="host unavailable")
+
+
+@pytest.mark.asyncio
+async def test_websocket_proxy_closes_client_when_remote_iterator_ends() -> None:
+    class ClosedRemote:
+        close_code = 1000
+        close_reason = "host finished"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def send(self, message: str) -> None:
+            raise AssertionError("send should not run")
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    websocket = AsyncMock()
+    websocket.url.path = "/ws/chat/chat-1"
+    websocket.url.query = ""
+    websocket.app.state.node_state_manager = None
+    pending_receive = asyncio.get_running_loop().create_future()
+
+    async def wait_for_disconnect():
+        await pending_receive
+
+    websocket.receive_text.side_effect = wait_for_disconnect
+
+    with patch("websockets.connect", return_value=ClosedRemote()):
+        await proxy_websocket(websocket, "http://10.0.0.5:8443")
+
+    websocket.send_json.assert_not_awaited()
+    websocket.close.assert_awaited_once_with(code=1000, reason="host finished")
+
+
+@pytest.mark.asyncio
+async def test_websocket_proxy_reports_unexpected_remote_close(caplog) -> None:
+    close = Close(1011, "protocol error")
+
+    class BrokenRemote:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def send(self, message: str) -> None:
+            raise AssertionError("send should not run")
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise ConnectionClosedError(close, close, True)
+
+    websocket = AsyncMock()
+    websocket.url.path = "/ws/chat/chat-1"
+    websocket.url.query = ""
+    websocket.app.state.node_state_manager = None
+    pending_receive = asyncio.get_running_loop().create_future()
+
+    async def wait_for_disconnect():
+        await pending_receive
+
+    websocket.receive_text.side_effect = wait_for_disconnect
+
+    with caplog.at_level("WARNING", logger="ciao.node_proxy"):
+        with patch("websockets.connect", return_value=BrokenRemote()):
+            await proxy_websocket(websocket, "http://10.0.0.5:8443")
+
+    assert "Client WebSocket proxy to host" in caplog.text
     websocket.send_json.assert_awaited_once_with({"type": "host_unreachable"})
     websocket.close.assert_awaited_once_with(code=4004)
 

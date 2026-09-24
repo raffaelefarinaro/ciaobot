@@ -85,6 +85,7 @@ RESPONSE_STRIP_HEADERS: set[str] = {"set-cookie"}
 _NO_CACHE = "no-cache, no-store, must-revalidate"
 
 _PROXY_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
+_EXPECTED_REMOTE_CLOSE_CODES = {1000, 1001, 4004}
 
 # One pooled client for every non-streaming proxied request. Building a fresh
 # AsyncClient per call meant a new TCP connect (plus TLS handshake) for each
@@ -446,6 +447,7 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
     """Proxy a WebSocket connection to the host node."""
     import asyncio
     import websockets
+    from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 
     clean_url = active_peer_url.rstrip("/")
     if clean_url.startswith("https://"):
@@ -469,6 +471,39 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
             target_ws_url,
             additional_headers=extra_headers or None,
         ) as remote_ws:
+            downstream_close: tuple[int, str] | None = None
+
+            def remember_downstream_close(
+                close_code: int | None = None,
+                close_reason: str | None = None,
+            ) -> None:
+                """Remember the host close until both forwarders are drained."""
+                nonlocal downstream_close
+                if downstream_close is not None:
+                    return
+
+                if close_code is None:
+                    close_code = getattr(remote_ws, "close_code", None)
+                if not isinstance(close_code, int):
+                    close_code = 1000
+                if close_reason is None:
+                    close_reason = getattr(remote_ws, "close_reason", None)
+                if not isinstance(close_reason, str):
+                    close_reason = ""
+                downstream_close = (close_code, close_reason)
+
+            async def close_downstream() -> None:
+                """Relay a host close to the browser after teardown is drained."""
+                if downstream_close is None:
+                    return
+                close_code, close_reason = downstream_close
+                try:
+                    await websocket.close(code=close_code, reason=close_reason)
+                except (WebSocketDisconnect, RuntimeError):
+                    # The browser can disconnect while the host is closing.
+                    # There is no downstream socket left to notify in that case.
+                    return
+
             async def forward_client_to_remote():
                 try:
                     while True:
@@ -478,6 +513,18 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                     # The local browser went away. Stop the paired host
                     # forwarder without reporting a host failure to a client
                     # that is no longer connected.
+                    return
+                except ConnectionClosed as exc:
+                    close = exc.rcvd
+                    if not isinstance(exc, ConnectionClosedOK) and (
+                        close is None
+                        or close.code not in _EXPECTED_REMOTE_CLOSE_CODES
+                    ):
+                        raise
+                    if close is not None:
+                        remember_downstream_close(close.code, close.reason)
+                    else:
+                        remember_downstream_close()
                     return
 
             async def forward_remote_to_client():
@@ -491,7 +538,19 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                     # The local browser disconnected while the host was still
                     # healthy. As above, this is a normal teardown.
                     return
-                raise OSError("host WebSocket closed")
+                except ConnectionClosed as exc:
+                    close = exc.rcvd
+                    if not isinstance(exc, ConnectionClosedOK) and (
+                        close is None
+                        or close.code not in _EXPECTED_REMOTE_CLOSE_CODES
+                    ):
+                        raise
+                    if close is not None:
+                        remember_downstream_close(close.code, close.reason)
+                    else:
+                        remember_downstream_close()
+                    return
+                remember_downstream_close()
 
             task1 = asyncio.create_task(forward_client_to_remote())
             task2 = asyncio.create_task(forward_remote_to_client())
@@ -507,8 +566,15 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
             # still receive host keepalives but its sends no longer reach the
             # host, leaving this socket open makes the composer paint phantom
             # optimistic messages with no visible connection error.
-            for t in done:
-                t.result()
+            forwarding_errors: list[BaseException] = []
+            for task in done:
+                try:
+                    task.result()
+                except BaseException as exc:
+                    forwarding_errors.append(exc)
+            if forwarding_errors:
+                raise forwarding_errors[0]
+            await close_downstream()
     except Exception as exc:
         logger.warning("Client WebSocket proxy to host %s failed: %s", target_ws_url, exc)
         try:
