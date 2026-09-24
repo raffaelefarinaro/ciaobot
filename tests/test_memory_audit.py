@@ -528,15 +528,13 @@ def test_memory_audit_command_tells_the_user_how_to_fix_over_cap(
     # code paths under test elsewhere (_load_env_file, from_env()'s dotenv
     # load, the setup wizard) write os.environ directly, so leaks survive
     # their tests. Anything that redirects the audit — a runtime root holding
-    # a workspaces.json, raised caps — flips this test's outcome, so scrub
+    # a workspaces.json — flips this test's outcome, so scrub
     # every variable it consumes instead of just the workspace trio.
     for name in (
         "CIAO_VAULT_ROOT",
         "CIAO_WORKSPACE",
         "CIAO_VAULT_MODE",
         "CIAO_RUNTIME_ROOT",
-        "CIAO_MEMORY_CHAR_LIMIT",
-        "CIAO_USER_CHAR_LIMIT",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -553,7 +551,7 @@ def test_memory_audit_command_tells_the_user_how_to_fix_over_cap(
     assert exit_code == 1
     assert "ciao:memory over cap: " in out
     assert 'consolidate the region (e.g. "consolidate my ciao:memory' in out
-    assert "CIAO_MEMORY_CHAR_LIMIT / CIAO_USER_CHAR_LIMIT in .env" in out
+    assert "CIAO_MEMORY_CHAR_LIMIT" not in out
 
 
 def test_memory_audit_with_vault_marks_retrieved_stale_notes(
@@ -580,8 +578,6 @@ def test_memory_audit_with_vault_marks_retrieved_stale_notes(
         "CIAO_WORKSPACE",
         "CIAO_VAULT_MODE",
         "CIAO_RUNTIME_ROOT",
-        "CIAO_MEMORY_CHAR_LIMIT",
-        "CIAO_USER_CHAR_LIMIT",
     ):
         monkeypatch.delenv(name, raising=False)
 

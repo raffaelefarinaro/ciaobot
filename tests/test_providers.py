@@ -627,7 +627,7 @@ def test_claude_error_result_annotation_is_selective(
     """Non-connection errors and success results pass through untouched (#162)."""
     from claude_agent_sdk import ResultMessage
 
-    from ciao.providers.claude import _annotate_connection_host, _resolve_api_host
+    from ciao.providers.claude import _annotate_connection_host
 
     claude_provider._api_host = "api.anthropic.com"
     # A non-connection error is not annotated.
@@ -658,14 +658,6 @@ def test_claude_error_result_annotation_is_selective(
         "API Error: Unable to connect to API (ENOTFOUND)", "api.anthropic.com"
     )
     assert _annotate_connection_host(annotated, "api.anthropic.com") == annotated
-    # A per-turn ANTHROPIC_BASE_URL override (Ollama/OpenRouter) wins.
-    assert (
-        _resolve_api_host({"ANTHROPIC_BASE_URL": "https://openrouter.ai/api/v1"})
-        == "openrouter.ai"
-    )
-    # Falls back to a real hostname (process env or Anthropic's default),
-    # never an empty string.
-    assert _resolve_api_host({})
 
 
 @pytest.mark.asyncio

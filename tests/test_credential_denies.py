@@ -53,7 +53,7 @@ def test_the_dotenv_and_runtime_and_secrets_paths_are_all_covered() -> None:
 def test_env_templates_are_not_denied() -> None:
     """A template is not a secret — the convention this codebase already keeps.
 
-    `git_sync._protected_path`, `local_session.py` and `public_release.py` all
+    `local_session.py` and `public_release.py` both
     carve out `.env.example` / `.sample` / `.template` / `.schema`, and this
     repo ships `.env.example`. A blanket `**/.env.*` would contradict that with
     no operator opt-out, since these rules sit outside the workspace extras.

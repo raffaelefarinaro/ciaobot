@@ -38,7 +38,6 @@ async def _deploy(tmp_path, monkeypatch: pytest.MonkeyPatch, platform: str):
         dev_mode=True,
         workspace_root=tmp_path / "ws",
         app_repo=str(_repo(tmp_path)),
-        restart_exit_code=75,
     )
 
     async def ok_push(*args, **kwargs):

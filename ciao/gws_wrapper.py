@@ -103,22 +103,14 @@ def _split_profile_and_args(argv: Sequence[str]) -> tuple[str | None, list[str]]
 
 
 def main(argv: list[str] | None = None) -> int:
-    from ciao.config import CiaoConfig
+    from ciao.config import GWS_DEFAULT_PROFILE, CiaoConfig
 
     args = list(sys.argv[1:] if argv is None else argv)
     profile, rest = _split_profile_and_args(args)
     config = CiaoConfig.from_env()
 
     if not profile:
-        profile = os.environ.get("GWS_PROFILE", "").strip()
-    if not profile:
-        profile = str(getattr(config, "gws_default_profile", "") or "").strip()
-    if not profile:
-        print(
-            "ciao gws: no profile given and GWS_PROFILE is unset",
-            file=sys.stderr,
-        )
-        return 2
+        profile = os.environ.get("GWS_PROFILE", "").strip() or GWS_DEFAULT_PROFILE
 
     workspace_root = _configured_workspace_root(config) or Path(
         config.workspace_root

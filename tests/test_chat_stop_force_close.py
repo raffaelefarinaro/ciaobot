@@ -137,6 +137,9 @@ async def test_stop_force_closes_a_hung_turn_and_flushes_queue(
             e.get("type") == "result" and e.get("stopped") for e in captured
         )
     )
+    await _wait_for(
+        lambda: len([e for e in captured if e.get("type") == "result"]) >= 2
+    )
     results = [e for e in captured if e.get("type") == "result"]
     # Synthetic stop result, then the flushed follow-up's own result.
     assert len(results) == 2
@@ -200,7 +203,7 @@ async def test_stop_prefers_the_clean_provider_level_end(tmp_path: Path) -> None
         lambda: any(e.get("type") == "text_delta" for e in captured),
     )
 
-    abort_issued.set()
+    asyncio.get_running_loop().call_soon(abort_issued.set)
     stopped = await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=2.0)
     assert stopped is True
 

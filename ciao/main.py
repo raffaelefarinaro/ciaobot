@@ -14,9 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Literal
 
-from ciao.config import CiaoConfig
-from ciao.git_sync import sync_workspace
-from ciao.models import ChatContext
+from ciao.config import RESTART_EXIT_CODE, CiaoConfig
 from ciao.schedules import (
     ScheduleManager,
     ScheduleStore,
@@ -152,27 +150,14 @@ def _refresh_vault_index(
 
 
 # Web Push (RFC 8292) requires a VAPID "sub" contact URI, but the push
-# service never verifies or contacts it. For a localhost/personal app there's
-# no reason to make the user supply a real email, so default to a placeholder
-# and let CIAO_PUSH_CONTACT override it. This keeps web-push notifications
-# working out of the box (previously an unset contact silently disabled them).
+# service never verifies or contacts it, so a fixed placeholder is enough.
 DEFAULT_PUSH_SUBJECT = "mailto:ciaobot@localhost"
-
-
-def _push_subject_from_env(env: dict[str, str] | None = None) -> str:
-    """Web Push VAPID subject; falls back to the localhost placeholder.
-
-    A real contact is optional (set CIAO_PUSH_CONTACT to override); the push
-    service only needs a syntactically valid mailto/https URI.
-    """
-    source = env if env is not None else os.environ
-    return source.get("CIAO_PUSH_CONTACT", "").strip() or DEFAULT_PUSH_SUBJECT
 
 
 def _push_subject_for_config(config: CiaoConfig) -> str:
     if getattr(config, "bootstrap_mode", False):
         return "mailto:bootstrap@localhost"
-    return _push_subject_from_env()
+    return DEFAULT_PUSH_SUBJECT
 
 
 def _open_browser_when_ready(url: str) -> None:
@@ -274,6 +259,36 @@ def _ensure_tool_dirs_on_path() -> None:
         os.environ["PATH"] = os.pathsep.join([*missing, *parts])
 
 
+async def _run_startup_backfill(
+    config: CiaoConfig, pcm, node_state_manager
+) -> None:
+    if (
+        getattr(config, "bootstrap_mode", False)
+        or not getattr(config, "insights_enabled", True)
+        or not node_state_manager.is_active()
+    ):
+        return
+    from ciao import job_runs
+    from ciao.insights import backfill_insights_task, format_backfill_summary
+
+    try:
+        async with job_runs.track(
+            "backfill_insights", "Insights backfill", category="system",
+        ) as run:
+            result = await backfill_insights_task(
+                config,
+                chat_workspaces=pcm.chat_workspaces(),
+            )
+            run.extra.update(result)
+            summary = format_backfill_summary(result)
+            run.extra["summary"] = summary
+            if result["errors"]:
+                run.status = "error"
+                run.error = summary
+    except Exception:
+        logger.exception("Insights backfill failed")
+
+
 async def _async_main() -> int:
     _ensure_tool_dirs_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
@@ -290,6 +305,7 @@ async def _async_main() -> int:
         # One-time import of the retired CIAO_WORKSPACES variable; it writes
         # the registry, so it runs under the lock like the persist below.
         config.import_legacy_workspaces_env()
+        config.import_legacy_gws_profile_env()
         if config._workspace_registry_changed:
             config.persist_workspace_registry()
         return await _run_server_locked(config)
@@ -320,6 +336,12 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     from ciao.app_settings import AppSettingsStore
 
     app_settings = AppSettingsStore(config.state_path.parent / "app_settings.json")
+    app_settings.migrate_legacy_insights_enabled(
+        getattr(config, "legacy_insights_disabled", None)
+    )
+    app_settings.migrate_legacy_trajectories_enabled(
+        getattr(config, "legacy_trajectories_disabled", None)
+    )
     app_settings.apply_to_config(config)
 
     # Pin the job-run recorder to the same .runtime the config uses, then
@@ -397,16 +419,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             continue
         _start_provider_check(descriptor)
 
-    # Sync workspace before anything else
-    if config.auto_sync_on_start:
-        tracker.start("sync_workspace")
-        try:
-            await sync_workspace(config.workspace_root)
-            tracker.done("sync_workspace")
-        except Exception:
-            tracker.fail("sync_workspace", "git sync failed")
-            logger.exception("Workspace sync failed")
-
     # Rename each root's legacy CLAUDE.md onto AGENTS.md, once. Both providers
     # discover AGENTS.md natively now, but Claude Code only falls back to it
     # when no CLAUDE.md is present, so the old name has to go for the new one
@@ -448,7 +460,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             # only `server.serve()`, and this happens long before that. The exit
             # code is the same one that path returns, so the supervisor restarts
             # us identically.
-            return config.restart_exit_code
+            return RESTART_EXIT_CODE
         elif status == "refused":
             # Surfaced by the `workspace-unmigrated` action, which reads the
             # refusal back out of the receipt and offers the retry.
@@ -459,20 +471,19 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         tracker.fail("reroot_workspaces", "re-root check failed")
         logger.exception("Workspace re-root check failed")
 
-    # Refresh vault index after git pull so INDEX.md reflects any remote changes
-    if config.auto_vault_index:
-        tracker.start("refresh_vault_index")
-        try:
-            await asyncio.to_thread(
-                _refresh_vault_index,
-                config.workspace_root,
-                config.vault_root,
-                config.vault_scan_targets(),
-            )
-            tracker.done("refresh_vault_index")
-        except Exception:
-            tracker.fail("refresh_vault_index", "index refresh failed")
-            logger.exception("Vault index refresh failed")
+    # Refresh vault index so INDEX.md reflects the current tree
+    tracker.start("refresh_vault_index")
+    try:
+        await asyncio.to_thread(
+            _refresh_vault_index,
+            config.workspace_root,
+            config.vault_root,
+            config.vault_scan_targets(),
+        )
+        tracker.done("refresh_vault_index")
+    except Exception:
+        tracker.fail("refresh_vault_index", "index refresh failed")
+        logger.exception("Vault index refresh failed")
 
     # Reconcile any memory receipt interrupted between its prepared row and its
     # terminal state. Runs after the re-rooting so the journals it reads are the
@@ -513,19 +524,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
     tracker.start("update_skills")
     asyncio.create_task(asyncio.to_thread(_skills_task))
-
-    if config.insights_backfill_on_startup:
-        tracker.start("backfill_insights")
-        async def _backfill_task():
-            try:
-                from ciao.insights import backfill_insights_task
-                from ciao.insights import format_backfill_summary
-                result = await backfill_insights_task(config)
-                tracker.done("backfill_insights", format_backfill_summary(result))
-            except Exception:
-                tracker.fail("backfill_insights", "backfill failed")
-                logger.exception("Insights backfill failed")
-        asyncio.create_task(_backfill_task())
 
     # Initialize stores
     state = StateStore(
@@ -691,7 +689,10 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     control_plane = None
     if not getattr(config, "bootstrap_mode", False):
         mcp_service = CiaoMcpService(config)
+    from ciao.insights import BackfillCoordinator
+
     app = create_app(config, app_settings=app_settings, mcp_service=mcp_service)
+    app.state.backfill_coordinator = BackfillCoordinator()
     app.state.startup_tracker = tracker
     app.state.node_state_manager = node_state_manager
     # Stamp the target project's name on schedules that only recorded its id,
@@ -754,7 +755,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         mcp_service.bind(control_plane)
         pcm._mcp_service = mcp_service
         app.state.control_plane = control_plane
-    # Never empty: an unset CIAO_PUSH_CONTACT falls back to DEFAULT_PUSH_SUBJECT.
     push_subject = _push_subject_for_config(config)
     app.state.push_manager = PushManager(config.state_path.parent, subject=push_subject)
     app.state.focused_chats = {}
@@ -964,6 +964,15 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
         asyncio.create_task(_run_catch_up())
 
+    # Fill in insights for archives that missed them (a failed model call at
+    # archive time, a budget or network error). Capped per run by
+    # `insights._BACKFILL_MAX`, so an aged vault is worked through over boots.
+    # Deliberately not a StartupTracker phase: the boot screen waits for every
+    # phase, and a backfill is up to that many model calls.
+    app.state.backfill_coordinator.submit(
+        lambda: _run_startup_backfill(config, pcm, node_state_manager)
+    )
+
     # ── Branch backup ────────────────────────────────────────
     # Backs up the same repo the sync flow targets (the repo containing the
     # vault root, falling back to the workspace root). Every instance works on
@@ -1118,15 +1127,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # plus an in-app status event (debounced until the token recovers), so
     # GWS-dependent schedules don't fail silently (issue #145). The credential
     # files are never read into logs; only the boolean validity is surfaced.
-    try:
-        _gws_health_interval = int(os.environ.get("CIAO_GWS_HEALTH_INTERVAL", "900"))
-    except ValueError:
-        _gws_health_interval = 900
+    _gws_health_interval = 900
 
     async def _gws_health_loop() -> None:
-        if _gws_health_interval <= 0:
-            logger.info("GWS token health checks disabled (CIAO_GWS_HEALTH_INTERVAL=0).")
-            return
         monitor = app.state.gws_health_monitor
         # Small initial delay so a fresh boot settles before the first probe.
         await asyncio.sleep(30)
@@ -1283,7 +1286,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                 logger.warning(
                     "%s; requesting restart onto the current version.", reason
                 )
-                request_restart(config.restart_exit_code)
+                request_restart(RESTART_EXIT_CODE)
                 return
 
     asyncio.create_task(_watch_installed_version())
@@ -1342,7 +1345,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     try:
         await server.serve()
     except RestartRequested as exc:
-        return int(exc.args[0]) if exc.args else config.restart_exit_code
+        return int(exc.args[0]) if exc.args else RESTART_EXIT_CODE
     if restart_flag[0] is not None:
         return restart_flag[0]
     return 0

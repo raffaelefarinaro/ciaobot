@@ -79,7 +79,7 @@ Check usage with `memory_status`. When a region is at or above ~85% of its cap (
 
 When a removal needs judgment you cannot confidently make, do not remove it; queue a yes/no question instead by appending `- [review] Keep "<entry text>" in ciao:<region>? Proposed action: drop because <reason>. (memory curation)` to `Workspace/Memory-Proposals.md`. Flatten the entry onto that one line (newline → "; ") so the queue stays line-parseable, and skip appending when an unanswered question about the same entry is already queued. The queue itself cannot apply a drop: the user dismisses the question (`ciao memory-proposal-dismiss --text-file <file>`, since the question template always contains double quotes) to KEEP the entry, or asks an attended chat to drop it. The Proposals panel's accept button is intentionally disabled for review rows.
 
-Never drop a durable fact merely to fit a cap. If a region remains over cap because every entry is genuinely high-signal, say so and give the user their options: raise `CIAO_MEMORY_CHAR_LIMIT` / `CIAO_USER_CHAR_LIMIT` in `.env` (restart Ciaobot to apply), or ask any attended chat to consolidate further.
+Never drop a durable fact merely to fit a cap. If a region remains over cap because every entry is genuinely high-signal, say so and give the user their options: leave the region over its advisory cap, or ask any attended chat to consolidate further.
 
 ## 3. Re-verify memory
 

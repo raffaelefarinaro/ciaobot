@@ -84,7 +84,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/schedule-run/{schedule_id}` | Run now. 409 for an interval entry whose target chat has a turn in flight (refused, not queued) |
 | PATCH, DELETE | `/api/schedules/{schedule_id}` | Update, pause/resume (`{"enabled": bool}`), or delete |
 | GET | `/api/automation` | Background-job status (Settings → Automations): per job its trigger, last run, duration, model, errors, and bulk `sub_jobs`. Omits retired jobs and schedule-only jobs whose schedule is not installed. With `?include=outcomes` answers `{"jobs": [...], "proposal_outcomes": {"promoted": n, "dismissed": m, "by_workspace": {…}, "recent_30d": {…}}}` — the memory-proposal promoted-vs-dismissed tally shown beside the job stats; without it the response stays the bare list |
-| POST | `/api/automation/backfill-insights` | Run Session insights over every archived chat missing them. Optional `{"model": "<model-id>"}` runs this pass with a different model without changing the stored setting |
+| POST | `/api/automation/backfill-insights` | Queue Session insights over every archived chat missing them behind any startup/manual bulk pass already running. Optional `{"model":"<model-id>"}` chooses a one-off model; `{"force":true}` permits one explicit run while automatic insights are off. Returns 202 `{status:"queued",model,forced}`; without `force`, a disabled setting returns 409 |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
 | GET | `/api/commands` | List slash commands |
 | GET | `/api/agent-assets` | List subagents, slash commands, and workspace health for Settings |
@@ -129,7 +129,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | DELETE | `/api/workspaces/{name}` | Alias of `POST /api/workspaces/{name}/archive`, kept for existing scripts; it no longer deletes anything |
 | GET | `/api/workspaces/archived` | List archived workspaces, newest first: `{archived: [{id, name, archived_at, path, layout, color, default_provider, gws_profile, disallowed_tools, allowed_mcp_servers, schedules, schedules_dropped, restorable, blocked_reason}]}`. The settings and `schedules` count are what a restore would apply after validation (`archive.json` syncs through git, so it is treated as untrusted); the PWA shows them in the restore confirmation |
 | POST | `/api/workspaces/archived/restore` | Restore an archived workspace (`{id}`): move its folder back, re-register it, and put its schedules back **paused**. Every registry field and schedule row is rebuilt from validated metadata: invalid schedules and system rows are dropped, restored ones are pinned to the workspace, and an unreadable MCP allowlist becomes `[]`. Refuses when the name or the folder is taken, or when the archive's vault location is not inside the restored folder (409). Response `restored: {id, name, path, schedules, schedules_paused, schedules_dropped}` |
-| GET, PATCH | `/api/settings/providers` | Read or update provider/service key status; credentials are redacted |
+| GET | `/api/settings/providers` | Read each provider CLI's connection status |
 | POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or opencode CLI |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
 | POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
@@ -590,12 +590,15 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
   -H 'content-type: application/json' -d '{"profile":"personal"}'
 ```
 
-**Routine settings (Settings → Models tab)**
+**Routine settings (Settings → Models / Automations)**
 
 ```bash
-# Read internal-routine settings: insights and critique model overrides, the
-# per-provider default model / thinking / routine-model maps, and the effective
-# models after defaults.
+# Read internal-routine settings: the automatic-session-insights and trajectory
+# capture switches, insights and critique model overrides, the per-provider
+# default model / thinking / routine-model maps, and the effective models after
+# defaults. insights_enabled=false stops live extraction, automatic resume, and
+# startup backfill; trajectories_enabled=false stops trajectory records; the
+# explicit bulk backfill route can still run with force=true.
 #
 # insights_model_effective is the PRIMARY workspace's answer only. With no
 # override the insights routine resolves from the chat's own workspace, so
@@ -611,7 +614,7 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # provider_default_models, provider_default_thinking, provider_insights_models.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
+  -d '{"insights_enabled":false,"trajectories_enabled":false,"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
 ```
 
 **Project MCP servers (Settings → MCP tab)**

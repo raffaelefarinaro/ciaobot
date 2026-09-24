@@ -53,6 +53,21 @@ def _provider(tmp_path: Path) -> OpencodeProvider:
     return OpencodeProvider(tmp_path)
 
 
+def test_resolve_opencode_binary_honors_exported_path(tmp_path, monkeypatch):
+    binary = tmp_path / "opencode"
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("CIAO_OPENCODE_BIN", str(binary))
+
+    assert resolve_opencode_binary({"OPENCODE_CONFIG": "/x"}) == str(binary.resolve())
+    assert resolve_opencode_binary() == str(binary.resolve())
+
+    request_binary = tmp_path / "opencode-request"
+    request_binary.write_text("#!/bin/sh\n")
+    assert resolve_opencode_binary(
+        {"CIAO_OPENCODE_BIN": str(request_binary)}
+    ) == str(request_binary.resolve())
+
+
 # ── capabilities ────────────────────────────────────────────────────────
 
 
@@ -1542,7 +1557,7 @@ def test_health_failure_reason_says_what_the_poll_saw():
 
 
 @pytest.mark.asyncio
-async def test_missing_binary_names_the_override_env_var(tmp_path, monkeypatch):
+async def test_missing_binary_says_how_to_fix_it(tmp_path, monkeypatch):
     provider = _provider(tmp_path)
     monkeypatch.setattr(
         "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: None
@@ -1552,7 +1567,7 @@ async def test_missing_binary_names_the_override_env_var(tmp_path, monkeypatch):
         extra_env: dict = {}
         mcp_token = ""
 
-    with pytest.raises(FileNotFoundError, match="CIAO_OPENCODE_BIN"):
+    with pytest.raises(FileNotFoundError, match="login shell PATH"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
 
 
@@ -2169,27 +2184,3 @@ async def test_resolve_model_passes_through_unqualified_ids(
 
     provider = _provider(tmp_path)
     assert await provider._resolve_model(_Client(), requested) == expected
-
-
-def test_extra_env_overlay_does_not_hide_an_exported_override(tmp_path, monkeypatch):
-    """`extra_env` is an overlay, not a replacement environment.
-
-    `_ensure_server` passes `AgentRequest.extra_env`, which never carries
-    `CIAO_OPENCODE_BIN`; reading only that overlay made the documented
-    override dead on every chat turn while the error still named it.
-    """
-    binary = tmp_path / "opencode"
-    binary.write_text("#!/bin/sh\n")
-    monkeypatch.setenv("CIAO_OPENCODE_BIN", str(binary))
-
-    # An unrelated per-request overlay must not mask the exported override.
-    assert resolve_opencode_binary({"OPENCODE_CONFIG": "/x"}) == str(binary.resolve())
-    # No overlay at all still reads the process environment.
-    assert resolve_opencode_binary(None) == str(binary.resolve())
-
-    # A per-request override still wins over the exported one.
-    other = tmp_path / "opencode-req"
-    other.write_text("#!/bin/sh\n")
-    assert resolve_opencode_binary(
-        {"CIAO_OPENCODE_BIN": str(other)}
-    ) == str(other.resolve())

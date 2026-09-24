@@ -239,19 +239,6 @@ def canonical_type(raw: str) -> str:
 DEFAULT_PROMOTION_THRESHOLD = 5
 
 
-def promotion_threshold() -> int:
-    raw = os.environ.get("VOCAB_PROMOTION_THRESHOLD", "").strip()
-    if not raw:
-        return DEFAULT_PROMOTION_THRESHOLD
-    try:
-        value = int(raw)
-        # A threshold of 1 would classify every one-use tag as both a candidate
-        # and established, and describe an impossible emerging range
-        # ("Two to 0 uses"). Enforce a minimum of 2 so the tiers stay disjoint.
-        return value if value >= 2 else DEFAULT_PROMOTION_THRESHOLD
-    except ValueError:
-        return DEFAULT_PROMOTION_THRESHOLD
-
 H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 # Duplicated from `vault_lint` rather than imported: `vault_lint` imports this
 # module, so the dependency only runs one way.
@@ -1292,7 +1279,7 @@ def format_vocabulary(entries: list[Entry]) -> str:
     tags: dict[str, int] = report["tags"]
     workspaces: dict[str, list[str]] = report["tag_workspaces"]
     lines: list[str] = []
-    established = promotion_threshold()
+    established = DEFAULT_PROMOTION_THRESHOLD
 
     lines.append("## Types (canonical — choose one of these)\n")
     for name in sorted(CANONICAL_TYPES):

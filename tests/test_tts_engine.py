@@ -86,19 +86,11 @@ def test_voice_settings_default_to_on_device(tmp_path):
     need not exist on the machine."""
     config = _config(tmp_path=tmp_path)
     assert config.tts_local_voice == ""
-    assert config.transcription_locale == "en-US"
+    assert voice.TRANSCRIPTION_LOCALE == "en-US"
+    assert not hasattr(config, "transcription_locale")
     assert not hasattr(config, "tts_engine")
     assert not hasattr(config, "tts_cloud_voice")
     assert not hasattr(config, "openai_api_key")
-
-
-def test_voice_env_overrides(tmp_path):
-    config = _config(
-        {"CIAO_TTS_LOCAL_VOICE": "com.apple.voice.x", "CIAO_TRANSCRIPTION_LOCALE": "it-IT"},
-        tmp_path,
-    )
-    assert config.tts_local_voice == "com.apple.voice.x"
-    assert config.transcription_locale == "it-IT"
 
 
 async def test_synthesize_speech_reports_the_reason_when_unavailable(tmp_path, monkeypatch):
@@ -118,9 +110,8 @@ async def test_synthesize_speech_is_free_and_uses_the_configured_voice(tmp_path,
     class FakeSpeaker:
         mime_type = "audio/wav"
 
-        def __init__(self, voice_id, locale):
+        def __init__(self, voice_id):
             assert voice_id == ""
-            assert locale == "en-US"
 
         async def speak(self, text):
             assert "Hello" in text
