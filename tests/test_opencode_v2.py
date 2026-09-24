@@ -261,6 +261,8 @@ async def test_v2_form_reply_preserves_semantics_and_empty_optional_values() -> 
             "fields": [
                 {"key": "choice", "type": "string", "required": True,
                  "options": [{"value": "a", "label": "A"}], "when": [{"key": "show", "op": "eq", "value": "yes"}]},
+                {"key": "inactive", "type": "string", "required": True,
+                 "when": [{"key": "show", "op": "neq", "value": "yes"}]},
                 {"key": "show", "type": "string", "required": True, "options": [{"value": "yes", "label": "Yes"}]},
                 {"key": "optional", "type": "string", "required": False},
                 {"key": "optional_number", "type": "number", "required": False},
@@ -440,6 +442,33 @@ async def test_v2_failed_form_delivery_is_reported_and_keeps_pending_request() -
     })
     assert await provider.send_question_response_async("frm_fail", {"optional": [""]}) is False
     assert "frm_fail" in provider._question_requests
+
+
+@pytest.mark.asyncio
+async def test_v2_form_rejects_pattern_and_closed_option_violations() -> None:
+    provider = OpencodeProvider(Path("/tmp/opencode-v2-validation"))
+    client = _V2Client()
+    provider._client = client  # type: ignore[assignment]
+    provider._event_to_stream({
+        "type": "form.created",
+        "data": {"form": {
+            "id": "frm_constraints", "sessionID": "ses_v2", "fields": [
+                {"key": "code", "type": "string", "required": True, "pattern": "^[A-Z]{3}$"},
+                {"key": "choice", "type": "string", "required": True, "custom": False,
+                 "options": [{"value": "a", "label": "A"}]},
+            ],
+        }},
+    })
+
+    assert await provider.send_question_response_async(
+        "frm_constraints", {"code": ["bad"], "choice": ["a"]}
+    ) is False
+    assert await provider.send_question_response_async(
+        "frm_constraints", {"code": ["ABC"], "choice": ["not-an-option"]}
+    ) is False
+    assert await provider.send_question_response_async(
+        "frm_constraints", {"code": ["ABC"], "choice": ["A"]}
+    ) is True
 
 
 @pytest.mark.asyncio
@@ -672,6 +701,26 @@ def test_v2_permission_policy_denies_root_credentials_and_broad_searches() -> No
     for action in ("glob", "grep", "list"):
         assert {"action": action, "resource": "*", "effect": "deny"} in rules
     assert not any(rule["action"] == "bash" for rule in rules)
+
+
+def test_v2_permission_policy_covers_a_relocated_runtime_root_relative_to_workspace(
+    tmp_path: Path,
+) -> None:
+    from ciao.providers.opencode import _mode_rules_for_version
+
+    workspace = tmp_path / "workspace"
+    runtime = workspace / "custom-state"
+    workspace.mkdir()
+    runtime.mkdir()
+    _agent, rules = _mode_rules_for_version(
+        "bypass",
+        "v2",
+        runtime_root=runtime,
+        workspace_root=workspace,
+    )
+    for action in ("read", "edit"):
+        assert {"action": action, "resource": "custom-state", "effect": "deny"} in rules
+        assert {"action": action, "resource": "custom-state/**", "effect": "deny"} in rules
 
 
 def test_v2_prompt_keeps_core_and_runtime_in_supported_text() -> None:

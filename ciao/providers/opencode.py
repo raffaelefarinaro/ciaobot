@@ -40,9 +40,10 @@ import time
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -181,7 +182,32 @@ def _message_path(client: Any, session_id: str, fallback: ApiVersion = "v1") -> 
     return _session_path(client, session_id, "/message" + suffix, fallback)
 
 
-def _v1_rules_to_v2(rules: Sequence[Mapping[str, str]]) -> list[dict[str, str]]:
+def _v2_runtime_relative_patterns(
+    runtime_root: object, workspace_root: object
+) -> tuple[str, str] | None:
+    """Return V2's relative spellings for a runtime root inside the workspace."""
+    if not runtime_root or not workspace_root:
+        return None
+    try:
+        root = Path(str(runtime_root)).expanduser().resolve()
+        workspace = Path(str(workspace_root)).expanduser().resolve()
+        relative = root.relative_to(workspace)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    relative_text = relative.as_posix()
+    if relative_text in {"", "."}:
+        # A runtime root equal to the session location makes every internal
+        # resource sensitive; fail closed rather than leave a spelling gap.
+        return ".", "**"
+    return relative_text, f"{relative_text}/**"
+
+
+def _v1_rules_to_v2(
+    rules: Sequence[Mapping[str, str]],
+    *,
+    runtime_root: object = None,
+    workspace_root: object = None,
+) -> list[dict[str, str]]:
     """Translate the V1 permission rules to the V2 action/resource shape.
 
     V2 resolves a rule against both the tool action and the *resource string*.
@@ -192,6 +218,11 @@ def _v1_rules_to_v2(rules: Sequence[Mapping[str, str]]) -> list[dict[str, str]]:
     patterns for external/absolute resources and add the relative spellings
     used by V2's resolver.
 
+    A relocated runtime root can likewise be inside the session location while
+    having a basename other than ``.runtime``.  In that case the V1 absolute
+    deny does not match V2's relative resource, so add the resolved root's
+    relative aliases as well.
+
     V2 also has no safe way to scope a glob/grep/list query to a denied path:
     the resource is a query/pattern, not a list of files that can be checked
     before output is produced.  Those actions are therefore denied wholesale
@@ -200,6 +231,17 @@ def _v1_rules_to_v2(rules: Sequence[Mapping[str, str]]) -> list[dict[str, str]]:
     action_names = {"bash": "shell", "write": "edit", "patch": "edit"}
     converted: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
+    runtime_relative = _v2_runtime_relative_patterns(runtime_root, workspace_root)
+    runtime_absolutes: set[str] = set()
+    if runtime_root:
+        try:
+            raw_runtime = Path(str(runtime_root)).expanduser()
+            runtime_absolutes.update({
+                str(raw_runtime).rstrip("/"),
+                str(raw_runtime.resolve()).rstrip("/"),
+            })
+        except (OSError, RuntimeError, ValueError):
+            runtime_absolutes.clear()
 
     def add(action: str, resource: str, effect: str) -> None:
         key = (action, resource, effect)
@@ -228,6 +270,20 @@ def _v1_rules_to_v2(rules: Sequence[Mapping[str, str]]) -> list[dict[str, str]]:
             if relative:
                 add(action, relative, effect)
 
+            # A relocated runtime root is absolute in the V1 rules, while V2
+            # turns an internal path into a location-relative resource.  Add
+            # the corresponding aliases so a custom root basename cannot fall
+            # through to the wildcard allow.
+            if runtime_absolutes and runtime_relative:
+                normalized_resource = resource.rstrip("/")
+                if normalized_resource in runtime_absolutes:
+                    add(action, runtime_relative[0], effect)
+                elif any(
+                    normalized_resource == f"{runtime}/**"
+                    for runtime in runtime_absolutes
+                ):
+                    add(action, runtime_relative[1], effect)
+
     # A broad search is an information channel even when its query is scoped
     # syntactically to the workspace.  Deny these V2 actions after every mode
     # rule (including a wildcard allow) rather than pretending a path glob can
@@ -243,13 +299,18 @@ def _mode_rules_for_version(
     *,
     tools_enabled: bool = True,
     runtime_root: object = None,
+    workspace_root: object = None,
 ) -> tuple[str, list[dict[str, str]]]:
     agent, rules = mode_settings(
         mode,
         tools_enabled=tools_enabled,
         runtime_root=runtime_root,
     )
-    return agent, _v1_rules_to_v2(rules) if version == "v2" else rules
+    return agent, _v1_rules_to_v2(
+        rules,
+        runtime_root=runtime_root,
+        workspace_root=workspace_root,
+    ) if version == "v2" else rules
 
 
 def _event_properties(event: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1061,12 +1122,12 @@ def _normalize_v2_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
         # drop: the row is the only durable proof that the turn ended (and, on
         # failure, why it ended).  Dropping it made recovery indistinguishable
         # from a user-only projection.
-        info: dict[str, Any] = {
+        idle_info: dict[str, Any] = {
             key: value for key, value in message.items() if key != "type"
         }
-        info["id"] = message_id
-        info["type"] = "idle"
-        return {"info": info, "parts": []}
+        idle_info["id"] = message_id
+        idle_info["type"] = "idle"
+        return {"info": idle_info, "parts": []}
 
     if message_type == "user":
         text = str(message.get("text") or "")
@@ -1156,8 +1217,9 @@ async def _read_message_list(
     """Read a complete V1/V2 session message list, following V2 cursors.
 
     V2 history can exceed any small page-count assumption.  Continue until the
-    server returns no next cursor (or repeats one); a bounded cursor would
-    silently drop the newest page and corrupt recovery/handover history.
+    server returns no next cursor, with a generous safety bound.  Exceeding the
+    bound (or a repeated cursor) raises an explicit error rather than silently
+    dropping the newest page and corrupting recovery/handover history.
     """
     if version == "v1":
         response = await client.get(_message_path(client, session_id, version))
@@ -1210,8 +1272,9 @@ async def _read_v2_child_sessions(
 ) -> list[dict[str, Any]]:
     """Read all V2 child sessions, following the session-list cursor.
 
-    The repeated/absent cursor guard is the termination condition; do not
-    impose a small page cap that could omit a valid child session.
+    The repeated/absent cursor guard is the termination condition.  A generous
+    page safety bound raises on exhaustion instead of returning a partial child
+    tree as if it were complete.
     """
     children: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -1232,10 +1295,14 @@ async def _read_v2_child_sessions(
             response = await client.get(f"/api/session?{query}")
             response.raise_for_status()
             raw = response.json()
-        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-            # A normal auxiliary read failure degrades to an empty collab
-            # tree.  Cursor exhaustion/repetition is raised below instead of
-            # being silently converted into a partial child list.
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
+            # A first-page auxiliary read failure degrades to an empty collab
+            # tree. Once pages have been accepted, returning the partial list
+            # would falsely look complete, so surface the interruption.
+            if children:
+                raise RuntimeError(
+                    "opencode child-session pagination was interrupted"
+                ) from exc
             break
         page = _unwrap_data(raw)
         if isinstance(page, list):
@@ -1277,18 +1344,18 @@ def _v2_active_state(value: object) -> bool | None:
         return value
     if isinstance(value, str):
         state = value.strip().lower()
-        if state in {"running", "active", "started", "in_progress", "in-progress"}:
+        if state in {"running", "active", "started", "busy", "in_progress", "in-progress"}:
             return True
         if state in {"idle", "stopped", "completed", "succeeded", "failed", "cancelled"}:
             return False
         return None
     if isinstance(value, Mapping):
-        state = value.get("type") or value.get("status") or value.get("state")
-        if state is None:
+        raw_state: object = value.get("type") or value.get("status") or value.get("state")
+        if raw_state is None:
             # A session-keyed object with no explicit state is an active entry
             # in the V2 shape; absence of the key is what carries the meaning.
             return True
-        return _v2_active_state(state)
+        return _v2_active_state(raw_state)
     return None
 
 
@@ -1324,12 +1391,12 @@ async def _read_v2_active_sessions(client: Any) -> set[str] | None:
             session_id = str(value.get("sessionID") or value.get("id") or "")
             if session_id:
                 state = _v2_active_state(value)
-                return {session_id} if state is True else set()
+                return {session_id} if state is not False else set()
             active: set[str] = set()
             for key, state in value.items():
                 if str(key) in {"data", "cursor", "meta"}:
                     continue
-                if _v2_active_state(state) is True:
+                if _v2_active_state(state) is not False:
                     active.add(str(key))
             return active
         if isinstance(value, list):
@@ -1341,7 +1408,7 @@ async def _read_v2_active_sessions(client: Any) -> set[str] | None:
                 if not isinstance(item, Mapping):
                     continue
                 session_id = str(item.get("sessionID") or item.get("id") or "")
-                if session_id and _v2_active_state(item) is True:
+                if session_id and _v2_active_state(item) is not False:
                     active.add(session_id)
             return active
     if isinstance(value, list):
@@ -1351,7 +1418,7 @@ async def _read_v2_active_sessions(client: Any) -> set[str] | None:
                 active.add(item)
             elif isinstance(item, Mapping):
                 session_id = str(item.get("sessionID") or item.get("id") or "")
-                if session_id and _v2_active_state(item) is True:
+                if session_id and _v2_active_state(item) is not False:
                     active.add(session_id)
         return active
     return None
@@ -1421,6 +1488,12 @@ def _prompt_message_id(payload: object) -> str:
     caller.
     """
     value = _unwrap_data(payload)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            nested_id = _prompt_message_id(item)
+            if nested_id:
+                return nested_id
+        return ""
     if not isinstance(value, Mapping):
         return ""
     for key in ("id", "messageID", "message_id", "userMessageID", "user_message_id"):
@@ -1526,6 +1599,14 @@ class _PendingRequest:
     question_required: tuple[bool, ...] = ()
     question_hidden: tuple[bool, ...] = ()
     question_when: tuple[tuple[dict[str, Any], ...], ...] = ()
+    question_pattern: tuple[str, ...] = ()
+    question_format: tuple[str, ...] = ()
+    question_min_length: tuple[int, ...] = ()
+    question_max_length: tuple[int, ...] = ()
+    question_minimum: tuple[float, ...] = ()
+    question_maximum: tuple[float, ...] = ()
+    question_min_items: tuple[int, ...] = ()
+    question_max_items: tuple[int, ...] = ()
     form: bool = False
 
 
@@ -1606,6 +1687,8 @@ class OpencodeProvider(BaseSDKProvider):
         # after a recovered V2 turn.
         self._context_usage: dict[str, str] = {}
         self._cost: float | None = None
+        # Error discovered while reconciling a dropped V2 stream.
+        self._poll_error: str = ""
         # Visible assistant text, accumulated per part so the terminal
         # ResultEvent can carry the turn's answer. `record_turn`
         # persists that as the durable transcript's response, so leaving it
@@ -1641,10 +1724,12 @@ class OpencodeProvider(BaseSDKProvider):
         self._announced_tools.clear()
         self._user_message_id = ""
         self._usage = {}
+        self._context_usage = {}
         self._cost = None
         self._answer_parts.clear()
         self._effective_model = ""
         self._turn_recovered_via_poll = False
+        # Error discovered while reconciling a dropped V2 stream.
         self._poll_error = ""
         self._stop_requested = None
 
@@ -2017,6 +2102,7 @@ class OpencodeProvider(BaseSDKProvider):
             version,
             tools_enabled=self._tools_enabled,
             runtime_root=self._runtime_root(),
+            workspace_root=self.workspace_root,
         )
         resume = (request.resume_session or "").strip()
         provider_id, model_id = split_model(request.model)
@@ -2271,10 +2357,200 @@ class OpencodeProvider(BaseSDKProvider):
             logger.debug("opencode question/form reply failed", exc_info=True)
             return False
 
+    def _validate_form_submission(
+        self,
+        pending: _PendingRequest,
+        answers: Mapping[str, Sequence[str]],
+    ) -> None:
+        """Validate V2 form constraints before an HTTP reply is attempted."""
+        typed_answers = self._form_answer(pending, answers)
+        for index, question_id in enumerate(pending.question_ids):
+            if index < len(pending.question_hidden) and pending.question_hidden[index]:
+                continue
+            if index < len(pending.question_when):
+                conditions = pending.question_when[index]
+                if not all(
+                    self._form_condition_matches(
+                        condition,
+                        typed_answers.get(str(condition.get("key") or "")),
+                    )
+                    for condition in conditions
+                ):
+                    continue
+            values = [str(value) for value in answers.get(question_id, ())]
+            field_type = (
+                pending.question_types[index]
+                if index < len(pending.question_types)
+                else "string"
+            )
+            multi = (
+                pending.question_multi[index]
+                if index < len(pending.question_multi)
+                else False
+            )
+            required = (
+                pending.question_required[index]
+                if index < len(pending.question_required)
+                else False
+            )
+            custom = (
+                pending.question_custom[index]
+                if index < len(pending.question_custom)
+                else True
+            )
+            option_map = dict(
+                pending.question_values[index]
+                if index < len(pending.question_values)
+                else ()
+            )
+            option_values = set(option_map.values())
+            mapped = [
+                value if value in option_values else option_map.get(value, value)
+                for value in values
+            ]
+            if not multi and len(mapped) > 1:
+                raise ValueError("Choose one answer")
+            if mapped and not any(value.strip() for value in mapped):
+                # The PWA uses [\"\"] as its explicit empty sentinel for an
+                # optional scalar. The provider omits that key from the
+                # typed answer so the server default can win.
+                if required:
+                    raise ValueError("This field is required")
+                continue
+            if not mapped:
+                if field_type == "multiselect":
+                    minimum_items = (
+                        pending.question_min_items[index]
+                        if index < len(pending.question_min_items)
+                        else 0
+                    )
+                    if required and minimum_items > 0:
+                        raise ValueError("Choose at least one option")
+                    continue
+                if required and field_type != "string":
+                    raise ValueError("This field is required")
+                if required and field_type == "string":
+                    raise ValueError("This field is required")
+                continue
+            if not custom and option_values and any(value not in option_values for value in mapped):
+                raise ValueError("Choose one of the available options")
+            if field_type == "integer":
+                try:
+                    number = float(mapped[0])
+                except ValueError as exc:
+                    raise ValueError("Enter a valid number") from exc
+                if not number.is_integer():
+                    raise ValueError("Enter a whole number")
+            elif field_type == "number":
+                try:
+                    float(mapped[0])
+                except ValueError as exc:
+                    raise ValueError("Enter a valid number") from exc
+            if field_type in {"integer", "number"}:
+                number = float(mapped[0])
+                minimum = (
+                    pending.question_minimum[index]
+                    if index < len(pending.question_minimum)
+                    else 0.0
+                )
+                maximum = (
+                    pending.question_maximum[index]
+                    if index < len(pending.question_maximum)
+                    else 0.0
+                )
+                if (minimum and number < minimum) or (maximum and number > maximum):
+                    raise ValueError("Enter a number within the allowed range")
+            if field_type == "boolean":
+                if mapped[0].strip().lower() not in {
+                    "true", "false", "1", "0", "yes", "no", "on", "off",
+                }:
+                    raise ValueError("Choose yes or no")
+            elif field_type == "external":
+                if not mapped:
+                    raise ValueError("Complete the external step first")
+            else:
+                value = mapped[0]
+                minimum_length = (
+                    pending.question_min_length[index]
+                    if index < len(pending.question_min_length)
+                    else 0
+                )
+                maximum_length = (
+                    pending.question_max_length[index]
+                    if index < len(pending.question_max_length)
+                    else 0
+                )
+                if len(value) < minimum_length:
+                    raise ValueError("Enter a longer value")
+                if maximum_length and len(value) > maximum_length:
+                    raise ValueError("Enter a shorter value")
+                pattern = (
+                    pending.question_pattern[index]
+                    if index < len(pending.question_pattern)
+                    else ""
+                )
+                if pattern:
+                    try:
+                        if re.search(pattern, value) is None:
+                            raise ValueError("Enter a value in the requested format")
+                    except re.error as exc:
+                        raise ValueError("The form has an invalid validation rule") from exc
+                format_name = (
+                    pending.question_format[index]
+                    if index < len(pending.question_format)
+                    else ""
+                )
+                if format_name == "email" and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value) is None:
+                    raise ValueError("Enter a valid email address")
+                if format_name == "uri" and not urlparse(value).scheme:
+                    raise ValueError("Enter a valid absolute URI")
+                if format_name == "date":
+                    try:
+                        parsed_date = datetime.strptime(value, "%Y-%m-%d")
+                    except ValueError as exc:
+                        raise ValueError("Enter a valid date") from exc
+                    if parsed_date.strftime("%Y-%m-%d") != value:
+                        raise ValueError("Enter a valid date")
+                if format_name == "date-time":
+                    try:
+                        datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    except ValueError as exc:
+                        raise ValueError("Enter a valid date and time") from exc
+                if field_type in {"integer", "number"}:
+                    number = float(value)
+                    minimum = (
+                        pending.question_minimum[index]
+                        if index < len(pending.question_minimum)
+                        else 0.0
+                    )
+                    maximum = (
+                        pending.question_maximum[index]
+                        if index < len(pending.question_maximum)
+                        else 0.0
+                    )
+                    if (minimum and number < minimum) or (maximum and number > maximum):
+                        raise ValueError("Enter a number within the allowed range")
+            if multi:
+                minimum_items = (
+                    pending.question_min_items[index]
+                    if index < len(pending.question_min_items)
+                    else 0
+                )
+                maximum_items = (
+                    pending.question_max_items[index]
+                    if index < len(pending.question_max_items)
+                    else 0
+                )
+                if len(mapped) < minimum_items or (maximum_items and len(mapped) > maximum_items):
+                    raise ValueError("Choose the allowed number of options")
+
     @staticmethod
     def _form_condition_matches(
         condition: Mapping[str, Any], answer: object
     ) -> bool:
+        # A missing controller is undefined, not `neq`-true.  This keeps a
+        # dependent field from becoming active merely because the user has not
+        # answered its controller yet.
         if answer is None:
             return False
         expected = condition.get("value")
@@ -2282,7 +2558,12 @@ class OpencodeProvider(BaseSDKProvider):
             hit = any(item == expected for item in answer)
         else:
             hit = answer == expected
-        return hit if str(condition.get("op") or "eq") == "eq" else not hit
+        op = str(condition.get("op") or "eq")
+        if op == "eq":
+            return hit
+        if op == "neq":
+            return not hit
+        return False
 
     def _form_answer(
         self,
@@ -2368,7 +2649,11 @@ class OpencodeProvider(BaseSDKProvider):
                 if normalized in {"false", "0", "no", "off"}:
                     return True, False
                 return True, values[0]
-            converted_values = [option_map.get(value, value) for value in values]
+            option_values = set(option_map.values())
+            converted_values = [
+                value if value in option_values else option_map.get(value, value)
+                for value in values
+            ]
             return True, converted_values if multi else converted_values[0]
 
         typed: dict[str, Any] = {}
@@ -2430,11 +2715,20 @@ class OpencodeProvider(BaseSDKProvider):
         if pending is None or self._client is None:
             return False
         version = _api_version_for_client(self._client, self._api_version)
+        if version == "v2" and pending.form and set(answers) - set(pending.question_ids):
+            # A V2 form response for a field the server never advertised is
+            # stale or malformed. Legacy question replies retain their
+            # historical provider-independent answer-map behavior.
+            return False
         if cancel:
             return await self._deliver_question_reply(
                 pending, {"_cancel": True}
             )
         if version == "v2" and pending.form:
+            try:
+                self._validate_form_submission(pending, answers)
+            except ValueError:
+                return False
             answer = self._form_answer(pending, answers)
             if not answer and not answers and not submitted:
                 return await self._deliver_question_reply(
@@ -2462,12 +2756,21 @@ class OpencodeProvider(BaseSDKProvider):
         if pending is None or self._client is None:
             return False
         version = _api_version_for_client(self._client, self._api_version)
+        if version == "v2" and pending.form and set(answers) - set(pending.question_ids):
+            # A V2 form response for a field the server never advertised is
+            # stale or malformed. Legacy question replies retain their
+            # historical provider-independent answer-map behavior.
+            return False
         if cancel:
             asyncio.create_task(
                 self._deliver_question_reply(pending, {"_cancel": True})
             )
             return True
         if version == "v2" and pending.form:
+            try:
+                self._validate_form_submission(pending, answers)
+            except ValueError:
+                return False
             answer = self._form_answer(pending, answers)
             if not answer and not answers and not submitted:
                 asyncio.create_task(
@@ -2507,57 +2810,262 @@ class OpencodeProvider(BaseSDKProvider):
         """Accumulate one emitted fragment of the visible reply."""
         self._answer_parts.setdefault(part_id, []).append(text)
 
-    def _turn_assistant_parts(
-        self, messages: list[Any]
+    def _turn_scope(
+        self,
+        messages: list[Any],
+        *,
+        allow_legacy_anchor: bool | None = None,
     ) -> list[Mapping[str, Any]]:
-        """Settled parts of *this* turn's assistant messages, in order.
+        """Return the rows projected after this turn's user message.
 
-        ``GET /session/{id}/message`` returns the session's whole history, not
-        the current turn, and ``_reset_turn_state`` has just cleared
-        ``_emitted`` — so replaying every assistant message re-emitted turns
-        1..10 as turn 11's text when the SSE dropped on turn 11, and
-        ``record_turn`` then persisted that mash-up as the turn's response.
-
-        The turn begins at its own user message — the same anchor
-        ``_part_updated`` filters on — so everything after it is this turn's
-        output. When that id was never seen live (the stream died before the
-        user ``message.updated`` arrived) the *last* user message in the list
-        is ours, because our prompt is what created it.
+        V2 prompt receipts provide the authoritative user-message id.  If that
+        id is missing or is not present in the snapshot, returning no scope is
+        safer than guessing that the newest user row belongs to us: a shared
+        session can receive another client's prompt, and a user-only snapshot
+        is not evidence that this turn produced an answer.  V1 historically
+        did not return a prompt receipt, so its callers may opt into the
+        legacy last-user fallback explicitly.
         """
+        if allow_legacy_anchor is None:
+            allow_legacy_anchor = (
+                self._client is None
+                or _api_version_for_client(self._client, self._api_version) != "v2"
+            )
         anchor = -1
+        matched = False
         for index, message in enumerate(messages):
             if not isinstance(message, Mapping):
                 continue
             info = message.get("info")
             if not isinstance(info, Mapping) or info.get("role") != "user":
                 continue
-            anchor = index
-            if self._user_message_id and str(info.get("id") or "") == self._user_message_id:
-                break
-
-        parts: list[Mapping[str, Any]] = []
+            if self._user_message_id:
+                if str(info.get("id") or "") == self._user_message_id:
+                    anchor = index
+                    matched = True
+                    break
+            elif allow_legacy_anchor:
+                anchor = index
+        if self._user_message_id and not matched:
+            if not allow_legacy_anchor:
+                return []
+            # V1 can lose the live user-id frame while still returning a
+            # complete legacy projection. Fall back only for that compatibility
+            # path; V2 remains strict about the prompt receipt anchor.
+            for index in range(len(messages) - 1, -1, -1):
+                candidate = messages[index]
+                if not isinstance(candidate, Mapping):
+                    continue
+                info = candidate.get("info")
+                if isinstance(info, Mapping) and info.get("role") == "user":
+                    anchor = index
+                    break
+        if anchor < 0:
+            # V1 message endpoints did not always include the user row in a
+            # partial projection.  Keep the old whole-list behavior only for
+            # that explicitly opted-in compatibility path; V2 never takes it.
+            return [
+                message
+                for message in messages
+                if isinstance(message, Mapping)
+            ] if allow_legacy_anchor and not self._user_message_id else []
+        scoped: list[Mapping[str, Any]] = []
         for message in messages[anchor + 1:]:
             if not isinstance(message, Mapping):
                 continue
             info = message.get("info")
-            role = str(info.get("role") or "") if isinstance(info, Mapping) else ""
+            if isinstance(info, Mapping) and info.get("role") == "user":
+                parts_for_user = message.get("parts")
+                synthetic = info.get("type") in {"synthetic", "compaction"} or (
+                    isinstance(parts_for_user, list)
+                    and any(
+                        isinstance(part, Mapping) and part.get("synthetic")
+                        for part in parts_for_user
+                    )
+                )
+                if not synthetic:
+                    break
+            scoped.append(message)
+        return scoped
+
+    def _turn_messages(
+        self,
+        messages: list[Any],
+        *,
+        allow_legacy_anchor: bool | None = None,
+    ) -> list[Mapping[str, Any]]:
+        """Assistant rows in this turn's anchored scope."""
+        return [
+            message
+            for message in self._turn_scope(
+                messages, allow_legacy_anchor=allow_legacy_anchor
+            )
+            if isinstance(message.get("info"), Mapping)
+            and message["info"].get("role") == "assistant"
+        ]
+
+    def _turn_assistant_parts(
+        self,
+        messages: list[Any],
+        *,
+        allow_legacy_anchor: bool | None = None,
+    ) -> list[Mapping[str, Any]]:
+        """Settled parts of *this* turn's assistant messages, in order."""
+        parts: list[Mapping[str, Any]] = []
+        for message in self._turn_messages(
+            messages, allow_legacy_anchor=allow_legacy_anchor
+        ):
             message_parts = message.get("parts")
-            if role != "assistant" or not isinstance(message_parts, list):
-                continue
-            parts.extend(part for part in message_parts if isinstance(part, Mapping))
+            if isinstance(message_parts, list):
+                parts.extend(
+                    part for part in message_parts if isinstance(part, Mapping)
+                )
         return parts
+
+    def _restore_turn_metadata(
+        self,
+        messages: list[Any],
+        *,
+        allow_legacy_anchor: bool | None = None,
+    ) -> None:
+        """Restore model, usage, cost, and terminal error after SSE loss."""
+        version = (
+            _api_version_for_client(self._client, self._api_version)
+            if self._client is not None
+            else "v1"
+        )
+        scope = self._turn_scope(
+            messages, allow_legacy_anchor=allow_legacy_anchor
+        )
+        totals: dict[str, int] = {}
+        last_context_usage: dict[str, str] = {}
+        total_cost = 0.0
+        for message in self._turn_messages(
+            messages, allow_legacy_anchor=allow_legacy_anchor
+        ):
+            info = message.get("info")
+            if not isinstance(info, Mapping):
+                continue
+            model_id = str(info.get("modelID") or "")
+            provider_id = str(info.get("providerID") or "")
+            if model_id:
+                self._effective_model = (
+                    f"{provider_id}/{model_id}" if provider_id else model_id
+                )
+            tokens = info.get("tokens")
+            if isinstance(tokens, Mapping):
+                message_usage = (
+                    _v2_usage_payload(tokens)
+                    if version == "v2"
+                    else usage_payload(tokens)
+                )
+                if message_usage:
+                    last_context_usage = message_usage
+                for key, value in message_usage.items():
+                    try:
+                        totals[key] = totals.get(key, 0) + int(value)
+                    except (TypeError, ValueError):
+                        continue
+            cost = info.get("cost")
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+                total_cost += float(cost)
+            message_error = info.get("error")
+            if isinstance(message_error, Mapping):
+                self._poll_error = self._poll_error or error_text(message_error)
+        for message in scope:
+            info = message.get("info")
+            if not isinstance(info, Mapping) or info.get("type") != "idle":
+                continue
+            outcome = str(info.get("outcome") or info.get("status") or "").lower()
+            if outcome in {"failed", "failure", "error", "interrupted", "cancelled", "canceled"}:
+                self._poll_error = self._poll_error or "opencode execution failed"
+        if totals:
+            self._usage = {key: str(value) for key, value in totals.items()}
+        elif last_context_usage:
+            self._usage = dict(last_context_usage)
+        if last_context_usage:
+            self._context_usage = dict(last_context_usage)
+        if total_cost:
+            self._cost = total_cost
+
+    def _turn_has_running_tools(
+        self,
+        messages: list[Any],
+        *,
+        allow_legacy_anchor: bool | None = None,
+    ) -> bool:
+        """Whether an assistant tool in this anchored turn is still running."""
+        for message in self._turn_messages(
+            messages, allow_legacy_anchor=allow_legacy_anchor
+        ):
+            for part in message.get("parts") or []:
+                if not isinstance(part, Mapping):
+                    continue
+                state = part.get("state")
+                state = state if isinstance(state, Mapping) else {}
+                status = str(state.get("status") or part.get("status") or "").lower()
+                if status in {"pending", "streaming", "running", "executing"}:
+                    return True
+        return False
+
+    @staticmethod
+    def _terminal_message_evidence(
+        messages: Sequence[Mapping[str, Any]],
+    ) -> tuple[bool, bool]:
+        """Return ``(terminal_seen, failed)`` for V2 projected message rows.
+
+        Only the latest assistant row can prove completion: a multi-step turn
+        may contain an older completed assistant row followed by a newer
+        running row. A later idle marker remains authoritative terminal
+        evidence for the whole projected turn.
+        """
+        latest_assistant: Mapping[str, Any] | None = None
+        terminal = False
+        failed = False
+        for message in messages:
+            info = message.get("info")
+            if not isinstance(info, Mapping):
+                continue
+            if info.get("type") == "idle":
+                terminal = True
+                outcome = str(
+                    info.get("outcome") or info.get("status") or ""
+                ).lower()
+                if outcome in {
+                    "failed", "failure", "error", "interrupted",
+                    "cancelled", "canceled",
+                }:
+                    failed = True
+            elif info.get("role") == "assistant":
+                latest_assistant = info
+        if latest_assistant is not None:
+            time_info = latest_assistant.get("time")
+            if isinstance(time_info, Mapping) and time_info.get("completed"):
+                terminal = True
+            status = str(
+                latest_assistant.get("status")
+                or latest_assistant.get("outcome")
+                or ""
+            ).lower()
+            if status in _V2_TERMINAL_OUTCOMES:
+                terminal = True
+                if status in {
+                    "failed", "failure", "error", "interrupted",
+                    "cancelled", "canceled",
+                }:
+                    failed = True
+        return terminal, failed
 
     async def _reconcile_interrupted_turn(
         self, client: httpx.AsyncClient, session_id: str
     ) -> AsyncGenerator[StreamEvent, None]:
         """Recover a turn whose SSE died after the prompt was accepted.
 
-        Polls ``GET /session/{id}/message`` until the message list stops
-        changing (or the recovery window expires), then replays this turn's
-        settled assistant parts through ``message.part.updated``. The
-        accumulator's per-part emitted counts make the replay emit only what
-        the live stream actually missed, so this backfills gaps and repairs a
-        truncated tail without duplicating anything already shown.
+        V1 keeps the historical stable-snapshot/poll behavior.  V2 is stricter:
+        a user row alone is never enough, and a stable assistant projection is
+        accepted only when the server says the session is no longer active or
+        the projection contains a terminal marker.  This prevents a shared or
+        merely user-only snapshot from being reported as a successful answer.
         """
         deadline = time.monotonic() + _OPENCODE_RECOVERY_WINDOW_S
         version = _api_version_for_client(client, self._api_version)
@@ -2566,25 +3074,77 @@ class OpencodeProvider(BaseSDKProvider):
             messages: list[Any] | None = None
             try:
                 messages = await _read_message_list(client, session_id, version)
+            except RuntimeError as exc:
+                # Pagination exhaustion/repetition is an explicit, actionable
+                # read failure.  Do not let it escape the async generator and
+                # strand the turn without its single closing ResultEvent.
+                self._poll_error = self._poll_error or str(exc)
+                return
             except (httpx.HTTPError, ValueError, TypeError, AttributeError):
                 # Best-effort by design: an unresponsive read endpoint just
                 # means the window expires and the turn finishes degraded.
                 messages = None
 
+            active_ids: set[str] | None = None
+            if version == "v2" and messages is not None:
+                active_ids = await _read_v2_active_sessions(client)
+
             if messages is not None:
-                current = _opencode_messages_signature(messages)
-                quiesced = (
-                    bool(current)
-                    and current == signature
-                    and not _messages_have_running_tools(messages)
+                allow_legacy_anchor = version != "v2"
+                scope = self._turn_scope(
+                    messages, allow_legacy_anchor=allow_legacy_anchor
                 )
+                user_seen = bool(scope) or (
+                    version == "v1" and not self._user_message_id
+                )
+                current = _opencode_messages_signature(scope)
+                previous_signature = signature
                 signature = current or signature
-                for part in self._turn_assistant_parts(messages):
+                running = self._turn_has_running_tools(
+                    messages, allow_legacy_anchor=allow_legacy_anchor
+                )
+                terminal_seen, terminal_failed = self._terminal_message_evidence(scope)
+                assistant_seen = bool(
+                    self._turn_messages(
+                        messages, allow_legacy_anchor=allow_legacy_anchor
+                    )
+                )
+                self._restore_turn_metadata(
+                    messages, allow_legacy_anchor=allow_legacy_anchor
+                )
+                for part in self._turn_assistant_parts(
+                    messages, allow_legacy_anchor=allow_legacy_anchor
+                ):
                     for converted in self._event_to_stream({
                         "type": "message.part.updated",
                         "properties": {"part": dict(part)},
                     }):
                         yield converted
+
+                if version == "v1":
+                    quiesced = (
+                        user_seen
+                        and bool(current)
+                        and current == previous_signature
+                        and not running
+                    )
+                else:
+                    active_clear = (
+                        active_ids is not None and session_id not in active_ids
+                    )
+                    quiesced = (
+                        user_seen
+                        and not running
+                        and (
+                            (terminal_seen or assistant_seen)
+                            and (
+                                terminal_seen
+                                or (active_clear and bool(current) and current == previous_signature)
+                            )
+                        )
+                    )
+                    if terminal_failed:
+                        self._poll_error = self._poll_error or "opencode execution failed"
                 if quiesced:
                     self._turn_recovered_via_poll = True
                     return
@@ -2815,6 +3375,8 @@ class OpencodeProvider(BaseSDKProvider):
             usage = _v2_usage_payload(tokens) if v2 else usage_payload(tokens)
             usage_changed = usage != self._usage
             self._usage = usage or self._usage
+            if usage:
+                self._context_usage = dict(usage)
         cost = props.get("cost")
         if isinstance(cost, (int, float)) and not isinstance(cost, bool):
             self._cost = float(cost)
@@ -2844,6 +3406,14 @@ class OpencodeProvider(BaseSDKProvider):
         required_flags: list[bool] = []
         hidden_flags: list[bool] = []
         when_flags: list[tuple[dict[str, Any], ...]] = []
+        pattern_flags: list[str] = []
+        format_flags: list[str] = []
+        min_length_flags: list[int] = []
+        max_length_flags: list[int] = []
+        minimum_flags: list[float] = []
+        maximum_flags: list[float] = []
+        min_item_flags: list[int] = []
+        max_item_flags: list[int] = []
         for index, field in enumerate(fields):
             if not isinstance(field, Mapping):
                 continue
@@ -2852,9 +3422,12 @@ class OpencodeProvider(BaseSDKProvider):
             options = []
             for option in field.get("options") or []:
                 if isinstance(option, Mapping):
+                    option_value = option.get("value")
+                    if option_value is None:
+                        option_value = option.get("label")
                     options.append({
-                        "label": str(option.get("label") or option.get("value") or ""),
-                        "value": str(option.get("value") or option.get("label") or ""),
+                        "label": str(option.get("label") or option_value or ""),
+                        "value": str(option_value if option_value is not None else ""),
                         "description": str(option.get("description") or ""),
                     })
             multi = field_type == "multiselect" or bool(field.get("multiple"))
@@ -2881,13 +3454,43 @@ class OpencodeProvider(BaseSDKProvider):
             when_flags.append(conditions)
             question_values.append(tuple(
                 (
-                    str(option.get("label") or option.get("value") or ""),
-                    str(option.get("value") or option.get("label") or ""),
+                    str(option.get("label") or (
+                        option.get("value") if option.get("value") is not None else ""
+                    )),
+                    str(
+                        option.get("value")
+                        if option.get("value") is not None
+                        else option.get("label") or ""
+                    ),
                 )
                 for option in field.get("options") or []
                 if isinstance(option, Mapping)
             ))
             question_custom.append(bool(field.get("custom", not options)))
+            pattern_flags.append(str(field.get("pattern") or ""))
+            format_flags.append(str(field.get("format") or ""))
+            for target, key in (
+                (min_length_flags, "minLength"),
+                (max_length_flags, "maxLength"),
+                (min_item_flags, "minItems"),
+                (max_item_flags, "maxItems"),
+            ):
+                value = field.get(key)
+                target.append(int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0)
+            minimum_value = field.get("minimum")
+            maximum_value = field.get("maximum")
+            minimum_flags.append(
+                float(minimum_value)
+                if isinstance(minimum_value, (int, float))
+                and not isinstance(minimum_value, bool)
+                else 0.0
+            )
+            maximum_flags.append(
+                float(maximum_value)
+                if isinstance(maximum_value, (int, float))
+                and not isinstance(maximum_value, bool)
+                else 0.0
+            )
             question: dict[str, Any] = {
                 "id": question_id,
                 "question": str(field.get("description") or field.get("title") or question_id),
@@ -2927,6 +3530,14 @@ class OpencodeProvider(BaseSDKProvider):
             question_required=tuple(required_flags),
             question_hidden=tuple(hidden_flags),
             question_when=tuple(when_flags),
+            question_pattern=tuple(pattern_flags),
+            question_format=tuple(format_flags),
+            question_min_length=tuple(min_length_flags),
+            question_max_length=tuple(max_length_flags),
+            question_minimum=tuple(minimum_flags),
+            question_maximum=tuple(maximum_flags),
+            question_min_items=tuple(min_item_flags),
+            question_max_items=tuple(max_item_flags),
             form=True,
         )
         payload: dict[str, Any] = {
@@ -3083,6 +3694,7 @@ class OpencodeProvider(BaseSDKProvider):
         tokens = info.get("tokens")
         if isinstance(tokens, Mapping):
             self._usage = usage_payload(tokens) or self._usage
+            self._context_usage = dict(self._usage) if self._usage else {}
         return _token_usage_events(tokens)
 
     def _permission_event(self, props: Mapping[str, Any]) -> list[StreamEvent]:
@@ -3308,9 +3920,6 @@ class OpencodeProvider(BaseSDKProvider):
         async def _pump_once() -> AsyncGenerator[StreamEvent, None]:
             """One SSE subscription, pumped until idle or premature close."""
             nonlocal prompt_accepted, prompt_rejected, error, saw_output, idle_seen
-            for converted in await self._recover_pending_v2_requests(client, session_id):
-                saw_output = saw_output or converted.type in {"text", "tool_use"}
-                yield converted
             async with client.stream(
                 "GET", _api_path(client, "/event", "/api/event", version)
             ) as stream:
@@ -3340,11 +3949,34 @@ class OpencodeProvider(BaseSDKProvider):
                         # successful, blank turn instead of the error.
                         error = error or f"opencode rejected the prompt: {detail}"
                         return
+                    # V2 returns the admitted user message in the prompt
+                    # receipt. Capture it before subscribing to the event
+                    # stream: the first SSE frame can race the receipt, and a
+                    # dropped stream must never fall back to the newest user
+                    # row (which may belong to another client).
+                    if version == "v2":
+                        try:
+                            receipt = response.json()
+                        except (TypeError, ValueError, AttributeError):
+                            receipt = None
+                        admitted_id = _prompt_message_id(receipt)
+                        if not admitted_id:
+                            prompt_rejected = True
+                            error = error or "opencode returned no prompt message id"
+                            return
+                        self._user_message_id = admitted_id
                     # Once accepted, the replacement session owns the handover
                     # context. Retain it only across a rejected prompt so a
                     # retry can still recover the old conversation.
                     self._session_handover_context = ""
                     prompt_accepted = True
+                # Reload pending native requests only after this turn's prompt
+                # was admitted. On a reconnect this is harmless and repairs a
+                # form/permission frame lost in the gap; before acceptance it
+                # could replay an unrelated stale request from the session.
+                for converted in await self._recover_pending_v2_requests(client, session_id):
+                    saw_output = saw_output or converted.type in {"text", "tool_use"}
+                    yield converted
                 decoder = SSEDecoder()
                 async for sse in decoder.aiter_bytes(stream.aiter_bytes()):
                     if self._stop_requested == session_id:
@@ -3446,6 +4078,24 @@ class OpencodeProvider(BaseSDKProvider):
         finally:
             register_handle(None)
 
+        # A terminal/idle marker with no assistant text is a real failed or
+        # incomplete execution, not a successful empty answer.  Never let the
+        # unconditional closing ResultEvent overwrite an earlier provider error
+        # with ``is_error=False`` and an empty transcript.
+        error = error or self._poll_error
+        if (
+            not error
+            and self._stop_requested != session_id
+            and not self._answer_text().strip()
+        ):
+            error = "opencode turn completed without an assistant response"
+        if (
+            not error
+            and degraded_final
+            and self._stop_requested != session_id
+        ):
+            error = "opencode turn could not be verified after connection loss"
+
         await self._augment_context_pct(client, self._turn_model)
 
         fallback_model = request.model
@@ -3476,9 +4126,10 @@ class OpencodeProvider(BaseSDKProvider):
         model's declared ``limit.context`` from ``GET /provider``. Silent on failure — the field
         is simply left off the usage payload when the CLI cannot answer.
         """
-        if not self._usage:
+        usage = self._context_usage or self._usage
+        if not usage:
             return
-        total = self._usage.get("totalTokens")
+        total = usage.get("totalTokens")
         if not total:
             return
         provider_id, model_id = model

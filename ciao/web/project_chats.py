@@ -8278,6 +8278,7 @@ class ProjectChatManager:
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.resolve_permission(request_id)
+            stream.publish_live({"type": "permission_resolved", "request_id": request_id})
             if not approved:
                 stream.deny_tool_use(retract_id or request_id)
         return True
@@ -8379,6 +8380,24 @@ class ProjectChatManager:
         provider = provider_service.provider if provider_service is not None else None
         if provider is None:
             return False
+        # Reject a response for a superseded form before touching the provider.
+        # Otherwise a late answer can be delivered to a live request with a
+        # reused/different id and the persisted newer card is left ambiguous.
+        chat = self._chats.get(chat_id)
+        stored_question: dict[str, Any] = {}
+        if chat is not None and chat.pending_question:
+            try:
+                parsed_question = json.loads(chat.pending_question)
+            except (TypeError, json.JSONDecodeError):
+                parsed_question = {}
+            if isinstance(parsed_question, dict):
+                stored_question = parsed_question
+        stored_request_id = str(stored_question.get("request_id") or "")
+        if stored_request_id and stored_request_id != request_id:
+            return False
+        # Leave answer-key compatibility to the provider: legacy V1 question
+        # replies historically accepted provider-independent map keys, while
+        # V2 forms enforce their own field ids after translating the payload.
         responder = getattr(provider, "send_question_response_async", None)
         if callable(responder):
             try:
@@ -8425,6 +8444,10 @@ class ProjectChatManager:
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.resolve_question(request_id)
+            # The submitting socket receives question_response_result
+            # directly; publish an idempotent resolution to every other tab
+            # attached to this turn so they do not keep a settled form card.
+            stream.publish_live({"type": "question_resolved", "request_id": request_id})
         return True
 
     def respond_question(
@@ -8457,17 +8480,43 @@ class ProjectChatManager:
             return True
         if provider_service is None or provider_service.provider is None:
             return False
+        chat = self._chats.get(chat_id)
+        if chat is not None and chat.pending_question:
+            try:
+                stored = json.loads(chat.pending_question)
+            except (TypeError, json.JSONDecodeError):
+                stored = {}
+            if isinstance(stored, dict) and stored.get("request_id") not in (None, request_id):
+                return False
         responder = getattr(
             provider_service.provider, "send_question_response", None
         )
         if not callable(responder):
             return False
-        accepted = bool(responder(request_id, {} if cancel else answers))
+        try:
+            accepted = bool(responder(
+                request_id,
+                {} if cancel else answers,
+                cancel=cancel,
+                submitted=submitted,
+            ))
+        except TypeError as exc:
+            if "cancel" not in str(exc) and "submitted" not in str(exc):
+                raise
+            accepted = bool(responder(request_id, {} if cancel else answers))
         if accepted:
-            chat = self._chats.get(chat_id)
             if chat is not None:
-                chat.pending_question = ""
-                self._save()
+                try:
+                    stored = json.loads(chat.pending_question)
+                except (TypeError, json.JSONDecodeError):
+                    stored = {}
+                if (
+                    not isinstance(stored, dict)
+                    or not stored.get("request_id")
+                    or stored.get("request_id") == request_id
+                ):
+                    chat.pending_question = ""
+                    self._save()
             stream = self._broker.get(chat_id)
             if stream is not None:
                 stream.resolve_question(request_id)

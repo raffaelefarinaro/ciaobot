@@ -434,8 +434,9 @@ metadata through the provider and PWA, and explicit empty optional values are
 sent as answers while Cancel remains a distinct action. Scalar, length,
 item-count, and pattern constraints are checked before submission. Permission and
 form replies are acknowledged only after the provider HTTP request completes;
-the PWA restores the card on a failed result. Credential path rules include
-V2's workspace-relative root spellings, while broad V2 search/list actions are
+the PWA keeps the card mounted while delivery is pending and restores it on a
+failed result. Credential path rules include V2's workspace-relative root
+spellings, including a relocated runtime root, while broad V2 search/list actions are
 denied because their query resource cannot be safely scoped; shell access is
 still governed by approval mode and is not claimed as path-denied.
 

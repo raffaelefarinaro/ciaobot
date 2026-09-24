@@ -431,10 +431,23 @@ constraints) intact through `ToolUseEvent` and `chatQuestions.ts`; validate
 those constraints before enabling Send, and keep Cancel distinct from a
 submitted empty optional answer. Permission/form responses are asynchronous HTTP
 operations: await the provider result before clearing the server-side pending
-state, and preserve a retryable PWA card when the result is negative. For V2
-security tests, remember that internal resources are workspace-relative and
-that broad `glob`/`grep`/`list` queries are denied rather than treated as
-path-scoped; shell access remains an approval-mode limitation.
+state, and preserve a retryable PWA card when the result is negative. V2
+message and child-session cursors are followed to completion up to a generous
+1,000-page safety bound; a repeated cursor or an exhausted bound is an
+explicit read error, never a silently truncated history. After a dropped V2
+stream, recovery requires the prompt receipt's user-message anchor plus either
+an authoritative idle/terminal row or an idle `/api/session/active` map; a
+user-only or unverified stable projection cannot become a successful turn.
+Permission/form responses use the `action: "reply" | "cancel"` wire contract
+(with `submitted: true` for an explicitly empty optional reply), remain
+mounted until the matching `(chat_id, request_id)` result is acknowledged, and
+are requeued when the chat socket is unavailable. For V2 security tests,
+remember that internal resources are workspace-relative and
+that both the default and a relocated `CIAO_RUNTIME_ROOT` need relative deny
+aliases; broad `glob`/`grep`/`list` queries are denied rather than treated as
+path-scoped, and shell access remains an approval-mode limitation. V2 recovery
+must wait for an authoritative terminal/active-session outcome before it
+finishes a turn.
 
 ## DAG-style schedules (maintainers)
 

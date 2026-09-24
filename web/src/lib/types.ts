@@ -404,8 +404,24 @@ export type WsEvent =
   // answer, so it must not raise an unread badge on a backgrounded tab.
   | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; stopped?: boolean; fallback_final?: boolean; sent_at?: string; completed_at?: string; duration_ms?: number }
   | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
-  | { type: 'permission_response_result'; request_id: string; ok: boolean }
-  | { type: 'question_response_result'; request_id: string; ok: boolean }
+  | {
+      type: 'permission_response_result';
+      request_id: string;
+      ok: boolean;
+      error?: string;
+      retryable?: boolean;
+    }
+  | {
+      type: 'question_response_result';
+      request_id: string;
+      ok: boolean;
+      /** Present on newer servers so the client can distinguish reply/cancel. */
+      state?: 'answered' | 'cancelled';
+      error?: string;
+      retryable?: boolean;
+    }
+  | { type: 'question_resolved'; request_id: string }
+  | { type: 'permission_resolved'; request_id: string }
   // The selected model cannot see the attached images; the engine asks the
   // user to pick a vision-capable model before dispatching. Answered via a
   // `capability_response` client message (action switch | picker | cancel).
@@ -520,6 +536,27 @@ export interface PendingPermission {
   // Epoch ms when the request arrived — used by the UI to grey out very old
   // pending prompts that were likely cancelled server-side on a stream end.
   received_at: number
+}
+
+export interface PermissionSubmission {
+  requestId: string
+  approved: boolean
+  reason: string
+  pending: boolean
+  queued: boolean
+  error: string
+  retryable: boolean
+}
+
+export interface QuestionSubmission {
+  requestId: string
+  action: 'reply' | 'cancel'
+  answers: Record<string, string[]>
+  submitted: boolean
+  pending: boolean
+  queued: boolean
+  error: string
+  retryable: boolean
 }
 
 // ── Voice ───────────────────────────────────────────────────────────────

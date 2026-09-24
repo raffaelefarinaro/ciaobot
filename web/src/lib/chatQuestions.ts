@@ -4,7 +4,12 @@
 // `activeCapabilityQuestions`, `resolvedQuestions`) stays in
 // `stores/projects.ts`, which owns when a card appears and when it is cleared.
 
-export type ActiveQuestionOption = { label: string; description?: string }
+export type ActiveQuestionOption = {
+  label: string
+  /** V2 wire value. Omitted for legacy label-only options. */
+  value?: string
+  description?: string
+}
 
 export type QuestionWhen = {
   key: string
@@ -38,6 +43,8 @@ export type ActiveQuestion = {
   maxLength?: number
   minItems?: number
   maxItems?: number
+  /** Whether a V2 form permits a value outside its declared options. */
+  custom?: boolean
 }
 
 // Rendered when the engine pre-flights an image turn and the selected
@@ -118,26 +125,31 @@ export function parseQuestions(
     return parsed.questions.map((q: Record<string, unknown>, index: number) => {
       const type = String(q.type ?? 'string').toLowerCase()
       const optionValues: Record<string, string> = {}
-      const options = Array.isArray(q.options)
-        ? (q.options as Array<Record<string, unknown>>).map(o => {
-            const label = String(o.label ?? o.value ?? '')
-            if (o.value !== undefined) optionValues[label] = String(o.value)
-            return {
-              label,
-              description: o.description ? String(o.description) : '',
-            }
-          })
+      const rawOptions = Array.isArray(q.options)
+        ? (q.options as Array<Record<string, unknown>>)
         : []
+      const legacyOptionShape = type === 'single_select' || type === 'multi_select'
+      const options: ActiveQuestionOption[] = rawOptions.map(o => {
+        const label = String(o.label ?? o.value ?? '')
+        const hasWireValue = o.value !== undefined && !legacyOptionShape
+        if (hasWireValue) optionValues[label] = String(o.value)
+        return {
+          label,
+          ...(hasWireValue ? { value: String(o.value) } : {}),
+          description: o.description ? String(o.description) : '',
+        }
+      })
       // Boolean V2 fields have no option list in the wire form, but a pair of
       // explicit choices is clearer and keeps the answer mapping typed.
       if (type === 'boolean' && options.length === 0) {
         options.push(
-          { label: 'Yes', description: '' },
-          { label: 'No', description: '' },
+          { label: 'Yes', value: 'true', description: '' },
+          { label: 'No', value: 'false', description: '' },
         )
         optionValues.Yes = 'true'
         optionValues.No = 'false'
       }
+      const hasOptions = options.length > 0
       const required = q.required === undefined ? true : Boolean(q.required)
       const rawWhen = Array.isArray(q.when)
         ? q.when
@@ -154,14 +166,18 @@ export function parseQuestions(
         const value = q[key]
         return typeof value === 'number' && Number.isFinite(value) ? value : undefined
       }
+      const hasCustom = q.custom !== undefined
+      const allowOther = q.isOther !== undefined
+        ? Boolean(q.isOther) || !hasOptions
+        : hasCustom
+          ? Boolean(q.custom) || !hasOptions
+          : true
       return {
         id: String(q.id ?? index),
         question: String(q.question ?? q.text ?? ''),
         header: String(q.header ?? q.title ?? ''),
         multiSelect: Boolean(q.multiSelect) || type === 'multi_select' || type === 'multiselect',
-        allowOther: q.isOther === undefined
-          ? true
-          : Boolean(q.isOther) || !Array.isArray(q.options) || q.options.length === 0,
+        allowOther,
         isSecret: Boolean(q.isSecret),
         requestId: resolvedRequestId,
         options,
@@ -181,6 +197,7 @@ export function parseQuestions(
         maxLength: numeric('maxLength'),
         minItems: numeric('minItems'),
         maxItems: numeric('maxItems'),
+        custom: hasCustom ? Boolean(q.custom) : undefined,
       }
     })
   } catch {
@@ -194,13 +211,46 @@ export type QuestionAnswerState = {
   external?: boolean
 }
 
+function questionOptionValue(question: ActiveQuestion, selected: string): string {
+  // Prefer an exact wire value.  A legacy label can itself look like another
+  // option's value (for example label "1" beside value "1"), so applying the
+  // label map unconditionally can silently send the wrong answer.
+  const exact = question.options.some(option => option.value === selected)
+  if (exact) return selected
+  return question.optionValues?.[selected] ?? selected
+}
+
 function questionValues(question: ActiveQuestion, state: QuestionAnswerState | undefined): string[] {
   const values = [...(state?.selected ?? [])].map(
-    label => question.optionValues?.[label] ?? label,
+    label => questionOptionValue(question, label),
   )
   const other = state?.other.trim() ?? ''
   if (other) values.push(other)
   return values
+}
+
+function isMultiQuestion(question: ActiveQuestion): boolean {
+  return question.multiSelect || question.type === 'multiselect' || question.type === 'multi_select'
+}
+
+function optionValues(question: ActiveQuestion): string[] {
+  return question.options
+    .map(option => option.value ?? question.optionValues?.[option.label] ?? option.label)
+    .filter(Boolean)
+}
+
+function isValidEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+}
+
+function isValidDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const date = new Date(`${value}T00:00:00Z`)
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+
+function isValidDateTime(value: string): boolean {
+  return value.trim() !== '' && !Number.isNaN(Date.parse(value))
 }
 
 /** Return a user-facing reason why a field cannot be submitted yet. */
@@ -214,15 +264,25 @@ export function questionAnswerError(
 
   const values = questionValues(question, state)
   if (!values.length) {
+    if (isMultiQuestion(question) && (question.minItems ?? 1) <= 0) return null
     return question.required === false ? null : 'This field is required.'
   }
+  if (!isMultiQuestion(question) && values.length > 1) {
+    return 'Choose one answer.'
+  }
 
-  if (question.multiSelect || question.type === 'multiselect' || question.type === 'multi_select') {
+  if (isMultiQuestion(question)) {
     if (question.minItems !== undefined && values.length < question.minItems) {
       return `Choose at least ${question.minItems} item${question.minItems === 1 ? '' : 's'}.`
     }
     if (question.maxItems !== undefined && values.length > question.maxItems) {
       return `Choose at most ${question.maxItems} item${question.maxItems === 1 ? '' : 's'}.`
+    }
+    if (question.custom === false || !question.allowOther) {
+      const allowed = new Set(optionValues(question))
+      if (values.some(value => !allowed.has(value))) {
+        return 'Choose one of the available options.'
+      }
     }
     return null
   }
@@ -250,6 +310,12 @@ export function questionAnswerError(
   }
 
   if (question.type === 'string' || question.type === undefined) {
+    if (question.custom === false || !question.allowOther) {
+      const allowed = new Set(optionValues(question))
+      if (allowed.size && !allowed.has(value)) {
+        return 'Choose one of the available options.'
+      }
+    }
     if (question.minLength !== undefined && value.length < question.minLength) {
       return `Use at least ${question.minLength} character${question.minLength === 1 ? '' : 's'}.`
     }
@@ -263,6 +329,16 @@ export function questionAnswerError(
         return 'This field has an invalid format.'
       }
     }
+    if (question.format === 'email' && !isValidEmail(value)) return 'Enter a valid email address.'
+    if (question.format === 'uri') {
+      try {
+        if (!new URL(value).protocol) return 'Enter a valid absolute URI.'
+      } catch {
+        return 'Enter a valid absolute URI.'
+      }
+    }
+    if (question.format === 'date' && !isValidDate(value)) return 'Enter a valid date.'
+    if (question.format === 'date-time' && !isValidDateTime(value)) return 'Enter a valid date and time.'
   }
   return null
 }
@@ -276,11 +352,12 @@ export function questionAnswerIsValid(
 
 /** Whether an empty optional value can be represented without violating the form schema. */
 export function questionEmptyAnswerAllowed(question: ActiveQuestion): boolean {
-  if (question.multiSelect || question.type === 'multiselect' || question.type === 'multi_select') {
+  if (question.type === 'external') return false
+  if (isMultiQuestion(question)) {
     return (question.minItems ?? 0) <= 0
   }
   if (question.type === 'string' || question.type === undefined) {
-    if (question.options.length > 0 && !question.allowOther) return false
+    if (question.options.length > 0 && (question.custom === false || !question.allowOther)) return false
     if ((question.minLength ?? 0) > 0) return false
     if (question.pattern) {
       try {
@@ -294,7 +371,31 @@ export function questionEmptyAnswerAllowed(question: ActiveQuestion): boolean {
   return false
 }
 
-/** Whether a V2 form field is active under the current answer map. */
+/** Whether a V2 form field is active under a value-based answer map. */
+export function questionIsActive(
+  question: ActiveQuestion,
+  answers: Record<string, string[]>,
+  allQuestions: ActiveQuestion[] = [],
+): boolean {
+  if (question.hidden) return false
+  return (question.when ?? []).every(condition => {
+    const values = answers[condition.key]
+    if (!values) return false
+    const controller = allQuestions.find(candidate => candidate.id === condition.key)
+    const controllerIsMulti = controller
+      ? isMultiQuestion(controller)
+      : isMultiQuestion(question)
+    const expected = typeof condition.value === 'string'
+      ? condition.value
+      : String(condition.value)
+    const equal = controllerIsMulti
+      ? values.includes(expected)
+      : values.length === 1 && values[0] === expected
+    return condition.op === 'eq' ? equal : !equal
+  })
+}
+
+/** Whether a V2 form field is active under the indexed UI answer state. */
 export function questionIsVisible(
   question: ActiveQuestion,
   questions: ActiveQuestion[],
@@ -305,24 +406,21 @@ export function questionIsVisible(
     const index = questions.findIndex(candidate => candidate.id === condition.key)
     if (index < 0) return false
     const state = answers[index]
-    // No state means the field is unanswered.  An existing state with an
-    // empty string/list is an explicit empty answer, which the V2 form
-    // service treats as defined for condition matching (`neq` is true).
+    // No state means the field is unanswered. An existing state with an empty
+    // string/list is an explicit empty answer only for fields whose schema can
+    // represent an empty value; typed scalar fields remain undefined.
     if (!state) return false
-    const values: Array<string | number | boolean> = []
-    for (const label of state.selected) {
-      values.push(label)
-      const optionValue = questions[index].optionValues?.[label]
-      if (optionValue !== undefined) values.push(optionValue)
-    }
-    if (state.other.trim()) values.push(state.other.trim())
+    const sourceQuestion = questions[index]
+    const values = questionValues(sourceQuestion, state)
     if (!values.length) {
-      const sourceQuestion = questions[index]
-      const emptyIsDefined = sourceQuestion.type === 'multiselect'
+      const emptyIsDefined = isMultiQuestion(sourceQuestion)
         || (sourceQuestion.type === 'string' && (sourceQuestion.options.length === 0 || sourceQuestion.allowOther))
       if (!emptyIsDefined) return false
     }
-    const hit = values.some(value => String(value) === String(condition.value))
+    const expected = String(condition.value)
+    const hit = isMultiQuestion(sourceQuestion)
+      ? values.includes(expected)
+      : values.length === 1 && values[0] === expected
     return condition.op === 'eq' ? hit : !hit
   })
 }

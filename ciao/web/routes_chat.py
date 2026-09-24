@@ -188,8 +188,16 @@ async def ws_chat(websocket: WebSocket) -> None:
                         and value.strip().lower() in {"1", "true", "yes"}
                     )
 
+                action = str(msg.get("action", "")).strip().lower()
                 cancel = _flag("cancel")
                 submitted = _flag("submitted")
+                if action in {"reply", "cancel"}:
+                    cancel = action == "cancel"
+                    submitted = action == "reply"
+                elif not answers and not submitted:
+                    # Pre-action clients used an empty answer map as cancel;
+                    # an explicit submitted flag still means an empty reply.
+                    cancel = True
                 delivered = False
                 if request_id:
                     delivered = await pcm.respond_question_async(
@@ -204,6 +212,11 @@ async def ws_chat(websocket: WebSocket) -> None:
                         "type": "question_response_result",
                         "request_id": request_id,
                         "ok": delivered,
+                        "state": "cancelled" if cancel else "answered",
+                        **({} if delivered else {
+                            "error": "The provider did not accept the response.",
+                            "retryable": True,
+                        }),
                     })
                 except (WebSocketDisconnect, RuntimeError):
                     break

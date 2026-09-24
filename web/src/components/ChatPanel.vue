@@ -700,11 +700,11 @@
          a structured question; we render an interactive option list so the
          answer flows back as the next user message. The SDK's built-in CLI
          picker can't run headless, so this is the only path. -->
-    <div v-if="questionCardVisible" class="question-card">
+    <form v-if="questionCardVisible" class="question-card" novalidate @submit.prevent="submitQuestionAnswers">
       <div class="question-card-header">
         <AppIcon class="question-card-icon" name="question" :size="18" />
         <span class="question-card-title">The model has a question</span>
-        <button class="question-card-dismiss" @click="dismissQuestions" title="Dismiss">&times;</button>
+        <button class="question-card-dismiss" :disabled="questionSubmitting" @click="dismissQuestions" title="Dismiss">&times;</button>
       </div>
       <template v-for="(q, qi) in activeQuestions" :key="qi">
         <div
@@ -731,6 +731,7 @@
             <input
               type="checkbox"
               :checked="questionAnswers[qi]?.external === true"
+              :disabled="questionSubmitting"
               @change="toggleQuestionExternal(qi, ($event.target as HTMLInputElement).checked)"
             />
             <span>I completed this step</span>
@@ -739,12 +740,13 @@
         <div v-else class="question-options">
           <button
             v-for="(opt, oi) in q.options"
-            :key="opt.label"
+            :key="`${opt.value || opt.label}-${oi}`"
             type="button"
             class="question-option"
-            :class="{ selected: isQuestionOptionSelected(qi, opt.label) }"
+            :class="{ selected: isQuestionOptionSelected(qi, opt.value || opt.label) }"
             :aria-keyshortcuts="questionOptionShortcut(qi, oi) || undefined"
-            @click="toggleQuestionOption(qi, opt.label, q.multiSelect)"
+            :disabled="questionSubmitting"
+            @click="toggleQuestionOption(qi, opt.value || opt.label, q.multiSelect)"
           >
             <span class="question-option-main">
               <!-- Keyboard hint, not part of the label: only rendered where the
@@ -773,8 +775,9 @@
           :max="q.maximum"
           :step="q.type === 'integer' ? 1 : undefined"
           :aria-invalid="Boolean(questionAnswerError(q, questionAnswers[qi]))"
+          :disabled="questionSubmitting"
           :value="questionAnswers[qi]?.other || ''"
-          @input="ensureAnswer(qi).other = ($event.target as HTMLInputElement).value"
+          @input="setQuestionOther(qi, ($event.target as HTMLInputElement).value)"
         />
         <p
           v-if="questionAnswerError(q, questionAnswers[qi])"
@@ -782,11 +785,14 @@
         >{{ questionAnswerError(q, questionAnswers[qi]) }}</p>
         </div>
       </template>
+      <div v-if="questionError" class="question-card-error">{{ questionError }}</div>
       <div class="question-card-actions">
-        <button class="btn-sm" type="button" @click="dismissQuestions">Cancel</button>
-        <button class="btn-sm primary" type="button" :disabled="!allQuestionsAnswered" @click="submitQuestionAnswers">Send answer</button>
+        <button class="btn-sm" type="button" :disabled="questionSubmitting" @click="dismissQuestions">Cancel</button>
+        <button class="btn-sm primary" type="submit" :disabled="questionSubmitting || !allQuestionsAnswered">
+          {{ questionSubmitting ? 'Sending…' : 'Send answer' }}
+        </button>
       </div>
-    </div>
+    </form>
 
     <!-- Image-capability question. The server paused before dispatch because
          the selected model can't see images. The card shows the full
@@ -859,14 +865,17 @@
           <button
             class="btn-deny"
             :aria-keyshortcuts="permissionShortcut('deny') || undefined"
+            :disabled="permissionSubmitting"
             @click="store.respondPermission(chat.chat_id, p.request_id, false, 'User denied')"
           ><span v-if="permissionShortcut('deny')" class="permission-key" aria-hidden="true">{{ permissionShortcut('deny') }}</span>Deny</button>
           <button
             class="btn-approve"
             :aria-keyshortcuts="permissionShortcut('approve') || undefined"
+            :disabled="permissionSubmitting"
             @click="store.respondPermission(chat.chat_id, p.request_id, true)"
           ><span v-if="permissionShortcut('approve')" class="permission-key" aria-hidden="true">{{ permissionShortcut('approve') }}</span>Approve</button>
         </div>
+        <div v-if="permissionError" class="question-card-error">{{ permissionError }}</div>
       </div>
     </div>
 
@@ -2173,6 +2182,12 @@ const pendingApprovals = computed(() => {
   if (!id) return []
   return store.pendingPermissions[id] || []
 })
+const permissionSubmission = computed(() => {
+  const id = store.activeChatId
+  return id ? store.permissionSubmissions[id] : undefined
+})
+const permissionSubmitting = computed(() => permissionSubmission.value?.pending === true)
+const permissionError = computed(() => permissionSubmission.value?.error || (permissionSubmission.value?.queued ? 'Waiting for the chat connection…' : ''))
 
 // The backend's `message` field is almost always the templated
 // "Approve use of {tool_name}?", which just repeats the tool-name badge shown
@@ -2230,6 +2245,13 @@ const activeQuestions = computed(() => {
   return store.activeQuestions[id] || []
 })
 
+const questionSubmission = computed(() => {
+  const id = store.activeChatId
+  return id ? store.questionSubmissions[id] : undefined
+})
+const questionSubmitting = computed(() => questionSubmission.value?.pending === true)
+const questionError = computed(() => questionSubmission.value?.error || (questionSubmission.value?.queued ? 'Waiting for the chat connection…' : ''))
+
 type QuestionAnswer = QuestionAnswerState
 const questionAnswers = ref<Record<number, QuestionAnswer>>({})
 
@@ -2240,7 +2262,9 @@ const visibleQuestionIndexes = computed(() => activeQuestions.value
 // The card is only on screen when it wins the dock, or when the dock strip is
 // expanded behind a permission. Hidden/inactive V2 fields alone are not a card.
 const questionCardVisible = computed(() =>
-  visibleQuestionIndexes.value.length > 0 && (dockPrimary.value === 'question' || dockExpanded.value),
+  // Keep a native card reachable even when every field is currently hidden or
+  // conditional; the user still needs Cancel and the server needs an answer.
+  activeQuestions.value.length > 0 && (dockPrimary.value === 'question' || dockExpanded.value),
 )
 
 // Reset per-question selections whenever the active chat changes or the
@@ -2252,25 +2276,27 @@ function defaultQuestionAnswer(question: ActiveQuestion): QuestionAnswer | undef
   if (question.default === undefined || question.type === 'external') return undefined
   const answer: QuestionAnswer = { selected: new Set<string>(), other: '' }
   const value = question.default
-  const optionLabel = (raw: string): string | undefined => {
+  const optionValue = (raw: string): string | undefined => {
     const option = question.options.find(candidate =>
-      candidate.label === raw || question.optionValues?.[candidate.label] === raw,
+      candidate.label === raw
+      || candidate.value === raw
+      || question.optionValues?.[candidate.label] === raw,
     )
-    return option?.label
+    return option?.value || option?.label
   }
   if (Array.isArray(value)) {
     for (const item of value) {
       const raw = String(item)
-      const label = optionLabel(raw) ?? raw
-      if (question.multiSelect || question.options.length === 0) answer.selected.add(label)
-      else answer.other = label
+      const valueForQuestion = optionValue(raw) ?? raw
+      if (question.multiSelect || question.options.length === 0) answer.selected.add(valueForQuestion)
+      else answer.other = valueForQuestion
     }
     return answer
   }
   const raw = String(value)
-  const label = optionLabel(raw)
-  if (label) {
-    answer.selected.add(label)
+  const selected = optionValue(raw)
+  if (selected) {
+    answer.selected.add(selected)
   } else if (question.allowOther) {
     answer.other = raw
   } else {
@@ -2305,9 +2331,19 @@ function toggleQuestionOption(i: number, label: string, multi: boolean) {
   } else {
     a.selected.clear()
     a.selected.add(label)
+    // A scalar field cannot submit both a declared option and Other.
+    a.other = ''
   }
   // Force reactivity since Set mutations aren't tracked.
   questionAnswers.value = { ...questionAnswers.value, [i]: { ...a } }
+}
+
+function setQuestionOther(i: number, value: string) {
+  const answer = ensureAnswer(i)
+  answer.other = value
+  const question = activeQuestions.value[i]
+  if (question && !question.multiSelect) answer.selected.clear()
+  questionAnswers.value = { ...questionAnswers.value, [i]: { ...answer } }
 }
 
 function isQuestionOptionSelected(i: number, label: string): boolean {
@@ -2390,7 +2426,7 @@ function handlePermissionShortcut(e: KeyboardEvent): boolean {
 // the card's own "Other" input both count as typing targets), so this only
 // decides whether the card has a use for the key.
 function handleQuestionShortcut(e: KeyboardEvent): boolean {
-  if (!questionCardVisible.value) return false
+  if (!questionCardVisible.value || questionSubmitting.value) return false
   const firstVisible = activeQuestions.value.findIndex(q => questionIsVisible(q, activeQuestions.value, questionAnswers.value))
   if (firstVisible < 0) return false
   const q = activeQuestions.value[firstVisible]
@@ -2412,7 +2448,7 @@ function handleQuestionShortcut(e: KeyboardEvent): boolean {
   if (!/^[1-9]$/.test(e.key)) return false
   const opt = q.options[Number(e.key) - 1]
   if (!opt) return false
-  toggleQuestionOption(firstVisible, opt.label, q.multiSelect)
+  toggleQuestionOption(firstVisible, opt.value || opt.label, q.multiSelect)
   return true
 }
 
@@ -2440,7 +2476,7 @@ function questionPromptLabel(
 }
 
 function submitQuestionAnswers() {
-  if (!allQuestionsAnswered.value) return
+  if (questionSubmitting.value || !allQuestionsAnswered.value) return
   if (!chat.value || chat.value.archived) return
   const qs = activeQuestions.value
   if (!qs.length) return
@@ -2478,8 +2514,14 @@ function submitQuestionAnswers() {
   }
   const requestId = qs[0]?.requestId || ''
   if (requestId) {
-    store.respondQuestion(chat.value.chat_id, requestId, nativeAnswers, false, true)
-    questionAnswers.value = {}
+    // Native V2 forms are answered in band.  Keep the card and the entered
+    // values mounted until the backend acknowledges the request; clearing
+    // them here made a dropped socket indistinguishable from a successful
+    // reply.
+    store.respondQuestion(chat.value.chat_id, requestId, nativeAnswers, {
+      action: 'reply',
+      submitted: true,
+    })
     return
   }
   const text = lines.join('\n')
@@ -2488,20 +2530,21 @@ function submitQuestionAnswers() {
 }
 
 function dismissQuestions() {
+  if (questionSubmitting.value) return
   const id = store.activeChatId
   if (!id) return
   const requestId = activeQuestions.value[0]?.requestId || ''
   if (requestId) {
-    // respondQuestion records the resolution optimistically; a negative
-    // provider result restores the card for retry.
-    if (!store.respondQuestion(id, requestId, {}, true)) return
+    // Native cancellation is also a round-trip.  Keep the card mounted until
+    // the provider acknowledges it so a closed socket can be retried.
+    store.respondQuestion(id, requestId, {}, { action: 'cancel' })
   } else {
     // Claude picker has no round-trip; remember it as resolved so a stale
     // server snapshot can't rebuild it after dismissal.
     store.markResolvedQuestion(id)
     delete store.activeQuestions[id]
+    questionAnswers.value = {}
   }
-  questionAnswers.value = {}
 }
 
 // Image-capability question. The server paused before dispatch because the
@@ -6398,6 +6441,18 @@ details[open] > .activity-summary::before {
   line-height: 1.35;
 }
 .question-card-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.question-card-error {
+  color: var(--error);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.question-option:disabled,
+.question-other:disabled,
+.question-external-check input:disabled,
+.question-card-dismiss:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 
 /* Pending Auto-mode permission prompts. Sticks above the input until the
    user answers. Chrome uses --warning (this is a "waiting on you" state,

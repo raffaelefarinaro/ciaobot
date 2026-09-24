@@ -665,6 +665,20 @@ class ChatStream:
             except asyncio.QueueFull:
                 logger.warning("Chat stream subscriber queue full, dropping event")
 
+    def publish_live(self, payload: dict) -> None:
+        """Fan out an ephemeral state change without adding it to replay.
+
+        Resolution acknowledgements are useful to tabs already attached, but
+        replaying them on a later reconnect would be redundant with the
+        authoritative chat snapshot and can make old event-buffer assertions
+        (and clients) see a terminal card event twice.
+        """
+        for queue in list(self._subs):
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                logger.warning("Chat stream subscriber queue full, dropping event")
+
     def deny_tool_use(self, tool_use_id: str) -> None:
         """Retract the file card for a tool call that was refused.
 

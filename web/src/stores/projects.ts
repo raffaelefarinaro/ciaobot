@@ -31,6 +31,8 @@ import type {
   InAppToast,
   PackageStatus,
   PendingPermission,
+  PermissionSubmission,
+  QuestionSubmission,
   RuntimeProvider,
   WorkspaceInfo,
   WorkspaceName,
@@ -235,13 +237,17 @@ export const useProjectStore = defineStore('projects', () => {
   const queuedMessages = ref<Record<string, QueuedMessage[]>>({})
   // Pending Auto-mode permission prompts keyed by chat_id. The chat bubble
   // renders Approve/Deny buttons for each entry; clicking sends a
-  // `permission_response` on the per-chat WS and pops the entry optimistically.
+  // `permission_response` and keeps the card mounted until its result frame.
   const pendingPermissions = ref<Record<string, PendingPermission[]>>({})
-  // Optimistic response state. The server sends an explicit result frame after
-  // the provider HTTP call; these snapshots let a failed V2 delivery put the
-  // card back instead of making it disappear permanently.
-  const permissionResponseSnapshots = new Map<string, { permission: PendingPermission; persisted: string }>()
-  const questionResponseSnapshots = new Map<string, { questions: ActiveQuestion[]; persisted: string }>()
+  const permissionSubmissions = ref<Record<string, PermissionSubmission>>({})
+  const questionSubmissions = ref<Record<string, QuestionSubmission>>({})
+  // A response can be acknowledged after its socket disappears. Keep the
+  // complete frame outside the reactive card state so onopen can requeue it;
+  // answers are intentionally never persisted to localStorage.
+  const queuedPermissionResponses: Record<string, PermissionSubmission[]> = {}
+  const queuedQuestionResponses: Record<string, QuestionSubmission[]> = {}
+  const permissionSubmissionTimers: Record<string, ReturnType<typeof setTimeout>> = {}
+  const questionSubmissionTimers: Record<string, ReturnType<typeof setTimeout>> = {}
   // Per-project "new chat is being created" flag so UI can disable buttons
   // and prevent double-clicks while the POST is in flight.
   const creatingChatProjectIds = ref<Record<string, boolean>>({})
@@ -296,6 +302,209 @@ export const useProjectStore = defineStore('projects', () => {
     const sig = questionsSignature(activeQuestions.value[chatId])
     if (!sig) return
     ;(resolvedQuestions.value[chatId] ||= new Set<string>()).add(sig)
+  }
+
+  function _clearSubmissionTimer(
+    timers: Record<string, ReturnType<typeof setTimeout>>,
+    chatId: string,
+  ) {
+    const timer = timers[chatId]
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      delete timers[chatId]
+    }
+  }
+
+  function _removeQueued<T extends { requestId: string }>(
+    queue: Record<string, T[]>,
+    chatId: string,
+    requestId: string,
+  ) {
+    const list = queue[chatId]
+    if (!list) return
+    const next = list.filter(item => item.requestId !== requestId)
+    if (next.length) queue[chatId] = next
+    else delete queue[chatId]
+  }
+
+  function clearQuestion(chatId: string, requestId = '') {
+    const currentSubmission = questionSubmissions.value[chatId]
+    if (requestId && currentSubmission && currentSubmission.requestId !== requestId) return
+    const questions = activeQuestions.value[chatId]
+    if (requestId && questions?.length && !questions.some(question => question.requestId === requestId)) return
+    if (requestId) markResolvedQuestion(chatId)
+    if (!requestId || questions?.some(question => question.requestId === requestId)) {
+      delete activeQuestions.value[chatId]
+    }
+    delete questionSubmissions.value[chatId]
+    _clearSubmissionTimer(questionSubmissionTimers, chatId)
+    _removeQueued(queuedQuestionResponses, chatId, requestId)
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (chat?.pending_question) {
+      try {
+        const stored = JSON.parse(chat.pending_question) as { request_id?: string }
+        if (!requestId || !stored.request_id || stored.request_id === requestId) {
+          chat.pending_question = ''
+        }
+      } catch {
+        if (!requestId) chat.pending_question = ''
+      }
+    }
+  }
+
+  function clearPermission(chatId: string, requestId: string) {
+    const currentSubmission = permissionSubmissions.value[chatId]
+    if (currentSubmission && currentSubmission.requestId !== requestId) return
+    const list = pendingPermissions.value[chatId]
+    if (list?.length && !list.some(permission => permission.request_id === requestId)) return
+    if (list) {
+      const next = list.filter(permission => permission.request_id !== requestId)
+      if (next.length) pendingPermissions.value[chatId] = next
+      else delete pendingPermissions.value[chatId]
+    }
+    delete permissionSubmissions.value[chatId]
+    _clearSubmissionTimer(permissionSubmissionTimers, chatId)
+    _removeQueued(queuedPermissionResponses, chatId, requestId)
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (chat?.pending_permission) {
+      try {
+        const stored = JSON.parse(chat.pending_permission) as { request_id?: string }
+        if (!stored.request_id || stored.request_id === requestId) {
+          chat.pending_permission = ''
+        }
+      } catch {
+        // A malformed legacy row is safe to clear on an acknowledged answer.
+        chat.pending_permission = ''
+      }
+    }
+  }
+
+  const RESPONSE_ACK_TIMEOUT_MS = 15_000
+
+  function _armResponseTimer(
+    timers: Record<string, ReturnType<typeof setTimeout>>,
+    chatId: string,
+    onTimeout: () => void,
+  ) {
+    _clearSubmissionTimer(timers, chatId)
+    timers[chatId] = setTimeout(() => {
+      delete timers[chatId]
+      onTimeout()
+    }, RESPONSE_ACK_TIMEOUT_MS)
+  }
+
+  function _queueResponse<T extends { requestId: string }>(
+    queue: Record<string, T[]>,
+    chatId: string,
+    response: T,
+  ) {
+    const list = queue[chatId] || (queue[chatId] = [])
+    if (!list.some(item => item.requestId === response.requestId)) list.push(response)
+  }
+
+  function _sendPermissionResponse(chatId: string, response: PermissionSubmission) {
+    const ws = sockets.value[chatId]
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      _queueResponse(queuedPermissionResponses, chatId, response)
+      permissionSubmissions.value[chatId] = { ...response, pending: true, queued: true }
+      _armResponseTimer(permissionSubmissionTimers, chatId, () => {
+        const current = permissionSubmissions.value[chatId]
+        if (!current || current.requestId !== response.requestId || !current.pending) return
+        _removeQueued(queuedPermissionResponses, chatId, response.requestId)
+        permissionSubmissions.value[chatId] = {
+          ...current,
+          pending: false,
+          queued: false,
+          error: 'Chat connection is down; retry when it reconnects.',
+        }
+      })
+      return false
+    }
+    try {
+      ws.send(JSON.stringify({
+        type: 'permission_response',
+        request_id: response.requestId,
+        approved: response.approved,
+        reason: response.reason,
+      }))
+      permissionSubmissions.value[chatId] = { ...response, pending: true, queued: false }
+      _armResponseTimer(permissionSubmissionTimers, chatId, () => {
+        const current = permissionSubmissions.value[chatId]
+        if (!current || current.requestId !== response.requestId || !current.pending) return
+        _removeQueued(queuedPermissionResponses, chatId, response.requestId)
+        permissionSubmissions.value[chatId] = {
+          ...current,
+          pending: false,
+          queued: false,
+          error: 'No acknowledgement arrived; try again.',
+        }
+      })
+      return true
+    } catch {
+      _queueResponse(queuedPermissionResponses, chatId, response)
+      permissionSubmissions.value[chatId] = { ...response, pending: true, queued: true }
+      return false
+    }
+  }
+
+  function _sendQuestionResponse(chatId: string, response: QuestionSubmission) {
+    const ws = sockets.value[chatId]
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      _queueResponse(queuedQuestionResponses, chatId, response)
+      questionSubmissions.value[chatId] = { ...response, pending: true, queued: true }
+      _armResponseTimer(questionSubmissionTimers, chatId, () => {
+        const current = questionSubmissions.value[chatId]
+        if (!current || current.requestId !== response.requestId || !current.pending) return
+        _removeQueued(queuedQuestionResponses, chatId, response.requestId)
+        questionSubmissions.value[chatId] = {
+          ...current,
+          pending: false,
+          queued: false,
+          error: 'Chat connection is down; retry when it reconnects.',
+        }
+      })
+      return false
+    }
+    try {
+      const payload: Record<string, unknown> = {
+        type: 'question_response',
+        request_id: response.requestId,
+        // `submitted` distinguishes an all-optional empty reply from the
+        // explicit cancel action. `action` is included for V1 clients and
+        // rolling upgrades; the route accepts both spellings.
+        action: response.action,
+        answers: response.answers,
+        cancel: response.action === 'cancel',
+      }
+      if (response.submitted) payload.submitted = true
+      ws.send(JSON.stringify(payload))
+      questionSubmissions.value[chatId] = { ...response, pending: true, queued: false }
+      _armResponseTimer(questionSubmissionTimers, chatId, () => {
+        const current = questionSubmissions.value[chatId]
+        if (!current || current.requestId !== response.requestId || !current.pending) return
+        _removeQueued(queuedQuestionResponses, chatId, response.requestId)
+        questionSubmissions.value[chatId] = {
+          ...current,
+          pending: false,
+          queued: false,
+          error: 'No acknowledgement arrived; try again.',
+        }
+      })
+      return true
+    } catch {
+      _queueResponse(queuedQuestionResponses, chatId, response)
+      questionSubmissions.value[chatId] = { ...response, pending: true, queued: true }
+      return false
+    }
+  }
+
+  function flushQueuedResponses(chatId: string) {
+    const questions = [...(queuedQuestionResponses[chatId] || [])]
+    delete queuedQuestionResponses[chatId]
+    for (const response of questions) _sendQuestionResponse(chatId, response)
+    const permissions = [...(queuedPermissionResponses[chatId] || [])]
+    delete queuedPermissionResponses[chatId]
+    for (const response of permissions) _sendPermissionResponse(chatId, response)
   }
 
   // ── Image-capability questions ────────────────────────────────────────
@@ -648,6 +857,8 @@ export const useProjectStore = defineStore('projects', () => {
       subagentPollTimer = null
     }
     stopRunningSubagentPoll()
+    for (const timer of Object.values(permissionSubmissionTimers)) clearTimeout(timer)
+    for (const timer of Object.values(questionSubmissionTimers)) clearTimeout(timer)
     for (const undo of teardowns.splice(0)) {
       try { undo() } catch { /* a disposed store must not throw */ }
     }
@@ -3078,6 +3289,7 @@ export const useProjectStore = defineStore('projects', () => {
       opened = true
       lastChatFrameAt[chatId] = nowMs()
       sendFocus(chatId)
+      flushQueuedResponses(chatId)
     }
 
     ws.onmessage = (ev) => {
@@ -3114,6 +3326,19 @@ export const useProjectStore = defineStore('projects', () => {
       if (isCurrent) {
         delete sockets.value[chatId]
         delete lastChatFrameAt[chatId]
+        // A response may have reached the server just before the socket died.
+        // Keep its card and retryable frame; onopen will requeue it rather than
+        // silently losing the user's answer.
+        const questionSubmission = questionSubmissions.value[chatId]
+        if (questionSubmission?.pending) {
+          _queueResponse(queuedQuestionResponses, chatId, questionSubmission)
+          questionSubmissions.value[chatId] = { ...questionSubmission, queued: true }
+        }
+        const permissionSubmission = permissionSubmissions.value[chatId]
+        if (permissionSubmission?.pending) {
+          _queueResponse(queuedPermissionResponses, chatId, permissionSubmission)
+          permissionSubmissions.value[chatId] = { ...permissionSubmission, queued: true }
+        }
       }
 
       const wasIntentional = intentionalCloses.delete(ws)
@@ -3992,11 +4217,21 @@ export const useProjectStore = defineStore('projects', () => {
     onSent?: () => void,
     _deferredAttempt = 0,
   ): boolean {
-    // Any send implicitly answers (or dismisses) a pending AskUserQuestion
-    // picker — the model already got an empty tool result and is reading
-    // this turn for the actual answer. Clear the local chat's persisted
-    // pending_question too, so a loadMessages racing this send (WS reconnect,
-    // reconciliation) doesn't rebuild the picker from a now-stale value.
+    // A native V2 form owns the turn until its reply/cancel is acknowledged.
+    // Do not silently dismiss it by sending an unrelated composer message.
+    const openNativeQuestion = activeQuestions.value[chatId]?.some(q => q.requestId)
+    const pendingNativeQuestion = questionSubmissions.value[chatId]?.requestId
+    if (openNativeQuestion || pendingNativeQuestion) {
+      pushToast({
+        chat_id: chatId,
+        title: 'Answer the open question first',
+        body: 'The model is waiting for the highlighted question before it can continue.',
+        variant: 'error',
+      })
+      return false
+    }
+    // Claude's legacy picker has no request id and is intentionally dismissed
+    // by the next ordinary message.
     if (activeQuestions.value[chatId]) {
       markResolvedQuestion(chatId)
       delete activeQuestions.value[chatId]
@@ -4225,74 +4460,59 @@ export const useProjectStore = defineStore('projects', () => {
     reason = '',
   ) {
     const list = pendingPermissions.value[chatId]
-    const permission = list?.find(p => p.request_id === requestId)
-    if (!permission) return false
-    const ws = sockets.value[chatId]
-    const chat = chats.value.find(c => c.chat_id === chatId)
-    const snapshot = {
-      permission,
-      persisted: chat?.pending_permission || '',
+    if (!list?.some(permission => permission.request_id === requestId)) return false
+    const current = permissionSubmissions.value[chatId]
+    if (current?.requestId === requestId && current.pending) return true
+    const response: PermissionSubmission = {
+      requestId,
+      approved,
+      reason,
+      pending: true,
+      queued: false,
+      error: '',
+      retryable: true,
     }
-    if (ws?.readyState === WebSocket.OPEN) {
-      try {
-        ws.send(
-          JSON.stringify({
-            type: 'permission_response',
-            request_id: requestId,
-            approved,
-            reason,
-          }),
-        )
-      } catch {
-        return false
-      }
-    }
-    permissionResponseSnapshots.set(requestId, snapshot)
-    // Pop optimistically so rapid taps cannot double-send. The matching
-    // result frame restores this snapshot if the provider HTTP call fails.
-    const next = list.filter(p => p.request_id !== requestId)
-    if (next.length) pendingPermissions.value[chatId] = next
-    else {
-      delete pendingPermissions.value[chatId]
-      delete activeQuestions.value[chatId]
-    }
-    if (chat?.pending_permission) chat.pending_permission = ''
-    return true
+    permissionSubmissions.value[chatId] = response
+    return _sendPermissionResponse(chatId, response)
   }
 
   function respondQuestion(
     chatId: string,
     requestId: string,
     answers: Record<string, string[]>,
-    cancel = false,
-    submitted = false,
+    options: { action?: 'reply' | 'cancel'; submitted?: boolean } | 'reply' | 'cancel' | boolean = 'reply',
+    legacySubmitted = false,
   ) {
     const questions = activeQuestions.value[chatId]
-    if (!questions?.length) return false
-    const ws = sockets.value[chatId]
-    const chat = chats.value.find(c => c.chat_id === chatId)
-    const snapshot = {
-      questions,
-      persisted: chat?.pending_question || '',
+    // Correlate with the exact native request. A reused id from another chat
+    // (or a stale card in this chat) must not send or clear anything.
+    if (!questions?.some(question => question.requestId === requestId)) return false
+    const current = questionSubmissions.value[chatId]
+    if (current?.requestId === requestId && current.pending) return true
+    let action: 'reply' | 'cancel' = 'reply'
+    let submitted = false
+    if (typeof options === 'string') {
+      action = options
+      submitted = action === 'reply'
+    } else if (typeof options === 'boolean') {
+      action = options ? 'cancel' : 'reply'
+      submitted = legacySubmitted
+    } else {
+      action = options.action || 'reply'
+      submitted = options.submitted === true || (action === 'reply' && options.submitted !== false)
     }
-    if (ws?.readyState === WebSocket.OPEN) {
-      try {
-        ws.send(JSON.stringify({
-          type: 'question_response',
-          request_id: requestId,
-          answers,
-          cancel,
-          ...(submitted ? { submitted: true } : {}),
-        }))
-      } catch {
-        return false
-      }
+    const response: QuestionSubmission = {
+      requestId,
+      action,
+      answers: action === 'cancel' ? {} : answers,
+      submitted: action === 'cancel' ? false : submitted,
+      pending: true,
+      queued: false,
+      error: '',
+      retryable: true,
     }
-    questionResponseSnapshots.set(requestId, snapshot)
-    markResolvedQuestion(chatId)
-    delete activeQuestions.value[chatId]
-    if (chat?.pending_question) chat.pending_question = ''
-    return true
+    questionSubmissions.value[chatId] = response
+    return _sendQuestionResponse(chatId, response)
   }
 
   function respondCapability(
@@ -4573,54 +4793,59 @@ export const useProjectStore = defineStore('projects', () => {
 
     switch (event.type) {
       case 'permission_response_result': {
-        const snapshot = permissionResponseSnapshots.get(event.request_id)
-        if (!snapshot) break
+        const submission = permissionSubmissions.value[chatId]
+        if (!submission || submission.requestId !== event.request_id) break
+        _clearSubmissionTimer(permissionSubmissionTimers, chatId)
+        _removeQueued(queuedPermissionResponses, chatId, event.request_id)
         if (event.ok) {
-          permissionResponseSnapshots.delete(event.request_id)
-          break
+          clearPermission(chatId, event.request_id)
+        } else {
+          permissionSubmissions.value[chatId] = {
+            ...submission,
+            pending: false,
+            queued: false,
+            error: event.error || 'The provider did not accept that response.',
+            retryable: event.retryable !== false,
+          }
+          pushToast({
+            chat_id: chatId,
+            title: 'Approval was not delivered',
+            body: 'The provider did not accept that response. Try again.',
+            variant: 'error',
+          })
         }
-        const list = pendingPermissions.value[chatId] || []
-        const has_current_permission = list.some(item => item.request_id !== event.request_id)
-        if (!list.some(item => item.request_id === event.request_id)) {
-          pendingPermissions.value[chatId] = [...list, snapshot.permission]
-        }
-        const chat = chats.value.find(c => c.chat_id === chatId)
-        if (chat && !has_current_permission && snapshot.persisted) {
-          chat.pending_permission = snapshot.persisted
-        }
-        pushToast({
-          chat_id: chatId,
-          title: 'Approval was not delivered',
-          body: 'The provider did not accept that response. Try again.',
-          variant: 'error',
-        })
         break
       }
       case 'question_response_result': {
-        const snapshot = questionResponseSnapshots.get(event.request_id)
-        if (!snapshot) break
+        const submission = questionSubmissions.value[chatId]
+        if (!submission || submission.requestId !== event.request_id) break
+        _clearSubmissionTimer(questionSubmissionTimers, chatId)
+        _removeQueued(queuedQuestionResponses, chatId, event.request_id)
         if (event.ok) {
-          questionResponseSnapshots.delete(event.request_id)
-          break
+          clearQuestion(chatId, event.request_id)
+        } else {
+          questionSubmissions.value[chatId] = {
+            ...submission,
+            pending: false,
+            queued: false,
+            error: event.error || 'The provider did not accept that response.',
+            retryable: event.retryable !== false,
+          }
+          pushToast({
+            chat_id: chatId,
+            title: 'Answer was not delivered',
+            body: 'The form is still waiting for a response. Try again.',
+            variant: 'error',
+          })
         }
-        const has_current_question = Boolean(activeQuestions.value[chatId]?.length)
-        if (!has_current_question) {
-          activeQuestions.value[chatId] = snapshot.questions
-          const chat = chats.value.find(c => c.chat_id === chatId)
-          if (chat && snapshot.persisted) chat.pending_question = snapshot.persisted
-        }
-        // The optimistic send marked this signature resolved; a failed
-        // delivery makes it pending again, so a later chat reload must be
-        // allowed to rebuild the retryable card from persisted state.
-        resolvedQuestions.value[chatId]?.delete(questionsSignature(snapshot.questions))
-        pushToast({
-          chat_id: chatId,
-          title: 'Answer was not delivered',
-          body: 'The form is still waiting for a response. Try again.',
-          variant: 'error',
-        })
         break
       }
+      case 'permission_resolved':
+        clearPermission(chatId, event.request_id)
+        break
+      case 'question_resolved':
+        clearQuestion(chatId, event.request_id)
+        break
       case 'user_echo': {
         // Broker echoes the user prompt first, so a reconnecting client can
         // render the user turn without depending on /messages being ready.
@@ -4786,6 +5011,10 @@ export const useProjectStore = defineStore('projects', () => {
             // memory for this chat (keeps the set from growing and avoids a
             // reused native request id being wrongly suppressed).
             delete resolvedQuestions.value[chatId]
+            const previousQuestionRequest = questionSubmissions.value[chatId]?.requestId || ''
+            delete questionSubmissions.value[chatId]
+            _clearSubmissionTimer(questionSubmissionTimers, chatId)
+            _removeQueued(queuedQuestionResponses, chatId, previousQuestionRequest)
             activeQuestions.value[chatId] = qs
             // Nudge the user when the tab is backgrounded so they don't
             // miss a question that the model needs answered.
@@ -5185,7 +5414,7 @@ export const useProjectStore = defineStore('projects', () => {
     // State
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
-    projectStreaming, backgroundAgents, backgroundRuns, runningSubagents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
+    projectStreaming, backgroundAgents, backgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable, chatPanelsMounted,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,

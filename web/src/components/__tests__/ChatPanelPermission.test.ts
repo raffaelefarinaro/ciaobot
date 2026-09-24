@@ -170,7 +170,8 @@ describe('permission card keyboard shortcuts', () => {
     await nextTick()
 
     expect(event.defaultPrevented).toBe(true)
-    expect(store.pendingPermissions[CHAT_ID]).toBeUndefined()
+    expect(store.pendingPermissions[CHAT_ID]?.[0]?.request_id).toBe('approval-1')
+    expect(store.permissionSubmissions[CHAT_ID]?.pending).toBe(true)
     expect(switchWorkspace).not.toHaveBeenCalled()
     expect(store.activeWorkspace).toBe('personal')
 
@@ -185,7 +186,8 @@ describe('permission card keyboard shortcuts', () => {
     await nextTick()
 
     expect(event.defaultPrevented).toBe(true)
-    expect(store.pendingPermissions[CHAT_ID]).toBeUndefined()
+    expect(store.pendingPermissions[CHAT_ID]?.[0]?.request_id).toBe('approval-1')
+    expect(store.permissionSubmissions[CHAT_ID]?.pending).toBe(true)
     expect(switchWorkspace).not.toHaveBeenCalled()
 
     wrapper.unmount()

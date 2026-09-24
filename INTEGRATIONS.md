@@ -55,7 +55,11 @@ option blanks are omitted from the typed V2 answer so the server default
 remains authoritative, while the Cancel button sends an explicit cancel
 action; a submitted empty answer is never confused with cancellation. V2
 minimum/maximum, length, item-count, and pattern constraints are carried into
-the PWA and checked before Send is enabled.
+the PWA and checked before Send is enabled. Response cards remain mounted
+until the provider acknowledges delivery; a disconnected socket queues the
+reply and reconnects retry the same request. Credential denies also include
+workspace-relative spellings for a relocated `CIAO_RUNTIME_ROOT`, not only its
+absolute V1 path.
 Model discovery uses V2's flat `/api/model` catalog. V1 routes and payloads
 remain supported for older servers. V2 model selections should be qualified
 `provider/model` IDs; an unqualified ID is treated as no explicit V2 model

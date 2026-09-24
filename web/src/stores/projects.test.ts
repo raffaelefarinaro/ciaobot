@@ -2411,7 +2411,8 @@ describe('provider-neutral input state', () => {
       message: 'Approve?',
     }) })
     expect(store.respondPermission(permissionChat, 'perm-retry', true)).toBe(true)
-    expect(store.pendingPermissions[permissionChat]).toBeUndefined()
+    expect(store.pendingPermissions[permissionChat]?.[0]?.request_id).toBe('perm-retry')
+    expect(store.permissionSubmissions[permissionChat]?.pending).toBe(true)
     permissionSocket.onmessage?.({ data: JSON.stringify({
       type: 'permission_response_result', request_id: 'perm-retry', ok: false,
     }) })
@@ -2430,7 +2431,8 @@ describe('provider-neutral input state', () => {
       required: false,
     }]
     expect(store.respondQuestion(questionChat, 'form-retry', { optional: [''] })).toBe(true)
-    expect(store.activeQuestions[questionChat]).toBeUndefined()
+    expect(store.activeQuestions[questionChat]?.[0]?.requestId).toBe('form-retry')
+    expect(store.questionSubmissions[questionChat]?.pending).toBe(true)
     questionSocket.onmessage?.({ data: JSON.stringify({
       type: 'question_response_result', request_id: 'form-retry', ok: false,
     }) })
