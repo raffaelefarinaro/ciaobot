@@ -656,6 +656,49 @@ def test_notification_answered_after_user_record_prose(tmp_path: Path) -> None:
     assert state.notification_pending is False
 
 
+def test_combined_notification_credits_every_agent(tmp_path: Path) -> None:
+    """One terminal response credits every agent in a combined prompt."""
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research A"),
+        _dispatch_result("toolu_1", "abc123"),
+        _assistant_dispatch("toolu_2", "Research B"),
+        _dispatch_result("toolu_2", "def456"),
+        _user_text(_notification("abc123") + "\n" + _notification("def456")),
+        _assistant_text("Both agents are ready. Here is the consolidated report."),
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.subagents["abc123"].status == "completed"
+    assert state.subagents["def456"].status == "completed"
+    assert state.notification_answered is True
+    assert state.notification_pending is False
+
+
+def test_combined_notification_through_queue_credits_every_agent(
+    tmp_path: Path,
+) -> None:
+    """The queued window also retains every combined agent identity."""
+    combined = _notification("abc123") + "\n" + _notification("def456")
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research A"),
+        _dispatch_result("toolu_1", "abc123"),
+        _assistant_dispatch("toolu_2", "Research B"),
+        _dispatch_result("toolu_2", "def456"),
+        {"type": "queue-operation", "operation": "enqueue", "content": combined},
+        {"type": "queue-operation", "operation": "dequeue"},
+        _user_text(combined),
+        _assistant_text("Both agents are ready. Here is the consolidated report."),
+    ]
+
+    state = parse_session_subagents(_write_session(tmp_path, records))
+
+    assert state.notification_answered is True
+    assert state.notification_pending is False
+
+
 def test_notification_answered_false_for_tool_use_only_assistant(
     tmp_path: Path,
 ) -> None:
