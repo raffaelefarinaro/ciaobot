@@ -91,6 +91,34 @@ const GET_ROUTES = {
     providers: [{ id: 'claude', label: 'Claude', short_label: 'Claude', capabilities: {} }],
     thinking_levels: { claude: ['low', 'high'] },
   }),
+  // Settings → Models reads these. The real endpoints always send every
+  // field; an empty object crashed the tab, so the stub mirrors the shape.
+  '/api/settings/routines': () => ({
+    insights_model: '',
+    insights_enabled: true,
+    trajectories_enabled: false,
+    critique_models: '',
+    provider_default_models: {},
+    provider_default_modes: {},
+    provider_default_thinking: {},
+    provider_insights_models: {},
+    insights_model_effective: 'synthetic-model',
+    insights_model_by_workspace: {},
+    critique_models_effective: '',
+    apple_model_available: false,
+    apple_model_unavailable_reason: 'Not available on the fixture host',
+    transcription: { engine: 'auto', locale: 'en-US', available: false, unavailable_reason: 'No speech engine on the fixture host' },
+    speech: { engine: 'off', local_voice: '', available: false, local_voices: [] },
+    model_options: { anthropic: ['synthetic-model'] },
+    backends: { anthropic: true, opencode: false },
+    workspace_context: { workspace_root: '/fixture/workspace', vault_root: '/fixture/workspace/memory-vault' },
+  }),
+  '/api/automation': () => ({ jobs: [], proposal_outcomes: null }),
+  '/api/settings/providers': () => ({
+    connections: {
+      claude: { name: 'claude', label: 'Claude Code', short_label: 'Claude', ok: true, auth: 'ok', command: 'claude', version: '2.0.0', account: 'fixture@example.com' },
+    },
+  }),
   '/api/status': () => ({ active_model: 'synthetic-model', mode: 'auto', cost: 0 }),
   '/api/stats': () => ({}),
   '/api/package/status': () => ({

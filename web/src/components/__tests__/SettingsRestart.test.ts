@@ -55,7 +55,7 @@ it('fails closed when the server type cannot be determined', async () => {
     await flushPromises()
     expect(confirm).not.toHaveBeenCalled()
     expect(post).not.toHaveBeenCalled()
-    expect(wrapper.text()).toContain('connection role unavailable')
+    expect(wrapper.text()).toContain('Connection role unavailable')
   } finally {
     wrapper.unmount()
   }

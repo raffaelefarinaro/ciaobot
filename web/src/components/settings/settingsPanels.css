@@ -13,25 +13,65 @@
  * still following it.
  */
 
+/* A settings "card" is a plain section now: heading, optional one-line
+   description, then hairline rows. No box, no fill - the page grid and the
+   rows' own rules carry the structure (DESIGN.md, aligned pages). */
 .card {
-  width: min(100%, 1040px);
-  margin: 0 auto;
-  gap: var(--space-4);
-  border-color: var(--border);
-  box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  gap: var(--space-3);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  scroll-margin-top: var(--space-4);
+}
+
+.card:focus {
+  outline: none;
 }
 
 .section-title {
-  letter-spacing: 0.08em;
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  text-transform: none;
 }
 
+/* No rule under the heading: the section's first row carries its own top
+   hairline, so a second line here doubled it. */
 .settings-card-header {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--border);
+  gap: var(--space-1);
+  padding-bottom: var(--space-1);
+  border-bottom: 0;
 }
+
+.settings-card-header .hint {
+  color: var(--fg3);
+}
+
+/* A status pill in a section header ("on", "off", "ok") reads as the row's
+   value, in text, not as a filled chip. Semantic colours still carry meaning. */
+.settings-card-header > .badge {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--fg2);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.settings-card-header > .badge--warn { color: var(--warning); }
+.settings-card-header > .badge--error { color: var(--error); }
 
 /* No divider when the header is the only element in the card (nothing below
    it to separate). v-if="false" siblings render as comment nodes, which
@@ -53,7 +93,7 @@
 }
 
 .settings-card-header .hint {
-  margin: var(--space-2) 0 0;
+  margin: var(--space-1) 0 0;
   max-width: 76ch;
 }
 

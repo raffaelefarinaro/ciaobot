@@ -3,7 +3,7 @@
     <div class="settings-card-header settings-card-header--split">
       <div>
         <div class="settings-label-row">
-          <p class="section-title">Background Automations</p>
+          <p class="section-title">Background automations</p>
           <button class="btn-small" :disabled="!automationLoaded" @click="fetchAutomation">Refresh</button>
         </div>
         <p class="hint">
@@ -313,21 +313,37 @@ async function runJob(item: AutomationProcess, model: string) {
 /* Shared settings-card scaffolding (mirrors SettingsView.vue so the tab keeps
    its layout when rendered from a child component). */
 .card {
-  width: min(100%, 1040px);
-  margin: 0 auto;
-  gap: var(--space-4);
-  border-color: var(--border);
-  box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  gap: var(--space-3);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  scroll-margin-top: var(--space-4);
+}
+.card:focus {
+  outline: none;
 }
 .section-title {
-  letter-spacing: 0.08em;
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  text-transform: none;
 }
 .settings-card-header {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--border);
+  gap: var(--space-1);
+  padding-bottom: var(--space-1);
+  border-bottom: 0;
+}
+.settings-card-header .hint {
+  color: var(--fg3);
 }
 .settings-card-header:last-child {
   padding-bottom: 0;
@@ -343,7 +359,7 @@ async function runJob(item: AutomationProcess, model: string) {
   min-width: 0;
 }
 .settings-card-header .hint {
-  margin: var(--space-2) 0 0;
+  margin: var(--space-1) 0 0;
   max-width: 76ch;
 }
 .settings-label-row {

@@ -2,7 +2,7 @@
   <div class="card" id="mcp-servers">
     <div class="settings-card-header settings-card-header--split">
       <div>
-        <p class="section-title">mcp servers</p>
+        <p class="section-title">MCP servers</p>
         <p class="hint">
           Model Context Protocol (MCP) servers and tools available to Ciaobot agents.
         </p>

@@ -445,8 +445,8 @@ describe('component mount smoke', () => {
 
     expect(wrapper.text()).toContain('Skills')
     expect(wrapper.text()).toContain('airtable-projects')
-    expect(wrapper.text()).toContain('custom skills')
-    expect(wrapper.text()).toContain('stock skills')
+    expect(wrapper.text()).toContain('Custom skills')
+    expect(wrapper.text()).toContain('Stock skills')
     wrapper.unmount()
   })
 
@@ -461,7 +461,7 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    expect(wrapper.text()).toContain('notifications')
+    expect(wrapper.text()).toContain('Notifications')
     expect(wrapper.text()).toContain('Get a notification when a chat replies')
     wrapper.unmount()
   })
@@ -778,7 +778,7 @@ describe('component mount smoke', () => {
     await nextTick()
 
     const titles = wrapper.findAll('.section-title').map((el) => el.text())
-    expect(titles).toEqual(['chat providers', 'background models', 'voice'])
+    expect(titles).toEqual(['Chat providers', 'Background models', 'Voice'])
     expect(wrapper.find('#chat-providers').exists()).toBe(true)
     wrapper.unmount()
   })

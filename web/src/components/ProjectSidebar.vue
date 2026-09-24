@@ -312,74 +312,17 @@
     </template>
 
     <template v-if="!collapsed && mode === 'settings'">
-      <div class="sidebar-section-header">
-        <span class="sidebar-section-title">settings</span>
-      </div>
-      <div class="settings-nav-list">
+      <nav class="settings-nav-list" aria-label="Settings sections">
+        <h2 class="sidebar-list-label">Settings</h2>
         <router-link
-          to="/settings"
+          v-for="item in SETTINGS_NAV"
+          :key="item.to"
+          :to="item.to"
           class="settings-nav-item"
-          :class="{ active: route.path === '/settings' }"
-        >
-          home
-        </router-link>
-        <router-link
-          to="/settings/workspaces"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/workspaces' }"
-        >
-          workspaces
-        </router-link>
-        <router-link
-          to="/settings/models"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/models' }"
-        >
-          models &amp; providers
-        </router-link>
-        <router-link
-          to="/settings/skills"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/skills' }"
-        >
-          skills
-        </router-link>
-        <router-link
-          to="/settings/subagents"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/subagents' }"
-        >
-          subagents
-        </router-link>
-        <router-link
-          to="/settings/commands"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/commands' }"
-        >
-          commands
-        </router-link>
-        <router-link
-          to="/settings/mcp"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/mcp' }"
-        >
-          mcp
-        </router-link>
-        <router-link
-          to="/settings/automations"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/automations' }"
-        >
-          automations
-        </router-link>
-        <router-link
-          to="/settings/notifications"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/notifications' }"
-        >
-          notifications
-        </router-link>
-      </div>
+          :class="{ active: route.path === item.to }"
+          :aria-current="route.path === item.to ? 'page' : undefined"
+        >{{ item.label }}</router-link>
+      </nav>
     </template>
 
     <!-- Workspace scope now lives once at the top of the rail. This mode keeps
@@ -1475,6 +1418,18 @@ function promptTitle(prompt: string): string {
 // With a single workspace the toggle is pure noise — hide it and let the
 // content fill the space.
 const hasMultipleWorkspaces = computed(() => store.workspaceOptions.length > 1)
+// Settings tabs, in rail order. /settings is the General tab (route kept as-is).
+const SETTINGS_NAV = [
+  { to: '/settings', label: 'General' },
+  { to: '/settings/workspaces', label: 'Workspaces' },
+  { to: '/settings/models', label: 'Models & providers' },
+  { to: '/settings/skills', label: 'Skills' },
+  { to: '/settings/subagents', label: 'Subagents' },
+  { to: '/settings/commands', label: 'Commands' },
+  { to: '/settings/mcp', label: 'MCP servers' },
+  { to: '/settings/automations', label: 'Automations' },
+  { to: '/settings/notifications', label: 'Notifications' },
+] as const
 // The chord ChatLayout binds for New chat: Cmd+T in the desktop shell (the
 // browser keeps Cmd+T for itself), Option/Alt+N everywhere else.
 const newChatShortcut = isDesktopApp() ? '⌘T' : isApplePlatform() ? '⌥N' : 'Alt+N'
@@ -3568,15 +3523,18 @@ async function confirmDeleteChat(chatId: string) {
 .settings-nav-list {
   display: flex;
   flex-direction: column;
-  padding: 8px;
+  padding: 4px 12px 12px;
   gap: 2px;
+}
+.settings-nav-list .sidebar-list-label {
+  margin: 0;
 }
 .settings-nav-item {
   display: flex;
   align-items: center;
-  min-height: 44px;
-  padding: 8px 12px;
-  border-radius: var(--radius-sm);
+  min-height: 36px;
+  padding: 0 10px;
+  border-radius: 7px;
   text-decoration: none;
   color: var(--fg2);
   font-size: var(--text-base);
@@ -3584,13 +3542,19 @@ async function confirmDeleteChat(chatId: string) {
   transition: background 120ms var(--ease), color 120ms var(--ease);
 }
 .settings-nav-item:hover {
-  background: var(--bg);
+  background: var(--bg-elev);
   color: var(--fg);
+}
+.settings-nav-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 .settings-nav-item.active {
   background: var(--bg3);
   color: var(--fg);
-  border-right: 2px solid var(--accent);
+}
+@media (pointer: coarse) {
+  .settings-nav-item { min-height: var(--touch); }
 }
 
 /* Memory Map sidebar (vault stats, search, categories, path finder) */
