@@ -15,8 +15,11 @@
       </template>
       <template #actions>
         <template v-if="schedule">
+          <!-- One primary (Run now), the pause toggle beside it, and the rare
+               destructive action behind the menu instead of a red button in
+               the header. On narrow panes the toggle joins the menu too. -->
           <button
-            class="btn-small desktop-only"
+            class="btn-small btn-run"
             :class="{ 'btn-running': showRunning }"
             :disabled="isStarting && !runningChatId"
             @click="onRunButtonClick"
@@ -24,29 +27,41 @@
           <button class="btn-small desktop-only" @click="onToggleEnabled">
             {{ enabledToggleLabel(schedule) }}
           </button>
-          <button v-if="schedule.scope !== 'system'" class="btn-small btn-danger desktop-only" @click="onDelete">Delete</button>
-
-          <button
-            class="btn-small mobile-primary"
-            :class="{ 'btn-running': showRunning }"
-            :disabled="isStarting && !runningChatId"
-            @click="onRunButtonClick"
-          >{{ showRunning ? 'Running...' : 'Run now' }}</button>
-          <div class="mobile-overflow" @keydown.escape.stop="actionsOpen = false">
-            <button
-              type="button"
-              class="btn-icon overflow-trigger"
-              aria-label="Automation actions"
-              :aria-expanded="actionsOpen"
-              @click="actionsOpen = !actionsOpen"
-            >•••</button>
-            <div v-if="actionsOpen" class="header-menu" role="menu">
-              <button role="menuitem" @click="runHeaderAction(onToggleEnabled)">
-                {{ enabledToggleLabel(schedule) }}
+          <DropdownMenuRoot :modal="false">
+            <DropdownMenuTrigger as-child>
+              <button
+                type="button"
+                class="btn-icon overflow-trigger"
+                :class="{ 'mobile-only-trigger': schedule.scope === 'system' }"
+                aria-label="More automation actions"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" />
+                </svg>
               </button>
-              <button v-if="schedule.scope !== 'system'" class="danger" role="menuitem" @click="runHeaderAction(onDelete)">Delete</button>
-            </div>
-          </div>
+            </DropdownMenuTrigger>
+            <DropdownMenuPortal>
+              <DropdownMenuContent
+                as-child
+                align="end"
+                :side-offset="6"
+                :collision-padding="8"
+              >
+                <!-- as-child, so the panel is this template's own element and
+                     picks up the scoped styles even though it is portalled. -->
+                <div class="schedule-actions-menu">
+                <DropdownMenuItem as-child>
+                  <button type="button" class="menu-toggle-item" @click="onToggleEnabled">
+                    {{ enabledToggleLabel(schedule) }}
+                  </button>
+                </DropdownMenuItem>
+                <DropdownMenuItem v-if="schedule.scope !== 'system'" as-child>
+                  <button type="button" class="danger" @click="onDelete">Delete automation…</button>
+                </DropdownMenuItem>
+                </div>
+              </DropdownMenuContent>
+            </DropdownMenuPortal>
+          </DropdownMenuRoot>
         </template>
 
       </template>
@@ -67,7 +82,7 @@
     </div>
 
     <!-- New automation form -->
-    <div v-if="showNew" class="scroll-body">
+    <div v-if="showNew" class="scroll-body scroll-body--padded">
       <details class="field-info field-info--block">
         <summary aria-label="What's possible with automations" title="What's possible with automations">i</summary>
         <div class="field-info-panel">
@@ -117,15 +132,17 @@
 
     <!-- Detail -->
     <div v-else-if="schedule" class="scroll-body">
-      <div v-if="!schedule.enabled" class="disabled-banner">
-        {{ isIntervalSchedule(schedule) ? 'Stopped' : 'Disabled' }} — won't run
-        automatically. "Run now" still works.
-      </div>
+      <div class="page-grid schedule-grid">
+      <div class="page-main">
+      <p v-if="!schedule.enabled" class="disabled-banner">
+        {{ isIntervalSchedule(schedule) ? 'Stopped' : 'Paused' }} — it won't run
+        on its own. "Run now" still works.
+      </p>
       <div class="prop-cards">
         <!-- Schedule -->
         <section class="prop-card prop-card-wide" :class="{ 'card-editing': editingCard === 'schedule' }">
           <div class="prop-card-head">
-            <span class="prop-card-name">Schedule</span>
+            <h2 class="prop-card-name">When</h2>
             <span v-if="editingCard === 'schedule'" class="esc-hint"><kbd>Esc</kbd> cancels</span>
             <button
               v-else-if="canEditSchedule && !editingCard"
@@ -144,7 +161,7 @@
               <dt>At</dt><dd>{{ schedule.daily_time_utc }} · {{ schedule.timezone_name }}</dd>
             </div>
             <div v-if="schedule.frequency !== 'manual'" class="prop-row">
-              <dt>Next run</dt><dd class="prop-highlight">{{ nextRunLabel(schedule) }}</dd>
+              <dt>Next run</dt><dd>{{ nextRunLabel(schedule) }}</dd>
             </div>
             <!-- Interval cadence has no expected slot, so the missed-run check
                  cannot report its health. last_status does instead. A
@@ -162,17 +179,17 @@
             <div class="prop-row">
               <dt>Last run</dt>
               <dd>
-                <component
-                  :is="schedule.last_run_chat_id ? 'router-link' : 'span'"
-                  :to="schedule.last_run_chat_id ? `/chat/${schedule.last_run_chat_id}` : undefined"
-                >
-                  {{ schedule.last_dispatched_at ? formatWhen(schedule.last_dispatched_at) : (schedule.last_triggered_on || 'never') }}
-                  <span
-                    v-if="showRunning && (schedule.last_dispatched_at || schedule.last_run_chat_id)"
-                    class="spinner-dot"
-                    title="Running now"
-                  />
-                </component>
+                {{ schedule.last_dispatched_at ? formatWhen(schedule.last_dispatched_at) : (schedule.last_triggered_on || 'never') }}
+                <span
+                  v-if="showRunning && (schedule.last_dispatched_at || schedule.last_run_chat_id)"
+                  class="spinner-dot"
+                  title="Running now"
+                />
+                <router-link
+                  v-if="schedule.last_run_chat_id"
+                  class="text-link"
+                  :to="`/chat/${schedule.last_run_chat_id}`"
+                > · open result</router-link>
               </dd>
             </div>
           </dl>
@@ -239,7 +256,7 @@
         <!-- Delivery -->
         <section class="prop-card" :class="{ 'card-editing': editingCard === 'delivery' }">
           <div class="prop-card-head">
-            <span class="prop-card-name">Delivery</span>
+            <h2 class="prop-card-name">Where it runs</h2>
             <span v-if="editingCard === 'delivery'" class="esc-hint"><kbd>Esc</kbd> cancels</span>
             <button
               v-else-if="canEditSchedule && !editingCard"
@@ -321,7 +338,7 @@
         <!-- Engine -->
         <section class="prop-card" :class="{ 'card-editing': editingCard === 'engine' }">
           <div class="prop-card-head">
-            <span class="prop-card-name">Engine</span>
+            <h2 class="prop-card-name">Model</h2>
             <span v-if="editingCard === 'engine'" class="esc-hint"><kbd>Esc</kbd> cancels</span>
             <button
               v-else-if="canEditEngine && !editingCard"
@@ -374,7 +391,7 @@
         <!-- Advanced -->
         <section class="prop-card" :class="{ 'card-editing': editingCard === 'advanced' }">
           <div class="prop-card-head">
-            <span class="prop-card-name">Advanced</span>
+            <h2 class="prop-card-name">Results</h2>
             <span v-if="editingCard === 'advanced'" class="esc-hint"><kbd>Esc</kbd> cancels</span>
             <button
               v-else-if="canEditAdvanced && !editingCard"
@@ -387,7 +404,7 @@
 
           <dl v-if="editingCard !== 'advanced'" class="prop-rows">
             <div class="prop-row">
-              <dt>Archive</dt><dd>{{ scheduleSupportsAutoArchive(schedule) ? archiveLabel(schedule.archive_policy) : 'manual (keeps the bound chat)' }}</dd>
+              <dt>Afterwards</dt><dd>{{ scheduleSupportsAutoArchive(schedule) ? archiveLabel(schedule.archive_policy) : 'Kept — it runs inside one chat' }}</dd>
             </div>
           </dl>
 
@@ -419,7 +436,7 @@
       <!-- Name, description and prompt -->
       <div v-if="editingCard === 'content'" class="card-form content-form">
         <div class="prop-card-head">
-          <span class="prop-card-name">Prompt</span>
+          <h2 class="prop-card-name">Prompt</h2>
           <span class="esc-hint"><kbd>Esc</kbd> cancels</span>
         </div>
         <div class="form-group">
@@ -441,114 +458,185 @@
         </div>
       </div>
 
-      <div v-else class="prompt-display">
-        <p v-if="schedule.description" class="schedule-description">{{ schedule.description }}</p>
+      <section v-else class="prompt-display">
         <div class="prompt-heading">
-          <span class="prompt-label">Prompt</span>
+          <h2 class="prompt-label">Prompt</h2>
           <div class="prompt-actions">
-            <button type="button" class="btn-small" @click="copyPrompt(schedule.prompt, schedule.schedule_id)">
+            <button type="button" class="text-link" @click="copyPrompt(schedule.prompt, schedule.schedule_id)">
               {{ promptCopyLabel(schedule.schedule_id) }}
             </button>
-            <button v-if="canEditSchedule && !editingCard" type="button" class="btn-small" @click="startCardEdit('content')">Edit</button>
+            <button v-if="canEditSchedule && !editingCard" type="button" class="text-link" @click="startCardEdit('content')">Edit</button>
           </div>
         </div>
-        <pre class="full-prompt">{{ schedule.prompt }}</pre>
+        <p v-if="schedule.description" class="schedule-description">{{ schedule.description }}</p>
+        <p class="full-prompt">{{ schedule.prompt }}</p>
+      </section>
+      </div>
+
+      <!-- Rail: this automation's own run state. The job-run log covers
+           background jobs, not routine runs, so there are no per-routine
+           totals to show - only what the schedule itself records. -->
+      <aside class="page-rail" aria-labelledby="schedule-status-title">
+        <h2 id="schedule-status-title" class="rail-title">Status</h2>
+        <div class="rail-kvs">
+          <div class="rail-kv">
+            <span>State</span>
+            <strong :class="{ 'rail-attention': scheduleNeedsAttention(schedule) }">{{ scheduleStateLabel(schedule) }}</strong>
+          </div>
+          <div v-if="schedule.frequency !== 'manual'" class="rail-kv">
+            <span>Next run</span><strong>{{ schedule.enabled && schedule.next_run ? relativeWhen(schedule.next_run, schedule.timezone_name) : '—' }}</strong>
+          </div>
+          <div class="rail-kv">
+            <span>Last run</span><strong>{{ schedule.last_dispatched_at ? relativeWhen(schedule.last_dispatched_at) : (schedule.last_triggered_on || 'never') }}</strong>
+          </div>
+        </div>
+        <div v-if="schedule.last_run_chat_id" class="rail-list rail-runs">
+          <router-link class="rail-item" :to="`/chat/${schedule.last_run_chat_id}`">
+            Last result
+            <small>{{ lastRunChatTitle(schedule) }}</small>
+          </router-link>
+        </div>
+        <p v-if="schedule.missed" class="rail-note rail-note--attention">
+          A run was due {{ formatWhen(schedule.last_expected_run) }} and didn't happen. It is caught up on the next launch, or use Run now.
+        </p>
+      </aside>
       </div>
     </div>
 
-    <!-- Overview homepage: shown when nothing is selected but automations exist -->
+    <!-- Overview: shown when nothing is selected but automations exist -->
     <div v-else-if="workspaceSchedules.length" ref="overviewEl" class="scroll-body overview-body">
-      <div v-if="recentRuns.length" class="ov-card">
-        <div class="ov-head">
-          <span class="ov-dot"></span>
-          Recent runs
-          <span class="ov-hint">click to open chat</span>
-        </div>
-        <router-link
-          v-for="r in recentRuns"
-          :key="r.id"
-          :to="`/chat/${r.chatId}`"
-          class="ov-item"
-        >
-          <span class="ov-when">{{ formatWhen(r.lastRunAt) }}</span>
-          <span class="ov-title">
-            {{ r.title }}
-            <span
-              v-if="projectStore.isChatStreaming(r.chatId)"
-              class="spinner-dot"
-              title="Running now"
-            />
-          </span>
-        </router-link>
-      </div>
-      <div v-if="missedSchedules.length" class="ov-card ov-card--alert">
-        <div class="ov-head">
-          <span class="ov-dot ov-dot--alert"></span>
-          Missed <span class="ov-count">{{ missedSchedules.length }}</span>
-          <span class="ov-hint">expected to run, didn't</span>
-          <button
-            type="button"
-            class="btn-small ov-run-all"
-            :disabled="runningAllMissed"
-            :aria-busy="runningAllMissed"
-            @click.stop="runAllMissed"
-          >{{ runningAllMissed ? 'Starting…' : 'Run all' }}</button>
-        </div>
-        <router-link
-          v-for="s in missedSchedules"
-          :key="s.schedule_id"
-          :to="`/schedules/${s.schedule_id}`"
-          class="ov-item"
-        >
-          <span class="ov-when ov-when--alert">{{ formatWhen(s.last_expected_run) }}</span>
-          <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
-        </router-link>
-      </div>
-      <div class="ov-card">
-        <div class="ov-head">
-          <span class="ov-dot"></span>
-          Next up
-          <details class="field-info">
-            <summary aria-label="About automations" title="About automations">i</summary>
-            <div class="field-info-panel">
-              <p>
-                An automation fires at a time of day — daily, weekly, monthly, or once — or every
-                N minutes. It either opens a fresh chat per run in a chosen project, or continues
-                one existing chat and inherits its model and mode.
-              </p>
-              <p>
-                Missed time-of-day runs (app was off when one was due, or a run stopped before it
-                finished) are caught up on next launch; interval cadence just resumes. Set
-                <strong>archive behavior</strong> to
-                automatic and, after each clean run, a classifier checks the result — if there's
-                nothing to judge (no proposals, decisions, or warnings) the chat is archived out
-                of the way; anything worth your attention stays visible.
-              </p>
+      <div class="page-grid">
+        <div class="page-main">
+          <section v-if="missedSchedules.length" class="ov-section ov-section--alert" aria-labelledby="ov-missed-title">
+            <div class="ov-head">
+              <h2 id="ov-missed-title">Missed</h2>
+              <span class="ov-hint">expected to run, didn't</span>
+              <button
+                type="button"
+                class="btn-small ov-run-all"
+                :disabled="runningAllMissed"
+                :aria-busy="runningAllMissed"
+                @click.stop="runAllMissed"
+              >{{ runningAllMissed ? 'Starting…' : 'Run all' }}</button>
             </div>
-          </details>
-          <span class="ov-hint">soonest first</span>
+            <router-link
+              v-for="s in missedSchedules"
+              :key="s.schedule_id"
+              :to="`/schedules/${s.schedule_id}`"
+              class="ov-item"
+            >
+              <span class="ov-main">
+                <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
+                <span class="ov-sub">{{ cadenceSummary(s) }}</span>
+              </span>
+              <span class="ov-when ov-when--alert">due {{ relativeWhen(s.last_expected_run) }}</span>
+            </router-link>
+          </section>
+
+          <section class="ov-section" aria-labelledby="ov-next-title">
+            <div class="ov-head">
+              <h2 id="ov-next-title" title="Soonest first. Missed time-of-day runs are caught up on the next launch; interval runs just resume.">Next up</h2>
+            </div>
+            <router-link
+              v-for="s in upcomingRoutines"
+              :key="s.schedule_id"
+              :to="`/schedules/${s.schedule_id}`"
+              class="ov-item"
+            >
+              <span class="ov-main">
+                <span class="ov-title">
+                  {{ s.title || promptTitle(s.prompt) }}
+                  <span v-if="s.web_chat_id && projectStore.isChatStreaming(s.web_chat_id)" class="spinner-dot" title="Running now" />
+                </span>
+                <span class="ov-sub">{{ cadenceSummary(s) }} · {{ deliverySummary(s) }}</span>
+              </span>
+              <span class="ov-when">{{ relativeWhen(s.next_run, s.timezone_name) }}</span>
+            </router-link>
+            <p v-if="!upcomingRoutines.length" class="ov-empty">
+              Nothing scheduled. The rest run only when you click Run now, or are paused.
+            </p>
+          </section>
+
+          <section v-if="pausedRoutines.length" class="ov-section" aria-labelledby="ov-paused-title">
+            <div class="ov-head"><h2 id="ov-paused-title">Paused</h2></div>
+            <router-link
+              v-for="s in pausedRoutines"
+              :key="s.schedule_id"
+              :to="`/schedules/${s.schedule_id}`"
+              class="ov-item ov-item--paused"
+            >
+              <span class="ov-main">
+                <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
+                <span class="ov-sub">{{ cadenceSummary(s) }} · paused</span>
+              </span>
+            </router-link>
+          </section>
+
+          <section v-if="systemRoutines.length" class="ov-section" aria-labelledby="ov-system-title">
+            <div class="ov-head"><h2 id="ov-system-title">System routines</h2></div>
+            <p class="ov-intro">Ciaobot's own upkeep. They run on their own and never need you.</p>
+            <router-link
+              v-for="s in systemRoutines"
+              :key="s.schedule_id"
+              :to="`/schedules/${s.schedule_id}`"
+              class="ov-item"
+              :class="{ 'ov-item--paused': !s.enabled }"
+            >
+              <span class="ov-main">
+                <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
+                <span class="ov-sub">{{ cadenceSummary(s) }}<template v-if="!s.enabled"> · paused</template></span>
+              </span>
+              <span v-if="s.enabled && s.next_run" class="ov-when">{{ relativeWhen(s.next_run, s.timezone_name) }}</span>
+            </router-link>
+          </section>
         </div>
-        <router-link
-          v-for="s in upcomingSchedules"
-          :key="s.schedule_id"
-          :to="`/schedules/${s.schedule_id}`"
-          class="ov-item"
-        >
-          <span class="ov-when">{{ formatWhen(s.next_run) }}</span>
-          <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
-        </router-link>
-        <p v-if="!upcomingSchedules.length" class="ov-empty">
-          No upcoming runs. Only manual or paused automations.
-        </p>
+
+        <aside class="page-rail" aria-labelledby="ov-rail-title">
+          <h2 id="ov-rail-title" class="rail-title">In this workspace</h2>
+          <div class="rail-kvs">
+            <div class="rail-kv"><span>Active</span><strong>{{ activeCount }}</strong></div>
+            <div class="rail-kv"><span>Paused</span><strong>{{ pausedCount }}</strong></div>
+          </div>
+
+          <template v-if="needsLook.length">
+            <h2 class="rail-title rail-title--spaced">Needs a look</h2>
+            <div class="rail-list">
+              <router-link
+                v-for="s in needsLook"
+                :key="s.schedule_id"
+                :to="`/schedules/${s.schedule_id}`"
+                class="rail-item"
+              >
+                {{ s.title || promptTitle(s.prompt) }}
+                <small class="rail-attention">{{ s.missed ? 'missed a run' : intervalStatusLabel(s) }}</small>
+              </router-link>
+            </div>
+          </template>
+
+          <template v-if="recentRuns.length">
+            <h2 class="rail-title rail-title--spaced">Recent runs</h2>
+            <div class="rail-list">
+              <router-link
+                v-for="r in recentRuns"
+                :key="r.id"
+                :to="`/chat/${r.chatId}`"
+                class="rail-item"
+              >
+                {{ r.title }}
+                <small>{{ relativeWhen(r.lastRunAt) }}<template v-if="projectStore.isChatStreaming(r.chatId)"> · running</template></small>
+              </router-link>
+            </div>
+          </template>
+        </aside>
       </div>
     </div>
 
     <div v-else class="empty-state">
-      <div class="empty-mark"><span class="wordmark wordmark--md">automations</span></div>
-      <p class="empty-hint">// pick one on the left, or tap <strong>+ New</strong>.</p>
+      <h2>No automations yet</h2>
       <p class="empty-hint">
-        An automation fires at a time of day or every N minutes — in a new chat
-        per run, or continuing one you pick.
+        An automation runs a prompt on a schedule — at a time of day or every
+        N minutes — in a new chat each time, or continuing one you pick. Start
+        one with <strong>New Automation</strong> in the sidebar.
       </p>
     </div>
   </div>
@@ -556,6 +644,13 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, useId, watch } from 'vue'
+import {
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuPortal,
+  DropdownMenuRoot,
+  DropdownMenuTrigger,
+} from 'reka-ui'
 import { bindsFixedChat, contextBindsFixedChat, scheduleSupportsAutoArchive } from '../lib/scheduleBinding'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/tasks'
@@ -586,7 +681,6 @@ type EditCard = '' | 'schedule' | 'delivery' | 'engine' | 'advanced' | 'content'
 const editingCard = ref<EditCard>('')
 // Serialised editData as it looked when the card opened, for the dirty check.
 const editBaseline = ref('')
-const actionsOpen = ref(false)
 const copiedPromptKey = ref('')
 const startingBySchedule = ref<Set<string>>(new Set())
 const runningAllMissed = ref(false)
@@ -666,7 +760,6 @@ watch(schedule, (s) => {
 watch(scheduleId, () => {
   editingCard.value = ''
   editBaseline.value = ''
-  actionsOpen.value = false
   copiedPromptKey.value = ''
   purgeFinishedRuns()
 })
@@ -726,13 +819,28 @@ const workspaceSchedules = computed(() =>
     projectStore.projects,
   )),
 )
-const upcomingSchedules = computed(() =>
-  workspaceSchedules.value
-    .filter(s => s.next_run)
-    .sort((a, b) => (a.next_run! < b.next_run! ? -1 : 1))
-    .slice(0, 5),
-)
 const missedSchedules = computed(() => workspaceSchedules.value.filter(s => s.missed))
+
+// The overview splits the user's own routines from Ciaobot's system ones, and
+// keeps paused routines out of "Next up": they have no run coming.
+const userRoutines = computed(() => workspaceSchedules.value.filter(s => s.scope !== 'system'))
+const upcomingRoutines = computed(() =>
+  userRoutines.value
+    .filter(s => s.enabled && s.next_run)
+    .sort((a, b) => Date.parse(a.next_run!) - Date.parse(b.next_run!))
+    .slice(0, 8),
+)
+const pausedRoutines = computed(() => userRoutines.value.filter(s => !s.enabled))
+const systemRoutines = computed(() =>
+  workspaceSchedules.value
+    .filter(s => s.scope === 'system')
+    .sort((a, b) => Date.parse(a.next_run || '') - Date.parse(b.next_run || '') || 0),
+)
+const activeCount = computed(() => workspaceSchedules.value.filter(s => s.enabled).length)
+const pausedCount = computed(() => workspaceSchedules.value.filter(s => !s.enabled).length)
+// Schedules whose own record says something went wrong: a missed slot, or a
+// last dispatch that failed, stopped short, or lost its chat.
+const needsLook = computed(() => workspaceSchedules.value.filter(scheduleNeedsAttention))
 
 const recentRuns = computed(() =>
   workspaceSchedules.value
@@ -753,7 +861,9 @@ const recentRuns = computed(() =>
 )
 
 function archiveLabel(policy: ScheduleArchivePolicy | undefined): string {
-  return policy === 'auto' ? 'automatic (archive routine results)' : 'manual (keep chat)'
+  return policy === 'auto'
+    ? 'Archived when there is nothing to judge'
+    : 'Kept as a normal chat'
 }
 
 function formatWhen(iso: string | null): string {
@@ -774,6 +884,78 @@ function formatWhen(iso: string | null): string {
   })
   if (rel === 'now') return clock
   return past ? `${clock} (${rel} ago)` : `${clock} (in ${rel})`
+}
+
+// Short relative form for rows and the rail: "Fri 10:00 · in 10h".
+// Upcoming slots are shown in the automation's own timezone, the one its
+// "At" row names, so the list, the rail and the detail rows agree.
+function relativeWhen(iso: string | null | undefined, timeZone?: string): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  const diffMs = d.getTime() - Date.now()
+  const absMin = Math.round(Math.abs(diffMs) / 60000)
+  let clock: string
+  try {
+    clock = d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false, timeZone })
+  } catch {
+    clock = d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false })
+  }
+  if (absMin < 1) return `${clock} · now`
+  let rel: string
+  if (absMin < 60) rel = `${absMin}m`
+  else if (absMin < 60 * 24) rel = `${Math.round(absMin / 60)}h`
+  else rel = `${Math.round(absMin / 1440)}d`
+  return diffMs < 0 ? `${clock} · ${rel} ago` : `${clock} · in ${rel}`
+}
+
+// Plain cadence for a row's sub-line: "Every day at 08:00", "Every 30 min".
+function cadenceSummary(s: Schedule): string {
+  const at = s.daily_time_utc ? ` at ${s.daily_time_utc}` : ''
+  if (s.frequency === 'manual') return 'Only when you run it'
+  if (s.frequency === 'interval') return `Every ${s.interval_minutes} min`
+  if (s.frequency === 'once') return s.run_at_date ? `Once on ${s.run_at_date}${at}` : `Once${at}`
+  if (s.frequency === 'monthly') return `Monthly on day ${s.day_of_month}${at}`
+  if (s.frequency === 'weekly') {
+    return s.days_of_week?.length
+      ? `Weekly on ${s.days_of_week.map(d => d.charAt(0).toUpperCase() + d.slice(1)).join(', ')}${at}`
+      : `Weekly${at}`
+  }
+  return `Every day${at}`
+}
+
+// Where each run lands, in the sub-line's words.
+function deliverySummary(s: Schedule): string {
+  if (s.web_chat_id) {
+    const chat = projectStore.chats.find(c => c.chat_id === s.web_chat_id)
+    return chat ? `continues “${chat.title || 'Untitled chat'}”` : 'continues one chat'
+  }
+  if (s.web_project_id) {
+    const proj = projectStore.projects.find(p => p.project_id === s.web_project_id)
+    if (proj) return `new chat in ${proj.name}`
+  }
+  return s.context_label ? `new chat in ${s.context_label}` : 'new chat each run'
+}
+
+function scheduleNeedsAttention(s: Schedule): boolean {
+  return Boolean(s.missed)
+    || s.last_status === 'error'
+    || s.last_status === 'skipped'
+    || s.last_status === 'missing-chat'
+}
+
+function scheduleStateLabel(s: Schedule): string {
+  if (s.missed) return 'Missed a run'
+  if (!s.enabled) return isIntervalSchedule(s) ? 'Stopped' : 'Paused'
+  if (s.last_status === 'running' || showRunning.value) return 'Running'
+  if (scheduleNeedsAttention(s)) return intervalStatusLabel(s).replace(/^./, c => c.toUpperCase())
+  if (s.frequency === 'manual') return 'Runs on demand'
+  return 'Scheduled'
+}
+
+function lastRunChatTitle(s: Schedule): string {
+  const chat = projectStore.chats.find(c => c.chat_id === s.last_run_chat_id)
+  return chat?.title || 'Open the chat it ran in'
 }
 
 const scheduleModelSections = computed(() => sectionsFromModelsResponse(store.models))
@@ -836,15 +1018,13 @@ function nextRunLabel(s: Schedule): string {
   }
   try {
     const d = new Date(s.next_run)
-    const fmt = new Intl.DateTimeFormat('en-CA', {
+    const when = new Intl.DateTimeFormat(undefined, {
       timeZone: s.timezone_name,
-      year: 'numeric', month: '2-digit', day: '2-digit',
+      weekday: 'short', day: 'numeric', month: 'short',
       hour: '2-digit', minute: '2-digit', hour12: false,
-    })
-    const parts = Object.fromEntries(
-      fmt.formatToParts(d).filter(p => p.type !== 'literal').map(p => [p.type, p.value]),
-    )
-    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} (${s.timezone_name})`
+    }).format(d)
+    const rel = relativeWhen(s.next_run, s.timezone_name).split(' · ')[1]
+    return rel ? `${when} · ${rel}` : when
   } catch {
     return s.next_run
   }
@@ -858,13 +1038,11 @@ function modelLabel(s: Schedule): string {
       ? `${s.effective_model} (from the target chat)`
       : 'From the target chat'
   }
-  if (s.model) return `${s.model} (override)`
-  const source = s.web_chat_id
-    ? 'target chat'
-    : workspaceDisplayName(s.workspace)
+  if (s.model) return s.model
+  const source = s.web_chat_id ? 'the target chat' : 'the workspace default'
   return s.effective_model
-    ? `${s.effective_model} (inherited from ${source})`
-    : `Provider default (inherited from ${source})`
+    ? `${s.effective_model} · inherits ${source}`
+    : `Provider default · inherits ${source}`
 }
 
 function workspaceDisplayName(workspace?: string): string {
@@ -882,10 +1060,8 @@ function providerLabel(s: Schedule): string {
   const label = projectStore.workspaceProviderOptions.find(
     option => option.value === providerValue,
   )?.label || providerValue
-  if (s.web_chat_id) return `${label} (inherited from target chat)`
-  return s.provider
-    ? `${label} (override)`
-    : `${label} (inherited from ${workspaceDisplayName(s.workspace)})`
+  if (s.web_chat_id) return `${label} · inherits the target chat`
+  return s.provider ? label || s.provider : `${label} · inherits the workspace default`
 }
 
 // An interval entry bound to one existing chat runs inside it and inherits its
@@ -934,7 +1110,7 @@ const cardEditBlocked = computed(() => cardDirty.value && !cardEditValid.value)
 
 function enabledToggleLabel(s: Schedule): string {
   if (isIntervalSchedule(s)) return s.enabled ? 'Stop' : 'Start'
-  return s.enabled ? 'Disable' : 'Enable'
+  return s.enabled ? 'Pause' : 'Resume'
 }
 
 // Interval entries have no expected slot, so the missed-run check cannot speak
@@ -958,8 +1134,9 @@ function intervalStatusLabel(s: Schedule): string {
 }
 
 function frequencyLabel(s: Schedule): string {
-  if (s.frequency === 'manual') return 'Manual (run on click only)'
+  if (s.frequency === 'manual') return 'Only when you run it'
   if (s.frequency === 'interval') return `Every ${s.interval_minutes} min`
+  if (s.frequency === 'once') return s.run_at_date ? `Once, on ${s.run_at_date}` : 'Once'
   if (s.frequency === 'monthly') return `Monthly, day ${s.day_of_month}`
   if (s.frequency === 'weekly') {
     if (s.days_of_week?.length) return `Weekly (${s.days_of_week.join(', ')})`
@@ -971,11 +1148,11 @@ function frequencyLabel(s: Schedule): string {
 function contextLabel(s: Schedule): string {
   if (s.web_project_id) {
     const proj = projectStore.projects.find(p => p.project_id === s.web_project_id)
-    if (proj) return `${proj.name} (new chat per run)`
+    if (proj) return `A new chat in ${proj.name} each run`
   }
   if (s.web_chat_id) {
     const chat = projectStore.chats.find(c => c.chat_id === s.web_chat_id)
-    if (chat) return chat.title || 'Untitled chat'
+    if (chat) return `Continues “${chat.title || 'Untitled chat'}”`
   }
   if (s.context_label) return s.context_label
   return 'General'
@@ -1017,11 +1194,6 @@ function promptCopyLabel(key: string): string {
   if (copiedPromptKey.value === key) return 'Copied'
   if (copiedPromptKey.value === `error:${key}`) return 'Copy failed'
   return 'Copy'
-}
-
-function runHeaderAction(action: () => void | Promise<void>) {
-  actionsOpen.value = false
-  void action()
 }
 
 function contextKeyFor(s: Schedule): string {
@@ -1386,16 +1558,20 @@ function closeSchedule() {
 .scroll-body {
   flex: 1;
   overflow-y: auto;
-  padding: var(--space-4);
+  padding: var(--space-6) 0 48px;
+}
+.scroll-body--padded {
+  padding-inline: var(--page-inset);
 }
 
 .disabled-banner {
-  font-size: var(--text-sm);
-  color: var(--fg2);
+  margin: 0 0 var(--space-5);
+  padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: var(--space-2) var(--space-3);
-  margin-bottom: var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  color: var(--fg2);
+  font-size: var(--text-sm);
 }
 .meta-grid {
   display: grid;
@@ -1426,46 +1602,61 @@ function closeSchedule() {
   line-height: 1.4;
 }
 
+.prompt-display { margin-top: var(--space-6); }
 .prompt-label {
-  display: block;
-  font-size: var(--text-xs);
-  color: var(--fg2);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 6px;
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.02em;
 }
 .prompt-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  margin-bottom: 6px;
+  margin-bottom: var(--space-2);
 }
-.prompt-heading .prompt-label { margin-bottom: 0; }
-.prompt-actions { display: flex; gap: var(--space-2); }
+.prompt-actions { display: flex; gap: var(--space-3); }
 
 .schedule-description {
+  margin: 0 0 10px;
+  color: var(--fg2);
   font-size: var(--text-sm);
-  color: var(--fg);
-  line-height: 1.55;
-  margin: 4px 0 0;
-  padding: 10px 12px;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  line-height: 1.5;
 }
 
+/* The prompt reads as prose, so it is set in the sans face, not as code. */
 .full-prompt {
-  font-size: var(--text-base);
-  color: var(--fg);
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  background: var(--bg2);
+  margin: 0;
+  padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: var(--space-3);
-  margin: 0;
+  background: var(--bg2);
+  color: var(--fg);
+  font-size: var(--text-base);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Quiet text actions: Edit, Copy, open result. */
+.text-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-decoration: none;
+  cursor: pointer;
+}
+.text-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+@media (pointer: coarse) {
+  .text-link { min-height: var(--touch); }
 }
 .edit-form { display: flex; flex-direction: column; gap: var(--space-3); }
 .form-grid {
@@ -1496,78 +1687,79 @@ function closeSchedule() {
 /* ── Routine property cards ────────────────────────────────────── */
 /* auto-fit rather than a viewport media query: the panel is often narrow while
    the window is wide (sidebar open), so the cards must react to their own box. */
+/* Property sections: a plain heading with a quiet Edit link, then hairline
+   definition rows. They used to be four boxed cards with uppercase labels. */
 .prop-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: var(--space-3);
-  margin-bottom: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
 }
-.prop-card-wide { grid-column: 1 / -1; }
 .prop-card {
   min-width: 0;
+}
+.prop-card.card-editing .card-form {
   padding: var(--space-3);
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--accent2) 55%, var(--border));
   border-radius: var(--radius);
   background: var(--bg-elev);
-}
-.prop-card.card-editing {
-  border-color: var(--accent2);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent2) 28%, transparent);
 }
 .prop-card-head {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   margin-bottom: var(--space-2);
-  min-height: 24px;
+  min-height: 28px;
 }
 .prop-card-name {
   flex: 1;
   min-width: 0;
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  font-weight: 600;
-  color: var(--fg2);
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.02em;
 }
 .card-edit {
   flex: none;
-  padding: 3px 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--bg2);
-  color: var(--fg2);
-  font-size: var(--text-xs);
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
   cursor: pointer;
 }
-.card-edit:hover { color: var(--fg); border-color: var(--accent2); }
+.card-edit:hover { text-decoration: underline; text-underline-offset: 3px; }
 .esc-hint { flex: none; font-size: var(--text-xs); color: var(--fg3); }
 .esc-hint kbd {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-xs);
   padding: 1px 4px;
   margin-right: 4px;
 }
 
-.prop-rows { margin: 0; display: flex; flex-direction: column; gap: 2px; }
+.prop-rows { margin: 0; border-top: 1px solid var(--border); }
 .prop-row {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
+  gap: var(--space-4);
+  min-height: 44px;
+  padding: 11px 2px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border);
   font-size: var(--text-sm);
 }
-.prop-row dt { color: var(--fg3); flex: none; }
+.prop-row dt { flex: 0 0 140px; color: var(--fg2); }
 .prop-row dd {
+  flex: 1;
   margin: 0;
   min-width: 0;
-  text-align: right;
   color: var(--fg);
   overflow-wrap: anywhere;
 }
-.prop-highlight { color: var(--success); font-weight: 600; }
 
 /* System routines keep their inline workspace switcher, but inside a card it
    drops the full-width divider and side-by-side layout it uses standalone. */
@@ -1623,15 +1815,18 @@ function closeSchedule() {
   flex: 1;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  gap: var(--space-3);
+  gap: var(--space-2);
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
+  padding: var(--space-4) var(--page-gutter);
+  box-sizing: border-box;
   color: var(--fg2);
-  text-align: center;
-  padding: var(--space-4);
 }
-.empty-state .empty-mark { opacity: 0.85; }
-.empty-state .empty-hint { color: var(--fg3); font-size: var(--text-sm); }
+.empty-state h2 { margin: 0; color: var(--fg); font-size: calc(20px * var(--font-scale)); letter-spacing: -0.02em; }
+.empty-state .empty-hint { margin: 0; color: var(--fg2); font-size: var(--text-sm); line-height: 1.55; }
 
 .hint { font-size: var(--text-xs); color: var(--fg2); margin: 0; }
 
@@ -1644,33 +1839,23 @@ function closeSchedule() {
    on its line, so it needs its own bottom margin. */
 .field-info--block { margin-bottom: 12px; }
 
-/* ── Overview (next up + missed) ─────────────────────────────────
-   Aligned to HomeRecentChats .home-tier language: header is a mono tier
-   label with a bottom rule, rows are .home-chat-item rows with a left rail.
-   The former card box made the overview feel like a different surface from
-   home, despite showing the same kind of list. */
-.overview-body {
+/* ── Overview ─────────────────────────────────────────────────────
+   Sections with a plain heading over hairline rows: title and a plain
+   cadence/delivery sub-line on the left, the next run on the right - the same
+   row language as Today's "Continue where you left off". */
+.overview-body .page-main {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: var(--space-6);
 }
-.ov-card {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  padding: 0;
-}
-.ov-card--alert {
-  border: none;
-  box-shadow: none;
-}
-.ov-card--alert .ov-head {
-  border-bottom-color: color-mix(in srgb, var(--warning) 30%, var(--border));
-}
+.ov-section { min-width: 0; }
+/* The shared rail is sticky at --space-4; inside this padded scroll body that
+   offset pushed its first heading below the main column's. */
+.page-rail { top: 0; }
+.rail-title--spaced { margin-top: var(--space-5); }
+.rail-note--attention { color: var(--warning); }
+.rail-runs { margin-top: var(--space-3); }
+
 .field-info {
   position: relative;
   display: inline-flex;
@@ -1724,106 +1909,109 @@ function closeSchedule() {
 }
 .ov-head {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-bottom: var(--space-1);
-  border-bottom: 1px solid var(--border);
-  color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 400;
-  margin-bottom: 0;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
 }
-.ov-run-all {
-  margin-left: auto;
-  flex-shrink: 0;
-  border-color: var(--warning);
-  color: var(--warning);
+.ov-head h2 {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.02em;
 }
-.ov-run-all:disabled {
-  opacity: 0.6;
-  cursor: wait;
-}
-.ov-count {
-  font-size: var(--text-xs);
-  background: var(--warning);
-  color: var(--bg);
-  border-radius: 999px;
-  padding: 0 7px;
-  font-weight: 700;
-}
-.ov-hint { font-size: var(--text-xs); color: var(--fg2); font-weight: 400; }
-.ov-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
-.ov-dot--alert { background: var(--warning); }
+.ov-section--alert .ov-head h2 { color: var(--warning); }
+.ov-run-all { margin-left: auto; }
+.ov-hint { color: var(--fg3); font-size: var(--text-sm); }
+.ov-intro { margin: -4px 0 var(--space-2); color: var(--fg3); font-size: var(--text-sm); }
 .ov-item {
   display: flex;
-  width: 100%;
-  min-width: 0;
-  min-height: var(--touch, 44px);
   align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border: 0;
-  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
-  background: transparent;
-  text-decoration: none;
+  gap: var(--space-4);
+  min-height: 56px;
+  padding: 9px 2px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border);
   color: var(--fg);
-  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+  text-decoration: none;
 }
-.ov-item:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.ov-head + .ov-item,
+.ov-intro + .ov-item { border-top: 1px solid var(--border); }
+.ov-item:hover .ov-title { color: var(--accent); }
 .ov-item:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  box-shadow: 0 0 0 2px var(--bg);
+  border-radius: var(--radius-xs);
 }
-.ov-card--alert .ov-item { border-left-color: color-mix(in srgb, var(--warning) 45%, transparent); }
-.ov-card--alert .ov-item:hover { background: color-mix(in srgb, var(--warning) 7%, transparent); }
-.ov-card--alert .ov-item:focus-visible { outline-color: var(--warning); }
-.ov-when {
-  font-size: var(--text-xs);
-  font-weight: 700;
-  color: var(--fg);
-  white-space: nowrap;
-  flex-shrink: 0;
-  min-width: 132px;
-}
-.ov-when--alert { color: var(--warning); }
+.ov-item--paused .ov-title { color: var(--fg2); font-weight: 500; }
+.ov-main { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 .ov-title {
-  flex: 1;
-  font-size: var(--text-sm);
-  color: var(--fg2);
   overflow: hidden;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
+  transition: color 120ms var(--ease);
 }
-.ov-empty { margin: 0; font-size: var(--text-xs); color: var(--fg2); }
+.ov-sub {
+  overflow: hidden;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ov-when {
+  flex: none;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.ov-when--alert { color: var(--warning); }
+.ov-empty { margin: 0; padding: 12px 2px; border-top: 1px solid var(--border); color: var(--fg3); font-size: var(--text-sm); }
 
-/* Close button */
+/* Header actions: Run now is the one primary; the toggle and Delete live in
+   the menu on narrow panes. */
+.btn-run {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+.btn-run:hover:not(:disabled) { background: var(--accent-strong); }
 .desktop-only { display: inline-flex; }
-.desktop-overflow { position: relative; display: inline-flex; }
-.mobile-primary,
-.mobile-overflow { display: none; }
+.overflow-trigger { color: var(--fg2); }
+.menu-toggle-item { display: none !important; }
 
-.mobile-overflow { position: relative; }
-.overflow-trigger {
-  font-size: 12px;
-  letter-spacing: 1px;
+@container chat-pane (max-width: 820px) {
+  .header-actions .desktop-only { display: none; }
+  .menu-toggle-item { display: flex !important; }
+  .close-btn.desktop-only { display: inline-flex; }
 }
-.header-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
+
+@container chat-pane (min-width: 821px) {
+  /* A system routine has no Delete, so on a wide pane its menu would be empty. */
+  .mobile-only-trigger { display: none; }
+}
+
+@media (max-width: 768px) {
+  .desktop-only,
+  .close-btn.desktop-only { display: none; }
+  .menu-toggle-item { display: flex !important; }
+  .mobile-only-trigger { display: inline-flex; }
+  .prompt-heading { align-items: flex-start; }
+  .prop-row { flex-direction: column; gap: 2px; }
+  .prop-row dt { flex: none; }
+}
+
+.schedule-actions-menu {
   z-index: 100;
-  min-width: 160px;
+  min-width: 180px;
   padding: 4px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: var(--bg-elev);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 35%);
 }
-.header-menu button {
+.schedule-actions-menu button {
   display: flex;
   align-items: center;
   width: 100%;
@@ -1833,26 +2021,14 @@ function closeSchedule() {
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--fg);
+  font: inherit;
+  font-size: var(--text-sm);
   text-align: left;
   cursor: pointer;
 }
-.header-menu button:hover { background: var(--bg3); }
-.header-menu button.danger { color: var(--error); }
-
-@container chat-pane (max-width: 820px) {
-  .header-actions .desktop-only { display: none; }
-  .mobile-primary,
-  .mobile-overflow { display: inline-flex; }
-  .close-btn.desktop-only { display: inline-flex; }
-}
-
-@media (max-width: 768px) {
-  .desktop-only,
-  .close-btn.desktop-only { display: none; }
-  .mobile-primary,
-  .mobile-overflow { display: inline-flex; }
-  .prompt-heading { align-items: flex-start; }
-}
+.schedule-actions-menu button:hover,
+.schedule-actions-menu button[data-highlighted] { background: var(--bg3); outline: none; }
+.schedule-actions-menu button.danger { color: var(--error); }
 
 .close-btn {
   background: none;

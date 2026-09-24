@@ -235,10 +235,7 @@
 
           <template v-if="oneOffSchedules.length">
           <div class="schedule-group schedule-group--once">
-            <div class="schedule-group-header">
-              <span>One-offs <span class="schedule-group-hint">delete after run</span></span>
-              <span class="schedule-group-count">{{ oneOffSchedules.length }}</span>
-            </div>
+            <h2 class="schedule-group-header" title="One-off automations delete themselves after they run">One-offs</h2>
             <div class="schedule-group-items">
               <router-link
                 v-for="s in oneOffSchedules"
@@ -248,8 +245,8 @@
                 :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
-                <span class="schedule-time">{{ s.run_at_date?.slice(5) }} {{ s.daily_time_utc }}</span>
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
+                <span class="schedule-time">{{ s.run_at_date?.slice(5) }} {{ s.daily_time_utc }}</span>
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
               </router-link>
             </div>
@@ -258,10 +255,7 @@
 
         <template v-if="userRoutines.length">
           <div class="schedule-group">
-            <div class="schedule-group-header">
-              <span>Custom Routines</span>
-              <span class="schedule-group-count">{{ userRoutines.length }}</span>
-            </div>
+            <h2 class="schedule-group-header">Routines</h2>
             <div class="schedule-group-items">
               <router-link
                 v-for="s in userRoutines"
@@ -271,8 +265,8 @@
                 :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
-                <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
+                <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span
                   v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
                   class="spinner-dot"
@@ -286,10 +280,7 @@
 
         <template v-if="systemAutomations.length">
           <div class="schedule-group schedule-group--system">
-            <div class="schedule-group-header">
-              <span>System Routines</span>
-              <span class="schedule-group-count">{{ systemAutomations.length }}</span>
-            </div>
+            <h2 class="schedule-group-header">System</h2>
             <div class="schedule-group-items">
               <router-link
                 v-for="s in systemAutomations"
@@ -299,8 +290,8 @@
                 :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
-                <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
+                <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span
                   v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
                   class="spinner-dot"
@@ -3489,137 +3480,76 @@ async function confirmDeleteChat(chatId: string) {
   gap: 12px;
 }
 
-/* Grouped schedule sections — aligned to HomeRecentChats .home-tier language:
-   tier header is a low, mono, lowercase label with a bottom rule; rows are
-   home-chat-item rows with a left hue rail. The card box was adding a second
-   border and a background the homepage never has, which made the two sidebars
-   read as different systems. */
+/* Grouped schedule sections: a sentence-case label over plain 36px rows,
+   the same list language as the Projects tree - title on the left, the muted
+   time or cadence on the right. */
 .schedule-group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
   min-width: 0;
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  overflow: visible;
-  margin-bottom: 0;
   flex-shrink: 0;
 }
-.schedule-group--once,
-.schedule-group--system {
-  border-left: none;
-}
 .schedule-group-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding-bottom: var(--space-1);
-  border-bottom: 1px solid var(--border);
+  margin: 4px 0 0;
+  padding: 6px 10px 5px;
   color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  text-transform: none;
-  letter-spacing: 0;
-  font-weight: 400;
-  background: transparent;
-}
-.schedule-group-hint {
-  font-weight: 400;
-  text-transform: none;
-  letter-spacing: 0;
-  color: var(--fg3);
-  opacity: 0.7;
-  font-size: var(--text-xs);
-  margin-left: 4px;
-}
-.schedule-group-count {
-  margin-left: auto;
-  font-size: var(--text-xs);
-  background: transparent;
-  padding: 0;
-  border-radius: 0;
-  color: var(--fg3);
-  min-width: auto;
-  text-align: right;
+  font: 600 var(--text-xs)/1.2 var(--font-sans);
 }
 .schedule-group-items {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-}
-.schedule-item--once .schedule-time {
-  color: var(--accent, #ff5566);
-  font-weight: 600;
+  gap: 2px;
 }
 .schedule-item {
   display: flex;
   width: 100%;
   min-width: 0;
-  min-height: var(--touch, 44px);
+  min-height: 36px;
+  box-sizing: border-box;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px;
+  padding: 0 10px;
   border: 0;
-  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  border-radius: 7px;
   background: transparent;
-  color: var(--fg);
+  color: var(--fg2);
   font: inherit;
-  font-size: var(--text-sm);
+  font-size: var(--text-base);
   text-align: left;
   text-decoration: none;
   cursor: pointer;
-  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+  transition: background 120ms var(--ease), color 120ms var(--ease);
 }
-.schedule-item:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); color: var(--fg); }
+@media (pointer: coarse) {
+  .schedule-item { min-height: var(--touch); }
+}
+.schedule-item:hover { background: var(--bg-elev); color: var(--fg); }
 .schedule-item:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  box-shadow: 0 0 0 2px var(--bg);
+  outline-offset: 1px;
 }
 .schedule-item.active {
-  background: color-mix(in srgb, var(--accent) 8%, var(--bg2));
+  background: var(--bg3);
   color: var(--fg);
-  font-weight: 600;
-  border-left: 2px solid var(--accent);
-  padding-left: 10px;
+  box-shadow: inset 2px 0 0 var(--accent);
 }
-.schedule-item .schedule-time {
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  color: var(--fg3);
-  flex-shrink: 0;
-  font-size: var(--text-xs);
-  font-family: var(--font-mono);
-}
-.schedule-item.active .schedule-time { color: var(--fg); }
 .schedule-item .schedule-label {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--fg2);
-  font-size: var(--text-sm);
 }
-.schedule-item.active .schedule-label { color: var(--fg); }
-.schedule-group--system .schedule-item {
-  border-left-color: color-mix(in srgb, var(--accent2) 45%, transparent);
+.schedule-item .schedule-time {
+  flex-shrink: 0;
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
 }
-.schedule-group--system .schedule-item:hover {
-  background: color-mix(in srgb, var(--accent2) 7%, transparent);
-}
-.schedule-group--system .schedule-item.active {
-  background: color-mix(in srgb, var(--accent2) 8%, var(--bg2));
-  border-left-color: var(--accent2);
-}
-.schedule-group--system .schedule-item:focus-visible {
-  outline-color: var(--accent2);
-}
-.schedule-item--missed { border-left-color: var(--warning) !important; }
 .schedule-item--missed .schedule-time { color: var(--warning); }
-.schedule-item--disabled { opacity: 0.55; }
+.schedule-item--disabled .schedule-label { color: var(--fg3); }
 .schedule-item .missed-dot {
   width: 6px;
   height: 6px;

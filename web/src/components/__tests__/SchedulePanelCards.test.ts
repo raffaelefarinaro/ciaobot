@@ -100,39 +100,39 @@ describe('SchedulePanel property cards', () => {
     while (mounted.length) mounted.pop()?.unmount()
   })
 
-  it('groups the properties into Schedule, Delivery, Engine and Advanced cards', async () => {
+  it('groups the properties into When, Where it runs, Model and Results sections', async () => {
     const wrapper = await mountPanel()
     const names = wrapper.findAll('.prop-card-name').map(n => n.text())
-    expect(names).toEqual(['Schedule', 'Delivery', 'Engine', 'Advanced'])
+    expect(names).toEqual(['When', 'Where it runs', 'Model', 'Results'])
   })
 
   it('keeps the other cards readable while one card is being edited', async () => {
     const wrapper = await mountPanel()
-    await card(wrapper, 'Schedule').find('.card-edit').trigger('click')
+    await card(wrapper, 'When').find('.card-edit').trigger('click')
 
-    expect(card(wrapper, 'Schedule').find('.card-form').exists()).toBe(true)
+    expect(card(wrapper, 'When').find('.card-form').exists()).toBe(true)
     // The untouched cards still render their values, not inputs.
-    expect(card(wrapper, 'Delivery').find('.card-form').exists()).toBe(false)
-    expect(card(wrapper, 'Delivery').find('.prop-rows').exists()).toBe(true)
-    expect(card(wrapper, 'Engine').find('.prop-rows').exists()).toBe(true)
+    expect(card(wrapper, 'Where it runs').find('.card-form').exists()).toBe(false)
+    expect(card(wrapper, 'Where it runs').find('.prop-rows').exists()).toBe(true)
+    expect(card(wrapper, 'Model').find('.prop-rows').exists()).toBe(true)
   })
 
   it('always offers a visible Cancel inside the card being edited', async () => {
     const wrapper = await mountPanel()
-    await card(wrapper, 'Engine').find('.card-edit').trigger('click')
+    await card(wrapper, 'Model').find('.card-edit').trigger('click')
 
-    const actions = card(wrapper, 'Engine').find('.card-actions')
+    const actions = card(wrapper, 'Model').find('.card-actions')
     expect(actions.exists()).toBe(true)
     expect(actions.text()).toContain('Cancel')
   })
 
   it('keeps archive behavior editable in the Advanced card', async () => {
     const wrapper = await mountPanel()
-    await card(wrapper, 'Advanced').find('.card-edit').trigger('click')
+    await card(wrapper, 'Results').find('.card-edit').trigger('click')
 
-    await card(wrapper, 'Advanced').find('select').setValue('manual')
-    expect(card(wrapper, 'Advanced').find('.card-actions .btn-primary').attributes('disabled')).toBeUndefined()
-    await card(wrapper, 'Advanced').find('.card-actions .btn-primary').trigger('click')
+    await card(wrapper, 'Results').find('select').setValue('manual')
+    expect(card(wrapper, 'Results').find('.card-actions .btn-primary').attributes('disabled')).toBeUndefined()
+    await card(wrapper, 'Results').find('.card-actions .btn-primary').trigger('click')
     await flushPromises()
 
     expect(useTaskStore().updateSchedule).toHaveBeenCalledWith(
@@ -146,40 +146,40 @@ describe('SchedulePanel property cards', () => {
     const headerText = () => wrapper.findAll('.btn-small').map(b => b.text()).join(' ')
     expect(headerText()).toContain('Run now')
 
-    await card(wrapper, 'Schedule').find('.card-edit').trigger('click')
+    await card(wrapper, 'When').find('.card-edit').trigger('click')
     expect(headerText()).toContain('Run now')
-    expect(headerText()).toContain('Disable')
+    expect(headerText()).toContain('Pause')
   })
 
   it('disables Save until something actually changes, then enables it', async () => {
     const wrapper = await mountPanel()
-    await card(wrapper, 'Schedule').find('.card-edit').trigger('click')
+    await card(wrapper, 'When').find('.card-edit').trigger('click')
 
-    const save = () => card(wrapper, 'Schedule').find('.card-actions .btn-primary')
+    const save = () => card(wrapper, 'When').find('.card-actions .btn-primary')
     expect(save().attributes('disabled')).toBeDefined()
-    expect(card(wrapper, 'Schedule').find('.dirty-flag').exists()).toBe(false)
+    expect(card(wrapper, 'When').find('.dirty-flag').exists()).toBe(false)
 
-    await card(wrapper, 'Schedule').find('input[type="time"]').setValue('07:45')
+    await card(wrapper, 'When').find('input[type="time"]').setValue('07:45')
     expect(save().attributes('disabled')).toBeUndefined()
-    expect(card(wrapper, 'Schedule').find('.dirty-flag').exists()).toBe(true)
+    expect(card(wrapper, 'When').find('.dirty-flag').exists()).toBe(true)
   })
 
   it('leaves edit mode on Escape without confirming when nothing changed', async () => {
     const wrapper = await mountPanel()
-    await card(wrapper, 'Delivery').find('.card-edit').trigger('click')
-    expect(card(wrapper, 'Delivery').find('.card-form').exists()).toBe(true)
+    await card(wrapper, 'Where it runs').find('.card-edit').trigger('click')
+    expect(card(wrapper, 'Where it runs').find('.card-form').exists()).toBe(true)
 
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
     await flushPromises()
 
     expect(confirmMock).not.toHaveBeenCalled()
-    expect(card(wrapper, 'Delivery').find('.card-form').exists()).toBe(false)
+    expect(card(wrapper, 'Where it runs').find('.card-form').exists()).toBe(false)
   })
 
   it('confirms before discarding unsaved changes on Escape', async () => {
     const wrapper = await mountPanel()
-    await card(wrapper, 'Schedule').find('.card-edit').trigger('click')
-    await card(wrapper, 'Schedule').find('input[type="time"]').setValue('07:45')
+    await card(wrapper, 'When').find('.card-edit').trigger('click')
+    await card(wrapper, 'When').find('input[type="time"]').setValue('07:45')
 
     confirmMock.mockResolvedValue(false)
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
@@ -187,42 +187,42 @@ describe('SchedulePanel property cards', () => {
 
     expect(confirmMock).toHaveBeenCalled()
     // Declining the confirm keeps the user in the form with their edit intact.
-    expect(card(wrapper, 'Schedule').find('.card-form').exists()).toBe(true)
+    expect(card(wrapper, 'When').find('.card-form').exists()).toBe(true)
 
     confirmMock.mockResolvedValue(true)
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
     await flushPromises()
-    expect(card(wrapper, 'Schedule').find('.card-form').exists()).toBe(false)
+    expect(card(wrapper, 'When').find('.card-form').exists()).toBe(false)
   })
 
   it('saves only through the edited card and closes it', async () => {
     const wrapper = await mountPanel()
     const store = useTaskStore()
 
-    await card(wrapper, 'Schedule').find('.card-edit').trigger('click')
-    await card(wrapper, 'Schedule').find('input[type="time"]').setValue('07:45')
-    await card(wrapper, 'Schedule').find('.card-actions .btn-primary').trigger('click')
+    await card(wrapper, 'When').find('.card-edit').trigger('click')
+    await card(wrapper, 'When').find('input[type="time"]').setValue('07:45')
+    await card(wrapper, 'When').find('.card-actions .btn-primary').trigger('click')
     await flushPromises()
 
     expect(store.updateSchedule).toHaveBeenCalledWith(
       'sched-1',
       expect.objectContaining({ time: '07:45', prompt: 'Sprint review and planning.' }),
     )
-    expect(card(wrapper, 'Schedule').find('.card-form').exists()).toBe(false)
+    expect(card(wrapper, 'When').find('.card-form').exists()).toBe(false)
   })
 
   it('withdraws the other edit entry points while one card is open', async () => {
     const wrapper = await mountPanel()
     expect(wrapper.findAll('.card-edit')).toHaveLength(4)
 
-    await card(wrapper, 'Schedule').find('.card-edit').trigger('click')
+    await card(wrapper, 'When').find('.card-edit').trigger('click')
 
     // Opening another card would re-seed editData and silently drop the edits
     // in progress, so no other card offers an entry point until this one closes.
     expect(wrapper.findAll('.card-edit')).toHaveLength(0)
     expect(wrapper.find('.prompt-actions').text()).not.toContain('Edit')
 
-    await card(wrapper, 'Schedule').find('.card-actions .btn-chip').trigger('click')
+    await card(wrapper, 'When').find('.card-actions .btn-chip').trigger('click')
     await flushPromises()
     expect(wrapper.findAll('.card-edit')).toHaveLength(4)
   })
@@ -231,12 +231,12 @@ describe('SchedulePanel property cards', () => {
     const wrapper = await mountPanel(makeSchedule({ scope: 'system' }))
     // Title, cadence, and delivery target are fixed for a system routine;
     // only the engine override and archive behavior are editable.
-    expect(card(wrapper, 'Schedule').find('.card-edit').exists()).toBe(false)
-    expect(card(wrapper, 'Delivery').find('.card-edit').exists()).toBe(false)
-    expect(card(wrapper, 'Engine').find('.card-edit').exists()).toBe(true)
-    expect(card(wrapper, 'Advanced').find('.card-edit').exists()).toBe(true)
+    expect(card(wrapper, 'When').find('.card-edit').exists()).toBe(false)
+    expect(card(wrapper, 'Where it runs').find('.card-edit').exists()).toBe(false)
+    expect(card(wrapper, 'Model').find('.card-edit').exists()).toBe(true)
+    expect(card(wrapper, 'Results').find('.card-edit').exists()).toBe(true)
     // …but the system workspace switcher is still reachable.
-    expect(card(wrapper, 'Delivery').find('.system-workspace-control').exists()).toBe(true)
+    expect(card(wrapper, 'Where it runs').find('.system-workspace-control').exists()).toBe(true)
   })
   // ── Interval cadence (the primitive that replaced loops) ──
 
@@ -250,7 +250,7 @@ describe('SchedulePanel property cards', () => {
       last_status: 'busy',
       next_run: '2020-01-01T00:00:00Z',
     }))
-    const scheduleCard = card(wrapper, 'Schedule')
+    const scheduleCard = card(wrapper, 'When')
     const rows = scheduleCard.findAll('.prop-row').map(r => r.text())
     expect(rows.some(r => r.includes('Every 15 min'))).toBe(true)
     // No time of day: interval cadence has none, and an empty "At" row read as
@@ -272,7 +272,7 @@ describe('SchedulePanel property cards', () => {
       daily_time_utc: '08:00',
       last_status: 'error',
     }))
-    const rows = card(wrapper, 'Schedule').findAll('.prop-row').map(r => r.text())
+    const rows = card(wrapper, 'When').findAll('.prop-row').map(r => r.text())
     expect(rows.some(r => r.includes('last run failed'))).toBe(true)
   })
 
@@ -282,7 +282,7 @@ describe('SchedulePanel property cards', () => {
       daily_time_utc: '08:00',
       last_status: '',
     }))
-    const rows = card(wrapper, 'Schedule').findAll('.prop-row').map(r => r.text())
+    const rows = card(wrapper, 'When').findAll('.prop-row').map(r => r.text())
     expect(rows.some(r => r.includes('last run failed'))).toBe(false)
   })
 
@@ -297,8 +297,8 @@ describe('SchedulePanel property cards', () => {
     }))
     // A stored model is ignored at dispatch, so it must not be presented as
     // the active override.
-    expect(card(wrapper, 'Engine').text()).toContain('sonnet (from the target chat)')
-    expect(card(wrapper, 'Engine').text()).not.toContain('override')
+    expect(card(wrapper, 'Model').text()).toContain('sonnet (from the target chat)')
+    expect(card(wrapper, 'Model').text()).not.toContain('override')
   })
 
   it('says Stop rather than Disable for an interval entry', async () => {
@@ -321,10 +321,10 @@ describe('SchedulePanel property cards', () => {
       web_project_id: null,
     }))
     const store = useTaskStore()
-    await card(wrapper, 'Schedule').find('.card-edit').trigger('click')
-    const minutes = card(wrapper, 'Schedule').find('input[type="number"]')
+    await card(wrapper, 'When').find('.card-edit').trigger('click')
+    const minutes = card(wrapper, 'When').find('input[type="number"]')
     await minutes.setValue(45)
-    await card(wrapper, 'Schedule').find('.card-actions .btn-primary').trigger('click')
+    await card(wrapper, 'When').find('.card-actions .btn-primary').trigger('click')
     await flushPromises()
 
     expect(store.updateSchedule).toHaveBeenCalledWith(
@@ -345,13 +345,13 @@ describe('SchedulePanel property cards', () => {
       frequency: 'interval', interval_minutes: 5, daily_time_utc: '',
       days_of_week: null, web_chat_id: 'chat-1', web_project_id: null,
     }))
-    await card(wrapper, 'Schedule').find('.card-edit').trigger('click')
+    await card(wrapper, 'When').find('.card-edit').trigger('click')
 
-    await card(wrapper, 'Schedule').find('select').setValue('daily')
+    await card(wrapper, 'When').find('select').setValue('daily')
 
-    const save = card(wrapper, 'Schedule').find('.card-actions .btn-primary')
+    const save = card(wrapper, 'When').find('.card-actions .btn-primary')
     expect(save.attributes('disabled')).toBeDefined()
-    expect(card(wrapper, 'Schedule').text()).toContain('Pick a time')
+    expect(card(wrapper, 'When').text()).toContain('Pick a time')
     expect(useTaskStore().updateSchedule).not.toHaveBeenCalled()
   })
 
@@ -360,11 +360,11 @@ describe('SchedulePanel property cards', () => {
       frequency: 'interval', interval_minutes: 5, daily_time_utc: '',
       days_of_week: null, web_chat_id: 'chat-1', web_project_id: null,
     }))
-    await card(wrapper, 'Schedule').find('.card-edit').trigger('click')
-    await card(wrapper, 'Schedule').find('select').setValue('daily')
-    await card(wrapper, 'Schedule').find('input[type="time"]').setValue('09:30')
+    await card(wrapper, 'When').find('.card-edit').trigger('click')
+    await card(wrapper, 'When').find('select').setValue('daily')
+    await card(wrapper, 'When').find('input[type="time"]').setValue('09:30')
 
-    const save = card(wrapper, 'Schedule').find('.card-actions .btn-primary')
+    const save = card(wrapper, 'When').find('.card-actions .btn-primary')
     expect(save.attributes('disabled')).toBeUndefined()
     await save.trigger('click')
     await flushPromises()
@@ -373,5 +373,96 @@ describe('SchedulePanel property cards', () => {
       'sched-1',
       expect.objectContaining({ frequency: 'daily', time: '09:30' }),
     )
+  })
+
+  it('keeps Delete out of the header and behind the actions menu', async () => {
+    const wrapper = await mountPanel()
+    const store = useTaskStore()
+    store.deleteSchedule = vi.fn(async () => {})
+    const headerText = wrapper.findAll('.btn-small').map(b => b.text()).join(' ')
+    expect(headerText).not.toContain('Delete')
+
+    await wrapper.get('button[aria-label="More automation actions"]').trigger('click')
+    await flushPromises()
+    const del = Array.from(document.body.querySelectorAll<HTMLButtonElement>('.schedule-actions-menu button'))
+      .find(button => button.textContent?.includes('Delete'))
+    expect(del).toBeTruthy()
+    del!.click()
+    await flushPromises()
+
+    expect(confirmMock).toHaveBeenCalledWith('Delete this automation? It will stop running.')
+    expect(store.deleteSchedule).toHaveBeenCalledWith('sched-1')
+  })
+
+  it('shows the automation\'s own state in the rail, and flags a failed run', async () => {
+    const wrapper = await mountPanel(makeSchedule({
+      last_status: 'error',
+      last_dispatched_at: '2026-08-14T00:30:00Z',
+      last_run_chat_id: 'chat-9',
+    }))
+    const rail = wrapper.get('.page-rail')
+    expect(rail.text()).toContain('Status')
+    expect(rail.get('.rail-attention').text()).toBe('Last run failed')
+    expect(rail.find('a[href="/chat/chat-9"]').exists()).toBe(true)
+    // No per-routine totals: the run log does not record routine runs.
+    expect(rail.text()).not.toContain('Success rate')
+  })
+})
+
+describe('SchedulePanel overview', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  afterEach(() => {
+    while (mounted.length) mounted.pop()?.unmount()
+  })
+
+  async function mountOverview(schedules: Schedule[]): Promise<VueWrapper> {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: Stub },
+        { path: '/chat/:chatId?', component: Stub },
+        { path: '/schedules/:scheduleId?', component: Stub },
+      ],
+    })
+    await router.push('/schedules')
+    await router.isReady()
+    const store = useTaskStore()
+    store.schedules = schedules
+    store.schedulesLoaded = true
+    store.scheduleLoadError = ''
+    store.fetchSchedules = vi.fn(async () => {})
+    store.fetchModels = vi.fn(async () => {})
+    useProjectStore().activeWorkspace = 'work'
+    const { default: SchedulePanel } = await import('../SchedulePanel.vue')
+    const wrapper = mount(SchedulePanel, {
+      global: { plugins: [router], stubs: { ModelSelector: Stub, PaneHeader: false } },
+    })
+    await flushPromises()
+    mounted.push(wrapper)
+    return wrapper
+  }
+
+  it('splits next up, paused and system routines, and counts them in the rail', async () => {
+    const wrapper = await mountOverview([
+      makeSchedule({ schedule_id: 'a', title: 'Morning brief' }),
+      makeSchedule({ schedule_id: 'b', title: 'Old sweep', enabled: false, next_run: null }),
+      makeSchedule({ schedule_id: 'c', title: 'Workspace care', scope: 'system' }),
+      makeSchedule({ schedule_id: 'd', title: 'Flaky one', last_status: 'error' }),
+    ])
+    const section = (id: string) => wrapper.get(`[aria-labelledby="${id}"]`)
+    expect(section('ov-next-title').text()).toContain('Morning brief')
+    expect(section('ov-next-title').text()).not.toContain('Workspace care')
+    expect(section('ov-paused-title').text()).toContain('Old sweep')
+    expect(section('ov-system-title').text()).toContain('Workspace care')
+
+    const rail = wrapper.get('.page-rail')
+    const kv = rail.findAll('.rail-kv').map(row => row.text())
+    expect(kv).toContain('Active3')
+    expect(kv).toContain('Paused1')
+    expect(rail.text()).toContain('Needs a look')
+    expect(rail.text()).toContain('Flaky one')
   })
 })
