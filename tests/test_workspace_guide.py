@@ -161,6 +161,24 @@ def test_merge_keeps_live_agents_regions_over_an_empty_legacy(tmp_path: Path) ->
     assert not (tmp_path / "AGENTS.md.bak").exists()
 
 
+def test_merge_keeps_live_agents_regions_over_an_empty_external_legacy_link(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "shared.md").write_text("# Shared instructions\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text(REGIONS, encoding="utf-8")
+    (tmp_path / "CLAUDE.md").symlink_to("shared.md")
+
+    assert wg.migrate_root(tmp_path) == "merged"
+
+    merged = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert _remembered(merged)
+    assert "Shared instructions" in merged
+    assert (tmp_path / "shared.md").read_text(encoding="utf-8") == "# Shared instructions\n"
+    assert (tmp_path / "CLAUDE.md.bak").read_text(encoding="utf-8") == "# Shared instructions\n"
+    assert not (tmp_path / "AGENTS.md.bak").exists()
+    assert not (tmp_path / "CLAUDE.md").exists()
+
+
 def test_merge_of_two_live_guides_still_parks_the_agents_side(tmp_path: Path) -> None:
     """Both sides carry entries: a genuine conflict, and the documented
     legacy-wins direction applies — the agents regions land in the backup
@@ -209,6 +227,52 @@ class _Config:
 
     def agent_root_targets(self) -> list[tuple[Path, str]]:
         return [(r, r.name) for r in self._roots]
+
+
+def test_migrate_config_covers_the_shared_install_root_before_reroot(
+    tmp_path: Path,
+) -> None:
+    install = tmp_path / "install"
+    install.mkdir()
+    (install / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
+
+    class _SharedConfig:
+        def agent_root_targets(self) -> list[tuple[Path, str]]:
+            return [(install, "")]
+
+    assert wg.migrate_config(_SharedConfig()) == {str(install): "renamed"}
+    assert not (install / "CLAUDE.md").exists()
+    assert _remembered((install / "AGENTS.md").read_text(encoding="utf-8"))
+
+
+def test_migrate_config_respects_the_agent_root_seam_after_reroot(
+    tmp_path: Path,
+) -> None:
+    """A re-rooted install root is not a guide target, even if a root guide exists.
+
+    ``workspace_reroot`` owns moving the shared guide into the primary root;
+    adding the raw install path here would touch repository metadata or leave
+    a parent guide for providers to discover.
+    """
+    install = tmp_path / "install"
+    personal = install / "personal"
+    personal.mkdir(parents=True)
+    (install / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
+    (install / "AGENTS.md").symlink_to("CLAUDE.md")
+    (personal / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
+
+    class _RerootedConfig:
+        workspace_root = install
+
+        def agent_root_targets(self) -> list[tuple[Path, str]]:
+            return [(personal, "personal")]
+
+    results = wg.migrate_config(_RerootedConfig())
+
+    assert results == {str(personal): "renamed"}
+    assert (install / "AGENTS.md").is_symlink()
+    assert (install / "CLAUDE.md").is_file()
+    assert _remembered((personal / "AGENTS.md").read_text(encoding="utf-8"))
 
 
 def test_every_root_is_migrated(tmp_path: Path) -> None:
