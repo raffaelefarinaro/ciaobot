@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  PopoverAnchor,
+  PopoverContent,
+  PopoverRoot,
+  PopoverTrigger,
+} from 'reka-ui'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
 export interface ModelSection {
   key: string
@@ -49,7 +55,6 @@ const emit = defineEmits<{
 
 const open = ref(false)
 const query = ref('')
-const popoverRef = ref<HTMLElement | null>(null)
 const rootRef = ref<HTMLElement | null>(null)
 const triggerRef = ref<HTMLElement | null>(null)
 const searchRef = ref<HTMLInputElement | null>(null)
@@ -123,24 +128,25 @@ const activeModelSet = computed(() => {
   )
 })
 
-function toggle() {
-  if (props.disabled) return
-  if (open.value) close()
-  else openPopover()
-}
-
-function openPopover() {
-  open.value = true
-  query.value = ''
-  nextTick(() => {
-    searchRef.value?.focus()
-    scrollActiveIntoView()
-  })
+function onPopoverOpenChange(nextOpen: boolean): void {
+  if (props.disabled && nextOpen) return
+  if (nextOpen) {
+    open.value = true
+    query.value = ''
+    nextTick(() => {
+      searchRef.value?.focus()
+      scrollActiveIntoView()
+    })
+    return
+  }
+  close()
 }
 
 function close() {
+  const returnFocus = !props.triggerless ? triggerRef.value : null
   open.value = false
   query.value = ''
+  if (returnFocus) nextTick(() => returnFocus.focus())
   if (props.triggerless) emit('close')
 }
 
@@ -243,116 +249,41 @@ function focusAdjacentItem(direction: 1 | -1) {
   items[nextIndex]?.focus()
 }
 
-// Viewport-anchored placement. The popover used to be absolutely positioned
-// inside the trigger, which put it inside whatever scroll container held the
-// selector -- `.chat-panel` has `overflow: hidden`, so in a split view the menu
-// was sliced off at the pane's edge, mid-word. Fixed positioning takes the
-// viewport as the containing block, so no ancestor can clip it, and the
-// coordinates below are clamped so it can never land off-screen either.
+// Reka's Popper owns the fixed-position collision work. Keeping these as
+// explicit props (rather than writing top/left after mount) means the same
+// placement is used for the first paint, scroll updates, visual-viewport
+// resizes, and filtered-list height changes.
 const POPOVER_GAP = 4
 const POPOVER_MARGIN = 8
-const popoverStyle = ref<Record<string, string>>({})
-const popoverPlaced = ref(false)
+const popoverSide = computed(() => props.placement.startsWith('top') ? 'top' : 'bottom')
+const popoverAlign = computed(() => props.placement.endsWith('-end') ? 'end' : 'start')
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), Math.max(min, max))
+function focusSearch(): void {
+  nextTick(() => {
+    searchRef.value?.focus()
+    scrollActiveIntoView()
+  })
 }
 
-function updatePopoverPosition() {
-  const host = rootRef.value
-  const pop = popoverRef.value
-  if (!host || !pop) {
-    // Never leave the menu invisible because we could not measure it.
-    popoverPlaced.value = true
-    return
-  }
-  const rect = host.getBoundingClientRect()
-  const width = pop.offsetWidth
-  const height = pop.offsetHeight
-  const vw = window.innerWidth
-  const vh = window.innerHeight
-
-  // `-end` keeps the menu's right edge on the trigger's, as the old
-  // `right: 0` did; `-start` aligns the left edges.
-  const alignEnd = props.placement.endsWith('-end')
-  const left = clamp(
-    alignEnd ? rect.right - width : rect.left,
-    POPOVER_MARGIN,
-    vw - width - POPOVER_MARGIN,
-  )
-
-  const prefersTop = props.placement.startsWith('top')
-  const below = rect.bottom + POPOVER_GAP
-  const above = rect.top - height - POPOVER_GAP
-  let top = prefersTop ? above : below
-  // Flip to the other side only when the preferred one overflows and the
-  // other one fits, so a menu taller than the viewport still opens downward
-  // and scrolls rather than flipping into an equally bad position.
-  if (!prefersTop && below + height > vh - POPOVER_MARGIN && above >= POPOVER_MARGIN) {
-    top = above
-  } else if (prefersTop && above < POPOVER_MARGIN && below + height <= vh - POPOVER_MARGIN) {
-    top = below
-  }
-  // Clamp only while the trigger is still on screen. A fixed popover does not
-  // scroll away with its trigger the way the old absolute one did, so clamping
-  // unconditionally left the menu pinned to the viewport edge — detached from
-  // the control that opened it and floating over unrelated content — as soon
-  // as the user scrolled the pane it lives in (Settings, Schedules). Off
-  // screen it now follows the trigger out of view instead.
-  const triggerOnScreen = rect.bottom > 0 && rect.top < vh
-  if (triggerOnScreen) {
-    top = clamp(top, POPOVER_MARGIN, vh - height - POPOVER_MARGIN)
-  }
-
-  popoverStyle.value = { top: `${top}px`, left: `${left}px` }
-  popoverPlaced.value = true
+function onOpenAutoFocus(event: Event): void {
+  // The selector is a searchable listbox, so focus the query field rather than
+  // letting Reka's generic dialog autofocus land on its container. Preventing
+  // the default also keeps the caret out of the search field on mouse opening
+  // when the caller has explicitly asked for pointer focus.
+  event.preventDefault()
+  focusSearch()
 }
 
-function schedulePopoverPosition() {
-  nextTick(() => updatePopoverPosition())
-}
-
-// `capture` so the popover follows a trigger inside any scrolling ancestor,
-// not just the page.
-function onViewportChange() {
-  updatePopoverPosition()
+function onEscapeKeyDown(event: KeyboardEvent): void {
+  // Claim Escape locally. ChatLayout treats an unclaimed Escape as navigation
+  // away from the current pane.
+  event.preventDefault()
+  event.stopPropagation()
+  close()
 }
 
 watch(popoverVisible, (visible) => {
-  if (visible) {
-    schedulePopoverPosition()
-    window.addEventListener('scroll', onViewportChange, true)
-    window.addEventListener('resize', onViewportChange)
-  } else {
-    popoverPlaced.value = false
-    window.removeEventListener('scroll', onViewportChange, true)
-    window.removeEventListener('resize', onViewportChange)
-  }
-}, { immediate: true })
-
-// A filtered list changes the popover's height, which moves a flipped or
-// clamped menu.
-watch(filteredSections, () => {
-  if (popoverVisible.value) schedulePopoverPosition()
-})
-
-function onClickOutside(event: MouseEvent) {
-  const target = event.target as Node
-  if (
-    open.value &&
-    !popoverRef.value?.contains(target) &&
-    !triggerRef.value?.contains(target)
-  ) {
-    close()
-  }
-}
-
-watch(open, (isOpen) => {
-  if (isOpen) {
-    document.addEventListener('mousedown', onClickOutside)
-  } else {
-    document.removeEventListener('mousedown', onClickOutside)
-  }
+  if (visible) focusSearch()
 })
 
 // Auto-focus the search input and scroll active item into view whenever the
@@ -374,123 +305,140 @@ onMounted(() => {
     })
   }
 })
-
-onBeforeUnmount(() => {
-  document.removeEventListener('mousedown', onClickOutside)
-  window.removeEventListener('scroll', onViewportChange, true)
-  window.removeEventListener('resize', onViewportChange)
-})
 </script>
 
 <template>
-  <div
-    ref="rootRef"
-    class="model-selector"
-    :class="{
-      'model-selector--open': popoverVisible,
-      'model-selector--disabled': disabled,
-      'model-selector--triggerless': triggerless,
-    }"
+  <PopoverRoot
+    :open="popoverVisible"
+    :modal="false"
+    @update:open="onPopoverOpenChange"
   >
-    <button
-      v-if="!triggerless"
-      ref="triggerRef"
-      type="button"
-      class="model-selector__trigger"
-      :disabled="disabled"
-      :title="triggerLabel"
-      :aria-expanded="popoverVisible"
-      aria-haspopup="listbox"
-      @click="toggle"
-    >
-      <span class="model-selector__label">{{ triggerLabel }}</span>
-      <span class="model-selector__chevron" aria-hidden="true">▾</span>
-    </button>
-
-    <div
-      v-if="popoverVisible"
-      ref="popoverRef"
-      class="model-selector__popover"
-      :class="[`model-selector__popover--${placement}`, { 'model-selector__popover--placed': popoverPlaced }]"
-      :style="popoverStyle"
-      role="listbox"
-      :aria-multiselectable="multiple"
-    >
-      <div v-if="$slots.header" class="model-selector__header">
-        <slot name="header" />
-      </div>
-
-      <div v-if="searchable" class="model-selector__search-wrap">
-        <input
-          ref="searchRef"
-          v-model="query"
-          type="text"
-          class="model-selector__search"
-          placeholder="Search models..."
-          @keydown="onKeydown"
-        />
-      </div>
-
+    <PopoverAnchor as-child>
       <div
-        v-if="hasAnyModels"
-        ref="listRef"
-        class="model-selector__list"
-        tabindex="-1"
-        @keydown="onKeydown"
+        ref="rootRef"
+        class="model-selector"
+        :class="{
+          'model-selector--open': popoverVisible,
+          'model-selector--disabled': disabled,
+          'model-selector--triggerless': triggerless,
+        }"
+      >
+        <PopoverTrigger v-if="!triggerless" as-child :disabled="disabled">
+        <button
+          ref="triggerRef"
+          type="button"
+          class="model-selector__trigger"
+          :disabled="disabled"
+          :title="triggerLabel"
+          :aria-expanded="popoverVisible"
+          aria-haspopup="listbox"
+        >
+          <span class="model-selector__label">{{ triggerLabel }}</span>
+          <span class="model-selector__chevron" aria-hidden="true">▾</span>
+        </button>
+      </PopoverTrigger>
+
+      <PopoverContent
+        v-if="popoverVisible"
+        as-child
+        :side="popoverSide"
+        :align="popoverAlign"
+        :side-offset="POPOVER_GAP"
+        :collision-padding="POPOVER_MARGIN"
+        :position-strategy="'fixed'"
+        :update-position-strategy="'always'"
+        @open-auto-focus="onOpenAutoFocus"
+        @escape-key-down="onEscapeKeyDown"
       >
         <div
-          v-for="section in filteredSections"
-          :key="section.key"
-          class="model-selector__section"
-          :class="{ 'model-selector__section--disabled': section.disabled }"
+          class="model-selector__popover"
+          :class="[`model-selector__popover--${placement}`, 'model-selector__popover--placed']"
+          aria-label="Model selector"
         >
-          <div class="model-selector__section-header">
-            <span class="model-selector__section-label">{{ section.label }}</span>
-            <span v-if="section.badge" class="model-selector__badge">{{ section.badge }}</span>
+          <div
+            class="model-selector__listbox"
+          role="listbox"
+          :aria-multiselectable="multiple"
+        >
+          <div v-if="$slots.header" class="model-selector__header">
+            <slot name="header" />
           </div>
-          <p v-if="section.hint" class="model-selector__hint">{{ section.hint }}</p>
-          <button
-            v-for="model in section.models"
-            :key="`${section.key}-${model}`"
-            type="button"
-            class="model-selector__item ms-item"
-            :class="{
-              'ms-item--active': isActive(model),
-            }"
-            :data-model="model"
-            :data-section="section.key"
-            :disabled="section.disabled"
-            role="option"
-            :aria-selected="isActive(model)"
-            @click="selectModel(model, section.key)"
+
+          <div v-if="searchable" class="model-selector__search-wrap">
+            <input
+              ref="searchRef"
+              v-model="query"
+              type="text"
+              class="model-selector__search"
+              placeholder="Search models..."
+              @keydown="onKeydown"
+            />
+          </div>
+
+          <div
+            v-if="hasAnyModels"
+            ref="listRef"
+            class="model-selector__list"
+            tabindex="-1"
+            @keydown="onKeydown"
           >
-            <span v-if="multiple" class="model-selector__check" aria-hidden="true">
-              <span v-if="isSelected(model)" class="model-selector__checkmark">✓</span>
-            </span>
-            <span class="model-selector__item-main">
-              <span class="model-selector__item-label">{{ modelLabel(section, model) }}</span>
-              <span v-if="modelBadges(section, model).length" class="model-selector__item-badges">
-                <span
-                  v-for="badge in modelBadges(section, model)"
-                  :key="`${section.key}-${model}-${badge}`"
-                  class="model-selector__item-badge"
-                  :class="badgeClass(badge)"
-                >{{ badge }}</span>
-              </span>
-            </span>
-          </button>
+            <div
+              v-for="section in filteredSections"
+              :key="section.key"
+              class="model-selector__section"
+              :class="{ 'model-selector__section--disabled': section.disabled }"
+            >
+              <div class="model-selector__section-header">
+                <span class="model-selector__section-label">{{ section.label }}</span>
+                <span v-if="section.badge" class="model-selector__badge">{{ section.badge }}</span>
+              </div>
+              <p v-if="section.hint" class="model-selector__hint">{{ section.hint }}</p>
+              <button
+                v-for="model in section.models"
+                :key="`${section.key}-${model}`"
+                type="button"
+                class="model-selector__item ms-item"
+                :class="{
+                  'ms-item--active': isActive(model),
+                }"
+                :data-model="model"
+                :data-section="section.key"
+                :disabled="section.disabled"
+                role="option"
+                :aria-selected="isActive(model)"
+                @click="selectModel(model, section.key)"
+              >
+                <span v-if="multiple" class="model-selector__check" aria-hidden="true">
+                  <span v-if="isSelected(model)" class="model-selector__checkmark">✓</span>
+                </span>
+                <span class="model-selector__item-main">
+                  <span class="model-selector__item-label">{{ modelLabel(section, model) }}</span>
+                  <span v-if="modelBadges(section, model).length" class="model-selector__item-badges">
+                    <span
+                      v-for="badge in modelBadges(section, model)"
+                      :key="`${section.key}-${model}-${badge}`"
+                      class="model-selector__item-badge"
+                      :class="badgeClass(badge)"
+                    >{{ badge }}</span>
+                  </span>
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <div v-else class="model-selector__empty">
+            No models match "{{ query }}"
+          </div>
+
+          <div v-if="$slots.footer" class="model-selector__footer">
+            <slot name="footer" />
+          </div>
+          </div>
         </div>
+      </PopoverContent>
       </div>
-
-      <div v-else class="model-selector__empty">
-        No models match "{{ query }}"
-      </div>
-
-      <div v-if="$slots.footer" class="model-selector__footer">
-        <slot name="footer" />
-      </div>
-    </div>
-  </div>
+    </PopoverAnchor>
+  </PopoverRoot>
 </template>
 
 <style scoped>
@@ -502,7 +450,7 @@ onBeforeUnmount(() => {
 }
 
 .model-selector--triggerless {
-  width: auto;
+  width: 100%;
   height: 100%;
   min-height: 30px;
   align-self: stretch;
@@ -559,28 +507,23 @@ onBeforeUnmount(() => {
 }
 
 .model-selector__popover {
-  position: fixed;
-  /* Coordinates arrive from updatePopoverPosition(); until they do the menu
-     stays invisible rather than flashing at the top-left of the viewport. */
-  top: 0;
-  left: 0;
-  opacity: 0;
-  /* Sit above header controls (archive button, etc.) so the open menu is a
-     clean overlay instead of tangling with the icons next to the trigger. */
+  /* Popper supplies the fixed placement and collision transform. The
+     component's own styles only describe the elevated surface. */
   z-index: 300;
   min-width: 320px;
   max-width: min(480px, calc(100vw - 24px));
-  max-height: min(420px, calc(100vh - var(--safe-top) - var(--safe-bottom) - 48px));
-  display: flex;
-  flex-direction: column;
+  max-height: min(420px, calc(100dvh - var(--safe-top) - var(--safe-bottom) - 32px));
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 
-.model-selector__popover--placed {
-  opacity: 1;
+.model-selector__listbox {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: inherit;
 }
 
 .model-selector__search-wrap {
@@ -797,12 +740,26 @@ onBeforeUnmount(() => {
 @media (max-width: 768px) {
   /* Header selectors have no trigger box of their own, so anchor their menu
      to the viewport below the shared top bar and keep both edges visible. */
+  .model-selector--triggerless :deep([data-reka-popper-content-wrapper]) {
+    /* The Popper wrapper is the positioning bridge. Turn it into a full-width
+       layout box on a phone, then let the sheet child use absolute coordinates
+       below the shared top bar. */
+    position: fixed !important;
+    top: 0 !important;
+    right: calc(12px + var(--safe-right)) !important;
+    bottom: auto !important;
+    left: calc(12px + var(--safe-left)) !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    transform: none !important;
+  }
   .model-selector--triggerless .model-selector__popover {
-    position: fixed;
+    position: absolute !important;
     top: calc(61px + var(--safe-top) + 4px);
-    right: calc(12px + var(--safe-right));
+    right: 0;
     bottom: auto;
-    left: calc(12px + var(--safe-left));
+    left: 0;
     width: auto;
     min-width: 0;
     max-width: none;

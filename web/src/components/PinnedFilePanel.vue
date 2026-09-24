@@ -267,26 +267,39 @@
         class="pfp-comment-backdrop pfp-comment-backdrop--dim"
         @click="handlePfpBackdropClick"
       ></div>
-      <div
+      <FocusScope
         v-if="commentPopover && popoverComment"
-        class="pfp-comment-pop"
-        :style="{ top: commentPopover.top + 'px', left: commentPopover.left + 'px' }"
-        @mousedown.stop
-        @mouseenter="onPopoverEnter"
-        @mouseleave="onPopoverLeave"
+        as-child
+        loop
+        :trapped="false"
+        @mount-auto-focus="onPfpMountAutoFocus"
+        @unmount-auto-focus="onPfpUnmountAutoFocus"
       >
-        <div class="pfp-pop-header">
-          <span class="pfp-sidebar-card-line" v-if="commentLineLabel(popoverComment)">{{ commentLineLabel(popoverComment) }}</span>
-          <div class="pfp-sidebar-card-actions pfp-pop-actions">
-            <button class="pfp-sidebar-card-edit" @click.stop="editFromPopover(popoverComment)" title="Edit">✎</button>
-            <button class="pfp-sidebar-card-remove" @click.stop="deleteFromPopover(popoverComment.id)" title="Delete">×</button>
+        <div
+          ref="commentPopEl"
+          class="pfp-comment-pop"
+          role="dialog"
+          aria-label="Comment"
+          tabindex="-1"
+          :style="{ top: commentPopover.top + 'px', left: commentPopover.left + 'px' }"
+          @mousedown.stop
+          @mouseenter="onPopoverEnter"
+          @mouseleave="onPopoverLeave"
+          @keydown="onPfpKeydown"
+        >
+          <div class="pfp-pop-header">
+            <span class="pfp-sidebar-card-line" v-if="commentLineLabel(popoverComment)">{{ commentLineLabel(popoverComment) }}</span>
+            <div class="pfp-sidebar-card-actions pfp-pop-actions">
+              <button class="pfp-sidebar-card-edit" @click.stop="editFromPopover(popoverComment)" title="Edit">✎</button>
+              <button class="pfp-sidebar-card-remove" @click.stop="deleteFromPopover(popoverComment.id)" title="Delete">×</button>
+            </div>
           </div>
+          <div v-if="popoverComment.images?.length" class="pfp-sidebar-card-images">
+            <img v-for="img in popoverComment.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="card-image-thumb" @click.stop />
+          </div>
+          <div class="pfp-sidebar-card-note">{{ popoverComment.comment }}</div>
         </div>
-        <div v-if="popoverComment.images?.length" class="pfp-sidebar-card-images">
-          <img v-for="img in popoverComment.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="card-image-thumb" @click.stop />
-        </div>
-        <div class="pfp-sidebar-card-note">{{ popoverComment.comment }}</div>
-      </div>
+      </FocusScope>
 
       <!-- Floating "Comment" button anchored near the active selection. -->
       <button
@@ -306,6 +319,7 @@
 </template>
 
 <script setup lang="ts">
+import { FocusScope } from 'reka-ui'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
@@ -799,6 +813,7 @@ const commentsForFile = computed(() =>
 //  - showCommentList: the drawer overlay listing every comment (header pill).
 //  - commentPopover: hover-preview / click-to-pin read popover on a highlight.
 const showCommentList = ref(false)
+const commentPopEl = ref<HTMLElement | null>(null)
 
 // A markdown highlight span, or a whole line in the plain-text viewer.
 function highlightElFromEvent(e: MouseEvent): HTMLElement | null {
@@ -830,9 +845,36 @@ const {
 })
 
 let pfpPinTimestamp = 0
+let skipPfpFocusRestore = false
 watch(() => commentPopover.value?.pinned, (pinned) => {
-  if (pinned) pfpPinTimestamp = Date.now()
+  if (pinned) {
+    pfpPinTimestamp = Date.now()
+    nextTick(() => commentPopEl.value?.querySelector<HTMLElement>('button')?.focus())
+    setTimeout(() => commentPopEl.value?.querySelector<HTMLElement>('button')?.focus(), 0)
+  }
 })
+
+function onPfpMountAutoFocus(event: Event): void {
+  // Hover previews are informational; pinning explicitly moves focus to Edit.
+  event.preventDefault()
+  if (commentPopover.value?.pinned) {
+    nextTick(() => commentPopEl.value?.querySelector<HTMLElement>('button')?.focus())
+    setTimeout(() => commentPopEl.value?.querySelector<HTMLElement>('button')?.focus(), 0)
+  }
+}
+
+function onPfpUnmountAutoFocus(event: Event): void {
+  if (!skipPfpFocusRestore) return
+  skipPfpFocusRestore = false
+  event.preventDefault()
+}
+
+function onPfpKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Escape') return
+  event.preventDefault()
+  event.stopPropagation()
+  closeCommentPopover()
+}
 
 function handlePfpBackdropClick(): void {
   if (Date.now() - pfpPinTimestamp < 150) return
@@ -840,6 +882,7 @@ function handlePfpBackdropClick(): void {
 }
 
 function deleteFromPopover(id: string): void {
+  skipPfpFocusRestore = true
   closeCommentPopover()
   comments.deleteFileComment(id)
   pushArtifactHighlights()
@@ -849,6 +892,7 @@ function editFromPopover(c: { id: string; comment: string; images?: string[] }):
   const popAnchor = commentPopover.value
     ? comments.toViewportAnchor({ top: commentPopover.value.top, left: commentPopover.value.left })
     : null
+  skipPfpFocusRestore = true
   closeCommentPopover()
   comments.startEditComment(c, popAnchor)
 }

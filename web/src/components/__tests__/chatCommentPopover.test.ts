@@ -5,7 +5,7 @@
 // heavy to mount (the smoke test stubs it), so the behaviour it used to own is
 // pinned down here: hover previews, click pins, a pin surviving a stray hover,
 // and the close grace period.
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ChatCommentPopover from '../ChatCommentPopover.vue'
@@ -44,6 +44,11 @@ beforeEach(() => {
   // The composable gates hover previews on pointer capability; jsdom has no
   // matchMedia, so declare this a hover-capable device.
   vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })))
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe('ChatCommentPopover', () => {
@@ -146,6 +151,70 @@ describe('ChatCommentPopover', () => {
       vi.useRealTimers()
     }
   })
+
+  it('gives a pinned popover dialog semantics, focuses its action, and returns focus on Escape', async () => {
+    const wrapper = mountPopover()
+    const el = highlight('c1')
+    el.tabIndex = 0
+    el.focus()
+    wrapper.vm.pinFromEvent(mouseEvent(el))
+    await nextTick()
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+
+    const popup = document.querySelector<HTMLElement>('.pop')!
+    expect(popup.getAttribute('role')).toBe('dialog')
+    expect(popup.getAttribute('aria-label')).toBe('Comment')
+    expect(document.activeElement).toBe(popup.querySelector('button'))
+
+    popup.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await nextTick()
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+    expect(wrapper.vm.openId).toBeNull()
+    expect(document.activeElement).toBe(el)
+  })
+
+  it('clamps a pinned popover to a shrinking visual viewport', async () => {
+    vi.stubGlobal('visualViewport', { width: 320, height: 200 })
+    const wrapper = mountPopover()
+    const el = highlight('c1')
+    vi.spyOn(el, 'getBoundingClientRect').mockReturnValue(new DOMRect(4, 190, 40, 12))
+    wrapper.vm.pinFromEvent(mouseEvent(el))
+    await nextTick()
+
+    const popup = document.querySelector<HTMLElement>('.pop')!
+    // 190 + 6 would put the 80px fallback below the 200px visible area;
+    // the top is pulled up to the 200 - 80 bottom edge.
+    expect(parseFloat(popup.style.top)).toBe(120)
+    expect(parseFloat(popup.style.left)).toBe(8)
+  })
+
+  it('re-clamps an open popover when the visual viewport changes', async () => {
+    const visualViewport = { width: 320, height: 400 }
+    vi.stubGlobal('visualViewport', visualViewport)
+    const wrapper = mountPopover()
+    const el = highlight('c1')
+    vi.spyOn(el, 'getBoundingClientRect').mockReturnValue(new DOMRect(4, 380, 40, 12))
+    wrapper.vm.pinFromEvent(mouseEvent(el))
+    await nextTick()
+    expect(parseFloat(document.querySelector<HTMLElement>('.pop')!.style.top)).toBe(320)
+
+    visualViewport.height = 200
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+    expect(parseFloat(document.querySelector<HTMLElement>('.pop')!.style.top)).toBe(120)
+  })
+
+  it('keeps a hover preview non-focus-stealing for touch-capable users', async () => {
+    const wrapper = mountPopover()
+    const el = highlight('c1')
+    const before = document.activeElement
+    wrapper.vm.onTargetOver(mouseEvent(el))
+    await nextTick()
+
+    expect(wrapper.vm.openId).toBe('c1')
+    expect(document.activeElement).toBe(before)
+  })
+
 
   it('close() dismisses immediately', async () => {
     const wrapper = mountPopover()

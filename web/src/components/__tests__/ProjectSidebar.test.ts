@@ -362,3 +362,125 @@ describe('ProjectSidebar update badge', () => {
     wrapper.unmount()
   })
 })
+
+describe('ProjectSidebar accessible context menus', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    const store = useProjectStore()
+    store.workspaces = [{
+      name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '',
+    }]
+    store.projects = [{
+      project_id: 'project-1', name: 'Notes', workspace: 'personal', context: '',
+      created_at: '2026-07-29T00:00:00Z', order: 0, vault_folder: '', is_auto: false,
+    }, {
+      project_id: 'project-2', name: 'Archive', workspace: 'personal', context: '',
+      created_at: '2026-07-29T00:00:00Z', order: 1, vault_folder: '', is_auto: false,
+    }]
+    store.chats = [{
+      chat_id: 'chat-menu', project_id: 'project-1', title: 'Menu chat', model: 'sonnet',
+      provider: 'claude', mode: 'default', session_id: 'session-menu',
+      created_at: '2026-07-29T00:00:00Z', archived: false,
+    }]
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  async function mountSidebar() {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+    return mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat' },
+      global: { plugins: [router] },
+    })
+  }
+
+  it('opens a right-click chat menu at the pointer and dismisses outside', async () => {
+    const wrapper = await mountSidebar()
+    const row = wrapper.get('.chat-item')
+    const event = new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, clientX: 140, clientY: 90, button: 2,
+    })
+    row.element.dispatchEvent(event)
+    await flushPromises()
+
+    const menu = document.body.querySelector<HTMLElement>('[data-reka-menu-content]')
+    expect(menu).not.toBeNull()
+    expect(['right', 'left']).toContain(menu?.getAttribute('data-side'))
+    expect(menu?.textContent).toContain('Copy chat ID')
+    expect(event.defaultPrevented).toBe(true)
+
+    document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
+    await flushPromises()
+    expect(document.body.querySelector('[data-reka-menu-content]')).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('exposes the same menu through the 44px keyboard/touch action trigger', async () => {
+    const wrapper = await mountSidebar()
+    const trigger = wrapper.get<HTMLButtonElement>('[aria-label="Chat actions"]')
+    trigger.element.focus()
+    await trigger.trigger('click')
+    await flushPromises()
+
+    expect(document.body.querySelector('[data-reka-menu-content]')?.getAttribute('role')).toBe('menu')
+    expect(document.body.textContent).toContain('Move to...')
+    // The explicit trigger remains a native button with a touch-sized class;
+    // unlike a hover-only affordance it is reachable on a phone.
+    expect(trigger.element.tagName).toBe('BUTTON')
+    expect(trigger.classes()).toContain('chat-actions-btn')
+    wrapper.unmount()
+  })
+
+  it('keeps project actions keyboard-reachable while retaining pointer context placement', async () => {
+    const wrapper = await mountSidebar()
+    const projectHeader = wrapper.findAll('.project-header')[0]
+    const event = new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, clientX: 220, clientY: 120, button: 2,
+    })
+    projectHeader.element.dispatchEvent(event)
+    await flushPromises()
+    expect(document.body.textContent).toContain('Rename')
+    expect(document.body.textContent).toContain('Delete')
+
+    document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
+    await flushPromises()
+    const action = wrapper.get<HTMLButtonElement>('[aria-label="Project actions"]')
+    await action.trigger('click')
+    await flushPromises()
+    expect(document.body.querySelector('[data-reka-menu-content]')).not.toBeNull()
+    expect(action.classes()).toContain('project-actions-btn')
+    wrapper.unmount()
+  })
+
+  it('keeps the Move submenu mounted for keyboard opening and returns to its parent', async () => {
+    const wrapper = await mountSidebar()
+    await wrapper.get('[aria-label="Chat actions"]').trigger('click')
+    await flushPromises()
+
+    const move = Array.from(document.body.querySelectorAll<HTMLElement>('button'))
+      .find(button => button.textContent?.trim() === 'Move to...')!
+    move.focus()
+    move.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
+    await flushPromises()
+
+    const menus = document.body.querySelectorAll('[data-reka-menu-content]')
+    expect(menus.length).toBe(2)
+    expect(menus[1].textContent).toContain('Archive')
+
+    const back = Array.from(document.body.querySelectorAll<HTMLElement>('button'))
+      .find(button => button.textContent?.includes('Back'))!
+    back.click()
+    await flushPromises()
+    expect(document.body.querySelectorAll('[data-reka-menu-content]')).toHaveLength(1)
+    wrapper.unmount()
+  })
+})

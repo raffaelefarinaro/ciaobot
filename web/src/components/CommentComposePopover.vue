@@ -1,12 +1,20 @@
 <template>
   <Teleport to="body">
-    <div
+    <FocusScope
       v-if="anchor"
-      ref="rootEl"
-      class="compose"
-      :style="{ top: placed.top + 'px', left: placed.left + 'px' }"
-      @mousedown.stop
+      as-child
+      loop
+      :trapped="false"
+      @mount-auto-focus="onMountAutoFocus"
     >
+      <div
+        class="compose"
+        role="dialog"
+        aria-label="Add comment"
+        :style="{ top: placed.top + 'px', left: placed.left + 'px' }"
+        @mousedown.stop
+        @keydown="onKeydown"
+      >
       <textarea
         ref="inputEl"
         :value="modelValue"
@@ -14,7 +22,6 @@
         placeholder="Add a comment…"
         rows="3"
         @input="onInput"
-        @keydown="onKeydown"
       ></textarea>
       <div v-if="images.length" class="compose-images">
         <span v-for="(img, i) in images" :key="img" class="compose-image">
@@ -51,7 +58,8 @@
           type="button"
         >Add comment</button>
       </div>
-    </div>
+      </div>
+    </FocusScope>
   </Teleport>
 </template>
 
@@ -67,6 +75,7 @@
 // reserve height and they disagreed, so a popover opened near the bottom edge
 // could put its Save button past the fold, where `position: fixed` means no
 // amount of scrolling reaches it.
+import { FocusScope } from 'reka-ui'
 import { computed, nextTick, ref, watch } from 'vue'
 
 import { useViewportHeight } from '../composables/useViewportHeight'
@@ -100,7 +109,6 @@ const emit = defineEmits<{
 
 const images = computed(() => props.images ?? [])
 const inputEl = ref<HTMLTextAreaElement>()
-const rootEl = ref<HTMLElement>()
 const voiceRecorderRef = ref<InstanceType<typeof VoiceRecorder> | null>(null)
 const transcribing = ref(false)
 // Measured height, once rendered. Null until then, so the first paint uses the
@@ -125,7 +133,7 @@ const placed = computed<ComposeAnchor>(() => {
 
 function measure(): void {
   nextTick(() => {
-    const h = rootEl.value?.offsetHeight
+    const h = inputEl.value?.closest<HTMLElement>('.compose')?.offsetHeight
     if (h) measuredH.value = h
   })
 }
@@ -143,9 +151,15 @@ function onUpload(e: Event): void {
   emit('upload', e)
 }
 
+function onMountAutoFocus(event: Event): void {
+  event.preventDefault()
+  focus()
+}
+
 function onKeydown(e: KeyboardEvent): void {
   if (e.key === 'Escape') {
     e.preventDefault()
+    e.stopPropagation()
     emit('cancel')
     return
   }
@@ -180,6 +194,7 @@ watch(
   (a) => {
     if (a) focus()
   },
+  { immediate: true },
 )
 
 function insertTextAtCursor(text: string): void {

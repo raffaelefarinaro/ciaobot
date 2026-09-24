@@ -62,6 +62,34 @@ describe('PinnedFilePanel', () => {
     return wrapper
   }
 
+  it('uses a non-stealing focus scope for the pinned read popover', async () => {
+    const wrapper = await mountPanel({ attach: true })
+    const store = useProjectStore()
+    store.addPendingComment({
+      path: '/vault/note.md', selection: 'Title', comment: 'A pinned note',
+    })
+    await nextTick()
+    await flushPromises()
+
+    const highlight = wrapper.get<HTMLElement>('.comment-highlight')
+    highlight.element.tabIndex = 0
+    highlight.element.focus()
+    highlight.element.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await nextTick()
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+
+    const popup = document.body.querySelector<HTMLElement>('.pfp-comment-pop')
+    expect(popup?.getAttribute('role')).toBe('dialog')
+    expect(popup?.getAttribute('aria-label')).toBe('Comment')
+    expect(document.activeElement).toBe(popup?.querySelector('button'))
+
+    popup!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await nextTick()
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+    expect(document.body.querySelector('.pfp-comment-pop')).toBeNull()
+    wrapper.unmount()
+  })
+
   it('keeps an in-progress text edit when the model turn ends', async () => {
     const wrapper = await mountPanel()
 

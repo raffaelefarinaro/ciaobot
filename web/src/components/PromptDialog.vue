@@ -1,38 +1,59 @@
 <template>
-  <div
-    v-if="request"
-    class="prompt-backdrop"
-    role="dialog"
-    aria-modal="true"
-    :aria-label="request.title"
-    @click.self="cancel"
+  <DialogRoot
+    :open="request !== null"
+    modal
+    @update:open="onOpenChange"
   >
-    <form class="prompt-card" @submit.prevent="accept">
-      <p class="prompt-title">{{ request.title }}</p>
-      <label class="prompt-label" for="prompt-dialog-input">{{ request.message }}</label>
-      <input
-        id="prompt-dialog-input"
-        ref="input"
-        v-model="draft"
-        class="prompt-input"
-        type="text"
-        autocomplete="off"
-        :placeholder="request.placeholder"
-        @keydown.esc.prevent.stop="cancel"
-      />
-      <div class="prompt-actions">
-        <button class="prompt-action prompt-action--cancel" type="button" @click="cancel">
-          {{ request.cancelLabel }}
-        </button>
-        <button class="prompt-action prompt-action--primary" type="submit" :disabled="!draft.trim()">
-          {{ request.confirmLabel }}
-        </button>
+    <DialogOverlay as-child>
+      <div class="prompt-backdrop">
+        <DialogContent
+          as="form"
+          class="prompt-card"
+          aria-modal="true"
+          @submit.prevent="accept"
+          @open-auto-focus="onOpenAutoFocus"
+          @escape-key-down="onEscapeKeyDown"
+        >
+          <DialogTitle as="p" class="prompt-title">
+            {{ request?.title }}
+          </DialogTitle>
+          <DialogDescription as="label" class="prompt-label" for="prompt-dialog-input">
+            {{ request?.message }}
+          </DialogDescription>
+          <input
+            id="prompt-dialog-input"
+            ref="input"
+            v-model="draft"
+            class="prompt-input"
+            type="text"
+            autocomplete="off"
+            :placeholder="request?.placeholder"
+          />
+          <div class="prompt-actions">
+            <DialogClose as-child>
+              <button class="prompt-action prompt-action--cancel" type="button" @click="cancel">
+                {{ request?.cancelLabel }}
+              </button>
+            </DialogClose>
+            <button class="prompt-action prompt-action--primary" type="submit" :disabled="!draft.trim()">
+              {{ request?.confirmLabel }}
+            </button>
+          </div>
+        </DialogContent>
       </div>
-    </form>
-  </div>
+    </DialogOverlay>
+  </DialogRoot>
 </template>
 
 <script setup lang="ts">
+import {
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogOverlay,
+  DialogRoot,
+  DialogTitle,
+} from 'reka-ui'
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { pendingPrompt } from '../lib/prompt'
 
@@ -52,16 +73,33 @@ function cancel() {
   request.value?.resolve(null)
 }
 
-// Esc is handled on the input rather than on window: ChatLayout's global
-// Escape handler yields while a dialog is up, and keeping the key local means
-// the press cannot also reach the view behind this one. Enter is the form's
-// native submit.
+function focusInput() {
+  nextTick(() => {
+    if (!request.value) return
+    input.value?.focus()
+    input.value?.select()
+  })
+}
+
+function onOpenChange(open: boolean) {
+  if (!open) cancel()
+}
+
+function onOpenAutoFocus(event: Event) {
+  event.preventDefault()
+  focusInput()
+}
+
+function onEscapeKeyDown(event: KeyboardEvent) {
+  event.preventDefault()
+  cancel()
+}
+
 watch(request, async value => {
   if (!value) return
   draft.value = value.value
   await nextTick()
-  input.value?.focus()
-  input.value?.select()
+  if (request.value === value) focusInput()
 })
 
 onBeforeUnmount(() => {

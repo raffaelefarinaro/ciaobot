@@ -1,39 +1,60 @@
 <template>
-  <div
-    v-if="request"
-    class="confirm-backdrop"
-    role="dialog"
-    aria-modal="true"
-    :aria-label="request.title"
-    @click.self="cancel"
+  <DialogRoot
+    :open="request !== null"
+    modal
+    @update:open="onOpenChange"
   >
-    <div class="confirm-card">
-      <p class="confirm-title">{{ request.title }}</p>
-      <p class="confirm-message">{{ request.message }}</p>
-      <div class="confirm-actions">
-        <button
-          ref="cancelButton"
-          class="confirm-action confirm-action--cancel"
-          type="button"
-          @click="cancel"
+    <DialogOverlay as-child>
+      <div class="confirm-backdrop" @click.self="cancel">
+        <DialogContent
+          class="confirm-card"
+          aria-modal="true"
+          @open-auto-focus="onOpenAutoFocus"
+          @escape-key-down="onEscapeKeyDown"
         >
-          {{ request.cancelLabel }}
-        </button>
-        <button
-          class="confirm-action"
-          :class="request.destructive ? 'confirm-action--danger' : 'confirm-action--primary'"
-          type="button"
-          @click="accept"
-        >
-          {{ request.confirmLabel }}
-        </button>
+          <DialogTitle as="p" class="confirm-title">
+            {{ request?.title }}
+          </DialogTitle>
+          <DialogDescription as="p" class="confirm-message">
+            {{ request?.message }}
+          </DialogDescription>
+          <div class="confirm-actions">
+            <DialogClose as-child>
+              <button
+                ref="cancelButton"
+                class="confirm-action confirm-action--cancel"
+                type="button"
+                @click="cancel"
+              >
+                {{ request?.cancelLabel }}
+              </button>
+            </DialogClose>
+            <button
+              class="confirm-action"
+              :class="request?.destructive ? 'confirm-action--danger' : 'confirm-action--primary'"
+              type="button"
+              @click="accept"
+            >
+              {{ request?.confirmLabel }}
+            </button>
+          </div>
+        </DialogContent>
       </div>
-    </div>
-  </div>
+    </DialogOverlay>
+  </DialogRoot>
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogOverlay,
+  DialogRoot,
+  DialogTitle,
+} from 'reka-ui'
+import { onKeyStroke } from '@vueuse/core'
+import { nextTick, onBeforeUnmount, ref } from 'vue'
 import { pendingConfirm } from '../lib/confirm'
 
 const request = pendingConfirm
@@ -47,30 +68,31 @@ function cancel() {
   request.value?.resolve(false)
 }
 
-// Escape must cancel, and Enter must confirm, so the dialog is usable without
-// a mouse the way the native one was.
-function onKeyDown(event: KeyboardEvent) {
-  if (!request.value) return
-  if (event.key === 'Escape') {
-    event.preventDefault()
-    cancel()
-  } else if (event.key === 'Enter') {
-    event.preventDefault()
-    accept()
-  }
+function onOpenChange(open: boolean) {
+  if (!open) cancel()
 }
 
-// Focus the non-destructive action so a stray Return never confirms a delete.
-watch(request, async value => {
-  if (!value) return
-  await nextTick()
-  cancelButton.value?.focus()
-})
+function onOpenAutoFocus(event: Event) {
+  event.preventDefault()
+  nextTick(() => {
+    if (request.value) cancelButton.value?.focus()
+  })
+}
 
-onMounted(() => window.addEventListener('keydown', onKeyDown))
+function onEscapeKeyDown(event: KeyboardEvent) {
+  event.preventDefault()
+  cancel()
+}
+
+function onEnter(event: KeyboardEvent) {
+  if (!request.value) return
+  event.preventDefault()
+  accept()
+}
+
+onKeyStroke('Enter', onEnter)
+
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onKeyDown)
-  // A dialog torn down mid-question would leave its caller awaiting forever.
   request.value?.resolve(false)
 })
 </script>
