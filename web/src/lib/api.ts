@@ -1,4 +1,6 @@
 /** The JSON body an error response may carry. Every field is best-effort. */
+import { navigateToContent } from './originNavigation'
+
 interface ApiErrorBody {
   error?: string
   steps?: Array<{ step?: string; ok?: boolean; output?: string }>
@@ -38,16 +40,22 @@ async function requestForm<T>(method: string, path: string, form: FormData): Pro
   if (!/^https?:$/.test(target.protocol) || target.origin !== window.location.origin) {
     throw new ApiError(`Blocked non-same-origin API path: ${path}`)
   }
+  const headers: Record<string, string> = {}
+  if (window.location.hostname === '127.0.0.1') {
+    headers['X-Ciao-Local-Control'] = '1'
+  }
   const opts: RequestInit = {
     method,
     credentials: 'same-origin',
+    redirect: 'manual',
+    headers,
     body: form,
   }
   const res = await fetch(`${target.pathname}${target.search}${target.hash}`, opts)
   if (res.status === 401) {
     const isAuthProbe = path === '/api/auth/check' || path === '/api/auth'
     if (!onLoginPage() && !onDevicePage() && !isAuthProbe) {
-      window.location.href = '/login'
+      navigateToContent('/login')
     }
     const payload = await res.json().catch(() => ({}))
     throw new ApiError(
@@ -101,10 +109,15 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   if (!/^https?:$/.test(target.protocol) || target.origin !== window.location.origin) {
     throw new ApiError(`Blocked non-same-origin API path: ${path}`)
   }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (window.location.hostname === '127.0.0.1') {
+    headers['X-Ciao-Local-Control'] = '1'
+  }
   const opts: RequestInit = {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     credentials: 'same-origin',
+    redirect: 'manual',
   }
   if (body !== undefined) {
     opts.body = JSON.stringify(body)
@@ -115,7 +128,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     // when client mode's /api/auth/check returns 401 (host password needed).
     const isAuthProbe = path === '/api/auth/check' || path === '/api/auth'
     if (!onLoginPage() && !onDevicePage() && !isAuthProbe) {
-      window.location.href = '/login'
+      navigateToContent('/login')
     }
     const payload = await res.json().catch(() => ({}))
     throw new ApiError(

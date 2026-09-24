@@ -21,15 +21,14 @@ import socket
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
 # Roles were renamed from active/standby to host/client ("active" also collided
 # with peer entries' `is_active`). Values persisted by older releases are
-# normalized through this map on every read and rewritten in their canonical
-# form on the next save, but the aliases stay accepted forever: a state file may
-# not have been rewritten yet, and an unknown role would silently flip a client
-# back to host (normalize_role's fallback), resuming schedules on both machines.
+# normalized through this map on every read; unknown values remain invalid and
+# never select host behavior.
 _ROLE_ALIASES = {
     "active": "host",
     "standby": "client",
@@ -37,6 +36,35 @@ _ROLE_ALIASES = {
     "client": "client",
 }
 _VALID_ROLES = frozenset({"host", "client"})
+_INVALID_ROLE = "invalid"
+
+
+def _state_is_valid(data: dict[str, Any]) -> bool:
+    """Return whether persisted routing fields are safe to act on.
+
+    A syntactically valid role is not enough: a client with a malformed peer
+    URL must not be treated as a confirmed client and then silently fall back to
+    local host behavior when the proxy cannot build a target.
+    """
+    if normalize_role(str(data.get("role", ""))) not in _VALID_ROLES:
+        return False
+    host_url = data.get("host_url")
+    if host_url not in (None, "") and (
+        not isinstance(host_url, str) or not _normalize_peer_url(host_url)
+    ):
+        return False
+    peers = data.get("peers", [])
+    if not isinstance(peers, list):
+        return False
+    for peer in peers:
+        if not isinstance(peer, dict):
+            return False
+        url = peer.get("url")
+        if not isinstance(url, str) or not _normalize_peer_url(url):
+            return False
+        if "is_active" in peer and not isinstance(peer["is_active"], bool):
+            return False
+    return True
 
 
 def _now_iso() -> str:
@@ -50,7 +78,7 @@ def get_default_node_id() -> str:
 def normalize_role(role: str) -> str:
     cleaned = str(role or "").strip().lower()
     mapped = _ROLE_ALIASES.get(cleaned, "")
-    return mapped if mapped in _VALID_ROLES else "host"
+    return mapped if mapped in _VALID_ROLES else _INVALID_ROLE
 
 
 def _normalize_peer_url(url: str) -> str:
@@ -59,15 +87,60 @@ def _normalize_peer_url(url: str) -> str:
         return ""
     if not (cleaned.startswith("http://") or cleaned.startswith("https://")):
         cleaned = f"http://{cleaned}"
-
     try:
-        from urllib.parse import urlparse
-        parsed = urlparse(cleaned)
-        if not parsed.port and parsed.scheme == "http":
-            cleaned = f"{cleaned}:8443"
-    except Exception:
-        pass
+        parsed = urlsplit(cleaned)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+            or parsed.netloc.endswith(":")
+        ):
+            return ""
+        port = parsed.port
+        if port == 0:
+            return ""
+        if port is None and parsed.scheme == "http":
+            # Rebuild the authority rather than appending to the raw input:
+            # `http://host:` and an empty query/fragment would otherwise turn
+            # into malformed strings such as `http://host::8443`.
+            host = parsed.hostname
+            if ":" in host:
+                host = f"[{host}]"
+            cleaned = f"{parsed.scheme}://{host}:8443"
+    except ValueError:
+        return ""
     return cleaned
+
+
+def peer_url_is_allowed(peer_url: str, request_scheme: str = "") -> bool:
+    try:
+        parsed = urlsplit(peer_url)
+    except ValueError:
+        return False
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+        or parsed.netloc.endswith(":")
+    ):
+        return False
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    if port == 0:
+        return False
+    request_scheme = request_scheme.lower()
+    request_scheme = {"ws": "http", "wss": "https"}.get(request_scheme, request_scheme)
+    return not (request_scheme == "https" and parsed.scheme != "https")
 
 
 class NodeStateManager:
@@ -77,10 +150,25 @@ class NodeStateManager:
         self.runtime_root = Path(runtime_root)
         self.state_file = self.runtime_root / "node_state.json"
         self.node_id = get_default_node_id()
+        self._state_loaded = False
         self._ensure_loaded()
+        self._state_loaded = True
+
+    def _invalid_state(self) -> dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "role": _INVALID_ROLE,
+            "active_since": None,
+            "last_handover": None,
+            "host_url": None,
+            "host_session": None,
+            "peers": [],
+        }
 
     def _ensure_loaded(self) -> dict[str, Any]:
         data = self._read_raw()
+        if data is None:
+            return self._invalid_state()
         if not data:
             now = _now_iso()
             default_role = "host"
@@ -100,7 +188,9 @@ class NodeStateManager:
         if self.node_id and data.get("node_id") != self.node_id:
             data["node_id"] = self.node_id
             changed = True
-        role = normalize_role(str(data.get("role", "host")))
+        role = normalize_role(str(data.get("role", "")))
+        if role == _INVALID_ROLE or not _state_is_valid(data):
+            return self._invalid_state()
         if data.get("role") != role:
             data["role"] = role
             changed = True
@@ -110,8 +200,7 @@ class NodeStateManager:
         if "host_session" not in data:
             data["host_session"] = None
             changed = True
-        # Prefer explicit host_url; else migrate from first/active peer.
-        if not data.get("host_url"):
+        if role != _INVALID_ROLE and not data.get("host_url"):
             peers = data.get("peers") or []
             if isinstance(peers, list) and peers:
                 active = next(
@@ -126,15 +215,38 @@ class NodeStateManager:
             self._write_raw(data)
         return data
 
-    def _read_raw(self) -> dict[str, Any]:
+    def _read_raw(self) -> dict[str, Any] | None:
         if not self.state_file.exists():
+            if self._state_loaded:
+                logger.warning("Node state disappeared after initialization: %s", self.state_file)
+                return None
             return {}
         try:
             val = json.loads(self.state_file.read_text(encoding="utf-8"))
-            return val if isinstance(val, dict) else {}
         except Exception as exc:
             logger.warning("Failed to parse %s: %s", self.state_file, exc)
-            return {}
+            return None
+        if not isinstance(val, dict):
+            logger.warning("Ignoring non-object node state in %s", self.state_file)
+            return None
+        if not val:
+            logger.warning("Ignoring empty node state in %s", self.state_file)
+            return None
+        if not isinstance(val.get("role"), str):
+            logger.warning("Ignoring node state with an invalid role in %s", self.state_file)
+            return None
+        if "node_id" in val and not isinstance(val["node_id"], str):
+            logger.warning("Ignoring node state with an invalid node id in %s", self.state_file)
+            return None
+        for field in ("host_url", "host_session"):
+            if field in val and val[field] is not None and not isinstance(val[field], str):
+                logger.warning("Ignoring node state with an invalid %s in %s", field, self.state_file)
+                return None
+        peers = val.get("peers", [])
+        if not isinstance(peers, list) or any(not isinstance(peer, dict) for peer in peers):
+            logger.warning("Ignoring node state with an invalid peer registry in %s", self.state_file)
+            return None
+        return val
 
     def _write_raw(self, payload: dict[str, Any]) -> None:
         self.runtime_root.mkdir(parents=True, exist_ok=True)
@@ -147,14 +259,30 @@ class NodeStateManager:
         return self.get_role() == "host"
 
     def is_client(self) -> bool:
-        return self.get_role() == "client"
+        return self.get_role() in {"client", _INVALID_ROLE}
+
+    def is_valid(self) -> bool:
+        data = self._read_raw()
+        if data is None:
+            return False
+        if not data:
+            return True
+        return _state_is_valid(data)
 
     def get_role(self) -> str:
         data = self._read_raw()
-        return normalize_role(str(data.get("role", "host")))
+        if data is None:
+            return _INVALID_ROLE
+        if not data:
+            return "host"
+        if not _state_is_valid(data):
+            return _INVALID_ROLE
+        return normalize_role(str(data.get("role", "")))
 
     def get_host_url(self) -> str | None:
         data = self._read_raw()
+        if data is None or not _state_is_valid(data):
+            return None
         raw = str(data.get("host_url") or "").strip()
         if raw:
             return _normalize_peer_url(raw) or None
@@ -178,23 +306,27 @@ class NodeStateManager:
 
     def get_host_session(self) -> str | None:
         data = self._read_raw()
+        if data is None:
+            return None
         session = str(data.get("host_session") or "").strip()
         return session or None
 
     def get_status(self) -> dict[str, Any]:
         data = self._ensure_loaded()
-        role = normalize_role(str(data.get("role", "host")))
+        role = normalize_role(str(data.get("role", "")))
         host_url = self.get_host_url()
+        peers = data.get("peers", [])
         return {
             "node_id": data.get("node_id", self.node_id),
             "role": role,
             "mode": role,
+            "state_valid": _state_is_valid(data),
             "active_since": data.get("active_since"),
             "last_handover": data.get("last_handover"),
             "host_url": host_url,
             "active_peer_url": host_url if role == "client" else None,
             "has_host_session": bool(str(data.get("host_session") or "").strip()),
-            "peers": data.get("peers", []),
+            "peers": peers if isinstance(peers, list) else [],
         }
 
     def set_role(self, role: str) -> dict[str, Any]:

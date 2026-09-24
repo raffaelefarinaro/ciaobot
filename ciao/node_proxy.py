@@ -21,6 +21,7 @@ log in with) and the static bundle, comes from the host.
 from __future__ import annotations
 
 import logging
+from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,6 +29,16 @@ import httpx
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
+
+from ciao.node_state import peer_url_is_allowed
+from ciao.web.remote_boundary import (
+    content_origin_guard,
+    is_control_origin,
+    is_local_static_path,
+    invalid_state_api_guard,
+    local_control_api_guard,
+    local_control_ui_guard,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -49,6 +60,7 @@ EXCLUDED_LOCAL_PATHS: set[str] = {
     "/api/auth/login",
     "/api/auth/logout",
     "/api/auth/check",
+    "/api/auth/bridge",
 }
 
 # Prefixes handled locally: this machine's role, connection, and own install.
@@ -56,6 +68,7 @@ LOCAL_API_PREFIXES: tuple[str, ...] = (
     "/api/node",
     "/api/device",
     "/api/desktop-drop",
+    "/api/native/sessions",
 )
 
 # Paths that live under a local prefix but must still be mirrored. The PWA
@@ -87,7 +100,10 @@ _NO_CACHE = "no-cache, no-store, must-revalidate"
 _PROXY_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
 _EXPECTED_REMOTE_CLOSE_CODES = {1000, 1001, 4004}
 
-# One pooled client for every non-streaming proxied request. Building a fresh
+# One pooled client for every non-streaming proxied request. Its cookie jar is
+# deliberately inert: the only peer credential is the explicit, state-bound
+# session header assembled per request, so a Set-Cookie from one peer can never
+# be replayed to another peer by httpx's implicit jar. Building a fresh
 # AsyncClient per call meant a new TCP connect (plus TLS handshake) for each
 # one — and a client node makes several per chat open on top of a 15s poll of
 # /api/chats + /messages + /subagents, so the handshakes dominated the latency
@@ -100,13 +116,28 @@ _EXPECTED_REMOTE_CLOSE_CODES = {1000, 1001, 4004}
 _SHARED_CLIENT: httpx.AsyncClient | None = None
 
 
+class _NoCookieJar(CookieJar):
+    """Cookie jar that never stores or replays peer cookies implicitly."""
+
+    def add_cookie_header(self, request) -> None:  # type: ignore[no-untyped-def]
+        return None
+
+    def extract_cookies(self, response, request) -> None:  # type: ignore[no-untyped-def]
+        return None
+
+
+def _cookie_jar() -> httpx.Cookies:
+    return httpx.Cookies(_NoCookieJar())
+
+
 def _shared_client() -> httpx.AsyncClient:
     """The pooled client, created on first use."""
     global _SHARED_CLIENT
     if _SHARED_CLIENT is None or _SHARED_CLIENT.is_closed:
         _SHARED_CLIENT = httpx.AsyncClient(
             timeout=_PROXY_TIMEOUT,
-            follow_redirects=True,
+            follow_redirects=False,
+            cookies=_cookie_jar(),
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
         )
     return _SHARED_CLIENT
@@ -190,12 +221,18 @@ def _client_host_url(request: Request | WebSocket) -> str | None:
         return None
 
     target = node_mgr.get_active_peer_url()
-    if not target:
+    request_scheme = str(request.url.scheme or "http").lower()
+    request_scheme = {"ws": "http", "wss": "https"}.get(request_scheme, request_scheme)
+    if not target or not peer_url_is_allowed(target, request_scheme):
         return None
 
-    # Self-proxy check: avoid proxying to ourselves
+    # Self-proxy check: avoid proxying to ourselves.  Compare explicit ports
+    # against the scheme's real default; using the app's usual 8443 fallback
+    # here misses `https://localhost` (and can recurse through ourselves).
     req_host = request.url.hostname or ""
-    req_port = request.url.port or 8443
+    req_scheme = str(request.url.scheme or "http").lower()
+    req_http_scheme = {"ws": "http", "wss": "https"}.get(req_scheme, req_scheme)
+    req_port = request.url.port or (443 if req_http_scheme == "https" else 80)
 
     try:
         from urllib.parse import urlparse
@@ -215,13 +252,27 @@ def _client_host_url(request: Request | WebSocket) -> str | None:
 
 def get_proxy_target_url(request: Request | WebSocket) -> str | None:
     """Return host URL when this node should tunnel the request as a client."""
-    # Proxy /api/ and /ws/ requests
     path = request.url.path
     if not (path.startswith("/api/") or path.startswith("/ws/")):
         return None
     if is_local_path(path):
         return None
     return _client_host_url(request)
+
+
+def client_peer_required(request: Request | WebSocket) -> bool:
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    if node_mgr is None or not node_mgr.is_client():
+        return False
+    validity = getattr(node_mgr, "is_valid", None)
+    if callable(validity) and not validity():
+        return False
+    path = request.url.path
+    if is_local_path(path):
+        return False
+    if not (path.startswith("/api/") or path.startswith("/ws/")):
+        return False
+    return _client_host_url(request) is None
 
 
 def get_static_proxy_target(request: Request) -> str | None:
@@ -235,6 +286,8 @@ def get_static_proxy_target(request: Request) -> str | None:
     if path.startswith("/api/") or path.startswith("/ws/") or path.startswith("/mcp"):
         return None
     if request.method.upper() not in {"GET", "HEAD"}:
+        return None
+    if is_control_origin(request) and is_local_static_path(path):
         return None
     if is_local_ui_path(path):
         return None
@@ -260,6 +313,19 @@ def _host_auth_headers(request: Request | WebSocket, target_url: str) -> dict[st
     return headers
 
 
+def _clear_host_session(request: Request | WebSocket) -> None:
+    from ciao.web.routes_auth import _clear_auth_bridges
+
+    _clear_auth_bridges(request.app)
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    if node_mgr is None:
+        return
+    try:
+        node_mgr.set_host_session(None)
+    except Exception:
+        logger.warning("Could not clear revoked host session", exc_info=True)
+
+
 def _capture_host_session(request: Request | WebSocket, res: httpx.Response) -> None:
     """Store a session cookie the host just issued as the new tunnel session.
 
@@ -283,9 +349,27 @@ def _capture_host_session(request: Request | WebSocket, res: httpx.Response) -> 
     if node_mgr is None:
         return
     try:
+        from ciao.web.routes_auth import _clear_auth_bridges
+
+        _clear_auth_bridges(request.app)
         node_mgr.set_host_session(issued)
     except Exception as exc:  # state file trouble must not fail the response
         logger.warning("Could not store refreshed host session: %s", exc)
+
+
+def _host_redirected(res: httpx.Response) -> bool:
+    return (
+        res.status_code in {300, 301, 302, 303, 307, 308}
+        or "location" in res.headers
+        or "refresh" in {key.lower() for key in res.headers}
+    )
+
+
+def _host_redirect_refusal() -> JSONResponse:
+    return JSONResponse(
+        {"error": "Host redirect refused", "peer_unreachable": False},
+        status_code=502,
+    )
 
 
 def _forwarded_response_headers(res: httpx.Response, *, decoded_body: bool) -> dict[str, str]:
@@ -313,6 +397,11 @@ async def proxy_http_request(
     ``on_unreachable`` gets a chance to answer when the host cannot be reached;
     returning None falls back to the standard 503 payload.
     """
+    if not peer_url_is_allowed(active_peer_url, str(request.url.scheme or "")):
+        return JSONResponse(
+            {"error": "client peer transport is not allowed", "client": True},
+            status_code=503,
+        )
     path_and_query = request.url.path
     if request.url.query:
         path_and_query += f"?{request.url.query}"
@@ -347,7 +436,11 @@ async def proxy_http_request(
         if is_sse:
             # An SSE response lives as long as the stream, so it gets its own
             # client that closes with it rather than a slot in the shared pool.
-            client = httpx.AsyncClient(timeout=_PROXY_TIMEOUT, follow_redirects=True)
+            client = httpx.AsyncClient(
+                timeout=_PROXY_TIMEOUT,
+                follow_redirects=False,
+                cookies=_cookie_jar(),
+            )
             req = client.build_request(
                 method=request.method,
                 url=target_url,
@@ -355,6 +448,12 @@ async def proxy_http_request(
                 content=body,
             )
             res = await client.send(req, stream=True)
+            if _host_redirected(res):
+                await res.aclose()
+                await client.aclose()
+                return _host_redirect_refusal()
+            if res.status_code in {401, 403}:
+                _clear_host_session(request)
 
             async def stream_generator():
                 try:
@@ -364,7 +463,8 @@ async def proxy_http_request(
                     await res.aclose()
                     await client.aclose()
 
-            _capture_host_session(request, res)
+            if res.is_success:
+                _capture_host_session(request, res)
             return StreamingResponse(
                 stream_generator(),
                 status_code=res.status_code,
@@ -380,7 +480,12 @@ async def proxy_http_request(
             headers=headers,
             content=body,
         )
-        _capture_host_session(request, res)
+        if _host_redirected(res):
+            return _host_redirect_refusal()
+        if res.status_code in {401, 403}:
+            _clear_host_session(request)
+        if res.is_success:
+            _capture_host_session(request, res)
         return Response(
             content=res.content,
             status_code=res.status_code,
@@ -434,13 +539,56 @@ class StandbyProxyMiddleware(BaseHTTPMiddleware):
     """Tunnel API, WS, and UI-bundle requests to the host in client mode."""
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        api_guard = local_control_api_guard(request)
+        if api_guard is not None:
+            return api_guard
+        control_guard = local_control_ui_guard(request)
+        if control_guard is not None:
+            return control_guard
+        origin_guard = content_origin_guard(request)
+        if origin_guard is not None:
+            return origin_guard
+        invalid_guard = invalid_state_api_guard(request)
+        if invalid_guard is not None:
+            return invalid_guard
         target_peer = get_proxy_target_url(request)
         if target_peer:
             return await proxy_http_request(request, target_peer)
+        if client_peer_required(request):
+            return JSONResponse(
+                {"error": "client has no valid host", "client": True},
+                status_code=503,
+            )
         static_peer = get_static_proxy_target(request)
         if static_peer:
             return await proxy_static_request(request, static_peer)
         return await call_next(request)
+
+
+class _RemoteWebSocketClosed(Exception):
+    def __init__(self, code: int | None) -> None:
+        super().__init__(f"host WebSocket closed ({code})")
+        self.code = code
+
+
+async def _proxy_socket_failure(
+    websocket: WebSocket,
+    *,
+    kind: str,
+    code: int,
+    reason: str,
+) -> None:
+    try:
+        payload = {"type": kind}
+        if kind != "host_unreachable":
+            payload["message"] = reason
+        await websocket.send_json(payload)
+        if kind == "host_unreachable":
+            await websocket.close(code=code)
+        else:
+            await websocket.close(code=code, reason=reason)
+    except Exception:
+        pass
 
 
 async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
@@ -450,12 +598,27 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
     from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 
     clean_url = active_peer_url.rstrip("/")
+    local_scheme = "https" if str(getattr(websocket.url, "scheme", "")) == "wss" else "http"
+    if not peer_url_is_allowed(clean_url, local_scheme):
+        await _proxy_socket_failure(
+            websocket,
+            kind="error",
+            code=4003,
+            reason="client peer transport is not allowed",
+        )
+        return
     if clean_url.startswith("https://"):
         target_ws_base = "wss://" + clean_url[8:]
     elif clean_url.startswith("http://"):
         target_ws_base = "ws://" + clean_url[7:]
     else:
-        target_ws_base = "ws://" + clean_url
+        await _proxy_socket_failure(
+            websocket,
+            kind="error",
+            code=4003,
+            reason="client peer URL is invalid",
+        )
+        return
 
     path_and_query = websocket.url.path
     if websocket.url.query:
@@ -510,9 +673,6 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                         msg = await websocket.receive_text()
                         await remote_ws.send(msg)
                 except WebSocketDisconnect:
-                    # The local browser went away. Stop the paired host
-                    # forwarder without reporting a host failure to a client
-                    # that is no longer connected.
                     return
                 except ConnectionClosed as exc:
                     close = exc.rcvd
@@ -535,8 +695,6 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                         else:
                             await websocket.send_text(msg)
                 except WebSocketDisconnect:
-                    # The local browser disconnected while the host was still
-                    # healthy. As above, this is a normal teardown.
                     return
                 except ConnectionClosed as exc:
                     close = exc.rcvd
@@ -550,6 +708,9 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                     else:
                         remember_downstream_close()
                     return
+                # A websockets iterator can finish without raising while the
+                # peer still supplied a terminal close code. Preserve that code
+                # for the downstream close instead of silently normalising it.
                 remember_downstream_close()
 
             task1 = asyncio.create_task(forward_client_to_remote())
@@ -576,11 +737,30 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                 raise forwarding_errors[0]
             await close_downstream()
     except Exception as exc:
-        logger.warning("Client WebSocket proxy to host %s failed: %s", target_ws_url, exc)
-        try:
-            await websocket.send_json(
-                {"type": "host_unreachable"}
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        if status is None:
+            status = getattr(exc, "status_code", None)
+        close_code = getattr(exc, "code", None)
+        if status in {401, 403} or close_code in {4001, 4400}:
+            _clear_host_session(websocket)
+            await _proxy_socket_failure(
+                websocket,
+                kind="auth_required",
+                code=4001,
+                reason="host authentication required",
             )
-            await websocket.close(code=4004)
-        except Exception:
-            pass
+            return
+        if close_code == 4003:
+            await _proxy_socket_failure(
+                websocket,
+                kind="error",
+                code=4003,
+                reason="host rejected the client connection",
+            )
+            return
+        if status in {300, 301, 302, 303, 307, 308}:
+            await _proxy_socket_failure(websocket, kind="error", code=4003, reason="host redirect refused")
+            return
+        logger.warning("Client WebSocket proxy to host %s failed: %s", target_ws_url, exc)
+        await _proxy_socket_failure(websocket, kind="host_unreachable", code=4004, reason="host unreachable")

@@ -125,6 +125,7 @@ ciao/                          Python backend (Starlette).
   web/                         PWA web server (Python routes) + static assets (built by web/).
     app.py                     Starlette app factory: middleware, route table, SPA catch-all.
     auth.py                    Session-cookie auth middleware and serializer.
+    remote_boundary.py         Client-content origin and local-control capability gate.
     security.py                Security response headers middleware.
     routes_api.py              REST route handlers. Catch-all for handlers without a domain home. The vault read handlers (`/api/vault/backlinks`, `/api/vault-markdown-paths`) do their whole file traversal in a bounded worker via `ciao/async_reads.run_read`, so a large-vault scan cannot stall WebSocket keepalives or unrelated responses. The chat-history handlers keep only their transport — query params, the pagination envelope, the part cache and the 404 — and hand the rendering to `transcript_service.py`.
     document_conversion.py     Lazy firecrawl-anydoc conversion for chat attachments.
@@ -180,7 +181,7 @@ web/                           Vue 3 PWA frontend.
 desktop/                       Tauri 2 macOS shell.
   src/                         Stylesheet for the bundled startup/recovery page; never loaded by the PWA.
   src-tauri/src/               Rust runtime discovery, lifecycle adapter, tray, notifications, settings, and engine status client.
-  src-tauri/                   Two tiny Tauri commands (`check_permission` / `request_permission`, for the push-notification permission flow) in the `main` capability; tray-driven preferences otherwise keep the remote PWA without an IPC surface.
+  src-tauri/                   Two tiny Tauri commands (`check_permission` / `request_permission`, for the push-notification permission flow) restricted to bundled local pages; tray-driven preferences keep the remote PWA without an IPC surface.
 
 scripts/
   README.md                    Scripts directory orientation.
@@ -278,8 +279,9 @@ native Tauri handler because WKWebView removes absolute paths from HTML
 `File` objects. Tauri writes the exact dropped paths into a five-minute,
 single-use grant under `.runtime/desktop-drop-grants/` and dispatches only
 that grant ID into the page. The local `/api/desktop-drop` endpoint consumes
-the grant: hosts receive the absolute paths, while clients transfer the file
-bytes into the active project on the host. This does not add a native command
+the grant: the route returns bounded opaque file references, and the server
+expands those references only in the provider prompt; clients transfer the
+file bytes into the active project on the host. This does not add a native command
 or general filesystem capability to the remote page. If the engine is unavailable
 at launch, the main window shows a bundled, capability-free recovery page,
 requests a service start through `ciao desktop-service`, and navigates to the
@@ -476,7 +478,7 @@ The map has two surfaces with parity of action. The graph canvas is driven by Po
 
 Primary navigation uses native button/link semantics with visible keyboard focus, and mobile controls keep a 44px minimum target. Browser zoom remains enabled; Settings font scaling is an additional preference rather than a replacement for platform accessibility controls. Tab bars are a shared `TabBar` component carrying the ARIA tablist contract — a single Tab stop with Left/Right/Home/End moving between tabs and selection following focus — so the behaviour cannot be dropped by copying the markup, which is how the memory-map review bar first shipped without it. In ChatLayout, unmodified number keys `1`–`9` switch to the corresponding workspace in the sidebar's displayed order; the shortcut is ignored while typing and the workspace buttons show their assigned key. On the home screen, arrow navigation follows the rendered lane layout: stacked workspace lanes use up/down between lanes and left/right within a lane, while side-by-side lanes use the corresponding horizontal/vertical mapping. The sidebar independently discloses each chat's running subagents inside an expanded project, while opening a subagent's read-only view reopens its parent group. Automation details preserve their title on narrow screens by moving secondary actions into an overflow menu, collapse long prompt previews, and explain stale project/chat targets without exposing raw runtime IDs.
 
-Each workspace has a "General" project plus auto-discovered projects from its configured `vault_root/projects/active/`. Chats stream over WebSocket; voice recording captures audio and previews before transcribing; image uploads and pending comments are scoped to the active chat, then attached to that chat's next prompt. Closing an unused new chat deletes its server-side draft; closing a completed chat disconnects it. A non-image file dropped into a host chat uses a desktop-exposed absolute path when available; a client drop (or a sandboxed host browser without that path) uploads into the active project folder on the host and inserts the returned absolute host path. Pinned files are scoped per-chat (persisted in local storage, falling back to project scope if no active chat exists) and render in a split layout sidebar. Commenting in that sidebar stays open while a turn streams — the comment simply rides on the next message — and the panel's auto-reload at turn end is deferred while a text edit or comment draft is open, then applied once the user saves or cancels.
+Each workspace has a "General" project plus auto-discovered projects from its configured `vault_root/projects/active/`. Chats stream over WebSocket; voice recording captures audio and previews before transcribing; image uploads and pending comments are scoped to the active chat, then attached to that chat's next prompt. Closing an unused new chat deletes its server-side draft; closing a completed chat disconnects it. A non-image file dropped into a host or client chat is uploaded through the chat attachment contract and inserts a bounded opaque reference; the provider-only prompt expansion resolves the server-side path. Pinned files are scoped per-chat (persisted in local storage, falling back to project scope if no active chat exists) and render in a split layout sidebar. Commenting in that sidebar stays open while a turn streams — the comment simply rides on the next message — and the panel's auto-reload at turn end is deferred while a text edit or comment draft is open, then applied once the user saves or cancels.
 
 In client mode, a failed remote-host WebSocket tunnel emits the dedicated
 `host_unreachable` connection state. The PWA keeps it out of conversation
@@ -505,7 +507,39 @@ made from a client) are captured into `node_state` and stripped from the
 forwarded response, so the tunnel survives a rotated host secret and the
 browser's cookie stays this node's own local session.
 
-Write/Edit/MultiEdit/NotebookEdit tool calls are tagged with `file_touch` by `ciao/web/chat_broker.py` and surface as standalone `_filecard` entries on reload, rendered as inline clickable preview cards that open `FileViewerModal` (see `PWA_API.md` → "File-touch cards" for the WS + `/messages` contract). On every file-touch event the broker also schedules a debounced content snapshot via `ProjectChatManager.snapshots` (`ciao/web/file_snapshots.py`, `SnapshotStore`), which writes append-only per-(chat, file) copies under `.runtime/snapshots/<chat_id>/<urlencoded_path>/NNNN.snap` plus a sibling `meta.json`. The PWA reads these back via `/api/file-history`, `/api/file-content`, and `/api/file-restore` to power the FileViewerModal's Preview / History / Diff tabs and one-click restore; `/api/vault/backlinks` lists the notes linking to a markdown note, using the same relative/path/stem link resolution as the preview, but the modal has no Backlinks tab that calls it. Preview renders text/markdown, images, PDF/PPTX (via a binary preview), and HTML artifacts; diagrams live inside HTML artifacts as inline SVG. History/Diff remain text-snapshot based. An in-modal Edit mode posts user-edited text content via `POST /api/workspace-file`, which captures a `tool="PWAEdit"` snapshot, and guards dirty edits against close, reload, or opening another file. Snapshots are wiped on chat delete and preserved on archive.
+Client mode has two loopback origins: the content origin (`localhost`) serves
+proxied host UI/API traffic, while the device origin (`127.0.0.1`) is the only
+origin accepted for `/api/node/*`, `/api/device/*`, `/api/desktop-drop`, and
+`/device`. The device origin also requires an explicit local-control header on
+API requests and a loopback TCP peer. A client request to a device route from
+the content origin is rejected, and a non-control navigation from the device
+origin is redirected to the content origin. Host redirects are not followed by the relay.
+The macOS capability grants native commands only to bundled local pages; remote
+PWA content has no Tauri capability or update command. Finder drop events carry
+only an opaque grant and display names; absolute paths stay in the Rust/server
+grant. This is a relay compatibility boundary, not completion of the broader
+credential, file-confinement, storage-isolation, or protocol work tracked by
+#546.
+
+Write/Edit/MultiEdit/NotebookEdit tool calls are tagged with `file_touch` by
+`ciao/web/chat_broker.py` and surface as standalone `_filecard` entries on
+reload, rendered as inline clickable preview cards that open `FileViewerModal`
+(see `PWA_API.md` → "File-touch cards" for the WS + `/messages` contract). On
+every file-touch event the broker also schedules a debounced content snapshot
+via `ProjectChatManager.snapshots` (`ciao/web/file_snapshots.py`,
+`SnapshotStore`), which writes append-only per-(chat, file) copies under
+`.runtime/snapshots/<chat_id>/<urlencoded_path>/NNNN.snap` plus a sibling
+`meta.json`. The PWA reads these back via `/api/file-history`,
+`/api/file-content`, and `/api/file-restore` to power the FileViewerModal's
+Preview / History / Diff tabs and one-click restore; `/api/vault/backlinks`
+lists the notes linking to a markdown note, using the same relative/path/stem
+link resolution as the preview, but the modal has no Backlinks tab that calls
+it. Preview renders text/markdown, images, PDF/PPTX (via a binary preview), and
+HTML artifacts; diagrams live inside HTML artifacts as inline SVG. History/Diff
+remain text-snapshot based. An in-modal Edit mode posts user-edited text content
+via `POST /api/workspace-file`, which captures a `tool="PWAEdit"` snapshot, and
+guards dirty edits against close, reload, or opening another file. Snapshots are
+wiped on chat delete and preserved on archive.
 
 Archived chats are read-only but can be continued into a new active chat via the "Continue in new chat" button (calling `POST /api/chats/{chat_id}/continue`). A header "files touched" chip in `ChatPanel.vue` summarizes the dedupped set of files written/edited in the chat and links each entry back to the modal.
 

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest'
 import { isGwsEngineHostEligible, type GwsNodeStatusKnowledge } from './gwsEngineHost'
 
 function status(overrides: Partial<GwsNodeStatusKnowledge> = {}): GwsNodeStatusKnowledge {
-  return { loaded: true, error: false, isClient: false, ...overrides }
+  return { loaded: true, error: false, isClient: false, stateValid: true, ...overrides }
 }
 
 describe('isGwsEngineHostEligible (issue #351)', () => {
@@ -12,10 +12,10 @@ describe('isGwsEngineHostEligible (issue #351)', () => {
     ).toBe(false)
   })
 
-  test('fetch failure on localhost stays eligible (single-machine case)', () => {
+  test('fetch failure on localhost is ineligible until role is verified', () => {
     expect(
       isGwsEngineHostEligible('localhost', false, status({ loaded: true, error: true, isClient: false })),
-    ).toBe(true)
+    ).toBe(false)
   })
 
   test('still loading, off a loopback hostname, is ineligible', () => {
@@ -24,10 +24,16 @@ describe('isGwsEngineHostEligible (issue #351)', () => {
     ).toBe(false)
   })
 
-  test('still loading, on localhost, stays eligible', () => {
+  test('still loading, on localhost, is ineligible', () => {
     expect(
       isGwsEngineHostEligible('localhost', false, status({ loaded: false, error: false, isClient: false })),
-    ).toBe(true)
+    ).toBe(false)
+  })
+
+  test('an invalid state is ineligible even on localhost', () => {
+    expect(
+      isGwsEngineHostEligible('localhost', false, status({ stateValid: false })),
+    ).toBe(false)
   })
 
   test('a confirmed client role is ineligible even on localhost', () => {
@@ -48,10 +54,10 @@ describe('isGwsEngineHostEligible (issue #351)', () => {
     ).toBe(false)
   })
 
-  test('desktop app while still loading is eligible without a loopback check', () => {
+  test('desktop app while still loading is ineligible', () => {
     expect(
       isGwsEngineHostEligible('localhost', true, status({ loaded: false, error: false, isClient: false })),
-    ).toBe(true)
+    ).toBe(false)
   })
 
   test('desktop app with a confirmed client role is still ineligible', () => {

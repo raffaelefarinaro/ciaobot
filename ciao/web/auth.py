@@ -12,6 +12,15 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 from starlette.websockets import WebSocket
 
+from ciao.web.remote_boundary import (
+    is_client_mode,
+    is_control_origin,
+    is_invalid_node_state,
+    is_local_control_api_path,
+    local_control_api_guard,
+    local_control_origin_allowed,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +34,8 @@ _LOOPBACK_ADDRESSES = {"127.0.0.1", "::1", "localhost"}
 # Endpoints reachable with no session at all, from anywhere.
 _PUBLIC_API = {
     "/api/auth",
+    "/api/auth/bridge",
+    "/api/auth/check",
     "/api/startup-status",
     "/api/active-chats",
     "/api/setup-status",
@@ -113,6 +124,12 @@ def _allowed_origin_hosts(request: Request | WebSocket) -> set[str]:
     return hosts
 
 
+def _effective_port(scheme: str, port: int | None) -> int | None:
+    if port is not None:
+        return port
+    return {"http": 80, "https": 443}.get(scheme.lower())
+
+
 def _same_origin(request: Request | WebSocket, origin: str) -> bool:
     from urllib.parse import urlsplit
 
@@ -120,7 +137,12 @@ def _same_origin(request: Request | WebSocket, origin: str) -> bool:
         parsed = urlsplit(origin)
     except ValueError:
         return False
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+    ):
         return False
 
     request_host, request_port = _split_host(request.headers.get("host", ""))
@@ -129,11 +151,18 @@ def _same_origin(request: Request | WebSocket, origin: str) -> bool:
         request_port = request.url.port
 
     origin_host = parsed.hostname.lower()
-    origin_port = parsed.port
+    try:
+        origin_port = parsed.port
+    except ValueError:
+        return False
     if origin_host == request_host:
-        if origin_port is not None and request_port is not None and origin_port != request_port:
-            return False
-        return True
+        request_scheme = str(getattr(request.url, "scheme", "") or parsed.scheme)
+        request_scheme = {"ws": "http", "wss": "https"}.get(
+            request_scheme, request_scheme
+        )
+        return _effective_port(parsed.scheme, origin_port) == _effective_port(
+            request_scheme, request_port
+        )
     # Reached under a proxy-declared host (port may differ
     # across the proxy hop, so it isn't compared here).
     return origin_host in _allowed_origin_hosts(request)
@@ -160,6 +189,13 @@ async def authorize_websocket(websocket: WebSocket) -> bool:
     Closes the socket and returns False when the connection is not allowed.
     """
     origin = websocket.headers.get("origin")
+    if is_invalid_node_state(websocket):
+        await websocket.close(code=4004, reason="node state is invalid")
+        return False
+    if is_client_mode(websocket):
+        if is_control_origin(websocket) or not origin:
+            await websocket.close(code=4003, reason="forbidden client websocket origin")
+            return False
     if origin and not _same_origin(websocket, origin):
         logger.warning(
             "WebSocket origin rejected: origin=%s host=%s x-forwarded-host=%s "
@@ -250,6 +286,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
+        control_guard = local_control_api_guard(request)
+        if control_guard is not None:
+            return control_guard
         setup_token = request.query_params.get("setup")
         if path == "/" and setup_token:
             return _redeem_setup_token(request, setup_token)
@@ -263,6 +302,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             or path.startswith("/ws/")
         )
         if not protected:
+            return await call_next(request)
+        if (
+            is_client_mode(request)
+            and is_local_control_api_path(path)
+            and local_control_origin_allowed(request)
+        ):
+            if not _state_change_origin_allowed(request):
+                return JSONResponse({"error": "forbidden origin"}, status_code=403)
             return await call_next(request)
         if path in _LOOPBACK_ONLY_API and is_loopback_client(request):
             if not _state_change_origin_allowed(request):

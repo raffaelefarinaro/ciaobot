@@ -5,8 +5,8 @@
  * injects `__CIAOBOT_DESKTOP__` with a document-start initialization script as
  * a one-way marker. A very small Tauri command surface is also exposed so the
  * PWA can ask macOS for native permissions (microphone, notifications,
- * camera in the future); these commands are gated by the `main` capability in
- * the Tauri shell and only allow the main window/localhost origin.
+ * camera in the future); the Tauri capability is limited to bundled local
+ * pages and does not grant commands to remote PWA content.
  */
 declare global {
   interface Window {
@@ -72,21 +72,5 @@ export async function requestDesktopPermission(
   } catch (e) {
     console.error('Could not request desktop permission:', e)
     return null
-  }
-}
-
-/**
- * Starts the same app+engine update flow as the tray's "Update" item,
- * confirmation dialog included. Returns false when not running inside the
- * desktop shell, so callers can fall back to the web update path.
- */
-export async function triggerDesktopUpdate(): Promise<boolean> {
-  if (!canInvokeTauri()) return false
-  try {
-    await window.__TAURI__!.core.invoke('trigger_app_update')
-    return true
-  } catch (e) {
-    console.error('Could not start desktop update:', e)
-    return false
   }
 }

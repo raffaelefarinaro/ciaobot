@@ -555,6 +555,7 @@ describe('LoginView setup wizard tests', () => {
           ok: true,
           json: async () => ({
             node_role: 'client',
+            state_valid: true,
             host_url: 'http://100.101.252.27:8443',
             has_host_session: false,
           }),
@@ -575,7 +576,6 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.text()).toContain('host password required')
     expect(wrapper.text()).toContain('Switch back to host')
 
-    mockApiPost.mockResolvedValue({ ok: true, status: { role: 'host' } })
     const assign = vi.fn()
     // LoginView asks through lib/confirm now, not window.confirm.
     const confirmModule = await import('../../lib/confirm')
@@ -588,11 +588,8 @@ describe('LoginView setup wizard tests', () => {
     await wrapper.find('.client-bailout-btn').trigger('click')
     await flushPromises()
 
-    expect(mockApiPost).toHaveBeenCalledWith('/api/node/handover', {
-      target_node_url: 'http://100.101.252.27:8443',
-      force: true,
-    })
-    expect(assign).toHaveBeenCalledWith('/')
+    expect(mockApiPost).not.toHaveBeenCalledWith('/api/node/handover', expect.anything())
+    expect(assign).toHaveBeenCalledWith('http://127.0.0.1/device')
     askConfirmSpy.mockRestore()  // clearAllMocks does not undo a spy
     vi.unstubAllGlobals()
   })

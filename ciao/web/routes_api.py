@@ -8,6 +8,7 @@ import errno
 import functools
 import json
 import logging
+import math
 import mimetypes
 import os
 import posixpath
@@ -1634,22 +1635,49 @@ async def project_files_upload(request: Request) -> JSONResponse:
 
     form = await request.form()
     saved: list[dict] = []
-    errors: list[dict] = []
+    errors: list[dict[str, str]] = []
+    upload_count = 0
+    total_bytes = 0
     for key in form:
         upload = form[key]
         if not hasattr(upload, "read"):
             continue
+        upload_count += 1
         filename = getattr(upload, "filename", "") or ""
+        display_name = _drop_display_name(Path(filename))
+        if upload_count > _DESKTOP_DROP_MAX_FILES:
+            errors.append({"filename": "file", "error": "too many files"})
+            break
         try:
             data = await _read_upload_limited(upload, chat_service._PROJECT_UPLOAD_MAX_BYTES)
+            total_bytes += len(data)
+            if total_bytes > _DESKTOP_DROP_MAX_TOTAL_BYTES:
+                errors.append({"filename": display_name, "error": "upload is too large"})
+                continue
             entry = pcm.save_project_file_upload(project_id, data, filename)
-            saved.append(entry)
+            relative_path = Path(str(entry.get("path", "")))
+            safe_path = (
+                ""
+                if relative_path.is_absolute() or ".." in relative_path.parts
+                else relative_path.as_posix()
+            )
+            saved.append(
+                {
+                    "path": safe_path,
+                    "kind": str(entry.get("kind", "binary"))[:32],
+                    "size": int(entry.get("size", 0) or 0),
+                    "mtime": str(entry.get("mtime", ""))[:64],
+                }
+            )
         except LookupError as exc:
             # Project has no vault folder to upload into. Same status across
             # all uploads in this request — return 409 immediately.
             return JSONResponse({"error": str(exc)}, status_code=409)
-        except ValueError as exc:
-            errors.append({"filename": filename, "error": str(exc)})
+        except (OSError, ValueError) as exc:
+            errors.append({
+                "filename": display_name,
+                "error": _safe_desktop_drop_error(Path(filename), exc),
+            })
     return JSONResponse({"saved": saved, "errors": errors})
 
 async def chat_attachments_upload(request: Request) -> JSONResponse:
@@ -1658,28 +1686,65 @@ async def chat_attachments_upload(request: Request) -> JSONResponse:
     if chat is None:
         return JSONResponse({"error": "chat not found"}, status_code=404)
     form = await request.form()
-    saved, errors = [], []
+    saved: list[dict] = []
+    errors: list[dict[str, str]] = []
+    total_bytes = 0
     for key in form:
         upload = form[key]
         if not hasattr(upload, "read"):
             continue
+        if len(saved) + len(errors) >= _DESKTOP_DROP_MAX_FILES:
+            errors.append({"filename": "file", "error": "too many files"})
+            break
         filename = getattr(upload, "filename", "") or ""
+        display_name = _drop_display_name(Path(filename))
         try:
             data = await _read_upload_limited(upload, chat_service._PROJECT_UPLOAD_MAX_BYTES)
-            saved.append(
-                await asyncio.to_thread(
-                    pcm.save_chat_attachment_upload, chat.project_id, data, filename
-                )
+            total_bytes += len(data)
+            if total_bytes > _DESKTOP_DROP_MAX_TOTAL_BYTES:
+                errors.append({"filename": display_name, "error": "upload is too large"})
+                continue
+            entry = await asyncio.to_thread(
+                pcm.save_chat_attachment_upload, chat.project_id, data, filename
             )
+            source = entry.get("markdown_path") or entry.get("absolute_path")
+            if not source:
+                raise ValueError("upload produced no file")
+            ref = pcm.register_file_ref(chat.chat_id, Path(str(source)))
+            saved.append({"ref": ref, "name": display_name})
         except LookupError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
-        except (ValueError, RuntimeError) as exc:
-            errors.append({"filename": filename, "error": str(exc)})
-    return JSONResponse({"saved": saved, "errors": errors})
+        except (ValueError, RuntimeError, OSError) as exc:
+            errors.append(
+                {
+                    "filename": display_name,
+                    "error": _safe_desktop_drop_error(Path(filename), exc),
+                }
+            )
+    return JSONResponse({"file_refs": saved, "errors": errors})
 
 
 _DESKTOP_DROP_GRANT_TTL_SECONDS = 5 * 60
 _DESKTOP_DROP_MAX_FILES = 100
+_DESKTOP_DROP_MAX_PATH_BYTES = 4096
+_DESKTOP_DROP_MAX_TOTAL_BYTES = 512 * 1024 * 1024
+_DESKTOP_DROP_MAX_ERROR_BYTES = 512
+_DESKTOP_DROP_MAX_GRANT_BYTES = 512 * 1024
+
+
+def _read_native_file_limited(path: Path, max_bytes: int) -> bytes:
+    """Read a dropped file without trusting a size that can change after stat."""
+    if max_bytes < 0:
+        raise ValueError("invalid file size limit")
+    with path.open("rb") as source:
+        data = source.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError("file too large")
+    return data
+
+
+def _utf8_size(value: str) -> int:
+    return len(value.encode("utf-8", "surrogatepass"))
 
 
 def _looks_like_nsird_screenshot(path: Path) -> bool:
@@ -1709,8 +1774,8 @@ def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
     ``EDEADLK`` means a cloud placeholder (see below). Any other permission
     denial still gets actionable text, just without naming a screenshot, so a
     plain unreadable drop is not mislabelled and does not regress to a raw
-    errno. Anything else falls through to the errno, which is all we know
-    about it.
+    errno. Unknown filesystem errors use a bounded generic message rather than
+    echoing an errno string that may contain the source path.
     """
     if _looks_like_nsird_screenshot(path):
         return (
@@ -1730,48 +1795,109 @@ def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
         # here. A non-image dropped on a host does not: the path is handed to
         # the agent unread, so the agent hits the same errno on its own.
         return (
-            f"{path.name} is not downloaded to this Mac yet. Right-click it in "
+            f"{_drop_display_name(path)} is not downloaded to this Mac yet. Right-click it in "
             "Finder, choose Download Now, then drag it in again."
         )
     if isinstance(exc, PermissionError):
         return (
-            f"macOS would not let Ciaobot read {path.name}. Save the file to a "
+            f"macOS would not let Ciaobot read {_drop_display_name(path)}. Save the file to a "
             "folder first, then drag it in."
         )
-    return str(exc)
+    # Do not echo arbitrary OSError text: errno implementations commonly append
+    # the source filename, which would turn a per-file error into an absolute
+    # path disclosure.  The dropped basename is enough for the user to act.
+    return f"Ciaobot could not read {_drop_display_name(path)}. Save the file to a folder and try again."
 
 
-def _clear_desktop_drop_staging(request: Request, grant_id: str) -> None:
-    """Delete the desktop shell's staged copies for a consumed grant.
-
-    Only the image copies are dead weight by this point: their bytes are in
-    media_root or on the host. A staged non-image copy is the agent's only
-    readable handle on a cloud placeholder, so it is deliberately left in
-    place for the agent to keep reading; the shell's stale sweep reclaims it
-    later. Best-effort: the shell's own stale sweep covers a grant that errored
-    out before reaching here.
-    """
+def _safe_desktop_drop_error(path: Path, exc: Exception) -> str:
+    if isinstance(exc, OSError):
+        return _desktop_drop_read_error(path, exc)
+    message = " ".join(str(exc).split()) or "could not be imported"
+    display_name = _drop_display_name(path)
+    candidates = [str(path), display_name]
     try:
-        # The id reaches us from the request body, and this builds an rmtree
-        # target. Re-check the UUID form here rather than trusting that every
-        # caller validated it first.
+        candidates.append(str(path.resolve(strict=False)))
+    except OSError:
+        pass
+    for candidate in candidates:
+        if candidate:
+            message = message.replace(candidate, display_name)
+    # A conversion/import failure can mention a different source path than the
+    # browser filename.  Redact any remaining absolute-looking token before the
+    # message crosses the drop API boundary.
+    message = re.sub(
+        r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|/)[^\s\"']*",
+        display_name,
+        message,
+    )
+    return message[:_DESKTOP_DROP_MAX_ERROR_BYTES]
+
+
+def _safe_remote_drop_error(value: object) -> str:
+    """Bound a host-side per-file error without reflecting its filesystem."""
+    message = str(value or "").strip()
+    if (
+        not message
+        or "/" in message
+        or "\\" in message
+        or "\x00" in message
+        or any(not char.isprintable() for char in message)
+    ):
+        return "host could not import this file"
+    return message[:_DESKTOP_DROP_MAX_ERROR_BYTES]
+
+
+def _safe_image_ref(value: object) -> str | None:
+    """Accept only a bounded, path-free image reference from a host."""
+    ref = str(value or "").strip()
+    if (
+        not ref
+        or len(ref) > 128
+        or "/" in ref
+        or "\\" in ref
+        or "\x00" in ref
+        or any(not char.isprintable() for char in ref)
+    ):
+        return None
+    return ref
+
+
+def _desktop_drop_ref(pcm, chat_id: str, path: Path) -> dict[str, str]:
+    ref = pcm.register_file_ref(chat_id, path)
+    return {"ref": ref, "name": _drop_display_name(path)}
+
+
+def _drop_display_name(path: Path) -> str:
+    name = "".join(char for char in path.name if char.isprintable()).strip()
+    return (name or "file")[:255]
+
+
+def _clear_desktop_drop_staging(
+    request: Request,
+    grant_id: str,
+    *,
+    keep_paths: set[Path] | None = None,
+) -> None:
+    try:
         if str(UUID(grant_id)) != grant_id:
             return
     except (ValueError, AttributeError):
         return
     grant_dir = request.app.state.config.state_path.parent / "desktop-drop-grants"
     staged_dir = grant_dir / "staged" / grant_id
+    keep = {path.resolve(strict=False) for path in (keep_paths or set())}
     try:
         for index_dir in staged_dir.iterdir():
             if not index_dir.is_dir():
                 continue
             for staged in index_dir.iterdir():
-                if (
-                    staged.is_file()
-                    and staged.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS
-                ):
+                try:
+                    if staged.resolve(strict=False) in keep:
+                        continue
+                except OSError:
+                    pass
+                if staged.is_file() or staged.is_symlink():
                     staged.unlink(missing_ok=True)
-            # Drop the index dir once every copy in it went away.
             try:
                 index_dir.rmdir()
             except OSError:
@@ -1800,8 +1926,16 @@ def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
         raise LookupError("desktop drop grant not found or already used") from exc
 
     try:
-        payload = json.loads(consuming.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        if consuming.stat().st_size > _DESKTOP_DROP_MAX_GRANT_BYTES:
+            raise ValueError("invalid desktop drop grant")
+        with consuming.open("rb") as source:
+            raw_grant = source.read(_DESKTOP_DROP_MAX_GRANT_BYTES + 1)
+        if len(raw_grant) > _DESKTOP_DROP_MAX_GRANT_BYTES:
+            raise ValueError("invalid desktop drop grant")
+        payload = json.loads(raw_grant.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("invalid desktop drop grant")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("invalid desktop drop grant") from exc
     finally:
         consuming.unlink(missing_ok=True)
@@ -1810,9 +1944,15 @@ def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
         raise ValueError("invalid desktop drop grant")
     created_at = payload.get("created_at")
     raw_paths = payload.get("paths")
-    if not isinstance(created_at, (int, float)):
+    if isinstance(created_at, bool) or not isinstance(created_at, (int, float)):
         raise ValueError("invalid desktop drop grant")
-    age = datetime.now(UTC).timestamp() - float(created_at)
+    try:
+        created_at_seconds = float(created_at)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("invalid desktop drop grant") from exc
+    if not math.isfinite(created_at_seconds):
+        raise ValueError("invalid desktop drop grant")
+    age = datetime.now(UTC).timestamp() - created_at_seconds
     if age < -30 or age > _DESKTOP_DROP_GRANT_TTL_SECONDS:
         # The two failure modes are different bugs and must not be reported
         # identically. Log the grant id, timestamp, age and reason so a 400
@@ -1837,191 +1977,230 @@ def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
         or not raw_paths
         or len(raw_paths) > _DESKTOP_DROP_MAX_FILES
         or not all(isinstance(path, str) for path in raw_paths)
+        or any(_utf8_size(path) > _DESKTOP_DROP_MAX_PATH_BYTES for path in raw_paths)
     ):
         raise ValueError("invalid desktop drop grant")
 
     paths = [Path(path) for path in raw_paths]
-    if any(not path.is_absolute() or not path.exists() for path in paths):
-        raise ValueError("a dropped file is no longer available")
+    total_bytes = 0
+    for path in paths:
+        if not path.is_absolute() or not path.exists():
+            raise ValueError("a dropped file is no longer available")
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise ValueError("a dropped file is no longer available") from exc
+        total_bytes += size
+        if total_bytes > _DESKTOP_DROP_MAX_TOTAL_BYTES:
+            raise ValueError("desktop drop is too large")
     return paths
 
 
 async def desktop_drop_import(request: Request) -> JSONResponse:
-    """Resolve a single-use native Finder drop for the active host or client."""
-    body = await request.json()
-    grant_id = str(body.get("grant_id") or "")
-    project_id = str(body.get("project_id") or "")
-    chat_id = str(body.get("chat_id") or "")
+    grant_id = ""
+    keep_paths: set[Path] = set()
+    preserve_staged = False
     try:
-        paths = _consume_desktop_drop_grant(request, grant_id)
-    except LookupError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=404)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        grant_id = str(body.get("grant_id") or "")
+        project_id = str(body.get("project_id") or "")
+        chat_id = str(body.get("chat_id") or "")
+        try:
+            paths = _consume_desktop_drop_grant(request, grant_id)
+        except LookupError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
-    node_mgr = getattr(request.app.state, "node_state_manager", None)
-    role = node_mgr.get_role() if node_mgr else "host"
-    is_client = role in {"client", "standby"}
-    image_paths = [
-        path
-        for path in paths
-        if path.is_file() and path.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS
-    ]
-    regular_paths = [path for path in paths if path not in image_paths]
-    errors: list[dict[str, str]] = []
+        node_mgr = getattr(request.app.state, "node_state_manager", None)
+        from ciao.web.remote_boundary import is_client_mode, is_invalid_node_state
 
-    if not is_client:
-        pcm = request.app.state.project_chat_manager
-        chat = pcm.get_chat(chat_id)
-        if chat is None:
-            _clear_desktop_drop_staging(request, grant_id)
-            return JSONResponse({"error": "chat not found"}, status_code=404)
-        project_id = chat.project_id
-        host_image_refs: list[str] = []
-        attachments: list[dict] = []
-        converted_paths: set[Path] = set()
-        if image_paths and pcm.get_chat(chat_id) is None:
-            errors.extend(
-                {"filename": path.name, "error": "chat not found"}
-                for path in image_paths
-            )
-        else:
+        if is_invalid_node_state(request):
+            return JSONResponse({"error": "node state is invalid"}, status_code=503)
+        is_client = is_client_mode(request)
+        image_paths = [
+            path
+            for path in paths
+            if path.is_file() and path.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS
+        ]
+        regular_paths = [path for path in paths if path not in image_paths]
+        errors: list[dict[str, str]] = []
+        file_refs: list[dict[str, str]] = []
+
+        if not is_client:
+            pcm = getattr(request.app.state, "project_chat_manager", None)
+            if pcm is None:
+                return JSONResponse({"error": "project chat manager unavailable"}, status_code=503)
+            chat = pcm.get_chat(chat_id)
+            if chat is None:
+                return JSONResponse({"error": "chat not found"}, status_code=404)
+            project_id = chat.project_id
+            image_refs: list[str] = []
             for path in image_paths:
                 try:
                     if path.stat().st_size > MAX_IMAGE_SIZE_BYTES:
                         raise ValueError("image too large")
-                    host_image_refs.append(
-                        pcm.save_image_upload(path.read_bytes(), path.name).path.name
+                    image_data = await asyncio.to_thread(
+                        _read_native_file_limited, path, MAX_IMAGE_SIZE_BYTES
                     )
-                except OSError as exc:
+                    image_refs.append(pcm.save_image_upload(image_data, path.name).path.name)
+                except (OSError, ValueError) as exc:
                     errors.append(
                         {
-                            "filename": path.name,
-                            "error": _desktop_drop_read_error(path, exc),
+                            "filename": _drop_display_name(path),
+                            "error": _safe_desktop_drop_error(path, exc),
                         }
                     )
-                except ValueError as exc:
-                    errors.append({"filename": path.name, "error": str(exc)})
-        for path in regular_paths:
-            if is_anydoc_document(path.name):
+            for path in regular_paths:
+                if not path.is_file():
+                    errors.append(
+                        {
+                            "filename": _drop_display_name(path),
+                            "error": "folders cannot be attached",
+                        }
+                    )
+                    continue
                 try:
-                    attachments.append(
-                        await asyncio.to_thread(
+                    if is_anydoc_document(path.name):
+                        converted = await asyncio.to_thread(
                             pcm.convert_chat_document, project_id, path
                         )
-                    )
-                    converted_paths.add(path)
+                        generated = Path(str(converted.get("markdown_path") or ""))
+                        if not generated.is_file():
+                            raise ValueError("document conversion produced no file")
+                        file_refs.append(_desktop_drop_ref(pcm, chat_id, generated))
+                        keep_paths.add(path)
+                    else:
+                        file_refs.append(_desktop_drop_ref(pcm, chat_id, path))
+                        keep_paths.add(path)
                 except (OSError, LookupError, RuntimeError, ValueError) as exc:
-                    errors.append({"filename": path.name, "error": str(exc)})
-        _clear_desktop_drop_staging(request, grant_id)
-        return JSONResponse(
-            {
-                "paths": [str(path) for path in regular_paths if path not in converted_paths],
-                "attachments": attachments,
-                "image_refs": host_image_refs,
-                "errors": errors,
-            }
-        )
+                    errors.append(
+                        {
+                            "filename": _drop_display_name(path),
+                            "error": _safe_desktop_drop_error(path, exc),
+                        }
+                    )
+            preserve_staged = True
+            return JSONResponse(
+                {
+                    "file_refs": file_refs,
+                    "image_refs": image_refs,
+                    "errors": errors,
+                }
+            )
 
-    if node_mgr is None:
-        return JSONResponse({"error": "client node state unavailable"}, status_code=503)
-    host_url = node_mgr.get_active_peer_url()
-    if not host_url:
-        return JSONResponse({"error": "client has no reachable host"}, status_code=503)
+        if node_mgr is None:
+            return JSONResponse({"error": "client node state unavailable"}, status_code=503)
+        host_url = node_mgr.get_active_peer_url()
+        from ciao.node_state import peer_url_is_allowed
 
-    import httpx
+        if not host_url:
+            return JSONResponse({"error": "client has no reachable host"}, status_code=503)
+        if not peer_url_is_allowed(host_url, str(request.url.scheme or "")):
+            return JSONResponse({"error": "client peer transport is not allowed"}, status_code=503)
 
-    from ciao.web.auth import SESSION_COOKIE
+        import httpx
 
-    headers = {"origin": host_url.rstrip("/")}
-    host_session = node_mgr.get_host_session()
-    if host_session:
-        headers["cookie"] = f"{SESSION_COOKIE}={host_session}"
-    # Host uploads synchronously convert supported documents. Give a Finder
-    # drop enough time for large PDFs/workbooks without leaving the request
-    # unbounded, so a client timeout does not invite duplicate retries.
-    timeout = httpx.Timeout(10 * 60.0, connect=5.0)
-    imported_paths: list[str] = []
-    image_refs: list[str] = []
+        from ciao.web.auth import SESSION_COOKIE
 
-    try:
-        # These are fixed API endpoints, so a redirect is never expected.
-        # Refusing it also prevents a configured/compromised peer from
-        # forwarding the stored host-session cookie to another origin.
+        headers = {
+            "origin": host_url.rstrip("/"),
+            "x-ciao-desktop-drop": "1",
+        }
+        host_session = node_mgr.get_host_session()
+        if host_session:
+            headers["cookie"] = f"{SESSION_COOKIE}={host_session}"
+        timeout = httpx.Timeout(10 * 60.0, connect=5.0)
+        client_image_refs: list[str] = []
+
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-            if image_paths:
-                image_files = []
-                for index, path in enumerate(image_paths):
-                    # Per-file, like the host branch above: one unreadable
-                    # screenshot must not turn the whole drop into a 502.
-                    try:
-                        if path.stat().st_size > MAX_IMAGE_SIZE_BYTES:
-                            errors.append({"filename": path.name, "error": "image too large"})
-                            continue
-                        data = path.read_bytes()
-                    except OSError as exc:
+            image_files = []
+            for index, path in enumerate(image_paths):
+                try:
+                    if path.stat().st_size > MAX_IMAGE_SIZE_BYTES:
                         errors.append(
-                            {
-                                "filename": path.name,
-                                "error": _desktop_drop_read_error(path, exc),
-                            }
+                            {"filename": _drop_display_name(path), "error": "image too large"}
                         )
                         continue
-                    image_files.append(
+                    data = await asyncio.to_thread(
+                        _read_native_file_limited, path, MAX_IMAGE_SIZE_BYTES
+                    )
+                except (OSError, ValueError) as exc:
+                    errors.append(
+                        {
+                            "filename": _drop_display_name(path),
+                            "error": _safe_desktop_drop_error(path, exc),
+                        }
+                    )
+                    continue
+                image_files.append(
+                    (
+                        f"file{index}",
                         (
-                            f"file{index}",
-                            (
-                                path.name,
-                                data,
-                                mimetypes.guess_type(path.name)[0] or "application/octet-stream",
-                            ),
-                        )
+                            path.name,
+                            data,
+                            mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                        ),
                     )
-                if image_files:
-                    response = await client.post(
-                        f"{host_url.rstrip('/')}/api/chats/{chat_id}/images",
-                        headers=headers,
-                        files=image_files,
-                    )
+                )
+            if image_files:
+                response = await client.post(
+                    f"{host_url.rstrip('/')}/api/chats/{chat_id}/images",
+                    headers=headers,
+                    files=image_files,
+                )
+                try:
                     payload = response.json()
-                    if response.is_success and isinstance(payload, list):
-                        for entry in payload:
-                            if entry.get("ref"):
-                                image_refs.append(str(entry["ref"]))
-                            elif entry.get("error"):
-                                errors.append(
-                                    {
-                                        "filename": str(entry.get("filename") or ""),
-                                        "error": str(entry["error"]),
-                                    }
-                                )
-                    else:
-                        raise ValueError(
-                            payload.get("error", "host image upload failed")
-                            if isinstance(payload, dict)
-                            else "host image upload failed"
+                except ValueError:
+                    payload = {}
+                if not response.is_success or not isinstance(payload, list):
+                    raise ValueError("host image upload failed")
+                for entry in payload:
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("ref"):
+                        image_ref = _safe_image_ref(entry.get("ref"))
+                        if image_ref:
+                            client_image_refs.append(image_ref)
+                    elif entry.get("error"):
+                        errors.append(
+                            {
+                                "filename": _drop_display_name(Path(str(entry.get("filename") or "file"))),
+                                "error": _safe_remote_drop_error(entry["error"]),
+                            }
                         )
 
             files: list[tuple[str, tuple[str, bytes, str]]] = []
             for path in regular_paths:
-                if path.is_dir():
+                if not path.is_file():
                     errors.append(
                         {
-                            "filename": path.name,
+                            "filename": _drop_display_name(path),
                             "error": "folders cannot be transferred to the host",
                         }
                     )
                     continue
                 try:
                     if path.stat().st_size > chat_service._PROJECT_UPLOAD_MAX_BYTES:
-                        errors.append({"filename": path.name, "error": "file too large"})
+                        errors.append(
+                            {"filename": _drop_display_name(path), "error": "file too large"}
+                        )
                         continue
-                    data = path.read_bytes()
-                except OSError as exc:
+                    data = await asyncio.to_thread(
+                        _read_native_file_limited,
+                        path,
+                        chat_service._PROJECT_UPLOAD_MAX_BYTES,
+                    )
+                except (OSError, ValueError) as exc:
                     errors.append(
                         {
-                            "filename": path.name,
-                            "error": _desktop_drop_read_error(path, exc),
+                            "filename": _drop_display_name(path),
+                            "error": _safe_desktop_drop_error(path, exc),
                         }
                     )
                     continue
@@ -2041,34 +2220,47 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                     headers=headers,
                     files=files,
                 )
-                payload = response.json()
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = {}
                 if not response.is_success or not isinstance(payload, dict):
-                    raise ValueError(
-                        payload.get("error", "host file upload failed")
-                        if isinstance(payload, dict)
-                        else "host file upload failed"
+                    raise ValueError("host file upload failed")
+                for entry in payload.get("file_refs", []):
+                    if not isinstance(entry, dict):
+                        continue
+                    ref = str(entry.get("ref") or "")
+                    if not ref or not re.fullmatch(r"drop_[0-9a-f]{32}", ref):
+                        continue
+                    file_refs.append(
+                        {
+                            "ref": ref,
+                            "name": _drop_display_name(Path(str(entry.get("name") or "file"))),
+                        }
                     )
-                imported_paths.extend(
-                    str(path)
-                    for entry in payload.get("saved", [])
-                    for path in (entry.get("original_path"), entry.get("markdown_path"))
-                    if path
-                )
-                errors.extend(
-                    {
-                        "filename": str(entry.get("filename") or ""),
-                        "error": str(entry.get("error") or "upload failed"),
-                    }
-                    for entry in payload.get("errors", [])
-                )
-    except (OSError, httpx.HTTPError, ValueError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=502)
+                for entry in payload.get("errors", []):
+                    if isinstance(entry, dict):
+                        errors.append(
+                            {
+                                "filename": _drop_display_name(Path(str(entry.get("filename") or "file"))),
+                                "error": _safe_remote_drop_error(entry.get("error") or "upload failed"),
+                            }
+                        )
+        return JSONResponse(
+            {"file_refs": file_refs, "image_refs": client_image_refs, "errors": errors}
+        )
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": _safe_desktop_drop_error(Path("file"), exc)}, status_code=502)
+    except Exception:
+        logger.exception("Desktop drop import failed")
+        return JSONResponse({"error": "desktop drop import failed"}, status_code=500)
     finally:
-        _clear_desktop_drop_staging(request, grant_id)
-
-    return JSONResponse(
-        {"paths": imported_paths, "image_refs": image_refs, "errors": errors}
-    )
+        if grant_id:
+            _clear_desktop_drop_staging(
+                request,
+                grant_id,
+                keep_paths=keep_paths if preserve_staged else set(),
+            )
 
 
 async def create_project_chat(request: Request) -> JSONResponse:
@@ -4981,6 +5173,7 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
         # so the mirrored UI can name whose data it is showing.
         "node_id": node_mgr.node_id if node_mgr else "",
         "node_role": role,
+        "state_valid": bool(node_mgr.is_valid()) if node_mgr else True,
         "active_peer_url": active_peer_url,
         "host_url": node_mgr.get_host_url() if node_mgr else None,
         "has_host_session": bool(node_mgr.get_host_session()) if node_mgr else False,

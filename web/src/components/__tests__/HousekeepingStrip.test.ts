@@ -242,14 +242,14 @@ describe('the update tile', () => {
     wrapper.unmount()
   })
 
-  it('leads with "Update now" in the desktop app', async () => {
+  it('does not expose a native update command in the desktop app', async () => {
     ;(window as unknown as Record<string, unknown>).__CIAOBOT_DESKTOP__ = true
     useHousekeepingStore().actions = [updateAction()]
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
 
     const [first, second] = controls(wrapper)
-    expect(first.text()).toBe('Update now')
+    expect(first.text()).toBe('How to install')
     expect(first.classes()).toContain('btn-primary')
     expect(second.text()).toBe('Release notes')
     expect(second.classes()).toContain('btn-chip')
