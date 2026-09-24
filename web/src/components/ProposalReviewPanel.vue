@@ -139,10 +139,10 @@ function cancelPreviewEdit() {
  * "accept" does not say that a fact is about to enter always-loaded memory. */
 function previewPrimaryLabel(row: ProposalRow): string {
   const preview = store.previews[row.id]
-  if (!preview) return 'save'
-  if (preview.operation === 'none') return 'clear this row'
-  if (preview.operation === 'move') return `move to ${preview.destination || 'destination'}`
-  return `save to ${preview.destination || 'memory'}`
+  if (!preview) return 'Save'
+  if (preview.operation === 'none') return 'Clear this row'
+  if (preview.operation === 'move') return `Move to ${preview.destination || 'destination'}`
+  return `Save to ${preview.destination || 'memory'}`
 }
 
 const OPERATION_LABELS: Record<string, string> = {
@@ -983,17 +983,6 @@ watch(
 
 <template>
   <div class="proposal-review">
-    <header v-if="activeSection === 'queue' && queueSettled" class="pr-head">
-      <p class="pr-summary">
-        <strong>{{ filtered.length }}</strong> to decide in {{ projectStore.activeWorkspace }}
-        <button
-          v-if="store.kindFilter !== 'all' || store.search"
-          type="button"
-          class="pr-clear-filter"
-          @click="store.resetFilters()"
-        >clear filter</button>
-      </p>
-    </header>
 
     <ProposalHistoryList v-if="activeSection === 'history'" />
 
@@ -1004,8 +993,13 @@ watch(
          took about 230px of screen before the first thing to decide. Where a
          row would actually go is now on the row itself. -->
     <p class="pr-lede">
-      Things Ciaobot thought worth remembering but was not sure enough to save on
-      its own. Keep the ones you want; dismiss the rest.
+      Facts Ciao was not sure enough to save on its own. Review shows where each one would be saved.
+      <button
+        v-if="store.kindFilter !== 'all' || store.search"
+        type="button"
+        class="pr-clear-filter"
+        @click="store.resetFilters()"
+      >Clear filter</button>
     </p>
     <details class="pr-how">
       <summary class="pr-how-summary">How memory works</summary>
@@ -1041,7 +1035,7 @@ watch(
         class="btn-small btn-primary"
         :disabled="store.busy"
         @click="batchAccept"
-      >accept {{ selectedAcceptable.length }}</button>
+      >Accept {{ selectedAcceptable.length }}</button>
       <!-- One destination for the whole selection. Re-home rows are moves, so
            "accept" cannot cover them: a move needs somewhere to go. -->
       <button
@@ -1051,20 +1045,20 @@ watch(
         class="btn-small btn-primary"
         :disabled="store.busy"
         @click="batchMove(target)"
-      >move {{ selectedRehomeCount }} to {{ target }}</button>
+      >Move {{ selectedRehomeCount }} to {{ target }}</button>
       <button
         type="button"
         class="btn-small btn-chip"
         :disabled="store.busy"
         @click="batchDismiss"
-      >dismiss {{ selectedVisible.length }}</button>
+      >Dismiss {{ selectedVisible.length }}</button>
       <button
         type="button"
         class="btn-small btn-chip"
         :disabled="chatBusy"
         @click="batchDiscuss"
-      >talk about {{ selectedVisible.length }}</button>
-      <button type="button" class="btn-small btn-chip" @click="selected = new Set()">clear</button>
+      >Talk about {{ selectedVisible.length }}</button>
+      <button type="button" class="btn-small btn-chip" @click="selected = new Set()">Clear</button>
     </div>
 
     <!-- What the last bulk action did, per destination. Fifty per-row lines
@@ -1075,7 +1069,7 @@ watch(
     <div v-if="store.lastBatchSummary.length" class="pr-summary-block" role="status" aria-live="polite">
       <div class="pr-summary-head">
         <span class="pr-summary-title">Last {{ store.lastBatchSummary[0].action }}</span>
-        <button type="button" class="btn-small btn-chip" @click="store.lastBatchSummary = []">dismiss</button>
+        <button type="button" class="btn-small btn-chip" @click="store.lastBatchSummary = []">Dismiss</button>
       </div>
       <ul class="pr-summary-rows">
         <li v-for="group in store.lastBatchSummary" :key="group.destination || 'none'" class="pr-summary-row">
@@ -1095,14 +1089,14 @@ watch(
 
     <div v-else-if="queueFailed" class="pr-error-block" role="alert">
       <p class="pr-error">{{ store.loadError }}</p>
-      <button type="button" class="btn-small btn-chip" @click="retryQueue">retry</button>
+      <button type="button" class="btn-small btn-chip" @click="retryQueue">Retry</button>
     </div>
 
     <!-- A refresh failed while rows are already on screen: keep showing them,
          but say they are the last snapshot rather than the current one. -->
     <div v-else-if="store.loadError" class="pr-stale" role="status">
       <span>Could not refresh — showing the last loaded queue.</span>
-      <button type="button" class="btn-small btn-chip" @click="retryQueue">retry</button>
+      <button type="button" class="btn-small btn-chip" @click="retryQueue">Retry</button>
     </div>
 
     <!-- Empty-state claims render only on a successful load with no failed
@@ -1126,7 +1120,7 @@ watch(
       <header v-if="filtered.length" class="pr-group-head">
         <label class="pr-group-select">
           <input type="checkbox" :checked="allSelected" @change="toggleAll" />
-          <span class="pr-group-name">select all</span>
+          <span class="pr-group-name">Select all</span>
         </label>
         <span class="pr-group-count">{{ filtered.length }}</span>
       </header>
@@ -1178,11 +1172,11 @@ watch(
                 :title="row.path"
                 @click="view(row)"
               >{{ pathLeaf(row.path) }}</button>
-              <template v-else>{{ rowConsequence(row) }}</template>
+              <template v-else><template v-if="row.source && !isRehome(row)">From {{ row.source }} · </template>{{ rowConsequence(row) }}</template>
               <span v-if="row.leak_warning" class="pr-badge --warn">visible in every workspace</span>
             </p>
             <details class="pr-row-detail">
-              <summary>details</summary>
+              <summary>Details</summary>
               <p v-if="rowDetail(row)" class="pr-row-prose">{{ rowDetail(row) }}</p>
               <p class="pr-row-source">Goes to {{ rowSubtitle(row) }}</p>
               <p v-if="row.path" class="pr-row-source">{{ row.path }}</p>
@@ -1233,8 +1227,8 @@ watch(
                   rows="3"
                 ></textarea>
                 <div class="pr-card-edit-actions">
-                  <button type="button" class="btn-small btn-primary" :disabled="!editBuffer.trim() || store.isPreviewLoading(row.id)" @click="applyPreviewEdit">preview change</button>
-                  <button type="button" class="btn-small btn-chip" @click="cancelPreviewEdit">cancel edit</button>
+                  <button type="button" class="btn-small btn-primary" :disabled="!editBuffer.trim() || store.isPreviewLoading(row.id)" @click="applyPreviewEdit">Preview change</button>
+                  <button type="button" class="btn-small btn-chip" @click="cancelPreviewEdit">Cancel edit</button>
                 </div>
               </div>
               <p v-else class="pr-card-text">{{ store.previews[row.id].text }}</p>
@@ -1294,12 +1288,12 @@ watch(
                   title="Compare this with what is already remembered before writing it, so a fact it replaces is updated instead of duplicated. Takes a few seconds."
                   :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
                   @click="reconcileFirst(row)"
-                >{{ store.isBusy(row.id) ? 'working…' : 'check first' }}</button>
-                <button v-if="!editingPreview" type="button" class="btn-small btn-chip" @click="startEditingPreview">edit suggestion</button>
-                <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip" @click="openDiscussion(row)">open chat</button>
-                <button v-else type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
-                <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">dismiss</button>
-                <button type="button" class="btn-small btn-chip" @click="closePreview">cancel</button>
+                >{{ store.isBusy(row.id) ? 'working…' : 'Check first' }}</button>
+                <button v-if="!editingPreview" type="button" class="btn-small btn-chip" @click="startEditingPreview">Edit suggestion</button>
+                <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
+                <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Talk about it</button>
+                <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
+                <button type="button" class="btn-small btn-chip" @click="closePreview">Cancel</button>
               </div>
             </template>
           </div>
@@ -1325,8 +1319,8 @@ watch(
               class="btn-small btn-primary"
               :disabled="store.isBusy(row.id)"
               @click="retryReconcile(row)"
-            >{{ store.isBusy(row.id) ? 'checking…' : 'try again' }}</button>
-            <button type="button" class="btn-small btn-chip" @click="clearDeferred(row.id)">leave it queued</button>
+            >{{ store.isBusy(row.id) ? 'checking…' : 'Try again' }}</button>
+            <button type="button" class="btn-small btn-chip" @click="clearDeferred(row.id)">Leave it queued</button>
           </div>
 
           <!-- Linked: this proposal already spawned a merge/implement chat that
@@ -1355,9 +1349,9 @@ watch(
               :disabled="store.isBusy(row.id)"
               @click="doAccept(row, c)"
             >{{ store.isBusy(row.id) ? 'working…' : c }}</button>
-            <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">dismiss</button>
-            <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip" @click="openDiscussion(row)">open chat</button>
-            <button v-else type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
+            <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
+            <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
+            <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Talk about it</button>
           </div>
 
           <!-- A skill proposal is a FILE, so its actions are the ones a file
@@ -1370,10 +1364,10 @@ watch(
               class="btn-small btn-primary"
               :disabled="chatBusy"
               @click="implementSkill(row)"
-            >implement</button>
-            <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'dismiss' }}</button>
-            <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip" @click="openDiscussion(row)">open chat</button>
-            <button v-else type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
+            >Implement</button>
+            <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
+            <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
+            <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Talk about it</button>
           </div>
 
           <div v-else class="pr-actions">
@@ -1387,10 +1381,10 @@ watch(
               class="btn-small btn-primary"
               :disabled="store.isBusy(row.id)"
               @click="reviewAccept(row)"
-            >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `move to ${rehomeTarget(row)}` : 'review') }}</button>
-            <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'dismiss' }}</button>
-            <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip" @click="openDiscussion(row)">open chat</button>
-            <button v-else type="button" class="btn-small btn-chip" :disabled="chatBusy" @click="discuss(row)">talk about it</button>
+            >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `Move to ${rehomeTarget(row)}` : 'Review') }}</button>
+            <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
+            <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
+            <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Talk about it</button>
           </div>
         </li>
         </ul>
@@ -1399,11 +1393,11 @@ watch(
 
     <footer v-if="filtered.length" class="pr-foot">
       <label class="pr-older">
-        <span>dismiss anything older than</span>
+        <span>Dismiss suggestions older than</span>
         <input v-model.number="olderThanDays" type="number" min="1" max="365" class="pr-older-input" />
         <span>days</span>
       </label>
-      <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="dismissOlder">dismiss old</button>
+      <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="dismissOlder">Dismiss old</button>
     </footer>
     </template>
     </div>
@@ -1414,28 +1408,14 @@ watch(
 /* One column, generous vertical rhythm, and every row the same shape. The old
    layout stacked three unrelated control rows above a list whose items were
    paragraphs, so nothing had a predictable position. */
+/* The panel sits in the Memory page's main column, which scrolls; it no
+   longer owns a scroller or its own inset. */
 .proposal-review {
-  flex: 1;
   min-width: 0;
-  min-height: 0;
-  overflow-y: auto;
-  padding: var(--space-4);
+  padding-top: var(--space-3);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-}
-
-.pr-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-}
-
-.pr-summary {
-  margin: 0;
-  font-size: 0.95rem;
 }
 
 .pr-counts {
@@ -1451,29 +1431,29 @@ watch(
    replaces was both harder to read and longer than the screen it opened on. */
 .pr-lede {
   margin: 0;
-  color: var(--fg);
+  color: var(--fg2);
   font-size: var(--text-sm);
   line-height: 1.5;
-  max-width: 62ch;
+  max-width: 72ch;
 }
 
 /* The mechanism, folded away. Closed it costs one line; the summary is a real
    disclosure control, so it is keyboard-reachable and states its own state. */
 .pr-how {
-  margin: 0;
+  margin: calc(-1 * var(--space-3)) 0 0;
   color: var(--fg2);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
 }
 
 .pr-how-summary {
   display: inline-flex;
   align-items: center;
   min-height: var(--touch);
-  color: var(--fg2);
+  color: var(--accent);
   cursor: pointer;
 }
 
-.pr-how-summary:hover { color: var(--fg); }
+.pr-how-summary:hover { text-decoration: underline; text-underline-offset: 3px; }
 .pr-how-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .pr-how-body {
@@ -1543,25 +1523,70 @@ watch(
 
 /* Stacked, so the text column gets the width. Four buttons in a row squeezed a
    long skill name into six wrapped lines beside a mostly-empty action strip. */
+/* Actions sit on their own line under the fact, left-aligned with it: one
+   primary, a neutral secondary, and "talk about it" as a link. */
 .pr-actions {
+  grid-column: 2;
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: var(--space-1);
-  flex: none;
-  min-width: 8.5rem;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pr-actions :deep(.btn-small),
+.pr-card :deep(.btn-small) {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.pr-actions .btn-chip,
+.pr-card .btn-chip {
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+
+.pr-actions .btn-chip:hover:not(:disabled),
+.pr-card .btn-chip:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.pr-actions .pr-talk,
+.pr-card .pr-talk {
+  border-color: transparent;
+  background: none;
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.pr-actions .pr-talk:hover:not(:disabled),
+.pr-card .pr-talk:hover:not(:disabled) {
+  border-color: transparent;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+@media (pointer: coarse) {
+  .pr-actions :deep(.btn-small),
+  .pr-card :deep(.btn-small) { min-height: var(--touch); }
 }
 
 .pr-actions--confirm {
-  min-width: 12rem;
+  min-width: 0;
 }
 
 /* Wider than the other action columns because it carries prose and a list of
    region entries, not just buttons. It still collapses to the full row width
    under 640px, where `.pr-actions` spans the grid. */
 .pr-actions--deferred {
-  min-width: 16rem;
-  max-width: 22rem;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: 60ch;
 }
 
 .pr-deferred-reason {
@@ -1595,7 +1620,7 @@ watch(
    underneath rather than being squeezed into the action column — a diff line
    wrapped to one word per line in 8.5rem. */
 .pr-card {
-  grid-column: 1 / -1;
+  grid-column: 2;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -1906,12 +1931,12 @@ watch(
 }
 
 .pr-clear-filter {
-  margin-left: var(--space-2);
+  margin-left: var(--space-1);
   background: none;
   border: none;
   padding: 0;
   color: var(--accent);
-  font-size: 0.78rem;
+  font-size: var(--text-sm);
   cursor: pointer;
 }
 
@@ -1958,8 +1983,10 @@ watch(
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding-bottom: var(--space-1);
+  min-height: 36px;
   border-bottom: 1px solid var(--border);
+  color: var(--fg3);
+  font-size: var(--text-sm);
 }
 
 .pr-group-select {
@@ -1970,15 +1997,13 @@ watch(
 }
 
 .pr-group-name {
-  font-weight: 600;
-  font-size: 0.9rem;
-  text-transform: lowercase;
+  font-weight: 500;
 }
 
 .pr-group-count {
   margin-left: auto;
-  color: var(--fg2);
-  font-size: 0.8rem;
+  color: var(--fg3);
+  font-variant-numeric: tabular-nums;
 }
 
 .pr-rows {
@@ -1987,22 +2012,21 @@ watch(
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
 }
 
+/* Hairline rows, not cards: the checkbox, then the fact and its source, with
+   the actions on their own line beneath. */
 .pr-row {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
-  gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg2);
+  gap: var(--space-2) var(--space-2);
+  padding: var(--space-3) 0 var(--space-4);
+  border-bottom: 1px solid var(--border);
 }
 
 .pr-row--leak {
-  border-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 6%, transparent);
 }
 
 .pr-row--busy {
@@ -2016,8 +2040,7 @@ watch(
 }
 
 .pr-row--linked {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, var(--bg2));
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
 .pr-actions--linked {
@@ -2041,10 +2064,14 @@ watch(
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  min-width: var(--touch);
-  min-height: var(--touch);
-  padding-top: 0.2rem;
+  min-width: 32px;
+  min-height: 32px;
+  padding-top: 0.25rem;
   cursor: pointer;
+}
+
+@media (pointer: coarse) {
+  .pr-row-check-hit { min-width: var(--touch); min-height: var(--touch); }
 }
 
 .pr-row-check {
@@ -2063,27 +2090,27 @@ watch(
 }
 
 .pr-row-title {
-  font-size: 0.95rem;
-  line-height: 1.4;
+  color: var(--fg);
+  font-size: var(--text-base);
+  font-weight: 600;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
 .pr-row-sub {
-  margin: 0.25rem 0 0;
-  color: var(--fg2);
-  font-size: 0.8rem;
+  margin: 2px 0 0;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
 }
 
+/* The kind is a quiet word before the fact, not a boxed mono tag. */
 .pr-kind {
   flex: none;
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 0.1rem 0.4rem;
-  border-radius: 4px;
-  background: var(--bg3);
-  color: var(--fg2);
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-transform: capitalize;
 }
 
 .pr-badge {
@@ -2101,14 +2128,19 @@ watch(
 /* The original bullet is a paragraph of prose with a CLI incantation in it.
    Useful, but not at the top of every row. */
 .pr-row-detail {
-  margin-top: var(--space-2);
-  font-size: 0.8rem;
-  color: var(--fg2);
+  margin-top: 2px;
+  font-size: var(--text-sm);
+  color: var(--fg3);
 }
 
 .pr-row-detail summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
   cursor: pointer;
 }
+
+.pr-row-detail summary:hover { color: var(--fg); }
 
 .pr-row-prose,
 .pr-row-source {
@@ -2131,11 +2163,24 @@ watch(
 .pr-foot {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-2);
-  padding-top: var(--space-2);
-  border-top: 1px solid var(--border);
-  color: var(--fg2);
-  font-size: 0.8rem;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+}
+
+.pr-foot .btn-small {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-size: var(--text-sm);
+}
+
+@media (pointer: coarse) {
+  .pr-foot .btn-small { min-height: var(--touch); }
 }
 
 .pr-older {
@@ -2149,13 +2194,10 @@ watch(
   width: 4.5rem;
 }
 
-/* Stacked column keeps text full-width on both desktop and mobile. */
+/* On a phone the actions take the row's full width under the checkbox. */
 @media (max-width: 640px) {
-  .pr-row {
-    grid-template-columns: auto 1fr;
-  }
-
-  .pr-actions {
+  .pr-actions,
+  .pr-card {
     grid-column: 1 / -1;
   }
 }

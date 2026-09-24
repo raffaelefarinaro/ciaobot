@@ -94,11 +94,10 @@ describe('ProjectSidebar review section', () => {
     expect(workspaceOptions[0].text()).toContain('3')
     expect(workspaceOptions[1].text()).toContain('1')
 
-    const stats = wrapper.findAll('.mm-stat').map(s => s.text())
-    expect(stats[0]).toContain('3')       // shown
-    expect(stats[0]).toContain('of 3')
-    expect(stats[2]).toContain('1')       // the work row
-    expect(stats[2]).toContain('other workspaces')
+    // No stat tiles: the Suggested tab counts the queue and the batch bar
+    // counts the selection. The sidebar keeps only what filters the list.
+    expect(wrapper.findAll('.mm-stat')).toHaveLength(0)
+    expect(wrapper.find('.mm-search input').attributes('placeholder')).toBe('Search proposals…')
   })
 
   it('opens the workspace scope as a keyboard menu and restores focus', async () => {
@@ -158,10 +157,14 @@ describe('ProjectSidebar review section', () => {
     expect(labels.some(t => t.startsWith('all') && t.includes('3'))).toBe(true)
   })
 
-  it('counts both review queues on the Review button, not just the proposals one', async () => {
-    // The button is the answer to "is there anything to decide", and it sits
-    // above a bar with two queues behind it. Counting one of them said "3"
-    // beside five more notes waiting on the other tab.
+  it('leaves the Review/Map switch to the Memory page header', async () => {
+    const wrapper = await mountSidebar()
+    expect(wrapper.find('.view-toggle').exists()).toBe(false)
+  })
+
+  it('counts both review queues on the workspace scope, not just the proposals one', async () => {
+    // "Is there anything to decide here" has two queues behind it. Counting
+    // one of them said "3" beside two more notes waiting on the other tab.
     const vaultReview = useVaultReviewStore()
     vaultReview.loadedWorkspace = 'personal'
     vaultReview.candidates = [
@@ -170,21 +173,17 @@ describe('ProjectSidebar review section', () => {
     ]
 
     const wrapper = await mountSidebar()
+    await wrapper.get('.workspace-scope-trigger').trigger('click')
 
-    const reviewButton = wrapper.findAll('.view-toggle button')[1]!
     // Three proposals in `personal` plus two notes to revisit.
-    expect(reviewButton.find('.view-count').text()).toBe('5')
-    // And it names its scope, so it cannot be read as the rail's all-workspace
-    // tally sitting a few pixels above it.
-    expect(reviewButton.attributes('aria-label'))
-      .toBe('Review — 5 waiting on a decision in Personal')
+    expect(wrapper.findAll('.workspace-scope-option')[0]!.get('.badge').text()).toBe('5')
     expect(wrapper.get('a[href="/memory"]').attributes('aria-label'))
       .toBe('memory — 4 suggested memories across all workspaces')
   })
 
-  it('leaves retired notes and the decision ledger out of that count', async () => {
-    // Those are records, not work: a badge counting them asks for attention no
-    // click can clear.
+  it('leaves retired notes out of that count', async () => {
+    // Records, not work: a badge counting them asks for attention no click
+    // can clear.
     const vaultReview = useVaultReviewStore()
     vaultReview.loadedWorkspace = 'personal'
     vaultReview.candidates = []
@@ -193,57 +192,21 @@ describe('ProjectSidebar review section', () => {
     ]
 
     const wrapper = await mountSidebar()
+    await wrapper.get('.workspace-scope-trigger').trigger('click')
 
-    expect(wrapper.findAll('.view-toggle button')[1]!.find('.view-count').text()).toBe('3')
+    expect(wrapper.findAll('.workspace-scope-option')[0]!.get('.badge').text()).toBe('3')
   })
 
-  it('says the retirement queue is still loading rather than reporting zero', async () => {
-    // "Not loaded yet" and "empty" are different claims. Printing 0/0/0 while
-    // the panel beside it reads "Loading candidates…" is the stats-vs-rows
-    // contradiction this column exists to avoid.
+  it('shows no proposal filters while Notes to revisit is open', async () => {
+    // Search and kinds act on the suggestions list only; beside the
+    // retirement queue they would filter nothing on screen.
     const mm = useMemoryMapStore()
     mm.reviewTab = 'retirement'
 
     const wrapper = await mountSidebar()
 
-    expect(wrapper.text()).toContain('Loading candidates…')
-    expect(wrapper.findAll('.mm-stat--skeleton')).toHaveLength(3)
-    expect(wrapper.findAll('.mm-stat .n')).toHaveLength(0)
-  })
-
-  it('reports the retirement queue as a failure rather than as empty', async () => {
-    const mm = useMemoryMapStore()
-    mm.reviewTab = 'retirement'
-    const vaultReview = useVaultReviewStore()
-    vaultReview.error = 'Could not load retirement candidates'
-
-    const wrapper = await mountSidebar()
-
-    expect(wrapper.text()).toContain('could not load the retirement queue')
-    expect(wrapper.text()).not.toContain('Loading candidates…')
-    expect(wrapper.findAll('.mm-stat .n')).toHaveLength(0)
-  })
-
-  it('prints the retirement counts once a load for this workspace succeeded', async () => {
-    const mm = useMemoryMapStore()
-    mm.reviewTab = 'retirement'
-    const vaultReview = useVaultReviewStore()
-    vaultReview.loadedWorkspace = 'personal'
-    vaultReview.candidates = [
-      { candidate_id: 'c1', workspace: 'personal', path: 'a.md', content_hash: 'h1', signals: ['unlinked'], priority: 1, evidence: EVIDENCE, status: 'candidate', disposition: '', deferred_until: '' },
-    ]
-    vaultReview.trashed = [
-      { candidate_id: 't1', workspace: 'personal', original_path: 'old.md', content_hash: 'h3', trashed_at: '2026-09-01T00:00:00Z' },
-    ]
-
-    const wrapper = await mountSidebar()
-
-    expect(wrapper.text()).not.toContain('Loading candidates…')
-    const stats = wrapper.findAll('.mm-stat').map(s => s.text())
-    expect(stats[0]).toContain('1')
-    expect(stats[0]).toContain('to revisit')
-    expect(stats[1]).toContain('1')
-    expect(stats[1]).toContain('retired')
+    expect(wrapper.find('.mm-search').exists()).toBe(false)
+    expect(wrapper.findAll('.mm-stat')).toHaveLength(0)
   })
 
   it('does not render the review section for other modes', async () => {
@@ -259,6 +222,6 @@ describe('ProjectSidebar review section', () => {
       global: { plugins: [router] },
     })
 
-    expect(wrapper.text()).not.toContain('other workspaces')
+    expect(wrapper.find('.mm-search').exists()).toBe(false)
   })
 })

@@ -212,7 +212,7 @@ describe('ProposalReviewPanel', () => {
     expect(candidates).toEqual(['work', 'client'])
     // And the non-committal options stay available.
     const chips = rowEl.findAll('.pr-actions .btn-chip').map(o => o.text())
-    expect(chips).toEqual(['dismiss', 'talk about it'])
+    expect(chips).toEqual(['Dismiss', 'Talk about it'])
     wrapper.unmount()
   })
 
@@ -333,9 +333,9 @@ describe('ProposalReviewPanel', () => {
     expect(link.attributes('title')).toBe('personal/Workspace/Skill-Proposals/proposal-2026-08-20.md')
     // Build it or drop it. `implement` is the primary because accepting a
     // proposed skill means implementing it — which is a chat, not a write.
-    expect(skillRow.find('.btn-primary').text()).toBe('implement')
+    expect(skillRow.find('.btn-primary').text()).toBe('Implement')
     expect(skillRow.findAll('.btn-chip').map(b => b.text()))
-      .toEqual(['dismiss', 'talk about it'])
+      .toEqual(['Dismiss', 'Talk about it'])
     wrapper.unmount()
   })
 
@@ -377,7 +377,7 @@ describe('ProposalReviewPanel', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    const button = wrapper.findAll('.btn-primary').find(b => b.text() === 'implement')!
+    const button = wrapper.findAll('.btn-primary').find(b => b.text() === 'Implement')!
     await button.trigger('click')
     await flushPromises()
 
@@ -471,7 +471,7 @@ describe('ProposalReviewPanel', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(wrapper.find('.btn-primary').text()).toBe('move to work')
+    expect(wrapper.find('.btn-primary').text()).toBe('Move to work')
     wrapper.unmount()
   })
 
@@ -548,7 +548,7 @@ describe('queue load states', () => {
 
     expect(wrapper.find('.pr-error-block').exists()).toBe(true)
     expect(wrapper.text()).toContain('proposals are unreachable')
-    expect(wrapper.find('.pr-error-block').text()).toContain('retry')
+    expect(wrapper.find('.pr-error-block').text()).toContain('Retry')
     expect(wrapper.text()).not.toContain('Nothing queued here.')
     expect(wrapper.text()).not.toContain('All reviewed.')
     // No rows section at all while the list could not be read.
@@ -642,13 +642,13 @@ describe('talk about it', () => {
     await flushPromises()
 
     const labels = wrapper.findAll('.pr-actions button').map((b) => b.text())
-    expect(labels).toEqual(['review', 'dismiss', 'talk about it'])
+    expect(labels).toEqual(['Review', 'Dismiss', 'Talk about it'])
 
     const store = useProposalsStore()
     const act = vi.spyOn(store, 'act')
     await wrapper
       .findAll('.pr-actions button')
-      .find((b) => b.text() === 'talk about it')!
+      .find((b) => b.text() === 'Talk about it')!
       .trigger('click')
     // It is not a decision: nothing resolves the row.
     expect(act).not.toHaveBeenCalled()
@@ -674,15 +674,15 @@ describe('talk about it', () => {
 
     await wrapper
       .findAll('.pr-actions button')
-      .find((b) => b.text() === 'talk about it')!
+      .find((b) => b.text() === 'Talk about it')!
       .trigger('click')
     await flushPromises()
 
     const labels = wrapper.findAll('.pr-actions button').map((b) => b.text())
-    expect(labels).toEqual(['review', 'dismiss', 'open chat'])
+    expect(labels).toEqual(['Review', 'Dismiss', 'Open chat'])
     await wrapper
       .findAll('.pr-actions button')
-      .find((b) => b.text() === 'open chat')!
+      .find((b) => b.text() === 'Open chat')!
       .trigger('click')
     await flushPromises()
     expect(switchChat).toHaveBeenCalledWith('chat-d')
@@ -696,7 +696,7 @@ describe('talk about it', () => {
     projects.chats = chats
     await flushPromises()
     expect(reloaded.findAll('.pr-actions button').map((b) => b.text()))
-      .toEqual(['review', 'dismiss', 'open chat'])
+      .toEqual(['Review', 'Dismiss', 'Open chat'])
     await testArchiveDropsLink(reloaded)
   })
 
@@ -706,7 +706,7 @@ describe('talk about it', () => {
     projects.chats.find((c) => c.chat_id === 'chat-d')!.archived = true
     await flushPromises()
     expect(wrapper.findAll('.pr-actions button').map((b) => b.text()))
-      .toEqual(['review', 'dismiss', 'talk about it'])
+      .toEqual(['Review', 'Dismiss', 'Talk about it'])
     wrapper.unmount()
   }
 })
@@ -797,11 +797,11 @@ describe('workspace scoping', () => {
     const batch = wrapper.find('.pr-batch')
     expect(batch.text()).toContain('1 selected')
     const labels = batch.findAll('button').map((b) => b.text())
-    expect(labels).not.toContain('accept 1')
+    expect(labels).not.toContain('Accept 1')
     expect(labels.some((l) => l.startsWith('accept'))).toBe(false)
     // Dismiss and discuss remain available for the selection.
-    expect(labels).toContain('dismiss 1')
-    expect(labels).toContain('talk about 1')
+    expect(labels).toContain('Dismiss 1')
+    expect(labels).toContain('Talk about 1')
     wrapper.unmount()
   })
 
@@ -817,7 +817,7 @@ describe('workspace scoping', () => {
     const act = vi.spyOn(store, 'act')
     const batch = vi.spyOn(store, 'batch')
     await wrapper.find('.pr-batch').findAll('button')
-      .find((b) => b.text() === 'talk about 2')!.trigger('click')
+      .find((b) => b.text() === 'Talk about 2')!.trigger('click')
 
     // Talking is not deciding: nothing resolves.
     expect(act).not.toHaveBeenCalled()
@@ -848,7 +848,7 @@ describe('workspace scoping', () => {
 
     const batch = wrapper.find('.pr-batch')
     expect(batch.text()).toContain('1 selected')
-    await batch.findAll('button').find(b => b.text() === 'dismiss 1')!.trigger('click')
+    await batch.findAll('button').find(b => b.text() === 'Dismiss 1')!.trigger('click')
     await flushPromises()
 
     expect(apiPost).toHaveBeenCalledWith('/api/proposals/batch', {
@@ -886,7 +886,7 @@ describe('workspace scoping', () => {
     await wrapper.find('.pr-row-check').setValue(true)
     await nextTick()
     await wrapper.find('.pr-batch').findAll('button')
-      .find(b => b.text() === 'dismiss 1')!.trigger('click')
+      .find(b => b.text() === 'Dismiss 1')!.trigger('click')
     await flushPromises()
 
     expect(apiPost).toHaveBeenCalledWith('/api/proposals/batch', {
@@ -915,7 +915,7 @@ describe('workspace scoping', () => {
     await wrapper.find('.pr-row-check').setValue(true)
     await nextTick()
 
-    expect(wrapper.find('.pr-batch .btn-primary').text()).toBe('accept 1')
+    expect(wrapper.find('.pr-batch .btn-primary').text()).toBe('Accept 1')
     await wrapper.find('.pr-batch .btn-primary').trigger('click')
     await flushPromises()
 
@@ -1151,11 +1151,11 @@ describe('decision card', () => {
     ])
     expect(card.text()).toContain('accepting bumps its recurrence count')
     expect(card.find('.pr-actions--card .btn-primary').text()).toBe(
-      'save to Workspace/Learnings.md',
+      'Save to Workspace/Learnings.md',
     )
     // A learnings row is not reconcilable, so the check-first chip stays away.
     expect(wrapper.findAll('.pr-actions--card button').map(b => b.text())).not.toContain(
-      'check first',
+      'Check first',
     )
     expect(apiPost).not.toHaveBeenCalled()
     wrapper.unmount()
@@ -1166,11 +1166,11 @@ describe('decision card', () => {
     const wrapper = await openCard()
 
     const actions = wrapper.findAll('.pr-actions--card button').map(b => b.text())
-    expect(actions[0]).toBe('save to ciao:memory')
+    expect(actions[0]).toBe('Save to ciao:memory')
     // "check first" is the same write with a reconcile in front of it, so it is
     // a secondary beside edit/discuss/dismiss rather than a second primary.
     expect(actions.slice(1)).toEqual([
-      'check first', 'edit suggestion', 'talk about it', 'dismiss', 'cancel',
+      'Check first', 'Edit suggestion', 'Talk about it', 'Dismiss', 'Cancel',
     ])
     expect(wrapper.findAll('.pr-actions--card .btn-primary')).toHaveLength(1)
     wrapper.unmount()
@@ -1225,7 +1225,7 @@ describe('decision card', () => {
     mockQueue()
     const wrapper = await openCard()
 
-    await wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'edit suggestion')!.trigger('click')
+    await wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Edit suggestion')!.trigger('click')
     await nextTick()
     await wrapper.find('.pr-card-edit-input').setValue('Remember the other thing')
     await wrapper.find('.pr-card-edit .btn-primary').trigger('click')
@@ -1369,7 +1369,7 @@ describe('reconcile before writing', () => {
     apiPost.mockResolvedValue({} as never)
     const wrapper = await openCard()
 
-    await clickCard(wrapper, 'save to ciao:memory')
+    await clickCard(wrapper, 'Save to ciao:memory')
     await flushPromises()
     expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept', {
       expected_revision: 'rev-1',
@@ -1378,7 +1378,7 @@ describe('reconcile before writing', () => {
     apiPost.mockClear()
     await wrapper.find('.pr-row .btn-primary').trigger('click')
     await flushPromises()
-    await clickCard(wrapper, 'check first')
+    await clickCard(wrapper, 'Check first')
     await flushPromises()
     expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept?reconcile=1', {
       expected_revision: 'rev-1',
@@ -1393,7 +1393,7 @@ describe('reconcile before writing', () => {
     const wrapper = await openCard()
 
     expect(cardLabels(wrapper)).toEqual([
-      'save to Workspace/Learnings.md', 'edit suggestion', 'talk about it', 'dismiss', 'cancel',
+      'Save to Workspace/Learnings.md', 'Edit suggestion', 'Talk about it', 'Dismiss', 'Cancel',
     ])
     wrapper.unmount()
   })
@@ -1403,7 +1403,7 @@ describe('reconcile before writing', () => {
     const wrapper = await openCard()
 
     expect(cardLabels(wrapper)).toEqual([
-      'save to ciao:memory', 'check first', 'edit suggestion', 'talk about it', 'dismiss', 'cancel',
+      'Save to ciao:memory', 'Check first', 'Edit suggestion', 'Talk about it', 'Dismiss', 'Cancel',
     ])
     // One primary: the check is the same write, not a competing decision.
     expect(wrapper.findAll('.pr-actions--card .btn-primary')).toHaveLength(1)
@@ -1418,7 +1418,7 @@ describe('reconcile before writing', () => {
     apiPost.mockRejectedValueOnce(refusal(deferral))
     const wrapper = await openCard()
 
-    await clickCard(wrapper, 'check first')
+    await clickCard(wrapper, 'Check first')
     await flushPromises()
 
     const box = wrapper.find('.pr-actions--deferred')
@@ -1429,7 +1429,7 @@ describe('reconcile before writing', () => {
     // is about these entries, not save-or-dismiss. The card closes with it.
     expect(wrapper.find('.pr-card').exists()).toBe(false)
     expect(wrapper.findAll('.pr-actions button').map((b) => b.text()))
-      .toEqual(['try again', 'leave it queued'])
+      .toEqual(['Try again', 'Leave it queued'])
     // A deferral is not one of the refusals that hand the row to a merge chat —
     // it has a cheaper remedy right here.
     expect(apiPost).toHaveBeenCalledTimes(1)
@@ -1461,12 +1461,12 @@ describe('reconcile before writing', () => {
     apiPost.mockRejectedValueOnce(refusal(deferral))
     const wrapper = await openCard()
 
-    await wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'edit suggestion')!.trigger('click')
+    await wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Edit suggestion')!.trigger('click')
     await nextTick()
     await wrapper.find('.pr-card-edit-input').setValue('Remember the other thing')
     await wrapper.find('.pr-card-edit .btn-primary').trigger('click')
     await flushPromises()
-    await clickCard(wrapper, 'check first')
+    await clickCard(wrapper, 'Check first')
     await flushPromises()
 
     expect(wrapper.find('.pr-actions--deferred').exists()).toBe(true)
@@ -1487,7 +1487,7 @@ describe('reconcile before writing', () => {
     apiPost.mockRejectedValue(refusal(deferral))
     const wrapper = await openCard()
 
-    await clickCard(wrapper, 'check first')
+    await clickCard(wrapper, 'Check first')
     await flushPromises()
     await wrapper.find('.pr-actions--deferred .btn-primary').trigger('click')
     await flushPromises()
@@ -1501,7 +1501,7 @@ describe('reconcile before writing', () => {
     await nextTick()
     expect(wrapper.find('.pr-actions--deferred').exists()).toBe(false)
     expect(wrapper.findAll('.pr-actions button').map((b) => b.text()))
-      .toEqual(['review', 'dismiss', 'talk about it'])
+      .toEqual(['Review', 'Dismiss', 'Talk about it'])
     wrapper.unmount()
   })
 
@@ -1520,7 +1520,7 @@ describe('reconcile before writing', () => {
     expect(apiPost).not.toHaveBeenCalled()
     expect(wrapper.find('.pr-card').text()).toContain('visible in every workspace')
 
-    await clickCard(wrapper, 'check first')
+    await clickCard(wrapper, 'Check first')
     await flushPromises()
     expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept?reconcile=1', {
       expected_revision: 'rev-1',

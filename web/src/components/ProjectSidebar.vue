@@ -329,98 +329,16 @@
          its own Memory/Review switcher, which is about what the memory page
          shows rather than which workspace it is scoped to. -->
     <template v-if="!collapsed && (mode === 'memory' || mode === 'proposals')">
-      <!-- The Memory/Review switcher lives here rather than in the pane
-           header: picking what the memory page shows is the same act as
-           scoping it to a workspace, and this keeps every memory control in
-           one column.
-
-           Two buttons, not three. Graph and List are two drawings of the same
-           notes and belong on one level; sitting beside Review they read as
-           three peers, one of which is a different page with a different job.
-           Graph/List now lives in the map's own toolbar, where the rest of the
-           "how should this look" controls already are. -->
-      <div class="workspace-toggle view-toggle">
-        <button
-          type="button"
-          :class="{ active: mm.view !== 'review' }"
-          :aria-pressed="mm.view !== 'review'"
-          @click="setMemoryView(mm.mapView)"
-        >Memory</button>
-        <button
-          type="button"
-          :class="{ active: mm.view === 'review' }"
-          :aria-pressed="mm.view === 'review'"
-          :title="decisionsWaiting ? `${decisionsWaiting} waiting on a decision in ${workspaceLabel(store.activeWorkspace)}` : undefined"
-          :aria-label="decisionsWaiting ? `Review — ${decisionsWaiting} waiting on a decision in ${workspaceLabel(store.activeWorkspace)}` : 'Review'"
-          @click="setMemoryView('review')"
-        >
-          <!-- Scoped, not the global tally: the workspace toggle directly
-               above scopes the queues, so a global count here claimed items the
-               Review list would not show — 12 next to a selected workspace
-               whose list is empty.
-
-               Both queues, not just the proposals one: this button is the
-               answer to "is there anything to decide", and a badge that
-               counted one of the two tabs behind it said no while the other
-               held five notes. -->
-          Review<span v-if="decisionsWaiting" class="view-count">{{ decisionsWaiting }}</span>
-        </button>
-      </div>
-
-      <!-- Retirements is a different queue from Proposals, and this column used
-           to report the proposals one whatever tab was open: a panel showing
-           five notes to review sat beside "0 of 0 shown". The stats follow the
-           tab, and the proposals-only search and kind chips stay with it. -->
-      <div v-if="mode === 'proposals' && mm.reviewTab === 'retirement'" class="mm-sidebar-scroll">
-        <h3>Notes to revisit</h3>
-        <!-- Three states, not one: a zero is a claim about the vault and may
-             only be printed once a load for this workspace has succeeded. -->
-        <template v-if="retirementPending">
-          <div class="mm-loading-heading" role="status" aria-live="polite">
-            <span class="history-loading-spinner" aria-hidden="true"></span>
-            <span>Loading candidates…</span>
-          </div>
-          <div class="mm-stat-grid mm-stat-grid--3" aria-hidden="true">
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
-          </div>
-        </template>
-        <p v-else-if="retirementFailed" class="empty-hint" role="status">
-          // could not load the retirement queue
-        </p>
-        <div v-else class="mm-stat-grid mm-stat-grid--3">
-          <div class="mm-stat">
-            <div class="n">{{ retirementScoped }}</div>
-            <div class="l">to revisit</div>
-          </div>
-          <div class="mm-stat">
-            <div class="n">{{ retirementTrashed }}</div>
-            <div class="l">retired</div>
-          </div>
-          <div class="mm-stat">
-            <div class="n">{{ retirementSignals }}</div>
-            <div class="l">reasons</div>
-          </div>
-        </div>
-      </div>
-
       <!-- Review: the same shape as the memory map's sidebar — stats, a search,
            then chips that both report and filter. The kind filter used to be a
            segmented control in the panel header while this column sat empty,
            which put the queue's controls somewhere different from every other
            memory view's. -->
-      <div v-else-if="mode === 'proposals'" class="mm-sidebar-scroll">
+      <div v-if="mode === 'proposals' && mm.reviewTab !== 'retirement'" class="mm-sidebar-scroll">
         <template v-if="proposals.loading">
-          <h3>Suggested memories</h3>
           <div class="mm-loading-heading" role="status" aria-live="polite">
             <span class="history-loading-spinner" aria-hidden="true"></span>
             <span>Loading proposals…</span>
-          </div>
-          <div class="mm-stat-grid mm-stat-grid--3" aria-hidden="true">
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
           </div>
           <div class="mm-search">
             <input type="text" placeholder="Search proposals…" autocomplete="off" disabled />
@@ -433,21 +351,6 @@
           </div>
         </template>
         <template v-else>
-          <h3>Suggested memories</h3>
-          <div class="mm-stat-grid mm-stat-grid--3">
-            <div class="mm-stat">
-              <div class="n">{{ reviewVisible }}</div>
-              <div class="l">of {{ reviewScoped }} shown</div>
-            </div>
-            <div class="mm-stat">
-              <div class="n">{{ proposals.selected.size }}</div>
-              <div class="l">selected</div>
-            </div>
-            <div class="mm-stat">
-              <div class="n">{{ reviewElsewhere }}</div>
-              <div class="l">other workspaces</div>
-            </div>
-          </div>
 
           <div class="mm-search">
             <input
@@ -464,7 +367,7 @@
         </div>
         <div class="mm-link-list">
           <div
-            class="mm-link-item"
+            class="mm-link-item mm-link-item--filter"
             :class="{ off: proposals.kindFilter !== 'all' }"
             @click="proposals.kindFilter = 'all'"
           >
@@ -474,7 +377,7 @@
           <div
             v-for="k in reviewKinds"
             :key="k.kind"
-            class="mm-link-item"
+            class="mm-link-item mm-link-item--filter"
             :class="{ off: proposals.kindFilter !== k.kind }"
             :title="`Show only ${reviewKindLabel(k.kind)} proposals`"
             @click="proposals.kindFilter = k.kind"
@@ -488,14 +391,9 @@
 
       <div v-if="mode === 'memory'" class="mm-sidebar-scroll">
         <template v-if="mm.loading">
-          <h3>Vault</h3>
           <div class="mm-loading-heading" role="status" aria-live="polite">
             <span class="history-loading-spinner" aria-hidden="true"></span>
             <span>Loading vault graph…</span>
-          </div>
-          <div class="mm-stat-grid" aria-hidden="true">
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
           </div>
           <div class="mm-search">
             <input type="text" placeholder="Search notes, tags…" autocomplete="off" disabled />
@@ -508,65 +406,6 @@
           </div>
         </template>
         <template v-else>
-          <h3>Vault</h3>
-          <!-- Two tiles: "notes shown" and "total" were separate tiles showing
-               the same number whenever nothing was filtered, so the total moved
-               into the sublabel. Orphans left the grid entirely — as a bare
-               number it was not actionable, and it is now a list. -->
-          <div class="mm-stat-grid">
-            <div class="mm-stat">
-              <div class="n">{{ mm.visibleNodes.length }}</div>
-              <div class="l">of {{ mm.nodes.length }} shown</div>
-            </div>
-            <div class="mm-stat"><div class="n">{{ mm.visibleEdgeCount }}</div><div class="l">links</div></div>
-          </div>
-
-          <!-- Workspace guide (AGENTS.md; CLAUDE.md pre-migration) — the only file every chat loads.
-               Surfaced here because the vault graph hides it (it is not a vault note)
-               yet its bounded regions budget every session. -->
-          <div class="guide-card" :class="{ 'guide-card--over': guideOverCap }">
-            <div class="guide-card-head">
-              <div class="guide-card-title">
-                <span class="guide-card-icon" aria-hidden="true">◆</span>
-                {{ guidePathLabel }}
-                <span v-if="guideOverCap" class="guide-card-badge guide-card-badge--warn" title="A bounded region is over its advisory cap">over cap</span>
-                <span v-else-if="guideLoading" class="guide-card-badge">loading…</span>
-              </div>
-              <div class="guide-card-actions">
-                <button type="button" class="guide-card-btn" :disabled="guideLoading || !!guideError" @click="openGuideFile" :title="`Open ${guidePathLabel}`">Open</button>
-                <button type="button" class="guide-card-btn guide-card-btn--primary" :disabled="!canDiscussGuide" @click="discussGuide" title="Start a chat about this guide">Discuss</button>
-              </div>
-            </div>
-            <div v-if="guideError" class="guide-card-error">{{ guideError }}</div>
-            <template v-else-if="guideStats">
-              <div class="guide-card-regions">
-                <div v-for="r in guideStats.regions" :key="r.key" class="guide-region">
-                  <div class="guide-region-head">
-                    <span class="guide-region-name">{{ r.label }}</span>
-                    <span class="guide-region-count" :class="{ 'guide-region-count--warn': r.overCap }">{{ r.usedChars }} / {{ r.charLimit }} chars</span>
-                    <span class="guide-region-tokens" :title="`${r.usedChars} chars ≈ ${r.tokens} tokens`">≈ {{ r.tokens }} tokens</span>
-                  </div>
-                  <div class="guide-region-bar" :class="{ 'guide-region-bar--warn': r.overCap, 'guide-region-bar--high': !r.overCap && r.pct >= 80 }" :title="`${r.pct}% of cap`">
-                    <span :style="{ width: Math.min(100, r.pct) + '%' }"></span>
-                  </div>
-                  <div class="guide-region-meta">
-                    {{ r.entryCount }} {{ r.entryCount === 1 ? 'entry' : 'entries' }} · {{ r.pct }}%
-                    <span v-if="r.expiredCount"> · {{ r.expiredCount }} expired</span>
-                    <span v-if="r.malformedCount" class="guide-region-meta--warn"> · {{ r.malformedCount }} malformed tag</span>
-                  </div>
-                </div>
-              </div>
-              <div class="guide-card-foot">
-                <span class="guide-card-foot-info" :title="guideContent ? `${guideContent.length} chars on disk` : ''">
-                  {{ guideContent ? `${guideContent.length.toLocaleString()} chars` : '' }} · {{ guideStats.totalTokens }} tokens total
-                </span>
-              </div>
-            </template>
-            <template v-else-if="!guideLoading">
-              <div class="guide-card-hint">No guide file found for this workspace.</div>
-            </template>
-          </div>
-
           <div class="mm-search">
             <input v-model="mm.search" type="text" placeholder="Search notes, tags…" autocomplete="off" />
           </div>
@@ -1157,7 +996,6 @@ import { workspaceLabel } from '../lib/workspaceLabel'
 import { kindLabel as reviewKindLabel } from '../lib/proposalKinds'
 import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
-import { startFileDiscussion } from '../lib/fileDiscussion'
 import { openNewChatPicker } from '../lib/newChat'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals' }>()
@@ -1177,34 +1015,9 @@ const vaultReview = useVaultReviewStore()
 // Retirement counts mirror `retirementCount`/`trashCount` in MemoryMapView:
 // the store holds one workspace at a time, so a load for another workspace
 // must read as zero here rather than as the previous workspace's queue.
-const retirementLoaded = computed(() => vaultReview.loadedWorkspace === store.activeWorkspace)
-// `retirementLoaded` alone collapsed three states into one number: the queue
-// not fetched yet, a fetch that failed (the store swallows the error and
-// leaves `loadedWorkspace` where it was), and a queue that really is empty.
-// The first two rendered a hard 0/0/0 beside a panel saying "Loading
-// candidates…" — the stats-vs-rows contradiction this column exists to avoid.
-// The Proposals column above solves it with a skeleton; so does this one.
-const retirementPending = computed(() => !retirementLoaded.value && !vaultReview.error)
-const retirementFailed = computed(() => !retirementLoaded.value && Boolean(vaultReview.error))
-const retirementScoped = computed(() => (retirementLoaded.value ? vaultReview.candidates.length : 0))
-const retirementTrashed = computed(() => (retirementLoaded.value ? vaultReview.trashed.length : 0))
-// Distinct reasons across the queue, not a sum: one note flagged unlinked and
-// weak_provenance is two signals on one row, and the number is there to say
-// what kind of work the queue holds.
-const retirementSignals = computed(() => {
-  if (!retirementLoaded.value) return 0
-  const seen = new Set<string>()
-  for (const c of vaultReview.candidates) for (const s of c.signals) seen.add(s)
-  return seen.size
-})
-
+// The memory page's Review/Map switch and its counts live in the page header
+// and tab bar now; the sidebar keeps only the filters that act on the list.
 const reviewScoped = computed(() => proposals.scopedRows(store.activeWorkspace).length)
-// What the Review button promises: everything in this workspace still waiting
-// on a decision, across both of its queues. Retired notes and the decision
-// ledger are records, not work, so neither counts here.
-const decisionsWaiting = computed(() => reviewScoped.value + retirementScoped.value)
-const reviewVisible = computed(() => proposals.visibleRows(store.activeWorkspace).length)
-const reviewElsewhere = computed(() => proposals.rows.length - reviewScoped.value)
 const reviewKinds = computed(() => proposals.kindCounts(store.activeWorkspace))
 const hasBlockingHousekeeping = computed(() => housekeeping.actions.some(action => action.blocking))
 const settingsNeedsAttention = computed(() => Boolean(store.packageStatus?.update_available || hasBlockingHousekeeping.value))
@@ -1228,164 +1041,6 @@ onBeforeUnmount(() => {
 const orphanLimit = ref(8)
 const staleLimit = ref(8)
 
-// ---------- workspace guide card (AGENTS.md; CLAUDE.md pre-migration) ----------
-const GUIDE_DEFAULTS: Record<string, { label: string; limit: number }> = {
-  memory: { label: 'Agent memory', limit: 3000 },
-  profile: { label: 'User profile', limit: 1375 },
-}
-const guideContent = ref('')
-const guideLoading = ref(false)
-const guideError = ref('')
-const guideResolvedPath = ref('') // actual file that existed: AGENTS.md, or a legacy CLAUDE.md
-const guidePathLabel = computed(() => guideResolvedPath.value || 'AGENTS.md')
-const GUIDE_REGION_RE: Record<string, RegExp> = {
-  memory: /<!--\s*ciao:memory:start(?:\s+cap=(\d+))?\s*-->([\s\S]*?)<!--\s*ciao:memory:end\s*-->/i,
-  profile: /<!--\s*ciao:profile:start(?:\s+cap=(\d+))?\s*-->([\s\S]*?)<!--\s*ciao:profile:end\s*-->/i,
-}
-function parseEntriesForRegion(raw: string): string[] {
-  const headingStripped = raw.replace(/^\s*##\s*(Agent memory|User profile)\s*\n?/, '')
-  const parts = headingStripped.split(/\n?§\n?/)
-  return parts.map(p => p.trim()).filter(Boolean)
-}
-function serializeLen(entries: string[]): number {
-  if (!entries.length) return 0
-  return entries.join('\n§\n').length + 1 // +1 trailing \n mirrors python serialize_entries
-}
-function tokensFor(chars: number): number { return Math.ceil(chars / 4) || 0 }
-function expirationInfo(entry: string): { expired: boolean; malformed: boolean } {
-  const hasPrefix = /\[expires\s*:/i.test(entry)
-  const m = entry.match(/\[expires:\s*([^\]]*)\]/i)
-  if (!m) return { expired: false, malformed: hasPrefix }
-  const raw = m[1].trim()
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return { expired: false, malformed: true }
-  // Reject impossible dates (e.g. 2026-02-30): JS normalizes them to a later
-  // day, so Number.isNaN alone would report them as valid. Round-trip the
-  // parsed year/month/day back to the original string to agree with the
-  // backend validator, which rejects these as malformed.
-  const [y, mo, da] = raw.split('-').map(Number)
-  const d = new Date(y, mo - 1, da)
-  const roundTrips = d.getFullYear() === y && d.getMonth() === mo - 1 && d.getDate() === da
-  if (!roundTrips) return { expired: false, malformed: true }
-  const today = new Date(); today.setHours(0,0,0,0)
-  return { expired: d < today, malformed: false }
-}
-const guideStats = computed(() => {
-  const content = guideContent.value
-  if (!content) return null
-  const regions: Array<{
-    key: string; label: string; usedChars: number; charLimit: number; pct: number;
-    tokens: number; entryCount: number; expiredCount: number; malformedCount: number; overCap: boolean
-  }> = []
-  let totalChars = 0
-  for (const key of ['memory', 'profile'] as const) {
-    const re = GUIDE_REGION_RE[key]
-    const match = content.match(re)
-    let cap = GUIDE_DEFAULTS[key].limit
-    let body = ''
-    if (match) {
-      if (match[1]) { const n = Number(match[1]); if (Number.isFinite(n)) cap = n }
-      body = match[2] || ''
-    }
-    const entries = body ? parseEntriesForRegion(body) : []
-    const used = serializeLen(entries)
-    totalChars += used
-    let expired = 0, malformed = 0
-    for (const e of entries) { const info = expirationInfo(e); if (info.expired) expired++; if (info.malformed) malformed++ }
-    const pct = cap ? Math.round((used / cap) * 100 * 10) / 10 : 0
-    regions.push({
-      key, label: GUIDE_DEFAULTS[key].label,
-      usedChars: used, charLimit: cap, pct, tokens: tokensFor(used),
-      entryCount: entries.length, expiredCount: expired, malformedCount: malformed,
-      overCap: used > cap,
-    })
-  }
-  return { regions, totalTokens: tokensFor(content.length), totalChars: content.length }
-})
-const guideOverCap = computed(() => !!guideStats.value?.regions.some(r => r.overCap))
-const canDiscussGuide = computed(() => !!guideResolvedPath.value && !guideLoading.value && !guideError.value)
-let guideFetchSeq = 0
-async function fetchGuide(): Promise<void> {
-  const seq = ++guideFetchSeq
-  guideLoading.value = true
-  guideError.value = ''
-  // AGENTS.md is the workspace guide; CLAUDE.md is only what an install that
-  // has not run the guide migration still has (ciao/workspace_guide.py), so it
-  // is tried second and will stop appearing once installs have upgraded.
-  //
-  // After the workspace re-root migration each guide lives under
-  // `<workspace>/AGENTS.md`, so a bare basename would let /api/workspace-file's
-  // fuzzy lookup silently resolve to the lexicographically-first workspace's
-  // guide. Try the workspace-qualified path first (retained for Open/Discuss/
-  // pin), then fall back to the bare basename for installs that have not
-  // re-rooted (guide still at the install root).
-  const ws = store.activeWorkspace
-  const qualified = [`${ws}/AGENTS.md`, `${ws}/CLAUDE.md`]
-  const bare = ['AGENTS.md', 'CLAUDE.md']
-  let lastError = ''
-  let qualifiedErrored = false
-  for (const candidate of [...qualified, ...bare]) {
-    // A bare basename can fuzzy-resolve to a DIFFERENT workspace's guide
-    // (routes_helpers._resolve_workspace_path anchors relative paths to the
-    // primary root), so it is only a legitimate fallback when every
-    // workspace-qualified probe genuinely 404'd. If one of them errored we
-    // do not know whether this workspace has a guide, and showing another
-    // one's — with Open/Discuss/pin acting on it — is worse than showing
-    // nothing.
-    if (bare.includes(candidate) && qualifiedErrored) break
-    try {
-      // `exact=1`: no fuzzy fallback. Without it, asking for
-      // `<ws>/AGENTS.md` on a workspace that has no guide yet
-      // filename-matches another workspace's and returns it with a 200,
-      // so the card would render someone else's guide as this one's.
-      const resp = await fetch(`/api/workspace-file?exact=1&path=${encodeURIComponent(candidate)}`, { credentials: 'same-origin' })
-      if (seq !== guideFetchSeq) return
-      if (resp.status === 404) continue
-      // Keep trying the remaining candidates rather than giving up on the
-      // first non-404: a transient 503 (the engine restarting) on the first
-      // name used to blank the card even though a later name would have
-      // served it. The error is only shown if every candidate fails.
-      if (!resp.ok) {
-        lastError = `Failed to load ${candidate} (HTTP ${resp.status})`
-        if (qualified.includes(candidate)) qualifiedErrored = true
-        continue
-      }
-      const text = await resp.text()
-      if (seq !== guideFetchSeq) return
-      guideContent.value = text
-      guideResolvedPath.value = candidate
-      guideError.value = ''
-      guideLoading.value = false
-      return
-    } catch (e) {
-      if (qualified.includes(candidate)) qualifiedErrored = true
-      if (seq === guideFetchSeq) { guideError.value = e instanceof Error ? e.message : String(e) }
-    }
-  }
-  if (seq !== guideFetchSeq) return
-  guideContent.value = ''
-  // Every candidate 404'd (no guide yet) or errored. Surface the last real
-  // error if there was one; a plain "not found" stays silent, because a
-  // workspace with no guide yet is an ordinary state, not a failure.
-  if (!guideError.value) guideError.value = lastError
-  guideResolvedPath.value = ''
-  guideLoading.value = false
-}
-watch(() => store.activeWorkspace, () => { void fetchGuide() }, { immediate: true })
-function openGuideFile(): void {
-  if (!guideResolvedPath.value) return
-  void fileViewer.open(guideResolvedPath.value)
-}
-async function discussGuide(): Promise<void> {
-  if (!guideResolvedPath.value) return
-  const path = guideResolvedPath.value
-  // Reuse the generic file-discuss flow (creates a chat and pins the guide).
-  await discussFileInChat(path, `Let's review the workspace guide \`${path}\`. Help me audit it — what should we trim, clarify, or promote from the bounded regions?`)
-}
-async function discussFileInChat(path: string, prompt?: string): Promise<void> {
-  await startFileDiscussion(store, { path, seed: prompt || `Let's discuss the file \`${path}\`.` })
-}
-// Expose for template's generic file discuss (also used by FileViewerModal/PinnedFilePanel via a shared helper fallback)
-// and for the guide card's "Discuss" button.
 const route = useRoute()
 const router = useRouter()
 
@@ -1440,7 +1095,7 @@ const workspaceScopeTrigger = ref<HTMLButtonElement | null>(null)
 const workspaceScopeMenu = ref<HTMLElement | null>(null)
 
 // Review + retirement work waiting in a workspace, used only as the scope
-// trigger's attention badge. `retirementScoped` is zero for other workspaces,
+// trigger's attention badge. The retirement queue is only loaded for the active workspace,
 // so their count is the proposals queue alone.
 function workspaceActionCount(workspace: string): number {
   const retirement = vaultReview.loadedWorkspace === workspace ? vaultReview.candidates.length : 0
@@ -3564,12 +3219,13 @@ async function confirmDeleteChat(chatId: string) {
   flex: 1;
   min-height: 0;
 }
+/* Same register as the chat rail's "Projects" label: 11px sans, sentence
+   case. The old uppercase tracked labels read as a second kind of heading. */
 .mm-sidebar-scroll h3 {
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  font: 600 var(--text-xs)/1.2 var(--font-sans);
   color: var(--fg3);
-  margin: var(--space-4) 0 var(--space-2);
+  margin: var(--space-4) 0 var(--space-1);
+  padding: 0 8px;
 }
 .mm-sidebar-scroll h3:first-child { margin-top: 0; }
 /* A heading inside this row (e.g. "Categories" + reset) is a flex item, so
@@ -3584,6 +3240,7 @@ async function confirmDeleteChat(chatId: string) {
   margin-bottom: var(--space-2);
 }
 .mm-row-between h3 { margin: 0; }
+.mm-row-between { padding-right: 8px; }
 .mm-row-between:first-child { margin-top: 0; }
 .mm-row-actions { display: inline-flex; align-items: baseline; gap: 6px; }
 .mm-sep { color: var(--fg3); font-size: var(--text-xs); }
@@ -3639,123 +3296,12 @@ async function confirmDeleteChat(chatId: string) {
 .mm-search { margin-top: var(--space-3); }
 .mm-search input { width: 100%; font-size: var(--text-sm); }
 
-/* Workspace guide card (AGENTS.md; CLAUDE.md pre-migration) — bounded memory health, always visible */
-.guide-card {
-  margin-top: var(--space-3);
-  padding: 10px 10px 8px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.guide-card--over { border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }
-.guide-card-head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 8px;
-}
-.guide-card-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  overflow-wrap: anywhere;
-  flex: 1 1 auto;
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--fg2);
-  font-family: var(--font-mono);
-}
-.guide-card-icon { color: var(--accent); font-size: 10px; }
-.guide-card-badge {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--fg3);
-  background: var(--bg3);
-  padding: 1px 6px;
-  border-radius: var(--radius-pill);
-}
-.guide-card-badge--warn { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
-.guide-card-actions { display: inline-flex; gap: 6px; flex-shrink: 0; }
-.guide-card-btn {
-  font-size: var(--text-xs);
-  padding: 3px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--bg2);
-  color: var(--fg2);
-  cursor: pointer;
-  font-family: var(--font);
-  /* Touch-safe hit area: the visible 3px/8px padding is too small to tap
-     reliably on the mobile sidebar, so guarantee a 44px minimum target. */
-  min-width: var(--touch);
-  min-height: var(--touch);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.guide-card-btn:disabled { opacity: 0.5; cursor: default; }
-.guide-card-btn:hover:not(:disabled) { background: var(--bg3); color: var(--fg); }
-.guide-card-btn--primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-.guide-card-btn--primary:hover:not(:disabled) { filter: brightness(1.08); color: var(--on-accent); }
-.guide-card-error { color: var(--warning); font-size: var(--text-xs); }
-.guide-card-hint { color: var(--fg3); font-size: var(--text-xs); }
-.guide-card-regions { display: flex; flex-direction: column; gap: 10px; }
-.guide-region-head {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  flex-wrap: wrap;
-  font-size: var(--text-xs);
-}
-.guide-region-name { font-weight: 600; color: var(--fg2); flex: 1; }
-.guide-region-count { color: var(--fg3); font-variant-numeric: tabular-nums; }
-.guide-region-count--warn { color: var(--warning); font-weight: 600; }
-.guide-region-tokens { color: var(--fg3); font-family: var(--font-mono); font-size: 11px; }
-.guide-region-bar {
-  height: 6px;
-  border-radius: 3px;
-  background: var(--bg3);
-  overflow: hidden;
-  margin-top: 4px;
-}
-.guide-region-bar > span {
-  display: block;
-  height: 100%;
-  border-radius: 3px;
-  background: var(--accent);
-  transition: width 200ms;
-}
-.guide-region-bar--high > span { background: #d6a600; }
-.guide-region-bar--warn > span { background: var(--warning); }
-.guide-region-meta { font-size: 11px; color: var(--fg3); margin-top: 3px; }
-.guide-region-meta--warn { color: var(--warning); }
-.guide-card-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border);
-  font-size: var(--text-xs);
-  color: var(--fg3);
-}
-.guide-card-foot-info { font-variant-numeric: tabular-nums; }
-
 .mm-chip-row { display: flex; flex-direction: column; gap: 2px; }
 .mm-chip {
-  display: flex; align-items: center; gap: 7px; padding: 5px 6px; border-radius: var(--radius-sm);
+  display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 8px; border-radius: 7px;
   cursor: pointer; font-size: var(--text-sm); color: var(--fg2);
 }
-.mm-chip:hover { background: var(--bg3); }
+.mm-chip:hover { background: var(--bg-elev); color: var(--fg); }
 .mm-chip.off { opacity: 0.35; }
 .mm-chip .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .mm-chip .cnt { margin-left: auto; color: var(--fg3); font-variant-numeric: tabular-nums; }
@@ -3768,10 +3314,13 @@ async function confirmDeleteChat(chatId: string) {
 
 .mm-link-list { display: flex; flex-direction: column; gap: 2px; }
 .mm-link-item {
-  display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: var(--radius-sm);
-  cursor: pointer; font-size: var(--text-sm); color: var(--fg);
+  display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 8px; border-radius: 7px;
+  cursor: pointer; font-size: var(--text-sm); color: var(--fg2);
 }
-.mm-link-item:hover { background: var(--bg3); }
+.mm-link-item:hover { background: var(--bg-elev); color: var(--fg); }
+@media (pointer: coarse) {
+  .mm-chip, .mm-link-item { min-height: var(--touch); }
+}
 .mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 /* Aging note marker: the app warning token, not a category colour — age is
    not a type, and reusing a hue would lie about what the dot means. */
@@ -3783,8 +3332,8 @@ async function confirmDeleteChat(chatId: string) {
 /* The review queue's kind rows are a filter, so the SELECTED one is the solid
    one and the rest recede — the inverse of the memory chips, where every chip is
    on until you switch it off. */
-.mm-link-item.off { opacity: 0.55; }
-.mm-link-item:not(.off) { background: var(--bg3); color: var(--fg); }
+.mm-link-item--filter.off { color: var(--fg3); }
+.mm-link-item--filter:not(.off) { background: var(--bg-elev); color: var(--fg); font-weight: 600; }
 .mm-link-item.current .label { font-weight: 600; }
 </style>
 

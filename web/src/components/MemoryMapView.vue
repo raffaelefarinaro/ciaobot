@@ -1,39 +1,30 @@
 <template>
   <div class="memory-map">
-    <PaneHeader page-tag="Memory" @open-sidebar="emit('open-sidebar')" />
-
-    <section class="memory-mode-intro" aria-labelledby="memory-mode-title">
-      <div class="memory-mode-copy">
-        <span>{{ mm.view === 'review' ? 'Review' : 'Knowledge map' }}</span>
-        <h1 id="memory-mode-title">
-          {{ mm.view === 'review' ? 'Review what Ciao learned' : 'Explore your second brain' }}
-        </h1>
-        <p>
-          {{ mm.view === 'review'
-            ? 'Accept, edit, or reject durable memory with its source and consequence in view.'
-            : 'See how notes connect, find stale knowledge, and open the source whenever a connection needs context.' }}
-        </p>
-      </div>
-      <div class="memory-mode-actions" role="group" aria-label="Memory mode">
-        <button
-          type="button"
-          :class="{ active: mm.view === 'review' }"
-          :aria-pressed="mm.view === 'review'"
-          @click="mm.view = 'review'"
-        >
-          Review
-          <span v-if="proposals.rows.length" class="memory-mode-count">{{ proposals.rows.length }}</span>
-        </button>
-        <button
-          type="button"
-          :class="{ active: mm.view !== 'review' }"
-          :aria-pressed="mm.view !== 'review'"
-          @click="setMapView('graph')"
-        >Map</button>
-      </div>
-    </section>
+    <PaneHeader page-tag="Memory" @open-sidebar="emit('open-sidebar')">
+      <!-- Review and Map are the page's two modes, so the switch sits in the
+           page's own header, once. The pending count lives on the Suggested
+           tab below rather than as a second badge here. -->
+      <template #actions>
+        <div class="memory-mode-actions" role="group" aria-label="Memory mode">
+          <button
+            type="button"
+            :class="{ active: mm.view === 'review' }"
+            :aria-pressed="mm.view === 'review'"
+            @click="mm.view = 'review'"
+          >Review</button>
+          <button
+            type="button"
+            :class="{ active: mm.view !== 'review' }"
+            :aria-pressed="mm.view !== 'review'"
+            @click="setMapView(mm.mapView)"
+          >Map</button>
+        </div>
+      </template>
+    </PaneHeader>
 
     <div v-if="mm.view === 'review'" class="mm-review-wrap">
+      <div class="page-grid mm-review-grid">
+      <div class="page-main">
       <!-- One navigation level for everything Review holds. It used to be two:
            Proposals/Retirements here, then Queue/History inside the proposal
            panel and To review/Trash inside the retirement one — so the trash
@@ -75,6 +66,28 @@
         role="tabpanel"
         :aria-labelledby="`mm-review-tab-${reviewTab}`"
       />
+      </div>
+      <!-- What the review decisions feed: the vault's size and the always-
+           loaded budget. Both used to be tiles in the sidebar, beside a second
+           copy of the Review/Map switch. -->
+      <aside class="page-rail mm-review-rail" aria-label="Memory at a glance">
+        <section class="rail-section" aria-labelledby="mm-vault-title">
+          <h2 id="mm-vault-title" class="rail-title">Vault</h2>
+          <p v-if="mm.loading && !mm.nodes.length" class="rail-note" role="status">Loading the vault…</p>
+          <p v-else-if="mm.loadError && !mm.nodes.length" class="rail-note">Could not load the vault.</p>
+          <div v-else class="rail-kvs">
+            <div class="rail-kv"><span>Notes</span><strong>{{ mm.nodes.length.toLocaleString() }}</strong></div>
+            <div class="rail-kv"><span>Links</span><strong>{{ mm.edges.length.toLocaleString() }}</strong></div>
+            <div class="rail-kv"><span>Unlinked</span><strong>{{ mm.orphanNotes.length.toLocaleString() }}</strong></div>
+            <div class="rail-kv">
+              <span>Unverified</span>
+              <strong :class="{ 'rail-attention': mm.staleNotes.length > 0 }">{{ mm.staleNotes.length.toLocaleString() }}</strong>
+            </div>
+          </div>
+        </section>
+        <MemoryGuideBudget />
+      </aside>
+      </div>
     </div>
 
     <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode, 'mm-body--dragging-detail': isDraggingDetail }" :style="detailBodyStyle">
@@ -442,6 +455,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from 'vue'
 import PaneHeader from './PaneHeader.vue'
+import MemoryGuideBudget from './MemoryGuideBudget.vue'
 import ProposalReviewPanel from './ProposalReviewPanel.vue'
 import VaultReviewPanel from './VaultReviewPanel.vue'
 import { useProposalsStore } from '../stores/proposals'
@@ -1523,7 +1537,7 @@ const reviewTab = computed<ReviewTabKey>({
 // described the pipeline that produced the rows; these say what is in them.
 const reviewTabs = computed<TabSpec<ReviewTabKey>[]>(() => [
   // `|| undefined` rather than 0: a zero pill on an empty queue is noise.
-  { key: 'proposals', label: 'Suggested memories', count: proposalCount.value || undefined },
+  { key: 'proposals', label: 'Suggested', count: proposalCount.value || undefined },
   { key: 'retirement', label: 'Notes to revisit', count: retirementCount.value || undefined },
   { key: 'trash', label: 'Retired', count: trashCount.value || undefined },
   { key: 'history', label: 'History', count: historyCount.value },
@@ -1756,126 +1770,76 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 
-.memory-mode-intro {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-5);
-  padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-}
-
-.memory-mode-copy {
-  min-width: 0;
-  max-width: 760px;
-}
-
-.memory-mode-copy > span {
-  color: var(--fg2);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 650;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.memory-mode-copy h1 {
-  margin: var(--space-1) 0 0;
-  color: var(--fg);
-  font-size: clamp(22px, 3vw, 30px);
-  line-height: 1.15;
-  letter-spacing: -0.03em;
-  text-wrap: balance;
-}
-
-.memory-mode-copy p {
-  max-width: 68ch;
-  margin: var(--space-2) 0 0;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  line-height: 1.5;
-}
-
 .memory-mode-actions {
   display: flex;
   flex: none;
-  gap: var(--space-1);
-  padding: var(--space-1);
+  gap: 2px;
+  padding: 2px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg2);
 }
 
 .memory-mode-actions button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  min-width: 6.5rem;
-  min-height: var(--touch);
+  min-width: 4.5rem;
+  min-height: 32px;
   padding: 0 var(--space-3);
-  border: 1px solid transparent;
+  border: 0;
   border-radius: 5px;
   background: transparent;
   color: var(--fg2);
+  cursor: pointer;
   font: inherit;
   font-size: var(--text-sm);
-  font-weight: 650;
-  cursor: pointer;
+  font-weight: 600;
+}
+
+.memory-mode-actions button:hover {
+  color: var(--fg);
 }
 
 .memory-mode-actions button.active {
-  border-color: var(--border-strong);
   background: var(--bg3);
   color: var(--fg);
 }
 
-.memory-mode-count {
-  display: grid;
-  place-items: center;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 5px;
-  border-radius: var(--radius-pill);
-  background: var(--accent);
-  color: var(--on-accent);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
+.memory-mode-actions button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
-@media (max-width: 700px) {
-  .memory-mode-intro {
-    align-items: stretch;
-    flex-direction: column;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-4);
-  }
-
-  .memory-mode-copy p {
-    display: none;
-  }
-
-  .memory-mode-actions button {
-    flex: 1;
-  }
+@media (pointer: coarse), (max-width: 700px) {
+  .memory-mode-actions button { min-height: var(--touch); }
 }
+
 /* The Review surface holds all four sections — two queues waiting on a
    decision and two records of decisions already made — under one tab bar. */
 .mm-review-wrap {
   flex: 1;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
+  overflow-y: auto;
+}
+.mm-review-grid {
+  padding-block: var(--space-5) var(--space-6);
 }
 /* Layout only. The tab styling itself lives in TabBar, which this bar renders
    through. It is now the only tab row on the Review surface; at a phone width
    the four tabs scroll sideways inside it rather than wrapping, so the panel
    below always starts at the same height. */
 .mm-review-tabs {
-  padding: 0 var(--space-4);
   flex: none;
 }
+/* Counts on the tabs are quiet numbers, not pills: the tab label already
+   says what is waiting, the number only says how much. */
+.mm-review-tabs :deep(.tab-bar-count) {
+  min-width: 0;
+  padding: 0;
+  background: none;
+  color: var(--fg3);
+  font-weight: 500;
+  min-height: 0;
+}
+.mm-review-tabs :deep(.tab-bar-tab.active .tab-bar-count) { color: var(--fg2); }
 /* A stale note's way into the retirement queue, next to its last-verified
    line. A text button, not a pink bar: deciding happens in Review, not here. */
 .mm-detail-review-link {
@@ -2336,11 +2300,14 @@ onBeforeUnmount(() => {
   text-decoration: none;
 }
 
-.mm-seg { display: flex; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+/* Same segmented control as the header's Review/Map: a quiet track with the
+   current choice lifted, not a pink fill competing with the page's actions. */
+.mm-seg { display: flex; gap: 2px; padding: 2px; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .mm-seg button {
-  background: transparent; border: none; color: var(--fg2); padding: 6px 12px; font-size: var(--text-sm); cursor: pointer; font-family: var(--font);
+  background: transparent; border: none; border-radius: 5px; color: var(--fg2); padding: 0 12px; font-size: var(--text-sm); font-weight: 600; cursor: pointer; font-family: var(--font);
 }
-.mm-seg button.active { background: var(--accent); color: var(--on-accent); }
+.mm-seg button:hover { color: var(--fg); }
+.mm-seg button.active { background: var(--bg3); color: var(--fg); }
 
 /* Canvas toolbar: overlays the graph top-left, opposite the zoom controls.
    Wraps rather than scrolls so a narrow window stacks the groups instead of
@@ -2357,20 +2324,25 @@ onBeforeUnmount(() => {
 /* Static, not absolutely positioned over the canvas: the row is shared with
    the list now, where an overlay would sit on top of the table header. The
    `max-width` that used to keep it clear of the zoom controls goes with it. */
+/* Left edge on the page grid, like the header title above it. */
 .mm-toolbar {
   flex: none;
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-2) var(--page-inset);
   border-bottom: 1px solid var(--border);
   background: var(--bg);
 }
 .mm-seg--sm button {
   min-width: 48px;
-  min-height: var(--touch); padding: 4px 10px; font-size: var(--text-xs); }
+  min-height: 30px; }
 .mm-toggle {
-  min-height: var(--touch);
-  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  color: var(--fg2); font-family: var(--font); font-size: var(--text-xs); padding: 4px 10px; cursor: pointer;
+  min-height: 34px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--fg2); font-family: var(--font); font-size: var(--text-sm); padding: 0 10px; cursor: pointer;
 }
-.mm-toggle.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.mm-toggle:hover { border-color: var(--border-strong); color: var(--fg); }
+.mm-toggle.on { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--fg); }
+@media (pointer: coarse), (max-width: 700px) {
+  .mm-seg--sm button, .mm-toggle { min-height: var(--touch); }
+}
 </style>

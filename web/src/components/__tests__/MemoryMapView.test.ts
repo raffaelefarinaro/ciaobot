@@ -614,7 +614,7 @@ describe('MemoryMapView review navigation', () => {
 
     expect(wrapper.findAll('[role="tablist"]')).toHaveLength(1)
     expect(tabs(wrapper).map(t => t.text().replace(/\d+$/, '').trim())).toEqual([
-      'Suggested memories', 'Notes to revisit', 'Retired', 'History',
+      'Suggested', 'Notes to revisit', 'Retired', 'History',
     ])
     wrapper.unmount()
   })
@@ -678,6 +678,48 @@ describe('MemoryMapView review navigation', () => {
     const { wrapper } = await mountReview()
 
     expect(tabs(wrapper)[3]!.find('.tab-bar-count').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('puts one Review/Map switch in the page header, with no second count badge', async () => {
+    const { wrapper } = await mountReview()
+    const header = wrapper.get('.pane-header')
+    const modes = header.findAll('.memory-mode-actions button').map(b => b.text())
+    expect(modes).toEqual(['Review', 'Map'])
+    expect(header.find('.memory-mode-count').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('names the workspace only in the sidebar scope, not in the review body', async () => {
+    const { wrapper } = await mountReview()
+    const body = wrapper.get('.mm-review-wrap .page-main').text()
+    expect(body).not.toContain('to decide in')
+    expect(body.toLowerCase()).not.toContain('personal')
+    wrapper.unmount()
+  })
+
+  it('shows the vault and the always-loaded budget on the rail', async () => {
+    const guide = '# Guide\n\n<!-- ciao:memory:start -->\nPrefers short briefs\n<!-- ciao:memory:end -->\n'
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input), 'http://localhost').searchParams.get('path')
+      return path === 'personal/AGENTS.md'
+        ? { ok: true, status: 200, text: async () => guide } as unknown as Response
+        : { ok: false, status: 404, text: async () => '' } as unknown as Response
+    }))
+    const { wrapper } = await mountReview()
+    await flushPromises()
+
+    const rail = wrapper.get('.mm-review-rail')
+    const kv = (label: string) => rail.findAll('.rail-kv')
+      .find(row => row.find('span').text() === label)?.find('strong').text()
+    expect(kv('Notes')).toBe('2')
+    expect(kv('Links')).toBe('1')
+    expect(rail.get('.guide-budget-path').text()).toBe('personal/AGENTS.md')
+    const regions = rail.findAll('.guide-region')
+    expect(regions[0]!.get('.guide-region-name').text()).toBe('Agent memory')
+    // 20 chars of entry plus the trailing newline, against the 3000 default cap.
+    expect(regions[0]!.get('.guide-region-count').text()).toBe('21 / 3,000')
+    expect(regions[0]!.get('[role="meter"]').attributes('aria-valuenow')).toBe('21')
     wrapper.unmount()
   })
 })

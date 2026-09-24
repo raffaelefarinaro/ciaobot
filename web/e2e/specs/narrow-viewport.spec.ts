@@ -94,7 +94,7 @@ test.describe('narrow viewport', () => {
   })
 
   test('a selected memory note opens an actionable sheet on a phone', async ({ page }) => {
-    await boot(page, '/memory', 'text=Review what Ciao learned')
+    await boot(page, '/memory', '.mm-review-tabs')
     await page.getByRole('button', { name: 'Map', exact: true }).click()
     await page.getByRole('button', { name: 'List', exact: true }).click()
     await page.getByRole('button', { name: 'Open Launch decision' }).click()
