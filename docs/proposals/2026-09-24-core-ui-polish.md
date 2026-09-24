@@ -4,9 +4,9 @@
 
 - Status: approved
 - Current checkpoint: C4 (rebased onto `origin/develop`, installed, verified)
-- Next action: none pending; the workbench is rebased onto the latest `develop` (post-reka-ui migration), green, and installed as `Ciaobot.app`
+- Next action: none pending; prototype A is fully ported to Today (F-17–F-19) and installed via `ciao-dev-install`
 - Blocker: none
-- Verified on this slice: `npm run build`, `npm run lint` (0 errors), `npm test` (118 files / 1,550 tests), `npx playwright test` (12 tests), plus light/dark and 1440px/420px browser inspection of the Today workbench and chat project control
+- Verified on this slice: `npm run build`, `npm run lint` (0 errors), `npm test` (119 files / 1,557 tests), `npm run test:e2e` (14 tests, incl. new `workbench-layout.spec.ts`), plus dark/light 1440px, 900px and 420px captures (home, mobile drawer, open chat, keyboard focus) against prototype A
 - Installed build (2026-09-24): `~/Applications/Ciaobot.app` from this branch's runtime + Tauri build; engine `0.18.1` reachable on :8443, workspace `/Users/raffaelefarinaro/repos/ciao` preserved, desktop shell running, no tracebacks in the boot window
 - Branch: `raffaelefarinaro/core-ui-workbench` (two commits on top of `origin/develop` `300f436d`); uncommitted work is limited to transient capture artifacts and a throwaway `web/shot.mjs`
 - Implementation repository: `/Users/raffaelefarinaro/repos/ciaobot`
@@ -467,6 +467,9 @@ Resolution after implementation:
 | F-14 | Direction choice | The user selected prototype A, then confirmed “A / option A” | Translate Quiet Workbench into production, keeping the Memory pulse as the Ciao-specific addition | Implemented (Today slice) | User answer; `HomeIntake.vue`, `ChatLayout.vue` workbench changes; green build/lint/test/e2e |
 | F-15 | Today command canvas | A's big prompt needs a working project control and a clear primary action | Add a project chip that only remembers a pick, a prompt textarea, and one New button with honest helper copy | Implemented | `HomeIntake.vue`; `HomeIntake.test.ts` (6 tests); 1440px/420px dark+light capture |
 | F-16 | Today layout ownership | Review summary must not compete with the composer | `.home-workbench` two-column grid with `.home-rail` sticky on wide panes, single column under 980px | Implemented | `ChatLayout.vue`; `DESIGN.md`, `web/README.md`, `docs/ARCHITECTURE.md` updated |
+| F-17 | Prototype A full port | Today shipped A's structure but kept card styling, a small composer and a crowded sidebar header | Port hero scale, command surface, memory-pulse rows, flat Continue rows, stacked sidebar top and Today crumbs; omit Add context / mic / thinking / Updates (no real handler on an empty home) and show only the workspace default provider, read-only | Implemented | `HomeIntake.vue`, `HomeReviewSummary.vue`, `HomeRecentChats.vue`, `ProjectSidebar.vue`, `HostStatusPill.vue`, `ChatLayout.vue`, `App.vue`; `workbench-a-port-*.png` |
+| F-18 | Honest composer hint | The old hint claimed "Enter sends" but bare Enter inserted a newline | Wire ⌘/Ctrl+Enter (chat's chord) and say so; bare Enter stays a newline | Implemented | `HomeIntake.test.ts` |
+| F-19 | Sidebar header at 340px | Workspace scope, four nav icons and New chat shared one 61px row and clipped | Stack them; destinations become a labelled list | Implemented | `e2e/specs/workbench-layout.spec.ts` |
 
 ## Implementation checkpoints
 

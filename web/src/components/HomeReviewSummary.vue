@@ -1,14 +1,12 @@
 <template>
   <section v-if="items.length" class="home-review-summary" aria-labelledby="home-review-title">
-    <div class="home-review-heading">
-      <div>
-        <span>What changed</span>
-        <h2 id="home-review-title">Review before you start again</h2>
-      </div>
-      <p>Durable knowledge and background work stay visible here instead of hiding behind their destination pages.</p>
+    <div class="home-review-intro">
+      <p class="home-review-eyebrow">memory pulse</p>
+      <h2 id="home-review-title">What changed</h2>
+      <p>The useful outcome of your work, not a second inbox.</p>
     </div>
 
-    <div class="home-review-grid">
+    <div class="home-review-list">
       <button
         v-for="item in items"
         :key="item.key"
@@ -17,15 +15,35 @@
         :class="{
           'home-review-item--attention': item.state === 'error',
           'home-review-item--stale': item.state === 'stale',
+          'home-review-item--loading': item.state === 'loading',
         }"
         @click="openItem(item.key)"
       >
-        <span class="home-review-label">{{ item.label }}</span>
-        <strong>{{ item.value }}</strong>
-        <span class="home-review-detail">{{ item.detail }}</span>
-        <span class="home-review-action" aria-hidden="true">Review →</span>
+        <span class="home-review-icon" aria-hidden="true">
+          <svg v-if="item.key === 'memory'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" />
+          </svg>
+          <svg v-else-if="item.key === 'retirement'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 4h10a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z" /><path d="M8 20V7a3 3 0 0 1 3-3M11 8h4M11 12h4" />
+          </svg>
+          <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="8" /><path d="M12 7v5l3 2" />
+          </svg>
+        </span>
+        <span class="home-review-copy">
+          <span class="home-review-title">{{ item.title }}</span>
+          <span class="home-review-detail">{{ item.detail }}</span>
+        </span>
+        <span class="home-review-action">{{ item.action }}</span>
       </button>
     </div>
+
+    <button type="button" class="home-review-link" @click="openMemory">
+      Open Memory
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M5 12h13M13 6l6 6-6 6" />
+      </svg>
+    </button>
   </section>
 </template>
 
@@ -42,9 +60,9 @@ import { scheduleInWorkspace } from '../lib/automationWorkspace'
 type ReviewState = 'ready' | 'loading' | 'stale' | 'error'
 type ReviewItem = {
   key: 'memory' | 'retirement' | 'automations'
-  label: string
-  value: string
+  title: string
   detail: string
+  action: string
   state: ReviewState
 }
 
@@ -55,21 +73,31 @@ const retirement = useVaultReviewStore()
 const tasks = useTaskStore()
 const memory = useMemoryMapStore()
 
+function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : pluralForm}`
+}
+
+// The row's trailing word: what clicking does when the count is trustworthy,
+// otherwise the state that makes it untrustworthy.
+function actionFor(state: ReviewState, verb: string): string {
+  if (state === 'loading') return 'checking'
+  if (state === 'stale') return 'stale'
+  if (state === 'error') return 'error'
+  return verb
+}
+
 const items = computed<ReviewItem[]>(() => {
   const workspace = projects.activeWorkspace
   const proposalCount = proposals.scopedRows(workspace).length
   let proposalState: ReviewState = 'ready'
-  let proposalValue = proposalCount ? String(proposalCount) : 'Up to date'
   let proposalDetail = proposalCount
-    ? 'Suggested durable facts are ready to accept, edit, or reject.'
-    : 'No suggested memories are waiting in this workspace.'
+    ? `${proposalCount === 1 ? 'A durable fact is' : 'Durable facts are'} ready to accept, edit, or reject.`
+    : 'Up to date. No suggested memories are waiting in this workspace.'
   if (!proposals.loaded && !proposals.loadError) {
     proposalState = 'loading'
-    proposalValue = 'Checking…'
     proposalDetail = `Checking ${workspace} for suggested memories.`
   } else if (proposals.loadError) {
     proposalState = proposalCount ? 'stale' : 'error'
-    proposalValue = proposalCount ? String(proposalCount) : 'Stale'
     proposalDetail = proposalCount
       ? `Showing the last successful load. ${proposals.loadError}`
       : proposals.loadError
@@ -78,17 +106,14 @@ const items = computed<ReviewItem[]>(() => {
   const hasCurrentRetirement = retirement.loadedWorkspace === workspace
   const retirementCount = hasCurrentRetirement ? retirement.candidates.length : 0
   let retirementState: ReviewState = 'ready'
-  let retirementValue = retirementCount ? String(retirementCount) : 'Up to date'
   let retirementDetail = retirementCount
-    ? 'Notes need a freshness or duplication decision.'
-    : 'No notes need a memory decision in this workspace.'
+    ? `${retirementCount === 1 ? 'A note needs' : 'Notes need'} a freshness or duplication decision.`
+    : 'Up to date. No notes need a memory decision in this workspace.'
   if (!hasCurrentRetirement && !retirement.loadError) {
     retirementState = 'loading'
-    retirementValue = 'Checking…'
     retirementDetail = `Checking ${workspace} for notes that need review.`
   } else if (retirement.loadError) {
     retirementState = hasCurrentRetirement && retirementCount ? 'stale' : 'error'
-    retirementValue = retirementCount ? String(retirementCount) : 'Stale'
     retirementDetail = hasCurrentRetirement && retirementCount
       ? `Showing the last successful load. ${retirement.loadError}`
       : retirement.loadError
@@ -103,21 +128,21 @@ const items = computed<ReviewItem[]>(() => {
     )
   ))
   const next = active
-    .map(schedule => schedule.next_run)
-    .filter((value): value is string => Boolean(value))
-    .sort()[0]
+    .filter(schedule => Boolean(schedule.next_run))
+    .sort((a, b) => String(a.next_run).localeCompare(String(b.next_run)))[0]
   let automationState: ReviewState = 'ready'
-  let automationValue = active.length ? String(active.length) : 'Up to date'
   let automationDetail = active.length
-    ? `Active · next ${next ? formatRun(next) : 'run pending'}`
-    : 'No active automations belong to this workspace.'
+    ? next
+      ? next.title
+        ? `${next.title} · next ${formatRun(String(next.next_run))}`
+        : `Next run ${formatRun(String(next.next_run))}`
+      : 'Active · next run pending'
+    : 'Up to date. No active automations belong to this workspace.'
   if (!tasks.schedulesLoaded && !tasks.scheduleLoadError) {
     automationState = 'loading'
-    automationValue = 'Checking…'
     automationDetail = `Checking ${workspace} for active automations.`
   } else if (tasks.scheduleLoadError) {
     automationState = tasks.schedules.length ? 'stale' : 'error'
-    automationValue = active.length ? String(active.length) : 'Stale'
     automationDetail = tasks.schedules.length
       ? `Showing the last successful load. ${tasks.scheduleLoadError}`
       : tasks.scheduleLoadError
@@ -126,23 +151,29 @@ const items = computed<ReviewItem[]>(() => {
   return [
     {
       key: 'memory',
-      label: 'Memory proposals',
-      value: proposalValue,
+      title: proposalCount && proposalState !== 'loading'
+        ? plural(proposalCount, 'memory proposal')
+        : 'Memory proposals',
       detail: proposalDetail,
+      action: actionFor(proposalState, 'review'),
       state: proposalState,
     },
     {
       key: 'retirement',
-      label: 'Knowledge upkeep',
-      value: retirementValue,
+      title: retirementCount && retirementState !== 'loading'
+        ? plural(retirementCount, 'note to revisit', 'notes to revisit')
+        : 'Notes to revisit',
       detail: retirementDetail,
+      action: actionFor(retirementState, 'open'),
       state: retirementState,
     },
     {
       key: 'automations',
-      label: 'Automations',
-      value: automationValue,
+      title: active.length && automationState !== 'loading'
+        ? plural(active.length, 'active automation')
+        : 'Automations',
       detail: automationDetail,
+      action: actionFor(automationState, 'view'),
       state: automationState,
     },
   ]
@@ -168,6 +199,10 @@ function formatRun(value: string): string {
   })
 }
 
+function openMemory() {
+  void router.push('/memory')
+}
+
 function openItem(key: ReviewItem['key']) {
   if (key === 'automations') {
     void router.push('/schedules')
@@ -182,144 +217,179 @@ function openItem(key: ReviewItem['key']) {
 
 <style scoped>
 .home-review-summary {
-  width: min(100%, 920px);
-  margin: 0 auto var(--space-5);
+  width: 100%;
+  min-width: 0;
+  padding-top: 10px;
 }
 
-.home-review-heading {
-  display: flex;
-  align-items: end;
-  justify-content: space-between;
-  gap: var(--space-4);
-  margin-bottom: var(--space-3);
+.home-review-intro {
+  margin-bottom: 18px;
 }
 
-.home-review-heading span {
-  color: var(--fg2);
+.home-review-eyebrow {
+  margin: 0;
+  color: var(--fg3);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  font-weight: 650;
-  letter-spacing: 0.06em;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
-.home-review-heading h2 {
-  margin: var(--space-1) 0 0;
+.home-review-intro h2 {
+  margin: 6px 0 4px;
   color: var(--fg);
-  font-size: var(--text-lg);
-  letter-spacing: -0.02em;
+  font-size: calc(19px * var(--font-scale));
+  letter-spacing: -0.03em;
 }
 
-.home-review-heading p {
-  max-width: 48ch;
+.home-review-intro p:last-child {
   margin: 0;
   color: var(--fg2);
-  font-size: var(--text-sm);
+  font-size: calc(13px * var(--font-scale));
   line-height: 1.45;
-  text-align: right;
 }
 
-.home-review-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-2);
+/* Pulse rows, not cards: a hairline list reads as "what changed", where a
+   stack of bordered tiles read as a second inbox to clear. */
+.home-review-list {
+  border-top: 1px solid var(--border);
 }
 
 .home-review-item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas:
-    "label action"
-    "value action"
-    "detail detail";
-  align-items: start;
-  gap: var(--space-1) var(--space-3);
-  min-height: 116px;
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg2);
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  width: 100%;
+  min-height: var(--touch);
+  padding: 15px 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
   color: var(--fg);
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: border-color 150ms var(--ease), background 150ms var(--ease), transform 150ms var(--ease);
 }
 
-.home-review-item:hover {
-  border-color: var(--border-strong);
-  background: var(--bg3);
-  transform: translateY(-1px);
+.home-review-item:hover .home-review-title {
+  color: var(--accent);
 }
 
-.home-review-item--attention {
-  border-color: color-mix(in srgb, var(--warning) 44%, var(--border));
+.home-review-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
 }
 
-.home-review-item--stale {
-  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+.home-review-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg2);
+  color: var(--accent);
 }
 
-.home-review-label {
-  grid-area: label;
-  color: var(--fg2);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
+.home-review-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.home-review-title {
+  display: block;
+  margin-bottom: 3px;
+  font-size: calc(13px * var(--font-scale));
   font-weight: 650;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.home-review-item strong {
-  grid-area: value;
-  color: var(--fg);
-  font-size: var(--text-lg);
-  line-height: 1.1;
-  letter-spacing: -0.02em;
-}
-
-.home-review-item--attention strong {
-  color: var(--warning);
+  transition: color 120ms var(--ease);
 }
 
 .home-review-detail {
-  grid-area: detail;
-  align-self: end;
+  display: block;
   color: var(--fg2);
   font-size: var(--text-sm);
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .home-review-action {
-  grid-area: action;
-  align-self: center;
-  color: var(--accent);
-  font-size: var(--text-sm);
-  font-weight: 650;
+  flex: none;
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 28px;
 }
 
-@media (max-width: 720px) {
-  .home-review-heading {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: var(--space-2);
+.home-review-item--stale .home-review-action {
+  color: var(--accent);
+}
+
+.home-review-item--attention .home-review-icon,
+.home-review-item--attention .home-review-action {
+  color: var(--warning);
+}
+
+.home-review-item--loading .home-review-title {
+  color: var(--fg2);
+}
+
+.home-review-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: var(--touch);
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-sm);
+}
+
+.home-review-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* Under the workbench's single-column break the rail sits below the request
+   column with room to spare, so the rows lay out as three short tiles. */
+@media (max-width: 980px) and (min-width: 701px) {
+  .home-review-summary {
+    padding-top: 0;
   }
 
-  .home-review-heading p {
-    text-align: left;
-  }
-
-  .home-review-grid {
-    grid-template-columns: 1fr;
+  .home-review-list {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    border-top: 0;
   }
 
   .home-review-item {
-    min-height: 0;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+  }
+}
+
+@media (max-width: 700px) {
+  .home-review-summary {
+    padding-top: 0;
+  }
+
+  .home-review-item {
+    padding: 13px 0;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .home-review-item {
+  .home-review-title {
     transition: none;
   }
 }

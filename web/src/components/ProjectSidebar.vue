@@ -1,6 +1,11 @@
 <template>
   <aside class="sidebar" :class="{ collapsed }" v-bind="$attrs">
-    <div class="sidebar-header">
+    <div class="sidebar-header" :class="{ 'sidebar-header--expanded': !collapsed }">
+      <div class="sidebar-brand-row">
+        <template v-if="!collapsed">
+          <span class="sidebar-brand-glyph" aria-hidden="true">›</span>
+          <BrandMark class="sidebar-brand" />
+        </template>
       <button
         class="toggle-btn touch-hit"
         :class="{ 'toggle-btn--collapsed': collapsed }"
@@ -18,10 +23,11 @@
           <line x1="9" y1="4" x2="9" y2="20" />
         </svg>
       </button>
+      </div>
       <template v-if="!collapsed">
-        <!-- The wordmark used to sit here, between the toggle and these icons.
-             It is `BrandMark` in the pane header now, where it is centred and
-             does not have to share the sidebar's width. -->
+        <!-- Prototype A's rail: brand row, workspace scope, one New chat, then
+             the destinations as a labelled vertical list. The pane header drops
+             its own centred wordmark on wide panes because this row carries it. -->
         <!-- One workspace scope for the whole rail. It used to be repeated as a
              per-mode row of pills (chat, automations, memory), which said the
              same thing in three places and pushed each mode's own content down
@@ -42,10 +48,10 @@
             @click="toggleWorkspaceMenu"
             @keydown.down.prevent="openWorkspaceMenu"
           >
-            <span v-if="workspaceShortcut(store.activeWorkspace)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(store.activeWorkspace) }}</span>
             <span class="workspace-scope-dot" aria-hidden="true" />
             <span class="workspace-scope-name">{{ workspaceLabel(store.activeWorkspace) }}</span>
             <span v-if="workspaceActionCount(store.activeWorkspace)" class="badge">{{ workspaceActionCount(store.activeWorkspace) }}</span>
+            <kbd v-if="workspaceShortcut(store.activeWorkspace)" class="sidebar-keycap" aria-hidden="true">{{ workspaceShortcut(store.activeWorkspace) }}</kbd>
             <svg v-if="hasMultipleWorkspaces" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" aria-hidden="true">
               <polyline points="6 9 12 15 18 9" />
             </svg>
@@ -71,18 +77,36 @@
               :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
               @click="selectWorkspaceScope(workspace.name)"
             >
-              <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
               <span class="workspace-scope-dot" aria-hidden="true" />
               <span class="workspace-scope-name">{{ workspaceLabel(workspace.name) }}</span>
               <span v-if="workspaceActionCount(workspace.name)" class="badge">{{ workspaceActionCount(workspace.name) }}</span>
+              <kbd v-if="workspaceShortcut(workspace.name)" class="sidebar-keycap" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</kbd>
             </button>
           </div>
         </div>
 
+        <!-- One global New chat, directly under the scope it belongs to. It opens the same shared project picker as
+             everywhere else, so the sidebar never grows a second
+             project-selection path. Project-local "+" buttons stay, because
+             they preselect their own project. -->
+        <button
+          v-if="!mode || mode === 'chat' || mode === 'project'"
+          type="button"
+          class="sidebar-new-chat"
+          aria-haspopup="dialog"
+          :aria-label="`New chat in ${workspaceLabel(store.activeWorkspace)}`"
+          :aria-keyshortcuts="newChatKeyshortcuts"
+          @click="chooseNewChat(store.activeWorkspace)"
+        >
+          <span class="sidebar-new-chat-plus" aria-hidden="true">+</span>
+          <span>New chat</span>
+          <kbd class="sidebar-keycap" aria-hidden="true">{{ newChatShortcut }}</kbd>
+        </button>
+
         <nav class="nav-links" aria-label="Primary navigation">
           <router-link
             to="/"
-            class="nav-item touch-hit"
+            class="nav-item"
             :class="{
               'nav-item--active': mode === 'chat' || mode === 'project',
               'nav-item--working': isAnyChatWorking
@@ -108,7 +132,7 @@
           </router-link>
           <router-link
             to="/schedules"
-            class="nav-item touch-hit"
+            class="nav-item"
             :class="{
               'nav-item--active': mode === 'schedules',
               'nav-item--warning': hasAutomationWarning
@@ -128,11 +152,11 @@
                 <polyline points="12 8 12 12 15 14" />
               </svg>
             </span>
-            <span class="nav-item-label" aria-hidden="true">automations</span>
+            <span class="nav-item-label" aria-hidden="true">Automations</span>
           </router-link>
           <router-link
             to="/memory"
-            class="nav-item touch-hit"
+            class="nav-item"
             :class="{ 'nav-item--active': mode === 'memory' || mode === 'proposals' }"
             :title="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} suggested across all workspaces` : 'memory'"
             :aria-label="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} suggested memories across all workspaces` : 'memory'"
@@ -153,7 +177,7 @@
                 class="nav-item-badge nav-item-badge--count"
               >{{ proposals.rows.length }}</span>
             </span>
-            <span class="nav-item-label" aria-hidden="true">memory</span>
+            <span class="nav-item-label" aria-hidden="true">Memory</span>
           </router-link>
           <!-- mode, not active-class: every settings tab is its own route
                (/settings/models, /settings/workspaces, ...) and none of them match
@@ -162,7 +186,7 @@
                sibling links already key off mode for the same reason. -->
           <router-link
             to="/settings"
-            class="nav-item touch-hit"
+            class="nav-item"
             :class="{ 'nav-item--active': mode === 'settings', 'nav-item--warning': hasBlockingHousekeeping }"
             :title="settingsNeedsAttention ? (store.packageStatus?.update_available && hasBlockingHousekeeping ? 'settings — update available and action required' : store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings — action required') : 'settings'"
             :aria-label="settingsNeedsAttention ? (store.packageStatus?.update_available && hasBlockingHousekeeping ? 'settings — update available and action required' : store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings — action required') : 'settings'"
@@ -184,26 +208,10 @@
                 :class="{ 'nav-item-badge--warning': hasBlockingHousekeeping }"
               />
             </span>
-            <span class="nav-item-label" aria-hidden="true">settings</span>
+            <span class="nav-item-label" aria-hidden="true">Settings</span>
           </router-link>
         </nav>
 
-        <!-- One global New chat, directly under the navigation and above the
-             scope it belongs to. It opens the same shared project picker as
-             everywhere else, so the sidebar never grows a second
-             project-selection path. Project-local "+" buttons stay, because
-             they preselect their own project. -->
-        <button
-          v-if="!mode || mode === 'chat' || mode === 'project'"
-          type="button"
-          class="sidebar-new-chat"
-          aria-haspopup="dialog"
-          :aria-label="`New chat in ${workspaceLabel(store.activeWorkspace)}`"
-          @click="chooseNewChat(store.activeWorkspace)"
-        >
-          <span class="sidebar-new-chat-plus" aria-hidden="true">+</span>
-          <span>New chat</span>
-        </button>
       </template>
     </div>
 
@@ -826,6 +834,7 @@
         </div>
 
         <!-- Project list -->
+        <h2 v-if="store.workspaceProjects.length" class="sidebar-list-label">Projects</h2>
         <div class="project-list">
           <div
             v-for="project in store.workspaceProjects"
@@ -1205,6 +1214,8 @@ import { useMemoryMapStore, categoryColorFor, catKeyFor } from '../stores/memory
 import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import ChatSignals from './ChatSignals.vue'
+import BrandMark from './BrandMark.vue'
+import { isApplePlatform, isDesktopApp } from '../lib/desktop'
 import { scheduleInWorkspace } from '../lib/automationWorkspace'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import { ARCHIVE_CONFIRM_MESSAGE, ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
@@ -1474,6 +1485,10 @@ function promptTitle(prompt: string): string {
 // With a single workspace the toggle is pure noise — hide it and let the
 // content fill the space.
 const hasMultipleWorkspaces = computed(() => store.workspaceOptions.length > 1)
+// The chord ChatLayout binds for New chat: Cmd+T in the desktop shell (the
+// browser keeps Cmd+T for itself), Option/Alt+N everywhere else.
+const newChatShortcut = isDesktopApp() ? '⌘T' : isApplePlatform() ? '⌥N' : 'Alt+N'
+const newChatKeyshortcuts = isDesktopApp() ? 'Meta+T' : 'Alt+N'
 const workspaceScopeOpen = ref(false)
 const workspaceScopeEl = ref<HTMLElement | null>(null)
 const workspaceScopeTrigger = ref<HTMLButtonElement | null>(null)
@@ -2202,15 +2217,67 @@ async function confirmDeleteChat(chatId: string) {
   display: flex;
   align-items: center;
   gap: 8px;
-  /* Queried below so the nav label answers to the width it actually has -
-     the sidebar is drag-resizable and remembers its width per user, so a
-     viewport media query cannot know whether "automations" fits. */
-  container-type: inline-size;
-  /* Keep the collapsed rail aligned with the expanded nav and pane headers. */
+  /* Keep the collapsed rail aligned with the pane header. */
   height: 61px;
   flex-shrink: 0;
   padding: 8px;
   border-bottom: 1px solid var(--border);
+}
+
+/* Expanded: prototype A's stacked rail top - brand row, workspace scope,
+   New chat, then the destinations as a labelled list. */
+.sidebar-header--expanded {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  height: auto;
+  padding: 10px 12px 12px;
+}
+
+.sidebar-brand-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.sidebar-header--expanded .sidebar-brand-row {
+  margin: 0 0 10px 4px;
+}
+
+.sidebar-header--expanded .toggle-btn {
+  margin-left: auto;
+}
+
+.sidebar-brand-glyph {
+  display: grid;
+  place-items: center;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  font: 700 16px/1 var(--font-sans);
+}
+
+.sidebar-brand-row :deep(.sidebar-brand) {
+  min-height: 30px;
+}
+
+/* Key hints: the chord or digit that reaches this control. */
+.sidebar-keycap {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  color: var(--fg3);
+  font: 700 10px/1 var(--font-mono);
 }
 
 .toggle-btn {
@@ -2421,15 +2488,15 @@ async function confirmDeleteChat(chatId: string) {
 .sidebar-new-chat {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: 9px;
   box-sizing: border-box;
-  width: calc(100% - 2 * var(--space-2));
-  min-height: var(--touch);
-  margin: var(--space-2) var(--space-2) 0;
-  padding: 0 var(--space-2);
+  width: 100%;
+  min-height: 40px;
+  margin: 10px 0 0;
+  padding: 0 11px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg3);
+  border-radius: 8px;
+  background: var(--bg-elev);
   color: var(--fg);
   font: inherit;
   font-weight: 600;
@@ -2439,8 +2506,8 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 .sidebar-new-chat:hover {
-  border-color: var(--border-strong);
-  background: var(--bg);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, var(--bg2));
 }
 
 .sidebar-new-chat-plus {
@@ -2449,63 +2516,39 @@ async function confirmDeleteChat(chatId: string) {
   line-height: 1;
 }
 
-.nav-links {
-  display: flex;
-  align-items: center;
-  /* The wordmark used to take the middle of this row, leaving these four icons
-     huddled at a 4px gap against the right edge. It is in the pane header now, and
-     the ~90px it gives back is spent here: the icons spread across a 200px strip,
-     so each 30px glyph gets ~27px of air and its 44px touch target no longer
-     overlaps its neighbour's. The glyphs stay 30px, because the pane header sizes
-     its own icons to match the sidebar - see the note there.
-     `space-between` over a capped basis rather than a fixed gap, because that
-     degrades in both directions: a sidebar dragged out to 500px does not fling the
-     icons to the far edge (the strip stops at 200px), and one dragged down to its
-     180px minimum packs them back to the --space-1 floor instead of overflowing
-      the rail. The strip is narrower on mobile, where labels hide - see below. */
-  /* Sized to content now rather than a fixed strip: the active item carries an
-     expanding label, so the row's width depends on which page you are on. */
-  flex: 0 1 auto;
-  justify-content: flex-end;
-  /* Wider than the old icon-only 4px: the active item now ends in text, and a
-     4px gap between a word and the next glyph reads as a collision. */
-  gap: var(--space-2);
+.sidebar-new-chat .sidebar-keycap {
   margin-left: auto;
+}
+
+/* The destinations, as a labelled vertical list. They used to be four icons
+   squeezed into the header row beside the workspace scope and New chat, which
+   left no room for either at the default sidebar width. */
+.nav-links {
+  display: grid;
+  gap: 3px;
+  margin: 12px 0 0;
   min-width: 0;
 }
 
 .nav-item {
   position: relative;
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  justify-content: center;
-  /* No gap: the label carries its own leading space instead. A collapsed label
-     is max-width:0, but a flex gap is reserved whether or not the item beside
-     it has width - so on an icons-only row the 4px still counted, pushing the
-     glyph 2px left of the pill's centre and leaving twice as much air on its
-     right. As padding on the label it disappears with the label, because
-     border-box folds it into that max-width:0. */
-  gap: 0;
-  /* min-width, not width: the active item grows to fit its label. */
-  min-width: 30px;
-  height: 30px;
-  /* Padding is left to .touch-hit, uniformly. Trading the inline half down to
-     var(--space-1) packed the rail by 6px per item, but .touch-hit paints its
-     pill by insetting that padding on every side: at 4px the highlight landed
-     3px *inside* the glyph, clipping the icon instead of padding it, and the
-     matching negative margin shrank each item's footprint to 24px. Uniform
-      padding restores the 30px control with a 44px touch target, matching the
-      other rail controls. */
-  border-radius: var(--radius-sm);
-  position: relative;
-  isolation: isolate;
+  gap: 10px;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
   color: var(--fg2);
   text-decoration: none;
-  transition: color 120ms var(--ease);
+  transition: color 120ms var(--ease), background 120ms var(--ease), border-color 120ms var(--ease);
 }
 
+/* Static, so the badge inside it anchors to the row and lands at the right
+   edge (prototype A's nav-badge) instead of covering the glyph. */
 .nav-item-icon {
-  position: relative;
+  position: static;
   display: inline-flex;
   width: 18px;
   height: 18px;
@@ -2514,23 +2557,17 @@ async function confirmDeleteChat(chatId: string) {
   justify-content: center;
 }
 
-/* The page you are on names itself, next to its own icon, instead of a separate
-   tag elsewhere in the window. Inactive items stay glyph-only, so the row reads
-   as one selected item among icons rather than a list of words. Collapsed with
-   max-width so it animates, and aria-hidden because .nav-item already carries a
-   full aria-label - otherwise the accessible name would read "automations
-   automations". */
 /* Persistent system-state signal, not a count: a pulsing dot reads better than
    a numeral for update and blocking-housekeeping warnings. */
 .nav-item-badge {
   position: absolute;
-  top: -5px;
-  right: -6px;
+  top: calc(50% - 4px);
+  right: 12px;
   width: 8px;
   height: 8px;
   border-radius: 999px;
   background: var(--accent, #4c8bf5);
-  box-shadow: 0 0 0 2px var(--bg-elev, #1b1e26);
+  box-shadow: 0 0 0 2px var(--bg2);
   animation: nav-item-badge-pulse 2s ease-in-out infinite;
 }
 
@@ -2539,14 +2576,17 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 .nav-item-badge--count {
+  top: calc(50% - 9px);
+  right: 10px;
   width: auto;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  box-sizing: border-box;
   background: var(--error);
   color: #fff;
-  box-shadow: 0 0 0 2px var(--bg-elev, #1b1e26);
-  font: 600 10px/16px var(--font-mono, monospace);
+  box-shadow: none;
+  font: 700 10px/18px var(--font-mono, monospace);
   text-align: center;
   animation: none;
 }
@@ -2556,60 +2596,30 @@ async function confirmDeleteChat(chatId: string) {
   50% { opacity: 0.55; transform: scale(0.85); }
 }
 
+/* Coarse pointers get the full 44px target on every rail row. */
+@media (pointer: coarse) {
+  .nav-item,
+  .sidebar-new-chat { min-height: var(--touch); }
+}
+
+/* aria-hidden because .nav-item already carries the full aria-label. */
 .nav-item-label {
-  max-width: 0;
+  min-width: 0;
   overflow: hidden;
-  /* The gap that used to live on .nav-item; see the note there. */
-  padding-inline-start: var(--space-1);
   color: inherit;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: var(--text-base);
+  text-overflow: ellipsis;
   white-space: nowrap;
-  opacity: 0;
-  transition: max-width 160ms var(--ease), opacity 120ms var(--ease);
-}
-
-.nav-item--active .nav-item-label {
-  /* Room for the longest label ("automations", 11 characters) plus a little, so
-     it is never clipped mid-word. At 9ch it read as "automatio" hard against the
-     next glyph. */
-  max-width: 13ch;
-  opacity: 1;
-}
-
-/* Below this the rail cannot hold a full label and every glyph at once, so trade
-   the label away rather than the icons. */
-@media (max-width: 900px) {
-  .nav-item--active .nav-item-label { max-width: 0; opacity: 0; }
-}
-
-/* The row's contents need roughly: toggle (44) + active item with label (~118)
-   + three bare items (132) + gaps (24) = 318. Under that the flex row
-   shrinks the only thing that can give - the label - and "automations" rendered
-   as "automation" jammed against the pill edge. Drop the label instead of
-   clipping a word in half; the icon and its tooltip still say what it is.
-   Keyed to the header's own width, so a user who drags the sidebar narrow (or
-   kept a width saved from before it grew) gets the icons-only row.
-
-   A container query resolves against the container's *content* box, so this
-   compares against 318 with the header's own 16px padding already excluded -
-   not against the sidebar's outer width. At the 340px default the header
-   measures 340 - 1 (sidebar border) - 16 (its padding) - any --safe-left inset
-   = 323 on a desktop window, which clears it. On a device with a left inset the
-   headroom shrinks and the label hides earlier, which is the intended
-   degradation rather than a clipped word.
-
-   Known limit: the cap above is in ch and this threshold is in px, so at a
-   large --font-scale the label can outgrow the budget and clip again. Fixing
-   that properly needs measurement rather than a breakpoint. */
-@container (max-width: 317px) {
-  .nav-item--active .nav-item-label { max-width: 0; opacity: 0; }
 }
 
 .nav-item:hover {
   color: var(--fg);
+  background: var(--bg-elev);
+}
+
+.nav-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .nav-item--working svg {
@@ -2655,11 +2665,13 @@ async function confirmDeleteChat(chatId: string) {
 
 .nav-item--active,
 .nav-item--active:hover {
-  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--fg);
 }
 
-.nav-item--active::before {
-  background: var(--bg3);
+.nav-item--active .nav-item-icon {
+  color: var(--accent);
 }
 
 .workspace-toggle {
@@ -2688,22 +2700,6 @@ async function confirmDeleteChat(chatId: string) {
   gap: 6px;
   white-space: nowrap;
   transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
-}
-
-.workspace-shortcut {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 3px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xs);
-  color: var(--fg3);
-  font-size: 10px;
-  line-height: 1;
-  font-weight: 700;
-  flex: 0 0 auto;
 }
 
 .workspace-toggle button:hover {
@@ -2742,18 +2738,27 @@ async function confirmDeleteChat(chatId: string) {
   margin-left: var(--space-2);
 }
 
+/* Prototype A's side-section label. */
+.sidebar-list-label {
+  margin: 4px 0 0;
+  padding: 6px 10px 5px;
+  color: var(--fg3);
+  font: 600 10px/1.2 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Flat rows rather than a bordered box per project: the tree keeps its
+   structure (project header, its chats indented beneath) at list density. */
 .project-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 2px;
   flex-shrink: 0;
 }
 
 .project-group {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
+  border-radius: 7px;
 }
 
 .project-header {
@@ -2761,17 +2766,29 @@ async function confirmDeleteChat(chatId: string) {
   align-items: center;
   gap: 4px;
   padding: 6px 10px;
-  font-size: var(--text-sm);
+  border-radius: 7px;
+  font-size: var(--text-base);
   color: var(--fg2);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-  background: var(--bg2);
   min-height: var(--touch);
 }
 
 .project-header:hover {
-  background: var(--bg3);
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+
+/* Fine pointers take prototype A's 36px row. The header's controls keep their
+   44px boxes (negative margins); only the row's own padding shrinks. */
+@media (pointer: fine) {
+  .project-header {
+    min-height: 36px;
+    padding-block: 2px;
+  }
+
+  .project-list .chat-item {
+    min-height: 36px;
+  }
 }
 
 /* Drag-to-reorder affordances. The header shows a grab cursor when draggable,
@@ -2786,10 +2803,6 @@ async function confirmDeleteChat(chatId: string) {
 .project-header.drag-over {
   box-shadow: inset 0 2px 0 0 var(--accent);
   background: var(--bg3);
-}
-
-.project-group:has(.chat-list) .project-header {
-  border-bottom: 1px solid var(--border);
 }
 
 .project-header.is-system {
@@ -2931,17 +2944,13 @@ async function confirmDeleteChat(chatId: string) {
   align-items: center;
   gap: 6px;
   min-height: var(--touch);
-  padding: 0 4px 0 20px;
+  padding: 0 4px 0 30px;
+  border-radius: 7px;
   cursor: pointer;
   font-size: var(--text-base);
   color: var(--fg2);
   overflow: hidden;
   white-space: nowrap;
-  border-bottom: 1px solid var(--border);
-}
-
-.chat-item:last-child {
-  border-bottom: none;
 }
 
 /* A subagent row is not a chat: it opens a read-only transcript, so it drops
@@ -2949,7 +2958,7 @@ async function confirmDeleteChat(chatId: string) {
    Indent is on padding rather than margin so the hover/active background
    still spans the full sidebar width. */
 .chat-item.subagent-item {
-  padding-left: 34px;
+  padding-left: 44px;
   text-decoration: none;
   color: var(--fg2);
 }
@@ -3051,7 +3060,7 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 .chat-item:hover {
-  background: var(--bg3);
+  background: var(--bg-elev);
   color: var(--fg);
 }
 
@@ -3068,8 +3077,7 @@ async function confirmDeleteChat(chatId: string) {
 .chat-item.active {
   background: var(--bg3);
   color: var(--fg);
-  border-left: 2px solid var(--accent);
-  padding-left: 18px;
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .chat-title {
@@ -3085,14 +3093,6 @@ async function confirmDeleteChat(chatId: string) {
   font-weight: 600;
 }
 
-.workspace-shortcut {
-  flex: 0 0 auto;
-  color: var(--accent);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 700;
-}
-
 .workspace-name {
   min-width: 0;
   overflow: hidden;
@@ -3104,7 +3104,7 @@ async function confirmDeleteChat(chatId: string) {
 .workspace-scope {
   position: relative;
   z-index: 40;
-  margin: 0 var(--space-2) var(--space-2);
+  margin: 0;
 }
 
 .workspace-scope-trigger,
@@ -3120,10 +3120,11 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 .workspace-scope-trigger {
-  padding: 0 var(--space-2);
+  min-height: 48px;
+  padding: 0 10px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg2);
+  border-radius: 9px;
+  background: var(--bg-elev);
   cursor: pointer;
 }
 
@@ -3139,14 +3140,16 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 .workspace-scope-dot {
-  width: 8px;
-  height: 8px;
-  flex: 0 0 8px;
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .workspace-scope-name {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3156,14 +3159,8 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 .workspace-scope-trigger > svg {
-  margin-left: auto;
   flex: none;
   color: var(--fg2);
-}
-
-.workspace-scope-trigger .badge,
-.workspace-scope-option .badge {
-  margin-left: auto;
 }
 
 .workspace-scope-menu {
@@ -3457,7 +3454,8 @@ async function confirmDeleteChat(chatId: string) {
     visibility: hidden;
   }
   .add-chat-btn { opacity: 1; }
-  .nav-links { flex-basis: 150px; }
+  .nav-item,
+  .sidebar-new-chat { min-height: var(--touch); }
   /* No containment on the drawer's header. `container-type: inline-size` makes
      the element its own rasterization root, and here that root sits inside a
      `position: fixed` layer that the transform above keeps composited - the

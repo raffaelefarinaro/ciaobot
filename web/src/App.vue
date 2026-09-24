@@ -71,7 +71,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, provide, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import InAppToast from './components/InAppToast.vue'
@@ -83,6 +83,7 @@ import { askConfirm } from './lib/confirm'
 import { normalizeWorkspaceColor } from './lib/workspaceColors'
 import { contentHref, deviceHref, isLoopbackPage, navigateToDevice } from './lib/originNavigation'
 import { useProjectStore } from './stores/projects'
+import { CONNECTION_ROLE_KEY, type ConnectionRole } from './lib/connectionRole'
 
 interface Phase {
   name: string
@@ -136,6 +137,18 @@ const clientHostLabel = computed(() => {
     return raw
   }
 })
+
+provide(CONNECTION_ROLE_KEY, computed<ConnectionRole>(() => {
+  if (clientStateUnknown.value) return { kind: 'unknown' }
+  if (clientMode.value) {
+    return {
+      kind: 'client',
+      hostLabel: clientHostLabel.value,
+      reachable: !projectStore.hostConnectionUnavailable,
+    }
+  }
+  return { kind: 'host' }
+}))
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let nodePollTimer: ReturnType<typeof setInterval> | null = null

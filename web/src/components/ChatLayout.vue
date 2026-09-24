@@ -80,7 +80,20 @@
                homepage behind it after closing a chat would just duplicate the
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-            <PaneHeader page-tag="today" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader page-tag="today" @open-sidebar="sidebarCollapsed = false">
+              <!-- Where am I: workspace / view. Omitted on phones, where the header
+                   keeps its single row for the menu button and the wordmark. -->
+              <template v-if="!isMobile" #title>
+                <span class="pane-crumbs">
+                  <span class="pane-crumb-scope">{{ displayWorkspaceLabel(store.activeWorkspace) }}</span>
+                  <span class="pane-crumb-sep" aria-hidden="true">/</span>
+                  <span class="pane-crumb-view">Today</span>
+                </span>
+              </template>
+              <template v-if="!isMobile" #actions>
+                <HostStatusPill />
+              </template>
+            </PaneHeader>
             <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
               <!-- The glanceable status (face + summary) lives inside the active
                    workspace's lane header now (HomeRecentChats.vue), right under
@@ -208,7 +221,20 @@
              homepage behind it after closing a chat would just duplicate the
              same list. Hide the empty-state whenever the mobile sidebar is open. -->
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-          <PaneHeader page-tag="today" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader page-tag="today" @open-sidebar="sidebarCollapsed = false">
+            <!-- Where am I: workspace / view. Omitted on phones, where the header
+                 keeps its single row for the menu button and the wordmark. -->
+            <template v-if="!isMobile" #title>
+              <span class="pane-crumbs">
+                <span class="pane-crumb-scope">{{ displayWorkspaceLabel(store.activeWorkspace) }}</span>
+                <span class="pane-crumb-sep" aria-hidden="true">/</span>
+                <span class="pane-crumb-view">Today</span>
+              </span>
+            </template>
+            <template v-if="!isMobile" #actions>
+              <HostStatusPill />
+            </template>
+          </PaneHeader>
           <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
             <!-- The glanceable status (face + summary) lives inside the active
                  workspace's lane header now (HomeRecentChats.vue), right under
@@ -292,6 +318,8 @@ const SettingsView = defineAsyncComponent(() => import('./SettingsView.vue'))
 import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
+import HostStatusPill from './HostStatusPill.vue'
+import { workspaceLabel as displayWorkspaceLabel } from '../lib/workspaceLabel'
 import HomeRecentChats from './HomeRecentChats.vue'
 import HomeIntake from './HomeIntake.vue'
 import HomeReviewSummary from './HomeReviewSummary.vue'
@@ -1501,22 +1529,22 @@ onBeforeUnmount(() => {
 }
 
 /* Workbench composition (prototype A): the request column keeps the readable
-   measure, and the review summary moves into a quiet side rail on wide panes
+   measure, and the memory pulse sits in a quiet side rail on wide panes
    instead of stacking another full-width band under the prompt. */
 .home-workbench {
+  box-sizing: border-box;
   width: 100%;
-  max-width: 1240px;
+  max-width: 1320px;
   margin: 0 auto;
+  padding: 30px clamp(0px, 2.2vw, 26px) 18px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(260px, 300px);
+  grid-template-columns: minmax(0, 1fr) 286px;
   align-items: start;
-  gap: var(--space-5);
+  gap: 46px;
 }
 
 .home-main {
   min-width: 0;
-  /* The lane list already caps its own width; this keeps the intake and chat
-     list on the same left edge inside the workbench grid. */
   display: flex;
   flex-direction: column;
 }
@@ -1531,40 +1559,57 @@ onBeforeUnmount(() => {
   position: sticky;
   top: var(--space-2);
   width: 100%;
+  min-width: 0;
   margin: 0;
-}
-
-.home-rail :deep(.home-review-summary) {
-  width: 100%;
-  margin-bottom: 0;
-}
-
-.home-rail :deep(.home-review-heading) {
-  display: block;
-}
-
-.home-rail :deep(.home-review-heading p) {
-  margin-top: var(--space-1);
-  text-align: left;
-}
-
-.home-rail :deep(.home-review-grid) {
-  grid-template-columns: 1fr;
-}
-
-.home-rail :deep(.home-review-item) {
-  min-height: 0;
 }
 
 @media (max-width: 980px) {
   .home-workbench {
     grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-4);
+    gap: 25px;
+    padding: var(--space-5) 0 var(--space-4);
   }
 
   .home-rail {
     position: static;
   }
+}
+
+@media (max-width: 700px) {
+  .home-workbench {
+    padding-top: var(--space-3);
+  }
+}
+
+/* Today's header crumbs: workspace / view, prototype A's topbar context. */
+.pane-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding-left: var(--space-3);
+  color: var(--fg2);
+  font-size: var(--text-base);
+}
+
+.pane-crumb-scope {
+  min-width: 0;
+  max-width: 260px;
+  overflow: hidden;
+  color: var(--fg);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-crumb-sep,
+.pane-crumb-view {
+  flex: none;
+  color: var(--fg3);
+}
+
+.empty-shell :deep(.header-actions) {
+  padding-right: var(--space-3);
 }
 
 .sidebar-backdrop {

@@ -10,7 +10,9 @@
     </div>
   </div>
   <div v-else-if="hasHomeActivity" class="home-recent">
-    <h2 class="home-recent-label">jump back in</h2>
+    <div class="home-recent-heading">
+      <h2 class="home-recent-label">Continue where you left off</h2>
+    </div>
     <div ref="lanesEl" class="home-lanes">
       <section
         v-for="lane in lanes"
@@ -66,43 +68,43 @@
                 :title="chat.local === false ? 'This chat lives on another instance' : chat.title"
                 @click="chat.local !== false && store.switchChat(chat.chat_id)"
               >
-                <span class="home-chat-heading">
-                  <span
-                    v-if="chat.title_status === 'pending'"
-                    class="title-shimmer"
-                    aria-label="Generating title"
-                  />
-                  <span
-                    v-else
-                    class="home-chat-title"
-                    :class="{ 'home-chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
-                  >{{ chat.title }}</span>
-                  <ChatSignals
-                    :chat-id="chat.chat_id"
-                    :density="entry.key === 'needsYou' || entry.key === 'unread' ? 'card' : 'row'"
-                    :hue="colorOf(chat)"
-                  />
-                  <!-- Project and time ride the title row in every density. On
-                       the compact rows they already did (the row is one line);
-                       on the cards this reclaims the third line, which is what
-                       lets the preview below run to its full two-line clamp. -->
+                <span class="home-chat-main">
+                  <span class="home-chat-heading">
+                    <span
+                      v-if="chat.title_status === 'pending'"
+                      class="title-shimmer"
+                      aria-label="Generating title"
+                    />
+                    <span
+                      v-else
+                      class="home-chat-title"
+                      :class="{ 'home-chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
+                    >{{ chat.title }}</span>
+                    <ChatSignals
+                      :chat-id="chat.chat_id"
+                      :density="entry.key === 'needsYou' || entry.key === 'unread' ? 'card' : 'row'"
+                      :hue="colorOf(chat)"
+                    />
+                  </span>
+                  <!-- Project plus a status phrase read from the same signals
+                       that sorted the row into its tier, so the sub-line can
+                       never claim more than the tier heading above it. -->
                   <span class="home-chat-meta">
-                    <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project">
-                      {{ store.projectFor(chat.chat_id)?.name }}
-                    </span>
+                    <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project">{{ store.projectFor(chat.chat_id)?.name }}</span>
+                    <span class="home-chat-status">{{ tierPhrase(entry.key) }}</span>
                     <span v-if="chat.local === false" class="remote-chip">remote</span>
-                    <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
+                  </span>
+                  <span v-if="entry.key === 'needsYou' && store.chatPendingQuestion(chat.chat_id)" class="home-chat-question">
+                    {{ store.chatPendingQuestion(chat.chat_id) }}
+                  </span>
+                  <!-- Only populated for turns that completed while this tab was
+                       open (see `lastResultSnippet` in the store) - a chat that
+                       finished earlier shows no preview until its next turn. -->
+                  <span v-if="entry.key === 'unread' && store.chatLastSnippet(chat.chat_id)" class="home-chat-snippet">
+                    {{ store.chatLastSnippet(chat.chat_id) }}
                   </span>
                 </span>
-                <span v-if="entry.key === 'needsYou' && store.chatPendingQuestion(chat.chat_id)" class="home-chat-question">
-                  {{ store.chatPendingQuestion(chat.chat_id) }}
-                </span>
-                <!-- Only populated for turns that completed while this tab was
-                     open (see `lastResultSnippet` in the store) - a chat that
-                     finished earlier shows no preview until its next turn. -->
-                <span v-if="entry.key === 'unread' && store.chatLastSnippet(chat.chat_id)" class="home-chat-snippet">
-                  {{ store.chatLastSnippet(chat.chat_id) }}
-                </span>
+                <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
               </button>
             </div>
 
@@ -495,6 +497,15 @@ function tierEntries(lane: HomeLane): Array<{ key: HomeTierKey; label: string; c
   ]
 }
 
+// The sub-line's status phrase. The tier was derived from the store's
+// needs-input / working / unread signals, so it restates that fact in words.
+function tierPhrase(tier: HomeTierKey): string {
+  if (tier === 'needsYou') return 'waiting for you'
+  if (tier === 'working') return 'agent is working'
+  if (tier === 'unread') return 'new reply'
+  return 'no new activity'
+}
+
 function relativeActivity(chat: ChatInfo): string {
   return formatRelative(chatActivityTimestamp(chat))
 }
@@ -636,7 +647,7 @@ defineExpose({ onArrow })
 .home-recent {
   width: 100%;
   max-width: var(--home-max);
-  margin: 0 auto;
+  margin: 42px auto 0;
   text-align: left;
   /* Stacking is decided by the width the lanes actually get, not the window's.
      The sidebar is resizable and takes a large share, so a viewport media query
@@ -645,20 +656,22 @@ defineExpose({ onArrow })
   container-type: inline-size;
 }
 
-/* Off the screen, still in the document. The lane headings and tier headings
-   below already say what this list is, so the label was a caption for something
-   self-evident - but it is the only heading naming this region, so assistive
-   tech keeps it. Same rule as .sr-only in App.vue. */
+/* Prototype A's section heading. Visible again: the lane and tier labels
+   below say how the list is sorted, this says what the list is for. */
+.home-recent-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: 4px;
+}
+
 .home-recent-label {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-  border: 0;
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.02em;
 }
 
 .home-lanes {
@@ -694,8 +707,7 @@ defineExpose({ onArrow })
   align-items: center;
   min-width: 0;
   min-height: 44px;
-  padding: 0 0 8px;
-  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  padding: 0;
 }
 
 /* Row one of the header: the workspace line and the "+ new" split share it,
@@ -731,9 +743,9 @@ defineExpose({ onArrow })
   flex: 0 0 auto;
   min-width: 18px;
   padding: 0 var(--space-1);
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-xs);
-  color: color-mix(in srgb, var(--accent) 65%, var(--fg3));
+  color: var(--fg3);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   font-weight: 700;
@@ -745,12 +757,10 @@ defineExpose({ onArrow })
   min-width: 0;
   overflow: hidden;
   color: var(--fg2);
-  font-family: var(--font-mono);
   font-size: var(--text-sm);
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  font-weight: 650;
   text-overflow: ellipsis;
-  text-transform: uppercase;
+  text-transform: capitalize;
   white-space: nowrap;
 }
 
@@ -758,8 +768,8 @@ defineExpose({ onArrow })
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
-  color: var(--fg2);
-  font-size: var(--text-xs);
+  color: var(--fg3);
+  font-size: var(--text-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -812,20 +822,23 @@ defineExpose({ onArrow })
   gap: 6px;
   min-height: var(--touch, 44px);
   flex: 0 0 auto;
-  padding: 5px 9px;
-  border: 1px dashed var(--accent);
+  padding: 0 8px;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm, 6px);
   background: transparent;
-  color: var(--accent);
+  color: var(--fg3);
   cursor: pointer;
   font: inherit;
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   white-space: nowrap;
 }
 
+/* A quiet secondary: the composer above is the page's primary way in. */
 .home-lane-new:hover,
 .home-lane-new:focus-visible {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: var(--border);
+  background: var(--bg-elev);
+  color: var(--fg);
 }
 
 .home-lane-new:disabled {
@@ -838,7 +851,7 @@ defineExpose({ onArrow })
    during the multi-second round trip to create the chat, so the spinner
    carries the "still working" signal. */
 .home-lane-new--creating {
-  border-style: solid;
+  border-color: var(--border);
 }
 
 .home-lane-new-spinner {
@@ -959,13 +972,14 @@ defineExpose({ onArrow })
 .home-lane-body {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-4);
   min-width: 0;
-  padding-top: 10px;
+  padding-top: 4px;
 }
 
 .home-lane-empty {
   padding: 10px 2px;
+  border-top: 1px solid var(--border);
   color: var(--fg3);
   font-size: var(--text-sm);
 }
@@ -973,14 +987,11 @@ defineExpose({ onArrow })
 .home-tier {
   display: flex;
   flex-direction: column;
-  gap: 6px;
   min-width: 0;
 }
 
 /* Lowercase deliberately: these are quiet structural markers, not headings.
-   They used to inherit `text-transform: uppercase` with a `span:last-child`
-   override cancelling it — which only fired when a tier had a second span, so
-   "needs you" shouted in caps while "working" and "quiet" did not. */
+   The label's hairline doubles as the top rule of the tier's row list. */
 .home-tier-label {
   display: flex;
   gap: var(--space-2);
@@ -991,143 +1002,113 @@ defineExpose({ onArrow })
   font-size: var(--text-xs);
 }
 
+/* Prototype A's chat row: a flat hairline list, title over a project/status
+   sub-line, time in its own right column. Every tier shares the row; urgency
+   rides the title weight, the ChatSignals dot and the tier label rather than
+   a card treatment. */
 .home-chat-item {
   display: flex;
+  align-items: center;
+  gap: var(--space-4);
   width: 100%;
   min-width: 0;
-  min-height: var(--touch, 44px);
-  flex-direction: column;
-  gap: 7px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-left: 2px solid var(--accent);
-  border-radius: var(--radius-sm);
-  background: var(--bg2);
+  min-height: 62px;
+  padding: 10px 2px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
   color: var(--fg);
   cursor: pointer;
   font: inherit;
   text-align: left;
-  transition: border-color 120ms var(--ease), background 120ms var(--ease), transform 60ms var(--ease);
+  transition: background 120ms var(--ease);
 }
 
-.home-chat-item:hover {
-  border-color: var(--accent);
-  background: var(--bg3);
+.home-chat-item:hover .home-chat-title {
+  color: var(--accent);
 }
 
 .home-chat-item:active {
-  transform: translateY(1px);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
 
-/* Positive offset, so the ring sits clear of the card edge. At -1px it was drawn
-   inside the border and merged with the accent rail on the left, which is the
-   one place a keyboard user most needs to see where focus is. Kept to a single
-   ring - the old two-ring treatment was what made the rows read as boxes inside
-   boxes - with a --bg gap so it separates on any surface. */
 .home-chat-item:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+  border-radius: var(--radius-xs);
   box-shadow: 0 0 0 2px var(--bg);
 }
 
+/* Needs-you rows keep one quiet accent: a short rail on the left edge, so
+   the tier stays findable when it is scrolled past its label. */
 .home-chat-item--needsYou {
-  background: color-mix(in srgb, var(--accent) 8%, var(--bg2));
+  padding-left: 12px;
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
-/* Working needs zero user action right now - the lane header's "N still
-   working" summary already covers in-flight visibility - so it gets the
-   compact row treatment: title + a flashing ChatSignals dot + timestamp,
-   nothing to preview yet. Unread took over the bigger bordered-card
-   treatment below, since it has a finished answer worth the extra room. */
-.home-chat-item--working,
-.home-chat-item--quiet,
-.home-chat-item--older,
+.home-chat-item--needsYou:focus-visible {
+  box-shadow: inset 2px 0 0 var(--accent), 0 0 0 2px var(--bg);
+}
+
 .home-chat-item--archiving,
 .home-chat-item--tidying,
 .home-chat-item--failed {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
   min-height: var(--touch, 44px);
-  padding: 7px 10px;
-  border: 0;
-  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  /* Square against its hue rail, rounded away from it. */
-  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
-  background: transparent;
-}
-
-.home-chat-item--working:hover,
-.home-chat-item--quiet:hover,
-.home-chat-item--older:hover,
-.home-chat-item--archiving:hover,
-.home-chat-item--tidying:hover,
-.home-chat-item--failed:hover {
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 
 .home-chat-item--week-old { opacity: 0.72; }
 .home-chat-item--old { opacity: 0.55; }
 
+.home-chat-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .home-chat-heading {
   display: flex;
-  align-items: flex-start;
+  flex: 1;
+  align-items: center;
   gap: 8px;
   min-width: 0;
 }
 
-.home-chat-item--working .home-chat-heading,
-.home-chat-item--quiet .home-chat-heading,
-.home-chat-item--older .home-chat-heading,
-.home-chat-item--archiving .home-chat-heading,
-.home-chat-item--tidying .home-chat-heading,
-.home-chat-item--failed .home-chat-heading {
-  flex: 1;
-  align-items: center;
-}
-
 .home-chat-title {
-  display: -webkit-box;
+  display: block;
   min-width: 0;
   flex: 1;
   overflow: hidden;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  font-weight: 400;
-  line-height: 1.35;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-.home-chat-title--unread {
   color: var(--fg);
+  font-size: var(--text-base);
   font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 120ms var(--ease);
 }
 
-.home-chat-item--working .home-chat-title,
+/* Quiet rows step the title back a register; anything that wants the user
+   (needs you, unread) keeps full weight. */
 .home-chat-item--quiet .home-chat-title,
 .home-chat-item--older .home-chat-title,
 .home-chat-item--archiving .home-chat-title,
 .home-chat-item--tidying .home-chat-title,
 .home-chat-item--failed .home-chat-title {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.home-chat-item--needsYou .home-chat-title {
-  color: var(--fg);
-  font-weight: 600;
+  color: var(--fg2);
+  font-weight: 500;
 }
 
 .home-chat-item .home-chat-title--unread {
   color: var(--fg);
-  font-weight: 600;
+  font-weight: 650;
 }
 
 .home-chat-question {
   display: -webkit-box;
+  margin-top: 4px;
   overflow: hidden;
   color: var(--fg);
   font-size: var(--text-sm);
@@ -1140,6 +1121,7 @@ defineExpose({ onArrow })
    answer to read is lower urgency than a question blocking the agent. */
 .home-chat-snippet {
   display: -webkit-box;
+  margin-top: 4px;
   overflow: hidden;
   color: var(--fg2);
   font-size: var(--text-sm);
@@ -1148,42 +1130,56 @@ defineExpose({ onArrow })
   -webkit-line-clamp: 2;
 }
 
-/* Keep project labels and timestamps in stable columns across every row. The
-   metadata used to shrink to each row's contents, making both columns jump
-   horizontally as project names and relative times changed. */
 .home-chat-meta {
   display: flex;
   align-items: baseline;
-  flex: 0 0 34%;
-  gap: 7px;
+  gap: 6px;
   min-width: 0;
-  max-width: 34%;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+
+/* Archive-pipeline rows put their note, retry and time in the meta; there it
+   is the row's right column rather than a sub-line. */
+.home-chat-item--archiving .home-chat-meta,
+.home-chat-item--tidying .home-chat-meta,
+.home-chat-item--failed .home-chat-meta {
+  flex: 0 1 auto;
+  align-items: center;
   margin-left: auto;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  /* The card heading top-aligns its children, so this smaller text needs the
-     title's first-line height (1.35 x text-sm) to share its centerline — and
-     the unread dot's (see .chat-signals--card in ChatSignals.vue). */
-  line-height: calc(1.35 * var(--text-sm));
 }
 
 .home-chat-project {
   min-width: 0;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   overflow: hidden;
   color: var(--fg2);
-  letter-spacing: 0.03em;
   text-overflow: ellipsis;
-  text-transform: uppercase;
   white-space: nowrap;
 }
 
+.home-chat-status {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.home-chat-project + .home-chat-status::before {
+  content: '·';
+  margin-right: 6px;
+  color: var(--fg3);
+}
+
+.home-chat-item--needsYou .home-chat-status {
+  color: var(--accent);
+}
+
 .home-chat-time {
-  flex: 0 0 7ch;
-  width: 7ch;
-  margin-left: auto;
+  flex: 0 0 auto;
+  min-width: 5ch;
   color: var(--fg3);
   font-family: var(--font-mono);
+  font-size: var(--text-xs);
   text-align: right;
   white-space: nowrap;
 }
@@ -1315,7 +1311,8 @@ defineExpose({ onArrow })
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .home-chat-item { transition: none; }
+  .home-chat-item,
+  .home-chat-title { transition: none; }
   .title-shimmer { animation: none; }
   .home-lane-new-spinner { animation: none; }
 }

@@ -166,4 +166,25 @@ describe('HomeReviewSummary', () => {
     ])
     loading.unmount()
   })
+
+  it('renders pulse rows with real counts and the next automation', async () => {
+    const proposals = useProposalsStore()
+    proposals.rows.push(proposal('personal-two', 'personal'))
+
+    const wrapper = mount(HomeReviewSummary)
+    const rows = wrapper.findAll('.home-review-item')
+    expect(rows[0].find('.home-review-title').text()).toBe('2 memory proposals')
+    expect(rows[0].find('.home-review-action').text()).toBe('review')
+    expect(rows[1].find('.home-review-title').text()).toBe('Notes to revisit')
+    expect(rows[1].text()).toContain('Up to date')
+    expect(rows[2].find('.home-review-title').text()).toBe('1 active automation')
+    expect(rows[2].find('.home-review-detail').text()).toContain('personal briefing · next')
+
+    await wrapper.get('.home-review-link').trigger('click')
+    expect(router.push).toHaveBeenCalledWith('/memory')
+
+    await rows[2].trigger('click')
+    expect(router.push).toHaveBeenCalledWith('/schedules')
+    wrapper.unmount()
+  })
 })

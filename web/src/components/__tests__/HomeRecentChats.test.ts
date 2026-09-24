@@ -120,6 +120,21 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(wrapper.findAll('.home-chat-item')).toHaveLength(2)
   })
 
+  it('gives every row a project and status sub-line read from its tier', async () => {
+    const wrapper = await mountHome()
+    const needs = wrapper.find('.home-tier--needsYou .home-chat-item')
+    expect(needs.find('.home-chat-project').text()).toBe('Personal project')
+    expect(needs.find('.home-chat-status').text()).toBe('waiting for you')
+    expect(wrapper.find('.home-tier--quiet .home-chat-status').text()).toBe('no new activity')
+
+    // The work chat has a background agent running, which is what puts it in
+    // the working tier; the sub-line says so rather than inventing activity.
+    useProjectStore().activeWorkspace = 'work'
+    await nextTick()
+    expect(wrapper.find('.home-tier--working .home-chat-status').text()).toBe('agent is working')
+    wrapper.unmount()
+  })
+
   it('lists older chats inline with quiet instead of behind a disclosure', async () => {
     const store = seedChats()
     // The seeded old chat lives in the other workspace; pull it into the

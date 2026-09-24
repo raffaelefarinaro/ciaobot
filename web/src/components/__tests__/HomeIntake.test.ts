@@ -163,4 +163,50 @@ describe('HomeIntake', () => {
     expect(create).toHaveBeenCalledWith('general')
     wrapper.unmount()
   })
+
+  it('sends with Cmd/Ctrl+Enter and keeps bare Enter as a newline', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'general', name: 'General', workspace: 'personal', order: 0 },
+    ] as unknown as typeof store.projects
+    store.activeWorkspace = 'personal'
+    openPicker.mockResolvedValue('general')
+    vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'x' } as ChatInfo)
+    vi.spyOn(store, 'sendMessage').mockReturnValue(true)
+
+    const wrapper = mount(HomeIntake)
+    const input = wrapper.get<HTMLTextAreaElement>('#home-intake-prompt')
+    await input.setValue('Draft the plan')
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(openPicker).not.toHaveBeenCalled()
+
+    await input.trigger('keydown', { key: 'Enter', ctrlKey: true })
+    await flushPromises()
+    expect(openPicker).toHaveBeenCalledTimes(1)
+    expect(store.newChatInProject).toHaveBeenCalledWith('general', 'Draft the plan', 'Draft the plan')
+    wrapper.unmount()
+  })
+
+  it('names the workspace default provider and keeps New as the send control name', async () => {
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'opencode', gws_profile: '' },
+    ] as unknown as typeof store.workspaces
+    store.workspaceProviderOptions = [
+      { value: 'claude', label: 'Claude' },
+      { value: 'opencode', label: 'OpenCode' },
+    ] as unknown as typeof store.workspaceProviderOptions
+    store.projects = [
+      { project_id: 'general', name: 'General', workspace: 'personal', order: 0 },
+    ] as unknown as typeof store.projects
+    store.activeWorkspace = 'personal'
+
+    const wrapper = mount(HomeIntake)
+    expect(wrapper.get('.home-intake-provider').text()).toContain('OpenCode')
+    // Read-only: it states a fact, it is not a picker.
+    expect(wrapper.find('.home-intake-provider').element.tagName).toBe('SPAN')
+    expect(wrapper.get('button[type="submit"]').attributes('aria-label')).toBe('New')
+    wrapper.unmount()
+  })
 })
