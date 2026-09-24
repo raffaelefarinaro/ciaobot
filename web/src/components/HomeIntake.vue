@@ -1,43 +1,10 @@
 <template>
   <section class="home-intake" aria-labelledby="home-intake-title">
-    <div class="home-intake-copy">
-      <p class="home-intake-eyebrow">{{ greeting }} · {{ workspaceLabel(store.activeWorkspace) }}</p>
-      <h1 id="home-intake-title">What should Ciao work on?</h1>
-      <p>Describe the outcome. Ciao brings the project's context, runs the work, and leaves a durable trail you can still own.</p>
-    </div>
+    <!-- The composer is the page's subject, so it carries no visible headline;
+         the heading stays for the document outline and screen readers. -->
+    <h1 id="home-intake-title" class="sr-only">Start new work</h1>
 
     <form class="home-intake-form" aria-label="Start a new chat" @submit.prevent="onSubmit">
-      <div class="home-intake-context">
-        <button
-          type="button"
-          class="home-intake-project"
-          :disabled="!hasProjects"
-          :aria-label="`Choose a project for the new chat — default ${defaultProjectLabel}`"
-          aria-haspopup="dialog"
-          @click="chooseProject"
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M3.5 7.5h6l2-2h9v13h-17z" />
-          </svg>
-          <span>{{ defaultProjectLabel }}</span>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="m7 9 5 5 5-5" />
-          </svg>
-        </button>
-        <!-- Read-only: an empty home has no chat to hold a model yet, so this
-             names what a new chat here will actually run on — the workspace's
-             default provider — instead of pretending to be a model picker. -->
-        <span
-          v-if="providerLabel"
-          class="home-intake-provider"
-          :title="`New chats in ${workspaceLabel(store.activeWorkspace)} run on ${providerLabel}. Change the default in Settings → Workspaces.`"
-        >
-          <span class="home-intake-provider-dot" aria-hidden="true" />
-          <span><span class="sr-only">Runs on </span>{{ providerLabel }}</span>
-        </span>
-        <span class="home-intake-note">context is added automatically</span>
-      </div>
-
       <label class="sr-only" for="home-intake-prompt">Ask Ciao to do something</label>
       <textarea
         id="home-intake-prompt"
@@ -50,10 +17,55 @@
       ></textarea>
 
       <div class="home-intake-bottom">
-        <span class="home-intake-hint">
-          <template v-if="prompt.trim()"><kbd>{{ sendChord }}</kbd> sends to the project you pick</template>
-          <template v-else>Send opens the project picker</template>
-        </span>
+        <button
+          type="button"
+          class="home-intake-chip home-intake-project"
+          :disabled="!hasProjects"
+          :aria-label="`Choose a project for the new chat — default ${defaultProjectLabel}`"
+          aria-haspopup="dialog"
+          @click="chooseProject"
+        >
+          <svg class="home-intake-chip-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3.5 7.5h6l2-2h9v13h-17z" />
+          </svg>
+          <span class="home-intake-chip-label">{{ defaultProjectLabel }}</span>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m7 9 5 5 5-5" />
+          </svg>
+        </button>
+
+        <!-- The model the next chat starts on. Unset means the workspace
+             default, which the server resolves; a pick rides the create call. -->
+        <div class="home-intake-model">
+          <button
+            ref="modelTrigger"
+            type="button"
+            class="home-intake-chip home-intake-model-trigger"
+            :aria-label="`Model for the new chat — ${modelLabel}`"
+            aria-haspopup="listbox"
+            :aria-expanded="showModelPicker"
+            @click="toggleModelPicker"
+          >
+            <span class="home-intake-model-dot" aria-hidden="true" />
+            <span class="home-intake-chip-label">{{ modelLabel }}</span>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m7 9 5 5 5-5" />
+            </svg>
+          </button>
+          <ModelSelector
+            v-if="showModelPicker"
+            triggerless
+            :model-value="selectedModel?.model || DEFAULT_KEY"
+            :sections="modelSections"
+            placeholder="Model"
+            placement="bottom-start"
+            @select="selectModel"
+            @close="closeModelPicker"
+          />
+        </div>
+
+        <span class="home-intake-spacer" />
+        <kbd v-if="prompt.trim()" class="home-intake-kbd" aria-hidden="true">{{ sendChord }}</kbd>
         <!-- Keeps "New" as its accessible name: the control still opens the
              shared project picker first, with or without a prompt. -->
         <button
@@ -61,6 +73,7 @@
           class="home-intake-new"
           :disabled="starting || !hasProjects"
           :aria-label="starting ? 'Opening…' : 'New'"
+          :aria-keyshortcuts="prompt.trim() ? sendKeyshortcuts : undefined"
           :title="prompt.trim() ? `Send (${sendChord})` : 'New chat'"
           aria-haspopup="dialog"
         >
@@ -76,21 +89,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { useProjectStore } from '../stores/projects'
+import { computed, nextTick, ref, watch } from 'vue'
+import { useProjectStore, type NewChatRuntime } from '../stores/projects'
+import { useTaskStore } from '../stores/tasks'
 import { clearChatDraft } from '../lib/chatDrafts'
 import { openNewChatPicker } from '../lib/newChat'
-import { workspaceLabel } from '../lib/workspaceLabel'
 import { isApplePlatform } from '../lib/desktop'
+import { providerForModelSection, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import ModelSelector from './ModelSelector.vue'
 
-// One greeting per session, not a live clock: it orients the page without
-// re-rendering on the minute, and matches the quiet-reference eyebrow.
-const greeting = (() => {
-  const hour = new Date().getHours()
-  if (hour < 12) return 'Good morning'
-  if (hour < 18) return 'Good afternoon'
-  return 'Good evening'
-})()
+// Sentinel row for "no override": ModelSelector lists models, so the
+// workspace default is offered as its own one-model section.
+const DEFAULT_KEY = '__workspace-default__'
 
 const store = useProjectStore()
 const prompt = ref('')
@@ -116,9 +126,7 @@ const defaultProject = computed(() => {
 })
 const defaultProjectLabel = computed(() => defaultProject.value?.name || 'Choose a project')
 
-// The provider a chat started here will run on. New chats take the
-// workspace's default provider (the picker only chooses a project), so this is
-// the one model-ish fact home can state without a chat to read it from.
+// The provider the workspace starts new chats on; names the default row.
 const providerLabel = computed(() => {
   const provider = store.workspaceOptions.find(
     workspace => workspace.name === store.activeWorkspace,
@@ -126,9 +134,51 @@ const providerLabel = computed(() => {
   if (!provider) return ''
   return store.workspaceProviderOptions.find(option => option.value === provider)?.label || provider
 })
+const defaultModelLabel = computed(() => (providerLabel.value ? `${providerLabel.value} default` : 'Default model'))
+
+const tasks = useTaskStore()
+const showModelPicker = ref(false)
+const selectedModel = ref<NewChatRuntime | null>(null)
+const modelLabel = computed(() => selectedModel.value?.model || defaultModelLabel.value)
+const modelSections = computed<ModelSection[]>(() => [
+  {
+    key: 'default',
+    label: 'Workspace default',
+    models: [DEFAULT_KEY],
+    modelLabels: { [DEFAULT_KEY]: defaultModelLabel.value },
+  },
+  ...sectionsFromModelsResponse(tasks.models).map(section => (
+    section.key === 'anthropic' ? { ...section, label: 'Claude (Anthropic)' } : section
+  )),
+])
+
+const modelTrigger = ref<HTMLButtonElement | null>(null)
+
+// The triggerless selector does not own the chip, so return focus to it
+// ourselves when the list closes (Escape, outside click, or a pick).
+function closeModelPicker(): void {
+  showModelPicker.value = false
+  void nextTick(() => modelTrigger.value?.focus())
+}
+
+function toggleModelPicker(): void {
+  if (!showModelPicker.value && !tasks.models) void tasks.fetchModels()
+  showModelPicker.value = !showModelPicker.value
+}
+
+function selectModel(value: string | string[], sectionKey: string): void {
+  const model = Array.isArray(value) ? value[0] : value
+  closeModelPicker()
+  if (!model || model === DEFAULT_KEY || sectionKey === 'default') {
+    selectedModel.value = null
+    return
+  }
+  selectedModel.value = { model, provider: providerForModelSection(sectionKey) }
+}
 
 // Same send chord as the chat composer: bare Enter is a newline everywhere.
 const sendChord = isApplePlatform() ? '⌘↩' : 'Ctrl+↩'
+const sendKeyshortcuts = isApplePlatform() ? 'Meta+Enter' : 'Control+Enter'
 
 // A workspace switch changes the project set underneath this form. Preserve
 // each scope's unsent prompt instead of carrying Personal text into Work (or
@@ -139,6 +189,9 @@ watch(
     if (previous) draftsByWorkspace.set(previous, prompt.value)
     prompt.value = draftsByWorkspace.get(next) ?? ''
     preferredProjectId.value = ''
+    // Another workspace has another default provider; an override picked for
+    // this one must not silently carry across.
+    selectedModel.value = null
   },
   { immediate: true },
 )
@@ -195,10 +248,15 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
     }
 
     if (message) {
-      const chat = await store.newChatInProject(projectId, message, titleFromPrompt(message))
+      const runtime = selectedModel.value ?? undefined
+      const chat = runtime
+        ? await store.newChatInProject(projectId, message, titleFromPrompt(message), runtime)
+        : await store.newChatInProject(projectId, message, titleFromPrompt(message))
       if (!chat) return
       await store.sendMessage(chat.chat_id, message)
       clearChatDraft(chat.chat_id)
+    } else if (selectedModel.value) {
+      await store.newChatInProject(projectId, '', undefined, selectedModel.value)
     } else {
       await store.newChatInProject(projectId)
     }
@@ -223,44 +281,8 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   text-align: left;
 }
 
-.home-intake-copy {
-  padding: var(--space-4) 0 var(--space-6);
-}
-
-.home-intake-eyebrow {
-  margin: 0;
-  color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-/* The one large line on the page (prototype A's hero). Everything else on
-   Today is quiet list density, so this is where the scale goes. */
-.home-intake h1 {
-  max-width: 700px;
-  margin: 10px 0 12px;
-  color: var(--fg);
-  font-size: clamp(32px, 4.3vw, 57px);
-  font-weight: 650;
-  line-height: 1.03;
-  letter-spacing: -0.055em;
-  text-wrap: balance;
-}
-
-.home-intake-copy p:last-child {
-  max-width: 570px;
-  margin: 0;
-  color: var(--fg2);
-  font-size: var(--text-lg);
-  line-height: 1.55;
-}
-
-/* The command surface: one bordered canvas holding the project context, the
-   prompt, and the single forward action. */
+/* The command surface: the prompt, then one bar holding its context
+   (project, model) and the single forward action. */
 .home-intake-form {
   display: flex;
   flex-direction: column;
@@ -268,110 +290,21 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   border: 1px solid var(--border-strong);
   border-radius: 15px;
   background: var(--bg2);
-  box-shadow: 0 18px 55px rgb(0 0 0 / 14%);
+  box-shadow: 0 18px 50px rgb(0 0 0 / 14%);
   transition: border-color 160ms var(--ease), box-shadow 160ms var(--ease);
 }
 
 .home-intake-form:focus-within {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
-  box-shadow: 0 18px 55px rgb(0 0 0 / 14%), 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
-}
-
-.home-intake-context {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  min-height: 36px;
-  padding: 0 8px 5px;
-}
-
-.home-intake-project,
-.home-intake-provider {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 1 auto;
-  min-width: 0;
-  min-height: 27px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev);
-  color: var(--fg2);
-  font: inherit;
-  font-size: var(--text-xs);
-}
-
-.home-intake-project {
-  cursor: pointer;
-}
-
-.home-intake-project:hover:not(:disabled) {
-  border-color: var(--border-strong);
-  color: var(--fg);
-}
-
-.home-intake-project:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
-
-.home-intake-project svg:first-child {
-  color: var(--accent);
-}
-
-.home-intake-project svg {
-  flex: none;
-}
-
-/* A project name can be a long unbreakable token; the chip ellipses rather
-   than widening the composer it sits inside. */
-.home-intake-project > span,
-.home-intake-provider > span:last-child {
-  min-width: 0;
-  max-width: 22ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Shrink order when the row is tight: the note goes first, then the
-   provider chip; the project chip keeps its name longest. */
-.home-intake-project {
-  flex-shrink: 0;
-  max-width: 60%;
-}
-
-.home-intake-provider {
-  flex-shrink: 1;
-  cursor: default;
-}
-
-.home-intake-provider-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 7px;
-  border-radius: 50%;
-  background: var(--accent2);
-}
-
-.home-intake-note {
-  flex: 1 1 0;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fg3);
-  font-size: var(--text-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  box-shadow: 0 18px 50px rgb(0 0 0 / 14%), 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .home-intake-form > textarea {
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
-  min-height: 116px;
-  padding: 14px 12px;
+  min-height: 108px;
+  padding: 12px 12px 8px;
   border: 0;
   resize: none;
   background: transparent;
@@ -394,26 +327,86 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 42px;
-  padding: 4px 0 0 8px;
+  min-width: 0;
+  padding: 6px 2px 0 4px;
   border-top: 1px solid var(--border);
 }
 
-.home-intake-hint {
-  flex: 1;
+.home-intake-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: border-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.home-intake-chip:hover:not(:disabled),
+.home-intake-chip[aria-expanded="true"] {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+.home-intake-chip:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.home-intake-chip svg {
+  flex: none;
+}
+
+.home-intake-chip-icon {
+  color: var(--accent);
+}
+
+/* Long names ellipse inside the chip instead of widening the bar. */
+.home-intake-chip-label {
+  min-width: 0;
+  max-width: 24ch;
   overflow: hidden;
-  color: var(--fg3);
-  font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.home-intake-hint kbd {
-  padding: 0 4px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-xs);
-  color: var(--fg2);
+.home-intake-project {
+  flex: 0 1 auto;
+}
+
+.home-intake-model {
+  position: relative;
+  display: flex;
+  flex: 0 2 auto;
+  min-width: 0;
+}
+
+.home-intake-model-trigger {
+  max-width: 100%;
+}
+
+.home-intake-model-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--accent2);
+}
+
+.home-intake-spacer {
+  flex: 1;
+}
+
+.home-intake-kbd {
+  flex: none;
+  color: var(--fg3);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
 }
@@ -422,11 +415,11 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   display: grid;
   place-items: center;
   flex: 0 0 auto;
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: 9px;
   background: var(--accent);
   color: var(--on-accent);
   cursor: pointer;
@@ -467,8 +460,7 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
 /* Touch layouts: the chips and the send button are real controls, so they
    meet the 44px minimum even though they read as quiet labels. */
 @media (pointer: coarse), (max-width: 700px) {
-  .home-intake-project,
-  .home-intake-provider {
+  .home-intake-chip {
     min-height: var(--touch);
   }
 
@@ -479,27 +471,20 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
 }
 
 @media (max-width: 700px) {
-  .home-intake-copy {
-    padding: 0 0 var(--space-5);
-  }
-
-  .home-intake h1 {
-    font-size: 34px;
-  }
-
-  .home-intake-note {
-    display: none;
-  }
-
   .home-intake-form > textarea {
-    min-height: 96px;
+    min-height: 92px;
     /* 16px floor: iOS zooms the page into any smaller focused field. */
     font-size: max(16px, calc(16px * var(--font-scale)));
+  }
+
+  .home-intake-kbd {
+    display: none;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .home-intake-form,
+  .home-intake-chip,
   .home-intake-new {
     transition: none;
   }

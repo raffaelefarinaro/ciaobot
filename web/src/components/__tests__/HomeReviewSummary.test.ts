@@ -84,11 +84,9 @@ describe('HomeReviewSummary', () => {
 
   it('counts only the active workspace and refreshes on scope changes', async () => {
     const wrapper = mount(HomeReviewSummary)
-    let cards = wrapper.findAll('.home-review-item')
-    expect(cards[0].text()).toContain('1')
-    expect(cards[0].text()).not.toContain('2')
-    expect(cards[1].text()).toContain('Up to date')
-    expect(cards[2].text()).toContain('1')
+    // Up-to-date queues drop out; only what needs a look is listed.
+    let titles = wrapper.findAll('.home-review-title').map(node => node.text())
+    expect(titles).toEqual(['1 memory proposal', '1 active automation'])
 
     const projects = useProjectStore()
     const proposals = useProposalsStore()
@@ -105,9 +103,18 @@ describe('HomeReviewSummary', () => {
     await nextTick()
     await flushPromises()
 
-    cards = wrapper.findAll('.home-review-item')
-    expect(cards[0].text()).toContain('2')
-    expect(cards[2].text()).toContain('2')
+    titles = wrapper.findAll('.home-review-title').map(node => node.text())
+    expect(titles).toContain('2 memory proposals')
+    expect(titles).toContain('2 active automations')
+    wrapper.unmount()
+  })
+
+  it('says so when nothing needs review', () => {
+    useProposalsStore().rows = []
+    useTaskStore().schedules = []
+    const wrapper = mount(HomeReviewSummary)
+    expect(wrapper.findAll('.home-review-item')).toHaveLength(0)
+    expect(wrapper.get('.home-review-clear').text()).toBe('Nothing to review.')
     wrapper.unmount()
   })
 
@@ -130,7 +137,7 @@ describe('HomeReviewSummary', () => {
     await flushPromises()
 
     expect(get).toHaveBeenCalledWith(expect.stringContaining('workspace=personal'))
-    expect(wrapper.findAll('.home-review-item')[1].text()).toContain('1')
+    expect(wrapper.findAll('.home-review-title').map(node => node.text())).toContain('1 note to revisit')
     wrapper.unmount()
   })
 
@@ -167,23 +174,21 @@ describe('HomeReviewSummary', () => {
     loading.unmount()
   })
 
-  it('renders pulse rows with real counts and the next automation', async () => {
+  it('renders rows with real counts and the next automation', async () => {
     const proposals = useProposalsStore()
     proposals.rows.push(proposal('personal-two', 'personal'))
 
     const wrapper = mount(HomeReviewSummary)
     const rows = wrapper.findAll('.home-review-item')
     expect(rows[0].find('.home-review-title').text()).toBe('2 memory proposals')
-    expect(rows[0].find('.home-review-action').text()).toBe('review')
-    expect(rows[1].find('.home-review-title').text()).toBe('Notes to revisit')
-    expect(rows[1].text()).toContain('Up to date')
-    expect(rows[2].find('.home-review-title').text()).toBe('1 active automation')
-    expect(rows[2].find('.home-review-detail').text()).toContain('personal briefing · next')
+    expect(rows[1].find('.home-review-title').text()).toBe('1 active automation')
+    expect(rows[1].find('.home-review-detail').text()).toContain('personal briefing · next')
+    expect(wrapper.find('.home-review-icon').exists()).toBe(false)
 
     await wrapper.get('.home-review-link').trigger('click')
     expect(router.push).toHaveBeenCalledWith('/memory')
 
-    await rows[2].trigger('click')
+    await rows[1].trigger('click')
     expect(router.push).toHaveBeenCalledWith('/schedules')
     wrapper.unmount()
   })

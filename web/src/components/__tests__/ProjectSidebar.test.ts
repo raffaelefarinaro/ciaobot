@@ -94,7 +94,8 @@ describe('ProjectSidebar chat actions', () => {
     })
 
     const chatsLink = wrapper.get('a[href="/"]')
-    expect(chatsLink.get('.nav-item-badge--count').text()).toBe('1')
+    // A dot, not a number; the accessible name carries the count.
+    expect(chatsLink.get('.nav-item-badge--static').text()).toBe('')
     expect(chatsLink.attributes('aria-label')).toBe('Today — 1 chat needs attention')
 
     wrapper.unmount()

@@ -81,14 +81,11 @@
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
             <PaneHeader page-tag="today" @open-sidebar="sidebarCollapsed = false">
-              <!-- Where am I: workspace / view. Omitted on phones, where the header
+              <!-- Where am I: the view. The workspace is named once, in the sidebar
+                 scope. Omitted on phones, where the header
                    keeps its single row for the menu button and the wordmark. -->
               <template v-if="!isMobile" #title>
-                <span class="pane-crumbs">
-                  <span class="pane-crumb-scope">{{ displayWorkspaceLabel(store.activeWorkspace) }}</span>
-                  <span class="pane-crumb-sep" aria-hidden="true">/</span>
-                  <span class="pane-crumb-view">Today</span>
-                </span>
+                    <span class="pane-crumbs"><span class="pane-crumb-view">Today</span></span>
               </template>
               <template v-if="!isMobile" #actions>
                 <HostStatusPill />
@@ -222,14 +219,11 @@
              same list. Hide the empty-state whenever the mobile sidebar is open. -->
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
           <PaneHeader page-tag="today" @open-sidebar="sidebarCollapsed = false">
-            <!-- Where am I: workspace / view. Omitted on phones, where the header
+            <!-- Where am I: the view. The workspace is named once, in the sidebar
+                 scope. Omitted on phones, where the header
                  keeps its single row for the menu button and the wordmark. -->
             <template v-if="!isMobile" #title>
-              <span class="pane-crumbs">
-                <span class="pane-crumb-scope">{{ displayWorkspaceLabel(store.activeWorkspace) }}</span>
-                <span class="pane-crumb-sep" aria-hidden="true">/</span>
-                <span class="pane-crumb-view">Today</span>
-              </span>
+                    <span class="pane-crumbs"><span class="pane-crumb-view">Today</span></span>
             </template>
             <template v-if="!isMobile" #actions>
               <HostStatusPill />
@@ -319,7 +313,6 @@ import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
 import HostStatusPill from './HostStatusPill.vue'
-import { workspaceLabel as displayWorkspaceLabel } from '../lib/workspaceLabel'
 import HomeRecentChats from './HomeRecentChats.vue'
 import HomeIntake from './HomeIntake.vue'
 import HomeReviewSummary from './HomeReviewSummary.vue'
@@ -1536,7 +1529,7 @@ onBeforeUnmount(() => {
   width: 100%;
   max-width: 1320px;
   margin: 0 auto;
-  padding: 30px clamp(0px, 2.2vw, 26px) 18px;
+  padding: 48px clamp(0px, 2.2vw, 26px) 18px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 286px;
   align-items: start;
@@ -1595,20 +1588,10 @@ onBeforeUnmount(() => {
   font-size: var(--text-base);
 }
 
-.pane-crumb-scope {
-  min-width: 0;
-  max-width: 260px;
-  overflow: hidden;
-  color: var(--fg);
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pane-crumb-sep,
 .pane-crumb-view {
   flex: none;
-  color: var(--fg3);
+  color: var(--fg);
+  font-weight: 650;
 }
 
 .empty-shell :deep(.header-actions) {

@@ -6,6 +6,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import HomeIntake from '../HomeIntake.vue'
 import { useProjectStore } from '../../stores/projects'
+import { useTaskStore } from '../../stores/tasks'
 import type { ChatInfo } from '../../lib/types'
 
 const openPicker = vi.hoisted(() => vi.fn())
@@ -188,25 +189,54 @@ describe('HomeIntake', () => {
     wrapper.unmount()
   })
 
-  it('names the workspace default provider and keeps New as the send control name', async () => {
+  it('starts the chat on a picked model instead of the workspace default', async () => {
     const store = useProjectStore()
     store.workspaces = [
       { name: 'personal', vault_root: '', default_provider: 'opencode', gws_profile: '' },
     ] as unknown as typeof store.workspaces
     store.workspaceProviderOptions = [
       { value: 'claude', label: 'Claude' },
-      { value: 'opencode', label: 'OpenCode' },
+      { value: 'opencode', label: 'opencode' },
     ] as unknown as typeof store.workspaceProviderOptions
     store.projects = [
       { project_id: 'general', name: 'General', workspace: 'personal', order: 0 },
     ] as unknown as typeof store.projects
     store.activeWorkspace = 'personal'
+    const tasks = useTaskStore()
+    tasks.models = {
+      models: ['opus', 'sonnet'], default: 'opus',
+      provider_models: { claude: ['opus', 'sonnet'], opencode: ['openai/gpt-5.2'] },
+      provider_defaults: { claude: 'opus', opencode: 'openai/gpt-5.2' },
+      opencode_models: ['openai/gpt-5.2'],
+    }
+    openPicker.mockResolvedValue('general')
+    const create = vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'x' } as ChatInfo)
+    vi.spyOn(store, 'sendMessage').mockReturnValue(true)
 
-    const wrapper = mount(HomeIntake)
-    expect(wrapper.get('.home-intake-provider').text()).toContain('OpenCode')
-    // Read-only: it states a fact, it is not a picker.
-    expect(wrapper.find('.home-intake-provider').element.tagName).toBe('SPAN')
+    const wrapper = mount(HomeIntake, { attachTo: document.body })
+    const trigger = wrapper.get('.home-intake-model-trigger')
+    expect(trigger.text()).toContain('opencode default')
     expect(wrapper.get('button[type="submit"]').attributes('aria-label')).toBe('New')
+
+    await trigger.trigger('click')
+    await flushPromises()
+    const sonnet = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'))
+      .find(option => option.textContent?.includes('sonnet'))
+    expect(sonnet).toBeTruthy()
+    sonnet!.click()
+    await flushPromises()
+    expect(trigger.text()).toContain('sonnet')
+
+    await wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').setValue('Plan the week')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(create).toHaveBeenCalledWith('general', 'Plan the week', 'Plan the week', { model: 'sonnet', provider: 'claude' })
+
+    // A workspace switch drops the override: the other workspace has its
+    // own default.
+    store.activeWorkspace = 'work'
+    await nextTick()
+    expect(wrapper.get('.home-intake-model-trigger').text()).not.toContain('sonnet')
     wrapper.unmount()
   })
 })

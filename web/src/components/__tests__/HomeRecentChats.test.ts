@@ -67,7 +67,8 @@ describe('HomeRecentChats lanes and tiers', () => {
   it('renders only the active workspace lane', async () => {
     const wrapper = await mountHome()
     expect(wrapper.findAll('.home-lane')).toHaveLength(1)
-    expect(wrapper.find('.home-lane-name').text()).toBe('personal')
+    // The sidebar scope names the workspace; the lane does not repeat it.
+    expect(wrapper.find('.home-lane-name').exists()).toBe(false)
     expect(wrapper.find('[data-lane-key="personal"]').exists()).toBe(true)
     expect(wrapper.find('[data-lane-key="work"]').exists()).toBe(false)
     wrapper.unmount()
@@ -457,23 +458,6 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(document.activeElement).toBe(workCards[0].element)
     wrapper.unmount()
   })
-
-  // Regression: focus landing on a lane's "+ new" header control (via Tab or a
-  // click) used to make the next arrow jump to the first lane. It now stays in
-  // the lane that holds the focused control.
-  it('keeps arrows in the lane whose header control has focus', async () => {
-    const wrapper = await mountHome()
-    const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
-
-    const personalNew = wrapper.find('[data-lane-key="personal"] .home-lane-new').element as HTMLElement
-    personalNew.focus()
-    expect(document.activeElement).toBe(personalNew)
-
-    expect(vm.onArrow('ArrowDown')).toBe(true)
-    const personalCards = wrapper.find('[data-lane-key="personal"]').findAll('.home-chat-item')
-    expect(document.activeElement).toBe(personalCards[0].element)
-    wrapper.unmount()
-  })
 })
 
 
@@ -547,16 +531,14 @@ describe('the lane header line', () => {
     if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
   })
 
-  it('keeps the status phrase on the same line as the workspace name', async () => {
+  it('keeps the selected lane header for screen readers only', async () => {
     const wrapper = await mountHome()
     const lane = wrapper.find('[data-lane-key="personal"]')
-    const topline = lane.find('.home-lane-topline')
-    expect(topline.exists()).toBe(true)
-    // The name and the status phrase are siblings inside the same topline row.
-    expect(topline.find('.home-lane-name').exists()).toBe(true)
-    expect(topline.find('.home-lane-status-text').exists()).toBe(true)
-    // No separate status row under the line anymore.
-    expect(lane.find('.home-lane-status').exists()).toBe(false)
+    const header = lane.get('.home-lane-header')
+    expect(header.classes()).toContain('home-lane-header--quiet')
+    expect(header.find('.home-lane-name').exists()).toBe(false)
+    expect(header.find('.home-lane-shortcut').exists()).toBe(false)
+    expect(header.get('.home-lane-status-text').attributes('aria-live')).toBe('polite')
     wrapper.unmount()
   })
 
@@ -618,35 +600,31 @@ describe('HomeRecentChats new-chat entry', () => {
     if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
   })
 
-  it('delegates every New action to the shared project picker', async () => {
+  it('leaves new work to the composer on the selected lane', async () => {
     const wrapper = await mountHome()
-    const lane = wrapper.find('[data-lane-key="personal"]')
-    const button = lane.get('.home-lane-new')
-
-    expect(button.attributes('aria-haspopup')).toBe('dialog')
-    expect(lane.find('.home-lane-project-menu').exists()).toBe(false)
-    await button.trigger('click')
-    expect(wrapper.emitted('choose-new-chat')?.[0]).toEqual(['personal'])
+    expect(wrapper.find('[data-lane-key="personal"] .home-lane-new').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('keeps the same New action when the workspace has one project', async () => {
+  it('keeps a New action on a rescue lane and routes it to the shared picker', async () => {
     const store = seedChats()
-    store.projects = store.projects.filter(
-      project => project.project_id !== 'personal-project',
-    )
+    store.projects = [
+      ...store.projects,
+      { project_id: 'stale-general', name: 'General', workspace: 'renamed-away' },
+    ] as unknown as typeof store.projects
     store.chats = store.chats.map(chat =>
-      chat.project_id === 'personal-project'
-        ? { ...chat, project_id: 'personal-general' }
-        : chat,
+      chat.chat_id === 'quiet' ? { ...chat, project_id: 'stale-general' } : chat,
     ) as unknown as typeof store.chats
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
 
-    const button = wrapper.get('[data-lane-key="personal"] .home-lane-new')
+    const rescue = wrapper.get('[data-lane-key="renamed-away"]')
+    expect(rescue.get('.home-lane-name').text()).toBe('renamed away')
+    const button = rescue.get('.home-lane-new')
+    expect(button.attributes('aria-haspopup')).toBe('dialog')
     await button.trigger('click')
-    expect(wrapper.emitted('choose-new-chat')?.[0]).toEqual(['personal'])
+    expect(wrapper.emitted('choose-new-chat')?.[0]).toEqual(['renamed-away'])
     wrapper.unmount()
   })
 })

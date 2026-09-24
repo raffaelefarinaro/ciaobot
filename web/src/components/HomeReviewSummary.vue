@@ -1,14 +1,12 @@
 <template>
-  <section v-if="items.length" class="home-review-summary" aria-labelledby="home-review-title">
-    <div class="home-review-intro">
-      <p class="home-review-eyebrow">memory pulse</p>
-      <h2 id="home-review-title">What changed</h2>
-      <p>The useful outcome of your work, not a second inbox.</p>
-    </div>
+  <section class="home-review-summary" aria-labelledby="home-review-title">
+    <h2 id="home-review-title">What changed</h2>
 
-    <div class="home-review-list">
+    <!-- Only what needs a look: an up-to-date queue is not news, so it drops
+         out instead of holding a row that says "nothing here". -->
+    <div v-if="visibleItems.length" class="home-review-list">
       <button
-        v-for="item in items"
+        v-for="item in visibleItems"
         :key="item.key"
         type="button"
         class="home-review-item"
@@ -19,24 +17,11 @@
         }"
         @click="openItem(item.key)"
       >
-        <span class="home-review-icon" aria-hidden="true">
-          <svg v-if="item.key === 'memory'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" />
-          </svg>
-          <svg v-else-if="item.key === 'retirement'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 4h10a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z" /><path d="M8 20V7a3 3 0 0 1 3-3M11 8h4M11 12h4" />
-          </svg>
-          <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="8" /><path d="M12 7v5l3 2" />
-          </svg>
-        </span>
-        <span class="home-review-copy">
-          <span class="home-review-title">{{ item.title }}</span>
-          <span class="home-review-detail">{{ item.detail }}</span>
-        </span>
-        <span class="home-review-action">{{ item.action }}</span>
+        <span class="home-review-title">{{ item.title }}</span>
+        <span class="home-review-detail">{{ item.detail }}</span>
       </button>
     </div>
+    <p v-else class="home-review-clear">Nothing to review.</p>
 
     <button type="button" class="home-review-link" @click="openMemory">
       Open Memory
@@ -62,7 +47,7 @@ type ReviewItem = {
   key: 'memory' | 'retirement' | 'automations'
   title: string
   detail: string
-  action: string
+  count: number
   state: ReviewState
 }
 
@@ -77,15 +62,6 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`): s
   return `${count} ${count === 1 ? singular : pluralForm}`
 }
 
-// The row's trailing word: what clicking does when the count is trustworthy,
-// otherwise the state that makes it untrustworthy.
-function actionFor(state: ReviewState, verb: string): string {
-  if (state === 'loading') return 'checking'
-  if (state === 'stale') return 'stale'
-  if (state === 'error') return 'error'
-  return verb
-}
-
 const items = computed<ReviewItem[]>(() => {
   const workspace = projects.activeWorkspace
   const proposalCount = proposals.scopedRows(workspace).length
@@ -95,7 +71,7 @@ const items = computed<ReviewItem[]>(() => {
     : 'Up to date. No suggested memories are waiting in this workspace.'
   if (!proposals.loaded && !proposals.loadError) {
     proposalState = 'loading'
-    proposalDetail = `Checking ${workspace} for suggested memories.`
+    proposalDetail = 'Checking for suggested memories.'
   } else if (proposals.loadError) {
     proposalState = proposalCount ? 'stale' : 'error'
     proposalDetail = proposalCount
@@ -111,7 +87,7 @@ const items = computed<ReviewItem[]>(() => {
     : 'Up to date. No notes need a memory decision in this workspace.'
   if (!hasCurrentRetirement && !retirement.loadError) {
     retirementState = 'loading'
-    retirementDetail = `Checking ${workspace} for notes that need review.`
+    retirementDetail = 'Checking for notes that need review.'
   } else if (retirement.loadError) {
     retirementState = hasCurrentRetirement && retirementCount ? 'stale' : 'error'
     retirementDetail = hasCurrentRetirement && retirementCount
@@ -140,7 +116,7 @@ const items = computed<ReviewItem[]>(() => {
     : 'Up to date. No active automations belong to this workspace.'
   if (!tasks.schedulesLoaded && !tasks.scheduleLoadError) {
     automationState = 'loading'
-    automationDetail = `Checking ${workspace} for active automations.`
+    automationDetail = 'Checking for active automations.'
   } else if (tasks.scheduleLoadError) {
     automationState = tasks.schedules.length ? 'stale' : 'error'
     automationDetail = tasks.schedules.length
@@ -155,7 +131,7 @@ const items = computed<ReviewItem[]>(() => {
         ? plural(proposalCount, 'memory proposal')
         : 'Memory proposals',
       detail: proposalDetail,
-      action: actionFor(proposalState, 'review'),
+      count: proposalCount,
       state: proposalState,
     },
     {
@@ -164,7 +140,7 @@ const items = computed<ReviewItem[]>(() => {
         ? plural(retirementCount, 'note to revisit', 'notes to revisit')
         : 'Notes to revisit',
       detail: retirementDetail,
-      action: actionFor(retirementState, 'open'),
+      count: retirementCount,
       state: retirementState,
     },
     {
@@ -173,11 +149,15 @@ const items = computed<ReviewItem[]>(() => {
         ? plural(active.length, 'active automation')
         : 'Automations',
       detail: automationDetail,
-      action: actionFor(automationState, 'view'),
+      count: active.length,
       state: automationState,
     },
   ]
 })
+
+const visibleItems = computed(() => items.value.filter(
+  item => item.state !== 'ready' || item.count > 0,
+))
 
 watch(
   () => projects.activeWorkspace,
@@ -219,39 +199,17 @@ function openItem(key: ReviewItem['key']) {
 .home-review-summary {
   width: 100%;
   min-width: 0;
-  padding-top: 10px;
 }
 
-.home-review-intro {
-  margin-bottom: 18px;
-}
-
-.home-review-eyebrow {
-  margin: 0;
-  color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.home-review-intro h2 {
-  margin: 6px 0 4px;
+.home-review-summary h2 {
+  margin: 0 0 12px;
   color: var(--fg);
-  font-size: calc(19px * var(--font-scale));
-  letter-spacing: -0.03em;
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.02em;
 }
 
-.home-review-intro p:last-child {
-  margin: 0;
-  color: var(--fg2);
-  font-size: calc(13px * var(--font-scale));
-  line-height: 1.45;
-}
-
-/* Pulse rows, not cards: a hairline list reads as "what changed", where a
+/* Hairline rows, not cards: "what changed" reads as a short list, where a
    stack of bordered tiles read as a second inbox to clear. */
 .home-review-list {
   border-top: 1px solid var(--border);
@@ -259,11 +217,11 @@ function openItem(key: ReviewItem['key']) {
 
 .home-review-item {
   display: flex;
-  align-items: flex-start;
-  gap: 11px;
+  flex-direction: column;
+  gap: 2px;
   width: 100%;
   min-height: var(--touch);
-  padding: 15px 0;
+  padding: 13px 0;
   border: 0;
   border-bottom: 1px solid var(--border);
   background: transparent;
@@ -283,58 +241,38 @@ function openItem(key: ReviewItem['key']) {
   border-radius: var(--radius-xs);
 }
 
-.home-review-icon {
-  display: grid;
-  place-items: center;
-  flex: 0 0 28px;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--bg2);
-  color: var(--accent);
-}
-
-.home-review-copy {
-  flex: 1;
-  min-width: 0;
-}
-
 .home-review-title {
-  display: block;
-  margin-bottom: 3px;
   font-size: calc(13px * var(--font-scale));
   font-weight: 650;
   transition: color 120ms var(--ease);
 }
 
 .home-review-detail {
-  display: block;
   color: var(--fg2);
   font-size: var(--text-sm);
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
 
-.home-review-action {
-  flex: none;
-  color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: 28px;
+.home-review-item--stale .home-review-detail {
+  color: var(--fg);
 }
 
-.home-review-item--stale .home-review-action {
-  color: var(--accent);
-}
-
-.home-review-item--attention .home-review-icon,
-.home-review-item--attention .home-review-action {
+.home-review-item--attention .home-review-title {
   color: var(--warning);
 }
 
 .home-review-item--loading .home-review-title {
   color: var(--fg2);
+}
+
+.home-review-clear {
+  margin: 0;
+  padding: 13px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg3);
+  font-size: var(--text-sm);
 }
 
 .home-review-link {
@@ -355,37 +293,6 @@ function openItem(key: ReviewItem['key']) {
 .home-review-link:hover {
   text-decoration: underline;
   text-underline-offset: 3px;
-}
-
-/* Under the workbench's single-column break the rail sits below the request
-   column with room to spare, so the rows lay out as three short tiles. */
-@container chat-pane (max-width: 940px) and (min-width: 701px) {
-  .home-review-summary {
-    padding-top: 0;
-  }
-
-  .home-review-list {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 10px;
-    border-top: 0;
-  }
-
-  .home-review-item {
-    padding: 12px;
-    border: 1px solid var(--border);
-    border-radius: 9px;
-  }
-}
-
-@container chat-pane (max-width: 700px) {
-  .home-review-summary {
-    padding-top: 0;
-  }
-
-  .home-review-item {
-    padding: 13px 0;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

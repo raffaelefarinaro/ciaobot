@@ -80,7 +80,11 @@ describe('ProjectSidebar review section', () => {
   it('counts the queue for the active workspace and what sits elsewhere', async () => {
     const wrapper = await mountSidebar()
 
-    expect(wrapper.get('a[href="/memory"] .nav-item-badge--count').text()).toBe('4')
+    // The count lives on the memory pulse, not on the nav: the link only
+    // states it in its accessible name.
+    const memoryLink = wrapper.get('a[href="/memory"]')
+    expect(memoryLink.find('.nav-item-badge').exists()).toBe(false)
+    expect(memoryLink.attributes('aria-label')).toContain('4 suggested')
     // The workspace scope is one dropdown at the top of the rail now, not a
     // per-mode row of pills.
     const workspaceTrigger = wrapper.get('.workspace-scope-trigger')

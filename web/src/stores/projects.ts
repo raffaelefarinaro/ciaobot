@@ -38,6 +38,12 @@ import type {
   WorkspacesResponse,
 } from '../lib/types'
 import { bareAgentId, sameAgent } from '../lib/subagentIds'
+
+/** Model/provider a new chat should start on instead of the workspace default. */
+export interface NewChatRuntime {
+  model: string
+  provider: RuntimeProvider
+}
 import {
   chatWsReconnectDelayMs,
   isHostConnectionUnavailableMessage,
@@ -1344,6 +1350,7 @@ export const useProjectStore = defineStore('projects', () => {
     projectId: string,
     initialText = '',
     title = DEFAULT_CHAT_TITLE,
+    runtime?: NewChatRuntime,
   ): Promise<ChatInfo | undefined> {
     const project = projects.value.find(p => p.project_id === projectId)
     if (!project) {
@@ -1359,6 +1366,7 @@ export const useProjectStore = defineStore('projects', () => {
     activeWorkspace.value = project.workspace
     persistState()
     try {
+      if (runtime) return await createChat(project.project_id, title, initialText || undefined, runtime)
       return initialText
         ? await createChat(project.project_id, title, initialText)
         : await createChat(project.project_id)
@@ -2231,7 +2239,12 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Chat actions ────────────────────────────────────────────────────
 
-  async function createChat(projectId: string, title = DEFAULT_CHAT_TITLE, seedDraft?: string) {
+  async function createChat(
+    projectId: string,
+    title = DEFAULT_CHAT_TITLE,
+    seedDraft?: string,
+    runtime?: NewChatRuntime,
+  ) {
     // Join an already-in-flight creation for this project instead of firing
     // a second POST: see the comment on pendingChatCreations above.
     const pending = pendingChatCreations[projectId]
@@ -2240,7 +2253,12 @@ export const useProjectStore = defineStore('projects', () => {
     const promise = (async () => {
       creatingChatProjectIds.value[projectId] = true
       try {
-        const c = await api.post<ChatInfo>(`/api/projects/${projectId}/chats`, { title })
+        // A runtime override (home's model picker) rides the create call; the
+        // server otherwise starts the chat on the workspace default.
+        const c = await api.post<ChatInfo>(
+          `/api/projects/${projectId}/chats`,
+          runtime ? { title, model: runtime.model, provider: runtime.provider } : { title },
+        )
         // The server also broadcasts chat_created for this same chat. The
         // broadcast can arrive before the POST response, so reconcile through
         // the ID-aware helper instead of pushing a possible duplicate.

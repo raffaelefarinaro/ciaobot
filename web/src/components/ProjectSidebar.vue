@@ -49,9 +49,9 @@
             @keydown.down.prevent="openWorkspaceMenu"
           >
             <span class="workspace-scope-dot" aria-hidden="true" />
+            <!-- Name only: counts and key hints live in the menu, next to the
+                 workspaces they would switch to. -->
             <span class="workspace-scope-name">{{ workspaceLabel(store.activeWorkspace) }}</span>
-            <span v-if="workspaceActionCount(store.activeWorkspace)" class="badge">{{ workspaceActionCount(store.activeWorkspace) }}</span>
-            <kbd v-if="workspaceShortcut(store.activeWorkspace)" class="sidebar-keycap" aria-hidden="true">{{ workspaceShortcut(store.activeWorkspace) }}</kbd>
             <svg v-if="hasMultipleWorkspaces" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" aria-hidden="true">
               <polyline points="6 9 12 15 18 9" />
             </svg>
@@ -96,11 +96,11 @@
           aria-haspopup="dialog"
           :aria-label="`New chat in ${workspaceLabel(store.activeWorkspace)}`"
           :aria-keyshortcuts="newChatKeyshortcuts"
+          :title="`New chat (${newChatShortcut})`"
           @click="chooseNewChat(store.activeWorkspace)"
         >
           <span class="sidebar-new-chat-plus" aria-hidden="true">+</span>
           <span>New chat</span>
-          <kbd class="sidebar-keycap" aria-hidden="true">{{ newChatShortcut }}</kbd>
         </button>
 
         <nav class="nav-links" aria-label="Primary navigation">
@@ -123,10 +123,12 @@
                 <line x1="6" y1="13" x2="18" y2="13" />
                 <polyline points="8 18 8 21 11 18" />
               </svg>
+              <!-- A dot, not a number: the count is on Today itself, and the
+                   link's accessible name still states it. -->
               <span
                 v-if="store.attentionChatCount > 0"
-                class="nav-item-badge nav-item-badge--count"
-              >{{ store.attentionChatCount }}</span>
+                class="nav-item-badge nav-item-badge--static"
+              />
             </span>
             <span class="nav-item-label" aria-hidden="true">Today</span>
           </router-link>
@@ -172,10 +174,7 @@
                 <path d="M4 16h16v4H4z" />
                 <line x1="8" y1="8" x2="16" y2="8" />
               </svg>
-              <span
-                v-if="proposals.rows.length > 0"
-                class="nav-item-badge nav-item-badge--count"
-              >{{ proposals.rows.length }}</span>
+
             </span>
             <span class="nav-item-label" aria-hidden="true">Memory</span>
           </router-link>
@@ -2575,19 +2574,7 @@ async function confirmDeleteChat(chatId: string) {
   background: var(--warning);
 }
 
-.nav-item-badge--count {
-  top: calc(50% - 9px);
-  right: 10px;
-  width: auto;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  box-sizing: border-box;
-  background: var(--error);
-  color: #fff;
-  box-shadow: none;
-  font: 700 10px/18px var(--font-mono, monospace);
-  text-align: center;
+.nav-item-badge--static {
   animation: none;
 }
 

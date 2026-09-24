@@ -2,8 +2,8 @@ import { expect, test } from '@playwright/test'
 import { boot, isolate } from '../support/app'
 
 /**
- * Prototype A at a desktop width: layout facts jsdom cannot see. The memory
- * pulse must sit beside the request column rather than under it, and the
+ * Prototype A at a desktop width: layout facts jsdom cannot see. The review
+ * rail must sit beside the request column rather than under it, and the
  * sidebar's stacked top (workspace, New chat, destinations) must not collapse
  * back into one crowded row - which is what it did at the default 340px
  * sidebar before the rail was restacked.
@@ -15,7 +15,7 @@ test.describe('workbench layout', () => {
     await isolate(page, `workbench-${testInfo.workerIndex}`)
   })
 
-  test('the memory pulse rail sits beside the command surface', async ({ page }) => {
+  test('the review rail sits beside the command surface', async ({ page }) => {
     await boot(page)
     const surface = await page.locator('.home-intake-form').boundingBox()
     const rail = await page.locator('.home-rail').boundingBox()
@@ -23,9 +23,10 @@ test.describe('workbench layout', () => {
     expect(rail).not.toBeNull()
     expect(rail!.x).toBeGreaterThan(surface!.x + surface!.width)
 
-    // Rows, not a card grid: each pulse row spans the rail's width.
+    // Rows, not a card grid: each row spans the rail's width. Up-to-date
+    // queues drop out, so the fixture shows proposals and automations only.
     const rows = page.locator('.home-review-item')
-    await expect(rows).toHaveCount(3)
+    await expect(rows).toHaveCount(2)
     for (const row of await rows.all()) {
       const box = await row.boundingBox()
       expect(box!.width).toBeGreaterThan(rail!.width - 2)

@@ -21,20 +21,27 @@
         class="home-lane"
         :data-lane-key="lane.key"
       >
-        <header class="home-lane-header" :data-workspace-color="lane.color">
+        <!-- The selected workspace's lane needs no header: the sidebar's
+             workspace scope already names it, the composer above starts new
+             work, and the tier labels carry the counts. Its status sentence
+             stays for screen readers. Rescue lanes keep a visible header,
+             because their workspace name is the only thing that says why
+             they are here. -->
+        <header
+          class="home-lane-header"
+          :class="{ 'home-lane-header--quiet': isActiveLane(lane) }"
+          :data-workspace-color="lane.color"
+        >
           <div class="home-lane-topline">
             <div class="home-lane-heading">
-              <!-- With a single workspace the key badge and the name are pure
-                   noise: there is nothing to switch to and the workspace is the
-                   only one. Keep the status summary and "+ new". -->
-              <template v-if="hasMultipleWorkspaces">
+              <template v-if="!isActiveLane(lane)">
                 <span class="home-lane-shortcut">{{ lane.shortcut }}</span>
                 <span class="home-lane-name">{{ lane.label || 'unassigned' }}</span>
               </template>
               <span class="home-lane-status-text" aria-live="polite">{{ laneStatusText(lane) }}</span>
             </div>
             <button
-              v-if="lane.newAction && lane.workspace"
+              v-if="!isActiveLane(lane) && lane.newAction && lane.workspace"
               type="button"
               class="home-lane-new"
               :class="{ 'home-lane-new--creating': lane.newAction.isCreating }"
@@ -222,7 +229,6 @@ const emit = defineEmits<{
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
-const hasMultipleWorkspaces = computed(() => store.workspaceOptions.length > 1)
 const hasHomeActivity = computed(() => (
   store.activeChatsAll.length > 0
   || store.archivingChatsList().length > 0
@@ -381,6 +387,10 @@ function workspaceLabel(name: string): string {
 function colorOf(chat: ChatInfo): WorkspaceColorId {
   const workspace = store.projectFor(chat.chat_id)?.workspace
   return colorForWorkspace(store.workspaceOptions.find(item => item.name === workspace))
+}
+
+function isActiveLane(lane: HomeLane): boolean {
+  return lane.workspace === store.activeWorkspace
 }
 
 function laneHasChats(lane: HomeLane): boolean {
@@ -663,7 +673,7 @@ defineExpose({ onArrow })
   align-items: baseline;
   justify-content: space-between;
   gap: var(--space-3);
-  margin-bottom: 4px;
+  margin-bottom: var(--space-2);
 }
 
 .home-recent-label {
@@ -708,6 +718,19 @@ defineExpose({ onArrow })
   min-width: 0;
   min-height: 44px;
   padding: 0;
+}
+
+.home-lane-header--quiet {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  min-height: 0;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* Row one of the header: the workspace line and the "+ new" split share it,
