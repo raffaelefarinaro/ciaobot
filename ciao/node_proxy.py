@@ -471,17 +471,16 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
             target_ws_url,
             additional_headers=extra_headers or None,
         ) as remote_ws:
-            downstream_close_started = False
+            downstream_close: tuple[int, str] | None = None
 
-            async def close_downstream(
+            def remember_downstream_close(
                 close_code: int | None = None,
                 close_reason: str | None = None,
             ) -> None:
-                """Relay a host close to the browser without masking teardown."""
-                nonlocal downstream_close_started
-                if downstream_close_started:
+                """Remember the host close until both forwarders are drained."""
+                nonlocal downstream_close
+                if downstream_close is not None:
                     return
-                downstream_close_started = True
 
                 if close_code is None:
                     close_code = getattr(remote_ws, "close_code", None)
@@ -491,7 +490,13 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                     close_reason = getattr(remote_ws, "close_reason", None)
                 if not isinstance(close_reason, str):
                     close_reason = ""
+                downstream_close = (close_code, close_reason)
 
+            async def close_downstream() -> None:
+                """Relay a host close to the browser after teardown is drained."""
+                if downstream_close is None:
+                    return
+                close_code, close_reason = downstream_close
                 try:
                     await websocket.close(code=close_code, reason=close_reason)
                 except (WebSocketDisconnect, RuntimeError):
@@ -517,9 +522,9 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                     ):
                         raise
                     if close is not None:
-                        await close_downstream(close.code, close.reason)
+                        remember_downstream_close(close.code, close.reason)
                     else:
-                        await close_downstream()
+                        remember_downstream_close()
                     return
 
             async def forward_remote_to_client():
@@ -541,11 +546,11 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                     ):
                         raise
                     if close is not None:
-                        await close_downstream(close.code, close.reason)
+                        remember_downstream_close(close.code, close.reason)
                     else:
-                        await close_downstream()
+                        remember_downstream_close()
                     return
-                await close_downstream()
+                remember_downstream_close()
 
             task1 = asyncio.create_task(forward_client_to_remote())
             task2 = asyncio.create_task(forward_remote_to_client())
@@ -569,6 +574,7 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                     forwarding_errors.append(exc)
             if forwarding_errors:
                 raise forwarding_errors[0]
+            await close_downstream()
     except Exception as exc:
         logger.warning("Client WebSocket proxy to host %s failed: %s", target_ws_url, exc)
         try:

@@ -430,6 +430,93 @@ async def test_websocket_proxy_treats_expected_remote_close_as_normal(
 
 
 @pytest.mark.asyncio
+async def test_websocket_proxy_drains_both_forwarders_before_closing_client() -> None:
+    close = Close(1000, "host closed")
+    close_error = ConnectionClosedOK(close, close, True)
+    close_started = asyncio.Event()
+    close_completed = False
+
+    class ClosedRemote:
+        close_code = 1000
+        close_reason = "host closed"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def send(self, message: str) -> None:
+            raise close_error
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise close_error
+
+    websocket = AsyncMock()
+    websocket.url.path = "/ws/chat/chat-1"
+    websocket.url.query = ""
+    websocket.app.state.node_state_manager = None
+    websocket.receive_text.return_value = "message"
+
+    async def close_downstream(*, code: int, reason: str) -> None:
+        nonlocal close_completed
+        close_started.set()
+        # Let the other forwarder finish before the close await resumes. If the
+        # close happens inside a forwarder, the other task can complete first
+        # and cancel this await before it sends the close frame.
+        await asyncio.sleep(0)
+        close_completed = True
+
+    websocket.close.side_effect = close_downstream
+
+    with patch("websockets.connect", return_value=ClosedRemote()):
+        await proxy_websocket(websocket, "http://10.0.0.5:8443")
+
+    assert close_started.is_set()
+    assert close_completed
+    websocket.send_json.assert_not_awaited()
+    websocket.close.assert_awaited_once_with(code=1000, reason="host closed")
+
+
+@pytest.mark.asyncio
+async def test_websocket_proxy_relays_close_seen_by_client_forwarder() -> None:
+    close = Close(4004, "host unavailable")
+    close_error = ConnectionClosedError(close, close, True)
+
+    class ClosedRemote:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def send(self, message: str) -> None:
+            raise close_error
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+    websocket = AsyncMock()
+    websocket.url.path = "/ws/chat/chat-1"
+    websocket.url.query = ""
+    websocket.app.state.node_state_manager = None
+    websocket.receive_text.return_value = "message"
+
+    with patch("websockets.connect", return_value=ClosedRemote()):
+        await proxy_websocket(websocket, "http://10.0.0.5:8443")
+
+    websocket.send_json.assert_not_awaited()
+    websocket.close.assert_awaited_once_with(code=4004, reason="host unavailable")
+
+
+@pytest.mark.asyncio
 async def test_websocket_proxy_closes_client_when_remote_iterator_ends() -> None:
     class ClosedRemote:
         close_code = 1000
