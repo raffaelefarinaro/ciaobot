@@ -1715,13 +1715,15 @@ class _FakeServerClient:
         return _Accepted()
 
     async def post(self, _path: str, json=None):
+        message_id = str((json or {}).get("id") or "")
+
         class _Accepted:
             status_code = 200
             text = ""
 
             @staticmethod
             def json():
-                return {"data": {"id": "msg_fixture"}}
+                return {"data": {"id": message_id}}
 
         return _Accepted()
 

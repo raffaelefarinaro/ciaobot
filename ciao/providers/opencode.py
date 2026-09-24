@@ -2130,6 +2130,8 @@ class OpencodeProvider(BaseSDKProvider):
                     and str(message["info"].get("id") or "") == self._user_message_id
                     for message in messages
                 )
+                if user_seen:
+                    self._session_handover_context = ""
                 running = self._turn_has_running_tools(messages)
                 idle_outcome = next(
                     (
@@ -2681,7 +2683,12 @@ class OpencodeProvider(BaseSDKProvider):
         system = compose_system(instructions, runtime)
         if self._session_handover_context:
             system = compose_system(system, self._session_handover_context)
-        body = self._prompt_body(request, system=system)
+        message_id = f"msg_{secrets.token_hex(12)}"
+        body = {**self._prompt_body(request, system=system), "id": message_id}
+        # Anchor recovery to our own id before the request leaves the process.
+        # V2 reconciles duplicate prompt ids, so a retry after an ambiguous
+        # transport failure cannot create a second execution.
+        self._user_message_id = message_id
 
         error: str = ""
         saw_output = False
@@ -2692,19 +2699,23 @@ class OpencodeProvider(BaseSDKProvider):
         # hold, poll the message list until output quiesces and replay settled
         # parts through the same accumulator (its `_emitted` bookkeeping makes
         # the replay idempotent). Mirrors conduit's poll-backstop design.
+        prompt_attempted = False
         prompt_accepted = False
         prompt_rejected = False
+        prompt_receipt_error = ""
         terminal_seen = False
 
         async def _pump_once() -> AsyncGenerator[StreamEvent, None]:
             """One SSE subscription, pumped until idle or premature close."""
-            nonlocal prompt_accepted, prompt_rejected, error, saw_output, terminal_seen
+            nonlocal prompt_attempted, prompt_accepted, prompt_rejected
+            nonlocal prompt_receipt_error, error, saw_output, terminal_seen
             async with client.stream("GET", "/api/event") as stream:
                 stream.raise_for_status()
                 # Subscribe before prompting: opencode starts emitting as soon
                 # as the prompt is accepted, and a late subscriber loses the
                 # opening deltas.
                 if not prompt_accepted:
+                    prompt_attempted = True
                     response = await client.post(
                         f"/api/session/{session_id}/prompt", json=body
                     )
@@ -2716,11 +2727,21 @@ class OpencodeProvider(BaseSDKProvider):
                     try:
                         admitted = _data(response.json())
                     except (TypeError, ValueError) as exc:
-                        prompt_rejected = True
-                        error = error or f"OpenCode returned an invalid prompt receipt: {exc}"
+                        prompt_receipt_error = (
+                            f"OpenCode returned an invalid prompt receipt: {exc}"
+                        )
                         return
-                    if isinstance(admitted, Mapping):
-                        self._user_message_id = str(admitted.get("id") or "")
+                    admitted_id = (
+                        str(admitted.get("id") or "")
+                        if isinstance(admitted, Mapping)
+                        else ""
+                    )
+                    if admitted_id != message_id:
+                        prompt_receipt_error = (
+                            "OpenCode returned an invalid prompt receipt: "
+                            f"expected message id {message_id}"
+                        )
+                        return
                     # Once accepted, the replacement session owns the handover.
                     self._session_handover_context = ""
                     prompt_accepted = True
@@ -2785,8 +2806,9 @@ class OpencodeProvider(BaseSDKProvider):
                     async for converted in _pump_once():
                         yield converted
                 except httpx.HTTPError as exc:
-                    if not prompt_accepted:
-                        # The turn never started; nothing to recover.
+                    if not prompt_attempted:
+                        # The event subscription failed before a prompt could be
+                        # admitted; there is no ambiguous server-side work.
                         yield ResultEvent(
                             type="result",
                             result=f"OpenCode connection failed: {exc}",
@@ -2794,6 +2816,8 @@ class OpencodeProvider(BaseSDKProvider):
                             is_error=True,
                         )
                         return
+                    # A prompt POST may have committed before its response was
+                    # lost. Retry the same V2 message id, then reconcile by id.
                 if prompt_rejected or terminal_seen:
                     break
                 if self._stop_requested == session_id:
@@ -2807,7 +2831,7 @@ class OpencodeProvider(BaseSDKProvider):
             degraded_final = False
             if (
                 not terminal_seen
-                and prompt_accepted
+                and prompt_attempted
                 and not prompt_rejected
                 and self._stop_requested != session_id
             ):
@@ -2822,6 +2846,8 @@ class OpencodeProvider(BaseSDKProvider):
                     yield converted
                 degraded_final = not self._turn_recovered_via_poll
                 error = error or self._poll_error
+                if not self._turn_recovered_via_poll:
+                    error = error or prompt_receipt_error
         finally:
             register_handle(None)
 

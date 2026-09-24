@@ -124,13 +124,15 @@ class _RecoveryClient:
         return _Other()
 
     async def post(self, _path: str, json=None):
+        message_id = str((json or {}).get("id") or "")
+
         class _Accepted:
             status_code = 200
             text = ""
 
             @staticmethod
             def json():
-                return {"data": {"id": "msg_u2"}}
+                return {"data": {"id": message_id}}
 
         return _Accepted()
 
@@ -144,6 +146,10 @@ def _wire(provider: OpencodeProvider, monkeypatch: pytest.MonkeyPatch, client) -
 
     monkeypatch.setattr(provider, "_ensure_server", fake_server)
     monkeypatch.setattr(provider, "_ensure_session", fake_session)
+    monkeypatch.setattr(
+        "ciao.providers.opencode.secrets.token_hex",
+        lambda _size: "u2",
+    )
     # Keep the test fast: instant backoff + tiny poll cadence/window.
     async def _instant_sleep(_delay: float) -> None:
         return None
@@ -470,6 +476,118 @@ async def test_poll_reconciliation_anchors_on_the_live_user_message(
     provider._user_message_id = "u2"
 
     assert [part["id"] for part in provider._turn_assistant_parts(messages)] == ["new1"]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_prompt_transport_retries_the_same_v2_message_id(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+
+    class _AmbiguousPostClient(_RecoveryClient):
+        def __init__(self):
+            super().__init__(
+                [_FakeEventStream([]), _FakeEventStream([_IDLE])],
+                messages=[],
+            )
+            self.post_ids: list[str] = []
+
+        async def post(self, _path: str, json=None):
+            self.post_ids.append(str((json or {}).get("id") or ""))
+            if len(self.post_ids) == 1:
+                raise httpx.ReadError("response lost after admission")
+            return await super().post(_path, json=json)
+
+    client = _AmbiguousPostClient()
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    assert len(client.post_ids) == 2
+    assert client.post_ids[0] == client.post_ids[1] == "msg_u2"
+    assert events[-1].is_error is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_prompt_receipt_reconciles_by_the_stable_message_id(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+
+    class _InvalidReceiptClient(_RecoveryClient):
+        async def post(self, _path: str, json=None):
+            class _Invalid:
+                status_code = 200
+                text = ""
+
+                @staticmethod
+                def json():
+                    return {"data": {}}
+
+            return _Invalid()
+
+    messages = [
+        {"id": "msg_u2", "type": "user", "text": "hi"},
+        {"id": "idle_ok", "type": "idle", "outcome": "succeeded"},
+    ]
+    client = _InvalidReceiptClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=messages,
+    )
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    result = events[-1]
+    assert result.is_error is False
+    assert result.result == ""
+    assert provider._turn_recovered_via_poll is True
+
+
+@pytest.mark.asyncio
+async def test_unverifiable_prompt_admission_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+
+    class _MissingReceiptClient(_RecoveryClient):
+        async def post(self, _path: str, json=None):
+            class _Missing:
+                status_code = 200
+                text = ""
+
+                @staticmethod
+                def json():
+                    return {"data": {}}
+
+            return _Missing()
+
+    client = _MissingReceiptClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=[],
+    )
+    _wire(provider, monkeypatch, client)
+    monkeypatch.setattr("ciao.providers.opencode._OPENCODE_RECOVERY_WINDOW_S", 0.0)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    result = events[-1]
+    assert result.is_error is True
+    assert "recovery timed out" in result.result
 
 
 @pytest.mark.asyncio
