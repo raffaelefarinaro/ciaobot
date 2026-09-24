@@ -31,7 +31,7 @@ from ciao import schedules as schedule_support
 from ciao.config import CiaoConfig
 from ciao.error_log import clear_error_log, tail_error_log
 from ciao.models import BridgeMode, ImageAttachment
-from ciao.provider_service import supported_providers
+from ciao.provider_service import ProviderService, supported_providers
 from ciao.providers.opencode import OpencodeProvider, opencode_collab_tree_counts
 from ciao.schedules import ScheduleEntry, ScheduleStore
 from ciao.web import chat_service
@@ -49,6 +49,7 @@ class ScheduleDispatchHost(Protocol):
     _config: CiaoConfig
     _chats: dict[str, ChatInfo]
     _projects: dict[str, ProjectInfo]
+    _providers: dict[str, ProviderService]
     schedule_store: ScheduleStore | None
 
     @property
@@ -156,9 +157,22 @@ class ScheduleDispatcher:
             had_async = False
             running = 0
             while time.perf_counter() < deadline:
-                tree = await OpencodeProvider.read_collab_tree(
-                    self._host._config.workspace_root, chat.session_id
+                provider_service = self._host._providers.get(chat_id)
+                live_provider = (
+                    provider_service.provider
+                    if provider_service is not None
+                    else None
                 )
+                if (
+                    isinstance(live_provider, OpencodeProvider)
+                    and live_provider.has_live_server
+                    and live_provider.current_session_id == chat.session_id
+                ):
+                    tree = await live_provider.read_live_collab_tree()
+                else:
+                    tree = await OpencodeProvider.read_collab_tree(
+                        self._host._agent_root_for_chat(chat_id), chat.session_id
+                    )
                 running, had_now = opencode_collab_tree_counts(tree)
                 had_async = had_async or had_now
                 if running == 0:

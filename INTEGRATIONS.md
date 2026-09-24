@@ -27,23 +27,28 @@ manual step, and the installer says which one applies:
 Provider logins do not depend on the shim: the setup wizard hands out each
 provider's own login command (`claude auth login`, `opencode auth login`).
 
-## opencode
+## OpenCode
+
+Ciaobot requires **OpenCode 2.0.16 or newer in the 2.x line**. OpenCode 1 is
+not supported because its server API was replaced in V2. Settings reports older
+or unidentifiable installs with an explicit upgrade message, and chat startup
+fails closed rather than probing retired V1 routes.
 
 ```bash
 npm install -g opencode-ai@latest   # or: brew install sst/tap/opencode
 ciao auth opencode                  # opens `opencode auth login`
 ```
 
-opencode is bring-your-own-provider: it authenticates against whichever model
-backends you connect (`opencode auth login`), and Ciaobot lists the models of
-the connected ones. Ciaobot runs one `opencode serve` process per active chat
-on an ephemeral loopback port protected by a per-process
-`OPENCODE_SERVER_PASSWORD`, and drives it over HTTP plus the `/event` SSE
-stream. Readiness verifies the operations Ciaobot needs against the server's
-own OpenAPI document at `/doc`, so a logged-in but incompatible build is
-reported as needing an update rather than half-working.
+OpenCode is bring-your-own-provider: it authenticates against whichever model
+backends you connect, and Ciaobot lists enabled models from active providers
+via the V2 `/api/provider` and `/api/model` endpoints. Ciaobot runs one
+`opencode serve` process per active chat on an ephemeral loopback port
+protected by a per-process `OPENCODE_SERVER_PASSWORD`. Startup reads the server
+identity from `/api/info`, requires the tested 2.0.16+ API, and verifies the
+operations Ciaobot uses against `/openapi.json`. Chat output arrives on the
+`/api/event` SSE stream.
 
-Workspace assets need almost no projection: opencode discovers
+Workspace assets need almost no projection: OpenCode discovers
 `.claude/skills/`, `.agents/skills/`, and `AGENTS.md` natively, so
 `ciao sync-skills` only generates `.opencode/agents/` (canonical subagents),
 `.opencode/commands/` (canonical commands), and the `mcp` object in
@@ -51,48 +56,41 @@ Workspace assets need almost no projection: opencode discovers
 are pruned; `opencode.json` tracks Ciaobot-owned server names in
 `.opencode/.ciao-managed-mcps.json` because JSON has no comment syntax.
 
-opencode has no API for injecting a message into a running turn, so Ciaobot
-keeps a mid-turn message in the next-turn queue instead of interrupting. This
-is the same behavior every provider uses: Ciaobot buffers mid-turn messages and
-flushes them as a fresh turn when the active one finishes. Fork, abort, tool
-approvals, structured questions, and
-background subagents (real child sessions) are all native. When a chat is
+Ciaobot sends V2 text/file prompts with queued delivery, so a message produced
+during an active turn remains a later turn instead of steering the current one.
+V2 has no stable per-prompt system field, so compact core/runtime context rides
+in the text behind markers that transcript replay and session handovers strip.
+The provider normalizes V2's flat message records once at the HTTP boundary;
+transcript rendering and child-session reads continue to use a small internal
+part representation. Fork, interrupt, tool approvals, forms (rendered as
+AskUserQuestion cards), and background subagents are native. When a chat is
 archived, deleted, or reset, Ciaobot disconnects its server and then calls
-`DELETE /session/{id}` to reclaim the persisted opencode session; cleanup is
-fail-open if the provider is unavailable.
+`DELETE /api/session/{id}` to reclaim the persisted OpenCode session; cleanup
+is fail-open if the provider is unavailable.
 
-### Auto mode (automatic permission review)
+### Auto mode approvals
 
-opencode chats follow the chat's permission mode (the per-provider default
-from Settings → Models & providers, Auto unless changed). In Auto the session
-permission ruleset is `allow` for every tool except `bash` (every shell
-command, including `ciao …` control-plane calls), which is routed to `ask`;
-Manual routes every tool to `ask` and Bypass allows everything. In every mode,
-including Bypass, credential-path denies (`**/.env`, `**/.runtime/**`,
-`**/secrets/**`, plus the resolved `CIAO_RUNTIME_ROOT`) are appended last for
-opencode's native file tools only: `read`, `edit`, `write`, `patch`, `glob`,
-`grep` and `list`. They do not cover `bash`, because a shell command cannot be
-path-scoped by a glob. In Manual and Auto a shell command such as `cat .env`
-still raises an approval card; in Bypass it runs without one, so Bypass does
-not protect those files from shell access. Each `ask` surfaces an
-approval card in the chat that the operator approves or denies.
+OpenCode chats follow the chat's permission mode (the per-provider default
+from Settings → Models & providers, Auto unless changed). In Auto the V2
+session permission ruleset allows routine tools while routing every `shell`
+action to `ask`; Manual routes every tool to `ask` and Bypass suppresses
+routine cards. V2 `glob` and `grep` resources are search patterns/regexes
+rather than file paths, so those search actions require an explicit approval
+card in every mode (including `bypass`) to prevent silent enumeration of
+credential-bearing paths. In every mode, including Bypass, credential-path
+denies (`**/.env`, `**/.runtime/**`, `**/secrets/**`, plus the resolved
+`CIAO_RUNTIME_ROOT`) are appended last for OpenCode's native file tools only:
+`read`, `edit`, `write`, `patch`, `glob`, `grep` and `list`. They do not cover
+`shell`, because a shell command cannot be path-scoped by a glob. In Manual
+and Auto a shell command such as `cat .env` still raises an approval card; in
+Bypass it runs without one, so Bypass does not protect those files from shell
+access. Each `ask` surfaces an approval card in the chat that the operator
+approves or denies.
 
-To get a Claude-Code/Codex-style **automatic** approval classifier instead of
-manual cards, install the [`opencode-auto-permissions`](https://github.com/hueyexe/opencode-auto-permissions)
-plugin into opencode's global config:
-
-```bash
-opencode plugin -g opencode-auto-permissions
-```
-
-The plugin answers each `permission.asked` with a reviewer model (your
-session's model by default) that auto-approves routine work and denies
-destructive or out-of-scope calls, so `rm`/`sudo`/`git push`/shell pipelines
-are reviewed rather than prompting you. It is designed for opencode's Auto
-mode; keep chats in Auto and opt into the plugin deliberately. See the
-plugin's README and opencode's
-[permissions docs](https://opencode.ai/docs/permissions/#auto-mode) for
-configuration.
+The `opencode-auto-permissions` plugin was written for OpenCode 1 and does not
+load under V2, so it cannot provide automatic review here. Use a
+V2-compatible plugin only after verifying that it preserves Ciaobot's
+server-side permission floor.
 
 ### Live eval provider access
 
@@ -388,7 +386,9 @@ Apple-native voice and Apple Intelligence are unavailable on Linux hosts.
 - `CLAUDE_DEFAULT_MODEL_PERSONAL` / `CLAUDE_DEFAULT_MODEL_WORK` / `CIAO_DISALLOWED_TOOLS_PERSONAL` / `CIAO_DISALLOWED_TOOLS_WORK`: **removed 2026-08-20 and no longer read.** They configured the two hardcoded `personal`/`work` entries of the bootstrap registry, which now derives its workspaces from the vault instead, so they could not describe a workspace named anything else. Put `disallowed_tools` on the workspace in `.runtime/workspaces.json`, which works for any name; the default model is now a per-provider operator setting (Settings → Models), not a per-workspace one. An install that still sets one gets a `legacy-env-ignored` operator tile, because a setting that is silently ignored reads as a setting that is in effect.
 - `CIAO_MEMORY_DIR`: legacy override for the old `~/.ciao/memory.md` + `user.md` directory during the one-release migration window. Default `~/.ciao`. Not used for new writes; safe to unset after migration.
 - `CIAO_GITHUB_TOKEN` (also honors `GITHUB_TOKEN` / `GH_TOKEN`): personal access token used to authenticate on-demand GitHub REST API calls when fetching the changelog for an available update. Optional; when set it raises GitHub's API rate limit from 60 to 5000 requests/hour. The recurring update check does not use the API at all (it follows the public `releases/latest` redirect), so a token is not needed just to check for updates. No scopes are required (public read only).
-- **Image-capability pre-flight**: before dispatch, a turn that carries images checks whether the selected model can see them. Anthropic's and OpenAI's current models all accept images, so only opencode is consulted — it is bring-your-own-provider, and its catalog states each model's `capabilities.input.image`. An unstated answer counts as capable, so a cold catalog or an older opencode build never blocks a turn. A non-vision model pauses the turn on a `model_capability_question` (30s window): the PWA offers the models opencode states accept images, an "Open picker" escape hatch, and Cancel. Switch re-dispatches on the picked model; cancel/timeout close the turn with a `status` bubble; the images are never silently dropped. Text-only and unattended (loop/schedule) turns skip the question. Implemented in `ciao/providers/opencode.py::model_accepts_images` and the pre-flight in `ciao/web/project_chats.py::ProjectChatManager.stream_chat`.
+- **Image-capability pre-flight**: before dispatch, a turn that carries images checks whether the selected model can see them. Anthropic's and OpenAI's current models all accept images, so only OpenCode is consulted — it is bring-your-own-provider, and each V2 catalog entry lists supported modalities in `capabilities.input`. An unstated answer counts as capable, so a cold catalog never blocks a turn. A non-vision model pauses the turn on a `model_capability_question` (30s window): the PWA offers the models OpenCode states accept images, an "Open picker" escape hatch, and Cancel. Switch re-dispatches on the picked model; cancel/timeout close the turn with a `status` bubble; the images are never silently dropped. Text-only and unattended (loop/schedule) turns skip the question. Implemented in `ciao/providers/opencode.py::model_accepts_images` and the pre-flight in `ciao/web/project_chats.py::ProjectChatManager.stream_chat`.
+- `CIAO_PUSH_CONTACT`: push notification contact string. Optional, no default; empty disables Web Push delivery. Used for VAPID subject.
+- `CIAO_PUSH_DELAY_SECONDS`: delay before sending push notifications after a completed turn (default `30`). Rapid replies to the same chat cancel the previous timer and start a new one (coalesce into a single push). Permission requests and model questions push immediately (no delay). Unanswered permission requests re-fire every 30 seconds, up to 3 times, until the user approves/denies or the turn ends. Marking a chat read sends a separate clear control to all registered Web Push subscriptions and the macOS notification log.
 - `CIAO_PYTHON`: path to a specific Python binary for `scripts/dev.sh` (e.g. when Homebrew breaks `ensurepip`).
 - `CIAO_PATH`: baked into the launchd plist's `EnvironmentVariables` at setup time so developer-mode subprocesses (npm, node, git) are found despite launchd's minimal default PATH. Not an operator env var; it's a `com.ciao.server.plist.tmpl` placeholder rendered from the user's shell PATH.
 - `CIAO_NATIVE_SIDECAR`: absolute path to the `ciaobot-native` binary that backs both on-device voice engines. Normally unset — the engine finds it inside the installed `Ciaobot.app`. Point it at `desktop/src-tauri/binaries/ciaobot-native-aarch64-apple-darwin` to test a locally built sidecar (`npm run build:native` in `desktop/`) without installing the app.

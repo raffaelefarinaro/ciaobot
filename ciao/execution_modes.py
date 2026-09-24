@@ -102,16 +102,31 @@ def harness_skill_overrides() -> dict[str, str]:
 # (``mcp_server._workspace_env_path``), so that is what is denied.
 #
 # What this does NOT cover, stated plainly. First, the shell: Claude's
-# ``Bash(cmd:*)`` rules are prefix matches on the command line and opencode's
-# ``bash`` pattern likewise matches the command, not a path — no glob can
-# path-scope a shell. Closing that needs a sandbox, not a denylist. Second,
+# ``Bash(cmd:*)`` and OpenCode 2's ``shell`` resources match the command, not a
+# path, so no glob can path-scope a shell. Closing that needs a sandbox, not a
+# denylist. Second,
 # ``**/.runtime/**`` is a *name*, while the real runtime root is operator-
 # configurable through ``CIAO_RUNTIME_ROOT``. Callers that can resolve it pass
 # it in (see the ``runtime_root`` argument below); the static pattern alone
 # only covers the default layout.
 CREDENTIAL_DENY_PATTERNS: tuple[str, ...] = (
+    # V2 read/edit resources are location-relative; keep root-relative forms
+    # alongside recursive forms because its matcher does not treat ** as a
+    # match for the root itself.
+    ".env",
+    "./.env",
     "**/.env",
+    ".runtime",
+    "./.runtime",
+    "**/.runtime",
+    ".runtime/**",
+    "./.runtime/**",
     "**/.runtime/**",
+    "secrets",
+    "./secrets",
+    "**/secrets",
+    "secrets/**",
+    "./secrets/**",
     "**/secrets/**",
 )
 
@@ -144,15 +159,15 @@ CLAUDE_CREDENTIAL_DENY_TOOLS: tuple[str, ...] = (
     "Grep",
 )
 
-# The same tools under opencode's lowercase permission names.
+# The same coverage under OpenCode 2's permission action names. V2
+# consolidated write/patch into edit. Its glob/grep resources are search
+# patterns rather than file paths, so these rules are defense-in-depth for
+# targeted searches; they are not a shell or arbitrary-regex sandbox.
 OPENCODE_CREDENTIAL_DENY_PERMISSIONS: tuple[str, ...] = (
     "read",
     "edit",
-    "write",
-    "patch",
     "glob",
     "grep",
-    "list",
 )
 
 
@@ -185,7 +200,7 @@ def opencode_credential_deny_rules(runtime_root: object = None) -> list[dict[str
     """
     patterns = (*CREDENTIAL_DENY_PATTERNS, *_runtime_root_patterns(runtime_root))
     return [
-        {"permission": permission, "pattern": pattern, "action": "deny"}
-        for permission in OPENCODE_CREDENTIAL_DENY_PERMISSIONS
-        for pattern in patterns
+        {"action": action, "resource": resource, "effect": "deny"}
+        for action in OPENCODE_CREDENTIAL_DENY_PERMISSIONS
+        for resource in patterns
     ]

@@ -446,6 +446,15 @@ exposes `memory_status`/`memory_update` without creating a second memory store.
 
 Edit canonical sources, not the generated `.claude/` or `.agents/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat); regenerate the `gws-*` skills through `ciao/release.py` rather than calling `gws generate-skills` by hand.
 
+OpenCode integration tests pin the V2 server contract: `/api/info` must report
+2.0.16+ before `/openapi.json` is checked, V2 message/session pagination must
+follow cursors, SSE frames are read from each event's `data` object, and child
+lifecycle comes from `/api/session/active` rather than the previous execution's
+`Session.Info.outcome`. When changing `ciao/providers/opencode.py`, replay the
+sanitized V2 fixtures and run a tiny real turn against the installed OpenCode
+2.x binary; route renames alone are insufficient because V2 also changed
+permissions, forms, prompts, and projected message shapes.
+
 ## DAG-style schedules (maintainers)
 
 Some packaged schedules are multi-step workflows (load state, gate, model call, write). For these, use `ciao.dag` rather than a long `async def`:

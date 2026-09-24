@@ -46,7 +46,7 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
 
 # opencode is bring-your-own-provider, so it is the only provider whose catalog
 # can contain a model that cannot accept an image. `images` mirrors what
-# opencode reports in `capabilities.input.image`; an absent key means "opencode
+# opencode reports in the V2 `capabilities.input` modality list; an absent key means "opencode
 # did not say", which must read as capable rather than as a refusal.
 _TEXT_ONLY = "test/text-only"
 _CATALOG = [

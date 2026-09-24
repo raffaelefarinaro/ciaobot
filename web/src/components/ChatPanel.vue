@@ -704,14 +704,11 @@
       <div class="question-card-header">
         <AppIcon class="question-card-icon" name="question" :size="18" />
         <span class="question-card-title">The model has a question</span>
-        <button class="question-card-dismiss" @click="dismissQuestions" title="Dismiss">&times;</button>
+        <button class="question-card-dismiss" :disabled="questionSubmitting" @click="dismissQuestions" title="Dismiss">&times;</button>
       </div>
-      <div
-        v-for="(q, qi) in activeQuestions"
-        :key="qi"
-        class="question-block"
-      >
-        <div class="question-block-header">
+      <template v-for="(q, qi) in activeQuestions" :key="qi">
+        <div v-if="isQuestionActive(qi, q)" class="question-block">
+          <div class="question-block-header">
           <span v-if="q.header" class="question-block-chip">{{ q.header }}</span>
           <span v-if="q.multiSelect" class="question-block-multi">multi-select</span>
         </div>
@@ -721,12 +718,13 @@
         <div class="question-options">
           <button
             v-for="(opt, oi) in q.options"
-            :key="opt.label"
+            :key="`${opt.value || opt.label}-${oi}`"
             type="button"
             class="question-option"
-            :class="{ selected: isQuestionOptionSelected(qi, opt.label) }"
+            :class="{ selected: isQuestionOptionSelected(qi, opt.value || opt.label) }"
             :aria-keyshortcuts="questionOptionShortcut(qi, oi) || undefined"
-            @click="toggleQuestionOption(qi, opt.label, q.multiSelect)"
+            :disabled="questionSubmitting"
+            @click="toggleQuestionOption(qi, opt.value || opt.label, q.multiSelect)"
           >
             <span class="question-option-main">
               <!-- Keyboard hint, not part of the label: only rendered where the
@@ -744,17 +742,22 @@
           </button>
         </div>
         <input
-          v-if="q.allowOther"
+          v-if="q.allowOther && isQuestionActive(qi, q)"
           :type="q.isSecret ? 'password' : 'text'"
           class="question-other"
           placeholder="Other (free text)"
+          :disabled="questionSubmitting"
           :value="questionAnswers[qi]?.other || ''"
-          @input="ensureAnswer(qi).other = ($event.target as HTMLInputElement).value"
+          @input="setQuestionOther(qi, ($event.target as HTMLInputElement).value)"
         />
-      </div>
+        </div>
+      </template>
+      <div v-if="questionError" class="question-card-error">{{ questionError }}</div>
       <div class="question-card-actions">
-        <button class="btn-sm" type="button" @click="dismissQuestions">Cancel</button>
-        <button class="btn-sm primary" type="button" :disabled="!allQuestionsAnswered" @click="submitQuestionAnswers">Send answer</button>
+        <button class="btn-sm" type="button" :disabled="questionSubmitting" @click="dismissQuestions">Cancel</button>
+        <button class="btn-sm primary" type="button" :disabled="questionSubmitting || !allQuestionsAnswered" @click="submitQuestionAnswers">
+          {{ questionSubmitting ? 'Sending…' : 'Send answer' }}
+        </button>
       </div>
     </div>
 
@@ -829,14 +832,17 @@
           <button
             class="btn-deny"
             :aria-keyshortcuts="permissionShortcut('deny') || undefined"
+             :disabled="permissionSubmitting"
             @click="store.respondPermission(chat.chat_id, p.request_id, false, 'User denied')"
           ><span v-if="permissionShortcut('deny')" class="permission-key" aria-hidden="true">{{ permissionShortcut('deny') }}</span>Deny</button>
           <button
             class="btn-approve"
             :aria-keyshortcuts="permissionShortcut('approve') || undefined"
+             :disabled="permissionSubmitting"
             @click="store.respondPermission(chat.chat_id, p.request_id, true)"
           ><span v-if="permissionShortcut('approve')" class="permission-key" aria-hidden="true">{{ permissionShortcut('approve') }}</span>Approve</button>
         </div>
+        <div v-if="permissionError" class="question-card-error">{{ permissionError }}</div>
       </div>
     </div>
 
@@ -1174,6 +1180,7 @@ import {
   escapeCssAttrValue,
   highlightCommentText,
 } from '../lib/commentHighlight'
+import { questionIsActive, type ActiveQuestion } from '../lib/chatQuestions'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import {
   useMentionPicker,
@@ -2135,6 +2142,12 @@ const pendingApprovals = computed(() => {
   if (!id) return []
   return store.pendingPermissions[id] || []
 })
+const permissionSubmission = computed(() => {
+  const id = store.activeChatId
+  return id ? store.permissionSubmissions[id] : undefined
+})
+const permissionSubmitting = computed(() => permissionSubmission.value?.pending === true)
+const permissionError = computed(() => permissionSubmission.value?.error || '')
 
 // The backend's `message` field is almost always the templated
 // "Approve use of {tool_name}?", which just repeats the tool-name badge shown
@@ -2192,6 +2205,33 @@ const activeQuestions = computed(() => {
   return store.activeQuestions[id] || []
 })
 
+const questionSubmission = computed(() => {
+  const id = store.activeChatId
+  return id ? store.questionSubmissions[id] : undefined
+})
+const questionSubmitting = computed(() => questionSubmission.value?.pending === true)
+const questionError = computed(() => questionSubmission.value?.error || '')
+
+function questionAnswerMap(limit = activeQuestions.value.length): Record<string, string[]> {
+  const out: Record<string, string[]> = {}
+  for (let i = 0; i < Math.min(limit, activeQuestions.value.length); i++) {
+    const q = activeQuestions.value[i]
+    // Conditions are ordered: only answers from fields that are still active
+    // may control later fields. Keeping an old answer from a now-hidden field
+    // would leave chained dependent questions visible and submit stale data.
+    if (!questionIsActive(q, out, activeQuestions.value)) continue
+    const answer = questionAnswers.value[i]
+    const values = answer ? [...answer.selected] : []
+    if (answer?.other?.trim()) values.push(answer.other.trim())
+    if (values.length) out[q.id] = values
+  }
+  return out
+}
+
+function isQuestionActive(index: number, question: ActiveQuestion): boolean {
+  return questionIsActive(question, questionAnswerMap(index), activeQuestions.value)
+}
+
 // The card is only on screen when it wins the dock, or when the dock strip is
 // expanded behind a permission. Named because the keyboard shortcuts below key
 // off the same condition as the template: a hidden card must not eat digits.
@@ -2225,8 +2265,18 @@ function toggleQuestionOption(i: number, label: string, multi: boolean) {
   } else {
     a.selected.clear()
     a.selected.add(label)
+    // A scalar V2 field cannot submit both a predefined option and Other.
+    a.other = ''
   }
   // Force reactivity since Set mutations aren't tracked.
+  questionAnswers.value = { ...questionAnswers.value, [i]: { ...a } }
+}
+
+function setQuestionOther(i: number, value: string) {
+  const a = ensureAnswer(i)
+  a.other = value
+  const question = activeQuestions.value[i]
+  if (question && !question.multiSelect) a.selected.clear()
   questionAnswers.value = { ...questionAnswers.value, [i]: { ...a } }
 }
 
@@ -2304,7 +2354,7 @@ function handleQuestionShortcut(e: KeyboardEvent): boolean {
   if (!/^[1-9]$/.test(e.key)) return false
   const opt = q.options[Number(e.key) - 1]
   if (!opt) return false
-  toggleQuestionOption(0, opt.label, q.multiSelect)
+  toggleQuestionOption(0, opt.value || opt.label, q.multiSelect)
   return true
 }
 
@@ -2316,13 +2366,13 @@ function handleQuestionShortcut(e: KeyboardEvent): boolean {
 const allQuestionsAnswered = computed(() => {
   const qs = activeQuestions.value
   if (!qs.length) return false
-  for (let i = 0; i < qs.length; i++) {
-    const a = questionAnswers.value[i]
-    const picked = a && a.selected.size > 0
-    const other = !!(a && a.other && a.other.trim())
-    if (!picked && !other) return false
-  }
-  return true
+  const answers = questionAnswerMap()
+  const activeRequired = qs.filter(q => questionIsActive(q, answers, qs))
+    .filter(q => q.required !== false)
+  return activeRequired.every((q) => {
+    const values = answers[q.id] || []
+    return values.length > 0
+  })
 })
 
 // Prefer the model's header/question; fall back to "Question N" so an empty
@@ -2336,7 +2386,7 @@ function questionPromptLabel(
 }
 
 function submitQuestionAnswers() {
-  if (!allQuestionsAnswered.value) return
+  if (questionSubmitting.value || !allQuestionsAnswered.value) return
   if (!chat.value || chat.value.archived) return
   const qs = activeQuestions.value
   if (!qs.length) return
@@ -2344,20 +2394,20 @@ function submitQuestionAnswers() {
   const nativeAnswers: Record<string, string[]> = {}
   for (let i = 0; i < qs.length; i++) {
     const q = qs[i]
+    if (!isQuestionActive(i, q)) continue
     const a = questionAnswers.value[i]
     const picked = a ? Array.from(a.selected) : []
     const other = (a?.other || '').trim()
     const parts: string[] = []
     if (picked.length) parts.push(...picked)
     if (other) parts.push(other)
+    if (parts.length) nativeAnswers[q.id] = parts
     const answer = parts.length ? parts.join(', ') : '(no answer)'
-    nativeAnswers[q.id] = parts
     lines.push(`**${questionPromptLabel(q, i)}**: ${answer}`)
   }
   const requestId = qs[0]?.requestId || ''
   if (requestId) {
-    store.respondQuestion(chat.value.chat_id, requestId, nativeAnswers)
-    questionAnswers.value = {}
+    store.respondQuestion(chat.value.chat_id, requestId, nativeAnswers, 'reply')
     return
   }
   const text = lines.join('\n')
@@ -2366,19 +2416,19 @@ function submitQuestionAnswers() {
 }
 
 function dismissQuestions() {
+  if (questionSubmitting.value) return
   const id = store.activeChatId
   if (!id) return
   const requestId = activeQuestions.value[0]?.requestId || ''
   if (requestId) {
-    // respondQuestion records the resolution itself before clearing.
-    store.respondQuestion(id, requestId, {})
+    store.respondQuestion(id, requestId, {}, 'cancel')
   } else {
     // Claude picker has no round-trip; remember it as resolved so a stale
     // server snapshot can't rebuild it after dismissal.
     store.markResolvedQuestion(id)
+    delete store.activeQuestions[id]
+    questionAnswers.value = {}
   }
-  delete store.activeQuestions[id]
-  questionAnswers.value = {}
 }
 
 // Image-capability question. The server paused before dispatch because the
@@ -6241,6 +6291,17 @@ details[open] > .activity-summary::before {
 }
 .question-other:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
 .question-card-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.question-card-error {
+  color: var(--error);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.question-option:disabled,
+.question-other:disabled,
+.question-card-dismiss:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 
 /* Pending Auto-mode permission prompts. Sticks above the input until the
    user answers. Chrome uses --warning (this is a "waiting on you" state,

@@ -626,28 +626,22 @@ async def test_claude_cli_surface_does_not_pre_approve_ciao_commands(
     assert not captured["options"].mcp_servers  # no MCP server is attached
 
 
-def test_opencode_cli_auto_mode_keeps_bash_ask_for_ciao_commands() -> None:
-    """Auto mode emits only the generic `bash: ask` — no `ciao …` allow row —
-    so every shell command, including `ciao …`, keeps a card."""
+def test_opencode_cli_auto_mode_keeps_shell_ask_for_ciao_commands() -> None:
+    """Auto mode emits one generic V2 `shell: ask` rule."""
     from ciao.providers.opencode import mode_settings
 
     _agent, rules = mode_settings("auto")
-    bash = [rule for rule in rules if rule["permission"] == "bash"]
-    assert bash[0] == {"permission": "bash", "pattern": "*", "action": "ask"}
-    assert not any(rule.get("pattern", "").startswith("ciao ") for rule in bash)
-    # The credential denies still come last, after everything.
-    assert rules[-1]["action"] == "deny"
+    shell = [rule for rule in rules if rule["action"] == "shell"]
+    assert shell == [{"action": "shell", "resource": "*", "effect": "ask"}]
+    assert rules[-1]["effect"] == "deny"
 
 
 @pytest.mark.parametrize("mode", ["plan", "normal", "bypass"])
 def test_opencode_cli_rules_are_auto_mode_only(mode: str) -> None:
-    """`plan`/`normal` ask on purpose; `bypass` already allows everything, and a
-    trailing `ask` row would narrow it under last-match-wins."""
     from ciao.providers.opencode import mode_settings
 
     rules = mode_settings(mode)[1]
-    bash = [rule for rule in rules if rule["permission"] == "bash"]
-    assert not any(rule.get("pattern", "").startswith("ciao ") for rule in bash)
+    assert not any(rule["resource"].startswith("ciao ") for rule in rules)
 
 
 # ── release-gate fixes (v0.18.0) ───────────────────────────────────────────

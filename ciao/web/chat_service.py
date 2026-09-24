@@ -291,7 +291,7 @@ def _is_retryable_provider_startup_error(text: str) -> bool:
         "database is locked" in low or "database is busy" in low
     ):
         return True
-    # A server that stays alive but never answers /global/health is the same
+    # A server that stays alive but never answers /api/info is the same
     # transient startup wedge (shared SQLite contention with other opencode
     # processes); _ensure_server already retries it internally, so a chat
     # turn that still lands here should get the same bounded auto-retry as

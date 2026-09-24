@@ -1,10 +1,9 @@
 """Provider-level stop responsiveness for opencode.
 
-``OpencodeActiveHandle.stop()`` flags the turn and aborts the session. The
-streaming pump must then end the turn on the next event (or immediately skip
-reconnects / the poll backstop) instead of waiting for a ``session.idle`` that
-a half-healthy SSE subscription may never deliver — that wait is what made
-the Stop button feel dead with opencode.
+``OpencodeActiveHandle.stop()`` flags the turn and interrupts the session. The
+streaming pump then ends on the next event and skips reconnects / the poll
+backstop instead of waiting for a terminal execution event that a half-healthy
+SSE subscription may never deliver.
 """
 
 from __future__ import annotations
@@ -72,7 +71,7 @@ async def test_stop_flag_ends_the_pump_without_waiting_for_idle(
     provider = _provider(tmp_path)
     gate = asyncio.Event()
     # Attempt 1: delta arrives, then the SSE goes quiet (gated) with no
-    # session.idle in sight.
+    # terminal execution event in sight.
     client = _RecoveryClient(
         [_GatedStream([_DELTA, _PART_FULL], gate)],
         messages=[],
@@ -83,7 +82,7 @@ async def test_stop_flag_ends_the_pump_without_waiting_for_idle(
         _collect(provider.run_streaming(_REQUEST, lambda _h: None))
     )
     # Wait until the delta was pumped before stopping.
-    while not provider._answer_parts.get("p1") and not task.done():
+    while not provider._answer_parts.get("msg_a:text:0") and not task.done():
         await asyncio.sleep(0.01)
 
     handle = OpencodeActiveHandle(provider, "s1")
@@ -97,7 +96,7 @@ async def test_stop_flag_ends_the_pump_without_waiting_for_idle(
 
     # No reconnect, no poll backstop: the flag short-circuited recovery.
     assert client.stream_calls == 1
-    assert "/session/s1/message" not in client.get_calls
+    assert "/api/session/s1/message" not in client.get_calls
     result = events[-1]
     assert result.type == "result"
     assert not result.is_error

@@ -145,19 +145,28 @@ async def ws_chat(websocket: WebSocket) -> None:
 
             if msg_type == "permission_response":
                 # Approve/deny reply to a prior ``permission_request``. The
-                # server silently drops stale request ids (chat has no
-                # provider yet, or the turn already ended); the UI is
-                # expected to clear the prompt optimistically on click.
+                # provider acknowledgement is sent back as a result event; the
+                # client keeps the card retryable until that acknowledgement.
                 request_id = str(msg.get("request_id", ""))
                 approved = bool(msg.get("approved", False))
                 reason = str(msg.get("reason", ""))
                 if request_id:
-                    pcm.respond_permission(
+                    result = await pcm.respond_permission(
                         chat_id,
                         request_id=request_id,
                         approved=approved,
                         reason=reason,
                     )
+                    try:
+                        await websocket.send_json({
+                            "type": "permission_response_result",
+                            "request_id": request_id,
+                            "ok": result.ok,
+                            "error": result.error,
+                            "retryable": result.retryable,
+                        })
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
                 continue
 
             if msg_type == "question_response":
@@ -173,11 +182,28 @@ async def ws_chat(websocket: WebSocket) -> None:
                         elif values is not None:
                             answers[str(question_id)] = [str(values)]
                 if request_id:
-                    pcm.respond_question(
+                    action = str(msg.get("action") or "").strip().lower()
+                    if action not in {"reply", "cancel"}:
+                        # Accept pre-transaction clients during a rolling deploy:
+                        # their empty answer map meant Cancel.
+                        action = "cancel" if not answers else "reply"
+                    result = await pcm.respond_question(
                         chat_id,
                         request_id=request_id,
                         answers=answers,
+                        action=action,
                     )
+                    try:
+                        await websocket.send_json({
+                            "type": "question_response_result",
+                            "request_id": request_id,
+                            "ok": result.ok,
+                            "state": "cancelled" if action == "cancel" else "answered",
+                            "error": result.error,
+                            "retryable": result.retryable,
+                        })
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
                 continue
 
             if msg_type == "capability_response":

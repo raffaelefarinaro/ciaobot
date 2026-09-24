@@ -706,7 +706,27 @@ class ChatStream:
                 and ev.get("request_id") == request_id
             )
         ]
-        return len(self._events) < before
+        removed = len(self._events) < before
+        self.publish({"type": "permission_resolved", "request_id": request_id})
+        return removed
+
+    def resolve_question(self, request_id: str) -> bool:
+        """Remove a resolved native question from replay and notify clients."""
+        if not request_id:
+            return False
+        before = len(self._events)
+        self._events = [
+            ev
+            for ev in self._events
+            if not (
+                ev.get("type") == "tool_use"
+                and ev.get("tool_name") == "AskUserQuestion"
+                and ev.get("request_id") == request_id
+            )
+        ]
+        removed = len(self._events) < before
+        self.publish({"type": "question_resolved", "request_id": request_id})
+        return removed
 
     def open_capability(self, request_id: str) -> bool:
         """Register an open capability question for ``request_id``.

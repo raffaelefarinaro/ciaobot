@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 import {
   parseCapabilityQuestion,
   parseQuestions,
+  questionIsActive,
   questionsSignature,
   type ActiveQuestion,
 } from './chatQuestions'
@@ -34,8 +35,8 @@ describe('parseQuestions', () => {
       requestId: 'req-7',
     })
     expect(qs[0].options).toEqual([
-      { label: 'develop', description: 'default' },
-      { label: 'main', description: '' },
+      { label: 'develop', value: 'develop', description: 'default' },
+      { label: 'main', value: 'main', description: '' },
     ])
   })
 
@@ -46,7 +47,7 @@ describe('parseQuestions', () => {
     expect(qs[0].question).toBe('Pick some')
     expect(qs[0].header).toBe('Files')
     expect(qs[0].multiSelect).toBe(true)
-    expect(qs[0].options).toEqual([{ label: 'a.md', description: '' }])
+    expect(qs[0].options).toEqual([{ label: 'a.md', value: 'a.md', description: '' }])
   })
 
   test('falls back to the request id carried in the payload', () => {
@@ -71,6 +72,23 @@ describe('parseQuestions', () => {
       questions: [{ question: 'q', isOther: false }],
     }))
     expect(noOptions[0].allowOther).toBe(true)
+  })
+})
+
+describe('questionIsActive', () => {
+  test('uses the controlling multiselect field for when conditions', () => {
+    const controller: ActiveQuestion = {
+      id: 'controller', question: 'Pick', header: 'Pick', multiSelect: true,
+      allowOther: false, isSecret: false, requestId: '', type: 'multiselect', options: [],
+    }
+    const dependent: ActiveQuestion = {
+      id: 'dependent', question: 'Follow-up', header: '', multiSelect: false,
+      allowOther: false, isSecret: false, requestId: '', type: 'string', options: [],
+      when: [{ key: 'controller', op: 'eq', value: 'yes' }],
+    }
+
+    expect(questionIsActive(dependent, { controller: ['yes', 'also'] }, [controller, dependent])).toBe(true)
+    expect(questionIsActive(dependent, { controller: ['no', 'also'] }, [controller, dependent])).toBe(false)
   })
 })
 

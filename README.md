@@ -25,7 +25,7 @@ During setup, choose the folder where Ciaobot should work. It can be a new folde
 Ciaobot does not replace the agent CLI or ask you to create a second model account. It runs the CLI you have already authenticated:
 
 - **Anthropic / Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`; it lands in `~/.local/bin`, so add that to your `PATH` if `claude` is not found afterwards), sign in with `claude auth login`, then choose **Claude Code** in Ciaobot. Ciaobot uses that official Claude Code session, adds the relevant workspace and project context, and handles chat archiving, memory extraction, and proposal review around it.
-- **OpenAI, OpenRouter, Ollama, and other providers:** install [opencode](https://opencode.ai/docs/), then configure and authenticate the provider in opencode. Choose **opencode** in Ciaobot; its connected models appear in Ciaobot's model picker. This also includes local models running on your own machine.
+- **OpenAI, OpenRouter, Ollama, and other providers:** install [OpenCode 2.0.16+](https://opencode.ai/v2/docs/), then configure and authenticate the provider in OpenCode. Choose **OpenCode** in Ciaobot; its connected models appear in Ciaobot's model picker. This also includes local models running on your own machine.
 
 Ciaobot keeps provider credentials in the provider's own CLI. It supplies the interface, workspace context, files, projects, scheduling, and second-brain memory around the agent. See [INTEGRATIONS.md](INTEGRATIONS.md) for current installation and authentication commands.
 

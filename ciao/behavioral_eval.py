@@ -2390,34 +2390,24 @@ def _claude_allowed_tools() -> set[str]:
 
 
 def _opencode_bash_rules() -> set[str]:
-    """``ciao …`` bash commands whose *effective* action in opencode auto is allow.
-
-    OpenCode resolves permissions last-match-wins over the session ruleset
-    (``mode_settings``), where auto starts with a ``("*", "allow")`` wildcard and
-    a later ``("bash", "ask")`` row. Simulate that resolution for a few
-    representative ``ciao`` commands so a missing or misordered ``bash: ask``
-    row — which would let every Bash command, including ``ciao …``, through the
-    wildcard — is caught rather than filtered away as "no explicit ciao allow".
-    """
+    """``ciao …`` shell commands effectively allowed by OpenCode auto mode."""
     from ciao.providers.opencode import mode_settings
 
     try:
         _agent, rules = mode_settings("auto")  # type: ignore[arg-type]
     except Exception:  # noqa: BLE001
         return set()
-    bash_rules = [r for r in rules if r.get("permission") == "bash"]
+    shell_rules = [r for r in rules if r.get("action") == "shell"]
     samples = {"ciao memory status", "ciao chat delete", "ciao run start"}
 
     def effective(cmd: str) -> str | None:
-        for rule in reversed(bash_rules):
-            pattern = str(rule.get("pattern") or "")
-            if _glob_matches(pattern, cmd):
-                return str(rule.get("action") or "")
+        for rule in reversed(shell_rules):
+            resource = str(rule.get("resource") or "")
+            if _glob_matches(resource, cmd):
+                return str(rule.get("effect") or "")
         return None
 
     allowed = {cmd for cmd in samples if effective(cmd) == "allow"}
-    # A bash command that matches no bash rule falls through to the wildcard
-    # `*` allow in auto — that is an allow too.
     for cmd in samples:
         if effective(cmd) is None:
             allowed.add(cmd)
