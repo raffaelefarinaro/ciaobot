@@ -42,6 +42,21 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
+def test_a_native_question_blocks_a_new_ordinary_turn(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+    chat.pending_question = json.dumps({
+        "request_id": "form-1",
+        "questions": [{"id": "choice", "question": "Continue?"}],
+    })
+
+    with pytest.raises(ValueError, match="Answer the open question"):
+        pcm.start_stream(chat.chat_id, "send around the form")
+
+    assert json.loads(chat.pending_question)["request_id"] == "form-1"
+
+
 @pytest.mark.asyncio
 async def test_respond_permission_forwards_to_provider_gate(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
@@ -64,16 +79,17 @@ async def test_respond_permission_forwards_to_provider_gate(tmp_path: Path) -> N
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
-    ok = pcm.respond_permission(
+    ok = await pcm.respond_permission(
         chat.chat_id, request_id="tool-1", approved=True, reason=""
     )
-    assert ok is True
+    assert ok.ok is True
 
     result = await pending
     assert isinstance(result, PermissionResultAllow)
 
 
-def test_respond_permission_clears_matching_pending_permission(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_respond_permission_keeps_matching_pending_without_ack(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("General", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="t")
@@ -81,12 +97,14 @@ def test_respond_permission_clears_matching_pending_permission(tmp_path: Path) -
         "request_id": "req-1", "tool_name": "Bash", "message": "Approve use of Bash?", "tool_input": "",
     })
 
-    pcm.respond_permission(chat.chat_id, request_id="req-1", approved=True, reason="")
+    await pcm.respond_permission(chat.chat_id, request_id="req-1", approved=True, reason="")
 
-    assert pcm._chats[chat.chat_id].pending_permission == ""
+    # No provider acknowledgement means the persisted card stays retryable.
+    assert pcm._chats[chat.chat_id].pending_permission != ""
 
 
-def test_respond_permission_ignores_stale_reply_for_a_superseded_request(
+@pytest.mark.asyncio
+async def test_respond_permission_ignores_stale_reply_for_a_superseded_request(
     tmp_path: Path,
 ) -> None:
     """A late reply for an already-superseded prompt must not wipe a newer one."""
@@ -97,17 +115,40 @@ def test_respond_permission_ignores_stale_reply_for_a_superseded_request(
         "request_id": "req-2", "tool_name": "Bash", "message": "Approve use of Bash?", "tool_input": "",
     })
 
-    pcm.respond_permission(chat.chat_id, request_id="req-1", approved=True, reason="")
+    await pcm.respond_permission(chat.chat_id, request_id="req-1", approved=True, reason="")
 
     assert json.loads(pcm._chats[chat.chat_id].pending_permission)["request_id"] == "req-2"
+
+
+@pytest.mark.asyncio
+async def test_stale_persisted_question_is_cleared_without_a_provider(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="stale form")
+    chat.pending_question = json.dumps({
+        "request_id": "form-1",
+        "questions": [{"id": "q1", "question": "Continue?"}],
+    })
+
+    result = await pcm.respond_question(
+        chat.chat_id,
+        request_id="form-1",
+        answers={},
+        action="cancel",
+    )
+
+    assert result.ok is True
+    assert chat.pending_question == ""
 
 
 @pytest.mark.asyncio
 async def test_respond_permission_returns_false_when_no_provider(tmp_path: Path) -> None:
     """A permission reply for a chat with no provider yet must be a no-op."""
     pcm = _make_manager(tmp_path)
-    ok = pcm.respond_permission("no-such-chat", request_id="x", approved=True, reason="")
-    assert ok is False
+    ok = await pcm.respond_permission("no-such-chat", request_id="x", approved=True, reason="")
+    assert ok.ok is False
 
 
 @pytest.mark.asyncio
@@ -117,10 +158,11 @@ async def test_respond_permission_unknown_request_id_returns_false(tmp_path: Pat
     chat = pcm.create_chat(project.project_id, title="t")
     pcm._get_provider(chat.chat_id)  # instantiate gate
 
-    ok = pcm.respond_permission(
+    ok = await pcm.respond_permission(
         chat.chat_id, request_id="never-asked", approved=True, reason=""
     )
-    assert ok is False
+    # A stale id is already settled; acknowledge it so clients clear the card.
+    assert ok.ok is True
 
 
 @pytest.mark.asyncio
@@ -156,7 +198,7 @@ async def test_respond_permission_strips_buffered_event_from_active_stream(
     pcm._get_provider(chat.chat_id)
 
     # Stale reply (gate has nothing pending) — should still strip the buffer.
-    pcm.respond_permission(
+    await pcm.respond_permission(
         chat.chat_id, request_id="tool-99", approved=True, reason=""
     )
 
@@ -167,82 +209,45 @@ async def test_respond_permission_strips_buffered_event_from_active_stream(
 
 
 @pytest.mark.asyncio
-async def test_async_permission_delivery_keeps_retry_state_until_success(tmp_path: Path) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("General", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="async-permission")
-    chat.pending_permission = json.dumps({
-        "request_id": "req-async", "tool_name": "Bash", "message": "Approve?", "tool_input": "ls",
-    })
+async def test_denial_retracts_the_tool_card_before_v2_consumes_the_request(
+    tmp_path: Path,
+) -> None:
+    """A V2 permission id can differ from the tool-call id it gates."""
     from ciao.web.chat_broker import ChatStream
 
-    stream = ChatStream("hi")
-    pcm._broker.register(chat.chat_id, stream)
-    stream.publish({
-        "type": "permission_request",
-        "request_id": "req-async",
-        "tool_name": "Bash",
-        "message": "Approve?",
-    })
-
-    class Provider:
-        ok = False
-
-        async def send_permission_response_async(self, request_id: str, approved: bool) -> bool:
-            return self.ok
-
-    provider = Provider()
-    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
-    assert await pcm.respond_permission_async(
-        chat.chat_id, request_id="req-async", approved=True
-    ) is False
-    assert chat.pending_permission
-    assert any(ev.get("request_id") == "req-async" for ev in stream.buffered_events())
-
-    provider.ok = True
-    assert await pcm.respond_permission_async(
-        chat.chat_id, request_id="req-async", approved=True
-    ) is True
-    assert chat.pending_permission == ""
-    assert all(ev.get("request_id") != "req-async" for ev in stream.buffered_events())
-
-
-@pytest.mark.asyncio
-async def test_async_question_delivery_keeps_retry_state_until_success(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("General", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="async-question")
-    chat.pending_question = json.dumps({"questions": [{"question": "Continue?"}]})
-    from ciao.web.chat_broker import ChatStream
+    chat = pcm.create_chat(project.project_id, title="t")
 
+    class _Provider:
+        def tool_use_id_for_request(self, _request_id: str) -> str:
+            return "call-1"
+
+        async def send_permission_response(
+            self, _request_id: str, _approved: bool, _reason: str = ""
+        ) -> bool:
+            # The real adapter removes its pending map before returning.
+            return True
+
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=_Provider())
     stream = ChatStream("hi")
     pcm._broker.register(chat.chat_id, stream)
     stream.publish({
         "type": "tool_use",
-        "tool_name": "AskUserQuestion",
-        "request_id": "form-async",
-        "tool_input": json.dumps({"questions": [{"question": "Continue?"}]}),
+        "tool_name": "write",
+        "tool_use_id": "call-1",
+        "file_touch": {"file_path": "notes.md", "action": "created"},
     })
 
-    class Provider:
-        ok = False
-
-        async def send_question_response_async(
-            self, request_id: str, answers: dict[str, list[str]], *, cancel: bool = False
-        ) -> bool:
-            return self.ok
-
-    provider = Provider()
-    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
-    assert await pcm.respond_question_async(
-        chat.chat_id, request_id="form-async", answers={"q": ["yes"]}
-    ) is False
-    assert chat.pending_question
-    assert any(ev.get("request_id") == "form-async" for ev in stream.buffered_events())
-
-    provider.ok = True
-    assert await pcm.respond_question_async(
-        chat.chat_id, request_id="form-async", answers={"q": ["yes"]}
-    ) is True
-    assert chat.pending_question == ""
-    assert all(ev.get("request_id") != "form-async" for ev in stream.buffered_events())
+    result = await pcm.respond_permission(
+        chat.chat_id, request_id="permission-1", approved=False
+    )
+    assert result.ok is True
+    events = stream.buffered_events()
+    assert any(
+        event.get("type") == "tool_denied"
+        and event.get("tool_use_id") == "call-1"
+        for event in events
+    )
+    tool_event = next(event for event in events if event.get("type") == "tool_use")
+    assert "file_touch" not in tool_event

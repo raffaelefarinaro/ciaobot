@@ -1,8 +1,8 @@
 """opencode workspace-asset projection.
 
-opencode discovers `.claude/skills`, `.agents/skills`, `AGENTS.md`, and
-`CLAUDE.md` natively (verified against opencode 1.18), so only subagents,
-commands, and MCP servers are generated. These tests cover the generated
+OpenCode discovers `.claude/skills`, `.agents/skills`, and `AGENTS.md`
+natively (verified against OpenCode 2.0.16), so only subagents, commands,
+and MCP servers are generated. These tests cover the generated
 files, idempotence, marker-only pruning, and the credential guard.
 """
 

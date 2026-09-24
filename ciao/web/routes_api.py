@@ -2642,8 +2642,10 @@ async def chat_subagents(request: Request) -> JSONResponse:
         ):
             collab_tree = await live_provider.read_live_collab_tree()
         else:
+            resolver = getattr(pcm, "_agent_root_for_chat", None)
+            root = resolver(chat_id) if resolver is not None else config.workspace_root
             collab_tree = await OpencodeProvider.read_collab_tree(
-                config.workspace_root, chat.session_id
+                root, chat.session_id
             )
         for item in collab_tree:
             info = item.get("info")
@@ -2667,7 +2669,11 @@ async def chat_subagents(request: Request) -> JSONResponse:
                 # endpoint is polled every few seconds while a turn streams —
                 # derive the lifecycle from the child's own messages and anchor
                 # it to the parent turn sent before the child was created.
-                "status": transcript_service._opencode_child_status(messages),
+                "status": transcript_service._opencode_child_status(
+                    messages,
+                    info,
+                    item.get("active") if isinstance(item.get("active"), bool) else None,
+                ),
                 "turn_index": transcript_service._opencode_child_turn_index(info, chat),
             })
         return JSONResponse(opencode_entries)
@@ -2860,7 +2866,11 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
                 continue
             messages = item.get("messages")
             messages = messages if isinstance(messages, list) else []
-            if transcript_service._opencode_child_status(messages) != "running":
+            if transcript_service._opencode_child_status(
+                messages,
+                info,
+                item.get("active") if isinstance(item.get("active"), bool) else None,
+            ) != "running":
                 continue
             rows.append({
                 "agent_id": agent_id,

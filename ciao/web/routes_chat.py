@@ -144,29 +144,29 @@ async def ws_chat(websocket: WebSocket) -> None:
                 continue
 
             if msg_type == "permission_response":
-                # Wait for the provider's HTTP completion before acknowledging
-                # the response.  The old fire-and-forget adapter returned true
-                # while the card was already cleared, so a failed V2 reply
-                # became unretryable.
+                # Approve/deny reply to a prior ``permission_request``. The
+                # provider acknowledgement is sent back as a result event; the
+                # client keeps the card retryable until that acknowledgement.
                 request_id = str(msg.get("request_id", ""))
                 approved = bool(msg.get("approved", False))
                 reason = str(msg.get("reason", ""))
-                delivered = False
                 if request_id:
-                    delivered = await pcm.respond_permission_async(
+                    result = await pcm.respond_permission(
                         chat_id,
                         request_id=request_id,
                         approved=approved,
                         reason=reason,
                     )
-                try:
-                    await websocket.send_json({
-                        "type": "permission_response_result",
-                        "request_id": request_id,
-                        "ok": delivered,
-                    })
-                except (WebSocketDisconnect, RuntimeError):
-                    break
+                    try:
+                        await websocket.send_json({
+                            "type": "permission_response_result",
+                            "request_id": request_id,
+                            "ok": result.ok,
+                            "error": result.error,
+                            "retryable": result.retryable,
+                        })
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
                 continue
 
             if msg_type == "question_response":
@@ -179,47 +179,38 @@ async def ws_chat(websocket: WebSocket) -> None:
                             answers[str(question_id)] = [
                                 str(value) for value in values
                             ]
-                        elif values is not None:
-                            answers[str(question_id)] = [str(values)]
-                def _flag(name: str) -> bool:
-                    value = msg.get(name, False)
-                    return value is True or (
-                        isinstance(value, str)
-                        and value.strip().lower() in {"1", "true", "yes"}
-                    )
-
-                action = str(msg.get("action", "")).strip().lower()
-                cancel = _flag("cancel")
-                submitted = _flag("submitted")
-                if action in {"reply", "cancel"}:
-                    cancel = action == "cancel"
-                    submitted = action == "reply"
-                elif not answers and not submitted:
-                    # Pre-action clients used an empty answer map as cancel;
-                    # an explicit submitted flag still means an empty reply.
-                    cancel = True
-                delivered = False
+                action = str(msg.get("action") or "").strip().lower()
+                if request_id and action not in {"reply", "cancel"}:
+                    try:
+                        await websocket.send_json({
+                            "type": "question_response_result",
+                            "request_id": request_id,
+                            "ok": False,
+                            "state": "rejected",
+                            "error": "Question action must be reply or cancel.",
+                            "retryable": False,
+                        })
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
+                    continue
                 if request_id:
-                    delivered = await pcm.respond_question_async(
+                    result = await pcm.respond_question(
                         chat_id,
                         request_id=request_id,
                         answers=answers,
-                        cancel=cancel,
-                        submitted=submitted,
+                        action=action,
                     )
-                try:
-                    await websocket.send_json({
-                        "type": "question_response_result",
-                        "request_id": request_id,
-                        "ok": delivered,
-                        "state": "cancelled" if cancel else "answered",
-                        **({} if delivered else {
-                            "error": "The provider did not accept the response.",
-                            "retryable": True,
-                        }),
-                    })
-                except (WebSocketDisconnect, RuntimeError):
-                    break
+                    try:
+                        await websocket.send_json({
+                            "type": "question_response_result",
+                            "request_id": request_id,
+                            "ok": result.ok,
+                            "state": "cancelled" if action == "cancel" else "answered",
+                            "error": result.error,
+                            "retryable": result.retryable,
+                        })
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
                 continue
 
             if msg_type == "capability_response":

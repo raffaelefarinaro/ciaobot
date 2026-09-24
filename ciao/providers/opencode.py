@@ -1,30 +1,26 @@
-"""opencode provider over the local HTTP + SSE server.
+"""OpenCode 2.x provider over the local HTTP + SSE server.
 
-Unlike Claude (in-process SDK), opencode ships a
-real multi-session HTTP server. Ciaobot runs ``opencode serve`` on an ephemeral
-loopback port and drives it over ``httpx``, consuming the version-appropriate
-SSE stream.
+Unlike Claude (in-process SDK), OpenCode ships a real multi-session HTTP
+server. Ciaobot runs ``opencode serve`` on an ephemeral loopback port and
+drives it over ``httpx``, consuming the ``/api/event`` SSE stream. OpenCode 1
+is intentionally unsupported: V2 replaced the server API, response envelopes,
+permission rules, event payloads, and model catalog, so carrying both wire
+contracts would duplicate every provider operation.
 
 **One server process per active chat.** A shared server is tempting because
-opencode isolates chats as sessions, but Ciaobot scopes its control-plane MCP
-token per chat, and opencode's MCP configuration is server-wide (``/mcp`` and
-``opencode.json``) rather than per-session. A shared server would force one
-long-lived token across every chat and lose failure isolation. Per-session
-*permission* and *model* are supported and are set on the session instead.
-Permission changes rotate to a newly-created session, because the V1 API does
-not apply a patched ruleset to an existing session.
+OpenCode isolates chats as sessions, but Ciaobot scopes its control-plane MCP
+token per chat, while OpenCode configures MCP at server scope. Per-session
+agent, model, and permission rules keep chat behavior isolated.
 
-The wire contract is verified against the server's own OpenAPI document on
-startup. V1 serves that document at ``/doc`` and uses the legacy paths; V2
-serves it at ``/openapi.json`` and uses the ``/api`` paths with data
-envelopes. The server is classified from ``/api/info`` (falling back to the
-legacy health/spec endpoints), so an incompatible build fails closed with a
-readable message rather than half-working.
+The V2 wire contract is verified against the server's own OpenAPI document at
+``/openapi.json`` on startup. Readiness and the installed major version come
+from ``/api/info``; V1 and unknown server shapes fail closed with an explicit
+upgrade message.
 
-Capability note: opencode has no method that injects a message into a running
+Capability note: OpenCode has no method that injects a message into a running
 turn; Ciaobot keeps a mid-turn message in the next-turn queue. Everything else
-Ciaobot needs — fork, abort, permissions, structured questions, background
-subagents as child sessions — is native where the running server exposes it.
+Ciaobot needs — fork, interrupt, permissions, forms, and background subagents
+as child sessions — is native.
 """
 
 from __future__ import annotations
@@ -32,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -39,11 +36,11 @@ import socket
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
-from urllib.parse import quote, urlparse
+from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -76,64 +73,23 @@ from ciao.tool_path import resolve_tool
 
 logger = logging.getLogger(__name__)
 
-ApiVersion = Literal["v1", "v2"]
-
-_API_VERSION_ATTR = "_ciao_opencode_api_version"
-_V2_CHILD_LIMIT = 1000
-# Cursor pagination is bounded so a broken or malicious server cannot make a
-# history/recovery read loop forever. Reaching the bound is an explicit error;
-# silently returning the pages read so far would make a recovered turn look
-# complete while dropping its newest messages.
-_V2_MAX_CURSOR_PAGES = 1000
-_V2_TERMINAL_OUTCOMES = frozenset({
-    "success",
-    "succeeded",
-    "completed",
-    "complete",
-    "ok",
-    "done",
-    "failed",
-    "failure",
-    "error",
-    "interrupted",
-    "cancelled",
-    "canceled",
-    "stopped",
-})
-
-
-class _UnsupportedApiVersion(RuntimeError):
-    """The server advertises a protocol major this adapter cannot speak."""
-
-
-_REQUIRED_PATHS_V1: frozenset[str] = frozenset({
-    "/global/health",
-    "/event",
-    "/session",
-    "/session/{sessionID}",
-    "/session/{sessionID}/abort",
-    "/session/{sessionID}/children",
-    "/session/{sessionID}/fork",
-    "/session/{sessionID}/message",
-    "/session/{sessionID}/prompt_async",
-    "/permission/{requestID}/reply",
-    "/question/{requestID}/reply",
-    "/question/{requestID}/reject",
-})
-
-_REQUIRED_PATHS_V2: frozenset[str] = frozenset({
+# Operations Ciaobot cannot work without. Checked against the server's own
+# OpenAPI paths at connect time so an incompatible build fails closed. This is
+# the machine-checkable equivalent of the provider's protocol requirements.
+REQUIRED_PATHS: frozenset[str] = frozenset({
     "/api/info",
     "/api/event",
     "/api/session",
+    "/api/session/active",
     "/api/session/{sessionID}",
-    "/api/session/{sessionID}/fork",
-    "/api/session/{sessionID}/message",
-    "/api/session/{sessionID}/prompt",
-    "/api/session/{sessionID}/interrupt",
     "/api/session/{sessionID}/agent",
+    "/api/session/{sessionID}/fork",
+    "/api/session/{sessionID}/interrupt",
+    "/api/session/{sessionID}/message",
     "/api/session/{sessionID}/model",
     "/api/session/{sessionID}/permission",
     "/api/session/{sessionID}/permission/{requestID}/reply",
+    "/api/session/{sessionID}/prompt",
     "/api/session/{sessionID}/form",
     "/api/session/{sessionID}/form/{formID}",
     "/api/session/{sessionID}/form/{formID}/reply",
@@ -142,271 +98,10 @@ _REQUIRED_PATHS_V2: frozenset[str] = frozenset({
     "/api/model/default",
 })
 
-REQUIRED_PATHS_V1 = _REQUIRED_PATHS_V1
-REQUIRED_PATHS_V2 = _REQUIRED_PATHS_V2
-REQUIRED_PATHS = REQUIRED_PATHS_V1
-
-
-def _unwrap_data(payload: object) -> object:
-    """Unwrap the V2 response envelope without changing raw V1 payloads."""
-    if isinstance(payload, Mapping) and "data" in payload:
-        return payload["data"]
-    return payload
-
-
-def _response_data(response: Any) -> object:
-    """Read a response body and unwrap V2's top-level ``data`` member."""
-    return _unwrap_data(response.json())
-
-
-def _api_version_for_client(client: Any, fallback: ApiVersion = "v1") -> ApiVersion:
-    value = getattr(client, _API_VERSION_ATTR, fallback)
-    return "v2" if value == "v2" else "v1"
-
-
-def _set_api_version(client: Any, version: ApiVersion) -> None:
-    setattr(client, _API_VERSION_ATTR, version)
-
-
-def _api_path(client: Any, v1: str, v2: str, fallback: ApiVersion = "v1") -> str:
-    return v2 if _api_version_for_client(client, fallback) == "v2" else v1
-
-
-def _session_path(client: Any, session_id: str, suffix: str = "", fallback: ApiVersion = "v1") -> str:
-    root = "/api/session" if _api_version_for_client(client, fallback) == "v2" else "/session"
-    return f"{root}/{session_id}{suffix}"
-
-
-def _message_path(client: Any, session_id: str, fallback: ApiVersion = "v1") -> str:
-    suffix = "?order=asc" if _api_version_for_client(client, fallback) == "v2" else ""
-    return _session_path(client, session_id, "/message" + suffix, fallback)
-
-
-def _v2_runtime_relative_patterns(
-    runtime_root: object, workspace_root: object
-) -> tuple[str, str] | None:
-    """Return V2's relative spellings for a runtime root inside the workspace."""
-    if not runtime_root or not workspace_root:
-        return None
-    try:
-        root = Path(str(runtime_root)).expanduser().resolve()
-        workspace = Path(str(workspace_root)).expanduser().resolve()
-        relative = root.relative_to(workspace)
-    except (OSError, RuntimeError, ValueError):
-        return None
-    relative_text = relative.as_posix()
-    if relative_text in {"", "."}:
-        # A runtime root equal to the session location makes every internal
-        # resource sensitive; fail closed rather than leave a spelling gap.
-        return ".", "**"
-    return relative_text, f"{relative_text}/**"
-
-
-def _v1_rules_to_v2(
-    rules: Sequence[Mapping[str, str]],
-    *,
-    runtime_root: object = None,
-    workspace_root: object = None,
-) -> list[dict[str, str]]:
-    """Translate the V1 permission rules to the V2 action/resource shape.
-
-    V2 resolves a rule against both the tool action and the *resource string*.
-    The V1 deny patterns assume a V1 file tool passes an absolute path.  V2
-    file access deliberately passes a location-relative path for files inside
-    the project (``.env`` rather than ``/project/.env``), so the old
-    ``**/.env`` pattern does not match the most important case.  Keep the V1
-    patterns for external/absolute resources and add the relative spellings
-    used by V2's resolver.
-
-    A relocated runtime root can likewise be inside the session location while
-    having a basename other than ``.runtime``.  In that case the V1 absolute
-    deny does not match V2's relative resource, so add the resolved root's
-    relative aliases as well.
-
-    V2 also has no safe way to scope a glob/grep/list query to a denied path:
-    the resource is a query/pattern, not a list of files that can be checked
-    before output is produced.  Those actions are therefore denied wholesale
-    in the V2 ruleset.  The shell remains a separate, documented limitation.
-    """
-    action_names = {"bash": "shell", "write": "edit", "patch": "edit"}
-    converted: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
-    runtime_relative = _v2_runtime_relative_patterns(runtime_root, workspace_root)
-    runtime_absolutes: set[str] = set()
-    if runtime_root:
-        try:
-            raw_runtime = Path(str(runtime_root)).expanduser()
-            runtime_absolutes.update({
-                str(raw_runtime).rstrip("/"),
-                str(raw_runtime.resolve()).rstrip("/"),
-            })
-        except (OSError, RuntimeError, ValueError):
-            runtime_absolutes.clear()
-
-    def add(action: str, resource: str, effect: str) -> None:
-        key = (action, resource, effect)
-        if key in seen:
-            return
-        seen.add(key)
-        converted.append({"action": action, "resource": resource, "effect": effect})
-
-    for rule in rules:
-        permission = str(rule.get("permission") or "*")
-        action = action_names.get(permission, permission)
-        resource = str(rule.get("pattern") or "*")
-        effect = str(rule.get("action") or "ask")
-        add(action, resource, effect)
-
-        # V2's internal file resource is relative to the session location.
-        # These are deliberately explicit rather than a broad ``.*`` rule, so
-        # a normal workspace file remains usable while a root credential file
-        # cannot be opened through the native file tool.
-        if effect == "deny":
-            relative = {
-                "**/.env": ".env",
-                "**/.runtime/**": ".runtime/**",
-                "**/secrets/**": "secrets/**",
-            }.get(resource)
-            if relative:
-                add(action, relative, effect)
-
-            # A relocated runtime root is absolute in the V1 rules, while V2
-            # turns an internal path into a location-relative resource.  Add
-            # the corresponding aliases so a custom root basename cannot fall
-            # through to the wildcard allow.
-            if runtime_absolutes and runtime_relative:
-                normalized_resource = resource.rstrip("/")
-                if normalized_resource in runtime_absolutes:
-                    add(action, runtime_relative[0], effect)
-                elif any(
-                    normalized_resource == f"{runtime}/**"
-                    for runtime in runtime_absolutes
-                ):
-                    add(action, runtime_relative[1], effect)
-
-    # A broad search is an information channel even when its query is scoped
-    # syntactically to the workspace.  Deny these V2 actions after every mode
-    # rule (including a wildcard allow) rather than pretending a path glob can
-    # make their result safe.
-    for action in ("glob", "grep", "list"):
-        add(action, "*", "deny")
-    return converted
-
-
-def _mode_rules_for_version(
-    mode: BridgeMode,
-    version: ApiVersion,
-    *,
-    tools_enabled: bool = True,
-    runtime_root: object = None,
-    workspace_root: object = None,
-) -> tuple[str, list[dict[str, str]]]:
-    agent, rules = mode_settings(
-        mode,
-        tools_enabled=tools_enabled,
-        runtime_root=runtime_root,
-    )
-    return agent, _v1_rules_to_v2(
-        rules,
-        runtime_root=runtime_root,
-        workspace_root=workspace_root,
-    ) if version == "v2" else rules
-
-
-def _event_properties(event: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Read V1 ``properties`` and V2 ``data`` event envelopes uniformly."""
-    properties = event.get("properties")
-    if isinstance(properties, Mapping):
-        return properties
-    data = event.get("data")
-    if isinstance(data, str):
-        try:
-            decoded = json.loads(data)
-        except (TypeError, ValueError):
-            return {}
-        return decoded if isinstance(decoded, Mapping) else {}
-    return data if isinstance(data, Mapping) else {}
-
-
-def _version_major(value: object) -> int | None:
-    match = re.match(r"^v?(\d+)", str(value or "").strip(), re.IGNORECASE)
-    return int(match.group(1)) if match else None
-
-
-async def _probe_api_version(
-    client: Any,
-) -> tuple[ApiVersion | None, int | None, Exception | None]:
-    """Classify a server without accepting the V2 SPA fallback as healthy."""
-    last_status: int | None = None
-    last_error: Exception | None = None
-
-    async def read(path: str) -> object | None:
-        nonlocal last_status, last_error
-        try:
-            response = await client.get(path, timeout=2.0)
-        except TypeError:
-            try:
-                response = await client.get(path)
-            except (httpx.HTTPError, ValueError, AttributeError) as exc:
-                last_error = exc
-                return None
-        except (httpx.HTTPError, ValueError, AttributeError) as exc:
-            last_error = exc
-            return None
-        status = getattr(response, "status_code", 200)
-        if isinstance(status, int):
-            last_status = status
-        if isinstance(status, int) and status >= 400:
-            return None
-        try:
-            return _response_data(response)
-        except (ValueError, TypeError, AttributeError) as exc:
-            last_error = exc
-            return None
-
-    info = await read("/api/info")
-    if isinstance(info, Mapping):
-        major = _version_major(info.get("version"))
-        if major == 2:
-            return "v2", last_status, last_error
-        if major == 1:
-            return "v1", last_status, last_error
-        if major is not None:
-            # A future server may retain the V2-looking paths while changing
-            # their semantics.  Do not infer V2 from the path shape: an
-            # unknown major is an unsupported protocol, not a V2 fallback.
-            last_error = _UnsupportedApiVersion(
-                f"unsupported opencode server major version {major}"
-            )
-            return None, last_status, last_error
-
-    health = await read("/global/health")
-    if isinstance(health, Mapping):
-        major = _version_major(health.get("version"))
-        if major == 2:
-            return "v2", last_status, last_error
-        if major == 1:
-            return "v1", last_status, last_error
-        if major is not None:
-            last_error = _UnsupportedApiVersion(
-                f"unsupported opencode server major version {major}"
-            )
-            return None, last_status, last_error
-        if health.get("healthy") is True:
-            return "v1", last_status, last_error
-
-    spec = await read("/openapi.json")
-    if isinstance(spec, Mapping) and isinstance(spec.get("paths"), Mapping):
-        paths = set(spec["paths"])
-        if "/api/info" in paths:
-            return "v2", last_status, last_error
-        if "/global/health" in paths or "/session" in paths:
-            return "v1", last_status, last_error
-
-    legacy_spec = await read("/doc")
-    if isinstance(legacy_spec, Mapping) and isinstance(legacy_spec.get("paths"), Mapping):
-        return "v1", last_status, last_error
-    return None, last_status, last_error
+OPENCODE_V2_REQUIRED = (
+    "Ciaobot requires OpenCode 2.0.16 or newer 2.x. "
+    "Update OpenCode, then retry this chat."
+)
 
 # The catalog needs a throwaway `opencode serve` (~1-2s), and /api/models is
 # hit on every model-picker open. Cache it rather than paying
@@ -421,8 +116,6 @@ _MODEL_CACHE_TTL = 300.0
 # on every single request.
 _EMPTY_MODEL_CACHE_TTL = 20.0
 _MODEL_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-_V2_MODEL_CATALOG_RETRIES = 4
-_V2_MODEL_CATALOG_RETRY_DELAY = 0.25
 
 # Session reads (`read_thread` / `read_collab_tree`) also cost a throwaway
 # `opencode serve`. A chat with a live provider attached reuses that server
@@ -457,15 +150,12 @@ _OPENCODE_RECOVERY_POLL_S = 2.5
 
 
 def _opencode_messages_signature(messages: list[Any]) -> str:
-    """Return a stable, lifecycle-aware signature for assistant output.
+    """Change detector for this turn's projected assistant messages.
 
-    A user-only projection is deliberately an empty signature.  During a
-    reconnect it is common to observe the accepted prompt before the first
-    assistant row; treating that stable projection as a finished turn would
-    manufacture a blank success.  Only assistant rows participate in the
-    quiescence detector.  Within those rows, include identity, tool status, and
-    a bounded fingerprint of tool input/output/error payloads so a running
-    tool cannot look like its completed result.
+    A user-only projection is deliberately an empty signature: two matching
+    polls before the first assistant row must not look like a finished turn.
+    Tool state and assistant completion are part of the signature so a running
+    tool cannot be mistaken for settled output.
     """
     pieces: list[str] = []
     for message in messages:
@@ -474,78 +164,28 @@ def _opencode_messages_signature(messages: list[Any]) -> str:
         info = message.get("info")
         if not isinstance(info, Mapping) or info.get("role") != "assistant":
             continue
-        message_id = str(info.get("id") or "")
-        pieces.append(f"message:assistant:{message_id}")
+        pieces.append(
+            f"message={info.get('id')}/completed="
+            f"{((info.get('time') or {}).get('completed') if isinstance(info.get('time'), Mapping) else None)}"
+        )
         parts = message.get("parts")
         if not isinstance(parts, list):
             continue
         for part in parts:
             if not isinstance(part, Mapping):
                 continue
-            part_type = str(part.get("type") or "")
-            part_id = str(part.get("id") or "")
-            if part_type == "tool":
-                state = part.get("state")
-                state = state if isinstance(state, Mapping) else {}
-                status = str(state.get("status") or part.get("status") or "")
-                raw_input = state.get("input", part.get("input"))
-                content = state.get("content", part.get("content"))
-                error = state.get("error", part.get("error"))
-                pieces.append(
-                    "tool:"
-                    f"{part_id}:{part.get('tool', part.get('name', ''))}:{status}:"
-                    f"in={_signature_shape(raw_input)}:"
-                    f"out={_signature_shape(content)}:"
-                    f"err={_signature_shape(error)}"
-                )
-                continue
-            text = part.get("text")
-            pieces.append(
-                f"part:{part_id}:{part_type}:"
-                f"{len(text) if isinstance(text, str) else 0}"
-            )
-    return "|".join(pieces)
-
-
-def _messages_have_running_tools(messages: list[Any]) -> bool:
-    """Whether an assistant snapshot still contains a non-terminal tool."""
-    for message in messages:
-        if not isinstance(message, Mapping):
-            continue
-        info = message.get("info")
-        if not isinstance(info, Mapping) or info.get("role") != "assistant":
-            continue
-        parts = message.get("parts")
-        if not isinstance(parts, list):
-            continue
-        for part in parts:
-            if not isinstance(part, Mapping) or part.get("type") != "tool":
-                continue
             state = part.get("state")
             state = state if isinstance(state, Mapping) else {}
-            status = str(state.get("status") or part.get("status") or "").lower()
-            if status in {"pending", "streaming", "running", "executing"}:
-                return True
-    return False
-
-
-def _signature_shape(value: object) -> str:
-    """Compact shape/length fingerprint used by message reconciliation."""
-    if value is None:
-        return "none"
-    if isinstance(value, str):
-        return f"str:{len(value)}"
-    if isinstance(value, (int, float, bool)):
-        return type(value).__name__
-    if isinstance(value, Mapping):
-        return "map:" + ",".join(
-            f"{key}={_signature_shape(item)}" for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-        )
-    if isinstance(value, (list, tuple)):
-        return f"seq:{len(value)}:" + ",".join(_signature_shape(item) for item in value)
-    return type(value).__name__
+            text = part.get("text")
+            pieces.append(
+                f"{part.get('id')}/{part.get('type')}/"
+                f"{len(text) if isinstance(text, str) else 0}/"
+                f"{state.get('status')}"
+            )
+    return "|".join(pieces)
 _SHUTDOWN_TIMEOUT = 5.0
 _SERVER_START_LOCKS: dict[str, asyncio.Lock] = {}
+_CATALOG_LOCKS: dict[str, asyncio.Lock] = {}
 # Lines of the server's stderr kept for error messages. The pipe must be read
 # continuously (a full 64K pipe buffer blocks the child's next write and wedges
 # the server mid-turn), so the reader keeps a bounded tail rather than the lot.
@@ -561,18 +201,20 @@ _MODE_AGENTS: dict[str, str] = {
     "bypass": "build",
 }
 
-# Per-session permission rulesets, as `POST /session` wants them: a *list* of
-# {permission, pattern, action} rules, not the `{"*": "ask"}` map used in
-# `opencode.json`. The two shapes are different and the API rejects the map
-# with a bare 400, so keep this in rule form.
-#
-# Resolution is last-match-wins, so the wildcard goes first and the specific
-# grants follow. ``auto`` is the permissive default: every tool is allowed
-# outright except ``bash`` and Ciaobot's destructive control-plane tools,
-# which stay ``ask`` so each call reaches ``_permission_event`` and is judged
-# by the operator or, when installed, the ``opencode-auto-permissions``
-# reviewer plugin. Every other mode keeps its own ruleset.
-_READ_ONLY_TOOLS = ("read", "glob", "grep", "list")
+# Per-session permission rulesets use OpenCode 2's ordered
+# ``{action, resource, effect}`` shape. Resolution is last-match-wins, so the
+# wildcard goes first and specific grants follow. ``auto`` allows routine work
+# while keeping every shell command behind an operator approval card.
+_READ_ONLY_TOOLS = ("read", "glob", "grep")
+# V2 sends the glob pattern/regex itself as the permission resource; it does
+# not send the search root or result paths. Require an explicit operator card
+# for both search actions in every mode, including bypass, so a broad search
+# cannot silently enumerate credential-bearing files. Path-shaped deny rules
+# below still hard-deny direct protected glob patterns after this ask rule.
+_SEARCH_PERMISSION_RULES: tuple[dict[str, str], ...] = (
+    {"action": "glob", "resource": "*", "effect": "ask"},
+    {"action": "grep", "resource": "*", "effect": "ask"},
+)
 
 # Permission changes cannot be patched onto an existing opencode session.
 # Keep the replacement-session handover bounded so a long-running chat does
@@ -583,22 +225,16 @@ _SESSION_HANDOVER_MAX_CHARS = 24_000
 
 def _rules(*entries: tuple[str, str]) -> list[dict[str, str]]:
     return [
-        {"permission": permission, "pattern": "*", "action": action}
-        for permission, action in entries
+        {"action": action, "resource": "*", "effect": effect}
+        for action, effect in entries
     ]
 
 
 def _permissive_auto_rules() -> list[dict[str, str]]:
-    """The auto-mode ruleset: allow routine work, ask for shell.
-
-    A leading wildcard ``allow`` lets almost every tool run without an
-    approval card. ``bash`` stays ``ask`` so each shell command is reviewed —
-    by the operator (a Ciaobot approval card) or, when the user opts into the
-    ``opencode-auto-permissions`` plugin, by its reviewer model.
-    """
+    """Allow routine work while routing every shell command to the operator."""
     return _rules(
         ("*", "allow"),
-        ("bash", "ask"),
+        ("shell", "ask"),
     )
 
 
@@ -673,21 +309,44 @@ def _server_start_lock(workspace_root: Path) -> asyncio.Lock:
     return lock
 
 
+def _catalog_lock(workspace_root: Path) -> asyncio.Lock:
+    key = str(workspace_root.resolve())
+    lock = _CATALOG_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _CATALOG_LOCKS[key] = lock
+    return lock
+
+
+def _version_number(value: object) -> tuple[int, ...] | None:
+    """Parse ``2.0.16`` or CLI output ``opencode v2.0.16``."""
+    match = re.search(r"(?<!\d)v?(\d+(?:\.\d+)+)", str(value or ""))
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _server_version_error(payload: object) -> str | None:
+    """Return the user-facing error when ``/api/info`` is too old or not V2."""
+    if not isinstance(payload, Mapping):
+        return OPENCODE_V2_REQUIRED
+    version = str(payload.get("version") or "").strip()
+    parsed = _version_number(version)
+    if parsed is None or parsed < (2, 0, 16) or parsed[0] != 2:
+        detail = f" Installed server version: {version}." if version else ""
+        return f"{OPENCODE_V2_REQUIRED}{detail}"
+    return None
+
+
 def _health_failure_reason(
     last_status: int | None, last_error: Exception | None
 ) -> str:
-    """A human-readable cause for a server that never became healthy.
-
-    A server that stays alive (returncode None) but never answers 200 wedges
-    on startup — most commonly opencode's shared SQLite migration — and the
-    poll loop leaves both the last HTTP status and the last transport error
-    empty. Say which it was rather than trailing a bare ``: ``.
-    """
+    """A human-readable cause for a server that never became healthy."""
     if last_status is not None:
         return f"health returned HTTP {last_status}"
     if last_error is not None:
         return str(last_error)
-    return "server stayed alive but never answered /global/health"
+    return "server stayed alive but never answered /api/info"
 
 
 def _is_transient_startup_error(exc: BaseException) -> bool:
@@ -705,19 +364,17 @@ def _is_transient_startup_error(exc: BaseException) -> bool:
     return "did not become healthy" in text
 
 
-def missing_required_paths(
-    spec: Mapping[str, Any], version: ApiVersion = "v1"
-) -> tuple[str, ...]:
+def missing_required_paths(spec: Mapping[str, Any]) -> tuple[str, ...]:
     """Required operations absent from a served OpenAPI document."""
-    value = _unwrap_data(spec)
-    if not isinstance(value, Mapping):
-        return tuple(sorted(_REQUIRED_PATHS_V1 if version == "v1" else _REQUIRED_PATHS_V2))
-    paths = value.get("paths")
+    paths = spec.get("paths")
     available = set(paths) if isinstance(paths, Mapping) else set()
-    required = _REQUIRED_PATHS_V1 if version == "v1" else _REQUIRED_PATHS_V2
-    return tuple(sorted(required - available))
+    return tuple(sorted(REQUIRED_PATHS - available))
 
 
+_CIAO_CONTEXT_BLOCK_RE = re.compile(
+    r"^\[CIAO_CONTEXT_BEGIN\]\n.*?\n\[CIAO_CONTEXT_END\]\n\n",
+    re.DOTALL,
+)
 _ENV_PLACEHOLDER_RE = re.compile(r"\{env:([^}]+)\}")
 _SHELL_PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
 
@@ -808,13 +465,11 @@ def _sanitize_error(message: object) -> str:
 
 
 def error_text(error: Mapping[str, Any] | None) -> str:
-    """Human-readable text from a V1 or V2 error payload."""
+    """Human-readable text from an OpenCode 2 structured error."""
     if not isinstance(error, Mapping):
-        return "opencode reported an error"
-    data = error.get("data")
-    message = data.get("message") if isinstance(data, Mapping) else error.get("message")
-    return _sanitize_error(message) or str(
-        error.get("name") or error.get("type") or "opencode error"
+        return "OpenCode reported an error"
+    return _sanitize_error(error.get("message")) or str(
+        error.get("type") or "OpenCode error"
     )
 
 
@@ -855,44 +510,25 @@ def _token_count(raw: object) -> int:
 
 
 def _context_window_for(payload: object, provider_id: str, model_id: str) -> int | None:
-    """The model's ``limit.context`` from a V1 or V2 model payload."""
-    value = _unwrap_data(payload)
-    if isinstance(value, list):
-        for model in value:
-            if not isinstance(model, Mapping):
-                continue
-            if str(model.get("providerID") or "") != provider_id:
-                continue
-            candidate = str(model.get("modelID") or model.get("id") or "")
-            prefix = f"{provider_id}/"
-            if candidate.startswith(prefix):
-                candidate = candidate[len(prefix):]
-            if candidate != model_id:
-                continue
-            limit = model.get("limit")
-            context = limit.get("context") if isinstance(limit, Mapping) else None
-            if isinstance(context, (int, float)) and not isinstance(context, bool) and context > 0:
-                return int(context)
-            return None
+    """The model's ``limit.context`` from V2's flat model snapshot."""
+    models = _data(payload)
+    if not isinstance(models, list):
         return None
-    if not isinstance(value, Mapping):
-        return None
-    for provider in value.get("all") or []:
-        if not isinstance(provider, Mapping):
-            continue
-        if str(provider.get("id") or "") != provider_id:
-            continue
-        models = provider.get("models")
-        if not isinstance(models, Mapping):
-            continue
-        model = models.get(model_id)
+    for model in models:
         if not isinstance(model, Mapping):
             continue
-        limit = model.get("limit")
-        if not isinstance(limit, Mapping):
+        if (
+            str(model.get("providerID") or "") != provider_id
+            or str(model.get("modelID") or "") != model_id
+        ):
             continue
-        context = limit.get("context")
-        if isinstance(context, (int, float)) and not isinstance(context, bool) and context > 0:
+        limit = model.get("limit")
+        context = limit.get("context") if isinstance(limit, Mapping) else None
+        if (
+            isinstance(context, (int, float))
+            and not isinstance(context, bool)
+            and context > 0
+        ):
             return int(context)
         return None
     return None
@@ -911,31 +547,20 @@ def usage_payload(tokens: Mapping[str, Any] | None) -> dict[str, str]:
         ("reasoningTokens", tokens.get("reasoning")),
         ("cacheReadTokens", cache.get("read")),
         ("cacheWriteTokens", cache.get("write")),
-        # opencode writes one assistant message per model call and sets its
+        # OpenCode writes one assistant message per model call and sets its
         # tokens from that call alone (not a turn sum), so the last message's
         # total (input + output + reasoning + cache) is the current context
-        # size: the figure opencode's own UI puts over the model's window.
+        # size: the figure OpenCode's own UI puts over the model's window.
         ("totalTokens", tokens.get("total")),
     ):
         count = _token_count(source)
         if count:
             usage[key] = str(count)
-    return usage
-
-
-def _v2_usage_payload(tokens: Mapping[str, Any] | None) -> dict[str, str]:
-    """Add V2's derived context total when the wire payload omits it."""
-    usage = usage_payload(tokens)
-    if "totalTokens" in usage or not isinstance(tokens, Mapping):
-        return usage
-    cache = tokens.get("cache")
-    cache = cache if isinstance(cache, Mapping) else {}
-    total = sum(
-        _token_count(tokens.get(key))
-        for key in ("input", "output", "reasoning")
-    ) + sum(_token_count(cache.get(key)) for key in ("read", "write"))
-    if total:
-        usage["totalTokens"] = str(total)
+    if "totalTokens" not in usage:
+        total = sum(_token_count(tokens.get(key)) for key in ("input", "output", "reasoning"))
+        total += _token_count(cache.get("read")) + _token_count(cache.get("write"))
+        if total:
+            usage["totalTokens"] = str(total)
     return usage
 
 
@@ -955,6 +580,7 @@ def mode_settings(
     *,
     tools_enabled: bool = True,
     runtime_root: object = None,
+    workspace_root: object = None,
 ) -> tuple[str, list[dict[str, str]]]:
     """Map a Ciaobot mode onto an opencode (agent, permission ruleset).
 
@@ -964,39 +590,49 @@ def mode_settings(
 
     ``runtime_root`` is the resolved runtime directory, when the caller can
     reach it, so the credential denies cover a relocated
-    ``CIAO_RUNTIME_ROOT`` and not only the default ``.runtime`` name.
+    ``CIAO_RUNTIME_ROOT`` and not only the default ``.runtime`` name. When a
+    workspace location is known, relative V2 aliases are included as well.
 
     Since S6 every chat is on the CLI surface. Auto mode does not pre-approve
     any ``ciao …`` argv prefix: an allow rule is a prefix a shell suffix
     (``ciao help >/dev/null; <cmd>``) could ride past, so bash stays ``ask``
     and every shell command, including ``ciao …``, keeps a card. Users who want
-    no cards switch to ``bypass``.
+    no routine cards switch to ``bypass``; V2 glob/grep search actions still
+    require an explicit card because their resources are not paths.
     """
     key = mode if mode in _MODE_AGENTS else "normal"
     if not tools_enabled:
         return _MODE_AGENTS[key], _rules(("*", "deny"))
     rules = [dict(rule) for rule in _MODE_PERMISSIONS[key]]
+    # Search resources in V2 are patterns/regexes rather than paths. Keep
+    # search operations behind an explicit card even in bypass mode; otherwise
+    # a broad glob/grep can enumerate secrets without any operator decision.
+    rules.extend(dict(rule) for rule in _SEARCH_PERMISSION_RULES)
     # Last, and for every mode including `bypass`: resolution is
     # last-match-wins, and this is the one carve-out no mode may buy its way
     # out of. See `opencode_credential_deny_rules`.
-    rules.extend(opencode_credential_deny_rules(runtime_root))
+    rules.extend(opencode_credential_deny_rules(runtime_root, workspace_root))
     return _MODE_AGENTS[key], rules
 
 
 def _session_permission_matches(
-    payload: object, expected: list[dict[str, str]], version: ApiVersion = "v1"
+    payload: object, expected: list[dict[str, str]]
 ) -> bool:
     """Return whether a session exposes exactly the rules for this turn."""
     if not isinstance(payload, Mapping):
         return False
-    info = payload.get("info")
-    if isinstance(info, Mapping):
-        payload = info
-    key = "permissions" if version == "v2" else "permission"
-    actual = payload.get(key)
-    if version == "v2" and not isinstance(actual, list):
-        actual = payload.get("permission")
+    actual = payload.get("permissions")
     return isinstance(actual, list) and actual == expected
+
+
+def _strip_prompt_context(text: str) -> str:
+    """Remove Ciaobot's transcript-only V2 prompt context prefix."""
+    stripped = text
+    while True:
+        next_text = _CIAO_CONTEXT_BLOCK_RE.sub("", stripped, count=1)
+        if next_text == stripped:
+            return stripped
+        stripped = next_text
 
 
 def _session_handover_text(payload: object) -> str:
@@ -1018,7 +654,7 @@ def _session_handover_text(payload: object) -> str:
         if not isinstance(parts, list):
             continue
         texts = [
-            str(part.get("text") or "").strip()
+            _strip_prompt_context(str(part.get("text") or "").strip())
             for part in parts
             if isinstance(part, Mapping)
             and part.get("type") == "text"
@@ -1051,12 +687,208 @@ def _session_handover_text(payload: object) -> str:
     return "\n\n".join(lines)
 
 
+def _data(payload: object) -> object:
+    """Unwrap V2's common ``{"data": ...}`` response envelope."""
+    if isinstance(payload, Mapping) and "data" in payload:
+        return payload["data"]
+    return payload
+
+
+def _projected_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Project one flat V2 message into the provider's internal part shape.
+
+    Keeping the stable ``{info, parts}`` representation inside this module
+    means transcript rendering, session handovers, and subagent lifecycle code
+    stay small while the wire adapter owns the V2 schema.
+    """
+    message_type = str(message.get("type") or "")
+    if message_type == "user":
+        message_id = str(message.get("id") or "")
+        text = str(message.get("text") or "")
+        info = {
+            key: value
+            for key, value in message.items()
+            if key not in {"type", "text", "files", "agents", "skills"}
+        }
+        info["role"] = "user"
+        return {
+            "info": info,
+            "parts": [{
+                "id": f"{message_id}:text",
+                "messageID": message_id,
+                "type": "text",
+                "text": text,
+            }],
+        }
+    if message_type == "idle":
+        return {
+            "info": {
+                key: value
+                for key, value in message.items()
+                if key != "type"
+            } | {"type": message_type},
+            "parts": [],
+        }
+    if message_type != "assistant":
+        return None
+
+    message_id = str(message.get("id") or "")
+    info = {
+        key: value
+        for key, value in message.items()
+        if key not in {"type", "content"}
+    }
+    info["role"] = "assistant"
+    model = message.get("model")
+    if isinstance(model, Mapping):
+        info["modelID"] = str(model.get("id") or "")
+        info["providerID"] = str(model.get("providerID") or "")
+
+    parts: list[dict[str, Any]] = []
+    content = message.get("content")
+    ordinals = {"text": 0, "reasoning": 0}
+    for part in content if isinstance(content, list) else []:
+        if not isinstance(part, Mapping):
+            continue
+        kind = str(part.get("type") or "")
+        if kind in {"text", "reasoning"}:
+            ordinal = ordinals[kind]
+            ordinals[kind] += 1
+            parts.append({
+                **dict(part),
+                "id": f"{message_id}:{kind}:{ordinal}",
+                "messageID": message_id,
+            })
+            continue
+        if kind != "tool":
+            continue
+        state = part.get("state")
+        state = dict(state) if isinstance(state, Mapping) else {}
+        call_id = str(part.get("id") or "")
+        parts.append({
+            "type": "tool",
+            "id": call_id,
+            "callID": call_id,
+            "messageID": message_id,
+            "tool": str(part.get("name") or "tool"),
+            "state": state,
+        })
+    return {"info": info, "parts": parts}
+
+
+async def _read_v2_messages(
+    client: httpx.AsyncClient, session_id: str
+) -> list[dict[str, Any]]:
+    """Read every V2 message in chronological order and normalize each row."""
+    messages: list[dict[str, Any]] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    while True:
+        params: dict[str, str] = {"limit": "100"}
+        if cursor:
+            # V2 rejects combining cursor with order; the cursor already
+            # encodes the direction chosen by the first page.
+            params["cursor"] = cursor
+        else:
+            params["order"] = "asc"
+        response = await client.get(
+            f"/api/session/{session_id}/message", params=params
+        )
+        response.raise_for_status()
+        body = response.json()
+        page = _data(body)
+        if not isinstance(page, list):
+            break
+        for message in page:
+            if not isinstance(message, Mapping):
+                continue
+            normalized = _projected_message(message)
+            if normalized is not None:
+                messages.append(normalized)
+        cursor_body = body.get("cursor") if isinstance(body, Mapping) else None
+        next_cursor = (
+            str(cursor_body.get("next") or "")
+            if isinstance(cursor_body, Mapping)
+            else ""
+        )
+        if not next_cursor:
+            break
+        if next_cursor in seen_cursors:
+            raise RuntimeError("OpenCode pagination returned a repeated cursor")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    return messages
+
+
+async def _read_v2_children(
+    client: httpx.AsyncClient, parent_id: str
+) -> list[dict[str, Any]]:
+    """Read every V2 child session for a parent, following cursors."""
+    children: list[dict[str, Any]] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    while True:
+        params: dict[str, str] = {
+            "parentID": parent_id,
+            "limit": "100",
+        }
+        if cursor:
+            params["cursor"] = cursor
+        response = await client.get("/api/session", params=params)
+        response.raise_for_status()
+        body = response.json()
+        page = _data(body)
+        if not isinstance(page, list):
+            break
+        children.extend(
+            dict(child)
+            for child in page
+            if isinstance(child, Mapping) and child.get("id")
+        )
+        cursor_body = body.get("cursor") if isinstance(body, Mapping) else None
+        next_cursor = (
+            str(cursor_body.get("next") or "")
+            if isinstance(cursor_body, Mapping)
+            else ""
+        )
+        if not next_cursor:
+            break
+        if next_cursor in seen_cursors:
+            raise RuntimeError("OpenCode pagination returned a repeated cursor")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    return children
+
+
+async def _read_active_sessions(client: httpx.AsyncClient) -> set[str]:
+    """Session IDs currently executing in this OpenCode server process."""
+    response = await client.get("/api/session/active")
+    raise_for_status = getattr(response, "raise_for_status", None)
+    if callable(raise_for_status):
+        raise_for_status()
+    active = _data(response.json())
+    if not isinstance(active, Mapping):
+        return set()
+    return {
+        str(session_id)
+        for session_id, state in active.items()
+        if isinstance(state, Mapping) and state.get("type") == "running"
+    }
+
+
+def _v2_part_key(props: Mapping[str, Any], kind: str = "") -> str:
+    return (
+        f"{props.get('assistantMessageID') or ''}:{kind}:"
+        f"{props.get('ordinal') or 0}"
+    )
+
+
 def split_model(model: str) -> tuple[str, str]:
     """Split ``providerID/modelID`` into its parts.
 
     opencode addresses models as ``provider/model`` (e.g.
-    ``anthropic/claude-sonnet-4-6``). A bare id has no provider, and the
-    caller lets opencode fall back to its configured default.
+    ``anthropic/claude-sonnet-4-6``). A bare id has no provider; the caller
+    resolves it against the V2 catalog before sending a model switch.
     """
     value = (model or "").strip()
     if not value:
@@ -1067,496 +899,12 @@ def split_model(model: str) -> tuple[str, str]:
     return provider, rest
 
 
-def _v2_attachment_url(attachment: Mapping[str, Any]) -> str:
-    """Return the URL used by the V1-shaped transcript for a V2 file.
-
-    V2 stores an attachment as base64 ``data`` plus a tagged ``source``.  An
-    inline source has no URI, while a URI source keeps the URI under
-    ``source.uri`` rather than at the top level.  Older/experimental builds
-    also emitted a top-level ``uri``; accepting that spelling keeps the
-    normalizer tolerant without manufacturing an empty URL.
-    """
-    source = attachment.get("source")
-    if isinstance(source, Mapping):
-        source_type = str(source.get("type") or "")
-        if source_type == "uri":
-            uri = str(source.get("uri") or attachment.get("uri") or "")
-            if uri:
-                return uri
-        if source_type == "inline":
-            data = str(attachment.get("data") or "")
-            mime = str(attachment.get("mime") or "application/octet-stream")
-            if data:
-                return f"data:{mime};base64,{data}"
-    uri = str(attachment.get("uri") or "")
-    if uri:
-        return uri
-    data = str(attachment.get("data") or "")
-    mime = str(attachment.get("mime") or "application/octet-stream")
-    return f"data:{mime};base64,{data}" if data else ""
-
-
-def _normalize_v2_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Convert one V2 session message to the V1-shaped internal transcript."""
-    if isinstance(message.get("info"), Mapping) and isinstance(message.get("parts"), list):
-        normalized = dict(message)
-        normalized_parts: list[Any] = []
-        for part in message["parts"]:
-            if not isinstance(part, Mapping):
-                normalized_parts.append(part)
-                continue
-            item = dict(part)
-            if item.get("type") == "file" and not item.get("url"):
-                item["url"] = _v2_attachment_url(item)
-                item.setdefault("filename", str(item.get("name") or ""))
-                item.setdefault("mime", str(item.get("mime") or ""))
-            normalized_parts.append(item)
-        normalized["parts"] = normalized_parts
-        return normalized
-
-    message_type = str(message.get("type") or "")
-    message_id = str(message.get("id") or "")
-    if message_type == "idle":
-        # V2 projects the terminal execution marker as a message row.  It is
-        # not an assistant answer, but retaining it is essential after an SSE
-        # drop: the row is the only durable proof that the turn ended (and, on
-        # failure, why it ended).  Dropping it made recovery indistinguishable
-        # from a user-only projection.
-        idle_info: dict[str, Any] = {
-            key: value for key, value in message.items() if key != "type"
-        }
-        idle_info["id"] = message_id
-        idle_info["type"] = "idle"
-        return {"info": idle_info, "parts": []}
-
-    if message_type == "user":
-        text = str(message.get("text") or "")
-        parts: list[dict[str, Any]] = []
-        if text:
-            parts.append({"type": "text", "text": text, "id": f"{message_id}:text"})
-        for index, attachment in enumerate(message.get("files") or []):
-            if isinstance(attachment, Mapping):
-                parts.append({
-                    "type": "file",
-                    "id": str(attachment.get("id") or f"{message_id}:file:{index}"),
-                    "url": _v2_attachment_url(attachment),
-                    "filename": str(attachment.get("name") or ""),
-                    "mime": str(attachment.get("mime") or ""),
-                })
-        return {
-            "info": {
-                "id": message_id,
-                "role": "user",
-                "time": message.get("time"),
-            },
-            "parts": parts,
-        }
-
-    if message_type == "assistant":
-        info: dict[str, Any] = {
-            key: value for key, value in message.items() if key != "content"
-        }
-        info["id"] = message_id
-        info["role"] = "assistant"
-        model = message.get("model")
-        if isinstance(model, Mapping):
-            info["modelID"] = str(model.get("id") or model.get("modelID") or "")
-            info["providerID"] = str(model.get("providerID") or "")
-        parts = []
-        for index, content in enumerate(message.get("content") or []):
-            if not isinstance(content, Mapping):
-                continue
-            kind = str(content.get("type") or "")
-            part_id = str(content.get("id") or f"{message_id}:{kind}:{index}")
-            if kind in {"text", "reasoning"}:
-                parts.append({
-                    "type": kind,
-                    "id": part_id,
-                    "text": str(content.get("text") or ""),
-                })
-            elif kind == "tool":
-                state = content.get("state")
-                state = dict(state) if isinstance(state, Mapping) else {}
-                parts.append({
-                    "type": "tool",
-                    "id": part_id,
-                    "tool": str(content.get("name") or "tool"),
-                    "state": state,
-                })
-        return {"info": info, "parts": parts}
-
-    if message_type in {"synthetic", "compaction"}:
-        text = str(message.get("text") or "")
-        return {
-            "info": {"id": message_id, "role": "user"},
-            "parts": [{"type": "text", "text": text, "synthetic": True}],
-        }
-    return None
-
-
-def _normalize_messages(payload: object, version: ApiVersion) -> list[Any]:
-    """Unwrap and normalize a message-list response for either API version."""
-    value = _unwrap_data(payload)
-    if not isinstance(value, list):
-        return []
-    if version == "v1":
-        return value
-    normalized: list[Any] = []
-    for message in value:
-        if not isinstance(message, Mapping):
-            continue
-        converted = _normalize_v2_message(message)
-        if converted is not None:
-            normalized.append(converted)
-    return normalized
-
-
-async def _read_message_list(
-    client: Any, session_id: str, version: ApiVersion
-) -> list[Any]:
-    """Read a complete V1/V2 session message list, following V2 cursors.
-
-    V2 history can exceed any small page-count assumption.  Continue until the
-    server returns no next cursor, with a generous safety bound.  Exceeding the
-    bound (or a repeated cursor) raises an explicit error rather than silently
-    dropping the newest page and corrupting recovery/handover history.
-    """
-    if version == "v1":
-        response = await client.get(_message_path(client, session_id, version))
-        response.raise_for_status()
-        return _normalize_messages(_response_data(response), version)
-
-    messages: list[Any] = []
-    cursor: str | None = None
-    seen_cursors: set[str] = set()
-    pages = 0
-    while True:
-        pages += 1
-        if cursor is None:
-            path = _message_path(client, session_id, version)
-        else:
-            path = (
-                f"/api/session/{session_id}/message?"
-                f"cursor={quote(cursor, safe='')}"
-            )
-        response = await client.get(path)
-        response.raise_for_status()
-        raw = response.json()
-        page = _unwrap_data(raw)
-        if isinstance(page, list):
-            messages.extend(page)
-        next_cursor: object = None
-        if isinstance(raw, Mapping):
-            cursor_info = raw.get("cursor")
-            if not isinstance(cursor_info, Mapping):
-                unwrapped = _unwrap_data(raw)
-                cursor_info = unwrapped.get("cursor") if isinstance(unwrapped, Mapping) else None
-            if isinstance(cursor_info, Mapping):
-                next_cursor = cursor_info.get("next")
-        if not isinstance(next_cursor, str) or not next_cursor:
-            break
-        if next_cursor in seen_cursors:
-            raise RuntimeError("opencode message pagination returned a repeated cursor")
-        if pages >= _V2_MAX_CURSOR_PAGES:
-            raise RuntimeError(
-                "opencode message pagination exceeded "
-                f"{_V2_MAX_CURSOR_PAGES} pages"
-            )
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
-    return _normalize_messages(messages, version)
-
-
-async def _read_v2_child_sessions(
-    client: Any, parent_id: str
-) -> list[dict[str, Any]]:
-    """Read all V2 child sessions, following the session-list cursor.
-
-    The repeated/absent cursor guard is the termination condition.  A generous
-    page safety bound raises on exhaustion instead of returning a partial child
-    tree as if it were complete.
-    """
-    children: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    cursor: str | None = None
-    seen_cursors: set[str] = set()
-    pages = 0
-    while True:
-        pages += 1
-        # The V2 cursor already carries the original parent/filter/order
-        # query.  Send it alone on continuation pages; repeating ``parentID``
-        # or ``limit`` is not part of the cursor contract.
-        query = (
-            f"cursor={quote(cursor, safe='')}"
-            if cursor
-            else f"parentID={quote(parent_id, safe='')}&limit={_V2_CHILD_LIMIT}"
-        )
-        try:
-            response = await client.get(f"/api/session?{query}")
-            response.raise_for_status()
-            raw = response.json()
-        except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
-            # A first-page auxiliary read failure degrades to an empty collab
-            # tree. Once pages have been accepted, returning the partial list
-            # would falsely look complete, so surface the interruption.
-            if children:
-                raise RuntimeError(
-                    "opencode child-session pagination was interrupted"
-                ) from exc
-            break
-        page = _unwrap_data(raw)
-        if isinstance(page, list):
-            for child in page:
-                if not isinstance(child, Mapping):
-                    continue
-                child_id = str(child.get("id") or "")
-                if not child_id or child_id in seen_ids:
-                    continue
-                if str(child.get("parentID") or "") != parent_id:
-                    continue
-                seen_ids.add(child_id)
-                children.append(dict(child))
-        next_cursor: object = None
-        if isinstance(raw, Mapping):
-            cursor_info = raw.get("cursor")
-            if not isinstance(cursor_info, Mapping):
-                unwrapped = _unwrap_data(raw)
-                cursor_info = unwrapped.get("cursor") if isinstance(unwrapped, Mapping) else None
-            if isinstance(cursor_info, Mapping):
-                next_cursor = cursor_info.get("next")
-        if not isinstance(next_cursor, str) or not next_cursor:
-            break
-        if next_cursor in seen_cursors:
-            raise RuntimeError("opencode child-session pagination returned a repeated cursor")
-        if pages >= _V2_MAX_CURSOR_PAGES:
-            raise RuntimeError(
-                "opencode child-session pagination exceeded "
-                f"{_V2_MAX_CURSOR_PAGES} pages"
-            )
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
-    return children
-
-
-def _v2_active_state(value: object) -> bool | None:
-    """Interpret one value in the V2 active-session response."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        state = value.strip().lower()
-        if state in {"running", "active", "started", "busy", "in_progress", "in-progress"}:
-            return True
-        if state in {"idle", "stopped", "completed", "succeeded", "failed", "cancelled"}:
-            return False
-        return None
-    if isinstance(value, Mapping):
-        raw_state: object = value.get("type") or value.get("status") or value.get("state")
-        if raw_state is None:
-            # A session-keyed object with no explicit state is an active entry
-            # in the V2 shape; absence of the key is what carries the meaning.
-            return True
-        return _v2_active_state(raw_state)
-    return None
-
-
-async def _read_v2_active_sessions(client: Any) -> set[str] | None:
-    """Read V2's active-session map, or ``None`` when it is unavailable.
-
-    A missing activity endpoint is different from an authoritative empty map:
-    the former cannot prove quiescence, while the latter can.  Recovery uses
-    that distinction to avoid turning a user-only snapshot into a successful
-    turn.  The parser accepts the small response-shape variations emitted by
-    V2 point releases (mapping keyed by session id, a list of session objects,
-    or an ``active``/``sessions`` wrapper).
-    """
-    try:
-        response = await client.get("/api/session/active")
-        status = int(getattr(response, "status_code", 200))
-        if status >= 400:
-            return None
-        raw = response.json()
-    except (httpx.HTTPError, TypeError, ValueError, AttributeError):
-        return None
-
-    value = _unwrap_data(raw)
-    if isinstance(value, Mapping):
-        # Unwrap the common named containers before interpreting the entries.
-        for key in ("sessions", "active", "items"):
-            nested = value.get(key)
-            if isinstance(nested, (Mapping, list)):
-                value = nested
-                break
-        if isinstance(value, Mapping):
-            # A single session object is also a valid response in older builds.
-            session_id = str(value.get("sessionID") or value.get("id") or "")
-            if session_id:
-                state = _v2_active_state(value)
-                return {session_id} if state is not False else set()
-            active: set[str] = set()
-            for key, state in value.items():
-                if str(key) in {"data", "cursor", "meta"}:
-                    continue
-                if _v2_active_state(state) is not False:
-                    active.add(str(key))
-            return active
-        if isinstance(value, list):
-            active = set()
-            for item in value:
-                if isinstance(item, str):
-                    active.add(item)
-                    continue
-                if not isinstance(item, Mapping):
-                    continue
-                session_id = str(item.get("sessionID") or item.get("id") or "")
-                if session_id and _v2_active_state(item) is not False:
-                    active.add(session_id)
-            return active
-    if isinstance(value, list):
-        active = set()
-        for item in value:
-            if isinstance(item, str):
-                active.add(item)
-            elif isinstance(item, Mapping):
-                session_id = str(item.get("sessionID") or item.get("id") or "")
-                if session_id and _v2_active_state(item) is not False:
-                    active.add(session_id)
-        return active
-    return None
-
-
-def _v2_model_ref(provider_id: str, model_id: str, variant: str = "") -> dict[str, str]:
-    model: dict[str, str] = {"id": model_id, "providerID": provider_id}
-    if variant:
-        model["variant"] = variant
-    return model
-
-
-_V2_SYSTEM_OPEN = "<ciaobot-trusted-context>"
-_V2_SYSTEM_CLOSE = "</ciaobot-trusted-context>"
-
-
-def _v2_prompt_body(
-    request: AgentRequest, *, system_context: str = ""
-) -> dict[str, Any]:
-    """Build the supported V2 prompt body (``text`` + ``files``).
-
-    V2 deliberately removed V1's per-prompt ``system``/``parts`` fields.  The
-    only model-visible input accepted by the supported endpoint is ``text``;
-    dropping Ciaobot's core and runtime context would therefore silently make
-    V2 chats behave like an unconfigured provider.  Carry the trusted context
-    in a delimited text preamble, with the user's request clearly separated
-    afterwards.  This is an API limitation, not a claim that V2 has a native
-    system role; the marker is escaped so a context value cannot terminate its
-    own block and impersonate the request section.
-    """
-    # The V2 prompt endpoint accepts PromptInput.FileAttachment objects: a
-    # URI/name pair, not V1's file part and not the response-side data/source
-    # attachment shape.
-    files: list[dict[str, Any]] = []
-    for image in request.images:
-        attachment: dict[str, Any] = {
-            "uri": image.path.resolve().as_uri(),
-            "name": image.original_filename,
-        }
-        if image.caption:
-            attachment["description"] = image.caption
-        files.append(attachment)
-    text = build_prompt(request)
-    context = system_context.strip()
-    if context:
-        safe_context = context.replace(_V2_SYSTEM_CLOSE, "<\\/ciaobot-trusted-context>")
-        text = (
-            "The following is trusted Ciaobot system and runtime context. "
-            "Follow it as the operator's standing instructions; the request "
-            "after the marker is the user's message.\n"
-            f"{_V2_SYSTEM_OPEN}\n{safe_context}\n{_V2_SYSTEM_CLOSE}\n\n"
-            f"[User request]\n{text}"
-        )
-    body: dict[str, Any] = {"text": text}
-    if files:
-        body["files"] = files
-    return body
-
-
-def _prompt_message_id(payload: object) -> str:
-    """Extract the admitted user-message id from a V2 prompt receipt.
-
-    V2 point releases have returned both a direct message object and a wrapper
-    containing ``message``.  Keep this deliberately small and permissive: the
-    id is an anchor for recovery, not a response schema we should reject a
-    server for lacking.  V1 responses may be empty and are ignored by the
-    caller.
-    """
-    value = _unwrap_data(payload)
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        for item in value:
-            nested_id = _prompt_message_id(item)
-            if nested_id:
-                return nested_id
-        return ""
-    if not isinstance(value, Mapping):
-        return ""
-    for key in ("id", "messageID", "message_id", "userMessageID", "user_message_id"):
-        candidate = value.get(key)
-        if candidate not in (None, ""):
-            return str(candidate)
-    for key in ("message", "prompt", "user"):
-        nested = value.get(key)
-        nested_id = _prompt_message_id(nested)
-        if nested_id:
-            return nested_id
-    return ""
-
-
-def _v2_model_rows(payload: object) -> list[dict[str, Any]]:
-    """Flatten V2's flat ``/api/model`` response into provider/model rows."""
-    value = _unwrap_data(payload)
-    if not isinstance(value, list):
-        return []
-    rows: list[dict[str, Any]] = []
-    for model in value:
-        if not isinstance(model, Mapping) or model.get("enabled") is False:
-            continue
-        provider_id = str(model.get("providerID") or "")
-        model_id = str(model.get("modelID") or model.get("id") or "")
-        if not provider_id or not model_id:
-            continue
-        prefix = f"{provider_id}/"
-        if model_id.startswith(prefix):
-            model_id = model_id[len(prefix):]
-        if not model_id:
-            continue
-        variants_raw = model.get("variants")
-        if isinstance(variants_raw, list):
-            variants = sorted(
-                str(item.get("id") or "")
-                for item in variants_raw
-                if isinstance(item, Mapping) and str(item.get("id") or "")
-            )
-        elif isinstance(variants_raw, Mapping):
-            variants = sorted(str(item) for item in variants_raw)
-        else:
-            variants = []
-        row: dict[str, Any] = {
-            "model": f"{provider_id}/{model_id}",
-            "label": f"{model.get('name') or model_id} ({provider_id})",
-            "variants": variants,
-        }
-        accepts_images = model_accepts_images(model)
-        if accepts_images is not None:
-            row["images"] = accepts_images
-        rows.append(row)
-    return rows
-
-
 def compose_system(developer_instructions: str, runtime: str) -> str:
-    """Build the prompt body's ``system`` field from its two halves.
+    """Build the context prefix carried in V2's text-only prompt body.
 
-    Instructions first, runtime facts after: the caller's system prompt is what
-    defines the call, and the date/workspace lines are context it may refer to.
-    Either half may be empty -- a chat supplies no instructions (opencode's own
-    agent config owns the system prompt) and a bare environment yields no
-    runtime lines -- and an empty result means "send no ``system`` at all".
+    Instructions come first, runtime facts after. The provider wraps the result
+    in transcript-only context markers because V2 has no stable per-prompt system
+    field.
     """
     return "\n\n".join(
         part for part in (developer_instructions.strip(), runtime.strip()) if part
@@ -1564,7 +912,7 @@ def compose_system(developer_instructions: str, runtime: str) -> str:
 
 
 class OpencodeActiveHandle(ActiveHandle):
-    """Stops the in-flight turn by aborting its session."""
+    """Stops the in-flight turn by interrupting its V2 session."""
 
     def __init__(self, provider: "OpencodeProvider", session_id: str) -> None:
         self._provider = provider
@@ -1572,10 +920,9 @@ class OpencodeActiveHandle(ActiveHandle):
 
     async def stop(self) -> None:
         # Flag first: the streaming pump checks it on every event and at
-        # every reconnect, so the local turn ends the moment the abort is
-        # issued rather than when the server's `session.idle` happens to
-        # arrive (or when the poll backstop gives up, which could take a
-        # minute over a dead SSE subscription).
+        # every reconnect, so the local turn ends as soon as the interrupt is
+        # issued rather than waiting for a terminal execution event over a
+        # half-healthy SSE subscription.
         # Guarded: an empty id would put the sentinel back to a value the
         # pump's `== session_id` guard can match by accident (see
         # `_stop_requested`), and there is nothing to abort either way.
@@ -1586,28 +933,229 @@ class OpencodeActiveHandle(ActiveHandle):
 
 @dataclass(slots=True)
 class _PendingRequest:
-    """A permission or question/form request awaiting the operator's reply."""
+    """A permission or form awaiting the operator's reply."""
 
     request_id: str
     session_id: str
     tool_use_id: str = ""
     question_ids: tuple[str, ...] = ()
-    question_multi: tuple[bool, ...] = ()
-    question_types: tuple[str, ...] = ()
-    question_values: tuple[tuple[tuple[str, str], ...], ...] = ()
-    question_custom: tuple[bool, ...] = ()
-    question_required: tuple[bool, ...] = ()
-    question_hidden: tuple[bool, ...] = ()
-    question_when: tuple[tuple[dict[str, Any], ...], ...] = ()
-    question_pattern: tuple[str, ...] = ()
-    question_format: tuple[str, ...] = ()
-    question_min_length: tuple[int, ...] = ()
-    question_max_length: tuple[int, ...] = ()
-    question_minimum: tuple[float, ...] = ()
-    question_maximum: tuple[float, ...] = ()
-    question_min_items: tuple[int, ...] = ()
-    question_max_items: tuple[int, ...] = ()
-    form: bool = False
+    question_fields: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class QuestionResponseResult:
+    """Outcome of one native-form reply/cancel operation."""
+
+    ok: bool
+    error: str = ""
+    retryable: bool = True
+
+
+class _FormValidationError(ValueError):
+    """The PWA answer cannot satisfy the V2 form schema."""
+
+
+FormValue = str | int | float | bool | list[str]
+
+
+def _form_option_values(field: Mapping[str, Any]) -> list[str]:
+    options = field.get("options")
+    if not isinstance(options, list):
+        return []
+    return [
+        str(option.get("value"))
+        for option in options
+        if isinstance(option, Mapping) and option.get("value") is not None
+    ]
+
+
+def _form_answer_value(
+    kind: str, values: Sequence[str]
+) -> FormValue | None:
+    """Coerce one PWA selection to the primitive expected by a V2 field."""
+    items = [str(value) for value in values]
+    if kind == "multiselect":
+        return items
+    if not items:
+        return None
+    value = items[0]
+    if kind == "external":
+        return True if value == "true" else None
+    if kind == "boolean":
+        if value in {"true", "1", "yes", "on"}:
+            return True
+        if value in {"false", "0", "no", "off"}:
+            return False
+        return None
+    if kind == "integer":
+        try:
+            parsed_int = int(value)
+        except ValueError:
+            return None
+        return parsed_int if math.isfinite(float(parsed_int)) else None
+    if kind == "number":
+        try:
+            parsed_float = float(value)
+        except ValueError:
+            return None
+        return parsed_float if math.isfinite(parsed_float) else None
+    return value
+
+
+def _form_field_active(
+    field: Mapping[str, Any], answer: Mapping[str, object]
+) -> bool:
+    """Apply V2's strict, ordered ``when`` semantics."""
+    conditions = field.get("when")
+    if not isinstance(conditions, list):
+        return True
+    for condition in conditions:
+        if not isinstance(condition, Mapping):
+            return False
+        key = str(condition.get("key") or "")
+        if key not in answer:
+            # V2 treats an unanswered reference as neither eq nor neq.
+            return False
+        actual = answer[key]
+        expected = condition.get("value")
+        if isinstance(actual, list):
+            equal = expected in actual
+        else:
+            equal = actual == expected
+        op = str(condition.get("op") or "eq")
+        if op == "eq" and not equal:
+            return False
+        if op == "neq" and equal:
+            return False
+        if op not in {"eq", "neq"}:
+            return False
+    return True
+
+
+def _validate_form_field(field: Mapping[str, Any], values: Sequence[str]) -> FormValue:
+    kind = str(field.get("type") or "string")
+    if kind != "multiselect" and len(values) > 1:
+        raise _FormValidationError("Choose one answer")
+    value = _form_answer_value(kind, values)
+    if value is None:
+        raise _FormValidationError("The answer has an invalid value")
+
+    if kind == "multiselect":
+        if not isinstance(value, list):
+            raise _FormValidationError("Choose one or more options")
+        items = [str(item) for item in value]
+        minimum = field.get("minItems")
+        maximum = field.get("maxItems")
+        if isinstance(minimum, (int, float)) and len(items) < minimum:
+            raise _FormValidationError("Choose more options")
+        if isinstance(maximum, (int, float)) and len(items) > maximum:
+            raise _FormValidationError("Choose fewer options")
+        if not field.get("custom"):
+            allowed = set(_form_option_values(field))
+            if any(item not in allowed for item in items):
+                raise _FormValidationError("Choose one of the available options")
+        return items
+
+    if kind == "external":
+        if value is not True:
+            raise _FormValidationError("Complete the external step first")
+        return True
+
+    if kind == "boolean":
+        if not isinstance(value, bool):
+            raise _FormValidationError("Choose yes or no")
+        return value
+
+    if kind in {"integer", "number"}:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise _FormValidationError("Enter a valid number")
+        if kind == "integer" and not float(value).is_integer():
+            raise _FormValidationError("Enter a whole number")
+        minimum = field.get("minimum")
+        maximum = field.get("maximum")
+        if isinstance(minimum, (int, float)) and value < minimum:
+            raise _FormValidationError("Enter a number within the allowed range")
+        if isinstance(maximum, (int, float)) and value > maximum:
+            raise _FormValidationError("Enter a number within the allowed range")
+        return value
+
+    if not isinstance(value, str):
+        raise _FormValidationError("Enter a valid value")
+    if field.get("required") and not value:
+        raise _FormValidationError("This field is required")
+    minimum = field.get("minLength")
+    maximum = field.get("maxLength")
+    if isinstance(minimum, int) and len(value) < minimum:
+        raise _FormValidationError("Enter a longer value")
+    if isinstance(maximum, int) and len(value) > maximum:
+        raise _FormValidationError("Enter a shorter value")
+    pattern = field.get("pattern")
+    if isinstance(pattern, str) and pattern:
+        try:
+            if re.search(pattern, value) is None:
+                raise _FormValidationError("Enter a value in the requested format")
+        except re.error as exc:
+            raise _FormValidationError("The form has an invalid validation rule") from exc
+    fmt = str(field.get("format") or "")
+    if fmt == "email" and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value) is None:
+        raise _FormValidationError("Enter a valid email address")
+    if fmt == "uri" and not urlparse(value).scheme:
+        raise _FormValidationError("Enter a valid absolute URI")
+    if fmt == "date":
+        try:
+            parsed_date = datetime.strptime(value, "%Y-%m-%d")
+        except ValueError as exc:
+            raise _FormValidationError("Enter a valid date") from exc
+        if parsed_date.strftime("%Y-%m-%d") != value:
+            raise _FormValidationError("Enter a valid date")
+    if fmt == "date-time":
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise _FormValidationError("Enter a valid date and time") from exc
+    if not field.get("custom") and _form_option_values(field):
+        if value not in set(_form_option_values(field)):
+            raise _FormValidationError("Choose one of the available options")
+    return value
+
+
+def _validate_form_answer(
+    pending: _PendingRequest, answers: Mapping[str, Sequence[str]]
+) -> dict[str, FormValue]:
+    known = set(pending.question_fields)
+    unknown = set(answers) - known
+    if unknown:
+        raise _FormValidationError("The answer contains an unknown field")
+
+    answer: dict[str, FormValue] = {}
+    for question_id in pending.question_ids:
+        field = pending.question_fields[question_id]
+        active = _form_field_active(field, answer)
+        if not active:
+            if question_id in answers:
+                raise _FormValidationError("An inactive field cannot be answered")
+            continue
+        values = answers.get(question_id, ())
+        if not values:
+            if field.get("required"):
+                raise _FormValidationError("This field is required")
+            continue
+        # The PWA sends display labels for legacy cards and wire values for V2.
+        # Prefer an exact option value, then map a legacy label to its value.
+        option_map = {
+            str(option.get("label") or ""): str(option.get("value"))
+            for option in (field.get("options") or [])
+            if isinstance(option, Mapping)
+        }
+        option_values = set(_form_option_values(field))
+        # A wire value may also be another option's display label. Prefer an
+        # exact value match before applying the legacy label-to-value map.
+        mapped_values = [
+            item if item in option_values else option_map.get(item, item)
+            for item in values
+        ]
+        answer[question_id] = _validate_form_field(field, mapped_values)
+    return answer
 
 
 class OpencodeProvider(BaseSDKProvider):
@@ -1658,7 +1206,6 @@ class OpencodeProvider(BaseSDKProvider):
         self._stderr_task: asyncio.Task[None] | None = None
         self._stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
         self._client: httpx.AsyncClient | None = None
-        self._api_version: ApiVersion = "v1"
         self._base_url: str = ""
         self._password: str = ""
         self._session_id: str = ""
@@ -1666,29 +1213,21 @@ class OpencodeProvider(BaseSDKProvider):
         self._permission_requests: dict[str, _PendingRequest] = {}
         self._question_requests: dict[str, _PendingRequest] = {}
         self._tool_calls: dict[str, str] = {}
-        # Tool ids that have already emitted their terminal result.  Message
-        # reconciliation can replay a completed V2 tool part after the live
-        # success event; this set makes that replay a no-op.
-        self._settled_tools: set[str] = set()
-        self._announced_tools: set[str] = set()
+        self._settled_tool_ids: set[str] = set()
         self._mcp_token: str = ""
         # Per-turn stream state, reset by `_reset_turn_state`.
         self._emitted: dict[str, int] = {}
-        # partID -> part type. `message.part.delta` reports the *field* it is
-        # filling, and a ReasoningPart stores its content in `text` just like a
-        # TextPart — so `field` alone cannot tell reasoning from prose. The
-        # part is always announced by `message.part.updated` before its deltas
-        # arrive, which is what makes this lookup reliable.
+        # `assistantMessageID:ordinal` -> reasoning/text. V2 uses separate
+        # reasoning/text event families, but recovery replays normalized parts
+        # through the same accumulator, so both paths share this lookup.
         self._part_types: dict[str, str] = {}
         self._user_message_id: str = ""
         self._usage: dict[str, str] = {}
-        # The last model-call usage snapshot is kept separately from the
-        # turn aggregate.  It is the value used for context-window occupancy
-        # after a recovered V2 turn.
+        # ``session.usage.updated`` is a cumulative session snapshot, while
+        # ``session.step.ended`` describes the latest model call. Keep the
+        # latter separately for context-window occupancy.
         self._context_usage: dict[str, str] = {}
         self._cost: float | None = None
-        # Error discovered while reconciling a dropped V2 stream.
-        self._poll_error: str = ""
         # Visible assistant text, accumulated per part so the terminal
         # ResultEvent can carry the turn's answer. `record_turn`
         # persists that as the durable transcript's response, so leaving it
@@ -1699,20 +1238,19 @@ class OpencodeProvider(BaseSDKProvider):
         # pin opencode without naming a model, in which case the request carries
         # none and only the assistant message says what was used.
         self._effective_model: str = ""
-        # Populated before session creation so a bare tier alias is resolved
-        # before the session payload is built, while the prompt reuses the
-        # exact same provider/model pair.
+        # Qualified model selected for this turn; an empty pair means V2 should
+        # use the session/server default.
         self._turn_model: tuple[str, str] = ("", "")
         # Session id whose turn the user asked to stop, or None. Set by the
         # active handle's stop() and consumed by the streaming pump so the
-        # turn ends as soon as the abort is issued instead of waiting for a
-        # session.idle that may never arrive over a flaky SSE subscription.
+        # turn ends as soon as the interrupt is issued instead of waiting for
+        # a terminal execution event that may never arrive over a flaky stream.
         #
         # None, not "": `_ensure_session` can hand back an empty id when the
         # server's response carries none, and with "" as the sentinel the
         # pump's `self._stop_requested == session_id` guard then read as
         # "stopped" on the first SSE event of a turn nobody stopped —
-        # returning with `idle_seen` set, which also skips the reconcile
+        # returning with `terminal_seen` set, which also skips the reconcile
         # backstop, for a silently empty turn.
         self._stop_requested: str | None = None
 
@@ -1720,8 +1258,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._emitted.clear()
         self._part_types.clear()
         self._tool_calls.clear()
-        self._settled_tools.clear()
-        self._announced_tools.clear()
+        self._settled_tool_ids.clear()
         self._user_message_id = ""
         self._usage = {}
         self._context_usage = {}
@@ -1729,8 +1266,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._answer_parts.clear()
         self._effective_model = ""
         self._turn_recovered_via_poll = False
-        # Error discovered while reconciling a dropped V2 stream.
-        self._poll_error = ""
+        self._poll_error: str = ""
         self._stop_requested = None
 
     # ---------------------------------------------------------------- server
@@ -1754,38 +1290,54 @@ class OpencodeProvider(BaseSDKProvider):
         )
 
     async def read_live_collab_tree(self) -> list[dict[str, Any]]:
-        """Read child sessions over this chat's already-running server."""
+        """``read_collab_tree`` read over this chat's already-running server.
+
+        Same shape as the classmethod, but skips ``_EphemeralServer`` entirely:
+        while a chat is attached, its own server is already up, so spawning a
+        second one just to poll subagent transcripts every few seconds wastes
+        a process start each time. Callers should check ``has_live_server``
+        first and fall back to the classmethod otherwise (e.g. a chat with no
+        attached provider, viewed from another device or after a restart).
+        """
         client = self._client
         if client is None or not self._session_id:
             return []
-        version = _api_version_for_client(client, self._api_version)
 
-        async def _child_messages(child_id: str) -> list[Any]:
+        async def _child_messages(child_id: str) -> list[dict[str, Any]]:
             try:
-                return await _read_message_list(client, child_id, version)
-            except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+                return await _read_v2_messages(client, child_id)
+            except (httpx.HTTPError, TypeError, ValueError):
                 return []
 
-        if version == "v2":
-            children = await _read_v2_child_sessions(client, self._session_id)
-        else:
-            children_path = f"/session/{self._session_id}/children"
-            try:
-                response = await client.get(children_path)
-                response.raise_for_status()
-                children_payload = _response_data(response)
-            except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-                return []
-            children = [
-                dict(child)
-                for child in children_payload
-                if isinstance(child, Mapping) and child.get("id")
-            ] if isinstance(children_payload, list) else []
+        children_result, active_result = await asyncio.gather(
+            _read_v2_children(client, self._session_id),
+            _read_active_sessions(client),
+            return_exceptions=True,
+        )
+        if isinstance(children_result, Exception):
+            return []
+        # A transient failure of the auxiliary activity map must not discard
+        # successfully fetched children. ``None`` means activity is unknown;
+        # the conservative counter will fall back to message timing.
+        active_ids = (
+            None
+            if isinstance(active_result, Exception)
+            else active_result
+        )
+        children = [child for child in children_result if child.get("id")]
         histories = await asyncio.gather(
             *(_child_messages(str(child["id"])) for child in children)
         )
         return [
-            {"info": child, "messages": messages}
+            {
+                "info": child,
+                "messages": messages,
+                "active": (
+                    None
+                    if active_ids is None
+                    else str(child["id"]) in active_ids
+                ),
+            }
             for child, messages in zip(children, histories)
         ]
 
@@ -1952,7 +1504,7 @@ class OpencodeProvider(BaseSDKProvider):
         return self._stderr_tail[-1] if self._stderr_tail else ""
 
     async def _await_health(self) -> None:
-        """Poll the version-specific health endpoint until the server answers."""
+        """Poll ``/api/info`` and require an OpenCode 2.x server."""
         assert self._client is not None
         deadline = asyncio.get_running_loop().time() + _SERVER_START_TIMEOUT
         last_error: Exception | None = None
@@ -1961,41 +1513,45 @@ class OpencodeProvider(BaseSDKProvider):
             if self._process is not None and self._process.returncode is not None:
                 detail = await self._stderr_detail()
                 raise RuntimeError(
-                    f"opencode serve exited with code {self._process.returncode}"
+                    f"OpenCode serve exited with code {self._process.returncode}"
                     + (f": {detail}" if detail else "")
                 )
-            version, status, error = await _probe_api_version(self._client)
-            if isinstance(error, _UnsupportedApiVersion):
-                raise RuntimeError(str(error)) from error
-            if version is not None:
-                self._api_version = version
-                _set_api_version(self._client, version)
-                return
-            if status is not None:
-                last_status = status
-            if error is not None:
-                last_error = error
+            try:
+                response = await self._client.get("/api/info", timeout=2.0)
+                last_status = response.status_code
+                if response.status_code == 401:
+                    raise RuntimeError("OpenCode server authentication failed")
+                if response.status_code == 200:
+                    try:
+                        payload = response.json()
+                    except ValueError as exc:
+                        raise RuntimeError(OPENCODE_V2_REQUIRED) from exc
+                    version_error = _server_version_error(payload)
+                    if version_error:
+                        raise RuntimeError(version_error)
+                    return
+                if response.status_code == 404:
+                    raise RuntimeError(OPENCODE_V2_REQUIRED)
+            except httpx.HTTPError as exc:  # not up yet
+                last_error = exc
+                last_status = None
             await asyncio.sleep(0.2)
         reason = _health_failure_reason(last_status, last_error)
-        raise TimeoutError(f"opencode serve did not become healthy: {reason}")
+        raise TimeoutError(f"OpenCode serve did not become healthy: {reason}")
 
     async def _verify_contract(self) -> None:
-        """Fail closed when the installed build is missing required operations."""
+        """Fail closed when the installed V2 build lacks required operations."""
         assert self._client is not None
-        version = _api_version_for_client(self._client, self._api_version)
-        path = "/openapi.json" if version == "v2" else "/doc"
         try:
-            response = await self._client.get(path, timeout=10.0)
+            response = await self._client.get("/openapi.json", timeout=10.0)
             response.raise_for_status()
-            spec = _response_data(response)
-        except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
-            raise RuntimeError(f"could not read the opencode API document: {exc}") from exc
-        if not isinstance(spec, Mapping):
-            raise RuntimeError("could not read the opencode API document: response was not an object")
-        missing = missing_required_paths(spec, version)
+            spec = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise RuntimeError(f"could not read the OpenCode API document: {exc}") from exc
+        missing = missing_required_paths(spec)
         if missing:
             raise RuntimeError(
-                "this opencode build is missing operations Ciaobot needs: "
+                "This OpenCode 2.x build is missing operations Ciaobot needs: "
                 + ", ".join(missing)
             )
 
@@ -2008,8 +1564,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._permission_requests.clear()
         self._question_requests.clear()
         self._tool_calls.clear()
-        self._settled_tools.clear()
-        self._announced_tools.clear()
+        self._settled_tool_ids.clear()
 
         if self._client is not None:
             await self._client.aclose()
@@ -2035,7 +1590,6 @@ class OpencodeProvider(BaseSDKProvider):
         if reader is not None:
             reader.cancel()
         self._base_url = ""
-        self._api_version = "v1"
         self._mcp_token = ""
         self._session_handover_context = ""
         self._reset_settings()
@@ -2047,7 +1601,7 @@ class OpencodeProvider(BaseSDKProvider):
         if client is None or not session_id:
             return False
         try:
-            response = await client.delete(_session_path(client, session_id))
+            response = await client.delete(f"/api/session/{session_id}")
         except httpx.HTTPError:
             logger.debug("opencode session deletion failed for %s", session_id, exc_info=True)
             return False
@@ -2064,143 +1618,170 @@ class OpencodeProvider(BaseSDKProvider):
 
     # --------------------------------------------------------------- session
 
-    async def _configure_v2_session(
-        self,
-        client: Any,
-        session_id: str,
-        *,
-        agent: str,
-        provider_id: str,
-        model_id: str,
-        variant: str,
-    ) -> None:
-        """Apply per-turn V2 model/agent selections to a resumed session."""
-        if model_id and provider_id:
-            model = _v2_model_ref(provider_id, model_id, variant)
-            response = await client.post(
-                f"/api/session/{session_id}/model", json={"model": model}
-            )
-            if getattr(response, "status_code", 200) >= 400:
-                raise RuntimeError(
-                    f"opencode rejected the V2 model selection ({response.status_code})"
-                )
-        response = await client.post(
-            f"/api/session/{session_id}/agent", json={"agent": agent}
-        )
-        if getattr(response, "status_code", 200) >= 400:
-            raise RuntimeError(
-                f"opencode rejected the V2 agent selection ({response.status_code})"
-            )
+    async def _default_model_ref(
+        self, client: httpx.AsyncClient, thinking_level: str = ""
+    ) -> dict[str, str] | None:
+        response = await client.get("/api/model/default")
+        response.raise_for_status()
+        model = _data(response.json())
+        if not isinstance(model, Mapping):
+            return None
+        model_id = str(model.get("modelID") or "")
+        provider_id = str(model.get("providerID") or "")
+        if not model_id or not provider_id:
+            return None
+        ref = {"id": model_id, "providerID": provider_id}
+        if thinking_level:
+            ref["variant"] = thinking_level
+        return ref
 
     async def _ensure_session(self, request: AgentRequest) -> str:
-        """Resume, fork, or create the session this turn runs in."""
+        """Resume, fork, or create the V2 session this turn runs in."""
         client = self._client
         assert client is not None
-        version = _api_version_for_client(client, self._api_version)
-        agent, permission = _mode_rules_for_version(
+        agent, permissions = mode_settings(
             request.mode,
-            version,
             tools_enabled=self._tools_enabled,
             runtime_root=self._runtime_root(),
             workspace_root=self.workspace_root,
         )
-        resume = (request.resume_session or "").strip()
         provider_id, model_id = split_model(request.model)
         if model_id and not provider_id:
             self._turn_model = await self._resolve_model(client, request.model)
             provider_id, model_id = self._turn_model
-        elif not model_id and version == "v2" and not resume:
-            # A new V2 session may use the server default.  On resume, an
-            # empty request model deliberately means "retain the session's
-            # model", matching V1 and avoiding a surprising switch merely
-            # because /api/model/default was temporarily empty.
-            provider_id, model_id = await self._resolve_v2_default_model(client)
-            self._turn_model = (provider_id, model_id)
         else:
             self._turn_model = (provider_id, model_id)
+
+        desired_model: dict[str, str] | None = None
+        if model_id:
+            desired_model = {"id": model_id, "providerID": provider_id}
+            if request.thinking_level:
+                desired_model["variant"] = request.thinking_level
+        default_model: dict[str, str] | None = None
+        if not request.model:
+            try:
+                default_model = await self._default_model_ref(
+                    client, request.thinking_level
+                )
+            except httpx.HTTPError:
+                logger.debug("OpenCode default-model lookup failed", exc_info=True)
+
+        async def _configure(
+            session_id: str, current: Mapping[str, Any]
+        ) -> bool:
+            if str(current.get("agent") or "") != agent:
+                response = await client.post(
+                    f"/api/session/{session_id}/agent", json={"agent": agent}
+                )
+                if response.status_code >= 400:
+                    return False
+            target_model = desired_model or default_model
+            if (
+                not request.model
+                and target_model is None
+                and isinstance(current.get("model"), Mapping)
+                and current["model"].get("id")
+            ):
+                # An empty request means "use OpenCode's configured default";
+                # silently retaining a resumed session's old model would make
+                # the request setting ineffective when /api/model/default is
+                # unavailable. Let the caller rotate to a fresh session.
+                return False
+            if target_model is not None:
+                current_model = current.get("model")
+                current_model = current_model if isinstance(current_model, Mapping) else {}
+                same_ref = (
+                    str(current_model.get("id") or "") == target_model["id"]
+                    and str(current_model.get("providerID") or "")
+                    == target_model["providerID"]
+                )
+                current_variant = str(current_model.get("variant") or "")
+                desired_variant = target_model.get("variant", "")
+                if current_variant == "default" and not desired_variant:
+                    current_variant = ""
+                if not same_ref or current_variant != desired_variant:
+                    response = await client.post(
+                        f"/api/session/{session_id}/model",
+                        json={"model": target_model},
+                    )
+                    if response.status_code >= 400:
+                        return False
+            return True
+
+        replacement_metadata: Mapping[str, Any] | None = None
+        resume = (request.resume_session or "").strip()
         if resume:
-            response = await client.get(_session_path(client, resume, fallback=version))
-            if getattr(response, "status_code", 500) < 400:
+            response = await client.get(f"/api/session/{resume}")
+            if response.status_code < 400:
                 try:
-                    session_payload = _response_data(response)
-                except (TypeError, ValueError, AttributeError):
+                    session_payload = _data(response.json())
+                except (TypeError, ValueError):
                     session_payload = None
-                if _session_permission_matches(session_payload, permission, version):
+                if isinstance(session_payload, Mapping):
+                    metadata = session_payload.get("metadata")
+                    if isinstance(metadata, Mapping):
+                        replacement_metadata = metadata
+                if (
+                    isinstance(session_payload, Mapping)
+                    and _session_permission_matches(session_payload, permissions)
+                ):
                     if request.fork_session:
                         fork_response = await client.post(
-                            _session_path(client, resume, "/fork", version), json={}
+                            f"/api/session/{resume}/fork", json={}
                         )
-                        if getattr(fork_response, "status_code", 500) < 400:
-                            fork_payload = _response_data(fork_response)
-                            fork_info = fork_payload if isinstance(fork_payload, Mapping) else {}
-                            self._session_id = str(fork_info.get("id") or "")
-                            if self._session_id:
-                                if version == "v2":
-                                    await self._configure_v2_session(
-                                        client,
-                                        self._session_id,
-                                        agent=agent,
-                                        provider_id=provider_id,
-                                        model_id=model_id,
-                                        variant=request.thinking_level,
-                                    )
-                                return self._session_id
+                        if fork_response.status_code < 400:
+                            try:
+                                forked = _data(fork_response.json())
+                            except (TypeError, ValueError):
+                                forked = None
+                            if isinstance(forked, Mapping):
+                                forked_id = str(forked.get("id") or "")
+                                if forked_id and await _configure(forked_id, forked):
+                                    self._session_id = forked_id
+                                    return forked_id
                         logger.warning(
-                            "opencode fork failed (%s); starting a new session",
-                            getattr(fork_response, "status_code", 500),
+                            "OpenCode fork failed (%s); starting a new session",
+                            fork_response.status_code,
                         )
-                    else:
+                    elif await _configure(resume, session_payload):
                         self._session_id = resume
-                        if version == "v2":
-                            await self._configure_v2_session(
-                                client,
-                                resume,
-                                agent=agent,
-                                provider_id=provider_id,
-                                model_id=model_id,
-                                variant=request.thinking_level,
-                            )
                         return resume
                 else:
                     logger.warning(
-                        "opencode session %s permission rules do not match %s; "
+                        "OpenCode session %s permission rules do not match %s; "
                         "starting a fresh session",
                         resume,
                         request.mode,
                     )
                     try:
-                        history = await _read_message_list(client, resume, version)
+                        history = await _read_v2_messages(client, resume)
                         self._session_handover_context = _session_handover_text(history)
-                    except (httpx.HTTPError, TypeError, ValueError, AttributeError):
+                    except (httpx.HTTPError, TypeError, ValueError, RuntimeError):
                         logger.info(
-                            "opencode session %s history unavailable during "
+                            "OpenCode session %s history unavailable during "
                             "permission rotation",
                             resume,
                         )
             else:
-                logger.info("opencode session %s is gone; starting a new one", resume)
+                logger.info("OpenCode session %s is gone; starting a new one", resume)
 
+            # A replacement session does not inherit stable workspace/project facts.
             prepend_stable_context(request)
 
-        payload: dict[str, Any] = {"agent": agent}
-        payload["permissions" if version == "v2" else "permission"] = permission
-        if model_id and (version == "v1" or provider_id):
-            if version == "v2":
-                payload["model"] = _v2_model_ref(
-                    provider_id, model_id, request.thinking_level
-                )
-            else:
-                model: dict[str, Any] = {"id": model_id, "providerID": provider_id}
-                if request.thinking_level:
-                    model["variant"] = request.thinking_level
-                payload["model"] = model
-        response = await client.post(
-            _api_path(client, "/session", "/api/session", version), json=payload
-        )
+        payload: dict[str, Any] = {"agent": agent, "permissions": permissions}
+        if replacement_metadata is not None:
+            payload["metadata"] = dict(replacement_metadata)
+        new_session_model = desired_model or default_model
+        if new_session_model is not None:
+            payload["model"] = dict(new_session_model)
+        response = await client.post("/api/session", json=payload)
         response.raise_for_status()
-        session_payload = _response_data(response)
-        session_info = session_payload if isinstance(session_payload, Mapping) else {}
-        self._session_id = str(session_info.get("id") or "")
+        session_payload = _data(response.json())
+        if not isinstance(session_payload, Mapping):
+            raise RuntimeError("OpenCode returned an invalid session payload")
+        self._session_id = str(session_payload.get("id") or "")
+        if not self._session_id:
+            raise RuntimeError("OpenCode returned a session without an id")
         return self._session_id
 
     async def abort_session(self, session_id: str) -> None:
@@ -2208,34 +1789,41 @@ class OpencodeProvider(BaseSDKProvider):
         if client is None or not session_id:
             return
         try:
-            await client.post(
-                _api_path(
-                    client,
-                    f"/session/{session_id}/abort",
-                    f"/api/session/{session_id}/interrupt",
-                )
-            )
+            await client.post(f"/api/session/{session_id}/interrupt")
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 — a failed abort must never wedge Stop
-            # Broader than httpx.HTTPError on purpose: this runs detached from
-            # the Stop request, so anything it raises that is not caught here
-            # never reaches a caller — it only ever surfaces as an unretrieved
-            # task exception. Stop's own escalation path handles a turn that
-            # does not end.
-            logger.debug("opencode abort failed for %s", session_id, exc_info=True)
+        except Exception:  # noqa: BLE001 — a failed interrupt must never wedge Stop
+            # This runs detached from the Stop request; observe every failure so
+            # it can never become an unretrieved task exception.
+            logger.debug("OpenCode interrupt failed for %s", session_id, exc_info=True)
 
-    def _prompt_parts(self, request: AgentRequest) -> list[dict[str, Any]]:
-        """Text plus any attached images, in opencode's part shape."""
-        parts: list[dict[str, Any]] = [{"type": "text", "text": build_prompt(request)}]
-        for image in request.images:
-            parts.append({
-                "type": "file",
-                "mime": image.mime_type,
-                "filename": image.original_filename,
-                "url": image.path.resolve().as_uri(),
-            })
-        return parts
+    def _prompt_body(
+        self, request: AgentRequest, *, system: str = ""
+    ) -> dict[str, Any]:
+        """V2 prompt text plus native file attachments.
+
+        V2 removed the per-prompt ``system`` field. Wrap Ciaobot's core/runtime
+        context in the existing transcript-only context markers so the model
+        receives it while replay strips it from the user bubble.
+        """
+        text = build_prompt(request)
+        if system:
+            text = f"[CIAO_CONTEXT_BEGIN]\n{system}\n[CIAO_CONTEXT_END]\n\n{text}"
+        body: dict[str, Any] = {
+            "text": text,
+            "delivery": "queue",
+            "resume": True,
+        }
+        files = [
+            {
+                "uri": image.path.resolve().as_uri(),
+                "name": image.original_filename,
+            }
+            for image in request.images
+        ]
+        if files:
+            body["files"] = files
+        return body
 
     async def steer(self, request: AgentRequest) -> bool:
         """Always False: opencode cannot inject into a running turn.
@@ -2253,553 +1841,127 @@ class OpencodeProvider(BaseSDKProvider):
         pending = self._permission_requests.get(request_id)
         return pending.tool_use_id if pending is not None else ""
 
-    async def _reply_permission(self, pending: _PendingRequest, reply: str) -> bool:
+    async def _reply_permission(
+        self, pending: _PendingRequest, reply: str, message: str = ""
+    ) -> QuestionResponseResult:
         client = self._client
-        if client is None:
-            return False
-        version = _api_version_for_client(client, self._api_version)
+        if client is None or not pending.session_id:
+            return QuestionResponseResult(False, "OpenCode is not connected", False)
         try:
-            if version == "v2":
-                response = await client.post(
-                    f"/api/session/{pending.session_id}/permission/"
-                    f"{pending.request_id}/reply",
-                    json={"decision": reply},
-                )
-            else:
-                response = await client.post(
-                    f"/permission/{pending.request_id}/reply", json={"reply": reply}
-                )
-            return int(getattr(response, "status_code", 500)) < 400
-        except Exception:  # noqa: BLE001 — delivery failure must be retryable
-            logger.debug("opencode permission reply failed", exc_info=True)
-            return False
-
-    async def _deliver_permission_reply(
-        self, pending: _PendingRequest, reply: str
-    ) -> bool:
-        replied = await self._reply_permission(pending, reply)
-        if replied:
-            self._permission_requests.pop(pending.request_id, None)
-        else:
-            logger.warning(
-                "opencode permission reply failed for %s", pending.request_id
+            body: dict[str, str] = {"decision": reply}
+            if message:
+                body["message"] = message
+            response = await client.post(
+                f"/api/session/{pending.session_id}/permission/"
+                f"{pending.request_id}/reply",
+                json=body,
             )
-        return replied
-
-    async def send_permission_response_async(
-        self, request_id: str, approved: bool
-    ) -> bool:
-        """Deliver an approval and report the HTTP result, not just admission."""
-        pending = self._permission_requests.get(request_id)
-        if pending is None or self._client is None:
-            return False
-        return await self._deliver_permission_reply(
-            pending, "once" if approved else "reject"
+        except httpx.HTTPError as exc:
+            logger.debug("OpenCode permission reply failed", exc_info=True)
+            return QuestionResponseResult(False, str(exc), True)
+        if response.status_code in {200, 204, 409}:
+            return QuestionResponseResult(True)
+        return QuestionResponseResult(
+            False,
+            _sanitize_error(getattr(response, "text", ""))
+            or f"OpenCode returned HTTP {response.status_code}",
+            response.status_code >= 500 or response.status_code in {408, 429},
         )
 
-    def send_permission_response(self, request_id: str, approved: bool) -> bool:
+    async def send_permission_response(
+        self, request_id: str, approved: bool, message: str = ""
+    ) -> QuestionResponseResult:
         pending = self._permission_requests.get(request_id)
         if pending is None or self._client is None:
-            return False
-        asyncio.create_task(
-            self._deliver_permission_reply(
-                pending, "once" if approved else "reject"
-            )
+            return QuestionResponseResult(False, "Permission request is no longer active", False)
+        result = await self._reply_permission(
+            pending, "once" if approved else "reject", message
         )
-        return True
+        if result.ok:
+            self._permission_requests.pop(request_id, None)
+        return result
 
-    async def _reject_question(self, pending: _PendingRequest) -> bool:
+    async def _reject_question(self, pending: _PendingRequest) -> QuestionResponseResult:
         client = self._client
-        if client is None:
-            return False
-        version = _api_version_for_client(client, self._api_version)
+        if client is None or not pending.session_id:
+            return QuestionResponseResult(False, "OpenCode is not connected", False)
         try:
-            if version == "v2" and pending.form:
-                response = await client.delete(
-                    f"/api/session/{pending.session_id}/form/{pending.request_id}"
-                )
-            elif version == "v2":
-                response = await client.post(
-                    f"/api/question/{pending.request_id}/reject", json={}
-                )
-            else:
-                response = await client.post(
-                    f"/question/{pending.request_id}/reject", json={}
-                )
-            return int(getattr(response, "status_code", 500)) < 400
-        except Exception:  # noqa: BLE001 — delivery failure must be retryable
-            logger.debug("opencode question/form reject failed", exc_info=True)
-            return False
+            response = await client.delete(
+                f"/api/session/{pending.session_id}/form/{pending.request_id}"
+            )
+        except httpx.HTTPError as exc:
+            logger.debug("OpenCode form cancellation failed", exc_info=True)
+            return QuestionResponseResult(False, str(exc), True)
+        if response.status_code in {200, 204, 409}:
+            return QuestionResponseResult(True)
+        return QuestionResponseResult(
+            False,
+            _sanitize_error(getattr(response, "text", ""))
+            or f"OpenCode returned HTTP {response.status_code}",
+            response.status_code >= 500 or response.status_code in {408, 429},
+        )
 
     async def _reply_question(
-        self, pending: _PendingRequest, payload: dict[str, Any]
-    ) -> bool:
+        self,
+        pending: _PendingRequest,
+        answer: Mapping[str, FormValue],
+    ) -> QuestionResponseResult:
         client = self._client
-        if client is None:
-            return False
-        version = _api_version_for_client(client, self._api_version)
+        if client is None or not pending.session_id:
+            return QuestionResponseResult(False, "OpenCode is not connected", False)
         try:
-            if version == "v2" and pending.form:
-                response = await client.post(
-                    f"/api/session/{pending.session_id}/form/{pending.request_id}/reply",
-                    json=payload,
-                )
-            elif version == "v2":
-                response = await client.post(
-                    f"/api/question/{pending.request_id}/reply", json=payload
-                )
-            else:
-                response = await client.post(
-                    f"/question/{pending.request_id}/reply", json=payload
-                )
-            return int(getattr(response, "status_code", 500)) < 400
-        except Exception:  # noqa: BLE001 — delivery failure must be retryable
-            logger.debug("opencode question/form reply failed", exc_info=True)
-            return False
-
-    def _validate_form_submission(
-        self,
-        pending: _PendingRequest,
-        answers: Mapping[str, Sequence[str]],
-    ) -> None:
-        """Validate V2 form constraints before an HTTP reply is attempted."""
-        typed_answers = self._form_answer(pending, answers)
-        for index, question_id in enumerate(pending.question_ids):
-            if index < len(pending.question_hidden) and pending.question_hidden[index]:
-                continue
-            if index < len(pending.question_when):
-                conditions = pending.question_when[index]
-                if not all(
-                    self._form_condition_matches(
-                        condition,
-                        typed_answers.get(str(condition.get("key") or "")),
-                    )
-                    for condition in conditions
-                ):
-                    continue
-            values = [str(value) for value in answers.get(question_id, ())]
-            field_type = (
-                pending.question_types[index]
-                if index < len(pending.question_types)
-                else "string"
+            response = await client.post(
+                f"/api/session/{pending.session_id}/form/{pending.request_id}/reply",
+                json={"answer": dict(answer)},
             )
-            multi = (
-                pending.question_multi[index]
-                if index < len(pending.question_multi)
-                else False
-            )
-            required = (
-                pending.question_required[index]
-                if index < len(pending.question_required)
-                else False
-            )
-            custom = (
-                pending.question_custom[index]
-                if index < len(pending.question_custom)
-                else True
-            )
-            option_map = dict(
-                pending.question_values[index]
-                if index < len(pending.question_values)
-                else ()
-            )
-            option_values = set(option_map.values())
-            mapped = [
-                value if value in option_values else option_map.get(value, value)
-                for value in values
-            ]
-            if not multi and len(mapped) > 1:
-                raise ValueError("Choose one answer")
-            if mapped and not any(value.strip() for value in mapped):
-                # The PWA uses [\"\"] as its explicit empty sentinel for an
-                # optional scalar. The provider omits that key from the
-                # typed answer so the server default can win.
-                if required:
-                    raise ValueError("This field is required")
-                continue
-            if not mapped:
-                if field_type == "multiselect":
-                    minimum_items = (
-                        pending.question_min_items[index]
-                        if index < len(pending.question_min_items)
-                        else 0
-                    )
-                    if required and minimum_items > 0:
-                        raise ValueError("Choose at least one option")
-                    continue
-                if required and field_type != "string":
-                    raise ValueError("This field is required")
-                if required and field_type == "string":
-                    raise ValueError("This field is required")
-                continue
-            if not custom and option_values and any(value not in option_values for value in mapped):
-                raise ValueError("Choose one of the available options")
-            if field_type == "integer":
-                try:
-                    number = float(mapped[0])
-                except ValueError as exc:
-                    raise ValueError("Enter a valid number") from exc
-                if not number.is_integer():
-                    raise ValueError("Enter a whole number")
-            elif field_type == "number":
-                try:
-                    float(mapped[0])
-                except ValueError as exc:
-                    raise ValueError("Enter a valid number") from exc
-            if field_type in {"integer", "number"}:
-                number = float(mapped[0])
-                minimum = (
-                    pending.question_minimum[index]
-                    if index < len(pending.question_minimum)
-                    else 0.0
-                )
-                maximum = (
-                    pending.question_maximum[index]
-                    if index < len(pending.question_maximum)
-                    else 0.0
-                )
-                if (minimum and number < minimum) or (maximum and number > maximum):
-                    raise ValueError("Enter a number within the allowed range")
-            if field_type == "boolean":
-                if mapped[0].strip().lower() not in {
-                    "true", "false", "1", "0", "yes", "no", "on", "off",
-                }:
-                    raise ValueError("Choose yes or no")
-            elif field_type == "external":
-                if not mapped:
-                    raise ValueError("Complete the external step first")
-            else:
-                value = mapped[0]
-                minimum_length = (
-                    pending.question_min_length[index]
-                    if index < len(pending.question_min_length)
-                    else 0
-                )
-                maximum_length = (
-                    pending.question_max_length[index]
-                    if index < len(pending.question_max_length)
-                    else 0
-                )
-                if len(value) < minimum_length:
-                    raise ValueError("Enter a longer value")
-                if maximum_length and len(value) > maximum_length:
-                    raise ValueError("Enter a shorter value")
-                pattern = (
-                    pending.question_pattern[index]
-                    if index < len(pending.question_pattern)
-                    else ""
-                )
-                if pattern:
-                    try:
-                        if re.search(pattern, value) is None:
-                            raise ValueError("Enter a value in the requested format")
-                    except re.error as exc:
-                        raise ValueError("The form has an invalid validation rule") from exc
-                format_name = (
-                    pending.question_format[index]
-                    if index < len(pending.question_format)
-                    else ""
-                )
-                if format_name == "email" and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value) is None:
-                    raise ValueError("Enter a valid email address")
-                if format_name == "uri" and not urlparse(value).scheme:
-                    raise ValueError("Enter a valid absolute URI")
-                if format_name == "date":
-                    try:
-                        parsed_date = datetime.strptime(value, "%Y-%m-%d")
-                    except ValueError as exc:
-                        raise ValueError("Enter a valid date") from exc
-                    if parsed_date.strftime("%Y-%m-%d") != value:
-                        raise ValueError("Enter a valid date")
-                if format_name == "date-time":
-                    try:
-                        datetime.fromisoformat(value.replace("Z", "+00:00"))
-                    except ValueError as exc:
-                        raise ValueError("Enter a valid date and time") from exc
-                if field_type in {"integer", "number"}:
-                    number = float(value)
-                    minimum = (
-                        pending.question_minimum[index]
-                        if index < len(pending.question_minimum)
-                        else 0.0
-                    )
-                    maximum = (
-                        pending.question_maximum[index]
-                        if index < len(pending.question_maximum)
-                        else 0.0
-                    )
-                    if (minimum and number < minimum) or (maximum and number > maximum):
-                        raise ValueError("Enter a number within the allowed range")
-            if multi:
-                minimum_items = (
-                    pending.question_min_items[index]
-                    if index < len(pending.question_min_items)
-                    else 0
-                )
-                maximum_items = (
-                    pending.question_max_items[index]
-                    if index < len(pending.question_max_items)
-                    else 0
-                )
-                if len(mapped) < minimum_items or (maximum_items and len(mapped) > maximum_items):
-                    raise ValueError("Choose the allowed number of options")
-
-    @staticmethod
-    def _form_condition_matches(
-        condition: Mapping[str, Any], answer: object
-    ) -> bool:
-        # A missing controller is undefined, not `neq`-true.  This keeps a
-        # dependent field from becoming active merely because the user has not
-        # answered its controller yet.
-        if answer is None:
-            return False
-        expected = condition.get("value")
-        if isinstance(answer, list):
-            hit = any(item == expected for item in answer)
-        else:
-            hit = answer == expected
-        op = str(condition.get("op") or "eq")
-        if op == "eq":
-            return hit
-        if op == "neq":
-            return not hit
-        return False
-
-    def _form_answer(
-        self,
-        pending: _PendingRequest,
-        answers: Mapping[str, Sequence[str]],
-    ) -> dict[str, Any]:
-        """Translate PWA answer arrays to V2 Form.Answer values.
-
-        Presence is meaningful: an optional field may be submitted as an empty
-        string or an empty multiselect array.  Only an absent key is omitted.
-        """
-        answer: dict[str, Any] = {}
-        supplied = {
-            str(key): [str(value) for value in values]
-            for key, values in answers.items()
-        }
-
-        def convert(index: int, values: Sequence[str]) -> tuple[bool, Any]:
-            """Return ``(present, typed_value)`` for one V2 field.
-
-            Conditions are evaluated against the same typed values that the
-            form endpoint validates.  Comparing a UI label such as ``"2"`` or
-            ``"true"`` directly with a number/boolean condition would make an
-            active dependent field look inactive and could make the server
-            reject the answer.
-            """
-            field_type = (
-                pending.question_types[index]
-                if index < len(pending.question_types)
-                else "string"
-            )
-            multi = (
-                pending.question_multi[index]
-                if index < len(pending.question_multi)
-                else False
-            )
-            if field_type == "external":
-                return True, True
-            option_map = (
-                dict(pending.question_values[index])
-                if index < len(pending.question_values)
-                else {}
-            )
-            custom = (
-                pending.question_custom[index]
-                if index < len(pending.question_custom)
-                else not bool(option_map)
-            )
-            if (
-                field_type == "string"
-                and all(not value.strip() for value in values)
-                and option_map
-                and not custom
-            ):
-                # A closed option field has no valid empty string.  The PWA
-                # still supplies the key so this remains a submitted form,
-                # while omission lets the server apply the field default.
-                return False, None
-            if not values:
-                if multi or field_type == "string":
-                    return True, [] if multi else ""
-                return False, None
-            if field_type in {"number", "integer", "boolean"} and all(
-                not value.strip() for value in values
-            ):
-                # The PWA uses an empty string as its UI sentinel for an
-                # unanswered optional scalar.  The V2 schema has no empty
-                # number/boolean value, so preserve omission (and the field's
-                # server-side default) instead of sending an invalid string.
-                return False, None
-            if field_type in {"number", "integer"} and len(values) == 1:
-                try:
-                    number = float(values[0])
-                except ValueError:
-                    return True, values[0]
-                if field_type == "integer" and not number.is_integer():
-                    return True, values[0]
-                return True, int(number) if field_type == "integer" else number
-            if field_type == "boolean" and len(values) == 1:
-                normalized = values[0].strip().lower()
-                if normalized in {"true", "1", "yes", "on"}:
-                    return True, True
-                if normalized in {"false", "0", "no", "off"}:
-                    return True, False
-                return True, values[0]
-            option_values = set(option_map.values())
-            converted_values = [
-                value if value in option_values else option_map.get(value, value)
-                for value in values
-            ]
-            return True, converted_values if multi else converted_values[0]
-
-        typed: dict[str, Any] = {}
-        for index, question_id in enumerate(pending.question_ids):
-            values = supplied.get(question_id)
-            if values is None:
-                continue
-            present, converted = convert(index, values)
-            if present:
-                typed[question_id] = converted
-
-        def condition_answer(key: str) -> object:
-            return typed.get(key)
-
-        for index, question_id in enumerate(pending.question_ids):
-            if question_id not in typed:
-                continue
-            if index < len(pending.question_hidden) and pending.question_hidden[index]:
-                continue
-            if index < len(pending.question_when):
-                active = all(
-                    self._form_condition_matches(
-                        condition, condition_answer(str(condition.get("key") or ""))
-                    )
-                    for condition in pending.question_when[index]
-                )
-                if not active:
-                    continue
-            answer[question_id] = typed[question_id]
-        return answer
-
-    async def _deliver_question_reply(
-        self, pending: _PendingRequest, payload: dict[str, Any]
-    ) -> bool:
-        cancel = bool(payload.get("_cancel"))
-        has_answers = "answer" in payload or bool(payload.get("answers"))
-        replied = (
-            await self._reject_question(pending)
-            if cancel or not has_answers
-            else await self._reply_question(pending, payload)
+        except httpx.HTTPError as exc:
+            logger.debug("OpenCode form reply failed", exc_info=True)
+            return QuestionResponseResult(False, str(exc), True)
+        if response.status_code in {200, 204, 409}:
+            return QuestionResponseResult(True)
+        return QuestionResponseResult(
+            False,
+            _sanitize_error(getattr(response, "text", ""))
+            or f"OpenCode returned HTTP {response.status_code}",
+            response.status_code >= 500 or response.status_code in {408, 429},
         )
-        if replied:
-            self._question_requests.pop(pending.request_id, None)
-        else:
-            logger.warning(
-                "opencode question/form reply failed for %s", pending.request_id
-            )
-        return replied
 
-    async def send_question_response_async(
+    async def send_question_response(
         self,
         request_id: str,
         answers: Mapping[str, Sequence[str]],
         *,
         cancel: bool = False,
-        submitted: bool = False,
-    ) -> bool:
-        pending = self._question_requests.get(request_id)
-        if pending is None or self._client is None:
-            return False
-        version = _api_version_for_client(self._client, self._api_version)
-        if version == "v2" and pending.form and set(answers) - set(pending.question_ids):
-            # A V2 form response for a field the server never advertised is
-            # stale or malformed. Legacy question replies retain their
-            # historical provider-independent answer-map behavior.
-            return False
-        if cancel:
-            return await self._deliver_question_reply(
-                pending, {"_cancel": True}
-            )
-        if version == "v2" and pending.form:
-            try:
-                self._validate_form_submission(pending, answers)
-            except ValueError:
-                return False
-            answer = self._form_answer(pending, answers)
-            if not answer and not answers and not submitted:
-                return await self._deliver_question_reply(
-                    pending, {"_cancel": True}
-                )
-            payload: dict[str, Any] = {"answer": answer}
-        else:
-            payload = {
-                "answers": [
-                    [str(value) for value in answers.get(question_id, ())]
-                    for question_id in pending.question_ids
-                ]
-            }
-        return await self._deliver_question_reply(pending, payload)
+    ) -> QuestionResponseResult:
+        """Reply to or explicitly cancel a V2 form.
 
-    def send_question_response(
-        self,
-        request_id: str,
-        answers: Mapping[str, Sequence[str]],
-        *,
-        cancel: bool = False,
-        submitted: bool = False,
-    ) -> bool:
+        ``answers={}`` is a valid answer for an all-optional form; only the
+        explicit ``cancel`` flag maps to DELETE. The HTTP operation is awaited
+        so the caller can keep the card retryable when V2 rejects it.
+        """
         pending = self._question_requests.get(request_id)
-        if pending is None or self._client is None:
-            return False
-        version = _api_version_for_client(self._client, self._api_version)
-        if version == "v2" and pending.form and set(answers) - set(pending.question_ids):
-            # A V2 form response for a field the server never advertised is
-            # stale or malformed. Legacy question replies retain their
-            # historical provider-independent answer-map behavior.
-            return False
+        if pending is None:
+            # A duplicate reply after the SSE form.replied/cancelled event is
+            # idempotently successful; there is nothing left to mutate.
+            return QuestionResponseResult(True)
+        if self._client is None:
+            return QuestionResponseResult(False, "OpenCode is not connected", False)
         if cancel:
-            asyncio.create_task(
-                self._deliver_question_reply(pending, {"_cancel": True})
-            )
-            return True
-        if version == "v2" and pending.form:
-            try:
-                self._validate_form_submission(pending, answers)
-            except ValueError:
-                return False
-            answer = self._form_answer(pending, answers)
-            if not answer and not answers and not submitted:
-                asyncio.create_task(
-                    self._deliver_question_reply(pending, {"_cancel": True})
-                )
-                return True
-            payload: dict[str, Any] = {"answer": answer}
+            result = await self._reject_question(pending)
         else:
-            payload = {
-                "answers": [
-                    [str(value) for value in answers.get(question_id, ())]
-                    for question_id in pending.question_ids
-                ]
-            }
-        asyncio.create_task(self._deliver_question_reply(pending, payload))
-        return True
+            try:
+                answer = _validate_form_answer(pending, answers)
+            except _FormValidationError as exc:
+                return QuestionResponseResult(False, str(exc), False)
+            result = await self._reply_question(pending, answer)
+        if result.ok:
+            self._question_requests.pop(request_id, None)
+        return result
 
     # -------------------------------------------------------------- streaming
 
     def _emit_suffix(self, part_id: str, text: str) -> str:
-        """Return only the not-yet-emitted tail of a cumulative part.
-
-        opencode streams the same text twice: incrementally via
-        ``message.part.delta`` and cumulatively via ``message.part.updated``
-        (which restates the whole part each time). Emitting both would double
-        every token, and consuming only one is not safe either — which of the
-        two a model produces varies. Tracking how much of each part has already
-        been emitted makes either source, or both, come out right.
-        """
+        """Return the unseen tail of V2 delta/settled or recovered text."""
         already = self._emitted.get(part_id, 0)
         if len(text) <= already:
             return ""
@@ -2810,29 +1972,9 @@ class OpencodeProvider(BaseSDKProvider):
         """Accumulate one emitted fragment of the visible reply."""
         self._answer_parts.setdefault(part_id, []).append(text)
 
-    def _turn_scope(
-        self,
-        messages: list[Any],
-        *,
-        allow_legacy_anchor: bool | None = None,
-    ) -> list[Mapping[str, Any]]:
-        """Return the rows projected after this turn's user message.
-
-        V2 prompt receipts provide the authoritative user-message id.  If that
-        id is missing or is not present in the snapshot, returning no scope is
-        safer than guessing that the newest user row belongs to us: a shared
-        session can receive another client's prompt, and a user-only snapshot
-        is not evidence that this turn produced an answer.  V1 historically
-        did not return a prompt receipt, so its callers may opt into the
-        legacy last-user fallback explicitly.
-        """
-        if allow_legacy_anchor is None:
-            allow_legacy_anchor = (
-                self._client is None
-                or _api_version_for_client(self._client, self._api_version) != "v2"
-            )
+    def _turn_scope(self, messages: list[Any]) -> list[Mapping[str, Any]]:
+        """Return rows projected after this turn's user row."""
         anchor = -1
-        matched = False
         for index, message in enumerate(messages):
             if not isinstance(message, Mapping):
                 continue
@@ -2842,79 +1984,28 @@ class OpencodeProvider(BaseSDKProvider):
             if self._user_message_id:
                 if str(info.get("id") or "") == self._user_message_id:
                     anchor = index
-                    matched = True
                     break
-            elif allow_legacy_anchor:
-                anchor = index
-        if self._user_message_id and not matched:
-            if not allow_legacy_anchor:
-                return []
-            # V1 can lose the live user-id frame while still returning a
-            # complete legacy projection. Fall back only for that compatibility
-            # path; V2 remains strict about the prompt receipt anchor.
-            for index in range(len(messages) - 1, -1, -1):
-                candidate = messages[index]
-                if not isinstance(candidate, Mapping):
-                    continue
-                info = candidate.get("info")
-                if isinstance(info, Mapping) and info.get("role") == "user":
-                    anchor = index
-                    break
-        if anchor < 0:
-            # V1 message endpoints did not always include the user row in a
-            # partial projection.  Keep the old whole-list behavior only for
-            # that explicitly opted-in compatibility path; V2 never takes it.
-            return [
-                message
-                for message in messages
-                if isinstance(message, Mapping)
-            ] if allow_legacy_anchor and not self._user_message_id else []
-        scoped: list[Mapping[str, Any]] = []
-        for message in messages[anchor + 1:]:
-            if not isinstance(message, Mapping):
                 continue
-            info = message.get("info")
-            if isinstance(info, Mapping) and info.get("role") == "user":
-                parts_for_user = message.get("parts")
-                synthetic = info.get("type") in {"synthetic", "compaction"} or (
-                    isinstance(parts_for_user, list)
-                    and any(
-                        isinstance(part, Mapping) and part.get("synthetic")
-                        for part in parts_for_user
-                    )
-                )
-                if not synthetic:
-                    break
-            scoped.append(message)
-        return scoped
+            anchor = index
+        if self._user_message_id and anchor < 0:
+            return []
+        return [message for message in messages[anchor + 1:] if isinstance(message, Mapping)]
 
-    def _turn_messages(
-        self,
-        messages: list[Any],
-        *,
-        allow_legacy_anchor: bool | None = None,
-    ) -> list[Mapping[str, Any]]:
-        """Assistant rows in this turn's anchored scope."""
+    def _turn_messages(self, messages: list[Any]) -> list[Mapping[str, Any]]:
+        """Return assistant messages projected after this turn's user row."""
         return [
             message
-            for message in self._turn_scope(
-                messages, allow_legacy_anchor=allow_legacy_anchor
-            )
+            for message in self._turn_scope(messages)
             if isinstance(message.get("info"), Mapping)
             and message["info"].get("role") == "assistant"
         ]
 
     def _turn_assistant_parts(
-        self,
-        messages: list[Any],
-        *,
-        allow_legacy_anchor: bool | None = None,
+        self, messages: list[Any]
     ) -> list[Mapping[str, Any]]:
         """Settled parts of *this* turn's assistant messages, in order."""
         parts: list[Mapping[str, Any]] = []
-        for message in self._turn_messages(
-            messages, allow_legacy_anchor=allow_legacy_anchor
-        ):
+        for message in self._turn_messages(messages):
             message_parts = message.get("parts")
             if isinstance(message_parts, list):
                 parts.extend(
@@ -2922,27 +2013,17 @@ class OpencodeProvider(BaseSDKProvider):
                 )
         return parts
 
-    def _restore_turn_metadata(
-        self,
-        messages: list[Any],
-        *,
-        allow_legacy_anchor: bool | None = None,
-    ) -> None:
-        """Restore model, usage, cost, and terminal error after SSE loss."""
-        version = (
-            _api_version_for_client(self._client, self._api_version)
-            if self._client is not None
-            else "v1"
-        )
-        scope = self._turn_scope(
-            messages, allow_legacy_anchor=allow_legacy_anchor
-        )
-        totals: dict[str, int] = {}
+    def _restore_turn_metadata(self, messages: list[Any]) -> None:
+        """Restore model, usage, cost, and assistant error after SSE loss."""
+        total_tokens: dict[str, int] = {}
         last_context_usage: dict[str, str] = {}
         total_cost = 0.0
-        for message in self._turn_messages(
-            messages, allow_legacy_anchor=allow_legacy_anchor
-        ):
+        for message in self._turn_scope(messages):
+            info = message.get("info")
+            if isinstance(info, Mapping) and info.get("type") == "idle":
+                if info.get("outcome") == "failed":
+                    self._poll_error = self._poll_error or "OpenCode execution failed"
+        for message in self._turn_messages(messages):
             info = message.get("info")
             if not isinstance(info, Mapping):
                 continue
@@ -2954,16 +2035,12 @@ class OpencodeProvider(BaseSDKProvider):
                 )
             tokens = info.get("tokens")
             if isinstance(tokens, Mapping):
-                message_usage = (
-                    _v2_usage_payload(tokens)
-                    if version == "v2"
-                    else usage_payload(tokens)
-                )
+                message_usage = usage_payload(tokens)
                 if message_usage:
                     last_context_usage = message_usage
                 for key, value in message_usage.items():
                     try:
-                        totals[key] = totals.get(key, 0) + int(value)
+                        total_tokens[key] = total_tokens.get(key, 0) + int(value)
                     except (TypeError, ValueError):
                         continue
             cost = info.get("cost")
@@ -2972,179 +2049,69 @@ class OpencodeProvider(BaseSDKProvider):
             message_error = info.get("error")
             if isinstance(message_error, Mapping):
                 self._poll_error = self._poll_error or error_text(message_error)
-        for message in scope:
-            info = message.get("info")
-            if not isinstance(info, Mapping) or info.get("type") != "idle":
-                continue
-            outcome = str(info.get("outcome") or info.get("status") or "").lower()
-            if outcome in {"failed", "failure", "error", "interrupted", "cancelled", "canceled"}:
-                self._poll_error = self._poll_error or "opencode execution failed"
-        if totals:
-            self._usage = {key: str(value) for key, value in totals.items()}
-        elif last_context_usage:
-            self._usage = dict(last_context_usage)
+        if total_tokens:
+            self._usage = {key: str(value) for key, value in total_tokens.items()}
         if last_context_usage:
-            self._context_usage = dict(last_context_usage)
+            self._context_usage = last_context_usage
         if total_cost:
             self._cost = total_cost
 
-    def _turn_has_running_tools(
-        self,
-        messages: list[Any],
-        *,
-        allow_legacy_anchor: bool | None = None,
-    ) -> bool:
-        """Whether an assistant tool in this anchored turn is still running."""
-        for message in self._turn_messages(
-            messages, allow_legacy_anchor=allow_legacy_anchor
-        ):
-            for part in message.get("parts") or []:
-                if not isinstance(part, Mapping):
-                    continue
-                state = part.get("state")
-                state = state if isinstance(state, Mapping) else {}
-                status = str(state.get("status") or part.get("status") or "").lower()
-                if status in {"pending", "streaming", "running", "executing"}:
-                    return True
-        return False
-
-    @staticmethod
-    def _terminal_message_evidence(
-        messages: Sequence[Mapping[str, Any]],
-    ) -> tuple[bool, bool]:
-        """Return ``(terminal_seen, failed)`` for V2 projected message rows.
-
-        Only the latest assistant row can prove completion: a multi-step turn
-        may contain an older completed assistant row followed by a newer
-        running row. A later idle marker remains authoritative terminal
-        evidence for the whole projected turn.
-        """
-        latest_assistant: Mapping[str, Any] | None = None
-        terminal = False
-        failed = False
-        for message in messages:
-            info = message.get("info")
-            if not isinstance(info, Mapping):
-                continue
-            if info.get("type") == "idle":
-                terminal = True
-                outcome = str(
-                    info.get("outcome") or info.get("status") or ""
-                ).lower()
-                if outcome in {
-                    "failed", "failure", "error", "interrupted",
-                    "cancelled", "canceled",
-                }:
-                    failed = True
-            elif info.get("role") == "assistant":
-                latest_assistant = info
-        if latest_assistant is not None:
-            time_info = latest_assistant.get("time")
-            if isinstance(time_info, Mapping) and time_info.get("completed"):
-                terminal = True
-            status = str(
-                latest_assistant.get("status")
-                or latest_assistant.get("outcome")
-                or ""
-            ).lower()
-            if status in _V2_TERMINAL_OUTCOMES:
-                terminal = True
-                if status in {
-                    "failed", "failure", "error", "interrupted",
-                    "cancelled", "canceled",
-                }:
-                    failed = True
-        return terminal, failed
+    def _turn_has_running_tools(self, messages: list[Any]) -> bool:
+        return any(
+            isinstance(part.get("state"), Mapping)
+            and part["state"].get("status") in {"pending", "running", "streaming"}
+            for message in self._turn_messages(messages)
+            for part in (message.get("parts") or [])
+            if isinstance(part, Mapping)
+        )
 
     async def _reconcile_interrupted_turn(
         self, client: httpx.AsyncClient, session_id: str
     ) -> AsyncGenerator[StreamEvent, None]:
-        """Recover a turn whose SSE died after the prompt was accepted.
-
-        V1 keeps the historical stable-snapshot/poll behavior.  V2 is stricter:
-        a user row alone is never enough, and a stable assistant projection is
-        accepted only when the server says the session is no longer active or
-        the projection contains a terminal marker.  This prevents a shared or
-        merely user-only snapshot from being reported as a successful answer.
-        """
+        """Recover a turn whose SSE died after the prompt was accepted."""
         deadline = time.monotonic() + _OPENCODE_RECOVERY_WINDOW_S
-        version = _api_version_for_client(client, self._api_version)
         signature = ""
         while True:
-            messages: list[Any] | None = None
-            try:
-                messages = await _read_message_list(client, session_id, version)
-            except RuntimeError as exc:
-                # Pagination exhaustion/repetition is an explicit, actionable
-                # read failure.  Do not let it escape the async generator and
-                # strand the turn without its single closing ResultEvent.
-                self._poll_error = self._poll_error or str(exc)
-                return
-            except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-                # Best-effort by design: an unresponsive read endpoint just
-                # means the window expires and the turn finishes degraded.
-                messages = None
-
+            messages: list[dict[str, Any]] | None = None
             active_ids: set[str] | None = None
-            if version == "v2" and messages is not None:
-                active_ids = await _read_v2_active_sessions(client)
+            try:
+                messages = await _read_v2_messages(client, session_id)
+                active_ids = await _read_active_sessions(client)
+            except (httpx.HTTPError, ValueError, AttributeError, RuntimeError):
+                # Best effort: an unreadable endpoint makes the turn degraded.
+                messages = messages if messages is not None else None
 
             if messages is not None:
-                allow_legacy_anchor = version != "v2"
-                scope = self._turn_scope(
-                    messages, allow_legacy_anchor=allow_legacy_anchor
+                turn_messages = self._turn_messages(messages)
+                current = _opencode_messages_signature(turn_messages)
+                user_seen = not self._user_message_id or any(
+                    isinstance(message.get("info"), Mapping)
+                    and message["info"].get("role") == "user"
+                    and str(message["info"].get("id") or "") == self._user_message_id
+                    for message in messages
                 )
-                user_seen = bool(scope) or (
-                    version == "v1" and not self._user_message_id
+                running = self._turn_has_running_tools(messages)
+                idle_failed = any(
+                    isinstance(message.get("info"), Mapping)
+                    and message["info"].get("type") == "idle"
+                    and message["info"].get("outcome") == "failed"
+                    for message in self._turn_scope(messages)
                 )
-                current = _opencode_messages_signature(scope)
-                previous_signature = signature
+                quiesced = (
+                    user_seen
+                    and not running
+                    and active_ids is not None
+                    and session_id not in active_ids
+                    and (
+                        (bool(current) and current == signature)
+                        or idle_failed
+                    )
+                )
                 signature = current or signature
-                running = self._turn_has_running_tools(
-                    messages, allow_legacy_anchor=allow_legacy_anchor
-                )
-                terminal_seen, terminal_failed = self._terminal_message_evidence(scope)
-                assistant_seen = bool(
-                    self._turn_messages(
-                        messages, allow_legacy_anchor=allow_legacy_anchor
-                    )
-                )
-                self._restore_turn_metadata(
-                    messages, allow_legacy_anchor=allow_legacy_anchor
-                )
-                for part in self._turn_assistant_parts(
-                    messages, allow_legacy_anchor=allow_legacy_anchor
-                ):
-                    for converted in self._event_to_stream({
-                        "type": "message.part.updated",
-                        "properties": {"part": dict(part)},
-                    }):
+                self._restore_turn_metadata(messages)
+                for part in self._turn_assistant_parts(messages):
+                    for converted in self._part_updated({"part": dict(part)}):
                         yield converted
-
-                if version == "v1":
-                    quiesced = (
-                        user_seen
-                        and bool(current)
-                        and current == previous_signature
-                        and not running
-                    )
-                else:
-                    active_clear = (
-                        active_ids is not None and session_id not in active_ids
-                    )
-                    quiesced = (
-                        user_seen
-                        and not running
-                        and (
-                            (terminal_seen or assistant_seen)
-                            and (
-                                terminal_seen
-                                or (active_clear and bool(current) and current == previous_signature)
-                            )
-                        )
-                    )
-                    if terminal_failed:
-                        self._poll_error = self._poll_error or "opencode execution failed"
                 if quiesced:
                     self._turn_recovered_via_poll = True
                     return
@@ -3159,409 +2126,196 @@ class OpencodeProvider(BaseSDKProvider):
         )
         return "\n\n".join(part for part in parts if part)
 
-    async def _recover_pending_v2_requests(
-        self, client: Any, session_id: str
+    async def _reload_pending_requests(
+        self, client: httpx.AsyncClient, session_id: str
     ) -> list[StreamEvent]:
-        """Re-emit pending V2 forms/permissions missed during SSE reconnects."""
-        version = _api_version_for_client(client, self._api_version)
-        if version != "v2":
-            return []
-        recovered: list[StreamEvent] = []
-        for path, handler in (
-            (f"/api/session/{session_id}/permission", self._permission_event),
-            (f"/api/session/{session_id}/form", self._form_event),
-        ):
+        """Recover V2 permission/form requests missed during an SSE outage."""
+        events: list[StreamEvent] = []
+        permission_seen: set[str] = set()
+        permission_loaded = False
+        for path in (f"/api/session/{session_id}/permission",):
             try:
                 response = await client.get(path)
-                response.raise_for_status()
-                payload = _response_data(response)
-            except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+                raise_for_status = getattr(response, "raise_for_status", None)
+                if callable(raise_for_status):
+                    raise_for_status()
+                requests = _data(response.json())
+            except (httpx.HTTPError, TypeError, ValueError, AttributeError):
                 continue
-            if not isinstance(payload, list):
+            if not isinstance(requests, list):
                 continue
-            for item in payload:
-                if isinstance(item, Mapping):
-                    enriched = dict(item)
-                    if not enriched.get("sessionID"):
-                        enriched["sessionID"] = session_id
-                    recovered.extend(handler(enriched))
-        return recovered
+            permission_loaded = True
+            for request in requests:
+                if not isinstance(request, Mapping):
+                    continue
+                request_id = str(request.get("id") or "")
+                if not request_id or request.get("state") not in (
+                    None,
+                    "pending",
+                    "asked",
+                ):
+                    continue
+                permission_seen.add(request_id)
+                if request_id in self._permission_requests:
+                    continue
+                events.extend(self._permission_event(request))
+        if permission_loaded:
+            for request_id, pending in list(self._permission_requests.items()):
+                if pending.session_id == session_id and request_id not in permission_seen:
+                    self._permission_requests.pop(request_id, None)
+
+        form_seen: set[str] = set()
+        form_loaded = False
+        for path in (f"/api/session/{session_id}/form",):
+            try:
+                response = await client.get(path)
+                raise_for_status = getattr(response, "raise_for_status", None)
+                if callable(raise_for_status):
+                    raise_for_status()
+                forms = _data(response.json())
+            except (httpx.HTTPError, TypeError, ValueError, AttributeError):
+                continue
+            if not isinstance(forms, list):
+                continue
+            form_loaded = True
+            for form in forms:
+                if not isinstance(form, Mapping):
+                    continue
+                if isinstance(form.get("form"), Mapping):
+                    form = form["form"]
+                form_session = str(form.get("sessionID") or "")
+                if form_session != session_id:
+                    continue
+                form_id = str(form.get("id") or "")
+                metadata = form.get("metadata")
+                if isinstance(metadata, Mapping) and metadata.get("kind") not in {
+                    None,
+                    "question",
+                }:
+                    continue
+                state = form.get("state")
+                if isinstance(state, Mapping) and state.get("status") not in {
+                    None,
+                    "pending",
+                }:
+                    continue
+                if form_id:
+                    form_seen.add(form_id)
+                if form_id and form_id not in self._question_requests:
+                    events.extend(self._question_event(form))
+        if form_loaded:
+            for form_id, pending in list(self._question_requests.items()):
+                if pending.session_id == session_id and form_id not in form_seen:
+                    self._question_requests.pop(form_id, None)
+        return events
 
     def _event_to_stream(self, event: Mapping[str, Any]) -> list[StreamEvent]:
-        """Translate V1 ``properties`` and V2 ``data`` events uniformly."""
+        """Translate one OpenCode 2.x SSE event into Ciaobot stream events."""
         kind = str(event.get("type") or "")
-        props = _event_properties(event)
+        props = event.get("data")
+        props = props if isinstance(props, Mapping) else {}
 
-        if kind == "message.part.delta":
-            return self._part_delta(props)
-        if kind == "message.part.updated":
-            return self._part_updated(props)
-        if kind == "message.updated":
-            return self._message_updated(props)
-
-        if kind in {"session.text.delta", "session.next.text.delta"}:
-            part_id = str(
-                props.get("partID")
-                or props.get("textID")
-                or f"{props.get('assistantMessageID', '')}:{props.get('ordinal', 0)}:text"
-            )
-            return self._part_delta({**props, "partID": part_id, "field": "text"})
-
-        if kind in {"session.reasoning.delta", "session.next.reasoning.delta"}:
-            part_id = str(
-                props.get("partID")
-                or props.get("reasoningID")
-                or f"{props.get('assistantMessageID', '')}:{props.get('ordinal', 0)}:reasoning"
-            )
-            return self._part_delta({**props, "partID": part_id, "field": "reasoning"})
-
-        if kind in {"session.text.ended", "session.next.text.ended"}:
-            part_id = str(
-                props.get("partID")
-                or props.get("textID")
-                or f"{props.get('assistantMessageID', '')}:{props.get('ordinal', 0)}:text"
-            )
-            return self._part_updated({
-                "part": {
-                    "type": "text",
-                    "id": part_id,
-                    "messageID": props.get("assistantMessageID"),
-                    "text": props.get("text") or "",
-                }
-            })
-
-        if kind in {"session.reasoning.ended", "session.next.reasoning.ended"}:
-            part_id = str(
-                props.get("partID")
-                or props.get("reasoningID")
-                or f"{props.get('assistantMessageID', '')}:{props.get('ordinal', 0)}:reasoning"
-            )
-            return self._part_updated({
-                "part": {
-                    "type": "reasoning",
-                    "id": part_id,
-                    "messageID": props.get("assistantMessageID"),
-                    "text": props.get("text") or "",
-                }
-            })
-
-        if kind in {
-            "session.tool.input.started",
-            "session.next.tool.input.started",
-        }:
-            call_id = str(props.get("id") or props.get("callID") or "")
-            tool = str(props.get("name") or props.get("tool") or "")
-            if call_id and tool and call_id not in self._settled_tools:
-                self._tool_calls[call_id] = tool
+        if kind in {"session.reasoning.started", "session.text.started"}:
+            part_kind = "reasoning" if kind.startswith("session.reasoning.") else "text"
+            self._part_types[_v2_part_key(props, part_kind)] = part_kind
             return []
-
-        if kind in {
-            "session.tool.input.ended",
-            "session.next.tool.input.ended",
-        }:
-            # The ended event carries the complete JSON input.  Keep the
-            # announcement until this boundary so a streaming input does not
-            # create an empty tool card; a subsequent called/success event is
-            # deduplicated by ``_tool_calls``.
-            call_id = str(props.get("id") or props.get("callID") or "")
-            tool = str(
-                props.get("name")
-                or props.get("tool")
-                or self._tool_calls.get(call_id, "")
-                or "tool"
-            )
-            if not call_id or call_id in self._settled_tools or call_id in self._announced_tools:
+        if kind in {"session.reasoning.delta", "session.text.delta"}:
+            part_kind = "reasoning" if kind.startswith("session.reasoning.") else "text"
+            key = _v2_part_key(props, part_kind)
+            self._part_types[key] = part_kind
+            return self._part_delta({
+                "partID": key,
+                "field": "text",
+                "delta": props.get("delta"),
+            })
+        if kind in {"session.reasoning.ended", "session.text.ended"}:
+            part_kind = "reasoning" if kind.startswith("session.reasoning.") else "text"
+            key = _v2_part_key(props, part_kind)
+            suffix = self._emit_suffix(key, str(props.get("text") or ""))
+            if not suffix:
                 return []
-            raw_input: object = props.get("input")
-            if raw_input is None and props.get("text") is not None:
-                try:
-                    raw_input = json.loads(str(props.get("text") or "{}"))
-                except (TypeError, ValueError):
-                    raw_input = {"input": str(props.get("text") or "")}
+            if part_kind == "reasoning":
+                return [ThinkingEvent(type="thinking", text=suffix)]
+            self._note_answer(key, suffix)
+            return [AssistantTextDelta(type="text", text=suffix)]
+
+        if kind == "session.tool.input.started":
+            call_id = str(props.get("id") or "")
+            if call_id:
+                self._tool_calls[call_id] = str(props.get("name") or "tool")
+            return []
+        if kind == "session.tool.called":
+            call_id = str(props.get("id") or "")
+            if call_id in self._settled_tool_ids:
+                return []
+            tool = str(props.get("name") or self._tool_calls.get(call_id) or "tool")
             self._tool_calls[call_id] = tool
-            self._announced_tools.add(call_id)
+            raw_input = props.get("input")
             return [ToolUseEvent(
                 type="tool_use",
                 tool_name=tool,
                 tool_input=_summarize_tool_input(tool, raw_input),
-                tool_use_id=call_id,
+                tool_use_id=call_id or None,
                 file_touches=_file_touches(tool, raw_input),
             )]
-
-        if kind in {
-            "session.next.tool.called",
-            "session.tool.called",
-        }:
-            call_id = str(props.get("callID") or props.get("id") or "")
-            tool = str(
-                props.get("tool")
-                or props.get("name")
-                or self._tool_calls.get(call_id, "")
-                or "tool"
-            )
-            if not call_id or call_id in self._settled_tools or call_id in self._announced_tools:
+        if kind in {"session.tool.success", "session.tool.failed"}:
+            call_id = str(props.get("id") or "")
+            if call_id in self._settled_tool_ids:
                 return []
-            self._tool_calls[call_id] = tool
-            self._announced_tools.add(call_id)
-            return [ToolUseEvent(
-                type="tool_use",
-                tool_name=tool,
-                tool_input=_summarize_tool_input(tool, props.get("input")),
-                tool_use_id=call_id,
-                file_touches=_file_touches(tool, props.get("input")),
-            )]
-
-        if kind in {
-            "session.next.tool.success",
-            "session.next.tool.failed",
-            "session.tool.success",
-            "session.tool.failed",
-        }:
-            call_id = str(props.get("callID") or props.get("id") or "")
-            if not call_id or call_id in self._settled_tools:
-                return []
-            had_announced = call_id in self._announced_tools
             tool = self._tool_calls.pop(call_id, "")
-            if not tool:
-                tool = str(props.get("name") or props.get("tool") or "tool")
-            self._settled_tools.add(call_id)
-            detail = error_text(props.get("error")) if kind.endswith("failed") else ""
-            events: list[StreamEvent] = []
-            if not had_announced:
-                # A terminal event can race the input/call event on a fast
-                # tool. Keep the activity row complete even in that case.
-                events.append(ToolUseEvent(
-                    type="tool_use",
-                    tool_name=tool,
-                    tool_use_id=call_id,
-                ))
-            events.append(ToolUseEvent(
+            if call_id:
+                self._settled_tool_ids.add(call_id)
+            error = props.get("error")
+            detail = error_text(error) if kind.endswith("failed") and isinstance(error, Mapping) else ""
+            return [ToolUseEvent(
                 type="tool_result",
                 tool_name=tool,
                 tool_input=detail,
-                tool_use_id=call_id,
-            ))
-            return events
+                tool_use_id=call_id or None,
+            )]
 
-        if kind in {"session.next.step.started", "session.step.started"}:
-            self._record_step_model(props)
+        if kind == "session.step.started":
+            model = props.get("model")
+            if isinstance(model, Mapping):
+                model_id = str(model.get("id") or "")
+                provider_id = str(model.get("providerID") or "")
+                if model_id:
+                    self._effective_model = (
+                        f"{provider_id}/{model_id}" if provider_id else model_id
+                    )
             return []
-        if kind in {"session.next.step.ended", "session.step.ended", "session.usage.updated"}:
-            return self._step_event(props, v2=not kind.startswith("session.next."))
+        if kind in {"session.step.ended", "session.usage.updated"}:
+            cost = props.get("cost")
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+                self._cost = float(cost)
+            tokens = props.get("tokens")
+            if isinstance(tokens, Mapping):
+                event_usage = usage_payload(tokens)
+                if event_usage:
+                    if kind == "session.step.ended":
+                        self._context_usage = event_usage
+                    self._usage = event_usage or self._usage
+            return _token_usage_events(tokens)
 
-        if kind in {"permission.v2.asked", "permission.asked"}:
+        if kind == "permission.asked":
             return self._permission_event(props)
-        if kind in {"question.v2.asked", "question.asked"}:
-            return self._question_event(props)
         if kind == "form.created":
-            return self._form_event(props)
-        if kind in {"session.status", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"}:
+            form = props.get("form")
+            if not isinstance(form, Mapping):
+                return []
+            metadata = form.get("metadata")
+            if isinstance(metadata, Mapping) and metadata.get("kind") not in {
+                None,
+                "question",
+            }:
+                return []
+            return self._question_event(form)
+        if kind in {"form.replied", "form.cancelled"}:
+            form_id = str(props.get("formID") or props.get("id") or "")
+            if form_id:
+                self._question_requests.pop(form_id, None)
             return []
         return []
-
-    def _record_step_model(self, props: Mapping[str, Any]) -> None:
-        model = props.get("model")
-        if isinstance(model, Mapping):
-            model_id = str(model.get("id") or model.get("modelID") or "")
-            provider_id = str(model.get("providerID") or "")
-        else:
-            model_id = str(props.get("modelID") or "")
-            provider_id = str(props.get("providerID") or "")
-        if model_id:
-            self._effective_model = f"{provider_id}/{model_id}" if provider_id else model_id
-
-    def _step_event(self, props: Mapping[str, Any], *, v2: bool = False) -> list[StreamEvent]:
-        self._record_step_model(props)
-        tokens = props.get("tokens")
-        usage_changed = False
-        if isinstance(tokens, Mapping):
-            usage = _v2_usage_payload(tokens) if v2 else usage_payload(tokens)
-            usage_changed = usage != self._usage
-            self._usage = usage or self._usage
-            if usage:
-                self._context_usage = dict(usage)
-        cost = props.get("cost")
-        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-            self._cost = float(cost)
-        if v2 and not usage_changed:
-            return []
-        return _token_usage_events(tokens)
-
-    def _form_event(self, props: Mapping[str, Any]) -> list[StreamEvent]:
-        form = props.get("form")
-        if not isinstance(form, Mapping):
-            form = props
-        request_id = str(form.get("id") or props.get("id") or "")
-        fields = form.get("fields")
-        if (
-            not request_id
-            or request_id in self._question_requests
-            or not isinstance(fields, list)
-            or not fields
-        ):
-            return []
-        questions: list[dict[str, Any]] = []
-        question_ids: list[str] = []
-        multi_flags: list[bool] = []
-        question_types: list[str] = []
-        question_values: list[tuple[tuple[str, str], ...]] = []
-        question_custom: list[bool] = []
-        required_flags: list[bool] = []
-        hidden_flags: list[bool] = []
-        when_flags: list[tuple[dict[str, Any], ...]] = []
-        pattern_flags: list[str] = []
-        format_flags: list[str] = []
-        min_length_flags: list[int] = []
-        max_length_flags: list[int] = []
-        minimum_flags: list[float] = []
-        maximum_flags: list[float] = []
-        min_item_flags: list[int] = []
-        max_item_flags: list[int] = []
-        for index, field in enumerate(fields):
-            if not isinstance(field, Mapping):
-                continue
-            question_id = str(
-                field.get("key")
-                if field.get("key") is not None
-                else index
-            )
-            field_type = str(field.get("type") or "string")
-            options = []
-            for option in field.get("options") or []:
-                if isinstance(option, Mapping):
-                    option_value = option.get("value")
-                    if option_value is None:
-                        option_value = option.get("label")
-                    options.append({
-                        "label": str(option.get("label") or option_value or ""),
-                        "value": str(option_value if option_value is not None else ""),
-                        "description": str(option.get("description") or ""),
-                    })
-            multi = field_type == "multiselect" or bool(field.get("multiple"))
-            # External steps have no ``required`` member in the V2 schema, but
-            # the server accepts them only after an explicit acknowledgement.
-            required = field_type == "external" or bool(field.get("required", False))
-            hidden = bool(field.get("hidden", False))
-            when_raw = field.get("when") or []
-            when_raw = [when_raw] if isinstance(when_raw, Mapping) else when_raw
-            conditions = tuple(
-                {
-                    "key": str(condition.get("key") or ""),
-                    "op": str(condition.get("op") or "eq"),
-                    "value": condition.get("value"),
-                }
-                for condition in when_raw
-                if isinstance(condition, Mapping) and str(condition.get("key") or "")
-            )
-            question_ids.append(question_id)
-            multi_flags.append(multi)
-            question_types.append(field_type)
-            required_flags.append(required)
-            hidden_flags.append(hidden)
-            when_flags.append(conditions)
-            question_values.append(tuple(
-                (
-                    str(option.get("label") or (
-                        option.get("value") if option.get("value") is not None else ""
-                    )),
-                    str(
-                        option.get("value")
-                        if option.get("value") is not None
-                        else option.get("label") or ""
-                    ),
-                )
-                for option in field.get("options") or []
-                if isinstance(option, Mapping)
-            ))
-            question_custom.append(bool(field.get("custom", not options)))
-            pattern_flags.append(str(field.get("pattern") or ""))
-            format_flags.append(str(field.get("format") or ""))
-            for target, key in (
-                (min_length_flags, "minLength"),
-                (max_length_flags, "maxLength"),
-                (min_item_flags, "minItems"),
-                (max_item_flags, "maxItems"),
-            ):
-                value = field.get(key)
-                target.append(int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0)
-            minimum_value = field.get("minimum")
-            maximum_value = field.get("maximum")
-            minimum_flags.append(
-                float(minimum_value)
-                if isinstance(minimum_value, (int, float))
-                and not isinstance(minimum_value, bool)
-                else 0.0
-            )
-            maximum_flags.append(
-                float(maximum_value)
-                if isinstance(maximum_value, (int, float))
-                and not isinstance(maximum_value, bool)
-                else 0.0
-            )
-            question: dict[str, Any] = {
-                "id": question_id,
-                "question": str(field.get("description") or field.get("title") or question_id),
-                "header": str(field.get("title") or question_id),
-                "multiSelect": multi,
-                # A V2 string field with no options is free text.  For a closed
-                # option list, custom defaults to false unless the form says
-                # otherwise; optional fields still get a blank path below.
-                "isOther": field_type == "external" or bool(
-                    field.get("custom", not options)
-                ),
-                "required": required,
-                "hidden": hidden,
-                "when": list(conditions),
-                "options": options,
-            }
-            if field_type == "external":
-                question["url"] = str(field.get("url") or "")
-            for metadata_key in (
-                "type", "format", "pattern", "minLength", "maxLength", "minimum",
-                "maximum", "minItems", "maxItems", "placeholder", "default",
-                "custom",
-            ):
-                if metadata_key in field:
-                    question[metadata_key] = field[metadata_key]
-            questions.append(question)
-        if not questions:
-            return []
-        self._question_requests[request_id] = _PendingRequest(
-            request_id=request_id,
-            session_id=str(form.get("sessionID") or props.get("sessionID") or ""),
-            question_ids=tuple(question_ids),
-            question_multi=tuple(multi_flags),
-            question_types=tuple(question_types),
-            question_values=tuple(question_values),
-            question_custom=tuple(question_custom),
-            question_required=tuple(required_flags),
-            question_hidden=tuple(hidden_flags),
-            question_when=tuple(when_flags),
-            question_pattern=tuple(pattern_flags),
-            question_format=tuple(format_flags),
-            question_min_length=tuple(min_length_flags),
-            question_max_length=tuple(max_length_flags),
-            question_minimum=tuple(minimum_flags),
-            question_maximum=tuple(maximum_flags),
-            question_min_items=tuple(min_item_flags),
-            question_max_items=tuple(max_item_flags),
-            form=True,
-        )
-        payload: dict[str, Any] = {
-            "form": {
-                "id": request_id,
-                "title": str(form.get("title") or ""),
-                "metadata": form.get("metadata") or {},
-            },
-            "questions": questions,
-        }
-        return [ToolUseEvent(
-            type="tool_use",
-            tool_name="AskUserQuestion",
-            tool_input=json.dumps(payload, ensure_ascii=False),
-            tool_use_id=request_id,
-            request_id=request_id,
-        )]
 
     def _part_delta(self, props: Mapping[str, Any]) -> list[StreamEvent]:
         """Incremental text/reasoning for one part."""
@@ -3614,151 +2368,116 @@ class OpencodeProvider(BaseSDKProvider):
         return []
 
     def _tool_part(self, part: Mapping[str, Any]) -> list[StreamEvent]:
-        """Emit one tool call/result pair, deduplicated across poll replays."""
+        """One tool call, emitted once on start and once on settle."""
         call_id = str(part.get("callID") or part.get("id") or "")
-        tool = str(part.get("tool") or part.get("name") or "")
+        tool = str(part.get("tool") or "")
         state = part.get("state")
         state = state if isinstance(state, Mapping) else {}
-        status = str(state.get("status") or part.get("status") or "").lower()
-        raw_input = state.get("input", part.get("input"))
+        status = str(state.get("status") or "")
+        raw_input = state.get("input")
 
-        if not call_id:
+        if call_id and call_id in self._settled_tool_ids:
             return []
-        if status == "streaming":
-            # V2 streaming parts carry partial JSON input.  Do not paint a
-            # misleading tool card; input-ended/running/settled carries the
-            # complete call.
-            return []
-        if status == "pending" and not raw_input:
-            return []
-
-        if status in {"pending", "running", "executing"}:
-            if call_id in self._settled_tools or call_id in self._announced_tools:
+        if status in {"pending", "running"}:
+            if call_id in self._tool_calls:
+                return []  # already announced; a running update is not news
+            # A `pending` part carries `input={}` — the arguments stream in and
+            # only land by `running`. Announcing at pending showed the tool
+            # with no detail at all ("bash" with an empty argument line).
+            if status == "pending" and not raw_input:
                 return []
             self._tool_calls[call_id] = tool
-            self._announced_tools.add(call_id)
             return [ToolUseEvent(
                 type="tool_use",
                 tool_name=tool,
                 tool_input=_summarize_tool_input(tool, raw_input),
-                tool_use_id=call_id,
+                tool_use_id=call_id or None,
                 file_touches=_file_touches(tool, raw_input),
             )]
 
-        if status in {"completed", "error", "failed", "cancelled"}:
-            if call_id in self._settled_tools:
-                return []
+        if status in {"completed", "error"}:
+            if call_id:
+                self._settled_tool_ids.add(call_id)
             events: list[StreamEvent] = []
-            if call_id not in self._announced_tools:
+            if call_id not in self._tool_calls:
                 # A fast tool can settle before any running update arrives, so
                 # the call would otherwise never be shown at all.
                 events.append(ToolUseEvent(
                     type="tool_use",
-                    tool_name=tool or "tool",
+                    tool_name=tool,
                     tool_input=_summarize_tool_input(tool, raw_input),
-                    tool_use_id=call_id,
+                    tool_use_id=call_id or None,
                     file_touches=_file_touches(tool, raw_input),
                 ))
             self._tool_calls.pop(call_id, None)
-            self._settled_tools.add(call_id)
+            raw_error = state.get("error")
             detail = (
-                error_text(state.get("error"))
-                if status in {"error", "failed"} and isinstance(state.get("error"), Mapping)
-                else _sanitize_error(state.get("error"))
-                if status in {"error", "failed"}
+                error_text(raw_error)
+                if status == "error" and isinstance(raw_error, Mapping)
                 else ""
             )
             events.append(ToolUseEvent(
                 type="tool_result",
-                tool_name=tool or "tool",
+                tool_name=tool,
                 tool_input=detail,
-                tool_use_id=call_id,
+                tool_use_id=call_id or None,
             ))
             return events
 
         return []
 
-    def _message_updated(self, props: Mapping[str, Any]) -> list[StreamEvent]:
-        """Track the turn's user message id and its final usage/cost."""
-        info = props.get("info")
-        if not isinstance(info, Mapping):
-            return []
-        if info.get("role") == "user":
-            self._user_message_id = str(info.get("id") or "")
-            return []
-        if info.get("role") != "assistant":
-            return []
-        # The only place the resolved model is reported. Without this a chat
-        # that let opencode pick (no model on the request) records an empty
-        # model forever, and the header has nothing to show.
-        model_id = str(info.get("modelID") or "")
-        if model_id:
-            provider_id = str(info.get("providerID") or "")
-            self._effective_model = f"{provider_id}/{model_id}" if provider_id else model_id
-        cost = info.get("cost")
-        if isinstance(cost, (int, float)):
-            self._cost = float(cost)
-        tokens = info.get("tokens")
-        if isinstance(tokens, Mapping):
-            self._usage = usage_payload(tokens) or self._usage
-            self._context_usage = dict(self._usage) if self._usage else {}
-        return _token_usage_events(tokens)
-
     def _permission_event(self, props: Mapping[str, Any]) -> list[StreamEvent]:
-        """Surface an approval prompt, naming what is actually being approved.
-
-        The live event is `permission.asked`, whose payload is
-        ``{permission, patterns, metadata, always, tool:{callID}}``. The
-        schema's newer `permission.v2.asked` uses ``{action, resources}``
-        instead, so both are read — an approval card that cannot say *what* it
-        is approving is worse than useless.
-        """
+        """Surface one V2 permission request as the PWA approval card."""
         request_id = str(props.get("id") or "")
-        if not request_id or request_id in self._permission_requests:
+        session_id = str(props.get("sessionID") or "")
+        if not request_id or not session_id:
             return []
-
-        # v1 names the tool in `permission`; v2 names it in `action`.
-        tool_name = str(props.get("permission") or props.get("action") or "").strip()
-        detail = ""
-        metadata = props.get("metadata")
-        if isinstance(metadata, Mapping):
-            for key in ("command", "filePath", "path", "url", "pattern"):
-                value = metadata.get(key)
-                if isinstance(value, str) and value.strip():
-                    detail = value.strip()
-                    break
-        reason = str(props.get("message") or "").strip()
-        if reason:
-            detail = reason
-        if not detail:
-            # `patterns` (v1) / `resources` (v2) hold the concrete targets.
-            targets = props.get("patterns")
-            if not isinstance(targets, list):
-                targets = props.get("resources")
-            if isinstance(targets, list):
-                detail = ", ".join(str(item) for item in targets if str(item).strip())
-
-        tool = props.get("tool")
-        call_id = str(tool.get("callID") or "") if isinstance(tool, Mapping) else ""
-        if not call_id and isinstance(props.get("source"), Mapping):
-            call_id = str(props["source"].get("id") or "")
-        pending = _PendingRequest(
+        if request_id in self._permission_requests:
+            return []
+        action = str(props.get("action") or "tool").strip()
+        detail = str(props.get("message") or "").strip()
+        resources = props.get("resources")
+        resource_detail = ""
+        if isinstance(resources, list):
+            resource_detail = ", ".join(
+                str(item) for item in resources if str(item).strip()
+            )
+        if action in {"glob", "grep"} and resource_detail:
+            # V2 uses the pattern/regex as the permission resource; metadata.path
+            # is only the search root and must not hide the query the operator is
+            # approving.
+            detail = resource_detail
+        else:
+            metadata = props.get("metadata")
+            if isinstance(metadata, Mapping):
+                metadata_detail = ""
+                for key in ("command", "filePath", "path", "url", "pattern"):
+                    value = metadata.get(key)
+                    if isinstance(value, str) and value.strip():
+                        metadata_detail = value.strip()
+                        break
+                if metadata_detail:
+                    detail = (
+                        f"{detail} ({metadata_detail})"
+                        if detail
+                        else metadata_detail
+                    )
+            if not detail and resource_detail:
+                detail = resource_detail
+        source = props.get("source")
+        call_id = (
+            str(source.get("id") or "") if isinstance(source, Mapping) else ""
+        )
+        self._permission_requests[request_id] = _PendingRequest(
             request_id=request_id,
-            session_id=str(props.get("sessionID") or ""),
+            session_id=session_id,
             tool_use_id=call_id,
         )
-        label = tool_name or "a tool"
-        # A permission event means the session ruleset resolved the action to
-        # ``ask`` — a shell command or a destructive control-plane tool in the
-        # permissive auto default, or any mutation in the narrower modes. There
-        # is no local classifier: the ``opencode-auto-permissions`` plugin
-        # answers these with a reviewer model when the user opts into it;
-        # otherwise the operator approves or denies the card.
-        self._permission_requests[request_id] = pending
+        label = {
+            "glob": "glob search",
+            "grep": "content search",
+        }.get(action, action or "a tool")
         return [PermissionRequestEvent(
-            # `system`, and "Approve use of X?", to match the Claude
-            # providers. A different type and a restated "opencode wants to
-            # use bash" rendered as an extra transcript line beside the card.
             type="system",
             message=f"Approve use of {label}?",
             tool_name=label,
@@ -3766,95 +2485,121 @@ class OpencodeProvider(BaseSDKProvider):
             request_id=request_id,
         )]
 
-    def _question_event(self, props: Mapping[str, Any]) -> list[StreamEvent]:
-        """Surface a structured question as the PWA's question card."""
-        request_id = str(props.get("id") or "")
-        questions = props.get("questions")
-        if not request_id or not isinstance(questions, list) or not questions:
+    def _question_event(self, form: Mapping[str, Any]) -> list[StreamEvent]:
+        """Surface one V2 form as the PWA's AskUserQuestion card."""
+        request_id = str(form.get("id") or "")
+        session_id = str(form.get("sessionID") or "")
+        fields = form.get("fields")
+        if not request_id or not session_id or not isinstance(fields, list):
             return []
-        question_ids = tuple(
-            str(item.get("id") if item.get("id") is not None else index)
-            for index, item in enumerate(questions)
-            if isinstance(item, Mapping)
-        )
-        question_items = [item for item in questions if isinstance(item, Mapping)]
-        tool = props.get("tool")
-        tool_use_id = (
-            str(tool.get("callID") or "")
-            if isinstance(tool, Mapping)
-            else ""
-        )
+        if request_id in self._question_requests:
+            return []
+        visible = [
+            item for item in fields
+            if isinstance(item, Mapping) and not item.get("hidden")
+        ]
+        if not visible:
+            return []
+
+        question_ids: list[str] = []
+        question_fields: dict[str, dict[str, Any]] = {}
+        questions: list[dict[str, Any]] = []
+        for index, item in enumerate(visible):
+            key = str(item.get("key") or index)
+            kind = str(item.get("type") or "string")
+            options = [
+                dict(option) for option in (item.get("options") or [])
+                if isinstance(option, Mapping)
+            ]
+            if kind == "boolean" and not options:
+                options = [
+                    {"value": "true", "label": "Yes"},
+                    {"value": "false", "label": "No"},
+                ]
+            if kind == "external":
+                options = [{
+                    "value": "true",
+                    "label": "Done",
+                    "description": str(item.get("url") or ""),
+                }]
+            field = {**dict(item), "options": options}
+            question_ids.append(key)
+            question_fields[key] = field
+            questions.append({
+                "id": key,
+                "question": str(item.get("description") or item.get("title") or key),
+                "header": str(item.get("title") or form.get("title") or "")[:80],
+                "type": kind,
+                "required": bool(item.get("required")),
+                "when": item.get("when") if isinstance(item.get("when"), list) else [],
+                "format": item.get("format"),
+                "pattern": item.get("pattern"),
+                "minLength": item.get("minLength"),
+                "maxLength": item.get("maxLength"),
+                "minimum": item.get("minimum"),
+                "maximum": item.get("maximum"),
+                "minItems": item.get("minItems"),
+                "maxItems": item.get("maxItems"),
+                "custom": bool(item.get("custom")),
+                "multiSelect": kind == "multiselect",
+                "isOther": kind != "external" and (bool(item.get("custom")) or not options),
+                "options": [
+                    {
+                        "label": str(option.get("label") or option.get("value") or ""),
+                        "value": str(option.get("value") or ""),
+                        "description": str(option.get("description") or ""),
+                    }
+                    for option in options
+                ],
+            })
+
         self._question_requests[request_id] = _PendingRequest(
             request_id=request_id,
-            session_id=str(props.get("sessionID") or ""),
-            tool_use_id=tool_use_id,
-            question_ids=question_ids,
-            question_multi=tuple(bool(item.get("multiple")) for item in question_items),
-            question_types=tuple("string" for _ in question_items),
-            form=False,
+            session_id=session_id,
+            question_ids=tuple(question_ids),
+            question_fields=question_fields,
         )
-        payload = {
-            "questions": [
-                {
-                    "id": str(item.get("id") or index),
-                    "question": str(item.get("question") or ""),
-                    "header": str(item.get("header") or ""),
-                    "multiSelect": bool(item.get("multiple")),
-                    "isOther": bool(item.get("custom")),
-                    "options": [
-                        {
-                            "label": str(option.get("label") or option.get("value") or ""),
-                            "description": str(option.get("description") or ""),
-                        }
-                        for option in (item.get("options") or [])
-                        if isinstance(option, Mapping)
-                    ],
-                }
-                for index, item in enumerate(questions)
-                if isinstance(item, Mapping)
-            ]
-        }
         return [ToolUseEvent(
             type="tool_use",
             tool_name="AskUserQuestion",
-            tool_input=json.dumps(payload, ensure_ascii=False),
+            tool_input=json.dumps({"questions": questions}, ensure_ascii=False),
             tool_use_id=request_id,
             request_id=request_id,
         )]
 
-    async def _resolve_v2_default_model(self, client: Any) -> tuple[str, str]:
-        for attempt in range(_V2_MODEL_CATALOG_RETRIES):
-            try:
-                response = await client.get("/api/model/default")
-                response.raise_for_status()
-                payload = _response_data(response)
-            except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-                payload = None
-            if isinstance(payload, Mapping):
-                provider_id = str(payload.get("providerID") or "")
-                model_id = str(payload.get("modelID") or payload.get("id") or "")
-                prefix = f"{provider_id}/"
-                if provider_id and model_id.startswith(prefix):
-                    model_id = model_id[len(prefix):]
-                if provider_id and model_id:
-                    return provider_id, model_id
-            if attempt + 1 < _V2_MODEL_CATALOG_RETRIES:
-                await asyncio.sleep(_V2_MODEL_CATALOG_RETRY_DELAY)
-        return "", ""
-
     async def _resolve_model(
         self, client: httpx.AsyncClient, model: str
     ) -> tuple[str, str]:
-        """Resolve a requested model to ``(providerID, modelID)`` for the prompt.
-
-        A qualified ``provider/model`` id passes through. An unqualified one is
-        kept under an empty provider for V1; V2 omits it from the model
-        selection because its native model reference requires a provider ID.
-        """
+        """Resolve a bare model id against V2's flat catalog."""
         provider_id, model_id = split_model(model)
         if provider_id or not model_id:
             return provider_id, model_id
-        return "", model_id.strip()
+        response = await client.get("/api/model")
+        response.raise_for_status()
+        models = _data(response.json())
+        if not isinstance(models, list):
+            return "", ""
+        matches = [
+            entry
+            for entry in models
+            if isinstance(entry, Mapping)
+            and entry.get("enabled") is not False
+            and str(entry.get("modelID") or entry.get("id") or "") == model_id
+            and str(entry.get("providerID") or "")
+        ]
+        providers = {str(entry.get("providerID")) for entry in matches}
+        if not matches:
+            raise ValueError(
+                f"OpenCode model {model!r} was not found; use provider/model"
+            )
+        if len(providers) != 1:
+            raise ValueError(
+                f"OpenCode model {model!r} is ambiguous; use provider/model"
+            )
+        entry = matches[0]
+        return str(entry.get("providerID") or ""), str(
+            entry.get("modelID") or entry.get("id") or ""
+        )
 
     async def run_streaming(
         self,
@@ -3871,127 +2616,72 @@ class OpencodeProvider(BaseSDKProvider):
         self._reset_turn_state()
         register_handle(OpencodeActiveHandle(self, session_id))
 
-        agent, _permission = mode_settings(
-            request.mode, tools_enabled=self._tools_enabled
-        )
-        provider_id, model_id = self._turn_model
-        version = _api_version_for_client(client, self._api_version)
-        if version == "v2":
-            # V2 has no supported per-prompt ``system`` field.  Keep the same
-            # core/runtime composition as V1 and carry it in the supported
-            # text preamble; omitting it would drop the operator's standing
-            # instructions on every V2 turn.
-            if self._developer_instructions is None:
-                instructions = self._chat_system_instructions()
-                runtime = ""
-            else:
-                instructions = self._developer_instructions
-                runtime = build_runtime_context(request)
-            system_context = compose_system(instructions, runtime)
-            if self._session_handover_context:
-                system_context = compose_system(
-                    system_context, self._session_handover_context
-                )
-            body = _v2_prompt_body(request, system_context=system_context)
+        if self._developer_instructions is None:
+            instructions = self._chat_system_instructions()
+            runtime = ""
         else:
-            body = {"agent": agent, "parts": self._prompt_parts(request)}
-            if model_id:
-                body["model"] = {"providerID": provider_id, "modelID": model_id}
-            if request.thinking_level:
-                body["variant"] = request.thinking_level
-            if self._developer_instructions is None:
-                instructions = self._chat_system_instructions()
-                runtime = ""
-            else:
-                instructions = self._developer_instructions
-                runtime = build_runtime_context(request)
-            system = compose_system(instructions, runtime)
-            if self._session_handover_context:
-                system = compose_system(system, self._session_handover_context)
-            if system:
-                body["system"] = system
+            instructions = self._developer_instructions
+            runtime = build_runtime_context(request)
+        system = compose_system(instructions, runtime)
+        if self._session_handover_context:
+            system = compose_system(system, self._session_handover_context)
+        body = self._prompt_body(request, system=system)
 
         error: str = ""
         saw_output = False
 
         # The SSE subscription can drop mid-turn (network blip, server hiccup)
-        # before `session.idle` arrives. Rather than failing the whole turn,
+        # before `session.execution.*` arrives. Rather than failing the whole turn,
         # re-subscribe a bounded number of times; if the stream still will not
         # hold, poll the message list until output quiesces and replay settled
         # parts through the same accumulator (its `_emitted` bookkeeping makes
         # the replay idempotent). Mirrors conduit's poll-backstop design.
         prompt_accepted = False
         prompt_rejected = False
-        idle_seen = False
+        terminal_seen = False
 
         async def _pump_once() -> AsyncGenerator[StreamEvent, None]:
             """One SSE subscription, pumped until idle or premature close."""
-            nonlocal prompt_accepted, prompt_rejected, error, saw_output, idle_seen
-            async with client.stream(
-                "GET", _api_path(client, "/event", "/api/event", version)
-            ) as stream:
+            nonlocal prompt_accepted, prompt_rejected, error, saw_output, terminal_seen
+            async with client.stream("GET", "/api/event") as stream:
                 stream.raise_for_status()
                 # Subscribe before prompting: opencode starts emitting as soon
                 # as the prompt is accepted, and a late subscriber loses the
                 # opening deltas.
                 if not prompt_accepted:
                     response = await client.post(
-                        _api_path(
-                            client,
-                            f"/session/{session_id}/prompt_async",
-                            f"/api/session/{session_id}/prompt",
-                            version,
-                        ),
-                        json=body,
+                        f"/api/session/{session_id}/prompt", json=body
                     )
                     if response.status_code >= 400:
                         detail = _sanitize_error(response.text)
                         prompt_rejected = True
-                        # Record the failure and let the single closing
-                        # ResultEvent below carry it. Yielding a terminal
-                        # result here emitted *two*: this one, then the
-                        # unconditional one at the end of the turn with an
-                        # empty `result` and `is_error=False`, which the PWA
-                        # applied last — so a rejected prompt rendered as a
-                        # successful, blank turn instead of the error.
-                        error = error or f"opencode rejected the prompt: {detail}"
+                        error = error or f"OpenCode rejected the prompt: {detail}"
                         return
-                    # V2 returns the admitted user message in the prompt
-                    # receipt. Capture it before subscribing to the event
-                    # stream: the first SSE frame can race the receipt, and a
-                    # dropped stream must never fall back to the newest user
-                    # row (which may belong to another client).
-                    if version == "v2":
-                        try:
-                            receipt = response.json()
-                        except (TypeError, ValueError, AttributeError):
-                            receipt = None
-                        admitted_id = _prompt_message_id(receipt)
-                        if not admitted_id:
-                            prompt_rejected = True
-                            error = error or "opencode returned no prompt message id"
-                            return
-                        self._user_message_id = admitted_id
-                    # Once accepted, the replacement session owns the handover
-                    # context. Retain it only across a rejected prompt so a
-                    # retry can still recover the old conversation.
+                    try:
+                        admitted = _data(response.json())
+                    except (TypeError, ValueError) as exc:
+                        prompt_rejected = True
+                        error = error or f"OpenCode returned an invalid prompt receipt: {exc}"
+                        return
+                    if isinstance(admitted, Mapping):
+                        self._user_message_id = str(admitted.get("id") or "")
+                    # Once accepted, the replacement session owns the handover.
                     self._session_handover_context = ""
                     prompt_accepted = True
-                # Reload pending native requests only after this turn's prompt
-                # was admitted. On a reconnect this is harmless and repairs a
-                # form/permission frame lost in the gap; before acceptance it
-                # could replay an unrelated stale request from the session.
-                for converted in await self._recover_pending_v2_requests(client, session_id):
-                    saw_output = saw_output or converted.type in {"text", "tool_use"}
-                    yield converted
+                if prompt_accepted:
+                    for converted in await self._reload_pending_requests(
+                        client, session_id
+                    ):
+                        saw_output = True
+                        yield converted
                 decoder = SSEDecoder()
                 async for sse in decoder.aiter_bytes(stream.aiter_bytes()):
                     if self._stop_requested == session_id:
                         # The user stopped the turn and the abort has been
                         # issued: end locally now. Waiting for the server's
-                        # `session.idle` can drag through SSE reconnects and
+                        # `session.execution.*` can drag through SSE reconnects and
                         # the poll backstop, leaving Stop feeling dead.
-                        idle_seen = True
+                        terminal_seen = True
                         return
                     try:
                         event = sse.json()
@@ -3999,37 +2689,27 @@ class OpencodeProvider(BaseSDKProvider):
                         continue
                     if not isinstance(event, Mapping):
                         continue
-                    props = _event_properties(event)
-                    kind = str(event.get("type") or "")
+                    props = event.get("data")
+                    props = props if isinstance(props, Mapping) else {}
                     event_session = str(props.get("sessionID") or "")
-                    if not event_session and kind == "form.created":
+                    if not event_session:
                         form = props.get("form")
                         if isinstance(form, Mapping):
                             event_session = str(form.get("sessionID") or "")
                     if event_session and event_session != session_id:
                         continue
 
-                    if kind in {"session.error", "session.step.failed"}:
+                    kind = str(event.get("type") or "")
+                    if kind == "session.execution.failed":
                         error = error or error_text(props.get("error"))
-                        continue
-                    if kind in {"session.idle", "session.execution.succeeded"}:
-                        idle_seen = True
+                        terminal_seen = True
                         break
-                    if kind in {"session.execution.failed", "session.execution.interrupted"}:
-                        if kind.endswith("interrupted") and self._stop_requested == session_id:
-                            idle_seen = True
-                            break
-                        failure_detail = (
-                            props.get("error")
-                            or props.get("message")
-                            or props.get("reason")
-                        )
-                        error = error or error_text(
-                            failure_detail
-                            if isinstance(failure_detail, Mapping)
-                            else {"data": {"message": failure_detail}}
-                        )
-                        idle_seen = True
+                    if kind == "session.execution.interrupted":
+                        error = error or "OpenCode execution was interrupted"
+                        terminal_seen = True
+                        break
+                    if kind == "session.execution.succeeded":
+                        terminal_seen = True
                         break
 
                     for converted in self._event_to_stream(event):
@@ -4037,7 +2717,7 @@ class OpencodeProvider(BaseSDKProvider):
                         yield converted
 
         # The SSE subscription can drop mid-turn (network blip, server hiccup)
-        # before `session.idle` arrives. Rather than failing the whole turn,
+        # before `session.execution.*` arrives. Rather than failing the whole turn,
         # re-subscribe a bounded number of times; if the stream still will not
         # hold, poll the message list until output quiesces and replay settled
         # parts through the same accumulator — its `_emitted` bookkeeping makes
@@ -4053,12 +2733,12 @@ class OpencodeProvider(BaseSDKProvider):
                         # The turn never started; nothing to recover.
                         yield ResultEvent(
                             type="result",
-                            result=f"opencode connection failed: {exc}",
+                            result=f"OpenCode connection failed: {exc}",
                             session_id=session_id,
                             is_error=True,
                         )
                         return
-                if prompt_rejected or idle_seen:
+                if prompt_rejected or terminal_seen:
                     break
                 if self._stop_requested == session_id:
                     # Stopped: no reconnects, no recovery — just finish.
@@ -4070,11 +2750,14 @@ class OpencodeProvider(BaseSDKProvider):
 
             degraded_final = False
             if (
-                not idle_seen
+                not terminal_seen
                 and prompt_accepted
                 and not prompt_rejected
                 and self._stop_requested != session_id
             ):
+                for converted in await self._reload_pending_requests(client, session_id):
+                    saw_output = True
+                    yield converted
                 self._turn_recovered_via_poll = False
                 async for converted in self._reconcile_interrupted_turn(
                     client, session_id
@@ -4082,32 +2765,12 @@ class OpencodeProvider(BaseSDKProvider):
                     saw_output = saw_output or converted.type in {"text", "tool_use"}
                     yield converted
                 degraded_final = not self._turn_recovered_via_poll
+                error = error or self._poll_error
         finally:
             register_handle(None)
 
-        # A terminal/idle marker with no assistant text is a real failed or
-        # incomplete execution, not a successful empty answer.  Never let the
-        # unconditional closing ResultEvent overwrite an earlier provider error
-        # with ``is_error=False`` and an empty transcript.
-        error = error or self._poll_error
-        if (
-            not error
-            and self._stop_requested != session_id
-            and not self._answer_text().strip()
-        ):
-            error = "opencode turn completed without an assistant response"
-        if (
-            not error
-            and degraded_final
-            and self._stop_requested != session_id
-        ):
-            error = "opencode turn could not be verified after connection loss"
-
         await self._augment_context_pct(client, self._turn_model)
 
-        fallback_model = request.model
-        if not fallback_model and self._turn_model[0] and self._turn_model[1]:
-            fallback_model = f"{self._turn_model[0]}/{self._turn_model[1]}"
         yield ResultEvent(
             type="result",
             # A successful turn carries the accumulated answer:
@@ -4116,7 +2779,7 @@ class OpencodeProvider(BaseSDKProvider):
             result=error or self._answer_text(),
             session_id=session_id,
             is_error=bool(error),
-            effective_model=self._effective_model or fallback_model,
+            effective_model=self._effective_model or request.model,
             # Accumulated from the assistant message's own totals rather than
             # summed per step, so a retried step cannot double-count.
             usage=self._usage,
@@ -4129,9 +2792,10 @@ class OpencodeProvider(BaseSDKProvider):
     ) -> None:
         """Attach the turn's context-window occupancy to ``self._usage``.
 
-        Mirrors opencode's own UI: the last model call's total tokens over the
-        model's declared ``limit.context`` from ``GET /provider``. Silent on failure — the field
-        is simply left off the usage payload when the CLI cannot answer.
+        Mirrors OpenCode's own UI: the last model call's total tokens over the
+        model's declared ``limit.context`` from ``GET /api/model``. Silent on
+        failure — the field is simply left off the usage payload when the CLI
+        cannot answer.
         """
         usage = self._context_usage or self._usage
         if not usage:
@@ -4149,14 +2813,12 @@ class OpencodeProvider(BaseSDKProvider):
             return
         context_window: int | None = None
         try:
-            response = await client.get(
-                _api_path(client, "/provider", "/api/model", self._api_version)
-            )
+            response = await client.get("/api/model")
             if response.status_code < 400:
                 context_window = _context_window_for(
-                    _response_data(response), provider_id, model_id
+                    response.json(), provider_id, model_id
                 )
-        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+        except (httpx.HTTPError, ValueError):
             context_window = None
         if not context_window:
             return
@@ -4189,33 +2851,41 @@ class OpencodeProvider(BaseSDKProvider):
             ttl = _MODEL_CACHE_TTL if cached[1] else _EMPTY_MODEL_CACHE_TTL
             if time.monotonic() - cached[0] < ttl:
                 return [dict(item) for item in cached[1]]
-        payload: object = None
-        async with _EphemeralServer(workspace_root) as client:
-            if client is not None:
-                version = _api_version_for_client(client)
-                attempts = _V2_MODEL_CATALOG_RETRIES if version == "v2" else 1
-                for attempt in range(attempts):
-                    try:
-                        response = await client.get(
-                            _api_path(client, "/provider", "/api/model")
-                        )
-                        response.raise_for_status()
-                        payload = _response_data(response)
-                    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-                        payload = None
-                    if version != "v2" or _catalog_from_providers(payload):
-                        break
-                    if attempt + 1 < attempts:
-                        await asyncio.sleep(_V2_MODEL_CATALOG_RETRY_DELAY)
-        catalog = _catalog_from_providers(payload)
-        _log_catalog_change(key, cached[1] if cached else None, catalog)
-        # Every outcome is cached, empties included — an empty result is the
-        # expensive one to recompute (a server spawn, or the full health-poll
-        # deadline when the binary exists but never answers), and /api/models is
-        # on the PWA's load path. `_EMPTY_MODEL_CACHE_TTL` keeps that short so
-        # models appear seconds after opencode starts working, not minutes.
-        _MODEL_CACHE[key] = (time.monotonic(), catalog)
-        return catalog
+
+        async with _catalog_lock(workspace_root):
+            # Recheck after acquiring the single-flight lock: another settings
+            # request may have filled the cache while this one was waiting.
+            cached = _MODEL_CACHE.get(key)
+            if cached and not force:
+                ttl = _MODEL_CACHE_TTL if cached[1] else _EMPTY_MODEL_CACHE_TTL
+                if time.monotonic() - cached[0] < ttl:
+                    return [dict(item) for item in cached[1]]
+            models_payload: object = {"data": []}
+            async with _EphemeralServer(workspace_root) as client:
+                if client is not None:
+                    for attempt in range(3):
+                        try:
+                            models = await client.get("/api/model")
+                            if (
+                                getattr(models, "status_code", 200) in {502, 503, 504}
+                                and attempt < 2
+                            ):
+                                await asyncio.sleep(0.25 * (attempt + 1))
+                                continue
+                            models.raise_for_status()
+                            models_payload = models.json()
+                            break
+                        except (httpx.HTTPError, ValueError, AttributeError):
+                            if attempt < 2:
+                                await asyncio.sleep(0.25 * (attempt + 1))
+                                continue
+                            models_payload = {"data": []}
+            # V2's /api/model snapshot is already filtered to enabled models;
+            # do not combine it with a separately timed provider snapshot.
+            catalog = _catalog_from_api({"data": None}, models_payload)
+            _log_catalog_change(key, cached[1] if cached else None, catalog)
+            _MODEL_CACHE[key] = (time.monotonic(), catalog)
+            return catalog
 
     @classmethod
     async def read_thread(
@@ -4237,18 +2907,14 @@ class OpencodeProvider(BaseSDKProvider):
                 # the next poll.
                 ttl = _READ_FAILURE_CACHE_TTL
             else:
-                version = _api_version_for_client(client)
                 try:
-                    info = await client.get(
-                        _session_path(client, session_id, fallback=version)
-                    )
+                    info = await client.get(f"/api/session/{session_id}")
                     info.raise_for_status()
-                    messages = await _read_message_list(client, session_id, version)
-                    thread = {
-                        "info": _response_data(info),
-                        "messages": messages,
-                    }
-                except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+                    session_info = _data(info.json())
+                    messages = await _read_v2_messages(client, session_id)
+                    if isinstance(session_info, Mapping):
+                        thread = {"info": dict(session_info), "messages": messages}
+                except (httpx.HTTPError, TypeError, ValueError, RuntimeError):
                     thread = {}
         _THREAD_CACHE[key] = (time.monotonic(), ttl, thread)
         return thread
@@ -4270,43 +2936,32 @@ class OpencodeProvider(BaseSDKProvider):
         if cached and time.monotonic() - cached[0] < cached[1]:
             return cached[2]
 
-        async def _child_messages(
-            client: Any, child_id: str, version: ApiVersion
-        ) -> list[Any]:
+        async def _child_messages(client: Any, child_id: str) -> list[dict[str, Any]]:
             try:
-                return await _read_message_list(client, child_id, version)
-            except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+                return await _read_v2_messages(client, child_id)
+            except (httpx.HTTPError, TypeError, ValueError):
                 return []
 
         result: list[dict[str, Any]] = []
         ttl = _READ_CACHE_TTL
         async with _EphemeralServer(workspace_root) as client:
             if client is None:
+                # Negative-cache the failed spawn (see read_thread).
                 ttl = _READ_FAILURE_CACHE_TTL
             else:
-                version = _api_version_for_client(client)
-                if version == "v2":
-                    children = await _read_v2_child_sessions(client, session_id)
-                else:
-                    try:
-                        response = await client.get(f"/session/{session_id}/children")
-                        response.raise_for_status()
-                        children_payload = _response_data(response)
-                    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-                        children_payload = None
-                    children = [
-                        dict(child)
-                        for child in children_payload
-                        if isinstance(child, Mapping) and child.get("id")
-                    ] if isinstance(children_payload, list) else []
+                try:
+                    children = await _read_v2_children(client, session_id)
+                except (httpx.HTTPError, TypeError, ValueError, RuntimeError):
+                    children = []
                 histories = await asyncio.gather(
-                    *(
-                        _child_messages(client, str(child["id"]), version)
-                        for child in children
-                    )
+                    *(_child_messages(client, str(child["id"])) for child in children)
                 )
+                # This server is a different process from the chat's live
+                # server; its /api/session/active map cannot prove that a
+                # child is idle. Leave activity unknown and let message timing
+                # provide the conservative fallback.
                 result = [
-                    {"info": child, "messages": messages}
+                    {"info": child, "messages": messages, "active": None}
                     for child, messages in zip(children, histories)
                 ]
         _COLLAB_CACHE[key] = (time.monotonic(), ttl, result)
@@ -4318,25 +2973,31 @@ class OpencodeProvider(BaseSDKProvider):
             if client is None or not session_id:
                 return False
             try:
-                response = await client.delete(_session_path(client, session_id))
+                response = await client.delete(f"/api/session/{session_id}")
                 return response.status_code < 400
             except httpx.HTTPError:
                 return False
 
 
 def opencode_collab_tree_counts(tree: Sequence[Mapping[str, Any]]) -> tuple[int, bool]:
-    """Return running and observed counts for ``read_collab_tree`` output.
-
-    opencode session objects carry no status field, so a child's lifecycle
-    state is derived from its own messages: the last assistant message with a
-    ``time`` record missing ``completed`` is a turn still in flight.
-    """
+    """Return running and observed counts, treating unknown activity safely."""
     running = 0
     for item in tree:
         if not isinstance(item, Mapping):
             continue
+        if "active" not in item:
+            continue
+        active = item.get("active")
+        if active is True:
+            running += 1
+            continue
+        if active is False:
+            continue
         messages = item.get("messages")
         if not isinstance(messages, list):
+            # A different process cannot prove that a child with no projected
+            # assistant row is idle. Keep it conservatively running.
+            running += 1
             continue
         last: Mapping[str, Any] | None = None
         for message in messages:
@@ -4345,9 +3006,10 @@ def opencode_collab_tree_counts(tree: Sequence[Mapping[str, Any]]) -> tuple[int,
             info = message.get("info")
             if isinstance(info, Mapping) and info.get("role") == "assistant":
                 last = info
-        if last is None or last.get("error"):
+        if last is None:
+            running += 1
             continue
-        time_info = last.get("time")
+        time_info = last.get("time") if isinstance(last, Mapping) else None
         if (
             isinstance(time_info, Mapping)
             and time_info.get("created")
@@ -4406,63 +3068,64 @@ def _log_catalog_change(
 
 
 def model_accepts_images(model: Mapping[str, Any]) -> bool | None:
-    """Whether an opencode V1 or V2 catalog entry accepts image input."""
+    """Read image support from V2's ``capabilities.input`` modality list."""
     capabilities = model.get("capabilities")
-    if not isinstance(capabilities, Mapping):
-        return None
-    inputs = capabilities.get("input")
-    if isinstance(inputs, Mapping) and isinstance(inputs.get("image"), bool):
-        return bool(inputs["image"])
-    if isinstance(inputs, list):
-        return "image" in inputs
-    if capabilities.get("attachment") is False:
+    inputs = capabilities.get("input") if isinstance(capabilities, Mapping) else None
+    if isinstance(inputs, list) and "image" in inputs:
+        return True
+    if isinstance(inputs, list) and "text" in inputs:
         return False
     return None
 
 
-def _catalog_from_providers(payload: object) -> list[dict[str, Any]]:
-    """Flatten a V1 provider response or a V2 model response."""
-    value = _unwrap_data(payload)
-    if isinstance(value, list):
-        return _v2_model_rows(value)
-    if not isinstance(value, Mapping):
+def _catalog_from_api(
+    providers_payload: object, models_payload: object
+) -> list[dict[str, Any]]:
+    """Flatten V2's active-provider and flat-model snapshots."""
+    providers = _data(providers_payload)
+    if providers is None:
+        active_providers: set[str] | None = None
+    elif isinstance(providers, list):
+        active_providers = {
+            str(provider.get("id") or "")
+            for provider in providers if isinstance(provider, Mapping)
+            if provider.get("id") and provider.get("activation") != "disabled"
+        }
+        # The free OpenCode provider is usable before provider discovery settles.
+        if not active_providers:
+            active_providers = {"opencode"}
+    else:
+        active_providers = None
+
+    models = _data(models_payload)
+    if not isinstance(models, list):
         return []
-    connected = value.get("connected")
-    filter_connected = isinstance(connected, list)
-    connected_ids = {str(item) for item in connected} if isinstance(connected, list) else set()
     rows: list[dict[str, Any]] = []
-    for provider in value.get("all") or []:
-        if not isinstance(provider, Mapping):
+    for model in models:
+        if not isinstance(model, Mapping) or model.get("enabled") is False:
             continue
-        provider_id = str(provider.get("id") or "")
-        if filter_connected and provider_id not in connected_ids:
+        provider_id = str(model.get("providerID") or "")
+        model_id = str(model.get("modelID") or model.get("id") or "")
+        if (
+            not provider_id
+            or not model_id
+            or (active_providers is not None and provider_id not in active_providers)
+        ):
             continue
-        models = provider.get("models")
-        entries = models.values() if isinstance(models, Mapping) else (models or [])
-        for model in entries:
-            if not isinstance(model, Mapping):
-                continue
-            model_id = str(model.get("id") or model.get("modelID") or "")
-            if not model_id:
-                continue
-            variants = model.get("variants")
-            if isinstance(variants, list):
-                variant_ids = sorted(
-                    str(item.get("id") or "")
-                    for item in variants
-                    if isinstance(item, Mapping) and str(item.get("id") or "")
-                )
-            else:
-                variant_ids = sorted(variants) if isinstance(variants, Mapping) else []
-            row: dict[str, Any] = {
-                "model": f"{provider_id}/{model_id}",
-                "label": f"{model.get('name') or model_id} ({provider_id})",
-                "variants": variant_ids,
-            }
-            accepts_images = model_accepts_images(model)
-            if accepts_images is not None:
-                row["images"] = accepts_images
-            rows.append(row)
+        variants = [
+            str(variant.get("id") or "")
+            for variant in (model.get("variants") or [])
+            if isinstance(variant, Mapping) and variant.get("id")
+        ]
+        row: dict[str, Any] = {
+            "model": f"{provider_id}/{model_id}",
+            "label": f"{model.get('name') or model_id} ({provider_id})",
+            "variants": sorted(variants),
+        }
+        accepts_images = model_accepts_images(model)
+        if accepts_images is not None:
+            row["images"] = accepts_images
+        rows.append(row)
     return rows
 
 
@@ -4481,40 +3144,48 @@ class _EphemeralServer:
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> httpx.AsyncClient | None:
+        async with _server_start_lock(self._workspace_root):
+            return await self._enter_unlocked()
+
+    async def _enter_unlocked(self) -> httpx.AsyncClient | None:
         binary = resolve_opencode_binary()
         if not binary:
             return None
         port = _free_port()
         password = secrets.token_urlsafe(24)
-        lock = _server_start_lock(self._workspace_root)
-        async with lock:
-            try:
-                self._process = await asyncio.create_subprocess_exec(
-                    binary, "serve", "--port", str(port), "--hostname", "127.0.0.1",
-                    cwd=str(self._workspace_root),
-                    env={**os.environ, "OPENCODE_SERVER_PASSWORD": password},
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-            except OSError:
-                return None
-            self._client = httpx.AsyncClient(
-                base_url=f"http://127.0.0.1:{port}",
-                auth=("opencode", password),
-                timeout=httpx.Timeout(_REQUEST_TIMEOUT),
+        try:
+            self._process = await asyncio.create_subprocess_exec(
+                binary, "serve", "--port", str(port), "--hostname", "127.0.0.1",
+                cwd=str(self._workspace_root),
+                env={**os.environ, "OPENCODE_SERVER_PASSWORD": password},
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
             )
-            deadline = asyncio.get_running_loop().time() + _SERVER_START_TIMEOUT
-            while asyncio.get_running_loop().time() < deadline:
-                if self._process.returncode is not None:
-                    return None
-                version, _status, error = await _probe_api_version(self._client)
-                if isinstance(error, _UnsupportedApiVersion):
-                    return None
-                if version is not None:
-                    _set_api_version(self._client, version)
-                    return self._client
-                await asyncio.sleep(0.2)
+        except OSError:
             return None
+        self._client = httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{port}",
+            auth=("opencode", password),
+            timeout=httpx.Timeout(_REQUEST_TIMEOUT),
+        )
+        deadline = asyncio.get_running_loop().time() + _SERVER_START_TIMEOUT
+        while asyncio.get_running_loop().time() < deadline:
+            if self._process.returncode is not None:
+                return None
+            try:
+                response = await self._client.get("/api/info", timeout=2.0)
+                if response.status_code == 200:
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        return None
+                    return self._client if _server_version_error(payload) is None else None
+                if response.status_code in {401, 404}:
+                    return None
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0.2)
+        return None
 
     async def __aexit__(self, *_exc: object) -> None:
         if self._client is not None:
@@ -4588,6 +3259,15 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
         version = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
     except (OSError, subprocess.SubprocessError):
         version = ""
+    if _server_version_error({"version": version}) is not None:
+        return _provider(
+            name="opencode",
+            ok=False,
+            auth="unsupported_version",
+            command="opencode --version",
+            detail=OPENCODE_V2_REQUIRED,
+            version=version or "unknown",
+        )
     credentials = _credential_count(binary, timeout=timeout)
     # opencode's own free tier serves models with no credentials at all, so an
     # empty credential store still means "usable" — it does not mean "not set

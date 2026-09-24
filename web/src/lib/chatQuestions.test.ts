@@ -4,9 +4,7 @@ import {
   parseQuestions,
   questionAnswerError,
   questionAnswerIsValid,
-  questionEmptyAnswerAllowed,
   questionIsActive,
-  questionIsVisible,
   questionsSignature,
   type ActiveQuestion,
 } from './chatQuestions'
@@ -39,8 +37,8 @@ describe('parseQuestions', () => {
       requestId: 'req-7',
     })
     expect(qs[0].options).toEqual([
-      { label: 'develop', description: 'default' },
-      { label: 'main', description: '' },
+      { label: 'develop', value: 'develop', description: 'default' },
+      { label: 'main', value: 'main', description: '' },
     ])
   })
 
@@ -51,7 +49,12 @@ describe('parseQuestions', () => {
     expect(qs[0].question).toBe('Pick some')
     expect(qs[0].header).toBe('Files')
     expect(qs[0].multiSelect).toBe(true)
-    expect(qs[0].options).toEqual([{ label: 'a.md', description: '' }])
+    expect(qs[0].options).toEqual([{ label: 'a.md', value: 'a.md', description: '' }])
+
+    const v2 = parseQuestions(JSON.stringify({
+      questions: [{ id: 'tags', type: 'multiselect', options: [{ value: 'a' }, { value: 'b' }] }],
+    }))
+    expect(v2[0].multiSelect).toBe(true)
   })
 
   test('falls back to the request id carried in the payload', () => {
@@ -76,99 +79,66 @@ describe('parseQuestions', () => {
       questions: [{ question: 'q', isOther: false }],
     }))
     expect(noOptions[0].allowOther).toBe(true)
-    const optionalClosed = parseQuestions(JSON.stringify({
-      questions: [{ question: 'q', required: false, isOther: false, options: [{ label: 'a' }] }],
-    }))
-    expect(optionalClosed[0].allowOther).toBe(false)
+  })
+})
+
+describe('questionIsActive', () => {
+  test('uses the controlling multiselect field for when conditions', () => {
+    const controller: ActiveQuestion = {
+      id: 'controller', question: 'Pick', header: 'Pick', multiSelect: true,
+      allowOther: false, isSecret: false, requestId: '', type: 'multiselect', options: [],
+    }
+    const dependent: ActiveQuestion = {
+      id: 'dependent', question: 'Follow-up', header: '', multiSelect: false,
+      allowOther: false, isSecret: false, requestId: '', type: 'string', options: [],
+      when: [{ key: 'controller', op: 'eq', value: 'yes' }],
+    }
+
+    expect(questionIsActive(dependent, { controller: ['yes', 'also'] }, [controller, dependent])).toBe(true)
+    expect(questionIsActive(dependent, { controller: ['no', 'also'] }, [controller, dependent])).toBe(false)
+  })
+})
+
+describe('questionAnswerIsValid', () => {
+  const base: ActiveQuestion = {
+    id: 'q', question: 'Value?', header: '', multiSelect: false,
+    allowOther: true, isSecret: false, requestId: 'r', type: 'string', required: true,
+    options: [],
+  }
+
+  test('enforces string and pattern constraints', () => {
+    const question = { ...base, minLength: 3, maxLength: 8, pattern: '^[A-Z]+$' }
+    expect(questionAnswerError(question, { selected: new Set(), other: 'ab' })).toContain('at least')
+    expect(questionAnswerError(question, { selected: new Set(), other: 'abcdefghi' })).toContain('at most')
+    expect(questionAnswerError(question, { selected: new Set(), other: 'lower' })).toContain('format')
+    expect(questionAnswerIsValid(question, { selected: new Set(), other: 'ABCDE' })).toBe(true)
   })
 
-  test('preserves V2 hidden, conditional, external, and optional form metadata', () => {
-    const qs = parseQuestions(JSON.stringify({
-      form: { id: 'frm_1', title: 'Details' },
-      questions: [
-        { id: 'show', type: 'string', required: true, options: [{ value: 'yes', label: 'Yes' }] },
-        { id: 'detail', type: 'string', required: false, when: [{ key: 'show', op: 'eq', value: 'yes' }] },
-        { id: 'link', type: 'external', url: 'https://example.test/auth' },
-        { id: 'secret', type: 'string', hidden: true, required: true },
-        { id: 'code', type: 'string', pattern: '^[A-Z]{3}$', minLength: 3, maxLength: 3 },
-      ],
-    }))
-    expect(qs[1]).toMatchObject({ required: false, when: [{ key: 'show', op: 'eq', value: 'yes' }] })
-    expect(qs[2]).toMatchObject({ type: 'external', url: 'https://example.test/auth' })
-    expect(qs[3]).toMatchObject({ hidden: true, required: true })
-    expect(qs[4]).toMatchObject({ pattern: '^[A-Z]{3}$', minLength: 3, maxLength: 3 })
-    const withDefault = parseQuestions(JSON.stringify({
-      questions: [{ id: 'choice', type: 'string', default: 'yes', options: [{ value: 'yes', label: 'Yes' }] }],
-    }))
-    expect(withDefault[0].default).toBe('yes')
-    const answers = { 0: { selected: new Set(['Yes']), other: '' } }
-    expect(questionIsVisible(qs[1], qs, answers)).toBe(true)
-    expect(questionIsVisible(qs[3], qs, answers)).toBe(false)
-
-    const emptyCondition = parseQuestions(JSON.stringify({
-      questions: [
-        { id: 'source', type: 'multiselect', options: [{ value: 'yes', label: 'Yes' }] },
-        { id: 'dependent', type: 'string', when: [{ key: 'source', op: 'neq', value: 'yes' }] },
-      ],
-    }))
-    expect(questionIsVisible(emptyCondition[1], emptyCondition, {})).toBe(false)
-    expect(questionIsVisible(emptyCondition[1], emptyCondition, {
-      0: { selected: new Set<string>(), other: '' },
-    })).toBe(true)
-    const closedCondition = parseQuestions(JSON.stringify({
-      questions: [
-        { id: 'source', type: 'string', options: [{ value: 'yes', label: 'Yes' }], isOther: false },
-        { id: 'dependent', type: 'string', when: [{ key: 'source', op: 'neq', value: 'yes' }] },
-      ],
-    }))
-    expect(questionIsVisible(closedCondition[1], closedCondition, {
-      0: { selected: new Set<string>(), other: '' },
-    })).toBe(false)
+  test('enforces numeric range and integer constraints', () => {
+    const question = { ...base, type: 'integer', minimum: 1, maximum: 5 }
+    expect(questionAnswerError(question, { selected: new Set(), other: '0' })).toContain('at least')
+    expect(questionAnswerError(question, { selected: new Set(), other: '3.5' })).toContain('whole')
+    expect(questionAnswerIsValid(question, { selected: new Set(), other: '3' })).toBe(true)
   })
 
-  test('validates V2 scalar and item constraints before submit', () => {
-    const qs = parseQuestions(JSON.stringify({ questions: [
-      { id: 'code', type: 'string', pattern: '^[A-Z]{3}$', minLength: 3, maxLength: 3 },
-      { id: 'amount', type: 'number', minimum: 2, maximum: 4, required: true },
-      { id: 'tags', type: 'multiselect', options: [
-        { value: 'a', label: 'A' }, { value: 'b', label: 'B' },
-      ], minItems: 2, maxItems: 2 },
-    ] }))
-    expect(questionAnswerError(qs[0], { selected: new Set(), other: 'abc' })).toMatch(/format/)
-    expect(questionAnswerIsValid(qs[0], { selected: new Set(), other: 'ABC' })).toBe(true)
-    expect(questionAnswerIsValid(qs[1], { selected: new Set(), other: '1' })).toBe(false)
-    expect(questionAnswerIsValid(qs[1], { selected: new Set(), other: '3' })).toBe(true)
-    expect(questionAnswerIsValid(qs[2], { selected: new Set(['A']), other: '' })).toBe(false)
-    expect(questionAnswerIsValid(qs[2], { selected: new Set(['A', 'B']), other: '' })).toBe(true)
-    expect(questionAnswerIsValid(qs[2], { selected: new Set(['A', 'B']), other: 'extra' })).toBe(false)
-    expect(questionEmptyAnswerAllowed(qs[0])).toBe(false)
+  test('checks item counts and closed wire values', () => {
+    const question: ActiveQuestion = {
+      ...base,
+      multiSelect: true,
+      type: 'multiselect',
+      custom: false,
+      minItems: 1,
+      maxItems: 2,
+      options: [{ label: 'One', value: 'one', description: '' }],
+    }
+    expect(questionAnswerError(question, { selected: new Set(), other: '' })).toContain('at least')
+    expect(questionAnswerError(question, { selected: new Set(['other']), other: '' })).toContain('available')
+    expect(questionAnswerIsValid(question, { selected: new Set(['one']), other: '' })).toBe(true)
   })
 
-  test('preserves custom constraints and wire values', () => {
-    const [closed, open] = parseQuestions(JSON.stringify({ questions: [
-      { id: 'closed', type: 'string', custom: false, options: [{ value: '0', label: 'Zero' }] },
-      { id: 'open', type: 'string', custom: true, options: [{ value: '0', label: 'Zero' }] },
-    ] }))
-    expect(closed.custom).toBe(false)
-    expect(closed.options[0].value).toBe('0')
-    expect(questionAnswerIsValid(closed, { selected: new Set(['other']), other: '' })).toBe(false)
-    expect(questionAnswerIsValid(open, { selected: new Set(['other']), other: '' })).toBe(true)
-  })
-
-  test('uses the controlling field type for conditional values', () => {
-    const qs = parseQuestions(JSON.stringify({ questions: [
-      { id: 'tags', type: 'multiselect', options: [{ value: 'yes', label: 'Yes' }] },
-      { id: 'detail', type: 'string', when: [{ key: 'tags', op: 'eq', value: 'yes' }] },
-    ] }))
-    expect(questionIsActive(qs[1], { tags: ['yes', 'also'] }, qs)).toBe(true)
-    expect(questionIsActive(qs[1], { tags: ['no'] }, qs)).toBe(false)
-  })
-
-  test('allows an explicitly empty required multiselect with minItems zero', () => {
-    const [q] = parseQuestions(JSON.stringify({ questions: [
-      { id: 'tags', type: 'multiselect', required: true, minItems: 0, options: [] },
-    ] }))
-    expect(questionAnswerIsValid(q, { selected: new Set(), other: '' })).toBe(true)
+  test('allows explicitly empty optional fields', () => {
+    expect(questionAnswerIsValid({ ...base, required: false }, undefined)).toBe(true)
+    expect(questionAnswerIsValid({ ...base, multiSelect: true, type: 'multiselect', minItems: 0, required: true }, undefined)).toBe(true)
   })
 })
 
@@ -176,7 +146,6 @@ describe('questionsSignature', () => {
   const base: ActiveQuestion = {
     id: 'q1', question: 'Which?', header: 'H', multiSelect: false,
     allowOther: true, isSecret: false, requestId: '', options: [],
-    type: 'string', required: true, hidden: false, when: [],
   }
 
   test('is empty for no picker', () => {

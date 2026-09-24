@@ -95,6 +95,7 @@ class SubagentWatcherHost(Protocol):
     """
 
     _chats: dict[str, ChatInfo]
+    _providers: dict[str, Any]
     _config: Any
     _events: Any
     _restart_draining: bool
@@ -471,9 +472,25 @@ class SubagentWatchers:
                 chat = self._host._chats.get(chat_id)
                 if chat is None or chat.provider != "opencode" or not chat.session_id:
                     break
-                tree = await OpencodeProvider.read_collab_tree(
-                    self._host._config.workspace_root, chat.session_id
+                provider_service = self._host._providers.get(chat_id)
+                live_provider = (
+                    provider_service.provider
+                    if provider_service is not None
+                    else None
                 )
+                if (
+                    isinstance(live_provider, OpencodeProvider)
+                    and live_provider.has_live_server
+                    and live_provider.current_session_id == chat.session_id
+                ):
+                    # /api/session/active is process-local. A throwaway read
+                    # server cannot see children still executing in this chat's
+                    # server, so use the live connection whenever it exists.
+                    tree = await live_provider.read_live_collab_tree()
+                else:
+                    tree = await OpencodeProvider.read_collab_tree(
+                        self._host._agent_root_for_chat(chat_id), chat.session_id
+                    )
                 count, had_subagents = opencode_collab_tree_counts(tree)
                 if count != last_count:
                     if count == 0 and last_count > 0:

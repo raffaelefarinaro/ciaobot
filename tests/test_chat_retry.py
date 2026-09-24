@@ -354,12 +354,12 @@ def test_connection_drop_banner_classified_as_connection_error() -> None:
     assert _is_retryable_provider_startup_error(
         "the model said database is locked"
     ) is False
-    # A server that stayed alive but never answered /global/health is the
+    # A server that stayed alive but never answered /api/info is the
     # same transient startup wedge (shared SQLite contention) and gets the
     # same bounded auto-retry.
     assert _is_retryable_provider_startup_error(
         "opencode serve did not become healthy: "
-        "server stayed alive but never answered /global/health"
+        "server stayed alive but never answered /api/info"
     ) is True
     # It is NOT a quota error — must not be routed to the hourly retry path.
     assert _is_retryable_quota_error(banner) is False

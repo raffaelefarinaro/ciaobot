@@ -100,7 +100,9 @@ async function mountLayout(seed: { permissions?: Array<ReturnType<typeof makePer
   ]
   store.activeWorkspace = 'personal'
   store.bootstrapped = true
-  if (seed.permissions) store.pendingPermissions = { [CHAT_ID]: seed.permissions }
+  store.pendingPermissions = seed.permissions ? { [CHAT_ID]: seed.permissions } : {}
+  store.permissionSubmissions = {}
+  store.activeQuestions = {}
   vi.spyOn(store, 'fetchAll').mockResolvedValue()
 
   const taskStore = useTaskStore()
@@ -170,8 +172,10 @@ describe('permission card keyboard shortcuts', () => {
     await nextTick()
 
     expect(event.defaultPrevented).toBe(true)
-    expect(store.pendingPermissions[CHAT_ID]?.[0]?.request_id).toBe('approval-1')
-    expect(store.permissionSubmissions[CHAT_ID]?.pending).toBe(true)
+    // Permission cards stay visible until the server acknowledges V2.
+    expect(store.pendingPermissions[CHAT_ID]).toHaveLength(1)
+    expect(store.permissionSubmissions[CHAT_ID]?.pending).toBe(false)
+    expect(store.permissionSubmissions[CHAT_ID]?.error).toContain('connection')
     expect(switchWorkspace).not.toHaveBeenCalled()
     expect(store.activeWorkspace).toBe('personal')
 
@@ -186,16 +190,18 @@ describe('permission card keyboard shortcuts', () => {
     await nextTick()
 
     expect(event.defaultPrevented).toBe(true)
-    expect(store.pendingPermissions[CHAT_ID]?.[0]?.request_id).toBe('approval-1')
-    expect(store.permissionSubmissions[CHAT_ID]?.pending).toBe(true)
+    // Permission cards stay visible until the server acknowledges V2.
+    expect(store.pendingPermissions[CHAT_ID]).toHaveLength(1)
+    expect(store.permissionSubmissions[CHAT_ID]?.pending).toBe(false)
+    expect(store.permissionSubmissions[CHAT_ID]?.error).toContain('connection')
     expect(switchWorkspace).not.toHaveBeenCalled()
 
     wrapper.unmount()
   })
 
   test('deny and approve report the right verdict through respondPermission', async () => {
-    const { wrapper, store } = await mountLayout({ permissions: [makePermission()] })
-    const respondPermission = vi.spyOn(store, 'respondPermission')
+    const respondPermission = vi.spyOn(useProjectStore(), 'respondPermission')
+    const { wrapper } = await mountLayout({ permissions: [makePermission()] })
 
     pressKey('1')
     await nextTick()
@@ -222,8 +228,8 @@ describe('permission card keyboard shortcuts', () => {
     // Not exercised here: the question shortcut path is covered by
     // ChatPanelQuestion.test.ts. This guard just documents the precedence —
     // both cards open at once, the question wins the digits.
-    const { wrapper, store } = await mountLayout({ permissions: [makePermission()] })
-    const respondPermission = vi.spyOn(store, 'respondPermission')
+    const respondPermission = vi.spyOn(useProjectStore(), 'respondPermission')
+    const { wrapper } = await mountLayout({ permissions: [makePermission()] })
 
     pressKey('1')
     await nextTick()

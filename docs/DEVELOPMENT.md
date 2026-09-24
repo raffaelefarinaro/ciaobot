@@ -446,34 +446,19 @@ exposes `memory_status`/`memory_update` without creating a second memory store.
 
 Edit canonical sources, not the generated `.claude/` or `.agents/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat); regenerate the `gws-*` skills through `ciao/release.py` rather than calling `gws generate-skills` by hand.
 
-The opencode adapter supports both server contracts. V2 uses `/api/info` and
-`/openapi.json`, `data`-wrapped responses, session-scoped permission/form
-routes, and cursor pagination for messages and child sessions. Its supported
-prompt body has only `text`/`files`; core and runtime instructions therefore
-travel in a delimited text preamble, which is a documented API limitation and
-not a native system role. Keep V2 form metadata (required, hidden, `when`,
-external URLs, optional empty values, and scalar/length/item/pattern
-constraints) intact through `ToolUseEvent` and `chatQuestions.ts`; validate
-those constraints before enabling Send, and keep Cancel distinct from a
-submitted empty optional answer. Permission/form responses are asynchronous HTTP
-operations: await the provider result before clearing the server-side pending
-state, and preserve a retryable PWA card when the result is negative. V2
-message and child-session cursors are followed to completion up to a generous
-1,000-page safety bound; a repeated cursor or an exhausted bound is an
-explicit read error, never a silently truncated history. After a dropped V2
-stream, recovery requires the prompt receipt's user-message anchor plus either
-an authoritative idle/terminal row or an idle `/api/session/active` map; a
-user-only or unverified stable projection cannot become a successful turn.
-Permission/form responses use the `action: "reply" | "cancel"` wire contract
-(with `submitted: true` for an explicitly empty optional reply), remain
-mounted until the matching `(chat_id, request_id)` result is acknowledged, and
-are requeued when the chat socket is unavailable. For V2 security tests,
-remember that internal resources are workspace-relative and
-that both the default and a relocated `CIAO_RUNTIME_ROOT` need relative deny
-aliases; broad `glob`/`grep`/`list` queries are denied rather than treated as
-path-scoped, and shell access remains an approval-mode limitation. V2 recovery
-must wait for an authoritative terminal/active-session outcome before it
-finishes a turn.
+OpenCode integration tests pin the V2 server contract: `/api/info` must report
+2.0.16+ before `/openapi.json` is checked, V2 message/session pagination must
+follow cursors, SSE frames are read from each event's `data` object, and child
+lifecycle comes from `/api/session/active` rather than the previous execution's
+`Session.Info.outcome`. When changing `ciao/providers/opencode.py`, replay the
+sanitized V2 fixtures and run a tiny real turn against the installed OpenCode
+2.x binary; route renames alone are insufficient because V2 also changed
+permissions, forms, prompts, and projected message shapes. Keep V2 internal
+credential resources covered in both absolute and workspace-relative spellings
+when a custom runtime root is configured. Keep form constraints and explicit
+empty-versus-cancel semantics in the provider/PWA contract, and keep native
+response cards mounted until the WebSocket result is acknowledged; disconnected
+sockets retain the complete reply for reconnect retry.
 
 ## DAG-style schedules (maintainers)
 

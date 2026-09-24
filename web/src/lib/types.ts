@@ -411,16 +411,6 @@ export type WsEvent =
       error?: string;
       retryable?: boolean;
     }
-  | {
-      type: 'question_response_result';
-      request_id: string;
-      ok: boolean;
-      /** Present on newer servers so the client can distinguish reply/cancel. */
-      state?: 'answered' | 'cancelled';
-      error?: string;
-      retryable?: boolean;
-    }
-  | { type: 'question_resolved'; request_id: string }
   | { type: 'permission_resolved'; request_id: string }
   // The selected model cannot see the attached images; the engine asks the
   // user to pick a vision-capable model before dispatching. Answered via a
@@ -444,6 +434,15 @@ export type WsEvent =
   // run). The call never executed, so any file card already painted for this
   // tool_use_id has to be retracted.
   | { type: 'tool_denied'; tool_use_id: string }
+  | {
+      type: 'question_response_result';
+      request_id: string;
+      ok: boolean;
+      state: 'answered' | 'cancelled';
+      error?: string;
+      retryable?: boolean;
+    }
+  | { type: 'question_resolved'; request_id: string }
   | { type: 'queued'; id?: string; text: string; images?: string[] }
   | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[] }> }
   | { type: 'error'; message: string }
@@ -536,27 +535,6 @@ export interface PendingPermission {
   // Epoch ms when the request arrived — used by the UI to grey out very old
   // pending prompts that were likely cancelled server-side on a stream end.
   received_at: number
-}
-
-export interface PermissionSubmission {
-  requestId: string
-  approved: boolean
-  reason: string
-  pending: boolean
-  queued: boolean
-  error: string
-  retryable: boolean
-}
-
-export interface QuestionSubmission {
-  requestId: string
-  action: 'reply' | 'cancel'
-  answers: Record<string, string[]>
-  submitted: boolean
-  pending: boolean
-  queued: boolean
-  error: string
-  retryable: boolean
 }
 
 // ── Voice ───────────────────────────────────────────────────────────────

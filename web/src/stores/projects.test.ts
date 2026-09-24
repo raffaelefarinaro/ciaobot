@@ -2371,149 +2371,54 @@ describe('provider-neutral input state', () => {
     })
   })
 
-  test('restores permission and form cards when delivery results fail', () => {
+  test('queues a native form response while the socket is down and flushes it on reconnect', () => {
     const store = useProjectStore()
-    const permissionChat = 'permission-retry'
-    const questionChat = 'question-retry'
-    store.chats = [
-      {
-        chat_id: permissionChat,
-        project_id: 'p1',
-        title: 'Permission',
-        model: 'gpt-test',
-        provider: 'opencode',
-        mode: 'normal',
-        session_id: 'thread-1',
-        created_at: '',
-        archived: false,
-      },
-      {
-        chat_id: questionChat,
-        project_id: 'p1',
-        title: 'Question',
-        model: 'gpt-test',
-        provider: 'opencode',
-        mode: 'normal',
-        session_id: 'thread-2',
-        created_at: '',
-        archived: false,
-      },
-    ]
-    store.connectWs(permissionChat)
-    store.connectWs(questionChat)
-    const permissionSocket = fakeSockets[0]
-    const questionSocket = fakeSockets[1]
-
-    permissionSocket.onmessage?.({ data: JSON.stringify({
-      type: 'permission_request',
-      request_id: 'perm-retry',
-      tool_name: 'shell',
-      message: 'Approve?',
-    }) })
-    expect(store.respondPermission(permissionChat, 'perm-retry', true)).toBe(true)
-    expect(store.pendingPermissions[permissionChat]?.[0]?.request_id).toBe('perm-retry')
-    expect(store.permissionSubmissions[permissionChat]?.pending).toBe(true)
-    permissionSocket.onmessage?.({ data: JSON.stringify({
-      type: 'permission_response_result', request_id: 'perm-retry', ok: false,
-    }) })
-    expect(store.pendingPermissions[permissionChat]?.[0]?.request_id).toBe('perm-retry')
-
-    store.activeQuestions[questionChat] = [{
-      id: 'optional',
-      question: 'Optional?',
-      header: 'Optional',
-      multiSelect: false,
-      allowOther: true,
-      isSecret: false,
-      requestId: 'form-retry',
-      options: [],
-      type: 'string',
-      required: false,
-    }]
-    expect(store.respondQuestion(questionChat, 'form-retry', { optional: [''] })).toBe(true)
-    expect(store.activeQuestions[questionChat]?.[0]?.requestId).toBe('form-retry')
-    expect(store.questionSubmissions[questionChat]?.pending).toBe(true)
-    questionSocket.onmessage?.({ data: JSON.stringify({
-      type: 'question_response_result', request_id: 'form-retry', ok: false,
-    }) })
-    expect(store.activeQuestions[questionChat]?.[0]?.requestId).toBe('form-retry')
-  })
-
-  test('correlates question results by chat and request id', () => {
-    const store = useProjectStore()
-    const first = 'same-request-a'
-    const second = 'same-request-b'
-    store.chats = [first, second].map(chat_id => ({
-      chat_id,
-      project_id: 'p1',
-      title: chat_id,
-      model: 'gpt-test',
-      provider: 'opencode' as const,
-      mode: 'normal',
-      session_id: chat_id,
-      created_at: '',
-      archived: false,
-    }))
-    store.connectWs(first)
-    store.connectWs(second)
-    const firstSocket = fakeSockets[0]
-    const secondSocket = fakeSockets[1]
-    for (const socket of [firstSocket, secondSocket]) {
-      socket.onmessage?.({ data: JSON.stringify({
-        type: 'tool_use',
-        tool_name: 'AskUserQuestion',
-        request_id: 'reused-request',
-        tool_input: JSON.stringify({ questions: [{ id: 'choice', question: 'Pick?' }] }),
-      }) })
-    }
-
-    expect(store.respondQuestion(first, 'reused-request', { choice: ['a'] })).toBe(true)
-    expect(store.respondQuestion(second, 'reused-request', { choice: ['b'] })).toBe(true)
-    firstSocket.onmessage?.({ data: JSON.stringify({
-      type: 'question_response_result', request_id: 'reused-request', ok: true,
-    }) })
-
-    expect(store.activeQuestions[first]).toBeUndefined()
-    expect(store.activeQuestions[second]?.[0]?.requestId).toBe('reused-request')
-    expect(store.questionSubmissions[second]?.pending).toBe(true)
-  })
-
-  test('queues a native response while the socket is closed and flushes it on open', () => {
-    const store = useProjectStore()
-    const chatId = 'closed-form-chat'
+    const chatId = 'queued-form'
     store.chats = [{
       chat_id: chatId,
       project_id: 'p1',
-      title: 'Closed form',
+      title: 'Queued form',
       model: 'gpt-test',
       provider: 'opencode',
       mode: 'normal',
-      session_id: 's1',
+      session_id: 'thread-1',
       created_at: '',
       archived: false,
     }]
     store.activeQuestions[chatId] = [{
       id: 'choice',
-      question: 'Pick?',
-      header: '',
+      question: 'Choose?',
+      header: 'Choice',
       multiSelect: false,
       allowOther: true,
       isSecret: false,
-      requestId: 'form-closed',
-      options: [],
+      requestId: 'form-1',
       type: 'string',
       required: true,
+      options: [],
     }]
 
-    expect(store.respondQuestion(chatId, 'form-closed', { choice: ['yes'] })).toBe(false)
-    expect(store.activeQuestions[chatId]).toHaveLength(1)
+    expect(store.respondQuestion(chatId, 'form-1', { choice: ['yes'] }, 'reply')).toBe(false)
     expect(store.questionSubmissions[chatId]?.queued).toBe(true)
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
 
     store.connectWs(chatId)
     const socket = fakeSockets[0]
-    expect(socket.send).toHaveBeenCalledWith(expect.stringContaining('form-closed'))
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({
+      type: 'question_response',
+      request_id: 'form-1',
+      action: 'reply',
+      answers: { choice: ['yes'] },
+    }))
     expect(store.questionSubmissions[chatId]?.queued).toBe(false)
-    expect(store.activeQuestions[chatId]).toHaveLength(1)
+
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'question_response_result',
+      request_id: 'form-1',
+      ok: true,
+    }) })
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+    expect(store.questionSubmissions[chatId]).toBeUndefined()
   })
 })
 

@@ -67,7 +67,8 @@ class MemoryStorage {
 type QuestionSeed = {
   multiSelect?: boolean
   allowOther?: boolean
-  options?: Array<{ label: string; description?: string }>
+  requestId?: string
+  options?: Array<{ label: string; value?: string; description?: string }>
 }
 
 function makeQuestion(seed: QuestionSeed = {}) {
@@ -78,7 +79,7 @@ function makeQuestion(seed: QuestionSeed = {}) {
     multiSelect: seed.multiSelect ?? false,
     allowOther: seed.allowOther ?? true,
     isSecret: false,
-    requestId: '',
+    requestId: seed.requestId ?? '',
     options: seed.options ?? [
       { label: 'Refactor first', description: 'clean up before adding' },
       { label: 'Ship the feature', description: '' },
@@ -180,6 +181,31 @@ describe('AskUserQuestion keyboard shortcuts', () => {
     wrapper.unmount()
   })
 
+  test('shows V2 validation only after a field has been touched', async () => {
+    const question = {
+      ...makeQuestion({ requestId: 'form-1' }),
+      required: true,
+      minLength: 3,
+    }
+    const { wrapper } = await mountLayout({ questions: [question] })
+    const other = wrapper.find('input.question-other')
+
+    expect(wrapper.find('.question-validation').exists()).toBe(false)
+    expect(wrapper.find('.question-card-actions .primary').attributes('disabled')).toBeDefined()
+
+    await other.trigger('blur')
+    expect(wrapper.find('.question-validation').text()).toContain('required')
+
+    await other.setValue('a')
+    expect(wrapper.find('.question-validation').text()).toContain('at least 3')
+
+    await other.setValue('abc')
+    expect(wrapper.find('.question-validation').exists()).toBe(false)
+    expect(wrapper.find('.question-card-actions .primary').attributes('disabled')).toBeUndefined()
+
+    wrapper.unmount()
+  })
+
   test('badges stop at the first question, which is the only one bound', async () => {
     const second = { ...makeQuestion(), id: 'q1', question: 'Then what?' }
     const { wrapper } = await mountLayout({ questions: [makeQuestion(), second] })
@@ -202,6 +228,61 @@ describe('AskUserQuestion keyboard shortcuts', () => {
     expect(optionButtons(wrapper)[0].classes()).toContain('selected')
     expect(switchWorkspace).not.toHaveBeenCalled()
     expect(store.activeWorkspace).toBe('personal')
+
+    wrapper.unmount()
+  })
+
+  test('a digit selection submits the V2 wire value, not the display label', async () => {
+    const { wrapper, store } = await mountLayout({
+      questions: [makeQuestion({
+        requestId: 'form-1',
+        options: [{ label: 'Continue', value: 'continue_wire' }],
+      })],
+    })
+    const respond = vi.spyOn(store, 'respondQuestion').mockReturnValue(true)
+
+    pressKey('1')
+    await nextTick()
+    await wrapper.find('.question-card-actions .primary').trigger('click')
+
+    expect(respond).toHaveBeenCalledWith(
+      CHAT_ID,
+      'form-1',
+      { q0: ['continue_wire'] },
+      'reply',
+    )
+
+    wrapper.unmount()
+  })
+
+  test('changing a controller hides chained dependent questions', async () => {
+    const q1 = makeQuestion({
+      options: [{ label: 'Yes', value: 'yes' }, { label: 'No', value: 'no' }],
+    })
+    const q2 = {
+      ...makeQuestion({ options: [{ label: 'X', value: 'x' }] }),
+      id: 'q2',
+      question: 'Second',
+      when: [{ key: 'q0', op: 'eq' as const, value: 'yes' }],
+    }
+    const q3 = {
+      ...makeQuestion(),
+      id: 'q3',
+      question: 'Third',
+      when: [{ key: 'q2', op: 'eq' as const, value: 'x' }],
+    }
+    const { wrapper } = await mountLayout({ questions: [q1, q2, q3] })
+
+    pressKey('1')
+    await nextTick()
+    expect(wrapper.findAll('.question-block')).toHaveLength(2)
+    await optionButtons(wrapper)[2].trigger('click')
+    await nextTick()
+    expect(wrapper.findAll('.question-block')).toHaveLength(3)
+
+    pressKey('2')
+    await nextTick()
+    expect(wrapper.findAll('.question-block')).toHaveLength(1)
 
     wrapper.unmount()
   })
@@ -284,6 +365,24 @@ describe('AskUserQuestion keyboard shortcuts', () => {
     await nextTick()
 
     expect(event.defaultPrevented).toBe(false)
+    expect(optionButtons(wrapper).filter(b => b.classes().includes('selected'))).toHaveLength(0)
+
+    wrapper.unmount()
+  })
+
+  test('scalar option and Other replace each other', async () => {
+    const { wrapper } = await mountLayout({ questions: [makeQuestion()] })
+    const other = wrapper.find('input.question-other')
+
+    await other.setValue('custom answer')
+    await nextTick()
+    pressKey('1')
+    await nextTick()
+    expect((other.element as HTMLInputElement).value).toBe('')
+    expect(optionButtons(wrapper).filter(b => b.classes().includes('selected'))).toHaveLength(1)
+
+    await other.setValue('custom again')
+    await nextTick()
     expect(optionButtons(wrapper).filter(b => b.classes().includes('selected'))).toHaveLength(0)
 
     wrapper.unmount()

@@ -700,44 +700,22 @@
          a structured question; we render an interactive option list so the
          answer flows back as the next user message. The SDK's built-in CLI
          picker can't run headless, so this is the only path. -->
-    <form v-if="questionCardVisible" class="question-card" novalidate @submit.prevent="submitQuestionAnswers">
+    <div v-if="questionCardVisible" class="question-card">
       <div class="question-card-header">
         <AppIcon class="question-card-icon" name="question" :size="18" />
         <span class="question-card-title">The model has a question</span>
         <button class="question-card-dismiss" :disabled="questionSubmitting" @click="dismissQuestions" title="Dismiss">&times;</button>
       </div>
       <template v-for="(q, qi) in activeQuestions" :key="qi">
-        <div
-          v-if="questionIsVisible(q, activeQuestions, questionAnswers)"
-          class="question-block"
-        >
-        <div class="question-block-header">
+        <div v-if="isQuestionActive(qi, q)" class="question-block">
+          <div class="question-block-header">
           <span v-if="q.header" class="question-block-chip">{{ q.header }}</span>
           <span v-if="q.multiSelect" class="question-block-multi">multi-select</span>
-          <span class="question-block-required">{{ q.required === false ? 'optional' : 'required' }}</span>
         </div>
         <div v-if="q.question || !q.header" class="question-block-prompt">
           {{ questionPromptLabel(q, qi) }}
         </div>
-        <div v-if="q.type === 'external'" class="question-external">
-          <a
-            v-if="safeQuestionUrl(q.url)"
-            :href="safeQuestionUrl(q.url)"
-            target="_blank"
-            rel="noopener noreferrer"
-          >Open external step</a>
-          <span v-else class="question-external-invalid">External link unavailable</span>
-          <label class="question-external-check">
-            <input
-              type="checkbox"
-              :checked="questionAnswers[qi]?.external === true"
-              :disabled="questionSubmitting"
-              @change="toggleQuestionExternal(qi, ($event.target as HTMLInputElement).checked)"
-            />
-            <span>I completed this step</span>
-          </label>
-        </div>
-        <div v-else class="question-options">
+        <div class="question-options">
           <button
             v-for="(opt, oi) in q.options"
             :key="`${opt.value ?? opt.label}-${oi}`"
@@ -746,6 +724,7 @@
             :class="{ selected: isQuestionOptionSelected(qi, opt.value ?? opt.label) }"
             :aria-keyshortcuts="questionOptionShortcut(qi, oi) || undefined"
             :disabled="questionSubmitting"
+            @blur="markQuestionTouched(qi)"
             @click="toggleQuestionOption(qi, opt.value ?? opt.label, q.multiSelect)"
           >
             <span class="question-option-main">
@@ -764,35 +743,36 @@
           </button>
         </div>
         <input
-          v-if="q.allowOther && q.type !== 'external'"
+          v-if="q.allowOther && isQuestionActive(qi, q)"
           :type="q.isSecret ? 'password' : questionInputType(q)"
           class="question-other"
-          :placeholder="q.placeholder || (q.required === false ? 'Optional (free text)' : 'Other (free text)')"
+          placeholder="Other (free text)"
+          :disabled="questionSubmitting"
           :minlength="q.minLength"
           :maxlength="q.maxLength"
           :pattern="q.pattern"
           :min="q.minimum"
           :max="q.maximum"
           :step="q.type === 'integer' ? 1 : undefined"
-          :aria-invalid="Boolean(questionAnswerError(q, questionAnswers[qi]))"
-          :disabled="questionSubmitting"
+          :aria-invalid="Boolean(questionValidationMessage(q, qi))"
           :value="questionAnswers[qi]?.other || ''"
+          @blur="markQuestionTouched(qi)"
           @input="setQuestionOther(qi, ($event.target as HTMLInputElement).value)"
         />
         <p
-          v-if="questionAnswerError(q, questionAnswers[qi])"
+          v-if="questionValidationMessage(q, qi)"
           class="question-validation"
-        >{{ questionAnswerError(q, questionAnswers[qi]) }}</p>
+        >{{ questionValidationMessage(q, qi) }}</p>
         </div>
       </template>
       <div v-if="questionError" class="question-card-error">{{ questionError }}</div>
       <div class="question-card-actions">
         <button class="btn-sm" type="button" :disabled="questionSubmitting" @click="dismissQuestions">Cancel</button>
-        <button class="btn-sm primary" type="submit" :disabled="questionSubmitting || !allQuestionsAnswered">
+        <button class="btn-sm primary" type="button" :disabled="questionSubmitting || !allQuestionsAnswered" @click="submitQuestionAnswers">
           {{ questionSubmitting ? 'Sending…' : 'Send answer' }}
         </button>
       </div>
-    </form>
+    </div>
 
     <!-- Image-capability question. The server paused before dispatch because
          the selected model can't see images. The card shows the full
@@ -865,13 +845,13 @@
           <button
             class="btn-deny"
             :aria-keyshortcuts="permissionShortcut('deny') || undefined"
-            :disabled="permissionSubmitting"
+             :disabled="permissionSubmitting"
             @click="store.respondPermission(chat.chat_id, p.request_id, false, 'User denied')"
           ><span v-if="permissionShortcut('deny')" class="permission-key" aria-hidden="true">{{ permissionShortcut('deny') }}</span>Deny</button>
           <button
             class="btn-approve"
             :aria-keyshortcuts="permissionShortcut('approve') || undefined"
-            :disabled="permissionSubmitting"
+             :disabled="permissionSubmitting"
             @click="store.respondPermission(chat.chat_id, p.request_id, true)"
           ><span v-if="permissionShortcut('approve')" class="permission-key" aria-hidden="true">{{ permissionShortcut('approve') }}</span>Approve</button>
         </div>
@@ -1213,6 +1193,7 @@ import {
   escapeCssAttrValue,
   highlightCommentText,
 } from '../lib/commentHighlight'
+import { questionAnswerError, questionAnswerIsValid, questionIsActive, type ActiveQuestion } from '../lib/chatQuestions'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import {
   useMentionPicker,
@@ -1227,14 +1208,6 @@ import { useChatComposer } from '../composables/useChatComposer'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import { subagentPath, shortAgentId } from '../lib/subagentIds'
-import {
-  questionAnswerError,
-  questionAnswerIsValid,
-  questionEmptyAnswerAllowed,
-  questionIsVisible,
-  type ActiveQuestion,
-  type QuestionAnswerState,
-} from '../lib/chatQuestions'
 
 /** The footer facts for one turn: when it landed, how long it took, which
  *  model answered and what it cost. Collected across the turn's assistant
@@ -2187,7 +2160,7 @@ const permissionSubmission = computed(() => {
   return id ? store.permissionSubmissions[id] : undefined
 })
 const permissionSubmitting = computed(() => permissionSubmission.value?.pending === true)
-const permissionError = computed(() => permissionSubmission.value?.error || (permissionSubmission.value?.queued ? 'Waiting for the chat connection…' : ''))
+const permissionError = computed(() => permissionSubmission.value?.error || '')
 
 // The backend's `message` field is almost always the templated
 // "Approve use of {tool_name}?", which just repeats the tool-name badge shown
@@ -2250,69 +2223,57 @@ const questionSubmission = computed(() => {
   return id ? store.questionSubmissions[id] : undefined
 })
 const questionSubmitting = computed(() => questionSubmission.value?.pending === true)
-const questionError = computed(() => questionSubmission.value?.error || (questionSubmission.value?.queued ? 'Waiting for the chat connection…' : ''))
+const questionError = computed(() => questionSubmission.value?.error || '')
 
-type QuestionAnswer = QuestionAnswerState
-const questionAnswers = ref<Record<number, QuestionAnswer>>({})
+function questionAnswerMap(limit = activeQuestions.value.length): Record<string, string[]> {
+  const out: Record<string, string[]> = {}
+  for (let i = 0; i < Math.min(limit, activeQuestions.value.length); i++) {
+    const q = activeQuestions.value[i]
+    // Conditions are ordered: only answers from fields that are still active
+    // may control later fields. Keeping an old answer from a now-hidden field
+    // would leave chained dependent questions visible and submit stale data.
+    if (!questionIsActive(q, out, activeQuestions.value)) continue
+    const answer = questionAnswers.value[i]
+    const values = answer ? [...answer.selected] : []
+    if (answer?.other?.trim()) values.push(answer.other.trim())
+    if (values.length) out[q.id] = values
+  }
+  return out
+}
 
-const visibleQuestionIndexes = computed(() => activeQuestions.value
-  .map((question, index) => questionIsVisible(question, activeQuestions.value, questionAnswers.value) ? index : -1)
-  .filter(index => index >= 0))
+function isQuestionActive(index: number, question: ActiveQuestion): boolean {
+  return questionIsActive(question, questionAnswerMap(index), activeQuestions.value)
+}
 
 // The card is only on screen when it wins the dock, or when the dock strip is
-// expanded behind a permission. Hidden/inactive V2 fields alone are not a card.
+// expanded behind a permission. Named because the keyboard shortcuts below key
+// off the same condition as the template: a hidden card must not eat digits.
 const questionCardVisible = computed(() =>
-  // Keep a native card reachable even when every field is currently hidden or
-  // conditional; the user still needs Cancel and the server needs an answer.
   activeQuestions.value.length > 0 && (dockPrimary.value === 'question' || dockExpanded.value),
 )
+
+type QuestionAnswer = { selected: Set<string>; other: string }
+const questionAnswers = ref<Record<number, QuestionAnswer>>({})
+const questionTouched = ref<Record<number, boolean>>({})
 
 // Reset per-question selections whenever the active chat changes or the
 // model fires a fresh AskUserQuestion. Watching the array reference catches
 // both "new chat" and "new questions in same chat" without us touching the
-// answers map by hand. V2 defaults are applied as initial answers so a
-// conditional field can become visible before the user touches the form.
-function defaultQuestionAnswer(question: ActiveQuestion): QuestionAnswer | undefined {
-  if (question.default === undefined || question.type === 'external') return undefined
-  const answer: QuestionAnswer = { selected: new Set<string>(), other: '' }
-  const value = question.default
-  const optionValue = (raw: string): string | undefined => {
-    const option = question.options.find(candidate =>
-      candidate.label === raw
-      || candidate.value === raw
-      || question.optionValues?.[candidate.label] === raw,
-    )
-    return option?.value ?? option?.label
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const raw = String(item)
-      const valueForQuestion = optionValue(raw) ?? raw
-      if (question.multiSelect || question.options.length === 0) answer.selected.add(valueForQuestion)
-      else answer.other = valueForQuestion
-    }
-    return answer
-  }
-  const raw = String(value)
-  const selected = optionValue(raw)
-  if (selected) {
-    answer.selected.add(selected)
-  } else if (question.allowOther) {
-    answer.other = raw
-  } else {
-    return undefined
-  }
-  return answer
+// answers or validation state by hand.
+watch(activeQuestions, () => {
+  questionAnswers.value = {}
+  questionTouched.value = {}
+})
+
+function markQuestionTouched(i: number) {
+  if (!questionTouched.value[i]) questionTouched.value = { ...questionTouched.value, [i]: true }
 }
 
-watch(activeQuestions, () => {
-  const defaults: Record<number, QuestionAnswer> = {}
-  activeQuestions.value.forEach((question, index) => {
-    const answer = defaultQuestionAnswer(question)
-    if (answer) defaults[index] = answer
-  })
-  questionAnswers.value = defaults
-}, { immediate: true })
+function questionValidationMessage(question: ActiveQuestion, index: number): string | null {
+  return questionTouched.value[index]
+    ? questionAnswerError(question, questionAnswers.value[index])
+    : null
+}
 
 function ensureAnswer(i: number): QuestionAnswer {
   let a = questionAnswers.value[i]
@@ -2331,7 +2292,7 @@ function toggleQuestionOption(i: number, label: string, multi: boolean) {
   } else {
     a.selected.clear()
     a.selected.add(label)
-    // A scalar field cannot submit both a declared option and Other.
+    // A scalar V2 field cannot submit both a predefined option and Other.
     a.other = ''
   }
   // Force reactivity since Set mutations aren't tracked.
@@ -2339,24 +2300,14 @@ function toggleQuestionOption(i: number, label: string, multi: boolean) {
 }
 
 function setQuestionOther(i: number, value: string) {
-  const answer = ensureAnswer(i)
-  answer.other = value
+  const a = ensureAnswer(i)
+  a.other = value
   const question = activeQuestions.value[i]
-  if (question && !question.multiSelect) answer.selected.clear()
-  questionAnswers.value = { ...questionAnswers.value, [i]: { ...answer } }
+  if (question && !question.multiSelect) a.selected.clear()
+  questionAnswers.value = { ...questionAnswers.value, [i]: { ...a } }
 }
 
-function isQuestionOptionSelected(i: number, label: string): boolean {
-  return questionAnswers.value[i]?.selected.has(label) ?? false
-}
-
-function toggleQuestionExternal(i: number, checked: boolean) {
-  const answer = ensureAnswer(i)
-  answer.external = checked
-  questionAnswers.value = { ...questionAnswers.value, [i]: { ...answer } }
-}
-
-function questionInputType(q: { isSecret?: boolean; format?: string; type?: string }): string {
+function questionInputType(q: ActiveQuestion): string {
   if (q.isSecret) return 'password'
   if (q.type === 'number' || q.type === 'integer') return 'number'
   if (q.format === 'email') return 'email'
@@ -2366,14 +2317,8 @@ function questionInputType(q: { isSecret?: boolean; format?: string; type?: stri
   return 'text'
 }
 
-function safeQuestionUrl(raw: string | undefined): string {
-  if (!raw) return ''
-  try {
-    const url = new URL(raw)
-    return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : ''
-  } catch {
-    return ''
-  }
+function isQuestionOptionSelected(i: number, label: string): boolean {
+  return questionAnswers.value[i]?.selected.has(label) ?? false
 }
 
 // Digit shortcuts cover the first question only -- the picker almost always
@@ -2383,8 +2328,7 @@ function safeQuestionUrl(raw: string | undefined): string {
 const MAX_QUESTION_SHORTCUTS = 9
 
 function questionOptionShortcut(qi: number, oi: number): string {
-  const firstVisible = activeQuestions.value.findIndex(q => questionIsVisible(q, activeQuestions.value, questionAnswers.value))
-  if (qi !== firstVisible || oi >= MAX_QUESTION_SHORTCUTS) return ''
+  if (qi !== 0 || oi >= MAX_QUESTION_SHORTCUTS) return ''
   return String(oi + 1)
 }
 
@@ -2426,10 +2370,9 @@ function handlePermissionShortcut(e: KeyboardEvent): boolean {
 // the card's own "Other" input both count as typing targets), so this only
 // decides whether the card has a use for the key.
 function handleQuestionShortcut(e: KeyboardEvent): boolean {
-  if (!questionCardVisible.value || questionSubmitting.value) return false
-  const firstVisible = activeQuestions.value.findIndex(q => questionIsVisible(q, activeQuestions.value, questionAnswers.value))
-  if (firstVisible < 0) return false
-  const q = activeQuestions.value[firstVisible]
+  if (!questionCardVisible.value) return false
+  const q = activeQuestions.value[0]
+  if (!q) return false
 
   if (e.key === 'Enter') {
     // Never steal Enter from a focused control: on Cancel/Send answer, or on
@@ -2439,7 +2382,7 @@ function handleQuestionShortcut(e: KeyboardEvent): boolean {
     if (e.target instanceof HTMLElement && e.target.closest('button, a, [role="button"]')) return false
     // Multi-select is a collection, not a choice: digits toggle and the
     // explicit Send answer ends it, so Enter stays a no-op there.
-    if (visibleQuestionIndexes.value.some(index => activeQuestions.value[index]?.multiSelect)) return false
+    if (activeQuestions.value.some(other => other.multiSelect)) return false
     if (!allQuestionsAnswered.value) return false
     submitQuestionAnswers()
     return true
@@ -2448,21 +2391,21 @@ function handleQuestionShortcut(e: KeyboardEvent): boolean {
   if (!/^[1-9]$/.test(e.key)) return false
   const opt = q.options[Number(e.key) - 1]
   if (!opt) return false
-  toggleQuestionOption(firstVisible, opt.value ?? opt.label, q.multiSelect)
+  toggleQuestionOption(0, opt.value ?? opt.label, q.multiSelect)
   return true
 }
 
-// Block Send answer until every visible field is present and satisfies the
-// provider's V2 constraints. Optional fields may remain empty; their explicit
-// empty values are handled separately by the submit path.
+// Block Send answer until every active field is present and satisfies the
+// provider's V2 constraints. Optional fields may remain empty; non-empty
+// values still need to be valid before the request leaves the browser.
 const allQuestionsAnswered = computed(() => {
   const qs = activeQuestions.value
-  if (!visibleQuestionIndexes.value.length) return false
-  for (let i = 0; i < qs.length; i++) {
-    if (!questionIsVisible(qs[i], qs, questionAnswers.value)) continue
-    if (!questionAnswerIsValid(qs[i], questionAnswers.value[i])) return false
-  }
-  return true
+  if (!qs.length) return false
+  const answers = questionAnswerMap()
+  return qs.every((q, index) => (
+    !questionIsActive(q, answers, qs)
+      || questionAnswerIsValid(q, questionAnswers.value[index])
+  ))
 })
 
 // Prefer the model's header/question; fall back to "Question N" so an empty
@@ -2484,44 +2427,20 @@ function submitQuestionAnswers() {
   const nativeAnswers: Record<string, string[]> = {}
   for (let i = 0; i < qs.length; i++) {
     const q = qs[i]
-    if (!questionIsVisible(q, qs, questionAnswers.value)) continue
+    if (!isQuestionActive(i, q)) continue
     const a = questionAnswers.value[i]
     const picked = a ? Array.from(a.selected) : []
     const other = (a?.other || '').trim()
     const parts: string[] = []
     if (picked.length) parts.push(...picked)
     if (other) parts.push(other)
-    if (q.type === 'external') {
-      if (a?.external) {
-        nativeAnswers[q.id] = ['acknowledged']
-        lines.push(`**${questionPromptLabel(q, i)}**: completed`)
-      }
-      continue
-    }
-    // Preserve an explicit empty optional answer. The provider omits scalar
-    // number/boolean blanks from the typed V2 answer (letting the server
-    // default win), but the key's presence distinguishes this submit from the
-    // explicit Cancel action.
-    if (!parts.length && q.required === false) {
-      if (questionEmptyAnswerAllowed(q)) {
-        nativeAnswers[q.id] = q.multiSelect ? [] : ['']
-      }
-    } else {
-      nativeAnswers[q.id] = parts
-    }
+    if (parts.length) nativeAnswers[q.id] = parts
     const answer = parts.length ? parts.join(', ') : '(no answer)'
     lines.push(`**${questionPromptLabel(q, i)}**: ${answer}`)
   }
   const requestId = qs[0]?.requestId || ''
   if (requestId) {
-    // Native V2 forms are answered in band.  Keep the card and the entered
-    // values mounted until the backend acknowledges the request; clearing
-    // them here made a dropped socket indistinguishable from a successful
-    // reply.
-    store.respondQuestion(chat.value.chat_id, requestId, nativeAnswers, {
-      action: 'reply',
-      submitted: true,
-    })
+    store.respondQuestion(chat.value.chat_id, requestId, nativeAnswers, 'reply')
     return
   }
   const text = lines.join('\n')
@@ -2535,9 +2454,7 @@ function dismissQuestions() {
   if (!id) return
   const requestId = activeQuestions.value[0]?.requestId || ''
   if (requestId) {
-    // Native cancellation is also a round-trip.  Keep the card mounted until
-    // the provider acknowledges it so a closed socket can be retried.
-    store.respondQuestion(id, requestId, {}, { action: 'cancel' })
+    store.respondQuestion(id, requestId, {}, 'cancel')
   } else {
     // Claude picker has no round-trip; remember it as resolved so a stale
     // server snapshot can't rebuild it after dismissal.
@@ -6329,34 +6246,6 @@ details[open] > .activity-summary::before {
   color: var(--fg2);
   font-style: italic;
 }
-.question-block-required {
-  margin-left: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 10px;
-  color: var(--fg2);
-}
-.question-external {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: flex-start;
-}
-.question-external a {
-  color: var(--accent);
-  min-height: var(--touch);
-  display: inline-flex;
-  align-items: center;
-}
-.question-external-check {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  min-height: var(--touch);
-  color: var(--fg);
-  font-size: 13px;
-}
-.question-external-check input { width: 18px; height: 18px; }
-.question-external-invalid { color: var(--warning, #ff9800); font-size: 12px; }
 .question-block-prompt {
   font-size: 13px;
   color: var(--fg);
@@ -6434,24 +6323,49 @@ details[open] > .activity-summary::before {
   color: var(--fg);
 }
 .question-other:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
-.question-validation {
-  margin: -2px 0 0;
-  color: var(--error);
-  font-size: 12px;
-  line-height: 1.35;
-}
 .question-card-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .question-card-error {
   color: var(--error);
   font-size: 12px;
   line-height: 1.4;
 }
+.question-validation {
+  margin: 0;
+  color: var(--error);
+  font-size: 12px;
+  line-height: 1.35;
+}
 .question-option:disabled,
 .question-other:disabled,
-.question-external-check input:disabled,
 .question-card-dismiss:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+/* Native question controls are frequently completed one-handed on a phone.
+   Keep their full hit areas at the shared touch minimum while leaving the
+   denser desktop controls unchanged. The narrow-width companion covers a
+   resized desktop window, where a touch screen may still report a fine
+   pointer. */
+@media (pointer: coarse), (max-width: 768px) {
+  .question-card-dismiss {
+    display: grid;
+    place-items: center;
+    min-width: var(--touch);
+    min-height: var(--touch);
+    margin: -9px -10px -9px 0;
+    padding: 0;
+  }
+  .question-option,
+  .question-other,
+  .question-card-actions .btn-sm {
+    min-height: var(--touch);
+  }
+  .question-option { justify-content: center; }
+  .question-other {
+    padding: 10px 12px;
+    font-size: 16px;
+  }
 }
 
 /* Pending Auto-mode permission prompts. Sticks above the input until the

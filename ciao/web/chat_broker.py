@@ -665,20 +665,6 @@ class ChatStream:
             except asyncio.QueueFull:
                 logger.warning("Chat stream subscriber queue full, dropping event")
 
-    def publish_live(self, payload: dict) -> None:
-        """Fan out an ephemeral state change without adding it to replay.
-
-        Resolution acknowledgements are useful to tabs already attached, but
-        replaying them on a later reconnect would be redundant with the
-        authoritative chat snapshot and can make old event-buffer assertions
-        (and clients) see a terminal card event twice.
-        """
-        for queue in list(self._subs):
-            try:
-                queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                logger.warning("Chat stream subscriber queue full, dropping event")
-
     def deny_tool_use(self, tool_use_id: str) -> None:
         """Retract the file card for a tool call that was refused.
 
@@ -720,10 +706,12 @@ class ChatStream:
                 and ev.get("request_id") == request_id
             )
         ]
-        return len(self._events) < before
+        removed = len(self._events) < before
+        self.publish({"type": "permission_resolved", "request_id": request_id})
+        return removed
 
     def resolve_question(self, request_id: str) -> bool:
-        """Remove a settled AskUserQuestion/form tool event from replay."""
+        """Remove a resolved native question from replay and notify clients."""
         if not request_id:
             return False
         before = len(self._events)
@@ -732,11 +720,13 @@ class ChatStream:
             for ev in self._events
             if not (
                 ev.get("type") == "tool_use"
-                and ev.get("request_id") == request_id
                 and ev.get("tool_name") == "AskUserQuestion"
+                and ev.get("request_id") == request_id
             )
         ]
-        return len(self._events) < before
+        removed = len(self._events) < before
+        self.publish({"type": "question_resolved", "request_id": request_id})
+        return removed
 
     def open_capability(self, request_id: str) -> bool:
         """Register an open capability question for ``request_id``.

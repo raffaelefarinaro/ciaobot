@@ -1,9 +1,9 @@
 """opencode provider unit tests.
 
 Event fixtures under ``tests/fixtures/opencode/`` were captured from a real
-``opencode serve`` process (1.18.18) and sanitized: absolute paths replaced,
-bundler stack traces trimmed to their first line. No credentials, prompts, or
-account identifiers are recorded.
+``opencode serve`` process (2.0.16) and sanitized: absolute paths replaced and
+identifiers shortened. No credentials, prompts, or account identifiers are
+recorded.
 """
 
 from __future__ import annotations
@@ -24,11 +24,18 @@ from ciao.models import (
     ToolUseEvent,
 )
 from ciao.providers.opencode import (
+    OPENCODE_V2_REQUIRED,
     OpencodeProvider,
     OpencodeSettings,
-    _catalog_from_providers,
+    _catalog_from_api,
     _context_window_for,
+    _form_answer_value,
+    _form_field_active,
+    _validate_form_field,
+    _projected_message,
     _log_catalog_change,
+    _read_v2_messages,
+    _server_version_error,
     catalog_providers,
     compose_system,
     config_placeholder_problems,
@@ -97,16 +104,26 @@ async def test_steer_never_sends_a_second_prompt(tmp_path):
 
 
 def test_missing_required_paths_flags_an_incompatible_build():
-    spec = {"paths": {"/global/health": {}, "/session": {}}}
+    spec = {"paths": {"/api/info": {}, "/api/session": {}}}
     missing = missing_required_paths(spec)
-    assert "/session/{sessionID}/abort" in missing
-    assert "/question/{requestID}/reply" in missing
+    assert "/api/session/{sessionID}/prompt" in missing
+    assert "/api/session/{sessionID}/form/{formID}/reply" in missing
 
 
-def test_missing_required_paths_accepts_the_real_document():
-    """The captured OpenAPI paths from opencode 1.18 satisfy every requirement."""
+def test_missing_required_paths_accepts_the_v2_document():
+    """The sanitized OpenCode 2.0.16 path subset satisfies every requirement."""
     spec = json.loads((FIXTURES / "openapi_paths.json").read_text(encoding="utf-8"))
     assert missing_required_paths(spec) == ()
+
+
+def test_v1_and_unknown_server_versions_fail_with_the_upgrade_message():
+    assert _server_version_error({"version": "1.18.18"}) == (
+        f"{OPENCODE_V2_REQUIRED} Installed server version: 1.18.18."
+    )
+    assert _server_version_error({"version": "2.0.0"}) is not None
+    assert _server_version_error({"version": "3.0.0"}) is not None
+    assert _server_version_error({"version": "unknown"}) is not None
+    assert _server_version_error({"version": "2.0.16"}) is None
 
 
 # ── model ids ───────────────────────────────────────────────────────────
@@ -140,32 +157,23 @@ def test_mode_agents(mode, agent):
 
 
 def _actions(mode: BridgeMode) -> dict[str, str]:
-    """Flatten a ruleset to {permission: action} for readable assertions.
-
-    Only the ``pattern: "*"`` rules — the ones that define what a *mode* does.
-    The path-scoped credential denies appended to every mode reuse the same
-    permission names (``read``, ``edit``, ...) with a narrow pattern, and
-    flattening those in would read as "this mode denies all reads". They have
-    their own coverage in tests/test_credential_denies.py.
-    """
+    """Flatten wildcard V2 rules to {action: effect}."""
     return {
-        rule["permission"]: rule["action"]
+        rule["action"]: rule["effect"]
         for rule in mode_settings(mode)[1]
-        if rule["pattern"] == "*"
+        if rule["resource"] == "*"
     }
 
 
-def _bash_patterns(mode: BridgeMode) -> dict[str, set[str]]:
-    """Split the bash ``ciao …`` CLI rules into {action: set of prefixes}."""
+def _shell_patterns(mode: BridgeMode) -> dict[str, set[str]]:
+    """Flatten shell rules to {effect: set of resources}."""
     out: dict[str, set[str]] = {"allow": set(), "ask": set()}
     for rule in mode_settings(mode)[1]:
-        if rule.get("permission") != "bash":
+        if rule.get("action") != "shell":
             continue
-        pattern = rule.get("pattern") or ""
-        if not pattern.startswith("ciao "):
-            continue
-        action = rule.get("action") or ""
-        out.setdefault(action, set()).add(pattern.removesuffix("*"))
+        out.setdefault(str(rule.get("effect") or ""), set()).add(
+            str(rule.get("resource") or "")
+        )
     return out
 
 
@@ -195,50 +203,57 @@ def test_normal_opencode_chat_uses_core_without_memory_duplication(tmp_path):
     assert "MEMORY (your personal notes)" not in instructions
 
 
-def test_permission_rules_use_the_api_shape_not_the_config_map():
-    """`POST /session` wants a list of rules; the `{"*": "ask"}` map 400s.
-
-    The config-file form and the API form differ, and the server rejects the
-    wrong one with a bare `{"_tag":"BadRequest"}`, so pin the shape here.
-    """
+def test_permission_rules_use_the_v2_api_shape():
     ruleset = mode_settings("normal")[1]
-    assert isinstance(ruleset, list)
-    assert ruleset[0] == {"permission": "*", "pattern": "*", "action": "ask"}
+    assert ruleset[0] == {"action": "*", "resource": "*", "effect": "ask"}
 
 
-def test_every_rule_uses_a_valid_action():
+def test_every_rule_uses_a_valid_v2_effect():
     for mode in ("plan", "normal", "auto", "bypass"):
         for rule in mode_settings(mode)[1]:
-            assert rule["action"] in {"allow", "deny", "ask"}
-            assert set(rule) == {"permission", "pattern", "action"}
+            assert rule["effect"] in {"allow", "deny", "ask"}
+            assert set(rule) == {"action", "resource", "effect"}
 
 
 def test_the_wildcard_rule_comes_first():
-    """Resolution is last-match-wins, so specific grants must follow it."""
     for mode in ("plan", "auto"):
-        assert mode_settings(mode)[1][0]["permission"] == "*"
+        assert mode_settings(mode)[1][0]["action"] == "*"
 
 
-def test_bypass_allows_everything_and_normal_asks():
-    # The wildcard is what defines the mode; the control-plane allow rules ride
-    # alongside it in every non-plan mode.
+def test_bypass_keeps_wildcard_allow_and_normal_asks():
     assert _actions("bypass")["*"] == "allow"
     assert _actions("normal")["*"] == "ask"
     assert "edit" not in _actions("normal")
+    # Search actions are the deliberate security exception to bypass.
 
 
 def test_auto_allows_everything_but_keeps_shell_gated():
-    """Auto's permissive default allows every tool outright; only bash stays
-    behind an ask, so every shell command (including `ciao …`) reaches the
-    classifier/operator — no `ciao …` argv prefix is pre-approved."""
     actions = _actions("auto")
     assert actions["*"] == "allow"
-    assert actions["bash"] == "ask"
+    assert actions["shell"] == "ask"
+    assert actions["glob"] == "ask"
+    assert actions["grep"] == "ask"
     assert "edit" not in actions
-    # No `ciao …` allow or ask bash patterns exist at all.
-    bash = _bash_patterns("auto")
-    assert not bash["allow"]
-    assert not bash["ask"]
+    shell = _shell_patterns("auto")
+    assert shell["ask"] == {"*"}
+
+
+@pytest.mark.parametrize("mode", ["plan", "normal", "auto", "bypass"])
+def test_v2_search_actions_require_explicit_approval(mode: BridgeMode):
+    rules = mode_settings(mode)[1]
+    for action in {"glob", "grep"}:
+        matching = [
+            rule for rule in rules
+            if rule["action"] == action and rule["resource"] == "*"
+        ]
+        assert matching[-1]["effect"] == "ask"
+
+
+def test_protected_glob_patterns_remain_hard_denied_after_search_approval():
+    rules = mode_settings("bypass")[1]
+    glob_rules = [rule for rule in rules if rule["action"] == "glob"]
+    assert next(rule["effect"] for rule in reversed(glob_rules) if rule["resource"] == ".env") == "deny"
+    assert next(rule["effect"] for rule in reversed(glob_rules) if rule["resource"] == ".runtime/**") == "deny"
 
 
 def test_plan_mode_is_read_only():
@@ -251,7 +266,7 @@ def test_plan_mode_is_read_only():
 def test_tools_can_be_disabled_for_one_shot_sessions():
     agent, rules = mode_settings("plan", tools_enabled=False)
     assert agent == "plan"
-    assert rules == [{"permission": "*", "pattern": "*", "action": "deny"}]
+    assert rules == [{"action": "*", "resource": "*", "effect": "deny"}]
 
 
 class _SessionResponse:
@@ -275,14 +290,26 @@ class _SessionClient:
         self.get_calls: list[str] = []
         self.post_calls: list[tuple[str, object]] = []
 
-    async def get(self, path: str):
+    async def get(self, path: str, *, params=None):
         self.get_calls.append(path)
-        payload = self.messages if path.endswith("/message") else self.payload
-        return _SessionResponse(payload)
+        if path.endswith("/message"):
+            return _SessionResponse({
+                "data": self.messages,
+                "cursor": {"previous": None, "next": None},
+            })
+        if path == "/api/model/default":
+            return _SessionResponse({
+                "data": {"modelID": "default-model", "providerID": "opencode"}
+            })
+        if path == "/api/model":
+            return _SessionResponse({"data": [
+                {"providerID": "anthropic", "modelID": "sonnet", "enabled": True}
+            ]})
+        return _SessionResponse({"data": self.payload})
 
     async def post(self, path: str, json=None):
         self.post_calls.append((path, json))
-        return _SessionResponse({"id": "session-new"})
+        return _SessionResponse({"data": {"id": "session-new"}})
 
 
 @pytest.mark.asyncio
@@ -290,10 +317,13 @@ async def test_resume_rotates_when_session_permission_is_stale(tmp_path):
     provider = _provider(tmp_path)
     client = _SessionClient({
         "id": "session-old",
-        "permission": mode_settings("bypass")[1],
+        "agent": "build",
+        "permissions": mode_settings("bypass")[1],
     }, messages=[
-        {"info": {"role": "user"}, "parts": [{"type": "text", "text": "Earlier request"}]},
-        {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Earlier answer"}]},
+        {"id": "msg_u", "type": "user", "text": "Earlier request"},
+        {"id": "msg_a", "type": "assistant", "content": [
+            {"type": "text", "text": "Earlier answer"},
+        ]},
     ])
     provider._client = client  # type: ignore[assignment]
     request = AgentRequest(
@@ -307,13 +337,22 @@ async def test_resume_rotates_when_session_permission_is_stale(tmp_path):
     expected = mode_settings("normal")[1]
 
     assert await provider._ensure_session(request) == "session-new"
-    assert client.get_calls == ["/session/session-old", "/session/session-old/message"]
+    assert client.get_calls == [
+        "/api/model/default",
+        "/api/session/session-old",
+        "/api/session/session-old/message",
+    ]
     assert "User: Earlier request" in provider._session_handover_context
     assert "Assistant: Earlier answer" in provider._session_handover_context
     assert request.prompt.startswith("[stable context]\n")
-    assert client.post_calls == [
-        ("/session", {"agent": "build", "permission": expected})
-    ]
+    assert client.post_calls == [(
+        "/api/session",
+        {
+            "agent": "build",
+            "permissions": expected,
+            "model": {"id": "default-model", "providerID": "opencode"},
+        },
+    )]
 
 
 @pytest.mark.asyncio
@@ -321,7 +360,8 @@ async def test_resume_keeps_session_when_permission_matches(tmp_path):
     provider = _provider(tmp_path)
     client = _SessionClient({
         "id": "session-old",
-        "permission": mode_settings("normal")[1],
+        "agent": "build",
+        "permissions": mode_settings("normal")[1],
     })
     provider._client = client  # type: ignore[assignment]
     request = AgentRequest(
@@ -333,30 +373,17 @@ async def test_resume_keeps_session_when_permission_matches(tmp_path):
     )
 
     assert await provider._ensure_session(request) == "session-old"
-    assert client.get_calls == ["/session/session-old"]
-    assert client.post_calls == []
+    assert client.get_calls == ["/api/model/default", "/api/session/session-old"]
+    assert client.post_calls == [(
+        "/api/session/session-old/model",
+        {"model": {"id": "default-model", "providerID": "opencode"}},
+    )]
 
 
 @pytest.mark.asyncio
 async def test_session_passes_through_unqualified_model(tmp_path):
     provider = _provider(tmp_path)
-
-    class _CatalogClient(_SessionClient):
-        async def get(self, path: str):
-            if path == "/provider":
-                self.get_calls.append(path)
-                return _SessionResponse({
-                    "connected": ["anthropic"],
-                    "all": [{
-                        "id": "anthropic",
-                        "models": {
-                            "claude-sonnet-4-6": {"id": "claude-sonnet-4-6"},
-                        },
-                    }],
-                })
-            return await super().get(path)
-
-    client = _CatalogClient(None)
+    client = _SessionClient(None)
     provider._client = client  # type: ignore[assignment]
     request = AgentRequest(
         prompt="hello",
@@ -366,15 +393,41 @@ async def test_session_passes_through_unqualified_model(tmp_path):
     )
 
     assert await provider._ensure_session(request) == "session-new"
-    # An unqualified model id is sent as-is under an empty provider, letting
-    # opencode apply its own default.
-    assert client.get_calls == []
+    assert client.get_calls == ["/api/model"]
     assert client.post_calls == [(
-        "/session",
+        "/api/session",
         {
             "agent": "build",
-            "permission": mode_settings("normal")[1],
-            "model": {"id": "sonnet", "providerID": ""},
+            "permissions": mode_settings("normal")[1],
+            "model": {"id": "sonnet", "providerID": "anthropic"},
+        },
+    )]
+
+
+@pytest.mark.asyncio
+async def test_new_default_session_applies_the_requested_thinking_variant(tmp_path):
+    provider = _provider(tmp_path)
+    client = _SessionClient(None)
+    provider._client = client  # type: ignore[assignment]
+    request = AgentRequest(
+        prompt="hello",
+        model="",
+        thinking_level="high",
+        mode="normal",
+        provider="opencode",
+    )
+
+    assert await provider._ensure_session(request) == "session-new"
+    assert client.post_calls == [(
+        "/api/session",
+        {
+            "agent": "build",
+            "permissions": mode_settings("normal")[1],
+            "model": {
+                "id": "default-model",
+                "providerID": "opencode",
+                "variant": "high",
+            },
         },
     )]
 
@@ -397,24 +450,120 @@ def test_session_handover_omits_synthetic_parts():
     assert "synthetic" not in rendered
 
 
+def test_session_handover_strips_v2_prompt_context():
+    history = [{
+        "info": {"role": "user"},
+        "parts": [{
+            "type": "text",
+            "text": (
+                "[CIAO_CONTEXT_BEGIN]\nprivate runtime context\n"
+                "[CIAO_CONTEXT_END]\n\nVisible request"
+            ),
+        }],
+    }]
+    rendered = _session_handover_text(history)
+    assert "Visible request" in rendered
+    assert "private runtime context" not in rendered
+
+
+def test_prompt_body_uses_v2_text_files_and_queue_delivery(tmp_path):
+    provider = _provider(tmp_path)
+    body = provider._prompt_body(
+        AgentRequest(prompt="Hello", model="", mode="bypass", provider="opencode"),
+        system="Core instructions",
+    )
+    assert body == {
+        "text": "[CIAO_CONTEXT_BEGIN]\nCore instructions\n[CIAO_CONTEXT_END]\n\nHello",
+        "delivery": "queue",
+        "resume": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_v2_message_pagination_omits_order_after_the_cursor():
+    class _Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class _Client:
+        def __init__(self):
+            self.params = []
+
+        async def get(self, _path, *, params=None):
+            self.params.append(params)
+            if len(self.params) == 1:
+                return _Response({
+                    "data": [{"id": "msg_1", "type": "user", "text": "one"}],
+                    "cursor": {"next": "cursor-2"},
+                })
+            return _Response({
+                "data": [{"id": "msg_2", "type": "user", "text": "two"}],
+                "cursor": {"next": None},
+            })
+
+    client = _Client()
+    messages = await _read_v2_messages(client, "ses_1")  # type: ignore[arg-type]
+    assert [message["info"]["id"] for message in messages] == ["msg_1", "msg_2"]
+    assert client.params[0]["order"] == "asc"
+    assert "order" not in client.params[1]
+    assert client.params[1]["cursor"] == "cursor-2"
+
+
+def test_v2_flat_messages_normalize_at_the_provider_boundary():
+    normalized = _projected_message({
+        "id": "msg_1",
+        "type": "assistant",
+        "agent": "build",
+        "model": {"id": "model", "providerID": "opencode"},
+        "time": {"created": 1, "completed": 2},
+        "content": [
+            {"type": "reasoning", "text": "think"},
+            {"type": "text", "text": "answer"},
+            {
+                "type": "tool", "id": "call_1", "name": "shell",
+                "state": {"status": "completed", "input": {"command": "pwd"}},
+            },
+        ],
+    })
+    assert normalized is not None
+    assert normalized["info"]["role"] == "assistant"
+    assert normalized["info"]["modelID"] == "model"
+    assert [part["type"] for part in normalized["parts"]] == [
+        "reasoning", "text", "tool",
+    ]
+    assert normalized["parts"][2]["tool"] == "shell"
+
+
+def test_v2_idle_messages_keep_the_recovery_discriminator():
+    normalized = _projected_message({"id": "idle_1", "type": "idle", "outcome": "failed"})
+    assert normalized is not None
+    assert normalized["info"]["type"] == "idle"
+    assert normalized["info"]["outcome"] == "failed"
+
+
 # ── error sanitization ──────────────────────────────────────────────────
 
 
 def test_error_text_drops_the_stack_trace():
-    """opencode error payloads embed a bundler stack; only line one is shown."""
     error = {
-        "name": "UnknownError",
-        "data": {"message": "Model not found: x\n    at <anonymous> (/$bunfs/root/a.js:1:2)"},
+        "type": "provider.no-route",
+        "message": "Model not found: x\n    at <anonymous> (/$bunfs/root/a.js:1:2)",
     }
     assert error_text(error) == "Model not found: x"
 
 
-def test_error_text_falls_back_to_the_error_name():
-    assert error_text({"name": "ProviderAuthError", "data": {}}) == "ProviderAuthError"
+def test_error_text_falls_back_to_the_v2_error_type():
+    assert error_text({"type": "provider.auth", "message": ""}) == "provider.auth"
 
 
 def test_error_text_handles_a_missing_payload():
-    assert error_text(None) == "opencode reported an error"
+    assert error_text(None) == "OpenCode reported an error"
 
 
 # ── usage ───────────────────────────────────────────────────────────────
@@ -435,7 +584,9 @@ def test_usage_payload_flattens_cache_counts():
 
 
 def test_usage_payload_omits_zero_counts():
-    assert usage_payload({"input": 0, "output": 5, "cache": {}}) == {"outputTokens": "5"}
+    assert usage_payload({"input": 0, "output": 5, "cache": {}}) == {
+        "outputTokens": "5", "totalTokens": "5",
+    }
 
 
 def test_usage_payload_tolerates_junk():
@@ -443,28 +594,20 @@ def test_usage_payload_tolerates_junk():
     assert usage_payload({"input": "not-a-number"}) == {}
 
 
-def test_context_window_for_reads_the_model_limit():
-    payload = {
-        "all": [{
-            "id": "anthropic",
-            "models": {
-                "claude-sonnet-4-6": {"id": "claude-sonnet-4-6", "limit": {"context": 200000}},
-            },
-        }],
-    }
+def test_context_window_for_reads_the_v2_model_limit():
+    payload = {"data": [{
+        "providerID": "anthropic",
+        "modelID": "claude-sonnet-4-6",
+        "limit": {"context": 200000},
+    }]}
     assert _context_window_for(payload, "anthropic", "claude-sonnet-4-6") == 200000
 
 
 def test_context_window_for_returns_none_when_unstated_or_unknown():
-    payload = {
-        "all": [{
-            "id": "anthropic",
-            "models": {
-                "m": {"id": "m"},
-                "no-limit": {"id": "no-limit", "limit": {"context": 0}},
-            },
-        }],
-    }
+    payload = {"data": [
+        {"providerID": "anthropic", "modelID": "m"},
+        {"providerID": "anthropic", "modelID": "no-limit", "limit": {"context": 0}},
+    ]}
     assert _context_window_for(payload, "anthropic", "m") is None
     assert _context_window_for(payload, "anthropic", "no-limit") is None
     assert _context_window_for(payload, "unknown", "m") is None
@@ -474,17 +617,22 @@ def test_context_window_for_returns_none_when_unstated_or_unknown():
 # ── model catalog ───────────────────────────────────────────────────────
 
 
-def test_catalog_lists_only_connected_providers():
-    """`all` enumerates every backend opencode knows of — hundreds. Only the
-    authenticated ones are models the user can actually run."""
-    payload = {
-        "connected": ["anthropic"],
-        "all": [
-            {"id": "anthropic", "models": {"claude-sonnet-4-6": {"id": "claude-sonnet-4-6", "name": "Sonnet"}}},
-            {"id": "openai", "models": {"gpt-5.6-terra": {"id": "gpt-5.6-terra", "name": "Terra"}}},
-        ],
-    }
-    assert _catalog_from_providers(payload) == [
+def test_catalog_lists_only_active_providers():
+    providers = {"data": [
+        {"id": "anthropic", "activation": "enabled"},
+        {"id": "openai", "activation": "disabled"},
+    ]}
+    models = {"data": [
+        {
+            "providerID": "anthropic", "modelID": "claude-sonnet-4-6",
+            "name": "Sonnet", "enabled": True, "variants": [],
+        },
+        {
+            "providerID": "openai", "modelID": "gpt-5.6-terra",
+            "name": "Terra", "enabled": True, "variants": [],
+        },
+    ]}
+    assert _catalog_from_api(providers, models) == [
         {
             "model": "anthropic/claude-sonnet-4-6",
             "label": "Sonnet (anthropic)",
@@ -493,117 +641,79 @@ def test_catalog_lists_only_connected_providers():
     ]
 
 
-def test_catalog_handles_list_shaped_models():
-    payload = {"connected": ["x"], "all": [{"id": "x", "models": [{"id": "m", "name": "M"}]}]}
-    assert _catalog_from_providers(payload) == [
-        {"model": "x/m", "label": "M (x)", "variants": []}
-    ]
-
-
 def test_catalog_reports_per_model_reasoning_variants():
-    """opencode calls reasoning effort a model `variant`, and it is per model.
-
-    Captured live: `deepseek-v4-flash-free` offers low/high/max while
-    `big-pickle` offers none, so the level list has to be narrowed per model
-    rather than assumed from a fixed ladder.
-    """
-    payload = {
-        "connected": ["opencode"],
-        "all": [{
-            "id": "opencode",
-            "models": {
-                "deepseek-v4-flash-free": {
-                    "id": "deepseek-v4-flash-free",
-                    "variants": {"low": {}, "high": {}, "max": {}},
-                },
-                "big-pickle": {"id": "big-pickle"},
-            },
-        }],
+    providers = {"data": [{"id": "opencode", "activation": "auto"}]}
+    models = {"data": [
+        {
+            "providerID": "opencode", "modelID": "deepseek-v4-flash-free",
+            "enabled": True,
+            "variants": [{"id": "low"}, {"id": "high"}, {"id": "max"}],
+        },
+        {
+            "providerID": "opencode", "modelID": "big-pickle",
+            "enabled": True, "variants": [],
+        },
+    ]}
+    by_model = {
+        row["model"]: row["variants"] for row in _catalog_from_api(providers, models)
     }
-    by_model = {row["model"]: row["variants"] for row in _catalog_from_providers(payload)}
     assert by_model["opencode/deepseek-v4-flash-free"] == ["high", "low", "max"]
     assert by_model["opencode/big-pickle"] == []
 
 
 # ── image capability ────────────────────────────────────────────────────
-# opencode is bring-your-own-backend, so it is the one provider where a user can
-# pin a model that cannot take an image. Its catalog states this per model, which
-# is what lets the image pre-flight stop guessing from model-name families.
 
 
-def test_model_accepts_images_reads_the_input_modality():
-    """`capabilities.input.image` is the authoritative per-model answer.
-
-    Shape captured live from opencode 1.18's `GET /provider`.
-    """
-    capable = {
-        "id": "m",
-        "capabilities": {
-            "attachment": True,
-            "input": {"text": True, "image": True, "pdf": False},
-        },
-    }
-    text_only = {
-        "id": "m",
-        "capabilities": {
-            "attachment": False,
-            "input": {"text": True, "image": False, "pdf": False},
-        },
-    }
-    assert model_accepts_images(capable) is True
-    assert model_accepts_images(text_only) is False
-
-
-def test_model_accepts_images_falls_back_to_the_attachment_flag():
-    """`attachment` covers any non-text input, so it can only rule vision out.
-
-    attachment=false is a reliable no; attachment=true says "some attachment"
-    and could mean pdf or audio, so it stays unknown rather than a false yes.
-    """
-    assert model_accepts_images({"capabilities": {"attachment": False}}) is False
-    assert model_accepts_images({"capabilities": {"attachment": True}}) is None
+def test_model_accepts_images_reads_the_v2_input_modalities():
+    assert model_accepts_images({
+        "capabilities": {"input": ["text", "image"]},
+    }) is True
+    assert model_accepts_images({
+        "capabilities": {"input": ["text"]},
+    }) is False
 
 
 def test_model_accepts_images_is_unknown_when_unstated():
-    """Older builds omit the block; unknown must not read as a refusal."""
     assert model_accepts_images({"id": "m"}) is None
     assert model_accepts_images({"id": "m", "capabilities": "junk"}) is None
-    assert model_accepts_images({"capabilities": {"input": {"image": "yes"}}}) is None
+    assert model_accepts_images({"capabilities": {"input": {}}}) is None
 
 
 def test_catalog_states_image_support_only_when_opencode_does():
-    """An absent `images` key means unknown -- distinct from a stated False."""
-    payload = {
-        "connected": ["opencode"],
-        "all": [{
-            "id": "opencode",
-            "models": {
-                "seer": {
-                    "id": "seer",
-                    "capabilities": {"input": {"text": True, "image": True}},
-                },
-                "reader": {
-                    "id": "reader",
-                    "capabilities": {"input": {"text": True, "image": False}},
-                },
-                "quiet": {"id": "quiet"},
-            },
-        }],
-    }
-    by_model = {row["model"]: row for row in _catalog_from_providers(payload)}
+    providers = {"data": [{"id": "opencode", "activation": "auto"}]}
+    models = {"data": [
+        {
+            "providerID": "opencode", "modelID": "seer", "enabled": True,
+            "capabilities": {"input": ["text", "image"]}, "variants": [],
+        },
+        {
+            "providerID": "opencode", "modelID": "reader", "enabled": True,
+            "capabilities": {"input": ["text"]}, "variants": [],
+        },
+        {
+            "providerID": "opencode", "modelID": "quiet", "enabled": True,
+            "variants": [],
+        },
+    ]}
+    by_model = {row["model"]: row for row in _catalog_from_api(providers, models)}
     assert by_model["opencode/seer"]["images"] is True
     assert by_model["opencode/reader"]["images"] is False
     assert "images" not in by_model["opencode/quiet"]
 
 
-def test_catalog_is_empty_when_nothing_is_connected():
-    payload = {"connected": [], "all": [{"id": "anthropic", "models": {"a": {"id": "a"}}}]}
-    assert _catalog_from_providers(payload) == []
+def test_catalog_keeps_free_models_before_provider_discovery_settles():
+    models = {"data": [{
+        "providerID": "opencode", "modelID": "space-bunny-free",
+        "enabled": True, "variants": [],
+    }]}
+    assert _catalog_from_api({"data": []}, models) == [
+        {"model": "opencode/space-bunny-free", "label": "space-bunny-free (opencode)", "variants": []}
+    ]
 
 
 def test_catalog_tolerates_junk():
-    assert _catalog_from_providers(None) == []
-    assert _catalog_from_providers({"all": "nope"}) == []
+    assert _catalog_from_api(None, None) == []
+    assert _catalog_from_api({"data": "nope"}, {"data": "nope"}) == []
 
 
 # ── default model ───────────────────────────────────────────────────────
@@ -621,27 +731,14 @@ def test_default_model_on_a_config_without_opencode():
 
 
 # ── collaboration tree counts ────────────────────────────────────────────
-# opencode session objects carry no status field; the running count comes from
-# each child's own messages (see `_opencode_child_status` in transcript_service).
 
 
-def test_collab_tree_counts_derive_running_from_child_messages():
+def test_collab_tree_counts_use_v2_active_session_metadata():
     tree = [
-        # A turn still in flight: time.created without time.completed.
-        {"info": {"id": "a"}, "messages": [
-            {"info": {"role": "user"}, "parts": []},
-            {"info": {"role": "assistant", "time": {"created": 1}}, "parts": []},
-        ]},
-        # A finished child.
-        {"info": {"id": "b"}, "messages": [
-            {"info": {"role": "assistant", "time": {"created": 1, "completed": 2}}, "parts": []},
-        ]},
-        # A failed child: its last assistant message carries an error.
-        {"info": {"id": "c"}, "messages": [
-            {"info": {"role": "assistant", "error": {"name": "E"}}, "parts": []},
-        ]},
-        # A child with no assistant messages counts as completed, not running.
-        {"info": {"id": "d"}, "messages": [{"info": {"role": "user"}, "parts": []}]},
+        {"info": {"id": "a", "outcome": "failed"}, "active": True, "messages": []},
+        {"info": {"id": "b", "outcome": "succeeded"}, "active": False, "messages": []},
+        {"info": {"id": "c", "outcome": "failed"}, "active": False, "messages": []},
+        {"info": {"id": "d"}, "active": False, "messages": []},
     ]
     running, had_subagents = opencode_collab_tree_counts(tree)
     assert running == 1
@@ -656,16 +753,46 @@ def test_collab_tree_counts_tolerate_junk():
     assert opencode_collab_tree_counts([None, {"info": {}}, {"messages": "nope"}]) == (0, True)
 
 
+@pytest.mark.asyncio
+async def test_live_collab_tree_preserves_children_when_activity_lookup_fails(
+    tmp_path, monkeypatch,
+):
+    provider = _provider(tmp_path)
+    provider._client = object()  # type: ignore[assignment]
+    provider._session_id = "ses_parent"
+
+    async def children(_client, _parent_id):
+        return [{"id": "ses_child", "parentID": "ses_parent"}]
+
+    async def active(_client):
+        raise RuntimeError("activity endpoint unavailable")
+
+    async def messages(_client, _child_id):
+        return []
+
+    monkeypatch.setattr("ciao.providers.opencode._read_v2_children", children)
+    monkeypatch.setattr("ciao.providers.opencode._read_active_sessions", active)
+    monkeypatch.setattr("ciao.providers.opencode._read_v2_messages", messages)
+
+    tree = await provider.read_live_collab_tree()
+
+    assert tree[0]["info"]["id"] == "ses_child"
+    assert tree[0]["active"] is None
+    # Unknown activity remains conservative instead of looking settled.
+    assert opencode_collab_tree_counts(tree) == (1, True)
+
+
 # ── event normalization ─────────────────────────────────────────────────
 
 
-def _convert(provider: OpencodeProvider, kind: str, properties: dict):
-    return provider._event_to_stream({"type": kind, "properties": properties})
+def _convert(provider: OpencodeProvider, kind: str, data: dict):
+    return provider._event_to_stream({"type": kind, "data": data})
 
 
 def test_text_delta_becomes_assistant_text(tmp_path):
     events = _convert(
-        _provider(tmp_path), "session.next.text.delta", {"delta": "hello"}
+        _provider(tmp_path), "session.text.delta",
+        {"assistantMessageID": "msg_1", "ordinal": 0, "delta": "hello"},
     )
     assert len(events) == 1
     assert isinstance(events[0], AssistantTextDelta)
@@ -673,22 +800,28 @@ def test_text_delta_becomes_assistant_text(tmp_path):
 
 
 def test_empty_text_delta_is_dropped(tmp_path):
-    assert _convert(_provider(tmp_path), "session.next.text.delta", {"delta": ""}) == []
+    assert _convert(
+        _provider(tmp_path), "session.text.delta",
+        {"assistantMessageID": "msg_1", "ordinal": 0, "delta": ""},
+    ) == []
 
 
 def test_reasoning_delta_becomes_thinking(tmp_path):
     events = _convert(
-        _provider(tmp_path), "session.next.reasoning.delta", {"delta": "hmm"}
+        _provider(tmp_path), "session.reasoning.delta",
+        {"assistantMessageID": "msg_1", "ordinal": 0, "delta": "hmm"},
     )
     assert isinstance(events[0], ThinkingEvent)
     assert events[0].text == "hmm"
 
 
 def test_tool_called_becomes_tool_use_with_a_stable_id(tmp_path):
+    provider = _provider(tmp_path)
+    _convert(provider, "session.tool.input.started", {"id": "call_1", "name": "read"})
     events = _convert(
-        _provider(tmp_path),
-        "session.next.tool.called",
-        {"callID": "call_1", "tool": "read", "input": {"filePath": "/workspace/a.py"}},
+        provider,
+        "session.tool.called",
+        {"id": "call_1", "input": {"filePath": "/workspace/a.py"}},
     )
     assert isinstance(events[0], ToolUseEvent)
     assert events[0].tool_name == "read"
@@ -699,8 +832,8 @@ def test_tool_called_becomes_tool_use_with_a_stable_id(tmp_path):
 def test_write_tool_reports_a_file_touch(tmp_path):
     events = _convert(
         _provider(tmp_path),
-        "session.next.tool.called",
-        {"callID": "c", "tool": "write", "input": {"filePath": "/workspace/new.py"}},
+        "session.tool.called",
+        {"id": "c", "name": "write", "input": {"filePath": "/workspace/new.py"}},
     )
     assert events[0].file_touches == [{"file_path": "/workspace/new.py", "action": "write"}]
 
@@ -708,29 +841,29 @@ def test_write_tool_reports_a_file_touch(tmp_path):
 def test_read_tool_reports_no_file_touch(tmp_path):
     events = _convert(
         _provider(tmp_path),
-        "session.next.tool.called",
-        {"callID": "c", "tool": "read", "input": {"filePath": "/workspace/a.py"}},
+        "session.tool.called",
+        {"id": "c", "name": "read", "input": {"filePath": "/workspace/a.py"}},
     )
     assert events[0].file_touches is None
 
 
 def test_tool_result_recovers_the_tool_name_from_the_call(tmp_path):
     provider = _provider(tmp_path)
-    _convert(provider, "session.next.tool.called", {"callID": "c1", "tool": "bash", "input": {}})
-    events = _convert(provider, "session.next.tool.success", {"callID": "c1"})
+    _convert(provider, "session.tool.input.started", {"id": "c1", "name": "shell"})
+    _convert(provider, "session.tool.called", {"id": "c1", "input": {}})
+    events = _convert(provider, "session.tool.success", {"id": "c1"})
     assert events[0].type == "tool_result"
-    assert events[0].tool_name == "bash"
-    # The call is forgotten once resolved, so a duplicate cannot re-fire it.
+    assert events[0].tool_name == "shell"
     assert provider._tool_calls == {}
 
 
 def test_failed_tool_carries_a_sanitized_reason(tmp_path):
     provider = _provider(tmp_path)
-    _convert(provider, "session.next.tool.called", {"callID": "c1", "tool": "bash", "input": {}})
+    _convert(provider, "session.tool.called", {"id": "c1", "name": "shell", "input": {}})
     events = _convert(
         provider,
-        "session.next.tool.failed",
-        {"callID": "c1", "error": {"name": "E", "data": {"message": "boom\n  at x"}}},
+        "session.tool.failed",
+        {"id": "c1", "error": {"type": "ToolError", "message": "boom\n  at x"}},
     )
     assert events[0].tool_input == "boom"
 
@@ -738,142 +871,210 @@ def test_failed_tool_carries_a_sanitized_reason(tmp_path):
 def test_step_ended_reports_token_usage(tmp_path):
     events = _convert(
         _provider(tmp_path),
-        "session.next.step.ended",
-        {"tokens": {"input": 10, "output": 3}},
+        "session.step.ended",
+        {"tokens": {"input": 10, "output": 3, "reasoning": 0, "cache": {"read": 0, "write": 0}}},
     )
     assert isinstance(events[0], TokenUsageEvent)
     assert (events[0].input_tokens, events[0].output_tokens) == (10, 3)
 
 
-# Captured verbatim from a live `permission.asked` event (opencode 1.18.18)
-# when a bash command was gated in `normal` mode.
+# Captured from a live OpenCode 2.0.16 `permission.asked` event.
 LIVE_PERMISSION = {
     "id": "per_live1",
     "sessionID": "ses_1",
-    "permission": "bash",
-    "patterns": ["echo approved-ok"],
+    "action": "shell",
+    "resources": ["echo approved-ok"],
     "metadata": {"command": "echo approved-ok"},
-    "always": ["echo *"],
-    "tool": {"messageID": "msg_1", "callID": "call_abc"},
+    "source": {"type": "tool", "messageID": "msg_1", "id": "call_abc"},
 }
 
 
 def test_permission_card_names_the_tool_and_the_command(tmp_path):
-    """Regression: an approval card must say *what* is being approved.
-
-    The live event is `permission.asked` with `permission`/`patterns`/
-    `metadata`; reading the schema's v2 `action`/`resources` instead produced
-    a card that said only "run a tool" with no detail — the user could not
-    tell what they were approving.
-    """
     provider = _provider(tmp_path)
-    provider._current_mode = "normal"  # the mode the event was captured under
     events = _convert(provider, "permission.asked", LIVE_PERMISSION)
     assert isinstance(events[0], PermissionRequestEvent)
-    assert events[0].tool_name == "bash"
+    assert events[0].tool_name == "shell"
     assert events[0].tool_input == "echo approved-ok"
-    assert "bash" in events[0].message
+    assert "shell" in events[0].message
 
 
 def test_permission_card_links_back_to_the_tool_call(tmp_path):
-    """So the UI can retract the tool card when the request is refused."""
     provider = _provider(tmp_path)
-    provider._current_mode = "normal"
     _convert(provider, "permission.asked", LIVE_PERMISSION)
     assert provider.tool_use_id_for_request("per_live1") == "call_abc"
 
 
-def test_permission_card_falls_back_to_patterns_without_metadata(tmp_path):
+def test_permission_card_falls_back_to_resources_without_metadata(tmp_path):
     provider = _provider(tmp_path)
-    provider._current_mode = "normal"
-    payload = {**LIVE_PERMISSION, "metadata": {}}
-    events = _convert(provider, "permission.asked", payload)
+    events = _convert(
+        provider, "permission.asked", {**LIVE_PERMISSION, "metadata": {}}
+    )
     assert events[0].tool_input == "echo approved-ok"
 
 
-def test_permission_ask_registers_a_pending_request(tmp_path):
+def test_permission_without_session_is_ignored(tmp_path):
     provider = _provider(tmp_path)
-    events = _convert(
-        provider,
-        "permission.v2.asked",
-        {"id": "perm_1", "sessionID": "ses_1", "action": "edit", "resources": ["/workspace/a.py"]},
-    )
-    assert isinstance(events[0], PermissionRequestEvent)
-    assert events[0].request_id == "perm_1"
-    # The newer v2 shape still resolves to a usable card.
-    assert events[0].tool_name == "edit"
-    assert events[0].tool_input == "/workspace/a.py"
-    assert "perm_1" in provider._permission_requests
-
-
-def test_permission_without_an_id_is_ignored(tmp_path):
-    provider = _provider(tmp_path)
-    assert _convert(provider, "permission.v2.asked", {"action": "edit"}) == []
+    assert _convert(provider, "permission.asked", {"id": "perm_1", "action": "edit"}) == []
     assert provider._permission_requests == {}
 
 
-def test_question_becomes_an_ask_user_question_card(tmp_path):
+def test_form_becomes_an_ask_user_question_card(tmp_path):
     provider = _provider(tmp_path)
     events = _convert(
         provider,
-        "question.v2.asked",
-        {
-            "id": "q_1",
+        "form.created",
+        {"form": {
+            "id": "frm_1",
             "sessionID": "ses_1",
-            "questions": [{
-                "question": "Which database?",
-                "header": "Database",
-                "multiple": False,
+            "title": "Database",
+            "fields": [{
+                "key": "database",
+                "title": "Database",
+                "description": "Which database should I use?",
+                "type": "string",
                 "custom": True,
-                "options": [{"label": "Postgres", "description": "Relational"}],
+                "options": [{
+                    "value": "postgres", "label": "Postgres",
+                    "description": "Relational",
+                }],
             }],
-        },
+        }},
     )
     assert events[0].tool_name == "AskUserQuestion"
     payload = json.loads(events[0].tool_input)
-    assert payload["questions"][0]["question"] == "Which database?"
-    assert payload["questions"][0]["options"] == [
-        {"label": "Postgres", "description": "Relational"}
+    question = payload["questions"][0]
+    assert question["id"] == "database"
+    assert question["question"] == "Which database should I use?"
+    assert question["header"] == "Database"
+    assert question["options"] == [
+        {"label": "Postgres", "value": "postgres", "description": "Relational"}
     ]
-    assert payload["questions"][0]["isOther"] is True
-    assert payload["questions"][0]["id"] == "0"
-    assert "q_1" in provider._question_requests
+    assert question["isOther"] is True
+    assert "frm_1" in provider._question_requests
 
 
-def test_question_without_questions_is_ignored(tmp_path):
+def test_form_without_fields_is_ignored(tmp_path):
     provider = _provider(tmp_path)
-    assert _convert(provider, "question.v2.asked", {"id": "q", "questions": []}) == []
+    assert _convert(
+        provider, "form.created", {"form": {"id": "frm", "sessionID": "s", "fields": []}}
+    ) == []
     assert provider._question_requests == {}
 
 
-def test_question_custom_false_is_preserved_for_the_pwa(tmp_path):
+def test_form_custom_false_is_preserved_for_the_pwa(tmp_path):
     provider = _provider(tmp_path)
     events = _convert(
         provider,
-        "question.v2.asked",
-        {
-            "id": "q_no_custom",
-            "questions": [{
-                "question": "Use the default?",
+        "form.created",
+        {"form": {
+            "id": "frm_2", "sessionID": "ses_1", "title": "Default",
+            "fields": [{
+                "key": "use_default", "title": "Use the default?", "type": "string",
                 "custom": False,
-                "options": [{"label": "Yes"}],
+                "options": [{"value": "yes", "label": "Yes"}],
             }],
-        },
+        }},
+    )
+    assert json.loads(events[0].tool_input)["questions"][0]["isOther"] is False
+
+
+def test_form_values_are_coerced_to_v2_field_types():
+    assert _form_answer_value("string", ["Postgres"]) == "Postgres"
+    assert _form_answer_value("integer", ["3"]) == 3
+    assert _form_answer_value("number", ["2.5"]) == 2.5
+    assert _form_answer_value("boolean", ["true"]) is True
+    assert _form_answer_value("external", ["true"]) is True
+    assert _form_answer_value("multiselect", ["a", "b"]) == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_form_reply_honors_conditions_and_external_fields(tmp_path):
+    provider, client = _armed_provider(tmp_path)
+    _convert(
+        provider,
+        "form.created",
+        {"form": {
+            "id": "frm_typed", "sessionID": "ses_1", "title": "Setup",
+            "fields": [
+                {
+                    "key": "enabled", "title": "Enable?", "type": "boolean",
+                    "required": True,
+                },
+                {
+                    "key": "details", "title": "Details", "type": "string",
+                    "when": [{"key": "enabled", "op": "eq", "value": True}],
+                },
+                {
+                    "key": "external", "title": "Open portal", "type": "external",
+                    "url": "https://example.com",
+                },
+            ],
+        }},
+    )
+    result = await provider.send_question_response(
+        "frm_typed",
+        {"enabled": ["Yes"], "details": ["only when enabled"], "external": ["Done"]},
+    )
+    assert result.ok is True
+    assert client.calls == [(
+        "/api/session/ses_1/form/frm_typed/reply",
+        {"answer": {"enabled": True, "details": "only when enabled", "external": True}},
+    )]
+
+
+@pytest.mark.asyncio
+async def test_form_reply_prefers_an_exact_wire_value_over_a_label_collision(tmp_path):
+    provider, client = _armed_provider(tmp_path)
+    _convert(
+        provider,
+        "form.created",
+        {"form": {
+            "id": "frm_collision", "sessionID": "ses_1", "title": "Choice",
+            "fields": [{
+                "key": "choice", "title": "Choice", "type": "string", "custom": True,
+                "options": [
+                    {"value": "1", "label": "One"},
+                    {"value": "2", "label": "1"},
+                ],
+            }],
+        }},
     )
 
-    payload = json.loads(events[0].tool_input)
-    assert payload["questions"][0]["isOther"] is False
+    result = await provider.send_question_response(
+        "frm_collision", {"choice": ["1"]}
+    )
+
+    assert result.ok is True
+    assert client.calls == [(
+        "/api/session/ses_1/form/frm_collision/reply",
+        {"answer": {"choice": "1"}},
+    )]
 
 
-def test_idle_status_is_not_surfaced_as_activity(tmp_path):
-    assert _convert(_provider(tmp_path), "session.status", {"status": {"type": "idle"}}) == []
+@pytest.mark.asyncio
+async def test_required_invalid_form_input_stays_pending(tmp_path):
+    provider, client = _armed_provider(tmp_path)
+    _convert(
+        provider,
+        "form.created",
+        {"form": {
+            "id": "frm_invalid", "sessionID": "ses_1", "title": "Count",
+            "fields": [{
+                "key": "count", "title": "How many?", "type": "integer",
+                "required": True,
+            }],
+        }},
+    )
+    result = await provider.send_question_response("frm_invalid", {"count": ["many"]})
+    assert result.ok is False
+    assert client.calls == []
+    assert "frm_invalid" in provider._question_requests
 
 
-def test_busy_status_is_not_rendered_as_a_message(tmp_path):
-    """opencode repeats `busy` through a turn and the PWA renders a system
-    event as a visible row, which printed a column of "busy" lines above the
-    reply. The streaming events already show the turn is running."""
-    assert _convert(_provider(tmp_path), "session.status", {"status": {"type": "busy"}}) == []
+def test_execution_terminal_events_are_not_user_visible(tmp_path):
+    assert _convert(
+        _provider(tmp_path), "session.execution.succeeded", {"sessionID": "s"}
+    ) == []
 
 
 def test_unknown_events_are_ignored(tmp_path):
@@ -883,24 +1084,62 @@ def test_unknown_events_are_ignored(tmp_path):
 # ── replies ─────────────────────────────────────────────────────────────
 
 
-def test_permission_reply_for_an_unknown_request_is_refused(tmp_path):
-    assert _provider(tmp_path).send_permission_response("nope", True) is False
+@pytest.mark.asyncio
+async def test_permission_reply_for_an_unknown_request_is_refused(tmp_path):
+    result = await _provider(tmp_path).send_permission_response("nope", True)
+    assert result.ok is False
 
 
-def test_question_reply_for_an_unknown_request_is_refused(tmp_path):
-    assert _provider(tmp_path).send_question_response("nope", {}) is False
+@pytest.mark.asyncio
+async def test_question_reply_for_an_already_settled_request_is_idempotent(tmp_path):
+    result = await _provider(tmp_path).send_question_response("nope", {})
+    assert result.ok is True
 
 
 def test_tool_use_id_for_unknown_request_is_empty(tmp_path):
     assert _provider(tmp_path).tool_use_id_for_request("nope") == ""
 
 
+def test_v2_form_conditions_use_strict_unanswered_and_multiselect_semantics():
+    eq = {"key": "mode", "op": "eq", "value": "advanced"}
+    neq = {"key": "mode", "op": "neq", "value": "advanced"}
+    assert not _form_field_active({"when": [eq]}, {})
+    assert not _form_field_active({"when": [neq]}, {})
+    assert _form_field_active({"when": [eq]}, {"mode": "advanced"})
+    assert _form_field_active({"when": [neq]}, {"mode": "basic"})
+    assert _form_field_active(
+        {"when": [{"key": "tags", "op": "eq", "value": "safe"}]},
+        {"tags": ["safe", "other"]},
+    )
+    assert not _form_field_active(
+        {"when": [{"key": "tags", "op": "eq", "value": "safe"}]},
+        {"tags": ["other"]},
+    )
+
+
+def test_v2_form_validation_covers_typed_constraints():
+    assert _validate_form_field(
+        {"type": "string", "format": "email", "required": True},
+        ["person@example.com"],
+    ) == "person@example.com"
+    with pytest.raises(ValueError):
+        _validate_form_field({"type": "string", "format": "email"}, ["not an email"])
+    with pytest.raises(ValueError):
+        _validate_form_field(
+            {"type": "number", "minimum": 1, "maximum": 3}, ["4"]
+        )
+    with pytest.raises(ValueError):
+        _validate_form_field(
+            {"type": "multiselect", "minItems": 1, "custom": True}, []
+        )
+    with pytest.raises(ValueError, match="Choose one answer"):
+        _validate_form_field({"type": "string", "custom": True}, ["option", "other"])
+
+
+
 # ── permission.asked surfaces a card ────────────────────────────────────
-# There is no local classifier. The auto ruleset keeps `bash` and the
-# destructive control-plane tools behind `ask`; every `permission.asked` that
-# reaches Ciaobot surfaces an approval card, which the
-# `opencode-auto-permissions` plugin answers with a reviewer model when the
-# user opts into it, and otherwise the operator approves or denies.
+# The auto ruleset keeps shell and destructive control-plane tools behind an
+# operator approval card.
 
 
 class _RecordingPermissionClient:
@@ -910,6 +1149,14 @@ class _RecordingPermissionClient:
 
     async def post(self, path, json=None):
         self.calls.append((path, json))
+
+        class _Response:
+            status_code = self.status_code
+
+        return _Response()
+
+    async def delete(self, path):
+        self.calls.append((path, {}))
 
         class _Response:
             status_code = self.status_code
@@ -962,11 +1209,29 @@ def test_permission_ask_surfaces_for_any_tool_action(tmp_path):
     provider, client = _armed_provider(tmp_path)
     events = _convert(
         provider,
-        "permission.v2.asked",
+        "permission.asked",
         {"id": "perm_ed", "sessionID": "ses_1", "action": "edit", "resources": ["/workspace/a.py"]},
     )
     assert isinstance(events[0], PermissionRequestEvent)
     assert client.calls == []
+
+
+def test_search_permission_card_names_the_search_action(tmp_path):
+    provider, _client = _armed_provider(tmp_path)
+    events = _convert(
+        provider,
+        "permission.asked",
+        {
+            "id": "perm_search",
+            "sessionID": "ses_1",
+            "action": "grep",
+            "resources": ["PWA_AUTH_TOKEN"],
+            "metadata": {"path": "."},
+        },
+    )
+    assert isinstance(events[0], PermissionRequestEvent)
+    assert events[0].tool_name == "content search"
+    assert events[0].tool_input == "PWA_AUTH_TOKEN"
 
 
 def test_permission_ask_works_without_a_client(tmp_path):
@@ -977,66 +1242,123 @@ def test_permission_ask_works_without_a_client(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_permission_reply_sends_v2_feedback_message(tmp_path):
+    provider, client = _armed_provider(tmp_path)
+    _convert(provider, "permission.asked", LIVE_PERMISSION)
+
+    result = await provider.send_permission_response(
+        "per_live1", False, "Do not push yet"
+    )
+
+    assert result.ok is True
+    assert client.calls == [(
+        "/api/session/ses_1/permission/per_live1/reply",
+        {"decision": "reject", "message": "Do not push yet"},
+    )]
+
+
+@pytest.mark.asyncio
 async def test_failed_permission_reply_keeps_request_for_retry(tmp_path):
     provider, client = _armed_provider(tmp_path)
     _convert(provider, "permission.asked", LIVE_PERMISSION)
     client.status_code = 500
 
-    assert provider.send_permission_response("per_live1", True) is True
-    await _drain_tasks()
+    result = await provider.send_permission_response("per_live1", True)
+    assert result.ok is False
+    assert result.retryable is True
 
     assert "per_live1" in provider._permission_requests
 
 
 @pytest.mark.asyncio
-async def test_failed_question_reply_keeps_request_for_retry(tmp_path):
+async def test_failed_form_reply_keeps_request_for_retry(tmp_path):
     provider, client = _armed_provider(tmp_path)
     _convert(
         provider,
-        "question.v2.asked",
-        {
-            "id": "q_retry",
-            "sessionID": "ses_1",
-            "questions": [{
-                "question": "Which?",
-                "header": "Pick",
-                "options": [],
-            }],
-        },
+        "form.created",
+        {"form": {
+            "id": "frm_retry", "sessionID": "ses_1", "title": "Pick",
+            "fields": [{"key": "q", "title": "Which?", "type": "string"}],
+        }},
     )
     client.status_code = 500
 
-    assert provider.send_question_response("q_retry", {"q": ["answer"]}) is True
-    await _drain_tasks()
+    result = await provider.send_question_response("frm_retry", {"q": ["answer"]})
+    assert result.ok is False
+    assert result.retryable is True
 
-    assert "q_retry" in provider._question_requests
+    assert "frm_retry" in provider._question_requests
 
 
 @pytest.mark.asyncio
-async def test_question_reply_uses_provider_question_order(tmp_path):
+async def test_form_reply_uses_field_keys_and_option_values(tmp_path):
     provider, client = _armed_provider(tmp_path)
     _convert(
         provider,
-        "question.v2.asked",
-        {
-            "id": "q_order",
-            "sessionID": "ses_1",
-            "questions": [
-                {"id": "first", "question": "First?", "options": []},
-                {"id": "second", "question": "Second?", "options": []},
+        "form.created",
+        {"form": {
+            "id": "frm_order", "sessionID": "ses_1", "title": "Order",
+            "fields": [
+                {
+                    "key": "first", "title": "First?", "type": "string",
+                    "options": [{"value": "a", "label": "A"}],
+                },
+                {
+                    "key": "second", "title": "Second?", "type": "string",
+                    "options": [{"value": "b", "label": "B"}],
+                },
             ],
-        },
+        }},
     )
 
-    assert provider.send_question_response(
-        "q_order", {"second": ["B"], "first": ["A"]}
-    ) is True
-    await _drain_tasks()
+    result = await provider.send_question_response(
+        "frm_order", {"second": ["B"], "first": ["A"]}
+    )
+    assert result.ok is True
 
     assert client.calls == [
-        ("/question/q_order/reply", {"answers": [["A"], ["B"]]})
+        (
+            "/api/session/ses_1/form/frm_order/reply",
+            {"answer": {"first": "a", "second": "b"}},
+        )
     ]
     assert provider._question_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_empty_form_reply_is_not_cancellation(tmp_path):
+    provider, client = _armed_provider(tmp_path)
+    _convert(
+        provider,
+        "form.created",
+        {"form": {
+            "id": "frm_empty", "sessionID": "ses_1", "title": "Optional",
+            "fields": [{"key": "q", "title": "Which?", "type": "string"}],
+        }},
+    )
+
+    result = await provider.send_question_response("frm_empty", {})
+    assert result.ok is True
+    assert client.calls == [(
+        "/api/session/ses_1/form/frm_empty/reply", {"answer": {}}
+    )]
+
+
+@pytest.mark.asyncio
+async def test_explicit_form_cancel_uses_delete(tmp_path):
+    provider, client = _armed_provider(tmp_path)
+    _convert(
+        provider,
+        "form.created",
+        {"form": {
+            "id": "frm_cancel", "sessionID": "ses_1", "title": "Cancel",
+            "fields": [{"key": "q", "title": "Which?", "type": "string"}],
+        }},
+    )
+
+    result = await provider.send_question_response("frm_cancel", {}, cancel=True)
+    assert result.ok is True
+    assert client.calls == [("/api/session/ses_1/form/frm_cancel", {})]
 
 
 # ── real captured stream ────────────────────────────────────────────────
@@ -1057,39 +1379,31 @@ def test_live_fixture_parses_without_raising(tmp_path):
         provider._event_to_stream(event)
 
 
-def test_a_failure_is_reported_before_idle_ends_the_turn():
-    """The turn loop stops at `session.idle`, so the error must precede it.
-
-    opencode emits the failure once before idle and repeats it afterwards with
-    a bundler stack appended. `run_streaming` breaks at idle and never sees the
-    repeat, so this ordering is what makes a failed turn report as failed.
-    """
-    kinds = [event["type"] for event in _live_events()]
-    assert "session.error" in kinds and "session.idle" in kinds
-    assert kinds.index("session.error") < kinds.index("session.idle")
+def test_v2_failure_is_a_terminal_execution_event():
+    events = _live_events()
+    assert events[0]["type"] == "server.connected"
+    failures = [
+        event["data"]["error"]
+        for event in events
+        if event["type"] == "session.execution.failed"
+    ]
+    assert failures
+    assert failures[0]["message"].startswith("Model unavailable:")
 
 
 def test_live_fixture_error_is_reported_without_a_stack(tmp_path):
-    lines = (FIXTURES / "live_events.jsonl").read_text(encoding="utf-8").splitlines()
-    errors = [
-        json.loads(line)["properties"]["error"]
-        for line in lines
-        if line.strip() and json.loads(line)["type"] == "session.error"
-    ]
-    assert errors, "fixture should contain a session.error"
-    for error in errors:
-        text = error_text(error)
+    for event in _live_events():
+        if event["type"] != "session.execution.failed":
+            continue
+        text = error_text(event["data"]["error"])
         assert "\n" not in text
         assert "$bunfs" not in text
 
 
-# ── the real streaming path (`message.part.*`) ──────────────────────────
+# ── the real OpenCode 2 streaming path ───────────────────────────────────
 #
-# `turn_with_tool.jsonl` is a full turn captured from a live opencode server
-# against a free model: reasoning, a bash tool call, assistant text, and the
-# usage totals. This is the event family opencode actually emits; the
-# `session.next.*` cases above are a forward-compatible path that this build
-# does not use for ordinary turns.
+# `turn_with_tool.jsonl` is a full V2 turn captured from a live server against
+# a free model: reasoning, a shell call, assistant text, and usage totals.
 
 
 def _replay(provider: OpencodeProvider, name: str = "turn_with_tool.jsonl"):
@@ -1142,14 +1456,14 @@ def test_real_turn_does_not_replay_the_user_prompt(tmp_path):
 def test_real_turn_reports_the_tool_call_and_its_result(tmp_path):
     events = _replay(_provider(tmp_path))
     tools = [(e.type, e.tool_name) for e in events if e.type in {"tool_use", "tool_result"}]
-    assert ("tool_use", "bash") in tools
-    assert ("tool_result", "bash") in tools
+    assert ("tool_use", "shell") in tools
+    assert ("tool_result", "shell") in tools
 
 
 def test_a_tool_call_is_announced_exactly_once(tmp_path):
     """Running updates repeat; only the first should surface as a new call."""
     events = _replay(_provider(tmp_path))
-    starts = [e for e in events if e.type == "tool_use" and e.tool_name == "bash"]
+    starts = [e for e in events if e.type == "tool_use" and e.tool_name == "shell"]
     assert len(starts) == 1
 
 
@@ -1181,7 +1495,10 @@ def test_augment_context_pct_attaches_window_occupancy(tmp_path):
         status_code = 200
 
         def json(self):
-            return {"all": [{"id": "opencode", "models": {"big-pickle": {"id": "big-pickle", "limit": {"context": 1000}}}}]}
+            return {"data": [{
+                "providerID": "opencode", "modelID": "big-pickle",
+                "limit": {"context": 1000},
+            }]}
 
     class _FakeClient:
         async def get(self, _path: str):
@@ -1195,18 +1512,51 @@ def test_augment_context_pct_attaches_window_occupancy(tmp_path):
     assert provider._usage["context_pct"] == "15.0%"
 
 
-def test_context_total_is_the_last_model_call_not_a_turn_sum(tmp_path):
-    """Each tool-loop step is its own assistant message with its own tokens.
+def test_v2_context_uses_the_last_step_not_the_cumulative_session_snapshot(
+    tmp_path,
+):
+    """V2 reports both per-step and cumulative session token snapshots.
 
-    The recorded turn has two steps (totals 8,412 and 8,429, each re-reading
-    the 8,320-token cached prompt). The context is the last step's size; a
-    turn sum (16,841) would double-count the prompt the way Claude's
-    ResultMessage.usage does.
+    The result usage keeps OpenCode's cumulative session total, while the
+    context percentage uses the latest model-call size rather than adding the
+    cached prompt from every tool-loop step.
     """
     provider = _provider(tmp_path)
     _replay(provider)
-    assert provider._usage["totalTokens"] == "8429"
-    assert provider._usage["cacheReadTokens"] == "8320"
+    assert provider._usage["totalTokens"] == "240"
+    assert provider._usage["cacheReadTokens"] == "100"
+    assert provider._context_usage["totalTokens"] == "102"
+    assert provider._context_usage["cacheReadTokens"] == "80"
+
+
+def test_recovered_turn_context_uses_the_final_assistant_call(tmp_path):
+    provider = _provider(tmp_path)
+    provider._restore_turn_metadata([
+        {"info": {"id": "user-1", "role": "user"}},
+        {
+            "info": {
+                "id": "assistant-1",
+                "role": "assistant",
+                "modelID": "model",
+                "providerID": "opencode",
+                "tokens": {"total": 100, "input": 10, "output": 5},
+            },
+            "parts": [],
+        },
+        {
+            "info": {
+                "id": "assistant-2",
+                "role": "assistant",
+                "modelID": "model",
+                "providerID": "opencode",
+                "tokens": {"total": 200, "input": 20, "output": 7},
+            },
+            "parts": [],
+        },
+    ])
+
+    assert provider._usage["totalTokens"] == "300"
+    assert provider._context_usage["totalTokens"] == "200"
 
 
 def test_augment_context_pct_is_silent_when_limit_is_missing(tmp_path):
@@ -1217,7 +1567,9 @@ def test_augment_context_pct_is_silent_when_limit_is_missing(tmp_path):
         status_code = 200
 
         def json(self):
-            return {"all": [{"id": "opencode", "models": {"big-pickle": {"id": "big-pickle"}}}]}
+            return {"data": [{
+                "providerID": "opencode", "modelID": "big-pickle",
+            }]}
 
     class _FakeClient:
         async def get(self, _path: str):
@@ -1279,7 +1631,7 @@ class _FakeServerClient:
     def stream(self, _method: str, _path: str) -> _FakeEventStream:
         return _FakeEventStream(self._lines)
 
-    async def get(self, _path: str):
+    async def get(self, _path: str, *, params=None):
         class _Accepted:
             status_code = 404
             text = ""
@@ -1293,6 +1645,10 @@ class _FakeServerClient:
         class _Accepted:
             status_code = 200
             text = ""
+
+            @staticmethod
+            def json():
+                return {"data": {"id": "msg_fixture"}}
 
         return _Accepted()
 
@@ -1515,7 +1871,7 @@ async def test_never_healthy_server_gets_startup_retries(tmp_path, monkeypatch):
 
     async def fake_health():
         if len(attempts) == 1:
-            raise TimeoutError("opencode serve did not become healthy: server stayed alive but never answered /global/health")
+            raise TimeoutError("opencode serve did not become healthy: server stayed alive but never answered /api/info")
 
     async def fake_sleep(delay: float):
         delays.append(delay)
@@ -1552,7 +1908,7 @@ def test_health_failure_reason_says_what_the_poll_saw():
     assert _health_failure_reason(None, ConnectionRefusedError("refused")) == "refused"
     assert (
         _health_failure_reason(None, None)
-        == "server stayed alive but never answered /global/health"
+        == "server stayed alive but never answered /api/info"
     )
 
 
@@ -1772,7 +2128,7 @@ def test_status_does_not_claim_authentication_without_credentials(monkeypatch):
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
     monkeypatch.setattr(mod, "_credential_count", lambda *_a, **_k: 0)
-    monkeypatch.setattr("subprocess.run", lambda *a, **k: __import__("types").SimpleNamespace(stdout="1.18.18\n"))
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: __import__("types").SimpleNamespace(stdout="opencode v2.0.16\n"))
 
     status = mod.opencode_login_status()
 
@@ -1780,6 +2136,20 @@ def test_status_does_not_claim_authentication_without_credentials(monkeypatch):
     assert status["auth"] == "free"
     assert "authenticated" not in status["detail"]
     assert "free models only" in status["detail"]
+
+
+def test_status_rejects_opencode_v1_with_an_update_message(monkeypatch):
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **k: __import__("types").SimpleNamespace(stdout="opencode v1.18.18\n"),
+    )
+    status = mod.opencode_login_status()
+    assert status["ok"] is False
+    assert status["auth"] == "unsupported_version"
+    assert status["detail"] == OPENCODE_V2_REQUIRED
 
 
 # ── chat model validation ───────────────────────────────────────────────
@@ -1853,19 +2223,26 @@ async def test_model_catalog_is_cached_between_calls(tmp_path, monkeypatch):
     calls = {"n": 0}
 
     class FakeClient:
-        async def get(self, _path):
+        async def get(self, path):
             calls["n"] += 1
-            return SimpleNamespaceResponse()
+            if path == "/api/provider":
+                return SimpleNamespaceResponse(
+                    {"data": [{"id": "opencode", "activation": "auto"}]}
+                )
+            return SimpleNamespaceResponse({"data": [{
+                "providerID": "opencode", "modelID": "m", "name": "M",
+                "enabled": True, "variants": [],
+            }]})
 
     class SimpleNamespaceResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
         def raise_for_status(self):
             return None
 
         def json(self):
-            return {
-                "connected": ["opencode"],
-                "all": [{"id": "opencode", "models": {"m": {"id": "m", "name": "M"}}}],
-            }
+            return self.payload
 
     class FakeServer:
         def __init__(self, _root):
@@ -1935,68 +2312,41 @@ async def test_an_empty_catalog_is_cached_only_briefly(tmp_path, monkeypatch):
 
 
 def test_control_plane_tools_do_not_prompt_in_the_permissive_modes():
-    """`bypass` allows every tool via the wildcard, so `ciao …` needs no
-    explicit bash pattern there. Auto mode does NOT pre-approve any `ciao …`
-    prefix (a shell-suffix bypass risk): every shell command keeps a card, and
-    users who want no cards switch to bypass."""
     for mode in ("auto", "bypass"):
-        bash = _bash_patterns(mode)
-        assert not bash["allow"], mode
-        assert not bash["ask"], mode
-    actions = _actions("bypass")
-    assert actions["*"] == "allow"
+        shell = _shell_patterns(mode)
+        assert not shell["allow"], mode
+    assert _actions("bypass")["*"] == "allow"
 
 
-def test_manual_mode_still_prompts_for_the_control_plane():
-    """"Ask for every action" has to include Ciaobot's own verbs.
-
-    `schedule` is the sharp one: an automation run is dispatched `unattended`,
-    which forces `bypass`, so a one-minute interval created without a card buys
-    unprompted arbitrary tool use every minute.
-    """
-    bash = _bash_patterns("normal")
-    assert "ciao schedule create" not in bash["allow"]
-    assert "ciao chat send" not in bash["allow"]
-    assert "ciao memory update" not in bash["allow"]
+def test_manual_mode_still_prompts_for_every_action():
+    assert _actions("normal")["*"] == "ask"
+    assert _shell_patterns("normal")["ask"] == set()
 
 
-def test_destructive_control_plane_verbs_still_prompt():
-    """Every shell command keeps a card in auto mode (no `ciao …` argv prefix
-    is pre-approved), so a destructive verb cannot be pre-approved."""
+def test_auto_gates_every_shell_command_without_argv_prefixes():
     actions = _actions("auto")
     assert actions["*"] == "allow"
-    assert actions["bash"] == "ask"
-    bash = _bash_patterns("auto")
-    assert not bash["allow"]
-    assert not bash["ask"]
+    assert actions["shell"] == "ask"
+    assert _shell_patterns("auto") == {"allow": set(), "ask": {"*"}}
 
 
 def test_plan_mode_grants_no_control_plane_allowance():
     """Plan's contract is propose-don't-act; an allow rule would hole it."""
-    assert _bash_patterns("plan")["allow"] == set()
+    assert _shell_patterns("plan")["allow"] == set()
 
 
 # ── activity-row rendering ──────────────────────────────────────────────
 
 
-def test_a_pending_tool_is_not_announced_before_its_arguments_arrive(tmp_path):
-    """Captured live: a `pending` tool part carries `input={}` and the real
-    arguments only land at `running`. Announcing at pending rendered the tool
-    with no detail beside it."""
+def test_a_projected_running_tool_is_announced_with_its_input(tmp_path):
     provider = _provider(tmp_path)
-    pending = {"part": {
-        "type": "tool", "id": "prt_1", "callID": "c1", "tool": "bash",
-        "state": {"status": "pending", "input": {}},
-    }}
-    assert provider._part_updated(pending) == []
-
     running = {"part": {
-        "type": "tool", "id": "prt_1", "callID": "c1", "tool": "bash",
+        "type": "tool", "id": "prt_1", "callID": "c1", "tool": "shell",
         "state": {"status": "running", "input": {"command": "echo hi"}},
     }}
     events = provider._part_updated(running)
     assert len(events) == 1
-    assert events[0].tool_name == "bash"
+    assert events[0].tool_name == "shell"
     assert events[0].tool_input == "echo hi"
 
 
@@ -2004,11 +2354,11 @@ def test_a_tool_with_genuinely_empty_input_is_still_announced(tmp_path):
     """Skipping pending must not swallow a tool that takes no arguments."""
     provider = _provider(tmp_path)
     events = provider._part_updated({"part": {
-        "type": "tool", "id": "prt_2", "callID": "c2", "tool": "list",
+        "type": "tool", "id": "prt_2", "callID": "c2", "tool": "read",
         "state": {"status": "running", "input": {}},
     }})
     assert len(events) == 1
-    assert events[0].tool_name == "list"
+    assert events[0].tool_name == "read"
     assert events[0].tool_input == ""
 
 
@@ -2030,11 +2380,11 @@ def test_permission_events_match_the_house_convention(tmp_path):
     provider._current_mode = "normal"
     events = _convert(provider, "permission.asked", LIVE_PERMISSION)
     assert events[0].type == "system"
-    assert events[0].message == "Approve use of bash?"
+    assert events[0].message == "Approve use of shell?"
 
 
 def test_dollar_brace_is_not_opencode_interpolation_syntax():
-    """Verified against opencode 1.18.x, whose config substitution is
+    """OpenCode's config substitution is
     ``/\\{env:([^}]+)\\}/g``: ``${VAR}`` is passed through verbatim. That is how
     a literal ``${NOTION_TOKEN}`` reached the Notion MCP server as a bearer
     token and came back 401.
@@ -2156,31 +2506,79 @@ def test_an_unchanged_provider_set_stays_quiet(caplog):
 
 
 # ── model resolution ────────────────────────────────────────────────────
-# opencode addresses models as providerID/modelID. A qualified id passes
-# through; an unqualified one is sent as-is under an empty provider, letting
-# opencode apply its own default.
+# opencode addresses models as providerID/modelID. Qualified ids pass through;
+# a bare id is resolved against the V2 catalog and an unknown id is rejected.
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("requested", "expected"),
     [
-        # Already qualified: passes straight through.
         ("anthropic/claude-sonnet-4-6", ("anthropic", "claude-sonnet-4-6")),
-        # An unqualified id is sent as-is under an empty provider.
-        ("sonnet", ("", "sonnet")),
-        ("  Sonnet  ", ("", "Sonnet")),
-        ("fable", ("", "fable")),
+        ("sonnet", ("anthropic", "sonnet")),
+        ("  sonnet  ", ("anthropic", "sonnet")),
         ("", ("", "")),
     ],
 )
-async def test_resolve_model_passes_through_unqualified_ids(
+async def test_resolve_model_resolves_unqualified_ids(
     tmp_path, requested, expected
 ):
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [
+                {"providerID": "anthropic", "modelID": "sonnet", "enabled": True}
+            ]}
+
     class _Client:
         @staticmethod
-        async def get(path: str) -> None:
-            raise AssertionError(f"catalog should not be consulted for {path}")
+        async def get(path: str):
+            assert path == "/api/model"
+            return _Response()
 
     provider = _provider(tmp_path)
     assert await provider._resolve_model(_Client(), requested) == expected
+
+
+@pytest.mark.asyncio
+async def test_resolve_model_rejects_an_unknown_bare_id(tmp_path):
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": []}
+
+    class _Client:
+        @staticmethod
+        async def get(_path: str):
+            return _Response()
+
+    with pytest.raises(ValueError, match="was not found"):
+        await _provider(tmp_path)._resolve_model(_Client(), "missing")
+
+
+def test_extra_env_overlay_does_not_hide_an_exported_override(tmp_path, monkeypatch):
+    """`extra_env` is an overlay, not a replacement environment.
+
+    `_ensure_server` passes `AgentRequest.extra_env`, which never carries
+    `CIAO_OPENCODE_BIN`; reading only that overlay made the documented
+    override dead on every chat turn while the error still named it.
+    """
+    binary = tmp_path / "opencode"
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("CIAO_OPENCODE_BIN", str(binary))
+
+    # An unrelated per-request overlay must not mask the exported override.
+    assert resolve_opencode_binary({"OPENCODE_CONFIG": "/x"}) == str(binary.resolve())
+    # No overlay at all still reads the process environment.
+    assert resolve_opencode_binary(None) == str(binary.resolve())
+
+    # A per-request override still wins over the exported one.
+    other = tmp_path / "opencode-req"
+    other.write_text("#!/bin/sh\n")
+    assert resolve_opencode_binary(
+        {"CIAO_OPENCODE_BIN": str(other)}
+    ) == str(other.resolve())

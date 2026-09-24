@@ -1,4 +1,4 @@
-"""Regression coverage for native question response WebSocket messages."""
+"""V2-only regression coverage for native question response WebSockets."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from starlette.applications import Starlette
 from starlette.routing import WebSocketRoute
 from starlette.testclient import TestClient
 
+from ciao.providers.opencode import QuestionResponseResult
 from ciao.web.routes_chat import ws_chat
 
 
@@ -21,9 +22,9 @@ class _Manager:
     def get_active_stream(self, _chat_id: str):
         return None
 
-    async def respond_question_async(self, _chat_id: str, **payload):
+    async def respond_question(self, _chat_id: str, **payload):
         self.calls.append(payload)
-        return True
+        return QuestionResponseResult(True)
 
 
 def _app(manager: _Manager) -> Starlette:
@@ -33,28 +34,33 @@ def _app(manager: _Manager) -> Starlette:
     return app
 
 
-def test_question_response_accepts_legacy_reply_action() -> None:
+def test_question_response_forwards_the_v2_reply_shape() -> None:
     manager = _Manager()
     with TestClient(_app(manager)).websocket_connect("/ws/chat/chat-1") as ws:
         ws.send_json({
             "type": "question_response",
             "request_id": "form-1",
             "action": "reply",
-            "answers": {"choice": ["yes"]},
+            "answers": {"choice": ["yes"], "count": [3]},
         })
         result = ws.receive_json()
 
-    assert result["ok"] is True
-    assert result["state"] == "answered"
+    assert result == {
+        "type": "question_response_result",
+        "request_id": "form-1",
+        "ok": True,
+        "state": "answered",
+        "error": "",
+        "retryable": True,
+    }
     assert manager.calls == [{
         "request_id": "form-1",
-        "answers": {"choice": ["yes"]},
-        "cancel": False,
-        "submitted": True,
+        "answers": {"choice": ["yes"], "count": ["3"]},
+        "action": "reply",
     }]
 
 
-def test_question_response_accepts_legacy_cancel_action() -> None:
+def test_question_response_forwards_the_v2_cancel_shape() -> None:
     manager = _Manager()
     with TestClient(_app(manager)).websocket_connect("/ws/chat/chat-1") as ws:
         ws.send_json({
@@ -67,5 +73,24 @@ def test_question_response_accepts_legacy_cancel_action() -> None:
 
     assert result["ok"] is True
     assert result["state"] == "cancelled"
-    assert manager.calls[0]["cancel"] is True
-    assert manager.calls[0]["submitted"] is False
+    assert manager.calls == [{
+        "request_id": "form-1",
+        "answers": {},
+        "action": "cancel",
+    }]
+
+
+def test_question_response_rejects_a_missing_or_unknown_action() -> None:
+    manager = _Manager()
+    with TestClient(_app(manager)).websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_json({
+            "type": "question_response",
+            "request_id": "form-1",
+            "answers": {"choice": ["yes"]},
+        })
+        result = ws.receive_json()
+
+    assert result["ok"] is False
+    assert result["state"] == "rejected"
+    assert result["retryable"] is False
+    assert manager.calls == []
