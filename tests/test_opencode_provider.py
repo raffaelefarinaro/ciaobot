@@ -720,6 +720,35 @@ def test_collab_tree_counts_tolerate_junk():
     assert opencode_collab_tree_counts([None, {"info": {}}, {"messages": "nope"}]) == (0, True)
 
 
+@pytest.mark.asyncio
+async def test_live_collab_tree_preserves_children_when_activity_lookup_fails(
+    tmp_path, monkeypatch,
+):
+    provider = _provider(tmp_path)
+    provider._client = object()  # type: ignore[assignment]
+    provider._session_id = "ses_parent"
+
+    async def children(_client, _parent_id):
+        return [{"id": "ses_child", "parentID": "ses_parent"}]
+
+    async def active(_client):
+        raise RuntimeError("activity endpoint unavailable")
+
+    async def messages(_client, _child_id):
+        return []
+
+    monkeypatch.setattr("ciao.providers.opencode._read_v2_children", children)
+    monkeypatch.setattr("ciao.providers.opencode._read_active_sessions", active)
+    monkeypatch.setattr("ciao.providers.opencode._read_v2_messages", messages)
+
+    tree = await provider.read_live_collab_tree()
+
+    assert tree[0]["info"]["id"] == "ses_child"
+    assert tree[0]["active"] is None
+    # Unknown activity remains conservative instead of looking settled.
+    assert opencode_collab_tree_counts(tree) == (1, True)
+
+
 # ── event normalization ─────────────────────────────────────────────────
 
 
@@ -1433,6 +1462,36 @@ def test_v2_context_uses_the_last_step_not_the_cumulative_session_snapshot(
     assert provider._usage["cacheReadTokens"] == "100"
     assert provider._context_usage["totalTokens"] == "102"
     assert provider._context_usage["cacheReadTokens"] == "80"
+
+
+def test_recovered_turn_context_uses_the_final_assistant_call(tmp_path):
+    provider = _provider(tmp_path)
+    provider._restore_turn_metadata([
+        {"info": {"id": "user-1", "role": "user"}},
+        {
+            "info": {
+                "id": "assistant-1",
+                "role": "assistant",
+                "modelID": "model",
+                "providerID": "opencode",
+                "tokens": {"total": 100, "input": 10, "output": 5},
+            },
+            "parts": [],
+        },
+        {
+            "info": {
+                "id": "assistant-2",
+                "role": "assistant",
+                "modelID": "model",
+                "providerID": "opencode",
+                "tokens": {"total": 200, "input": 20, "output": 7},
+            },
+            "parts": [],
+        },
+    ])
+
+    assert provider._usage["totalTokens"] == "300"
+    assert provider._context_usage["totalTokens"] == "200"
 
 
 def test_augment_context_pct_is_silent_when_limit_is_missing(tmp_path):

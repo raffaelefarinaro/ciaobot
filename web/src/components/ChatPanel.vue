@@ -2225,7 +2225,7 @@ function questionAnswerMap(limit = activeQuestions.value.length): Record<string,
 }
 
 function isQuestionActive(index: number, question: ActiveQuestion): boolean {
-  return questionIsActive(question, questionAnswerMap(index))
+  return questionIsActive(question, questionAnswerMap(index), activeQuestions.value)
 }
 
 // The card is only on screen when it wins the dock, or when the dock strip is
@@ -2353,7 +2353,7 @@ const allQuestionsAnswered = computed(() => {
   const qs = activeQuestions.value
   if (!qs.length) return false
   const answers = questionAnswerMap()
-  const activeRequired = qs.filter(q => questionIsActive(q, answers))
+  const activeRequired = qs.filter(q => questionIsActive(q, answers, qs))
     .filter(q => q.required !== false)
   return activeRequired.every((q) => {
     const values = answers[q.id] || []

@@ -83,6 +83,7 @@ export function questionsSignature(qs: ActiveQuestion[] | undefined): string {
 export function questionIsActive(
   question: ActiveQuestion,
   answers: Record<string, string[]>,
+  allQuestions: ActiveQuestion[] = [],
 ): boolean {
   for (const condition of question.when || []) {
     const values = answers[condition.key]
@@ -90,7 +91,11 @@ export function questionIsActive(
     const expected = condition.value
     const expectedText = typeof expected === 'string' ? expected : String(expected)
     const includes = values.includes(expectedText)
-    const equal = question.type === 'multiselect'
+    const controller = allQuestions.find(candidate => candidate.id === condition.key)
+    const controllerIsMulti = controller
+      ? controller.multiSelect || controller.type === 'multiselect' || controller.type === 'multi_select'
+      : question.type === 'multiselect' || question.type === 'multi_select'
+    const equal = controllerIsMulti
       ? includes
       : values.length === 1 && values[0] === expectedText
     if ((condition.op === 'eq' && !equal) || (condition.op === 'neq' && equal)) {

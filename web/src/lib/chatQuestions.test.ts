@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 import {
   parseCapabilityQuestion,
   parseQuestions,
+  questionIsActive,
   questionsSignature,
   type ActiveQuestion,
 } from './chatQuestions'
@@ -71,6 +72,23 @@ describe('parseQuestions', () => {
       questions: [{ question: 'q', isOther: false }],
     }))
     expect(noOptions[0].allowOther).toBe(true)
+  })
+})
+
+describe('questionIsActive', () => {
+  test('uses the controlling multiselect field for when conditions', () => {
+    const controller: ActiveQuestion = {
+      id: 'controller', question: 'Pick', header: 'Pick', multiSelect: true,
+      allowOther: false, isSecret: false, requestId: '', type: 'multiselect', options: [],
+    }
+    const dependent: ActiveQuestion = {
+      id: 'dependent', question: 'Follow-up', header: '', multiSelect: false,
+      allowOther: false, isSecret: false, requestId: '', type: 'string', options: [],
+      when: [{ key: 'controller', op: 'eq', value: 'yes' }],
+    }
+
+    expect(questionIsActive(dependent, { controller: ['yes', 'also'] }, [controller, dependent])).toBe(true)
+    expect(questionIsActive(dependent, { controller: ['no', 'also'] }, [controller, dependent])).toBe(false)
   })
 })
 

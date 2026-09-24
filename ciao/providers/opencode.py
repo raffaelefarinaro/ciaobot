@@ -1299,14 +1299,22 @@ class OpencodeProvider(BaseSDKProvider):
             except (httpx.HTTPError, TypeError, ValueError):
                 return []
 
-        try:
-            children, active_ids = await asyncio.gather(
-                _read_v2_children(client, self._session_id),
-                _read_active_sessions(client),
-            )
-        except (httpx.HTTPError, TypeError, ValueError):
+        children_result, active_result = await asyncio.gather(
+            _read_v2_children(client, self._session_id),
+            _read_active_sessions(client),
+            return_exceptions=True,
+        )
+        if isinstance(children_result, Exception):
             return []
-        children = [child for child in children if child.get("id")]
+        # A transient failure of the auxiliary activity map must not discard
+        # successfully fetched children. ``None`` means activity is unknown;
+        # the conservative counter will fall back to message timing.
+        active_ids = (
+            None
+            if isinstance(active_result, Exception)
+            else active_result
+        )
+        children = [child for child in children_result if child.get("id")]
         histories = await asyncio.gather(
             *(_child_messages(str(child["id"])) for child in children)
         )
@@ -1314,7 +1322,11 @@ class OpencodeProvider(BaseSDKProvider):
             {
                 "info": child,
                 "messages": messages,
-                "active": str(child["id"]) in active_ids,
+                "active": (
+                    None
+                    if active_ids is None
+                    else str(child["id"]) in active_ids
+                ),
             }
             for child, messages in zip(children, histories)
         ]
@@ -1992,6 +2004,7 @@ class OpencodeProvider(BaseSDKProvider):
     def _restore_turn_metadata(self, messages: list[Any]) -> None:
         """Restore model, usage, cost, and assistant error after SSE loss."""
         total_tokens: dict[str, int] = {}
+        last_context_usage: dict[str, str] = {}
         total_cost = 0.0
         for message in self._turn_scope(messages):
             info = message.get("info")
@@ -2010,7 +2023,10 @@ class OpencodeProvider(BaseSDKProvider):
                 )
             tokens = info.get("tokens")
             if isinstance(tokens, Mapping):
-                for key, value in usage_payload(tokens).items():
+                message_usage = usage_payload(tokens)
+                if message_usage:
+                    last_context_usage = message_usage
+                for key, value in message_usage.items():
                     try:
                         total_tokens[key] = total_tokens.get(key, 0) + int(value)
                     except (TypeError, ValueError):
@@ -2023,6 +2039,8 @@ class OpencodeProvider(BaseSDKProvider):
                 self._poll_error = self._poll_error or error_text(message_error)
         if total_tokens:
             self._usage = {key: str(value) for key, value in total_tokens.items()}
+        if last_context_usage:
+            self._context_usage = last_context_usage
         if total_cost:
             self._cost = total_cost
 
