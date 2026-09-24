@@ -117,6 +117,32 @@ One-time GitHub setup for a fresh clone or repo admin:
 
 That sets `develop` as the default branch and enables pull-request + CI requirements on `develop` and `main`.
 
+### GitHub code scanning
+
+CodeQL runs through GitHub's repository-level default setup and is independent of
+Ciao CI. GitHub also offers an optional **AI Scan for pull requests** workflow;
+that workflow is GitHub-managed (`dynamic/agents/github-advanced-security`) and
+its model is injected by GitHub, so there is no model pin in `.github/workflows`
+to update in this repository. If a run reports `The requested model is not
+supported`, check the repository setting before changing application code:
+
+```bash
+gh api repos/raffaelefarinaro/ciaobot/code-scanning/ai-scan
+```
+
+If the owner chooses to remove the failing advisory invocation (while keeping
+CodeQL enabled), disable it explicitly:
+
+```bash
+gh api repos/raffaelefarinaro/ciaobot/code-scanning/ai-scan \
+  --method PATCH -f pr_scan=disabled
+```
+
+The setting is reversible. Re-enable AI Scan only after GitHub/Copilot reports
+that its configured model is supported; do not make Ciao CI pass or fail based
+on this advisory workflow. The GitHub Settings → Code security → Code scanning
+page provides the same toggle when the REST API is unavailable.
+
 ## Frontend build
 
 Node 22 is the supported version (`.nvmrc`, and what CI uses). The floor is
