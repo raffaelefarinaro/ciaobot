@@ -4,7 +4,7 @@
       v-if="packageUpdating"
       :version="packageStatus?.latest_version"
     />
-    <PaneHeader page-tag="settings" @open-sidebar="emit('open-sidebar')" />
+    <PaneHeader page-tag="Settings" @open-sidebar="emit('open-sidebar')" />
     <div class="pane-body">
 
       <!-- HOME TAB -->

@@ -2,10 +2,10 @@
   <div class="schedule-panel">
     <PaneHeader
       v-if="!schedule && !showNew"
-      page-tag="automations"
+      page-tag="Automations"
       @open-sidebar="emit('open-sidebar')"
     />
-    <PaneHeader v-else page-tag="automations" @open-sidebar="emit('open-sidebar')">
+    <PaneHeader v-else page-tag="Automations" @open-sidebar="emit('open-sidebar')">
       <template #title>
         <div class="header-left">
           <button class="btn-icon close-btn desktop-only" @click="closeSchedule" title="Close" aria-label="Close automation">&times;</button>

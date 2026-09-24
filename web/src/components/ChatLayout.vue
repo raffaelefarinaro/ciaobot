@@ -47,7 +47,7 @@
           />
           <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-            <PaneHeader page-tag="today" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader page-tag="Today" @open-sidebar="sidebarCollapsed = false" />
             <div class="home-boot-body">
               <!-- Skeleton of the home screen this will become (lane header
                    with the face+status row inside it, housekeeping tile, chat
@@ -80,13 +80,7 @@
                homepage behind it after closing a chat would just duplicate the
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-            <PaneHeader page-tag="today" @open-sidebar="sidebarCollapsed = false">
-              <!-- Where am I: the view. The workspace is named once, in the sidebar
-                 scope. Omitted on phones, where the header
-                   keeps its single row for the menu button and the wordmark. -->
-              <template v-if="!isMobile" #title>
-                    <span class="pane-crumbs"><span class="pane-crumb-view">Today</span></span>
-              </template>
+            <PaneHeader page-tag="Today" @open-sidebar="sidebarCollapsed = false">
               <template v-if="!isMobile" #actions>
                 <HostStatusPill />
               </template>
@@ -187,7 +181,7 @@
         />
         <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-          <PaneHeader page-tag="today" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader page-tag="Today" @open-sidebar="sidebarCollapsed = false" />
           <div class="home-boot-body">
             <!-- Same skeleton as the split-view copy above; only one is ever
                  mounted, so the two must stay identical. -->
@@ -218,13 +212,7 @@
              homepage behind it after closing a chat would just duplicate the
              same list. Hide the empty-state whenever the mobile sidebar is open. -->
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-          <PaneHeader page-tag="today" @open-sidebar="sidebarCollapsed = false">
-            <!-- Where am I: the view. The workspace is named once, in the sidebar
-                 scope. Omitted on phones, where the header
-                 keeps its single row for the menu button and the wordmark. -->
-            <template v-if="!isMobile" #title>
-                    <span class="pane-crumbs"><span class="pane-crumb-view">Today</span></span>
-            </template>
+          <PaneHeader page-tag="Today" @open-sidebar="sidebarCollapsed = false">
             <template v-if="!isMobile" #actions>
               <HostStatusPill />
             </template>
@@ -1393,6 +1381,10 @@ onBeforeUnmount(() => {
   align-items: stretch;
   justify-content: flex-start;
   padding-top: var(--space-2);
+  /* The workbench carries the page gutter itself (--page-gutter), so the
+     shell only keeps the device safe-area insets. */
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
   text-align: left;
 }
 
@@ -1527,13 +1519,13 @@ onBeforeUnmount(() => {
 .home-workbench {
   box-sizing: border-box;
   width: 100%;
-  max-width: 1320px;
+  max-width: var(--page-max);
   margin: 0 auto;
-  padding: 48px clamp(0px, 2.2vw, 26px) 18px;
+  padding: 48px var(--page-gutter) 18px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 286px;
+  grid-template-columns: minmax(0, 1fr) var(--page-rail);
   align-items: start;
-  gap: 46px;
+  gap: 48px;
 }
 
 .home-main {
@@ -1563,7 +1555,7 @@ onBeforeUnmount(() => {
   .home-workbench {
     grid-template-columns: minmax(0, 1fr);
     gap: 25px;
-    padding: var(--space-5) 0 var(--space-4);
+    padding: var(--space-5) var(--page-gutter) var(--space-4);
   }
 
   .home-rail {
@@ -1575,27 +1567,6 @@ onBeforeUnmount(() => {
   .home-workbench {
     padding-top: var(--space-3);
   }
-}
-
-/* Today's header crumbs: workspace / view, prototype A's topbar context. */
-.pane-crumbs {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding-left: var(--space-3);
-  color: var(--fg2);
-  font-size: var(--text-base);
-}
-
-.pane-crumb-view {
-  flex: none;
-  color: var(--fg);
-  font-weight: 650;
-}
-
-.empty-shell :deep(.header-actions) {
-  padding-right: var(--space-3);
 }
 
 .sidebar-backdrop {

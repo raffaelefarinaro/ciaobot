@@ -1,6 +1,6 @@
 <template>
   <div class="memory-map">
-    <PaneHeader page-tag="memory" @open-sidebar="emit('open-sidebar')" />
+    <PaneHeader page-tag="Memory" @open-sidebar="emit('open-sidebar')" />
 
     <section class="memory-mode-intro" aria-labelledby="memory-mode-title">
       <div class="memory-mode-copy">

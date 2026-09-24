@@ -363,6 +363,15 @@ watch(showStartup, (show) => {
   --space-4: 16px;
   --space-5: 24px;
   --space-6: 32px;
+  /* Page grid shared by every pane (header, body, rail, composer):
+     content is capped at --page-max, centred, with --page-gutter inside it,
+     and an optional --page-rail column on the right. --page-inset is the
+     resulting horizontal padding for a full-width row (e.g. a header) so its
+     edges land on the content's edges. */
+  --page-max: 1180px;
+  --page-gutter: 32px;
+  --page-rail: 280px;
+  --page-inset: max(var(--page-gutter), calc((100% - var(--page-max)) / 2 + var(--page-gutter)));
   /* Safe area passthrough. In browser mode we zero out --safe-bottom because
      the browser's own bottom UI (Safari toolbar) already occupies that zone;
      adding our own safe-inset on top creates dead space below the input bar.
@@ -636,6 +645,84 @@ a:not(.btn-small, .btn-primary, .btn-chip, .btn-icon):hover {
    the border-box for taps; negative margin keeps flex/grid spacing tight.
    ::before paints the visible hover surface at 30px so highlights don't bleed
    into the expanded hit target (matches sidebar nav-item icons). */
+/* ── Page grid ─────────────────────────────────────────────────────────
+   One layout for every pane body: a main column and an optional right rail,
+   capped at --page-max and centred, so switching pages never moves the
+   content's edges. Collapses to one column when the pane (not the window)
+   is narrow; chat-pane is the container ChatLayout declares on .chat-main. */
+.page-grid {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto;
+  padding-inline: var(--page-gutter);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--page-rail);
+  align-items: start;
+  gap: 48px;
+}
+.page-grid--single { grid-template-columns: minmax(0, 1fr); }
+.page-main { min-width: 0; }
+.page-rail {
+  position: sticky;
+  top: var(--space-4);
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+@container chat-pane (max-width: 940px) {
+  .page-grid { grid-template-columns: minmax(0, 1fr); gap: var(--space-6); }
+  .page-rail { position: static; }
+}
+@media (max-width: 700px) {
+  :root { --page-gutter: 16px; }
+}
+
+/* Rail vocabulary: a small heading, hairline key/value rows, hairline link
+   rows, and a muted note. Shared so every page's rail reads the same. */
+.rail-title {
+  margin: 0 0 10px;
+  color: var(--fg);
+  font-size: calc(15px * var(--font-scale));
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.rail-title + .rail-kvs, .rail-title + .rail-list { margin-top: 0; }
+.rail-section + .rail-section { margin-top: var(--space-5); }
+.rail-label { margin: 0 0 4px; color: var(--fg3); font-size: var(--text-sm); }
+.rail-note { margin: 8px 0 0; color: var(--fg3); font-size: var(--text-sm); line-height: 1.45; }
+.rail-kvs, .rail-list { border-top: 1px solid var(--border); }
+.rail-kv {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 36px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg2);
+}
+.rail-kv strong { color: var(--fg); font-weight: 600; text-align: right; }
+.rail-kv .rail-attention { color: var(--warning); }
+.rail-item {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: var(--touch);
+  justify-content: center;
+  padding: 6px 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.rail-item:hover { color: var(--accent); }
+.rail-item small { color: var(--fg3); font-size: var(--text-xs); }
+.rail-item .rail-attention { color: var(--warning); }
+
 .touch-hit {
   box-sizing: content-box;
   --touch-hit-visual: 30px;

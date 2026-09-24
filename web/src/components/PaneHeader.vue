@@ -1,5 +1,11 @@
 <template>
-  <header class="pane-header" :class="{ 'pane-header--no-center': !hasCenter }">
+  <header
+    class="pane-header"
+    :class="{
+      'pane-header--no-center': !hasCenter,
+      'pane-header--tag-title': !hasTitle && !!pageTag,
+    }"
+  >
     <button class="header-hamburger touch-hit" aria-label="Open sidebar" @click="$emit('open-sidebar')">
       <!-- 18px at stroke 2, the size and weight every other icon in this header
            and in the sidebar uses (see the .btn-icon block below). At 22px and
@@ -75,7 +81,10 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   align-items: center;
   /* Match the sidebar header: 44px controls + 8px vertical padding + border. */
   height: calc(61px + var(--safe-top));
-  padding: calc(var(--space-2) + var(--safe-top)) var(--space-2) var(--space-2);
+  /* Horizontal padding follows the page grid (App.vue --page-*), so the title
+     starts where the page content starts and the actions end where its rail
+     ends, instead of both hugging the pane edges. */
+  padding: calc(var(--space-2) + var(--safe-top)) var(--page-inset) var(--space-2);
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   column-gap: var(--space-2);
@@ -148,28 +157,36 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   .header-center--with-title :deep(.brand) { display: none; }
 }
 
-/* The expanded sidebar already carries the product mark. On a wide pane,
-   trade the duplicate centre wordmark for the current destination; on narrow
-   panes the mark remains the compact reload affordance described above. */
-@container chat-pane (min-width: 900px) {
+/* The expanded sidebar carries the product mark, so on a pane wide enough for
+   a real title the header drops its centred wordmark. A view with no title of
+   its own (Today, Settings, Automations, Memory) shows its page tag as that
+   title, on the left, where every other page's title sits - not as a pill in
+   the middle of the header. */
+@container chat-pane (min-width: 600px) {
   .header-center :deep(.brand) { display: none; }
-  .header-center:not(.header-center--with-title) .page-tag {
+  .pane-header--tag-title {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .pane-header--tag-title .header-center {
+    grid-column: 1;
+    justify-self: start;
+  }
+  .pane-header--tag-title .header-trail {
+    grid-column: 2;
+  }
+  .pane-header--tag-title .page-tag {
     position: static;
     width: auto;
     height: auto;
     margin: 0;
-    padding: var(--space-1) var(--space-2);
-    overflow: visible;
+    overflow: hidden;
     clip: auto;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-pill);
-    background: var(--bg2);
     color: var(--fg);
     font-family: var(--font-sans);
-    font-size: var(--text-sm);
+    font-size: var(--text-lg);
     font-weight: 650;
-    letter-spacing: 0;
-    text-transform: none;
+    letter-spacing: -0.01em;
+    text-overflow: ellipsis;
   }
 }
 

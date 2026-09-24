@@ -2730,9 +2730,7 @@ async function confirmDeleteChat(chatId: string) {
   margin: 4px 0 0;
   padding: 6px 10px 5px;
   color: var(--fg3);
-  font: 600 10px/1.2 var(--font-mono);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font: 600 var(--text-xs)/1.2 var(--font-sans);
 }
 
 /* Flat rows rather than a bordered box per project: the tree keeps its
