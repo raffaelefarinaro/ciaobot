@@ -273,41 +273,6 @@ async def test_a_parked_message_queue_does_not_pin_the_provider(
     assert manager._chats[chat_id].pending_queue == [{"id": "e1", "text": "later"}]
 
 
-@pytest.mark.parametrize("bad", ["0", "-5", "not-a-number", "nan", "inf", "-inf"])
-def test_a_bad_env_override_falls_back_to_the_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad: str
-) -> None:
-    """Each of these breaks the sweep in its own way, so none is accepted.
-
-    `0` busy-loops it; `nan` makes the sleep timer never come due because every
-    comparison against it is False; `inf` as the timeout means nothing is ever
-    old enough to reclaim. `float()` accepts the last three happily, so a
-    `<= 0` test alone would let them through.
-    """
-    from ciao.web.project_chats import (
-        _PROVIDER_IDLE_TIMEOUT_SECONDS,
-        _PROVIDER_REAP_INTERVAL_SECONDS,
-    )
-
-    monkeypatch.setenv("CIAO_PROVIDER_IDLE_TIMEOUT", bad)
-    monkeypatch.setenv("CIAO_PROVIDER_REAP_INTERVAL", bad)
-    manager = _make_manager(tmp_path)
-
-    assert manager._provider_idle_timeout == _PROVIDER_IDLE_TIMEOUT_SECONDS
-    assert manager._provider_reap_interval == _PROVIDER_REAP_INTERVAL_SECONDS
-
-
-def test_a_valid_env_override_is_honoured(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("CIAO_PROVIDER_IDLE_TIMEOUT", "30")
-    monkeypatch.setenv("CIAO_PROVIDER_REAP_INTERVAL", "5")
-    manager = _make_manager(tmp_path)
-
-    assert manager._provider_idle_timeout == 30.0
-    assert manager._provider_reap_interval == 5.0
-
-
 class _FailingProvider(_StubProvider):
     """A provider whose teardown raises — an opencode server that won't die."""
 

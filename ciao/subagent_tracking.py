@@ -160,6 +160,13 @@ class SubagentInfo:
 
 
 @dataclass
+class _NotificationWindow:
+    state: str
+    task_id: str
+    kind: str
+
+
+@dataclass
 class SessionSubagentState:
     """Aggregate subagent state parsed from a parent session JSONL."""
 
@@ -175,6 +182,11 @@ class SessionSubagentState:
     # notification as a prompt, the read task was cancelled, and the run
     # archived on an interim "Waiting on X" message).
     notification_pending: bool = False
+    # True when the most recent completion notification was followed by an
+    # assistant record carrying prose: the CLI resumed the parent on its own and
+    # the parent has already written about the result, so the synthesis nudge
+    # would only produce a redundant "that was the report above" turn.
+    notification_answered: bool = False
 
     @property
     def awaiting_user_answer(self) -> bool:
@@ -449,6 +461,15 @@ def _normalize_agent_id(agent_id: str) -> str:
     return agent_id.removeprefix("agent-")
 
 
+def _notification_identity(
+    state: SessionSubagentState, content: str
+) -> tuple[str, str]:
+    fields = _notification_fields(content) or {}
+    task_id = _normalize_agent_id(fields.get("task-id", ""))
+    info = state.subagents.get(task_id)
+    return task_id, info.kind if info is not None else "agent"
+
+
 def parse_session_subagents(path: Path) -> SessionSubagentState:
     """Parse subagent dispatch/completion state out of a session JSONL."""
     state = SessionSubagentState()
@@ -456,23 +477,13 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
     # when the tool_result record lands.
     dispatch_inputs: dict[str, dict[str, str]] = {}
     user_idx = 0
-    # The CLI's prompt queue, in order. Each entry is one of:
-    #   None         — an ordinary prompt (no synthesis-nudge window)
-    #   "queued"     — a completion notification still queued (window open)
-    #   "dequeued"   — a notification taken off the queue, not yet seen as a
-    #                  user record (window open)
-    #   "surfaced"   — a notification present as a user record, awaiting an
-    #                  assistant reply (window open)
-    # Dequeues are matched to the front of this queue so a dequeue of an
-    # ordinary prompt never claims a notification still queued behind it.
-    # "dequeued" and "surfaced" are separate states because one notification
-    # normally passes through both: it is dequeued, and then the very same
-    # notification lands again as a user record. Collapsing them made that one
-    # notification occupy two entries, so the single assistant reply that
-    # followed closed only one and `notification_pending` stayed true for the
-    # rest of the session — which pins `held_ticks` in the nudge poller and
-    # makes the next real notification start out already past its grace.
-    queue: list[str | None] = []
+    # The CLI's prompt queue, in order. None is an ordinary prompt; a
+    # _NotificationWindow is a completion notification still being processed.
+    queue: list[_NotificationWindow | None] = []
+    agent_notification_answers: dict[str, bool] = {}
+    latest_agent_turn: int | None = None
+    current_agent_ids: set[str] = set()
+    carry_agent_ids: list[str] = []
 
     try:
         fh = path.open(encoding="utf-8")
@@ -507,8 +518,12 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     # pending until an assistant reply closes it.
                     if queue:
                         front = queue.pop(0)
-                        if front == "queued":
-                            queue.append("dequeued")
+                        if (
+                            isinstance(front, _NotificationWindow)
+                            and front.state == "queued"
+                        ):
+                            front.state = "dequeued"
+                            queue.append(front)
                     continue
                 else:
                     content = record.get("content")
@@ -517,25 +532,62 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                         if isinstance(content, str)
                         else ""
                     )
-                    if normalized_content and _notification_fields(normalized_content):
+                    fields = (
+                        _notification_fields(normalized_content)
+                        if normalized_content
+                        else None
+                    )
+                    if fields is not None:
                         _apply_notification(state, normalized_content)
-                        queue.append("queued")
+                        task_id, kind = _notification_identity(
+                            state, normalized_content
+                        )
+                        queue.append(_NotificationWindow("queued", task_id, kind))
+                        if kind == "agent" and task_id:
+                            agent_notification_answers[task_id] = False
+                            if task_id in carry_agent_ids:
+                                carry_agent_ids.remove(task_id)
+                            info = state.subagents.get(task_id)
+                            if info is None or info.is_async:
+                                current_agent_ids.add(task_id)
                     else:
                         queue.append(None)
                 continue
 
             if rtype == "assistant":
-                # Only an assistant reply to a dequeued/surfaced notification
-                # closes its window. A normal parent record after enqueue is
-                # not evidence that the completion notification was handled.
+                closed_window: _NotificationWindow | None = None
                 for index, entry in enumerate(queue):
-                    if entry in ("dequeued", "surfaced"):
+                    if (
+                        isinstance(entry, _NotificationWindow)
+                        and entry.state in ("dequeued", "surfaced")
+                    ):
+                        closed_window = entry
                         queue.pop(index)
                         break
                 message = record.get("message")
                 assistant_text = _text_content(message)
+                terminal_prose = bool(assistant_text.strip()) and _is_final_answer_record(
+                    record
+                )
                 if assistant_text.strip():
                     state.last_assistant_text = assistant_text
+                if closed_window is not None:
+                    if closed_window.kind == "agent" and closed_window.task_id:
+                        if terminal_prose:
+                            for carry_id in [
+                                *carry_agent_ids,
+                                closed_window.task_id,
+                            ]:
+                                agent_notification_answers[carry_id] = True
+                            carry_agent_ids.clear()
+                        elif closed_window.task_id not in carry_agent_ids:
+                            carry_agent_ids.append(closed_window.task_id)
+                elif terminal_prose and carry_agent_ids and not any(
+                    isinstance(entry, _NotificationWindow) for entry in queue
+                ):
+                    for carry_id in carry_agent_ids:
+                        agent_notification_answers[carry_id] = True
+                    carry_agent_ids.clear()
                 blocks = message.get("content") if isinstance(message, dict) else None
                 if not isinstance(blocks, list):
                     continue
@@ -590,6 +642,7 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 status = "running" if is_async else "completed"
                 if existing is not None and existing.status not in ("", "running"):
                     status = existing.status
+                turn_index = user_idx - 1 if user_idx > 0 else None
                 state.subagents[agent_id] = SubagentInfo(
                     agent_id=agent_id,
                     tool_use_id=tool_use_id,
@@ -601,8 +654,21 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     subagent_type=dispatched.get("subagent_type", ""),
                     is_async=is_async,
                     status=status,
-                    turn_index=user_idx - 1 if user_idx > 0 else None,
+                    turn_index=turn_index,
                 )
+                if is_async:
+                    if not current_agent_ids or turn_index != latest_agent_turn:
+                        current_agent_ids = {
+                            info.agent_id
+                            for info in state.subagents.values()
+                            if info.is_async
+                            and info.kind == "agent"
+                            and info.status == "running"
+                        }
+                        latest_agent_turn = turn_index
+                    current_agent_ids.add(agent_id)
+                else:
+                    current_agent_ids.discard(agent_id)
                 continue
 
             if isinstance(tool_use_result, dict) and tool_use_result.get("taskId"):
@@ -633,6 +699,7 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     kind="task",
                     command=str(dispatched.get("command") or ""),
                 )
+                current_agent_ids.discard(task_id)
                 continue
 
             content = _text_content(message)
@@ -659,28 +726,49 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                         state.subagents[wake_id] = info
                     info.status = "lost"
                     info.raw_status = "lost"
-            if _notification_fields(normalized_content) is not None:
+            fields = _notification_fields(normalized_content)
+            if fields is not None:
                 _apply_notification(state, normalized_content)
-                # A notification landed as a user record. If no assistant
-                # record follows it, the CLI has not turned it into a reply
-                # yet — that is exactly the window where steering the nudge
-                # kills the run (see notification_pending).
-                #
-                # A notification that went through the queue is already
-                # tracked: this record IS the dequeued entry arriving, not a
-                # second notification. Promote the oldest one instead of
-                # appending, or a queued-then-dequeued notification would need
-                # two assistant replies to close and never would.
+                task_id, kind = _notification_identity(state, normalized_content)
+                if kind == "agent" and task_id:
+                    agent_notification_answers[task_id] = False
+                    if task_id in carry_agent_ids:
+                        carry_agent_ids.remove(task_id)
+                    info = state.subagents.get(task_id)
+                    if info is None or info.is_async:
+                        current_agent_ids.add(task_id)
+                matched_index: int | None = None
                 for index, entry in enumerate(queue):
-                    if entry == "dequeued":
-                        queue[index] = "surfaced"
+                    if (
+                        isinstance(entry, _NotificationWindow)
+                        and entry.state == "dequeued"
+                        and entry.task_id == task_id
+                    ):
+                        matched_index = index
                         break
+                if matched_index is None:
+                    for index, entry in enumerate(queue):
+                        if (
+                            isinstance(entry, _NotificationWindow)
+                            and entry.state == "dequeued"
+                        ):
+                            matched_index = index
+                            break
+                if matched_index is not None:
+                    matched = queue[matched_index]
+                    if isinstance(matched, _NotificationWindow):
+                        matched.state = "surfaced"
                 else:
-                    queue.append("surfaced")
+                    queue.append(_NotificationWindow("surfaced", task_id, kind))
                 continue
             if _is_countable_user_turn(normalized_content, record):
                 user_idx += 1
+                carry_agent_ids.clear()
 
+    state.notification_answered = bool(current_agent_ids) and all(
+        agent_notification_answers.get(agent_id) is True
+        for agent_id in current_agent_ids
+    )
     state.notification_pending = any(entry is not None for entry in queue)
     return state
 

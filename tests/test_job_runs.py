@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -133,6 +134,48 @@ def test_track_sync_records(tmp_path: Path) -> None:
     assert rows[0]["extra"]["proposal_count"] == 3
 
 
+@pytest.mark.parametrize(
+    ("bootstrap", "insights_enabled", "active", "expected_calls"),
+    [
+        (False, True, True, 1),
+        (False, True, False, 0),
+        (False, False, True, 0),
+        (True, True, True, 0),
+    ],
+)
+async def test_startup_backfill_runs_only_on_a_configured_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bootstrap: bool,
+    insights_enabled: bool,
+    active: bool,
+    expected_calls: int,
+) -> None:
+    from ciao import main
+
+    calls: list[dict[str, str]] = []
+
+    async def fake_backfill(_config, *, chat_workspaces):
+        calls.append(chat_workspaces)
+        return {"errors": 0}
+
+    monkeypatch.setattr("ciao.insights.backfill_insights_task", fake_backfill)
+    jr.configure(tmp_path)
+    config = SimpleNamespace(
+        bootstrap_mode=bootstrap,
+        insights_enabled=insights_enabled,
+    )
+    pcm = SimpleNamespace(chat_workspaces=lambda: {"chat-1": "personal"})
+    node_state = SimpleNamespace(is_active=lambda: active)
+
+    await main._run_startup_backfill(config, pcm, node_state)
+
+    assert len(calls) == expected_calls
+    if expected_calls:
+        assert calls == [{"chat-1": "personal"}]
+        assert _read_lines(tmp_path)[0]["job"] == "backfill_insights"
+
+
 # ── rotation / fail-open ─────────────────────────────────────────────────
 
 
@@ -165,16 +208,15 @@ class _Phase:
 
 
 def test_record_startup_phase_maps_and_skips(tmp_path: Path) -> None:
-    jr.record_startup_phase(_Phase("sync_workspace", "done", "No archives needed backfill."))
+    jr.record_startup_phase(_Phase("update_skills", "done", "No archives needed backfill."))
     jr.record_startup_phase(_Phase("refresh_vault_index", "failed", "index refresh failed"))
     jr.record_startup_phase(_Phase("connect_pi", "done"))  # not a tracked job
 
     rows = _read_lines(tmp_path)
     jobs = {r["job"]: r for r in rows}
-    assert set(jobs) == {"startup_sync", "vault_index"}
-    assert jobs["startup_sync"]["category"] == "system"
-    assert jobs["startup_sync"]["duration_ms"] == 2000
-    assert jobs["startup_sync"]["extra"]["summary"] == "No archives needed backfill."
+    assert set(jobs) == {"skills_update", "vault_index"}
+    assert jobs["skills_update"]["duration_ms"] == 2000
+    assert jobs["skills_update"]["extra"]["summary"] == "No archives needed backfill."
     assert jobs["vault_index"]["status"] == "error"
     assert jobs["vault_index"]["error"] == "index refresh failed"
 
@@ -198,11 +240,11 @@ def test_summary_includes_never_run_jobs(tmp_path: Path) -> None:
     assert summary["skill_evolution"]["last_run"] is None
     assert summary["skill_evolution"]["stats"]["total_runs"] == 0
     # categories carried through
-    assert summary["startup_sync"]["category"] == "system"
+    assert summary["vault_index"]["category"] == "system"
     assert summary["insights"]["uses_model"] is True
     assert summary["insights"]["produces_outcome"] is True
-    assert summary["startup_sync"]["uses_model"] is False
-    assert summary["startup_sync"]["produces_outcome"] is False
+    assert summary["vault_index"]["uses_model"] is False
+    assert summary["vault_index"]["produces_outcome"] is False
     # every row can answer "when does this run?"
     assert summary["insights"]["trigger"]
     # the archive pipeline reports as one group of steps in execution order,

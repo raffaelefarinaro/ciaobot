@@ -2,9 +2,7 @@
 
 ``provider`` selects the runner: ``claude`` (Claude Agent SDK) or
 ``opencode``. The Apple on-device sentinel is handled ahead of both, in
-:func:`run_oneshot`. On the ``claude`` path the upstream can still be
-redirected by the caller through the ``env`` dict -- the same
-``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_AUTH_TOKEN`` injection used for chats.
+:func:`run_oneshot`.
 
 Calls are intentionally bare: custom system prompt, no filesystem
 settings/skills, no tools, no MCP discovery. Titles, insights, critique,

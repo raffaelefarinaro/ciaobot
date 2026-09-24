@@ -41,13 +41,12 @@ SECTION_SEP = "§"
 
 
 DEFAULT_MEMORY_CHAR_LIMIT = 3000
-"""Advisory cap on the ``ciao:memory`` region (chars). Tunable via
-``CIAO_MEMORY_CHAR_LIMIT``."""
+"""Advisory cap on the ``ciao:memory`` region (chars)."""
 
 
 DEFAULT_USER_CHAR_LIMIT = 1375
-"""Advisory cap on the ``ciao:profile`` region (chars). Tunable via
-``CIAO_USER_CHAR_LIMIT``. Named ``user`` for env-var continuity."""
+"""Advisory cap on the ``ciao:profile`` region (chars). Named ``user`` for
+historical continuity."""
 
 
 MAX_ENTRY_CHARS = 600
@@ -559,7 +558,6 @@ def prune_expired_entries(
         return {"ok": True, "removed": {"memory": 0, "profile": 0}, "guide": str(guide)}
     lock = guide_lock(guide)
     try:
-        text = guide.read_text(encoding="utf-8")
         filtered: dict[MemoryRegion, list[str]] = {}
         removed_entries: dict[MemoryRegion, list[str]] = {}
         removed: dict[str, int] = {"memory": 0, "profile": 0}
@@ -764,51 +762,19 @@ custom cap and is never touched."""
 _FORMER_CAPS: dict[MemoryRegion, int] = {"memory": FORMER_MEMORY_CHAR_LIMIT}
 
 
-def _explicit_memory_char_limit() -> int | None:
-    """The operator's explicit ``CIAO_MEMORY_CHAR_LIMIT``, when set and valid.
+def migrate_region_caps(guide: Path) -> list[str]:
+    """Restamp region markers still carrying a former shipped default cap.
 
-    An unset or non-numeric value means "use the shipped default"; a number
-    is an intentional override that cap migration must respect.
-    """
-    raw = os.environ.get("CIAO_MEMORY_CHAR_LIMIT", "").strip()
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning(
-            "memory: ignoring non-numeric CIAO_MEMORY_CHAR_LIMIT=%r", raw
-        )
-        return None
-
-
-def migrate_region_caps(
-    guide: Path,
-    *,
-    char_limit: int | None = None,
-) -> list[str]:
-    """Restamp region markers carrying a known shipped default cap.
-
-    ``ensure_regions`` never rewrites existing markers, so guides can end up
-    advertising a cap number the runtime does not apply: a pre-3000 guide
-    still says ``cap=2200``, and a freshly seeded guide says ``cap=3000``
-    even when an explicit limit overrides the shipped default. Any marker
-    whose cap is a KNOWN shipped default (the former or the current one) is
-    restamped to the EFFECTIVE advisory budget so the guide advertises what the
-    runtime actually uses: ``char_limit`` when the caller resolved configuration (including
-    a workspace ``.env``, which this module cannot see), else an explicit
-    ``CIAO_MEMORY_CHAR_LIMIT`` from the environment, else the shipped
-    default. Any other marker value is an intentional custom cap and is never
-    touched. Idempotent; returns the list of regions restamped. Never creates
-    the guide or any region, and holds the guide lock across
-    read-modify-write so it cannot discard a concurrent
+    ``ensure_regions`` never rewrites existing markers, so a pre-3000 guide
+    still advertises ``cap=2200`` although the runtime applies the current
+    default. Such markers are restamped to the current default; any other
+    marker value is left alone. Idempotent; returns the list of regions
+    restamped. Never creates the guide or any region, and holds the guide
+    lock across read-modify-write so it cannot discard a concurrent
     ``memory_update``/``write_region``.
     """
     if not guide.exists():
         return []
-    override = char_limit if char_limit is not None else (
-        _explicit_memory_char_limit()
-    )
     lock = _guide_lock(guide)
     try:
         try:
@@ -820,19 +786,13 @@ def migrate_region_caps(
         updated = text
         restamped: list[str] = []
         for region, former in _FORMER_CAPS.items():
-            shipped_current = _REGION_FACTS[region][1]
-            effective = (
-                override if override is not None else shipped_current
-            )
-            candidates = sorted({former, shipped_current} - {effective})
-            if not candidates:
+            current = _REGION_FACTS[region][1]
+            if former == current:
                 continue
             pattern = re.compile(
-                rf"(<!--\s*ciao:{region}:start\s+cap=)(?:{'|'.join(str(c) for c in candidates)})(\s*-->)"
+                rf"(<!--\s*ciao:{region}:start\s+cap=){former}(\s*-->)"
             )
-            new_text, count = pattern.subn(
-                rf"\g<1>{effective}\g<2>", updated
-            )
+            new_text, count = pattern.subn(rf"\g<1>{current}\g<2>", updated)
             if count:
                 updated = new_text
                 restamped.append(region)

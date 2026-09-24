@@ -56,8 +56,10 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     data = client.get("/api/settings/routines").json()
     # Automatic resolves to the workspace's default model.
     assert data["insights_model_effective"] == config.claude_default_model
+    assert data["insights_enabled"] is True
+    assert data["trajectories_enabled"] is True
     # The Claude model list is the vocabulary the selectors offer.
-    assert data["model_options"]["anthropic"] == list(config.claude_models)
+    assert data["model_options"]["anthropic"] == ["opus", "sonnet", "haiku", "fable"]
     assert data["backends"] == {"anthropic": True}
     assert data["workspace_context"] == {
         "workspace_root": str(config.workspace_root),
@@ -116,6 +118,52 @@ def test_patch_applies_to_live_config_and_persists(tmp_path):
     # Persisted: a fresh store sees the values.
     fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
     assert fresh.settings.insights_model == "haiku"
+
+
+def test_patch_toggles_insights_enabled(tmp_path):
+    client, config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"insights_enabled": False},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["insights_enabled"] is False
+    assert config.insights_enabled is False
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.settings.insights_enabled is False
+
+
+def test_patch_rejects_non_boolean_insights_enabled(tmp_path):
+    client, _config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"insights_enabled": "false"},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_toggles_trajectories_enabled(tmp_path):
+    client, config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"trajectories_enabled": False},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["trajectories_enabled"] is False
+    assert config.trajectories_enabled is False
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.settings.trajectories_enabled is False
+
+
+def test_patch_rejects_non_boolean_trajectories_enabled(tmp_path):
+    client, _config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"trajectories_enabled": "false"},
+    )
+    assert resp.status_code == 400
 
 
 def test_patch_applies_provider_default_models(tmp_path):
@@ -221,16 +269,18 @@ def test_an_override_clears_the_per_workspace_maps(monkeypatch, tmp_path):
     assert data["insights_model_by_workspace"] == {}
 
 
-def test_patch_persists_the_voice_locale_and_voice(tmp_path):
-    """What is left to configure once the engine choice is gone: the language
-    the on-device engines use, and which installed voice reads aloud."""
+def test_patch_persists_the_voice(tmp_path):
+    """What is left to configure once the engine choice is gone: which
+    installed voice reads aloud. The locale is fixed, so a PATCH naming it
+    is ignored like any unknown key."""
     client, config = _make_client(tmp_path)
     resp = client.patch(
         "/api/settings/routines",
         json={"transcription_locale": "it-IT", "tts_local_voice": "com.apple.voice.x"},
     )
     assert resp.status_code == 200
-    assert config.transcription_locale == "it-IT"
+    assert resp.json()["transcription"]["locale"] == "en-US"
+    assert not hasattr(config, "transcription_locale")
     assert config.tts_local_voice == "com.apple.voice.x"
     assert not hasattr(config, "transcription_engine")
     assert not hasattr(config, "tts_engine")

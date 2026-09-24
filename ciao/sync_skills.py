@@ -1038,55 +1038,6 @@ def _resolve_vault_root(workspace: Path) -> Path:
     return root if root.is_absolute() else workspace / root
 
 
-def _configured_memory_char_limit(workspace: Path) -> int | None:
-    """The effective ``CIAO_MEMORY_CHAR_LIMIT`` for cap-marker migration.
-
-    Resolution order mirrors what the server does at start (dotenv loads
-    without overriding exported variables): the process environment wins,
-    then the nearest ``.env`` defining the variable — the workspace's own,
-    walking up through owning directories (an install root that scaffolds
-    per-workspace agent roots keeps its ``.env`` there, and ``ciao setup``
-    re-scaffolding passes agent roots to sync without exporting its parsed
-    values), bounded at four levels up — then ``None`` meaning "use
-    memory_tool's shipped default". Each dotenv is parsed with python-dotenv
-    itself (``dotenv_values``, which mutates nothing) so exactly the syntaxes
-    the server accepts are honoured here — ``export`` prefixes, quoting,
-    inline comments. Building no ``CiaoConfig`` matters: its constructor
-    mutates shared env state mid-sync. Unparseable numeric values are
-    ignored, falling through to the next source or the shipped default.
-    """
-    sources: list[str] = [os.environ.get("CIAO_MEMORY_CHAR_LIMIT", "").strip()]
-    try:
-        from dotenv import dotenv_values
-    except ImportError:  # pragma: no cover - dotenv ships with the app
-        logger.debug("memory: python-dotenv unavailable for cap migration")
-        return None
-    for ancestor in [workspace, *workspace.parents[:4]]:
-        dotenv = ancestor / ".env"
-        if not dotenv.exists():
-            continue
-        try:
-            values = dotenv_values(dotenv) or {}
-        except Exception:  # noqa: BLE001 — advisory migration must not block sync
-            logger.debug(
-                "memory: could not parse %s for cap migration",
-                dotenv,
-                exc_info=True,
-            )
-            continue
-        raw = str(values.get("CIAO_MEMORY_CHAR_LIMIT", "") or "").strip()
-        if raw:
-            sources.append(raw)
-            break
-    for raw in sources:
-        if raw:
-            try:
-                return int(raw)
-            except ValueError:
-                continue
-    return None
-
-
 def _resolve_runtime_root(workspace: Path) -> Path:
     raw = os.environ.get("CIAO_RUNTIME_ROOT", "").strip() or ".runtime"
     root = Path(raw).expanduser()
@@ -1277,14 +1228,8 @@ def sync_workspace_skills(
         else:
             ensure_regions(guide)
         # Restamp markers still carrying a former shipped default so the
-        # guide every session loads advertises the cap the runtime enforces.
-        # The effective limit is resolved here, not inside memory_tool: a
-        # standalone `ciao sync-skills` never loads <root>/.env, and an
-        # override that lives only there must beat the stamp like it beats
-        # the runtime default after a server start.
-        restamped = migrate_region_caps(
-            guide, char_limit=_configured_memory_char_limit(root)
-        )
+        # guide every session loads advertises the cap the runtime applies.
+        restamped = migrate_region_caps(guide)
         if restamped:
             logger.info(
                 "memory: restamped region caps to current defaults in %s: %s",

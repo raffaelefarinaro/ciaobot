@@ -625,7 +625,7 @@ def opencode_status_probe(
 ) -> dict[str, Any]:
     from ciao.providers.opencode import opencode_login_status
 
-    return opencode_login_status(env)
+    return opencode_login_status()
 
 
 # Where the wizard sends someone who has no Claude Code at all. Kept as a
@@ -886,7 +886,7 @@ def _claude_status(
         "Claude Desktop uses an app-private login. Sign in once via "
         f"`{auth_command}`; no separate CLI install is needed."
         if app_path
-        else "Run Claude OAuth or set ANTHROPIC_API_KEY."
+        else "Run Claude OAuth."
     )
     return _provider(
         name="claude",
@@ -1057,15 +1057,6 @@ def setup_status(
             label="PWA auth token",
             ok=bool(getattr(config, "pwa_auth_token", "")),
             required=True,
-        ),
-        _check(
-            check_id="push_contact",
-            label="Push contact",
-            ok=bool(source.get("CIAO_PUSH_CONTACT", "").strip()),
-            # Optional: without it Web Push uses the localhost placeholder
-            # subject (ciao.main.DEFAULT_PUSH_SUBJECT) and still delivers.
-            required=False,
-            detail="CIAO_PUSH_CONTACT",
         ),
     ]
     providers = {

@@ -804,6 +804,8 @@
           :notify-saved="notifySaved"
           :notify-failed="notifyFailed"
           :routines="routines"
+          :routines-saving="routinesSaving"
+          :save-routines="saveRoutines"
           :provider-models="workspaceModels?.provider_models"
           :provider-labels="aliasProviderLabels"
         />
@@ -2090,7 +2092,9 @@ async function saveRoutines(patch: Record<string, unknown>) {
     routines.value = await api.patch<RoutineSettings>('/api/settings/routines', patch)
     notifySaved('Model settings saved.')
   } catch (e) {
-    routinesResult.value = `Error: ${errorMessage(e)}`
+    const detail = errorMessage(e)
+    routinesResult.value = `Error: ${detail}`
+    notifyFailed('Could not save model settings', detail)
   } finally {
     routinesSaving.value = false
   }

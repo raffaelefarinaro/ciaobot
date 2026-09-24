@@ -102,7 +102,7 @@ def test_stock_curation_skill_consolidation_contract() -> None:
     assert "Memory-Proposals.md" in skill
     # Promotion of new facts stays user-reviewed; over-cap has named options.
     assert "Do not promote new facts into the bounded" in skill
-    assert "CIAO_MEMORY_CHAR_LIMIT" in skill
+    assert "leave the region over its advisory cap" in skill
 
 
 def test_stock_curation_skill_files_discovered_bounded_facts() -> None:

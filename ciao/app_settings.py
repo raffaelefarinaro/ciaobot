@@ -67,6 +67,7 @@ _NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
     "provider_insights_models": _clean_provider_map,
     "provider_default_modes": _clean_default_modes,
 }
+_BOOLEAN_FIELDS = {"insights_enabled", "trajectories_enabled"}
 
 
 def _default_model_settings(config: object, descriptor: object) -> Any:
@@ -93,11 +94,11 @@ class AppSettings:
     provider.
     """
 
+    insights_enabled: bool = True
+    trajectories_enabled: bool = True
     # Model used by post-archive session-insights extraction.
     insights_model: str = ""
 
-    # BCP-47 language for the on-device voice engines.
-    transcription_locale: str = ""
     # macOS voice identifier for read-aloud; empty means the sidecar picks the
     # best installed voice for the locale.
     tts_local_voice: str = ""
@@ -131,6 +132,7 @@ class AppSettingsStore:
 
     def __init__(self, path: Path) -> None:
         self._path = path
+        self._explicit_fields: set[str] = set()
         self.settings = self._load()
         # Env-backed defaults captured on the first apply_to_config() call,
         # so clearing an override restores the original value.
@@ -144,15 +146,23 @@ class AppSettingsStore:
         except (OSError, ValueError):
             logger.warning("Unreadable app settings at %s; using defaults", self._path)
             return AppSettings()
+        if isinstance(raw, dict):
+            self._explicit_fields.update(
+                key for key in _BOOLEAN_FIELDS if isinstance(raw.get(key), bool)
+            )
         string_fields = {
             field.name
             for field in fields(AppSettings)
             if field.name not in _NESTED_CLEANERS
+            and field.name not in _BOOLEAN_FIELDS
         }
         settings = AppSettings()
         for key, value in raw.items():
             if key in string_fields and isinstance(value, str):
                 setattr(settings, key, value.strip())
+        for key in _BOOLEAN_FIELDS:
+            if isinstance(raw.get(key), bool):
+                setattr(settings, key, raw[key])
         for key, cleaner in _NESTED_CLEANERS.items():
             cleaned = cleaner(raw.get(key))
             if cleaned:
@@ -162,7 +172,7 @@ class AppSettingsStore:
     def _save(self) -> None:
         payload = {}
         for key, value in asdict(self.settings).items():
-            if value:
+            if key in _BOOLEAN_FIELDS or value:
                 payload[key] = value
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(
@@ -178,6 +188,12 @@ class AppSettingsStore:
         known = {f.name for f in fields(AppSettings)}
         for key, value in changes.items():
             if key not in known:
+                continue
+            if key in _BOOLEAN_FIELDS:
+                if not isinstance(value, bool):
+                    raise ValueError(f"{key} must be a boolean")
+                setattr(self.settings, key, value)
+                self._explicit_fields.add(key)
                 continue
             if key in _NESTED_CLEANERS:
                 if not isinstance(value, dict):
@@ -206,6 +222,38 @@ class AppSettingsStore:
         self._save()
         return self.settings
 
+    def migrate_legacy_insights_enabled(
+        self, legacy_disabled: bool | None
+    ) -> bool | None:
+        if legacy_disabled is None:
+            return None
+        if "insights_enabled" in self._explicit_fields:
+            return None
+        self.settings.insights_enabled = not legacy_disabled
+        self._explicit_fields.add("insights_enabled")
+        self._save()
+        logger.warning(
+            "CIAO_INSIGHTS_DISABLED is no longer read; migrated it to Settings → "
+            "Automations once. Remove it from .env."
+        )
+        return self.settings.insights_enabled
+
+    def migrate_legacy_trajectories_enabled(
+        self, legacy_disabled: bool | None
+    ) -> bool | None:
+        if legacy_disabled is None:
+            return None
+        if "trajectories_enabled" in self._explicit_fields:
+            return None
+        self.settings.trajectories_enabled = not legacy_disabled
+        self._explicit_fields.add("trajectories_enabled")
+        self._save()
+        logger.warning(
+            "CIAO_TRAJECTORIES_DISABLED is no longer read; migrated it to "
+            "Settings → Automations once. Remove it from .env."
+        )
+        return self.settings.trajectories_enabled
+
     def apply_to_config(self, config) -> None:
         """Overlay settings onto the live ``CiaoConfig`` object.
 
@@ -216,7 +264,6 @@ class AppSettingsStore:
         if self._defaults is None:
             self._defaults = {
                 "insights_model_override": config.insights_model_override,
-                "transcription_locale": config.transcription_locale,
                 "tts_local_voice": config.tts_local_voice,
                 "critique_models": config.critique_models,
             }
@@ -231,11 +278,9 @@ class AppSettingsStore:
                 )
         d = self._defaults
         s = self.settings
+        config.insights_enabled = s.insights_enabled
+        config.trajectories_enabled = s.trajectories_enabled
         config.insights_model_override = s.insights_model or d["insights_model_override"]
-
-        config.transcription_locale = (
-            s.transcription_locale or d["transcription_locale"]
-        )
         config.tts_local_voice = s.tts_local_voice or d["tts_local_voice"]
         config.critique_models = s.critique_models or d["critique_models"]
         # Per-provider default models / thinking / routine models have no

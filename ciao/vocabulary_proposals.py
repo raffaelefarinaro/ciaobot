@@ -17,10 +17,7 @@ mirroring the Memory-Proposals.md promote/dismiss pattern:
 
 Threshold is deliberately a constant rather than a registry entry: ``5`` matched
 the tier boundary in the original sweep and is the point where a tag moves
-from ``Tags (emerging)`` to ``Tags (established)`` in ``VOCABULARY.md``. It
-is configurable via ``VOCAB_PROMOTION_THRESHOLD`` env for tests/installs
-that want a different bar, but the default is the deliberate number from the
-plan's open question.
+from ``Tags (emerging)`` to ``Tags (established)`` in ``VOCABULARY.md``.
 
 Types are a single global canonical set, so usage is counted across EVERY
 workspace vault via ``config.vault_scan_targets()`` when a registry is
@@ -43,10 +40,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ciao import vault_index
 from ciao.vault_index import (
-    DEFAULT_PROMOTION_THRESHOLD,
     Entry,
-    promotion_threshold,
     scan_targets,
     vocabulary_report,
 )
@@ -201,11 +197,10 @@ def generate_vocabulary_proposals(
       among any other tag. Each carries ``tag``, ``workspaces`` and
       ``near_duplicates`` (list of the tags it resembles).
 
-    ``threshold`` overrides the env-driven default; used by tests to pin the
-    bar without touching the environment.
+    ``threshold`` overrides the default; used by tests to pin the bar.
     """
     if threshold is None:
-        threshold = promotion_threshold()
+        threshold = vault_index.DEFAULT_PROMOTION_THRESHOLD
     report = vocabulary_report(entries)
     tags: dict[str, int] = report["tags"]
     tag_workspaces: dict[str, list[str]] = report["tag_workspaces"]
@@ -400,7 +395,7 @@ def audit_vocabulary_proposals(
     "checked and clean".
     """
     empty = {
-        "threshold": promotion_threshold(),
+        "threshold": vault_index.DEFAULT_PROMOTION_THRESHOLD,
         "type_promotions": [],
         "tag_promotions": [],
         "tag_merges": [],

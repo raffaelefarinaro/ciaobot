@@ -1016,14 +1016,12 @@ def test_slugify_profile_cannot_escape_the_secrets_directory(tmp_path: Path) -> 
 def _profile_config(
     tmp_path: Path,
     *,
-    gws_default_profile: str = "",
     workspaces: dict | None = None,
 ) -> SimpleNamespace:
     (tmp_path / ".runtime").mkdir(exist_ok=True)
     return SimpleNamespace(
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime" / "state.json",
-        gws_default_profile=gws_default_profile,
         workspaces=workspaces or {},
         _workspace_registry_changed=False,
     )
@@ -1037,7 +1035,6 @@ def test_workspace_gws_profile_uses_explicit_link(tmp_path: Path) -> None:
     """A real, registered explicit per-workspace link wins."""
     cfg = _profile_config(
         tmp_path,
-        gws_default_profile="personal",
         workspaces={"home": _workspace_cfg("home", "acme")},
     )
     cfg.workspace = lambda name: cfg.workspaces.get(name)
@@ -1055,7 +1052,6 @@ def test_workspace_gws_profile_synthetic_link_is_not_connected(tmp_path: Path) -
     """
     cfg = _profile_config(
         tmp_path,
-        gws_default_profile="personal",
         workspaces={"home": _workspace_cfg("home", "personal")},
     )
     cfg.workspace = lambda name: cfg.workspaces.get(name)
@@ -1069,7 +1065,6 @@ def test_workspace_gws_profile_falls_back_only_to_a_real_default(
     """A default that names no existing account is not used."""
     cfg = _profile_config(
         tmp_path,
-        gws_default_profile="personal",
         workspaces={"home": _workspace_cfg("home", "")},
     )
     cfg.workspace = lambda name: cfg.workspaces.get(name)
@@ -1082,7 +1077,6 @@ def test_workspace_gws_profile_default_when_account_exists(
 ) -> None:
     cfg = _profile_config(
         tmp_path,
-        gws_default_profile="personal",
         workspaces={"home": _workspace_cfg("home", "")},
     )
     cfg.workspace = lambda name: cfg.workspaces.get(name)

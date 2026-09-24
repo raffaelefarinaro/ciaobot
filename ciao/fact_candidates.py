@@ -13,17 +13,13 @@ whether the supporting turn was one the user attended. Every field is either
 read from the archive or left explicitly unknown — nothing here invents
 evidence a bullet did not carry.
 
-Three entry points produce candidates:
+Two entry points produce candidates:
 
 * :func:`candidates_from_markdown` — the compatibility parser for the
   Markdown archives already on disk. A bullet with an ``[idx=N]`` citation
   yields ``provenance="cited"``; a bullet without one yields
   ``provenance="unknown"`` and an empty ``source_message_ids``. Unknown
   provenance is recorded as unknown; it is never upgraded into a guess.
-* :func:`candidates_from_structured` — for a model that returns JSON. Rows it
-  cannot read are *not* dropped: each one comes back as a ``[review]``
-  candidate carrying the parse error, alongside the reasons in the returned
-  error list, so invalid structured output is reviewable rather than lost.
 * :func:`candidate_from_proposal` — lifts an already-parsed
   :class:`~ciao.memory_proposals.MemoryProposal` without re-parsing it.
 
@@ -46,7 +42,6 @@ number cannot:
 ``hypothetical-evidence``    the cited turn is an example, not an assertion
 ``superseded``               a later user turn corrects the cited one
 ``unknown-destination``      the destination is outside the known registry
-``unparsable-candidate``     the structured row could not be read
 ``unknown-provenance``       there is nothing to check the citation against
 ===========================  ==================================================
 
@@ -56,10 +51,6 @@ failure — a text-mode extraction is told not to emit indices at all, so
 demanding them would queue every fact in a legacy archive for no evidence
 gain. It is reported so the caller can record *why* a fact was accepted
 without an id rather than pretending it had one.
-
-:func:`render_insights_markdown` renders candidates back to the human-readable
-``## Session insights`` shape, so the structure is the source of truth and the
-Markdown is a view of it.
 """
 
 from __future__ import annotations
@@ -83,9 +74,6 @@ against the schema it was extracted under."""
 EXTRACTION_VERSION_MARKDOWN = "insights-markdown/v1"
 """The tagged-Markdown extraction contract in ``ciao/insights.py``."""
 
-EXTRACTION_VERSION_STRUCTURED = "insights-structured/v1"
-"""A model that returns candidate rows as JSON rather than Markdown."""
-
 POLICY_VERSION = "evidence-policy/v1"
 """The rule set :func:`validate_candidate` applies. Recorded next to the
 saved fact so an accepted fact says which policy admitted it."""
@@ -108,18 +96,6 @@ NEGATED_EVIDENCE = "negated-evidence"
 HYPOTHETICAL_EVIDENCE = "hypothetical-evidence"
 SUPERSEDED = "superseded"
 UNKNOWN_DESTINATION = "unknown-destination"
-UNPARSABLE = "unparsable-candidate"
-
-UNREADABLE_SECTION = "Unreadable extraction output"
-"""The insights section an unreadable structured row is rendered under.
-
-Named here rather than spelled out at both ends: ``candidates_from_structured``
-writes it and ``memory_proposals.propose_from_insights`` reads it, and a typo
-in either copy would turn "queued for review" back into a silent drop."""
-
-
-class CandidateSchemaError(ValueError):
-    """A structured row that does not parse as a fact candidate v1 record."""
 
 
 # ── The record ────────────────────────────────────────────────────────────
@@ -155,30 +131,9 @@ class FactCandidate:
     schema: str = SCHEMA_VERSION
     extraction_version: str = EXTRACTION_VERSION_MARKDOWN
     policy_version: str = POLICY_VERSION
-    parse_error: str = ""
-
-    def as_bullet(self) -> str:
-        """Render back to the ``## Session insights`` bullet shape.
-
-        The citation goes before the destination tag, which is the order both
-        extraction prompts ask for. A candidate with unknown provenance emits
-        no citation at all rather than a fabricated one — the round trip has
-        to be able to represent "this archive never said".
-        """
-        parts = [self.text.strip()]
-        if self.source_message_ids:
-            joined = ",".join(str(i) for i in self.source_message_ids)
-            parts.append(f"[idx={joined}]")
-        if self.destination == "people" and self.payload:
-            parts.append(f"[people: {self.payload}]")
-        elif self.destination == "project" and self.payload:
-            parts.append(f"[project: {self.payload}]")
-        elif self.destination:
-            parts.append(f"[{self.destination}]")
-        return "- " + " ".join(p for p in parts if p)
 
     def to_dict(self) -> dict[str, Any]:
-        """A JSON-safe record. Round-trips through :func:`candidate_from_dict`."""
+        """A JSON-safe record."""
         return {
             "schema": self.schema,
             "text": self.text,
@@ -193,7 +148,6 @@ class FactCandidate:
             "provenance": self.provenance,
             "extraction_version": self.extraction_version,
             "policy_version": self.policy_version,
-            "parse_error": self.parse_error,
         }
 
 
@@ -618,20 +572,7 @@ def validate_candidate(
     ``Durable rule:`` clause, not the sentence around it — pass the text that
     will actually be saved, so the evidence is weighed against the assertion
     being made rather than the narration around it.
-
-    Never raises on malformed input: a candidate the parser already marked
-    unreadable comes back as an ``unparsable-candidate`` verdict, because a
-    validator that throws would put the caller back on the path where a fact
-    disappears with the exception.
     """
-    if candidate.parse_error:
-        return Verdict(
-            ok=False,
-            code=UNPARSABLE,
-            reason=candidate.parse_error,
-            source_message_ids=candidate.source_message_ids,
-        )
-
     bad_destination = _destination_verdict(candidate)
     if bad_destination is not None:
         return bad_destination
@@ -901,149 +842,3 @@ def candidate_from_proposal(proposal: Any) -> FactCandidate:
         provenance=PROVENANCE_CITED if ids else PROVENANCE_UNKNOWN,
         extraction_version=EXTRACTION_VERSION_MARKDOWN,
     )
-
-
-# ── Structured extraction ─────────────────────────────────────────────────
-
-
-def candidate_from_dict(row: object) -> FactCandidate:
-    """Read one structured candidate row. Raises on a shape we cannot trust.
-
-    Permissive about what it accepts and strict about what it claims: unknown
-    keys are ignored and missing optional fields default, but a row without
-    usable ``text`` or ``destination`` raises rather than producing a
-    candidate with invented fields. Source ids must be positive integers —
-    the extraction prompt numbers turns from 1 and forbids ``[idx=0]``, so a
-    0 or a negative id is a malformed row, not a citation.
-    """
-    if not isinstance(row, dict):
-        raise CandidateSchemaError(f"expected an object, got {type(row).__name__}")
-    schema = str(row.get("schema") or SCHEMA_VERSION)
-    if schema != SCHEMA_VERSION:
-        raise CandidateSchemaError(f"unsupported candidate schema {schema!r}")
-    text = str(row.get("text") or "").strip()
-    if not text:
-        raise CandidateSchemaError("row carries no fact text")
-    destination = str(row.get("destination") or "").strip().lower()
-    if not destination:
-        raise CandidateSchemaError("row carries no destination")
-
-    raw_ids = row.get("source_message_ids")
-    ids: list[int] = []
-    if raw_ids is not None:
-        if not isinstance(raw_ids, list):
-            raise CandidateSchemaError("source_message_ids is not a list")
-        for value in raw_ids:
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise CandidateSchemaError(
-                    f"source_message_ids holds a non-integer id {value!r}"
-                )
-            if value < 1:
-                raise CandidateSchemaError(
-                    f"source_message_ids holds an out-of-range id {value!r}"
-                )
-            ids.append(value)
-
-    attended_raw = row.get("attended")
-    if attended_raw is None:
-        attended: bool | None = None
-    elif isinstance(attended_raw, bool):
-        attended = attended_raw
-    else:
-        raise CandidateSchemaError("attended is not a boolean")
-
-    return FactCandidate(
-        text=text,
-        destination=destination,
-        payload=str(row.get("payload") or ""),
-        section=str(row.get("section") or ""),
-        source_message_ids=tuple(sorted(set(ids))),
-        evidence_excerpt=str(row.get("evidence_excerpt") or ""),
-        as_of=str(row.get("as_of") or ""),
-        expires=str(row.get("expires") or ""),
-        attended=attended,
-        provenance=PROVENANCE_CITED if ids else PROVENANCE_UNKNOWN,
-        extraction_version=str(
-            row.get("extraction_version") or EXTRACTION_VERSION_STRUCTURED
-        ),
-        policy_version=str(row.get("policy_version") or POLICY_VERSION),
-    )
-
-
-def candidates_from_structured(raw: str) -> tuple[list[FactCandidate], list[str]]:
-    """Parse a model's JSON candidate array. Never loses a row silently.
-
-    Returns ``(candidates, errors)``. A row that does not parse still comes
-    back as a candidate — addressed to ``review``, carrying its
-    ``parse_error`` and whatever text could be recovered — so invalid
-    structured output lands in the review queue instead of vanishing. When
-    the payload as a whole is unreadable, ``candidates`` is empty and
-    ``errors`` says why; the caller's fallback is the Markdown path, not a
-    silent success.
-    """
-    text = raw.strip()
-    if not text:
-        return [], ["structured extraction returned nothing"]
-    # Models fence JSON about as often as not.
-    fenced = re.match(r"(?s)^```(?:json)?\s*(.*?)\s*```$", text)
-    if fenced:
-        text = fenced.group(1).strip()
-    try:
-        payload = json.loads(text)
-    except ValueError as exc:
-        return [], [f"structured extraction is not valid JSON: {exc}"]
-    if isinstance(payload, dict):
-        payload = payload.get("facts", payload.get("candidates"))
-    if not isinstance(payload, list):
-        return [], ["structured extraction is not a list of candidate rows"]
-
-    candidates: list[FactCandidate] = []
-    errors: list[str] = []
-    for position, row in enumerate(payload, start=1):
-        try:
-            candidates.append(candidate_from_dict(row))
-        except CandidateSchemaError as exc:
-            reason = f"row {position}: {exc}"
-            errors.append(reason)
-            recovered = ""
-            if isinstance(row, dict):
-                recovered = str(row.get("text") or "").strip()
-            candidates.append(FactCandidate(
-                text=recovered or f"(unreadable candidate row {position})",
-                destination="review",
-                section=UNREADABLE_SECTION,
-                provenance=PROVENANCE_UNKNOWN,
-                extraction_version=EXTRACTION_VERSION_STRUCTURED,
-                parse_error=str(exc),
-            ))
-    return candidates, errors
-
-
-# ── Rendering ─────────────────────────────────────────────────────────────
-
-
-def render_insights_markdown(
-    candidates: list[FactCandidate],
-    *,
-    sections: tuple[str, ...] = (),
-) -> str:
-    """Render candidates as the human-readable ``## Session insights`` body.
-
-    Section order follows ``sections`` when given, then any remaining section
-    in first-seen order, so a caller can pin the prompt's canonical order
-    without this module restating it. A candidate with no section lands under
-    a plain ``## Facts`` heading rather than being dropped.
-    """
-    grouped: dict[str, list[FactCandidate]] = {}
-    for candidate in candidates:
-        grouped.setdefault(candidate.section.strip() or "Facts", []).append(candidate)
-
-    ordered = [s for s in sections if s in grouped]
-    ordered.extend(s for s in grouped if s not in ordered)
-
-    blocks: list[str] = []
-    for heading in ordered:
-        lines = [f"## {heading}"]
-        lines.extend(candidate.as_bullet() for candidate in grouped[heading])
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks)

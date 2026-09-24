@@ -3049,27 +3049,6 @@ def test_named_single_file_project_routes_to_its_doc(tmp_path: Path) -> None:
     assert rows[0]["target"].endswith("projects/garden.md")
 
 
-def test_unreadable_row_naming_the_own_project_is_not_dropped(tmp_path: Path) -> None:
-    """A parse failure is a human's question even when it names a known project."""
-    from ciao.fact_candidates import UNREADABLE_SECTION
-
-    vault = _known_vault(tmp_path)
-    own = vault / "projects" / "active" / "ai-native-sdk" / "ai-native-sdk.md"
-    archive = _archive(
-        tmp_path,
-        f"## {UNREADABLE_SECTION}\n"
-        "- The ai-native-sdk listing ships skills only, never MCP. [review]\n",
-    )
-
-    out = mp.proposals_from_archive(
-        archive, vault, project_doc_path=str(own), project_fold_wrote=True
-    )
-
-    assert out is not None
-    rows = mp.list_proposals(out)
-    assert [r["kind"] for r in rows] == ["review"]
-
-
 def test_session_write_suppression_reads_a_markdown_link_path(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     guide = write_guide(tmp_path / "AGENTS.md")

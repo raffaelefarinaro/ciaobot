@@ -13,6 +13,7 @@ import asyncio
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ciao.config import RESTART_EXIT_CODE
 from ciao.network_addresses import is_loopback_url, server_addresses
 from ciao.package_version import package_changelog, package_status, update_package
 from ciao.web.routes_helpers import _parse_set_cookie_session, api_error
@@ -72,15 +73,14 @@ async def package_update_endpoint(request: Request) -> JSONResponse:
     """Return update guidance; packaged app updates are owned by Ciaobot.app."""
     res = await asyncio.to_thread(update_package)
     if res.get("ok"):
-        config = request.app.state.config
         async def _do_restart():
             await asyncio.sleep(2)
             fn = getattr(request.app.state, "request_restart", None)
             if callable(fn):
-                fn(config.restart_exit_code)
+                fn(RESTART_EXIT_CODE)
             else:
                 from ciao.signals import RestartRequested
-                raise RestartRequested(config.restart_exit_code)
+                raise RestartRequested(RESTART_EXIT_CODE)
 
         asyncio.create_task(_do_restart())
         return JSONResponse(res)

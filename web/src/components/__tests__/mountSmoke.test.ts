@@ -19,6 +19,8 @@ import { api } from '../../lib/api'
 vi.mock('../../lib/api', () => {
   let routineSettings = {
     insights_model: '',
+    insights_enabled: true,
+    trajectories_enabled: true,
 
     critique_models: '',
     insights_model_effective: 'haiku',
@@ -55,14 +57,6 @@ vi.mock('../../lib/api', () => {
   const responses: Record<string, unknown> = {
     '/api/settings': {},
     '/api/settings/providers': {
-      keys: {},
-      service_keys: {
-        OPENAI_API_KEY: {
-          label: 'OpenAI voice API key',
-          description: 'Used directly by Ciaobot for cloud transcription and speech.',
-          configured: false,
-        },
-      },
       connections: {
         claude: {
           name: 'claude',
@@ -86,8 +80,6 @@ vi.mock('../../lib/api', () => {
           short_label: 'opencode',
         },
       },
-      requires_restart: true,
-      env_path: '/tmp/workspace/.env',
     },
     '/api/local/status': { git_repo: true, branch: 'main', dirty: false },
     '/api/admin/skills': {
@@ -287,7 +279,7 @@ vi.mock('../../lib/api', () => {
     return Promise.resolve([])
   })
   const post = vi.fn(() => Promise.resolve({}))
-  const patch = vi.fn((path: string, body: Record<string, string>) => {
+  const patch = vi.fn((path: string, body: Record<string, unknown>) => {
     if (path === '/api/settings/routines') {
       routineSettings = { ...routineSettings, ...body }
       return Promise.resolve(routineSettings)
