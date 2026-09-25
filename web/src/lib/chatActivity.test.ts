@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   collectToolUsage,
+  describeToolStep,
   mentionedFilePaths,
   buildTurnParts,
   collectTraceOutputs,
@@ -403,6 +404,19 @@ describe('mentionedFilePaths', () => {
       'memory-vault/work/review-pr418.md',
       'docs/notes.md',
     ])
+  })
+})
+
+describe('describeToolStep', () => {
+  it('turns both providers\' live tool lines into words', () => {
+    expect(describeToolStep('$ Bash List vault review candidates to find BPR slide-0 notes'))
+      .toBe('List vault review candidates to find BPR slide-0 notes')
+    expect(describeToolStep('📖 Read memory-vault/work/projects/brief.md')).toBe('Reading brief.md')
+    expect(describeToolStep('🔧 edit src/app.ts')).toBe('Editing app.ts')
+    expect(describeToolStep('🧩 Skill pr-review')).toBe('Using the pr-review skill')
+    expect(describeToolStep('🔧 skill {"name":"docs"}')).toBe('Using the docs skill')
+    expect(describeToolStep('🔌 mcp__github__get_pull_request #418')).toBe('github · get pull request')
+    expect(describeToolStep('📝 TodoWrite [...]')).toBe('Updating the plan')
   })
 })
 

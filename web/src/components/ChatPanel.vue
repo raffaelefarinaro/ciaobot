@@ -1471,6 +1471,7 @@ import {
   buildTurnParts,
   collectToolUsage,
   collectTraceOutputs,
+  describeToolStep,
   fileCardBasename,
   fileCardDirname,
   fileCardIcon,
@@ -4055,12 +4056,11 @@ const liveStepLabel = computed(() => {
   if (store.currentStreamingThinking) return ''
   const last = store.currentTimeline[store.currentTimeline.length - 1]
   if (!last) return ''
-  if (last.kind === 'filecard' && last.file_path) return `editing ${fileCardBasename(last.file_path)}`
+  if (last.kind === 'filecard' && last.file_path) return `Editing ${fileCardBasename(last.file_path)}`
   if (last.kind !== 'tool') return ''
   const lines = activityLines(last.content)
-  const line = (lines[lines.length - 1] || '').replace(/[`*_]/g, '').replace(/^\s*[↳>-]\s*/, '').trim()
-  if (!line) return ''
-  return line.length > 60 ? `${line.slice(0, 57)}…` : line
+  // The row ellipses in CSS; this only turns the raw tool line into words.
+  return describeToolStep(lines[lines.length - 1] || '')
 })
 const liveTraceLabel = computed(() => {
   if (liveStepLabel.value) return `Working · ${liveStepLabel.value}`
@@ -5261,6 +5261,10 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  /* The transcript never scrolls sideways: wide content (code, tables)
+     scrolls inside its own box, and long tokens wrap. A stray horizontal
+     bar used to appear while a turn streamed a long unbroken token. */
+  overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   /* The column already carries the page gutter; the transcript only keeps

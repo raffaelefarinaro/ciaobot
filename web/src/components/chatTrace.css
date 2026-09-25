@@ -61,9 +61,11 @@
 }
 
 .trace-icon { flex-shrink: 0; }
+/* The step text is what gives way on a narrow row; the counts and time
+   beside it keep their full width. */
 .trace-label {
-  flex-shrink: 0;
-  max-width: 70%;
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   color: var(--fg2);
   font-weight: 600;
@@ -73,8 +75,8 @@
 .trace-block.live .trace-label { color: var(--fg); }
 .trace-meta {
   display: flex;
+  flex: none;
   align-items: center;
-  min-width: 0;
   overflow: hidden;
   color: var(--fg3);
   font-size: var(--text-sm);
@@ -160,7 +162,9 @@
   font-size: var(--text-sm);
   line-height: 1.5;
   min-width: 0;
-  overflow-wrap: break-word;
+  /* anywhere, not break-word: in a flex item only 'anywhere' lets a long
+     path or hash shrink the min-content width instead of widening the row. */
+  overflow-wrap: anywhere;
 }
 
 .thinking-block {
@@ -466,4 +470,8 @@
 .activity-line :deep(a.file-link:hover) {
   color: var(--accent);
   text-decoration: underline solid;
+}
+
+@media (max-width: 700px) {
+  .trace-meta { flex: 0 1 auto; min-width: 0; }
 }

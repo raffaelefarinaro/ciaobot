@@ -94,11 +94,43 @@ describe('ProjectSidebar chat actions', () => {
     })
 
     const chatsLink = wrapper.get('a[href="/"]')
-    // A dot, not a number; the accessible name carries the count.
     // A subtle number from a data attribute, not a dot or a pill.
     expect(chatsLink.attributes('data-count')).toBe('1')
     expect(chatsLink.attributes('aria-label')).toBe('Today — 1 chat needs attention')
 
+    wrapper.unmount()
+  })
+
+  it('summarises a project only while it is collapsed, with a dot and no count', async () => {
+    const store = useProjectStore()
+    store.chats[0].last_activity_at = '2026-08-12T10:00:00Z'
+    store.chats[0].last_read_at = '2026-08-12T09:00:00Z'
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat' },
+      global: { plugins: [router] },
+    })
+    await nextTick()
+
+    const projectId = store.chats[0].project_id
+    const group = () => wrapper.findAll('.project-group').find(g => g.find('.project-name').text().includes(
+      store.projects.find(p => p.project_id === projectId)!.name,
+    ))!
+    const chevron = () => group().get('.project-icon')
+    // Make sure the project is expanded, then collapsed, whatever it starts as.
+    if (chevron().attributes('aria-expanded') !== 'true') await chevron().trigger('click')
+    expect(group().find('.project-dot').exists()).toBe(false)
+    await chevron().trigger('click')
+    expect(chevron().attributes('aria-expanded')).toBe('false')
+    const dot = group().get('.project-dot')
+    expect(dot.text()).toBe('')
+    expect(dot.attributes('aria-label')).toBe('1 unread')
     wrapper.unmount()
   })
 

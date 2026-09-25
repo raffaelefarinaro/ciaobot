@@ -509,3 +509,35 @@ export function mentionedFilePaths(text: string): string[] {
   for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) push(match[1])
   return found
 }
+
+
+/**
+ * A live step in words, from its activity line ("<icon> <Tool> <summary>"),
+ * for the in-flight turn's summary row. Covers both providers' tool names;
+ * anything unknown falls back to "<Tool> <summary>".
+ */
+export function describeToolStep(line: string): string {
+  const parsed = parseToolLine(line.replace(/[`*]/g, ''))
+  if (!parsed) return ''
+  const { name, summary } = parsed
+  const lower = name.toLowerCase()
+  const base = (value: string) => value.split(/[\\/]/).filter(Boolean).pop() || value
+  const first = summary.split(/\s+/)[0] || ''
+  if (lower === 'read') return first ? `Reading ${base(first)}` : 'Reading a file'
+  if (['write', 'edit', 'multiedit', 'patch', 'notebookedit'].includes(lower)) {
+    return first ? `Editing ${base(first)}` : 'Editing a file'
+  }
+  if (lower === 'grep' || lower === 'glob' || lower === 'codesearch') return summary ? `Searching ${summary}` : 'Searching'
+  if (lower === 'websearch') return summary ? `Searching the web for ${summary}` : 'Searching the web'
+  if (lower === 'webfetch') return summary ? `Reading ${summary}` : 'Reading a web page'
+  if (lower === 'bash') return summary || 'Running a command'
+  if (lower === 'agent' || lower === 'task') return summary ? `Delegating: ${summary}` : 'Delegating to an agent'
+  if (lower === 'skill') {
+    const skill = skillNameFrom(summary)
+    return skill ? `Using the ${skill} skill` : 'Using a skill'
+  }
+  if (lower === 'todowrite' || lower === 'taskcreate' || lower === 'taskupdate') return 'Updating the plan'
+  const mcp = /^mcp__(.+?)__(.+)$/.exec(name)
+  if (mcp) return `${mcp[1]} · ${mcp[2].replace(/_/g, ' ')}`
+  return summary ? `${name} ${summary}` : name
+}

@@ -643,21 +643,26 @@
                 >
                   {{ project.name }}
                   <span v-if="project.is_auto" class="system-chip" title="Auto-managed project">auto</span>
-                  <span
-                    v-if="store.projectIsStreaming(project.project_id) && !projectAttention(project.project_id)"
-                    class="rollup-ring"
-                    title="A chat in this project is working"
-                    aria-label="A chat in this project is working"
-                  ><span class="rollup-ring-core" aria-hidden="true" /></span>
-                  <!-- A subtle count of chats that want the user (needs an answer
-                       or unread), accent only when one is blocked on an answer. -->
-                  <span
-                    v-if="projectAttention(project.project_id)"
-                    class="project-count"
-                    :class="{ 'project-count--needs': store.projectNeedsInput(project.project_id) > 0 }"
-                    :title="projectAttentionLabel(project.project_id)"
-                    :aria-label="projectAttentionLabel(project.project_id)"
-                  >{{ projectAttention(project.project_id) }}</span>
+                  <!-- Only a collapsed project summarises its chats: expanded,
+                       each chat row already carries its own signal. One static
+                       dot when a chat wants the user (accent if it waits for an
+                       answer), else the working ring - never a count. -->
+                  <template v-if="!expandedProjects.has(project.project_id)">
+                    <span
+                      v-if="projectAttention(project.project_id)"
+                      class="project-dot"
+                      :class="{ 'project-dot--needs': store.projectNeedsInput(project.project_id) > 0 }"
+                      role="img"
+                      :title="projectAttentionLabel(project.project_id)"
+                      :aria-label="projectAttentionLabel(project.project_id)"
+                    />
+                    <span
+                      v-else-if="store.projectIsStreaming(project.project_id)"
+                      class="rollup-ring"
+                      title="A chat in this project is working"
+                      aria-label="A chat in this project is working"
+                    ><span class="rollup-ring-core" aria-hidden="true" /></span>
+                  </template>
                 </button>
                 <input
                   v-else
@@ -2420,17 +2425,17 @@ async function confirmDeleteChat(chatId: string) {
   vertical-align: baseline;
 }
 
-.project-count {
-  margin-left: 8px;
-  color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
+.project-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: var(--space-2);
+  border-radius: 50%;
+  background: var(--fg3);
+  vertical-align: middle;
 }
-.project-count--needs {
-  color: var(--accent);
-  font-weight: 700;
+.project-dot--needs {
+  background: var(--accent);
 }
 
 .project-icon {
