@@ -1463,6 +1463,35 @@ export interface VaultReviewEvidence {
    * Optional because a server older than this client does not send it; the
    * panel falls back to its lazy per-row fetch when it is absent. */
   excerpt?: string
+  /** Why an `unverified` candidate is due: how old its last check is, the
+   * limit for its type, and where that date came from. Optional (and null
+   * when the signal is absent) so an older server simply leaves it out. */
+  unverified?: VaultReviewUnverified | null
+  /** Where a `superseded_language` candidate says so: the 1-based line, the
+   * line itself, the phrase that matched, and the nearest line either side. */
+  superseded?: VaultReviewSuperseded | null
+}
+
+export interface VaultReviewUnverified {
+  age_days: number
+  threshold_days: number
+  /** `YYYY-MM-DD`. */
+  last_verified: string
+  /** `frontmatter` when read off the note's `updated:` field, `mtime` when the
+   * note has none and the file's modified date stood in. */
+  source: 'frontmatter' | 'mtime'
+}
+
+export interface VaultReviewQuotedLine {
+  line: number
+  text: string
+}
+
+export interface VaultReviewSuperseded extends VaultReviewQuotedLine {
+  match: string
+  where: 'frontmatter' | 'lead'
+  before: VaultReviewQuotedLine | null
+  after: VaultReviewQuotedLine | null
 }
 
 /** One stale-note retirement candidate from `GET /api/vault/review`. */

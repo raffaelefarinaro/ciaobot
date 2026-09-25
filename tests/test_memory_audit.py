@@ -698,3 +698,74 @@ def test_audit_entries_reports_aging_state(tmp_path) -> None:
     )
     assert len(report["aging_state_entries"]) == 1
     assert report["aging_state_entries"][0]["kind"] == "as-of"
+
+
+# --- shared staleness predicate ---------------------------------------------
+
+
+def test_note_verification_prefers_frontmatter_and_reports_horizon() -> None:
+    from ciao.memory_audit import note_verification
+
+    today = datetime.date(2026, 9, 25)
+    result = note_verification(
+        "person", "2026-06-01", _days_ago(1, today=today), today=today
+    )
+
+    assert result is not None
+    assert result.source == "frontmatter"
+    assert result.age_days == 116
+    assert result.threshold_days == 90
+    assert result.stale is True
+    assert result.as_evidence() == {
+        "age_days": 116,
+        "threshold_days": 90,
+        "last_verified": "2026-06-01",
+        "source": "frontmatter",
+    }
+
+
+def test_note_verification_falls_back_to_mtime_and_clamps_future_dates() -> None:
+    from ciao.memory_audit import note_verification
+
+    today = datetime.date(2026, 9, 25)
+    by_mtime = note_verification("project", "", _days_ago(31, today=today), today=today)
+    assert by_mtime is not None
+    assert (by_mtime.source, by_mtime.age_days, by_mtime.stale) == ("mtime", 31, True)
+
+    future = note_verification("note", "2099-01-01", None, today=today)
+    assert future is not None
+    assert future.age_days == 0 and future.stale is False
+
+    assert note_verification("note", "not-a-date", None, today=today) is None
+
+
+def test_note_verification_exempts_event_types_including_aliases_and_case() -> None:
+    from ciao.memory_audit import is_stale_exempt_type, note_verification
+
+    today = datetime.date(2026, 9, 25)
+    for note_type in ("log", "journal", "workspace", "Journal", "hackathon-log", "project-log"):
+        assert is_stale_exempt_type(note_type), note_type
+        result = note_verification(note_type, "2020-01-01", None, today=today)
+        assert result is not None
+        # Still aged (the map shows it), never stale.
+        assert result.exempt is True and result.stale is False
+        assert result.age_days > 2000
+
+    # A capitalised type ages on its canonical horizon, not the default one.
+    person = note_verification("Person", "2026-06-01", None, today=today)
+    assert person is not None and person.threshold_days == 90 and person.stale
+
+
+def test_find_stale_notes_uses_the_shared_predicate_for_aliased_exempt_types() -> None:
+    today = datetime.date(2026, 9, 25)
+    entries = [
+        _entry("memory-vault/Journal/hack.md", "hackathon-log"),
+        _entry("memory-vault/People/Mo.md", "Person"),
+    ]
+    report = find_stale_notes(
+        entries, mtimes={str(e.path): _days_ago(120, today=today) for e in entries}, today=today
+    )
+
+    assert [f["path"] for f in report["stale_notes"]] == ["memory-vault/People/Mo.md"]
+    assert report["stale_notes"][0]["threshold_days"] == 90
+    assert report["notes_exempt"] == 1

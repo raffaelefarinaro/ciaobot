@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 
 /**
- * The review queue's controls live in the sidebar, like the memory map's.
+ * Memory's sections live in the sidebar, the way Settings' tabs do.
  *
- * They used to be a segmented control in the panel header while this column sat
- * empty — the only memory view that kept its controls somewhere else.
+ * The page used to carry a Review/Map switch and a tab row of its own while
+ * Settings listed its sections here — two navigation patterns for one app.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -96,10 +96,10 @@ describe('ProjectSidebar review section', () => {
     expect(workspaceOptions[0].find('.badge').exists()).toBe(false)
     expect(workspaceOptions[1].find('.badge').exists()).toBe(false)
 
-    // No stat tiles: the Suggested tab counts the queue and the batch bar
-    // counts the selection. The sidebar keeps only what filters the list.
+    // No stat tiles and no proposal filters: the section list carries the
+    // counts, and Suggested filters itself.
     expect(wrapper.findAll('.mm-stat')).toHaveLength(0)
-    expect(wrapper.find('.mm-search input').attributes('placeholder')).toBe('Search proposals…')
+    expect(wrapper.find('.mm-search').exists()).toBe(false)
   })
 
   it('marks workspaces with their key number and offers a new workspace', async () => {
@@ -135,43 +135,34 @@ describe('ProjectSidebar review section', () => {
     wrapper.unmount()
   })
 
-  it('offers a kind row per kind, counted over the scope', async () => {
+  it('lists Memory\'s sections like Settings\' tabs, each a route with its count', async () => {
+    const vaultReview = useVaultReviewStore()
+    vaultReview.loadedWorkspace = 'personal'
+    vaultReview.candidates = [
+      { candidate_id: 'c1', workspace: 'personal', path: 'a.md', content_hash: 'h1', signals: ['unverified'], priority: 0, evidence: EVIDENCE, status: 'candidate', disposition: '', deferred_until: '' },
+    ]
     const wrapper = await mountSidebar()
 
-    const labels = wrapper.findAll('.mm-link-item').map(i => i.text())
-    expect(labels.some(t => t.startsWith('All kinds') && t.includes('3'))).toBe(true)
-    expect(labels.some(t => t.startsWith('Memory') && t.includes('2'))).toBe(true)
-    expect(labels.some(t => t.startsWith('Skill') && t.includes('1'))).toBe(true)
+    const nav = wrapper.get('nav[aria-label="Memory sections"]')
+    expect(nav.findAll('.sidebar-list-label').map(h => h.text())).toEqual(['To decide', 'Explore', 'Records'])
+    const items = nav.findAll('.memory-nav-item')
+    expect(items.map(i => i.attributes('href'))).toEqual([
+      '/memory/suggested', '/memory/revisit', '/memory/map', '/memory/retired', '/memory/history',
+    ])
+    // Three proposals in `personal`, one note to revisit; the queues' counts
+    // are the accent ones, and the accessible name carries the number.
+    expect(items[0].get('.memory-nav-count').text()).toBe('3')
+    expect(items[0].get('.memory-nav-count').classes()).toContain('memory-nav-count--due')
+    expect(items[1].attributes('aria-label')).toBe('To revisit, 1 waiting')
+    // Nothing retired: no zero badge.
+    expect(items[3].find('.memory-nav-count').exists()).toBe(false)
   })
 
-  it('clicking a kind filters the shared store, and reset clears it', async () => {
+  it('marks the section on screen as the current page', async () => {
+    useMemoryMapStore().setSection('revisit')
     const wrapper = await mountSidebar()
-    const proposals = useProposalsStore()
-
-    const skill = wrapper.findAll('.mm-link-item').find(i => i.text().startsWith('Skill'))
-    await skill!.trigger('click')
-
-    expect(proposals.kindFilter).toBe('skill')
-    expect(proposals.visibleRows('personal').map(r => r.id)).toEqual(['p-skill'])
-
-    expect(skill!.attributes('aria-pressed')).toBe('true')
-
-    await wrapper.find('.mm-link').trigger('click')   // "Reset"
-    expect(proposals.kindFilter).toBe('all')
-  })
-
-  it('keeps every kind listed and counted while one is filtered', async () => {
-    // The chips are how you switch back, so filtering must not remove them, and
-    // their counts must not renumber under the pointer.
-    const proposals = useProposalsStore()
-    proposals.kindFilter = 'skill'
-
-    const wrapper = await mountSidebar()
-
-    const labels = wrapper.findAll('.mm-link-item').map(i => i.text())
-    expect(labels.some(t => t.startsWith('Memory') && t.includes('2'))).toBe(true)
-    expect(labels.some(t => t.startsWith('Skill') && t.includes('1'))).toBe(true)
-    expect(labels.some(t => t.startsWith('All kinds') && t.includes('3'))).toBe(true)
+    const current = wrapper.get('.memory-nav-item[aria-current="page"]')
+    expect(current.text()).toContain('To revisit')
   })
 
   it('leaves the Review/Map switch to the Memory page header', async () => {
@@ -210,16 +201,17 @@ describe('ProjectSidebar review section', () => {
     expect(wrapper.get('a[href="/memory"]').attributes('data-count')).toBe('3')
   })
 
-  it('shows no proposal filters while Notes to revisit is open', async () => {
-    // Search and kinds act on the suggestions list only; beside the
-    // retirement queue they would filter nothing on screen.
+  it('shows the map\'s search and categories only under Map', async () => {
+    // They filter the map and nothing else; beside a review queue they would
+    // filter nothing on screen.
     const mm = useMemoryMapStore()
-    mm.reviewTab = 'retirement'
-
+    mm.setSection('revisit')
     const wrapper = await mountSidebar()
-
     expect(wrapper.find('.mm-search').exists()).toBe(false)
-    expect(wrapper.findAll('.mm-stat')).toHaveLength(0)
+
+    mm.setSection('map')
+    await nextTick()
+    expect(wrapper.find('.mm-search').exists()).toBe(true)
   })
 
   it('does not render the review section for other modes', async () => {

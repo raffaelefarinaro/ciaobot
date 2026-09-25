@@ -383,75 +383,35 @@
       </nav>
     </template>
 
-    <!-- Workspace scope now lives once at the top of the rail. This mode keeps
-         its own Memory/Review switcher, which is about what the memory page
-         shows rather than which workspace it is scoped to. -->
+    <!-- Memory lists its sections the way Settings lists its tabs: one level
+         of navigation, each a route. The map's own filters (search,
+         categories) follow under the list only while the map is showing,
+         because they act on nothing else. -->
     <template v-if="!collapsed && (mode === 'memory' || mode === 'proposals')">
-      <!-- Review: the same shape as the memory map's sidebar — stats, a search,
-           then chips that both report and filter. The kind filter used to be a
-           segmented control in the panel header while this column sat empty,
-           which put the queue's controls somewhere different from every other
-           memory view's. -->
-      <div v-if="mode === 'proposals' && mm.reviewTab !== 'retirement'" class="mm-sidebar-scroll">
-        <template v-if="proposals.loading">
-          <div class="mm-loading-heading" role="status" aria-live="polite">
-            <span class="history-loading-spinner" aria-hidden="true"></span>
-            <span>Loading proposals…</span>
-          </div>
-          <div class="mm-search">
-            <input type="text" placeholder="Search proposals…" autocomplete="off" disabled />
-          </div>
-          <div class="mm-skeleton-block" aria-hidden="true">
-            <span class="mm-shimmer-line" style="width: 40%; margin-bottom: 10px;"></span>
-            <span class="mm-shimmer-line" style="width: 100%; height: 28px; margin-bottom: 6px;"></span>
-            <span class="mm-shimmer-line" style="width: 92%; height: 28px; margin-bottom: 6px;"></span>
-            <span class="mm-shimmer-line" style="width: 88%; height: 28px;"></span>
-          </div>
-        </template>
-        <template v-else>
-
-          <div class="mm-search">
-            <input
-              v-model="proposals.search"
-              type="text"
-              placeholder="Search proposals…"
-              autocomplete="off"
-            />
-          </div>
-
-        <div class="mm-row-between">
-          <h3 id="sidebar-kinds-title">Kinds</h3>
-          <button type="button" class="mm-link" @click="proposals.resetFilters()">Reset</button>
-        </div>
-        <div class="mm-link-list" role="group" aria-labelledby="sidebar-kinds-title">
-          <button
-            type="button"
-            class="mm-link-item mm-link-item--filter"
-            :class="{ off: proposals.kindFilter !== 'all' }"
-            :aria-pressed="proposals.kindFilter === 'all'"
-            @click="proposals.kindFilter = 'all'"
+      <nav class="settings-nav-list memory-nav-list" aria-label="Memory sections">
+        <template v-for="group in MEMORY_NAV" :key="group.label">
+          <h2 class="sidebar-list-label">{{ group.label }}</h2>
+          <router-link
+            v-for="item in group.items"
+            :key="item.section"
+            :to="memorySectionPath(item.section)"
+            class="settings-nav-item memory-nav-item"
+            :class="{ active: mm.section === item.section }"
+            :aria-current="mm.section === item.section ? 'page' : undefined"
+            :aria-label="memoryNavLabel(item)"
           >
-            <span class="label">All kinds</span>
-            <span class="cnt">{{ reviewScoped }}</span>
-          </button>
-          <button
-            v-for="k in reviewKinds"
-            :key="k.kind"
-            type="button"
-            class="mm-link-item mm-link-item--filter"
-            :class="{ off: proposals.kindFilter !== k.kind }"
-            :aria-pressed="proposals.kindFilter === k.kind"
-            :title="`Show only ${reviewKindLabel(k.kind)} proposals`"
-            @click="proposals.kindFilter = k.kind"
-          >
-            <span class="label">{{ sentenceCase(reviewKindLabel(k.kind)) }}</span>
-            <span class="cnt">{{ k.count }}</span>
-          </button>
-        </div>
+            <span class="memory-nav-label">{{ item.label }}</span>
+            <span
+              v-if="memoryNavCount(item.section) !== null"
+              class="memory-nav-count"
+              :class="{ 'memory-nav-count--due': item.due && (memoryNavCount(item.section) ?? 0) > 0 }"
+              aria-hidden="true"
+            >{{ memoryNavCount(item.section)?.toLocaleString() }}</span>
+          </router-link>
         </template>
-      </div>
+      </nav>
 
-      <div v-if="mode === 'memory'" class="mm-sidebar-scroll">
+      <div v-if="mm.section === 'map'" class="mm-sidebar-scroll">
         <template v-if="mm.loading">
           <div class="mm-loading-heading" role="status" aria-live="polite">
             <span class="history-loading-spinner" aria-hidden="true"></span>
@@ -491,9 +451,6 @@
           </div>
         </div>
 
-        <!-- Most connected, Unlinked, Needs review, Recently written and the
-             path finder live in the map's rail now: the sidebar filters what
-             the map shows, the rail says what is in it. -->
         </template>
       </div>
     </template>
@@ -905,7 +862,7 @@ import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useFileViewerStore } from '../stores/fileViewer'
-import { useMemoryMapStore } from '../stores/memoryMap'
+import { useMemoryMapStore, memorySectionPath, type MemorySection } from '../stores/memoryMap'
 import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import ChatSignals from './ChatSignals.vue'
@@ -917,7 +874,6 @@ import { colorForWorkspace } from '../lib/workspaceColors'
 import { ARCHIVE_CONFIRM_MESSAGE, ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
 import { workspaceLabel } from '../lib/workspaceLabel'
-import { kindLabel as reviewKindLabel } from '../lib/proposalKinds'
 import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
 import { openNewChatPicker } from '../lib/newChat'
@@ -933,16 +889,46 @@ const mm = useMemoryMapStore()
 const proposals = useProposalsStore()
 const vaultReview = useVaultReviewStore()
 
-// Review-queue figures for the sidebar. Scoped counts come from the store so
-// they use the same workspace rule as the list — a chip that disagreed with the
-// rows under it would be worse than no chip.
-// Retirement counts mirror `retirementCount`/`trashCount` in MemoryMapView:
-// the store holds one workspace at a time, so a load for another workspace
-// must read as zero here rather than as the previous workspace's queue.
-// The memory page's Review/Map switch and its counts live in the page header
-// and tab bar now; the sidebar keeps only the filters that act on the list.
-const reviewScoped = computed(() => proposals.scopedRows(store.activeWorkspace).length)
-const reviewKinds = computed(() => proposals.kindCounts(store.activeWorkspace))
+// Memory's sections and their counts. Scoped counts come from the stores so
+// they use the same workspace rule as each page's list — a count that
+// disagreed with the rows under it would be worse than none. The retirement
+// store holds one workspace at a time, so a load for another workspace reads
+// as "not loaded" here rather than as the previous workspace's queue.
+type MemoryNavItem = { section: MemorySection; label: string; due?: boolean }
+const MEMORY_NAV: { label: string; items: MemoryNavItem[] }[] = [
+  { label: 'To decide', items: [
+    { section: 'suggested', label: 'Suggested', due: true },
+    { section: 'revisit', label: 'To revisit', due: true },
+  ] },
+  { label: 'Explore', items: [{ section: 'map', label: 'Map' }] },
+  { label: 'Records', items: [
+    { section: 'retired', label: 'Retired' },
+    { section: 'history', label: 'History' },
+  ] },
+]
+/** A section's count, scoped to the selected workspace; null hides it (not
+ * loaded yet, or a zero on a queue where zero is the news). */
+function memoryNavCount(section: MemorySection): number | null {
+  const workspace = store.activeWorkspace
+  const retirementLoaded = vaultReview.loadedWorkspace === workspace
+  // The ledger is fetched per workspace too; until the switch's refetch lands
+  // it still holds the previous workspace's total.
+  const historyLoaded = proposals.historyLoaded && (proposals.historyWorkspace ?? '') === workspace
+  switch (section) {
+    case 'suggested': return proposals.scopedRows(workspace).length || null
+    case 'revisit': return retirementLoaded ? vaultReview.candidates.length || null : null
+    case 'retired': return retirementLoaded ? vaultReview.trashed.length || null : null
+    case 'map': return mm.nodes.length || null
+    case 'history': return historyLoaded ? proposals.historyTotal || null : null
+  }
+}
+function memoryNavLabel(item: MemoryNavItem): string {
+  const count = memoryNavCount(item.section)
+  if (count === null) return item.label
+  if (item.section === 'map') return `${item.label}, ${count} notes`
+  if (item.due) return `${item.label}, ${count} waiting`
+  return `${item.label}, ${count}`
+}
 const hasBlockingHousekeeping = computed(() => housekeeping.actions.some(action => action.blocking))
 const settingsNeedsAttention = computed(() => Boolean(store.packageStatus?.update_available || hasBlockingHousekeeping.value))
 
@@ -967,12 +953,6 @@ const historyNav = useHistoryNav()
 function historyChordHint(key: '[' | ']'): string {
   if (isDesktopApp() || isApplePlatform()) return ` (⌘${key})`
   return key === '[' ? ' (Alt+←)' : ' (Alt+→)'
-}
-
-/** Kind labels are lower-case nouns ("memory", "skill"); the sidebar lists
- * them as sentence-case names like every other filter row. */
-function sentenceCase(label: string): string {
-  return label ? label.charAt(0).toUpperCase() + label.slice(1) : label
 }
 
 function promptTitle(prompt: string): string {
@@ -3089,7 +3069,16 @@ async function confirmDeleteChat(chatId: string) {
   .settings-nav-item { min-height: var(--touch); }
 }
 
-/* Memory Map sidebar (vault stats, search, categories, path finder) */
+/* Memory's sections: Settings' list with a count at the row's end. */
+.memory-nav-list .sidebar-list-label { margin-top: 8px; }
+.memory-nav-list .sidebar-list-label:first-child { margin-top: 0; }
+.memory-nav-item { gap: 8px; }
+.memory-nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-nav-count { color: var(--fg3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.memory-nav-count--due { color: var(--accent); font-weight: 650; }
+.memory-nav-item.active { font-weight: 600; }
+
+/* Memory Map sidebar (search, categories) */
 .mm-sidebar-scroll {
   overflow-y: auto;
   padding: var(--space-3);

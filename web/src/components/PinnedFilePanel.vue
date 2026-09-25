@@ -45,7 +45,7 @@
                 <DropdownMenuItem as-child :disabled="loading || !!error || openExternalState === 'loading'" @select="openExternally">
                   <button type="button">{{ openExternalState === 'ok' ? 'Opened' : 'Open in default app' }}</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem v-if="memoryPath" as-child @select="void openInMemoryMap()">
+                <DropdownMenuItem v-if="memoryPath && !inMemoryMap" as-child @select="void openInMemoryMap()">
                   <button type="button">Open in memory map</button>
                 </DropdownMenuItem>
               </div>
@@ -53,13 +53,16 @@
           </DropdownMenuPortal>
         </DropdownMenuRoot>
         <!-- Close sits last, where a window's close lives; the tile is a window. -->
-        <button class="btn-icon close-btn desktop-only" @click="$emit('close')" title="Unpin file" aria-label="Unpin file">
+        <button class="btn-icon close-btn" :class="{ 'desktop-only': !inMemoryMap }" @click="$emit('close')" :title="closeLabel || 'Unpin file'" :aria-label="closeLabel || 'Unpin file'">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
         </button>
       </template>
     </PaneHeader>
     <div class="pfp-main" ref="mainEl">
       <div class="pfp-body" :class="{ 'pfp-body-csv': isCsv }" ref="bodyEl">
+        <!-- A host's own context for the file (the memory map's stale-note
+             callout), above the document. -->
+        <slot name="lead" />
         <div v-if="loading" class="pfp-skeleton" role="status" aria-live="polite" aria-label="Loading file" aria-busy="true">
           <div class="pfp-skeleton-meta" aria-hidden="true">
             <span class="pfp-skeleton-pill pfp-skeleton-pill--type"></span>
@@ -233,6 +236,8 @@
             >{{ line }}</span></code></pre>
           </template>
         </template>
+        <!-- …and under it (the memory map's linked notes). -->
+        <slot name="after" />
       </div>
 
       <CommentComposePopover
@@ -338,12 +343,19 @@ import PaneHeader from './PaneHeader.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import { fileViewerKindForPath, useFileViewerStore } from '../stores/fileViewer'
 import type { FileViewerKind, HtmlArtifactView } from '../stores/fileViewer'
-import { useMemoryMapStore } from '../stores/memoryMap'
+import { useMemoryMapStore, memorySectionPath } from '../stores/memoryMap'
 import { router } from '../router'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
-const props = defineProps<{ filePath: string }>()
+const props = defineProps<{
+  filePath: string
+  /** Mounted as the memory map's note tile: "Open in memory map" would open
+   * the page it is already on, so the menu drops it. */
+  inMemoryMap?: boolean
+  /** The close control's name; the chat's tile unpins, the map's closes. */
+  closeLabel?: string
+}>()
 defineEmits<{ (e: 'close'): void }>()
 
 const projectsStore = useProjectStore()
@@ -365,7 +377,7 @@ async function openInMemoryMap(): Promise<void> {
   // panel, so requesting it before the prompt would leave the map jumping to
   // this note the next time /memory opens, after a navigation that was cancelled.
   memoryMapStore.requestFocusOnOpen(target)
-  await router.push('/memory')
+  await router.push(memorySectionPath('map'))
 }
 
 // ── Loading & rendering ──────────────────────────────────────────────

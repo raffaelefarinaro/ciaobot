@@ -70,14 +70,14 @@ describe('visibility', () => {
     // the canvas dims everything that is not the selected note or its direct
     // neighbours, but the nodes stay in the layout.
     const mm = seedChain()
-    mm.handleNodeClick('b', false)
+    mm.handleNodeClick('b')
     expect(mm.selectedId).toBe('b')
     expect(mm.visibleNodes).toHaveLength(5)
   })
 
   test('clicking a node selects it and asks the canvas to focus it', () => {
     const mm = seedChain()
-    mm.handleNodeClick('c', false)
+    mm.handleNodeClick('c')
     expect(mm.selectedId).toBe('c')
     expect(mm.focusSignal.id).toBe('c')
     expect(mm.focusSignal.seq).toBe(1)
@@ -85,7 +85,7 @@ describe('visibility', () => {
 
   test('a canvas click pans without magnifying — the dot was already visible', () => {
     const mm = seedChain()
-    mm.handleNodeClick('c', false)
+    mm.handleNodeClick('c')
     expect(mm.focusSignal.magnify).toBe(false)
   })
 
@@ -120,76 +120,28 @@ describe('visibility', () => {
     expect(mm.consumePendingFocus()).toBeNull()
   })
 
-  test('shift-click builds a path instead of changing the selection', () => {
-    const mm = seedChain()
-    mm.handleNodeClick('a', false)
-    mm.handleNodeClick('d', true)
-    expect(mm.pathStart).toBe('d')
-    expect(mm.selectedId).toBe('a')
-  })
 })
 
-describe('explicit path endpoints', () => {
-  test('start and end are named slots, so the order picked does not matter', () => {
-    const mm = seedChain()
-    mm.choosePathEndpoint('d', 'start')
-    mm.choosePathEndpoint('a', 'end')
-    expect(mm.pathStart).toBe('d')
-    expect(mm.pathEnd).toBe('a')
-    // a — b — c — d: the path is the whole chain regardless of which end the
-    // user named first.
-    expect([...mm.pathIds].sort()).toEqual(['a', 'b', 'c', 'd'])
+describe('sections', () => {
+  test('setSection keeps the panels\' own state in step', () => {
+    const mm = useMemoryMapStore()
+    mm.setSection('revisit')
+    expect([mm.section, mm.view, mm.reviewTab, mm.retirementTab]).toEqual(['revisit', 'review', 'retirement', 'candidates'])
+    mm.setSection('retired')
+    expect([mm.view, mm.reviewTab, mm.retirementTab]).toEqual(['review', 'retirement', 'trash'])
+    mm.setSection('suggested')
+    expect([mm.view, mm.reviewTab]).toEqual(['review', 'proposals'])
   })
 
-  test('choosing the same note for both slots keeps only one', () => {
-    const mm = seedChain()
-    mm.choosePathEndpoint('b', 'start')
-    mm.choosePathEndpoint('b', 'end')
-    expect(mm.pathStart).toBeNull()
-    expect(mm.pathEnd).toBe('b')
-  })
-
-  test('toggle fills start, then end, then restarts, for a single-button UI', () => {
-    const mm = seedChain()
-    mm.choosePathEndpoint('a', 'toggle')
-    expect([mm.pathStart, mm.pathEnd]).toEqual(['a', null])
-    mm.choosePathEndpoint('d', 'toggle')
-    expect([mm.pathStart, mm.pathEnd]).toEqual(['a', 'd'])
-    mm.choosePathEndpoint('b', 'toggle')
-    expect([mm.pathStart, mm.pathEnd]).toEqual(['b', null])
-  })
-
-  test('a toggle never seats one note in both slots', () => {
-    // Reachable from the canvas: set the start from a row's "start" button,
-    // then shift-click the same dot. The toggle branch used to fill the empty
-    // end slot with the note already holding the start, and `pathIds` then
-    // BFS-terminated at once on a degenerate one-note "path".
-    const mm = seedChain()
-    mm.choosePathEndpoint('b', 'start')
-    mm.handleNodeClick('b', true)
-    expect([mm.pathStart, mm.pathEnd]).toEqual([null, null])
-    expect(mm.pathIds.size).toBe(0)
-    expect(mm.pathHint).not.toContain('1 notes')
-  })
-
-  test('a toggle on the note already holding the end slot releases it', () => {
-    // The mirror case: with the end named first and the start empty, the same
-    // branch dropped the id into `pathStart` instead.
-    const mm = seedChain()
-    mm.choosePathEndpoint('b', 'end')
-    mm.choosePathEndpoint('b', 'toggle')
-    expect([mm.pathStart, mm.pathEnd]).toEqual([null, null])
-    expect(mm.pathIds.size).toBe(0)
-  })
-
-  test('the hint names the next step in words, not just on a canvas', () => {
-    const mm = seedChain()
-    expect(mm.pathHint).toContain('start')
-    mm.choosePathEndpoint('a', 'start')
-    expect(mm.pathHint).toContain('Start:')
-    expect(mm.pathHint).toContain('end')
-    mm.choosePathEndpoint('d', 'end')
-    expect(mm.pathHint).toContain('4 notes')
+  test('the map returns to whichever drawing was on screen', () => {
+    const mm = useMemoryMapStore()
+    mm.mapView = 'list'
+    mm.setSection('map')
+    expect(mm.view).toBe('list')
+    mm.setSection('history')
+    expect(mm.view).toBe('review')
+    mm.setSection('map')
+    expect(mm.view).toBe('list')
   })
 })
 

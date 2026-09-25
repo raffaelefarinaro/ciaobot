@@ -6,8 +6,9 @@ import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import type { ProposalAcceptRefusal, ProposalPreview, ProposalRow } from '../lib/types'
-import { lineChanges, type LineChange } from '../lib/textDiff'
+import { diffWithContext, headingAbove, lineChanges, type DiffLine, type LineChange } from '../lib/textDiff'
 import { canReconcile, descriptorFor, kindLabel, rehomeMode } from '../lib/proposalKinds'
+import { CHANGE_FILTERS, changeFor, isRegionPreview, type ProposalChange, type ProposalChangeType } from '../lib/proposalChange'
 import type { ProposalMergeFallback } from '../lib/proposalKinds'
 import ProposalHistoryList from './ProposalHistoryList.vue'
 
@@ -100,6 +101,10 @@ function isPreviewOpen(row: ProposalRow): boolean {
 }
 
 async function reviewAccept(row: ProposalRow) {
+  // Moving to another row's card walks away from this one: close it the same
+  // way Cancel does, so an edited wording it re-previewed does not stay on its
+  // row as the preview the row's own accept button would then commit.
+  if (previewId.value && previewId.value !== row.id) closePreview()
   previewId.value = row.id
   editingPreview.value = false
   editBuffer.value = row.text
@@ -111,9 +116,23 @@ function closePreview() {
   previewId.value = ''
   editingPreview.value = false
   editBuffer.value = ''
-  // The revision is only a promise about a card the operator is looking at.
-  // Leaving it behind would hand a stale one to the next batch accept.
-  if (id) store.dropPreview(id)
+  if (!id) return
+  // The row shows its preview, so closing the card keeps it — unless the card
+  // re-previewed an edited wording. That preview describes a write the
+  // operator walked away from, so the row goes back to the original bullet's.
+  const row = store.rows.find(r => r.id === id)
+  const shown = store.previews[id]
+  if (row && shown && shown.text !== row.text) {
+    store.dropPreview(id)
+    void store.loadPreview(id)
+  }
+}
+
+/** Open the card straight into editing: the row's "Edit first". */
+async function editFirst(row: ProposalRow) {
+  await reviewAccept(row)
+  // Another card may have been opened while the preview loaded.
+  if (previewId.value === row.id) startEditingPreview()
 }
 
 function startEditingPreview() {
@@ -177,8 +196,12 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
   })
   if (result.conflict) return
   if (result.ok) {
-    previewId.value = ''
-    editingPreview.value = false
+    // A row accepted from the list must not close (and discard the edit on)
+    // a different row's open card.
+    if (previewId.value === row.id) {
+      previewId.value = ''
+      editingPreview.value = false
+    }
     store.dropPreview(row.id)
     clearDeferred(row.id)
     return
@@ -188,7 +211,7 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
   // The pending edit rides along into the deferral: without it the retry
   // below would resend the original bullet, silently replacing the wording
   // the operator just approved.
-  closePreview()
+  if (previewId.value === row.id) closePreview()
   await handleAcceptRefusal(row, result.error || '', result.payload, {
     text: edited || undefined,
     expectedRevision: preview.revision,
@@ -363,7 +386,188 @@ const selected = computed({
  * back to. The scope rule itself is in the store, so the sidebar's chip counts
  * and this list cannot disagree about what is in scope.
  */
-const filtered = computed(() => store.visibleRows(projectStore.activeWorkspace))
+const scopeFiltered = computed(() => store.visibleRows(projectStore.activeWorkspace))
+
+// -- Change type ------------------------------------------------------------
+//
+// Every row says what accepting it does to which file — create a note, add to
+// one, merge into one — read off the server's preview (see
+// `lib/proposalChange.ts` for the table). The previews for the rows on screen
+// are fetched as soon as the queue is showing, a few at a time, so the change
+// is on the row without a click.
+
+function computeChange(row: ProposalRow): ProposalChange {
+  return changeFor(row, store.previews[row.id], {
+    canAccept: canAccept(row),
+    fallbackQualifier: rowConsequence(row),
+  })
+}
+
+// The template asks for a row's change and diff several times per render, and
+// the diff walks the whole destination body, so both are computed once per
+// preview/row change here rather than on every call.
+const changeById = computed(() => {
+  const out = new Map<string, ProposalChange>()
+  for (const row of scopeFiltered.value) out.set(row.id, computeChange(row))
+  return out
+})
+
+function rowChange(row: ProposalRow): ProposalChange {
+  return changeById.value.get(row.id) ?? computeChange(row)
+}
+
+/** Whether this row gets a preview at all: a skill is built in a chat, and a
+ * row with no accept has nothing to preview. */
+function wantsPreview(row: ProposalRow): boolean {
+  return !isSkill(row) && canAccept(row)
+}
+
+const changeFilter = ref<'all' | ProposalChangeType>('all')
+
+const changeCounts = computed(() => {
+  const tally = new Map<ProposalChangeType, number>()
+  for (const row of scopeFiltered.value) {
+    const type = rowChange(row).type
+    tally.set(type, (tally.get(type) ?? 0) + 1)
+  }
+  return CHANGE_FILTERS
+    .map(f => ({ ...f, count: tally.get(f.type) ?? 0 }))
+    .filter(f => f.count > 0)
+})
+
+/** Rows the list renders: the store's workspace/kind/search scope, then the
+ * change-type chip. Every batch action goes through this, so a batch can only
+ * touch what is on screen. */
+const filtered = computed(() => changeFilter.value === 'all'
+  ? scopeFiltered.value
+  : scopeFiltered.value.filter(r => rowChange(r).type === changeFilter.value))
+
+// The chip for the last row of a type disappears when that row is decided;
+// fall back to All rather than keep a filter no chip shows.
+watch(changeCounts, (chips) => {
+  if (changeFilter.value !== 'all' && !chips.some(c => c.type === changeFilter.value)) {
+    changeFilter.value = 'all'
+  }
+})
+
+function clearAllFilters() {
+  changeFilter.value = 'all'
+  store.resetFilters()
+}
+
+const CHANGE_ICONS: Record<string, string[]> = {
+  new: ['M14 3H6v18h12V7z', 'M14 3v4h4M12 11v6M9 14h6'],
+  add: ['M5 6h14M5 10h14M5 14h8M16 14v6M13 17h6'],
+  update: ['M4 20h4L19 9l-4-4L4 16z', 'm13 7 4 4'],
+  merge: ['M6 4v5a5 5 0 0 0 5 5h7', 'M6 20v-6', 'm15 11 3 3-3 3'],
+  move: ['M4 12h11', 'm11 7 5 5-5 5', 'M20 5v14'],
+  none: ['m5 12 5 5 9-10'],
+  blocked: ['M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16', 'm6.5 6.5 11 11'],
+  skill: ['M12 3v4M12 17v4M3 12h4M17 12h4', 'M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6'],
+  decide: ['M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16', 'M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5V14', 'M12 17h.01'],
+}
+
+function changeIcon(type: string): string[] {
+  return CHANGE_ICONS[type] ?? []
+}
+
+/** The muted words after the destination: the section a line lands under,
+ * when the file has one, else the change's own qualifier. */
+const qualifierById = computed(() => {
+  const out = new Map<string, string>()
+  for (const row of scopeFiltered.value) out.set(row.id, computeQualifier(row))
+  return out
+})
+
+function changeQualifier(row: ProposalRow): string {
+  return qualifierById.value.get(row.id) ?? computeQualifier(row)
+}
+
+function computeQualifier(row: ProposalRow): string {
+  const change = rowChange(row)
+  const preview = store.previews[row.id]
+  if (preview && (change.type === 'add' || change.type === 'update') && !isRegionPreview(preview)) {
+    const first = diffWithContext(preview.before, preview.after, '\n', 0).find(l => l.op === 'added')
+    const heading = first ? headingAbove(preview.after, first.line) : ''
+    if (heading) return `under ${heading}`
+  }
+  return change.qualifier
+}
+
+interface RowDiff {
+  head: string
+  lines: DiffLine[]
+  numbered: boolean
+  more: number
+  note: string
+}
+
+const DIFF_MAX_LINES = 12
+
+function plural(n: number, unit: 'line' | 'entry'): string {
+  if (unit === 'entry') return `${n} ${n === 1 ? 'entry' : 'entries'}`
+  return `${n} ${n === 1 ? 'line' : 'lines'}`
+}
+
+/** The compact diff under a row: the whole file for a new note, the changed
+ * lines with one line of context for an add or update, and the text to be
+ * merged for a merge whose wording a model decides at accept time. */
+const diffById = computed(() => {
+  const out = new Map<string, RowDiff | null>()
+  for (const row of scopeFiltered.value) out.set(row.id, computeDiff(row))
+  return out
+})
+
+function rowDiff(row: ProposalRow): RowDiff | null {
+  const cached = diffById.value.get(row.id)
+  return cached !== undefined ? cached : computeDiff(row)
+}
+
+function computeDiff(row: ProposalRow): RowDiff | null {
+  const preview = store.previews[row.id]
+  if (!preview) return null
+  const change = rowChange(row)
+  const cap = (lines: DiffLine[]) => ({ lines: lines.slice(0, DIFF_MAX_LINES), more: Math.max(0, lines.length - DIFF_MAX_LINES) })
+  const truncatedNote = preview.truncated ? 'The destination is too large to show in full.' : ''
+  if (change.type === 'new') {
+    const lines = diffWithContext('', preview.after, '\n', 0)
+    return { head: `New file, ${plural(lines.length, 'line')}`, numbered: true, note: truncatedNote, ...cap(lines) }
+  }
+  if (change.type === 'merge') {
+    const lines: DiffLine[] = (preview.text || row.text).split('\n').map((text, i) => ({ op: 'added', text, line: i + 1 }))
+    return { head: 'To merge', numbered: false, note: 'Wording decided when you accept.', ...cap(lines) }
+  }
+  if (change.type === 'add' || change.type === 'update') {
+    const region = isRegionPreview(preview)
+    const lines = diffWithContext(preview.before, preview.after, preview.separator || '\n', 1)
+    if (!lines.length) return null
+    const unit = region ? 'entry' : 'line'
+    const added = lines.filter(l => l.op === 'added')
+    const removed = lines.filter(l => l.op === 'removed').length
+    let head: string
+    if (!removed) {
+      head = `${plural(added.length, unit)} added`
+      if (!region && added[0] && added[0].line > 1) head += ` after line ${added[0].line - 1}`
+    } else if (!added.length) {
+      head = `${plural(removed, unit)} removed`
+    } else if (added.length === removed) {
+      head = `${plural(added.length, unit)} replaced`
+    } else {
+      head = `${plural(removed, unit)} replaced by ${added.length}`
+    }
+    return { head, numbered: !region, note: truncatedNote, ...cap(lines) }
+  }
+  return null
+}
+
+/** The server's own sentence about the change, when it adds something the tag
+ * and the diff do not already say. */
+function rowReason(row: ProposalRow): string {
+  const preview = store.previews[row.id]
+  if (!preview?.reason) return ''
+  if (preview.action === 'fold_doc') return ''
+  return preview.reason
+}
 
 // -- Queue load states ------------------------------------------------------
 //
@@ -528,12 +732,6 @@ function rowSubtitle(row: ProposalRow): string {
  * path. Same registry, so a new kind still answers both in one place. */
 function rowConsequence(row: ProposalRow): string {
   return descriptorFor(row).consequence(row)
-}
-
-/** The verbose original, kept behind a disclosure rather than on the surface. */
-function rowDetail(row: ProposalRow): string {
-  if (isRehome(row)) return row.text
-  return row.source ? `from ${row.source}` : ''
 }
 
 /** Whether an accept can do what it says. Each kind's descriptor decides. */
@@ -1015,6 +1213,18 @@ function dismissOlder() {
   void store.dismissOlderThan(iso)
 }
 
+// Prefetch the previews the rows show. Declared after `activeSection` so the
+// immediate run can read it.
+watch(
+  () => (activeSection.value === 'queue'
+    ? scopeFiltered.value.filter(wantsPreview).map(r => r.id).join(',')
+    : ''),
+  (ids) => {
+    if (ids) void store.prefetchPreviews(ids.split(','))
+  },
+  { immediate: true },
+)
+
 onMounted(() => {
   pruneProposalChatLinks()
   void store.fetch().then(pruneProposalChatLinks)
@@ -1039,41 +1249,23 @@ watch(
 
     <ProposalHistoryList v-if="activeSection === 'history'" />
 
-    <div v-else>
-    <!-- One sentence naming the decision, and the mechanism behind it folded
-         away. The paragraph this replaces ran nine lines — internal routing,
-         bounded regions, stub notes, file removal — and at a 390px viewport it
-         took about 230px of screen before the first thing to decide. Where a
-         row would actually go is now on the row itself. -->
-    <p class="pr-lede">
-      Facts Ciao was not sure enough to save on its own. Review shows where each one would be saved.
-      <button
-        v-if="store.kindFilter !== 'all' || store.search"
-        type="button"
-        class="pr-clear-filter"
-        @click="store.resetFilters()"
-      >Clear filter</button>
-    </p>
-    <details class="pr-how">
-      <summary class="pr-how-summary">How memory works</summary>
-      <div class="pr-how-body">
-        <p>
-          When you archive a chat, Ciaobot saves what it is confident about by
-          itself. Anything it is unsure about waits here instead, so nothing it
-          guessed at lands in your notes without you seeing it.
-        </p>
-        <p>
-          Each row says what keeping it would do. A nightly pass looks again at
-          this list and at your older notes, so a row can also clear itself once
-          that pass can settle it.
-        </p>
-        <p>
-          Notes that are already saved but may have gone out of date are under
-          <strong>Notes to revisit</strong>, not here.
-        </p>
-      </div>
-    </details>
-
+    <div v-else class="pr-queue">
+    <!-- A heading and one sentence. Where each row would go, and what it would
+         do there, is on the row itself. -->
+    <header class="pr-head">
+      <!-- No workspace name: the sidebar's workspace scope already says it. -->
+      <h2 class="mr-head">{{ scopedCount }} suggested</h2>
+      <p class="mr-lede pr-lede">
+        What archived chats taught Ciaobot that it would not save on its own. Each one
+        says what it will do: create a note, add to one, or change one that is already there.
+        <button
+          v-if="store.kindFilter !== 'all' || store.search"
+          type="button"
+          class="pr-clear-filter"
+          @click="clearAllFilters()"
+        >Clear filter</button>
+      </p>
+    </header>
 
     <!-- Counted and gated on the VISIBLE selection, so the bar can never
          advertise (or act on) rows the current workspace/kind filter hides. -->
@@ -1159,10 +1351,10 @@ watch(
       <p v-if="filtersHideEverything" class="pr-empty">
         No proposals match the current filters.
         <button
-          v-if="store.kindFilter !== 'all' || store.search"
+          v-if="store.kindFilter !== 'all' || store.search || changeFilter !== 'all'"
           type="button"
           class="pr-clear-filter"
-          @click="store.resetFilters()"
+          @click="clearAllFilters()"
         >Clear filters</button>
       </p>
       <p v-else-if="queueEmpty" class="pr-empty">All reviewed.</p>
@@ -1170,14 +1362,30 @@ watch(
 
     <template v-if="queueSettled">
     <section class="pr-group">
-      <!-- Count on the left, section actions on the right: Select turns the
-           row checkboxes on, the menu holds the rare bulk clean-up. -->
-      <header v-if="filtered.length" class="pr-group-head">
+      <!-- Filter chips by change type on the left, section tools on the right:
+           Select turns the row checkboxes on, the menu holds the rare bulk
+           clean-up. -->
+      <header v-if="scopeFiltered.length" class="pr-group-head">
         <label v-if="showChecks" class="pr-group-select">
           <input type="checkbox" :checked="allSelected" @change="toggleAll" />
           <span class="pr-group-name">Select all {{ filtered.length }}</span>
         </label>
-        <span v-else class="pr-group-name">{{ filtered.length === 1 ? '1 suggestion' : `${filtered.length} suggestions` }}</span>
+        <div class="mr-chips pr-chips" role="group" aria-label="Filter by change">
+          <button
+            type="button"
+            class="mr-chip"
+            :aria-pressed="changeFilter === 'all'"
+            @click="changeFilter = 'all'"
+          >All <span class="mr-chip-count">{{ scopeFiltered.length }}</span></button>
+          <button
+            v-for="chip in changeCounts"
+            :key="chip.type"
+            type="button"
+            class="mr-chip"
+            :aria-pressed="changeFilter === chip.type"
+            @click="changeFilter = chip.type"
+          >{{ chip.label }} <span class="mr-chip-count">{{ chip.count }}</span></button>
+        </div>
         <span class="pr-group-tools">
           <button
             v-if="showChecks"
@@ -1220,7 +1428,7 @@ watch(
           v-for="row in group.rows"
           :key="row.id"
           class="pr-row"
-          :class="{ 'pr-row--leak': row.leak_warning, 'pr-row--busy': store.isBusy(row.id), 'pr-row--linked': hasActiveLink(row) }"
+          :class="[`pr-row--${rowChange(row).type}`, { 'pr-row--leak': row.leak_warning, 'pr-row--busy': store.isBusy(row.id), 'pr-row--linked': hasActiveLink(row) }]"
         >
           <!-- Wrapped so the tap target reaches 44px; the input itself keeps its
                native size, and the aria-label names the fact this row controls. -->
@@ -1235,8 +1443,6 @@ watch(
           </label>
 
           <div class="pr-row-body">
-            <!-- Kind and source first, as one quiet line, so the fact itself
-                 starts at the row's left edge and reads as the subject. -->
             <p class="pr-row-meta">
               <span class="pr-kind" :class="`pr-kind--${row.kind}`">{{ kindLabel(row.kind) }}</span>
               <template v-if="row.source && !isRehome(row) && !isSkill(row)"> · from {{ row.source }}</template>
@@ -1246,40 +1452,70 @@ watch(
                    built from segments, never v-html, since the text is model-written. -->
               <span class="pr-row-title"><template v-for="(part, pi) in inlineCodeParts(rowTitle(row))" :key="pi"><code v-if="part.code" class="pr-inline-code">{{ part.text }}</code><template v-else>{{ part.text }}</template></template></span>
             </div>
-            <!-- What accepting this row would do, in words rather than a path:
-                 `ciao:memory` and `Workspace/Learnings.md` are the same shape of
-                 string and say nothing about the difference between them. The
-                 path is still one disclosure away, and still the title text.
 
-                 For a skill row the file IS the row, so its leaf stays a button
-                 that opens it — a separate "view" button spent a slot saying
-                 what the path already said. -->
-            <p class="pr-row-sub" :title="rowSubtitle(row)">
-              <button
-                v-if="isSkill(row) && row.path"
-                type="button"
-                class="pr-path-link"
-                :title="row.path"
-                @click="view(row)"
-              >{{ pathLeaf(row.path) }}</button>
-              <template v-else>{{ rowConsequence(row) }}</template>
-              <span v-if="row.leak_warning" class="pr-badge --warn">visible in every workspace</span>
-            </p>
-            <details class="pr-row-detail">
-              <summary>Details</summary>
-              <p v-if="rowDetail(row)" class="pr-row-prose">{{ rowDetail(row) }}</p>
-              <p class="pr-row-source">Goes to {{ rowSubtitle(row) }}</p>
-              <p v-if="row.path" class="pr-row-source">{{ row.path }}</p>
-            </details>
+            <!-- The change, on the row: a tag naming what an accept does, the
+                 file it does it to, and the lines. Hidden while the decision
+                 card is open, which shows the same thing with its own actions. -->
+            <template v-if="!isPreviewOpen(row)">
+              <p v-if="rowChange(row).label" class="pr-change" :title="rowSubtitle(row)">
+                <span class="pr-op" :class="`pr-op--${rowChange(row).type}`">
+                  <svg class="pr-op-icon" viewBox="0 0 24 24" aria-hidden="true"><path v-for="(d, di) in changeIcon(rowChange(row).type)" :key="di" :d="d" /></svg>
+                  {{ rowChange(row).label }}
+                </span>
+                <button
+                  v-if="isSkill(row) && row.path"
+                  type="button"
+                  class="pr-path-link"
+                  :title="row.path"
+                  @click="view(row)"
+                >{{ pathLeaf(row.path) }}</button>
+                <span v-else-if="rowChange(row).destination" class="pr-dest">{{ rowChange(row).destination }}</span>
+                <span v-if="changeQualifier(row)" class="pr-where">· {{ changeQualifier(row) }}</span>
+                <span v-if="row.leak_warning" class="pr-badge --warn">visible in every workspace</span>
+              </p>
+              <!-- No preview yet (or none to be had): what keeping it does, in
+                   words, until the server says exactly. -->
+              <p v-else class="pr-row-sub" :title="rowSubtitle(row)">
+                {{ rowConsequence(row) }}
+                <span v-if="store.isPreviewLoading(row.id)" class="pr-checking" role="status"> · checking what it changes…</span>
+                <template v-else-if="store.previewErrors[row.id]">
+                  <span class="pr-preview-error"> · could not read the destination.</span>
+                  <button type="button" class="mr-link pr-preview-retry" @click="store.loadPreview(row.id)">Retry</button>
+                </template>
+                <span v-if="row.leak_warning" class="pr-badge --warn">visible in every workspace</span>
+              </p>
+
+              <p v-if="store.conflictIds.has(row.id)" class="pr-card-conflict" role="alert">
+                The destination changed since this preview, so nothing was written.
+                This is what it would do now.
+              </p>
+
+              <div v-if="rowDiff(row)" class="mr-box pr-diff">
+                <div class="mr-box-head"><span>{{ rowDiff(row)!.head }}</span></div>
+                <ol class="mr-box-lines">
+                  <li
+                    v-for="(line, li) in rowDiff(row)!.lines"
+                    :key="li"
+                    class="mr-box-line"
+                    :class="[`mr-box-line--${line.op}`, { 'mr-box-line--nonum': !rowDiff(row)!.numbered }]"
+                  >
+                    <span v-if="rowDiff(row)!.numbered" class="mr-box-num">{{ line.line }}</span>
+                    <span class="mr-box-sign" aria-hidden="true">{{ line.op === 'added' ? '+' : line.op === 'removed' ? '−' : ' ' }}</span>
+                    <span class="mr-box-text">{{ line.text }}</span>
+                    <span v-if="line.op !== 'context'" class="mr-sr-only">{{ line.op }}</span>
+                  </li>
+                </ol>
+                <p v-if="rowDiff(row)!.more" class="mr-box-foot">{{ rowDiff(row)!.more }} more {{ rowDiff(row)!.more === 1 ? 'line' : 'lines' }}. <button type="button" class="mr-link" @click="reviewAccept(row)">Show all</button></p>
+                <p v-if="rowDiff(row)!.note" class="mr-box-foot">{{ rowDiff(row)!.note }}</p>
+              </div>
+              <p v-if="rowReason(row)" class="pr-row-reason">{{ rowReason(row) }}</p>
+            </template>
           </div>
 
-          <!-- The decision card. It replaces the row's actions until answered,
-               and it is the ONLY place an accept is confirmed from: the bullet's
-               text is not the change, so a card that names the destination and
-               shows the server's exact replacement is what makes the accept a
-               decision rather than a guess. One primary action; edit, discuss
-               and dismiss are secondary. The leak warning lives here now too,
-               rather than as a second confirmation stacked on top of this one. -->
+          <!-- The decision card: "Edit first", or a row with no preview yet.
+               It replaces the row's actions until answered, confirms against the
+               revision it shows, and keeps edit, check, discuss and dismiss as
+               its secondaries. The leak warning rides on it too. -->
           <div v-if="isPreviewOpen(row)" class="pr-card" role="group" :aria-label="`Review ${rowTitle(row)}`">
             <p v-if="store.isPreviewLoading(row.id) && !store.previews[row.id]" class="pr-card-note" role="status">Reading the destination…</p>
             <p v-else-if="store.previewErrors[row.id]" class="pr-card-error" role="alert">{{ store.previewErrors[row.id] }}</p>
@@ -1305,9 +1541,9 @@ watch(
                 <span v-if="store.previews[row.id].leak_warning" class="pr-badge --warn">visible in every workspace</span>
               </p>
 
-              <!-- Edit suggestion: a secondary action, and the edited wording is
-                   re-previewed against the same destination so what is on screen
-                   is always what the accept would write. -->
+              <!-- Edit suggestion: the edited wording is re-previewed against the
+                   same destination so what is on screen is always what the
+                   accept would write. -->
               <div v-if="editingPreview" class="pr-card-edit">
                 <label class="pr-card-edit-label" :for="`pr-edit-${row.id}`">Edit the wording</label>
                 <textarea
@@ -1323,9 +1559,6 @@ watch(
               </div>
               <p v-else class="pr-card-text">{{ store.previews[row.id].text }}</p>
 
-              <!-- The exact replacement, as lines rather than two full bodies:
-                   the region is reprinted in full otherwise and the one line that
-                   changes is lost in it. -->
               <div v-if="store.previews[row.id].exact && previewChanges(store.previews[row.id]).length" class="pr-card-diff">
                 <p class="pr-card-diff-label">What changes in {{ store.previews[row.id].destination }}</p>
                 <ul class="pr-card-diff-lines">
@@ -1348,12 +1581,6 @@ watch(
               <p v-else class="pr-card-note">Nothing in {{ store.previews[row.id].destination }} changes.</p>
 
               <p v-if="store.previews[row.id].reason" class="pr-card-reason">{{ store.previews[row.id].reason }}</p>
-              <!-- No edited-wording caveat here any more. The ledger still
-                   records the ORIGINAL bullet (that is what the nightly curator
-                   compares a re-extracted fact against), but the decision row
-                   now also carries the id of the receipt that performed the
-                   write, so an edited accept reaches History with its real
-                   before/after and a working Undo like any other. -->
 
               <div class="pr-actions pr-actions--card">
                 <button
@@ -1363,14 +1590,8 @@ watch(
                   :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
                   @click="confirmPreview(row)"
                 >{{ store.isBusy(row.id) ? 'working…' : previewPrimaryLabel(row) }}</button>
-                <!-- The same write, with one check in front of it: a fact that
-                     replaces something already remembered is merged over it
-                     instead of added beside it. A chip, not a second primary —
-                     the plain save remains the routine decision, and this one
-                     costs a model call, which is why it is asked for rather
-                     than always done. The card's replacement is what a plain
-                     save would write; a check can land on a different line,
-                     which is what the title says. -->
+                <!-- The same write with a reconcile in front of it. A chip, not
+                     a second primary: it costs a model call. -->
                 <button
                   v-if="store.previews[row.id].can_accept && canReconcile(row)"
                   type="button"
@@ -1381,7 +1602,7 @@ watch(
                 >{{ store.isBusy(row.id) ? 'working…' : 'Check first' }}</button>
                 <button v-if="!editingPreview" type="button" class="btn-small btn-chip" @click="startEditingPreview">Edit suggestion</button>
                 <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
-                <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Talk about it</button>
+                <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
                 <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
                 <button type="button" class="btn-small btn-chip" @click="closePreview">Cancel</button>
               </div>
@@ -1390,12 +1611,9 @@ watch(
 
           <!-- Deferred: the last accept reconciled this fact against the region
                and could not tell whether it supersedes something already there,
-               so nothing was written and the row is still queued. Shown in place
-               of the row's actions, and of the decision card that raised it,
-               because the next step is not "save or dismiss" but "decide about
-               these entries": the
-               reason, what it was weighed against, and one more attempt against
-               the region as it stands now. -->
+               so nothing was written and the row is still queued. The next step
+               is "decide about these entries", so the reason, what it was
+               weighed against, and one more attempt sit where the actions were. -->
           <div v-else-if="deferredFor(row)" class="pr-actions pr-actions--deferred">
             <p class="pr-deferred-reason">Nothing was written: {{ deferredFor(row)!.reason }}</p>
             <template v-if="deferredFor(row)!.competing.length">
@@ -1404,77 +1622,88 @@ watch(
                 <li v-for="entry in deferredFor(row)!.competing" :key="entry">{{ entry }}</li>
               </ul>
             </template>
-            <button
-              type="button"
-              class="btn-small btn-primary"
-              :disabled="store.isBusy(row.id)"
-              @click="retryReconcile(row)"
-            >{{ store.isBusy(row.id) ? 'checking…' : 'Try again' }}</button>
-            <button type="button" class="btn-small btn-chip" @click="clearDeferred(row.id)">Leave it queued</button>
+            <div class="pr-deferred-buttons">
+              <button
+                type="button"
+                class="mr-btn"
+                :disabled="store.isBusy(row.id)"
+                @click="retryReconcile(row)"
+              >{{ store.isBusy(row.id) ? 'checking…' : 'Try again' }}</button>
+              <button type="button" class="mr-btn mr-btn--quiet" @click="clearDeferred(row.id)">Leave it queued</button>
+            </div>
           </div>
 
           <!-- Linked: this proposal already spawned a merge/implement chat that
-               is still active. The row stays queued while the agent works, so
-               replace the accept/dismiss buttons with a link to that chat.
-               If the chat was closed/archived without removing the row, the
-               watcher clears the link and this collapses back to the normal
-               actions. -->
-          <div v-else-if="hasActiveLink(row)" class="pr-actions pr-actions--linked">
+               is still active, so the row links to it instead of offering the
+               same decision twice. -->
+          <div v-else-if="hasActiveLink(row)" class="mr-actions pr-actions pr-actions--linked">
             <span class="pr-linked-label">Working in <strong>{{ linkedChatTitle(row) }}</strong></span>
-            <button type="button" class="btn-small btn-chip pr-row-action" @click="openLinkedChat(row)">Open chat</button>
-            <button type="button" class="btn-small btn-chip" @click="clearLink(row.id)">Show actions</button>
+            <button type="button" class="mr-btn pr-row-action" @click="openLinkedChat(row)">Open chat</button>
+            <button type="button" class="mr-link" @click="clearLink(row.id)">Show actions</button>
           </div>
 
           <!-- Any rehome row that is not a plain justified accept: pick the
-               destination, never pre-filled. Every registered workspace, not
-               just tag-named candidates — most rows have no tag naming anywhere,
-               and offering them nothing to pick is why they could not be moved. -->
-          <div v-else-if="isRehome(row) && rehomeMode(row) !== 'accept'" class="pr-actions">
+               destination, never pre-filled, from every registered workspace. -->
+          <div v-else-if="isRehome(row) && rehomeMode(row) !== 'accept'" class="mr-actions pr-actions">
             <span class="pr-confirm-text">Move to…</span>
             <button
               v-for="c in moveTargets(row)"
               :key="c"
               type="button"
-              class="btn-small btn-chip pr-row-action"
+              class="mr-btn pr-row-action"
               :disabled="store.isBusy(row.id)"
               @click="doAccept(row, c)"
             >{{ store.isBusy(row.id) ? 'working…' : c }}</button>
-            <button type="button" class="btn-small btn-chip pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
-            <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
-            <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Talk about it</button>
+            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
+            <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open chat</button>
+            <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
           </div>
 
-          <!-- A skill proposal is a FILE, so its actions are the ones a file
-               has: read it, build it, or drop it. "Accept" for a region row means
-               "write this fact"; for a proposed skill it means "implement it",
-               which is a chat, not a write. -->
-          <div v-else-if="isSkill(row)" class="pr-actions">
+          <!-- A skill proposal is a FILE: read it, build it, or drop it.
+               Implementing it is a chat, not a write. -->
+          <div v-else-if="isSkill(row)" class="mr-actions pr-actions">
             <button
               type="button"
-              class="btn-small btn-chip pr-row-action"
+              class="mr-btn pr-row-action"
               :disabled="chatBusy"
               @click="implementSkill(row)"
             >Implement</button>
-            <button type="button" class="btn-small btn-chip pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
-            <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
-            <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Talk about it</button>
+            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
+            <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open chat</button>
+            <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
           </div>
 
-          <div v-else class="pr-actions">
-            <!-- No accept when nothing backs a destination: a button that cannot
-                 do what it says is worse than absent. A justified re-home names
-                 the destination on the button, because "accept" does not say that
-                 a file is about to move. -->
+          <div v-else class="mr-actions pr-actions">
+            <!-- The preview is on the row, so the row can accept it: the verb
+                 names the change, and the accept is pinned to the revision the
+                 row is showing (a destination that moved comes back as a
+                 conflict with the new preview). Neutral, not pink: every row is
+                 the same routine choice. Before the preview arrives, Review
+                 opens the card that loads it. No accept at all when nothing
+                 backs a destination. -->
             <button
-              v-if="canAccept(row)"
+              v-if="canAccept(row) && store.previews[row.id] && rowChange(row).verb"
               type="button"
-              class="btn-small btn-chip pr-row-action"
+              class="mr-btn pr-row-accept"
+              :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
+              @click="confirmPreview(row)"
+            >{{ store.isBusy(row.id) ? 'working…' : rowChange(row).verb }}</button>
+            <button
+              v-else-if="canAccept(row) && !store.previews[row.id]"
+              type="button"
+              class="mr-btn pr-row-action"
               :disabled="store.isBusy(row.id)"
               @click="reviewAccept(row)"
             >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `Move to ${rehomeTarget(row)}` : 'Review') }}</button>
-            <button type="button" class="btn-small btn-chip pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
-            <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
-            <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Talk about it</button>
+            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
+            <button
+              v-if="canAccept(row) && !isRehome(row)"
+              type="button"
+              class="mr-link pr-edit-first"
+              @click="editFirst(row)"
+            >Edit first</button>
+            <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open chat</button>
+            <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
           </div>
         </li>
         </ul>
@@ -1485,6 +1714,8 @@ watch(
     </div>
   </div>
 </template>
+
+<style scoped src="./memoryReview.css"></style>
 
 <style scoped>
 /* One column, generous vertical rhythm, and every row the same shape. The old
@@ -1508,46 +1739,12 @@ watch(
   font-size: 0.8rem;
 }
 
-/* The one sentence that says what this list is. Full-contrast and at body
-   size, because it is the first thing read — the nine-line muted paragraph it
-   replaces was both harder to read and longer than the screen it opened on. */
-.pr-lede {
-  margin: 0;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  line-height: 1.5;
-  max-width: 72ch;
+.pr-queue {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 
-/* The mechanism, folded away. Closed it costs one line; the summary is a real
-   disclosure control, so it is keyboard-reachable and states its own state. */
-.pr-how {
-  margin: calc(-1 * var(--space-3)) 0 0;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-}
-
-.pr-how-summary {
-  display: inline-flex;
-  align-items: center;
-  min-height: var(--touch);
-  color: var(--accent);
-  cursor: pointer;
-}
-
-.pr-how-summary:hover { text-decoration: underline; text-underline-offset: 3px; }
-.pr-how-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-.pr-how-body {
-  max-width: 62ch;
-  line-height: 1.5;
-}
-
-.pr-how-body p {
-  margin: 0 0 var(--space-2);
-}
-
-.pr-how-body p:last-child { margin-bottom: 0; }
 
 .pr-error {
   color: var(--error);
@@ -1608,16 +1805,9 @@ watch(
 /* Actions sit on their own line under the fact, left-aligned with it: one
    primary, a neutral secondary, and "talk about it" as a link. */
 .pr-actions {
-  grid-column: 2;
-  display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
   min-width: 0;
 }
 
-.pr-actions :deep(.btn-small),
 .pr-card :deep(.btn-small) {
   min-height: 34px;
   padding: 0 12px;
@@ -1653,21 +1843,8 @@ watch(
   text-underline-offset: 3px;
 }
 
-/* A dismissal is routine and reversible, so it reads as a quiet text action
-   beside the row's one neutral button, not a second bordered one. */
-.pr-actions .pr-quiet {
-  border-color: transparent;
-  background: none;
-  color: var(--fg2);
-  font-weight: 500;
-}
-.pr-actions .pr-quiet:hover:not(:disabled) {
-  border-color: transparent;
-  color: var(--fg);
-}
 
 @media (pointer: coarse) {
-  .pr-actions :deep(.btn-small),
   .pr-card :deep(.btn-small) { min-height: var(--touch); }
 }
 
@@ -2076,13 +2253,17 @@ watch(
 
 .pr-group-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
   min-height: 36px;
+  padding-bottom: var(--space-3);
   border-bottom: 1px solid var(--border);
   color: var(--fg3);
   font-size: var(--text-sm);
 }
+
+.pr-chips { min-width: 0; }
 
 .pr-group-select {
   display: flex;
@@ -2107,10 +2288,10 @@ watch(
    the actions on their own line beneath. */
 .pr-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: start;
-  gap: var(--space-2) var(--space-2);
-  padding: var(--space-3) 0 var(--space-4);
+  gap: var(--space-2) var(--space-5);
+  padding: var(--space-4) 0;
   border-bottom: 1px solid var(--border);
 }
 
@@ -2318,16 +2499,103 @@ watch(
   .pr-menu button { min-height: var(--touch); }
 }
 
-/* Without checkboxes the row is one column; the body and actions that were
-   placed in column 2 move to column 1. */
-.pr-rows--plain > .pr-row { grid-template-columns: minmax(0, 1fr); }
-.pr-rows--plain > .pr-row > * { grid-column: 1 / -1; }
+/* Without checkboxes: body | actions. The card and a deferral carry prose,
+   so they take a full-width row under the body rather than the action
+   column (with checkboxes, everything after the checkbox column). */
+.pr-rows--plain > .pr-row { grid-template-columns: minmax(0, 1fr) auto; }
+.pr-card,
+.pr-actions--deferred { grid-column: 2 / -1; }
+.pr-rows--plain .pr-card,
+.pr-rows--plain .pr-actions--deferred { grid-column: 1 / -1; }
 
-/* On a phone the actions take the row's full width under the checkbox. */
+/* On a phone the actions drop under the body. */
 @media (max-width: 640px) {
-  .pr-actions,
-  .pr-card {
-    grid-column: 1 / -1;
-  }
+  .pr-row { grid-template-columns: auto minmax(0, 1fr); }
+  .pr-rows--plain > .pr-row { grid-template-columns: minmax(0, 1fr); }
+  .pr-actions { grid-column: 2 / -1; }
+  .pr-rows--plain .pr-actions { grid-column: 1 / -1; }
+}
+
+/* ── The change on the row ───────────────────────────────────────────────
+   A small bordered tag with a drawn icon (shape and words, never colour
+   alone), then the destination in mono and a muted qualifier. */
+.pr-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pr-change {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+}
+
+.pr-op {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px 2px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.pr-op-icon {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.pr-op--new .pr-op-icon { color: var(--success); }
+.pr-op--add .pr-op-icon { color: color-mix(in srgb, var(--accent2) 60%, var(--fg)); }
+.pr-op--update .pr-op-icon,
+.pr-op--merge .pr-op-icon { color: var(--warning); }
+.pr-op--move .pr-op-icon,
+.pr-op--none .pr-op-icon,
+.pr-op--skill .pr-op-icon,
+.pr-op--decide .pr-op-icon { color: var(--fg2); }
+.pr-op--blocked .pr-op-icon { color: var(--error); }
+
+.pr-dest {
+  font-family: var(--font-mono);
+  color: var(--fg2);
+  overflow-wrap: anywhere;
+}
+
+.pr-where {
+  color: var(--fg3);
+}
+
+.pr-diff { margin-top: var(--space-2); }
+
+.pr-row-reason {
+  margin: 6px 0 0;
+  max-width: 72ch;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.pr-checking { color: var(--fg3); }
+.pr-preview-error { color: var(--error); }
+.pr-preview-retry { min-height: 0; }
+
+.pr-deferred-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: var(--space-1);
 }
 </style>

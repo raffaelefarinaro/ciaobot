@@ -5,9 +5,10 @@ import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import type { VaultReviewCandidate, VaultTrashedNote,
   VaultClearedNote } from '../lib/types'
-import { candidateLeaf, signalReasons, verificationLabel } from '../lib/vaultReviewLabels'
+import {
+  candidateLeaf, orderedSignals, signalChipLabel, signalLabel, signalReasons, signalRowLabel, verificationLabel,
+} from '../lib/vaultReviewLabels'
 import { askConfirm } from '../lib/confirm'
-import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { startFileDiscussion } from '../lib/fileDiscussion'
 
 /** Which half of the retirement queue to render.
@@ -82,78 +83,112 @@ function refresh() {
   if (workspace.value) void store.fetch(workspace.value, { force: true })
 }
 
-// A candidate carries no content — only its path and why it was flagged —
-// so each row lazy-loads an excerpt behind a disclosure, the way the Memory
-// Map's detail panel does. Frontmatter is stripped: tags and dates already
-// surface as structured rows above the excerpt.
-interface ExcerptState {
-  loading: boolean
-  error: string
-  text: string
-}
-const excerpts = ref<Record<string, ExcerptState>>({})
-const EXCERPT_LIMIT = 1200
-// The codes `/api/workspace-file` actually returns (404 missing, 413 over the
-// size cap, 415 not an allowlisted extension); anything else falls through to
-// the raw status. Deliberately no 403: the endpoint never sends one, and the
-// only 403 in the app is the auth middleware's "forbidden origin", which is
-// not a fact about this file.
-const EXCERPT_ERRORS: Record<number, string> = {
-  404: 'File not found — it may have been moved.',
-  413: 'File too large to preview.',
-  415: 'Cannot preview this file type.',
-}
+// -- Reason filter ----------------------------------------------------------
+//
+// One chip per reason actually present, with its count. A note flagged for two
+// reasons counts under both. Local to the panel: the section remounts on every
+// switch, and coming back to the full list is the right default.
+const signalFilter = ref('all')
 
-async function ensureExcerpt(candidate: VaultReviewCandidate) {
-  const id = candidate.candidate_id
-  // A cached success (or an in-flight load) is reused; a cached FAILURE is
-  // not, or a single transient error would pin "Could not load" on the row
-  // for the life of the panel with no way to retry but a full refresh.
-  const cached = excerpts.value[id]
-  if (cached && !cached.error) return
-  excerpts.value[id] = { loading: true, error: '', text: '' }
-  try {
-    const resp = await fetch(`/api/workspace-file?path=${encodeURIComponent(candidate.path)}`, {
-      credentials: 'same-origin',
-    })
-    if (!resp.ok) {
-      excerpts.value[id] = {
-        loading: false,
-        error: EXCERPT_ERRORS[resp.status] || `Could not load (HTTP ${resp.status}).`,
-        text: '',
-      }
-      return
-    }
-    // Shared splitter, not a local `startsWith('---')` scan: it handles a BOM,
-    // CRLF line endings and a missing closing fence, which a hand-rolled copy
-    // silently renders as raw YAML.
-    const text = parseFrontmatter(await resp.text()).body.trimStart()
-    excerpts.value[id] = {
-      loading: false,
-      error: '',
-      text: text.length > EXCERPT_LIMIT ? `${text.slice(0, EXCERPT_LIMIT).trimEnd()} …` : text,
-    }
-  } catch (e) {
-    excerpts.value[id] = {
-      loading: false,
-      error: e instanceof Error ? e.message : 'Could not load the excerpt.',
-      text: '',
-    }
+const signalCounts = computed(() => {
+  const tally = new Map<string, number>()
+  for (const c of visibleCandidates.value) {
+    for (const s of new Set(c.signals)) tally.set(s, (tally.get(s) ?? 0) + 1)
   }
+  return orderedSignals([...tally.keys()])
+    .map(signal => ({ signal, label: signalChipLabel(signal), count: tally.get(signal) ?? 0 }))
+    .filter(chip => chip.count > 0)
+})
+
+const shownCandidates = computed(() => signalFilter.value === 'all'
+  ? visibleCandidates.value
+  : visibleCandidates.value.filter(c => c.signals.includes(signalFilter.value)))
+
+// A chip whose last row was just decided disappears; fall back to All rather
+// than leave a filter selected that no chip shows.
+watch(signalCounts, (chips) => {
+  if (signalFilter.value !== 'all' && !chips.some(c => c.signal === signalFilter.value)) {
+    signalFilter.value = 'all'
+  }
+})
+
+// -- Evidence ----------------------------------------------------------------
+//
+// Each reason on a row is a disclosure button: it opens the evidence the queue
+// holds for that reason — the quoted line for "superseded", the date and where
+// it came from for "unchecked" — directly under the reason line.
+const openEvidence = ref<Set<string>>(new Set())
+
+function evidenceKey(candidate: VaultReviewCandidate, signal: string): string {
+  return `${candidate.candidate_id}:${signal}`
 }
 
-function onExcerptToggle(candidate: VaultReviewCandidate, event: Event) {
-  if ((event.target as HTMLDetailsElement).open) void ensureExcerpt(candidate)
+function evidenceId(candidate: VaultReviewCandidate, signal: string): string {
+  return `vr-ev-${candidate.candidate_id}-${signal}`.replace(/[^A-Za-z0-9_-]/g, '-')
 }
 
-/** The opening lines the queue already sent with the row.
- *
- * Every row used to start as a path and four bullet points with the note's own
- * words hidden behind a disclosure, so telling two stale project logs apart
- * meant opening both. The server now carries a short excerpt in the candidate's
- * evidence; the disclosure below still loads the longer text on demand, and an
- * older server that sends no excerpt simply falls back to it.
- */
+function isEvidenceOpen(candidate: VaultReviewCandidate, signal: string): boolean {
+  return openEvidence.value.has(evidenceKey(candidate, signal))
+}
+
+function toggleEvidence(candidate: VaultReviewCandidate, signal: string) {
+  const key = evidenceKey(candidate, signal)
+  const next = new Set(openEvidence.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  openEvidence.value = next
+}
+
+function rowSignals(candidate: VaultReviewCandidate): string[] {
+  return orderedSignals(candidate.signals)
+}
+
+function backlinkLabel(candidate: VaultReviewCandidate): string {
+  const n = candidate.evidence.backlinks.length
+  if (!n) return 'no backlinks'
+  return `${n} backlink${n === 1 ? '' : 's'}`
+}
+
+/** "Person notes", "Project notes": the type the age limit belongs to. */
+function typePlural(candidate: VaultReviewCandidate): string {
+  const type = (candidate.evidence.type || 'note').trim()
+  const word = type.charAt(0).toUpperCase() + type.slice(1)
+  return /notes?$/i.test(word) ? word.replace(/notes?$/i, 'notes') : `${word} notes`
+}
+
+interface QuotedLine { line: number; parts: Array<{ text: string; mark: boolean }>; hit: boolean }
+
+/** The superseded line with a line either side, the matched phrase split out
+ * so it renders in a <mark> without v-html. */
+function quotedLines(candidate: VaultReviewCandidate): QuotedLine[] {
+  const ev = candidate.evidence.superseded
+  if (!ev) return []
+  const out: QuotedLine[] = []
+  if (ev.before) out.push({ line: ev.before.line, parts: [{ text: ev.before.text, mark: false }], hit: false })
+  out.push({ line: ev.line, parts: markParts(ev.text, ev.match), hit: true })
+  if (ev.after) out.push({ line: ev.after.line, parts: [{ text: ev.after.text, mark: false }], hit: false })
+  return out
+}
+
+function markParts(text: string, match: string): Array<{ text: string; mark: boolean }> {
+  const at = match ? text.toLowerCase().indexOf(match.toLowerCase()) : -1
+  if (at < 0) return [{ text, mark: false }]
+  return [
+    { text: text.slice(0, at), mark: false },
+    { text: text.slice(at, at + match.length), mark: true },
+    { text: text.slice(at + match.length), mark: false },
+  ].filter(p => p.text)
+}
+
+function duplicatesOf(candidate: VaultReviewCandidate): string[] {
+  return candidate.evidence.duplicate_group.filter(p => p !== candidate.path)
+}
+
+async function openAtLine(path: string, line: number) {
+  await fileViewer.open(path, line)
+}
+
+/** The opening lines the queue sent with the row, clamped to two lines. */
 function inlineExcerpt(candidate: VaultReviewCandidate): string {
   return candidate.evidence.excerpt?.trim() || ''
 }
@@ -311,20 +346,23 @@ function clearedDate(note: VaultClearedNote): string {
 <template>
   <div class="vault-review">
     <header class="vr-head">
-      <p class="vr-summary">
+      <h2 class="mr-head vr-summary">
         <template v-if="props.section === 'trash'">
-          <strong>{{ visibleTrashed.length }}</strong> retired {{ visibleTrashed.length === 1 ? 'note' : 'notes' }} in {{ workspace }}
+          {{ visibleTrashed.length }} retired {{ visibleTrashed.length === 1 ? 'note' : 'notes' }}
         </template>
         <template v-else>
-          <strong>{{ visibleCandidates.length }}</strong> to revisit in {{ workspace }}
+          {{ visibleCandidates.length }} to revisit
         </template>
+      </h2>
+      <!-- One sentence says what the two buttons do; the rows repeat nothing. -->
+      <p v-if="props.section !== 'trash'" class="mr-lede vr-lede">
+        Saved notes that may have gone out of date. <strong>Still true</strong> marks a note
+        checked today; <strong>Retire</strong> moves it to Retired, where it can be restored.
       </p>
-      <button
-        type="button"
-        class="vr-refresh"
-        :disabled="store.loading"
-        @click="refresh"
-      >{{ store.loading ? 'Loading…' : 'Refresh' }}</button>
+      <p v-else class="mr-lede vr-lede">
+        Notes you retired. They stay here until you say otherwise — nothing is removed
+        on a timer. Restore is one click; deleting for good asks first.
+      </p>
     </header>
 
     <div v-if="showStaleError" class="vr-load-state vr-load-state--stale" role="status">
@@ -338,35 +376,6 @@ function clearedDate(note: VaultClearedNote): string {
     </div>
 
     <template v-if="props.section !== 'trash'">
-      <!-- One sentence, then the mechanism folded away. The paragraph this
-           replaces spent eight lines on what each button does before the first
-           note appeared; the buttons are on every row and say so themselves. -->
-      <p class="vr-lede">
-        Notes you already saved that may have gone out of date. Say whether each one
-        still holds.
-      </p>
-      <details class="vr-how">
-        <summary class="vr-how-summary">What each choice does</summary>
-        <div class="vr-how-body">
-          <p>
-            <strong>Still true</strong> takes the note off this list and marks it
-            checked today — though a note with no frontmatter has nowhere to record
-            that, and Ciaobot will say so when that happens.
-          </p>
-          <p>
-            <strong>Retire</strong> moves the note to <strong>Retired</strong>, where
-            one click brings it back. Nothing is deleted for good except through the
-            delete control there, which asks first.
-          </p>
-          <p>
-            <strong>Talk about it</strong> opens a chat with the note pinned and
-            decides nothing. When nothing links to a note, that chat goes looking for
-            the notes that should link to it — which is what actually clears the flag.
-          </p>
-          <p>Leaving a row alone keeps it here.</p>
-        </div>
-      </details>
-
       <p v-if="showInitialLoading" class="vr-empty" role="status">Loading candidates…</p>
       <div v-else-if="showInitialError" class="vr-load-state vr-load-state--error" role="alert">
         <span>Could not load notes to revisit. {{ store.loadError }}</span>
@@ -377,72 +386,159 @@ function clearedDate(note: VaultClearedNote): string {
         unchecked, nothing links to it, or it looks like a duplicate of another note.
       </p>
 
-      <ul v-else-if="visibleCandidates.length" class="vr-rows">
-        <li
-          v-for="candidate in visibleCandidates"
-          :key="candidate.candidate_id"
-          class="vr-row"
-          :class="{ 'vr-row--busy': store.isBusy(candidate.candidate_id) }"
-        >
-          <div class="vr-row-body">
-            <div class="vr-row-top">
-              <span class="vr-title">{{ candidateLeaf(candidate.path) }}</span>
-            </div>
-            <button
-              type="button"
-              class="vr-path"
-              :title="candidate.path"
-              @click="openNote(candidate.path)"
-            >{{ candidate.path }}</button>
-            <ul class="vr-reasons">
-              <li v-for="reason in signalReasons(candidate.signals)" :key="reason">{{ reason }}</li>
-            </ul>
-            <p class="vr-meta">
-              {{ candidate.evidence.type }} · {{ verifyLabelOf(candidate) }}
-              <span v-if="candidate.evidence.backlinks.length">
-                · {{ candidate.evidence.backlinks.length }} backlink{{ candidate.evidence.backlinks.length === 1 ? '' : 's' }}
-              </span>
-              <span v-if="candidate.evidence.bridge" class="vr-badge --warn">well linked — think twice</span>
-            </p>
-            <p v-if="candidate.evidence.duplicate_group.length" class="vr-meta">
-              Possible {{ candidate.evidence.duplicate_group.length === 1 ? 'duplicate' : 'duplicates' }}:
-              {{ candidate.evidence.duplicate_group.filter(p => p !== candidate.path).slice(0, 3).join(', ') || 'see evidence' }}
-            </p>
-            <p v-if="inlineExcerpt(candidate)" class="vr-excerpt-inline">{{ inlineExcerpt(candidate) }}</p>
-            <details class="vr-excerpt" @toggle="onExcerptToggle(candidate, $event)">
-              <summary>{{ inlineExcerpt(candidate) ? 'read more' : 'excerpt' }}</summary>
-              <p v-if="excerpts[candidate.candidate_id]?.loading" class="vr-meta">Loading…</p>
-              <p v-else-if="excerpts[candidate.candidate_id]?.error" class="vr-error">
-                {{ excerpts[candidate.candidate_id].error }}
-              </p>
-              <pre v-else-if="excerpts[candidate.candidate_id]?.text" class="vr-excerpt-text">{{ excerpts[candidate.candidate_id].text }}</pre>
-            </details>
-          </div>
+      <template v-else-if="visibleCandidates.length">
+        <div class="mr-chips vr-chips" role="group" aria-label="Why notes are here">
+          <button
+            type="button"
+            class="mr-chip"
+            :aria-pressed="signalFilter === 'all'"
+            @click="signalFilter = 'all'"
+          >All <span class="mr-chip-count">{{ visibleCandidates.length }}</span></button>
+          <button
+            v-for="chip in signalCounts"
+            :key="chip.signal"
+            type="button"
+            class="mr-chip"
+            :aria-pressed="signalFilter === chip.signal"
+            @click="signalFilter = chip.signal"
+          >{{ chip.label }} <span class="mr-chip-count">{{ chip.count }}</span></button>
+        </div>
 
-          <div class="vr-actions">
-            <button
-              type="button"
-              class="btn-small btn-primary"
-              :disabled="store.isBusy(candidate.candidate_id)"
-              title="Clear the row, and stamp the note's updated date as today when it has frontmatter to stamp"
-              @click="keepRow(candidate)"
-            >{{ store.isBusy(candidate.candidate_id) ? 'working…' : 'Still true' }}</button>
-            <button
-              type="button"
-              class="btn-small btn-chip"
-              :disabled="store.isBusy(candidate.candidate_id)"
-              @click="trashRow(candidate)"
-            >Retire</button>
-            <button
-              type="button"
-              class="btn-small btn-chip"
-              :disabled="chatBusy"
-              title="Open a chat about this note before deciding"
-              @click="discussRow(candidate)"
-            >Talk about it</button>
-          </div>
-        </li>
-      </ul>
+        <ul class="vr-rows">
+          <li
+            v-for="candidate in shownCandidates"
+            :key="candidate.candidate_id"
+            class="vr-row"
+            :class="{ 'vr-row--busy': store.isBusy(candidate.candidate_id) }"
+          >
+            <div class="vr-row-body">
+              <h3 class="vr-title">{{ candidateLeaf(candidate.path) }}</h3>
+              <!-- type · reason(s) · backlinks. Each reason is the disclosure
+                   for its own evidence. -->
+              <p class="vr-why">
+                <span>{{ candidate.evidence.type }}</span>
+                <template v-for="signal in rowSignals(candidate)" :key="signal">
+                  <span class="vr-why-sep" aria-hidden="true">·</span>
+                  <button
+                    type="button"
+                    class="mr-flag vr-flag"
+                    :aria-expanded="isEvidenceOpen(candidate, signal)"
+                    :aria-controls="evidenceId(candidate, signal)"
+                    @click="toggleEvidence(candidate, signal)"
+                  >{{ signalRowLabel(signal, candidate.evidence) }}<svg class="vr-flag-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg></button>
+                </template>
+                <span class="vr-why-sep" aria-hidden="true">·</span>
+                <span>{{ backlinkLabel(candidate) }}</span>
+                <span v-if="candidate.evidence.bridge" class="vr-badge --warn">well linked — think twice</span>
+              </p>
+
+              <template v-for="signal in rowSignals(candidate)" :key="`ev-${signal}`">
+                <div
+                  v-show="isEvidenceOpen(candidate, signal)"
+                  :id="evidenceId(candidate, signal)"
+                  class="mr-box vr-evidence"
+                  :class="`vr-evidence--${signal}`"
+                >
+                  <template v-if="signal === 'superseded_language' && candidate.evidence.superseded">
+                    <div class="mr-box-head">
+                      <span>Where it says so · {{ candidate.evidence.superseded.where === 'frontmatter' ? 'frontmatter' : 'lead paragraph' }}, line {{ candidate.evidence.superseded.line }}</span>
+                      <button
+                        type="button"
+                        class="mr-link"
+                        @click="openAtLine(candidate.path, candidate.evidence.superseded.line)"
+                      >Open at line {{ candidate.evidence.superseded.line }}</button>
+                    </div>
+                    <ol class="mr-box-lines">
+                      <li
+                        v-for="q in quotedLines(candidate)"
+                        :key="q.line"
+                        class="mr-box-line mr-box-line--nosign"
+                        :class="{ 'mr-box-line--hit': q.hit }"
+                      >
+                        <span class="mr-box-num">{{ q.line }}</span>
+                        <span class="mr-box-text"><template v-for="(part, pi) in q.parts" :key="pi"><mark v-if="part.mark">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></span>
+                      </li>
+                    </ol>
+                    <p class="mr-box-foot">
+                      Only the frontmatter and the opening paragraph count. If this sentence is
+                      about part of the note, not all of it, <strong>Still true</strong> keeps it.
+                    </p>
+                  </template>
+                  <p v-else-if="signal === 'superseded_language'" class="mr-box-body">
+                    Its frontmatter or opening paragraph says it was superseded.
+                  </p>
+
+                  <p v-else-if="signal === 'unverified'" class="mr-box-body">
+                    <template v-if="candidate.evidence.unverified?.source === 'mtime'">
+                      No <code>updated:</code> field, so the file's modified date is used:
+                      <code>{{ candidate.evidence.unverified.last_verified }}</code>.
+                    </template>
+                    <template v-else-if="candidate.evidence.unverified">
+                      Last checked <code>{{ candidate.evidence.unverified.last_verified }}</code>,
+                      from the note's <code>updated:</code> field.
+                    </template>
+                    <template v-else>{{ verifyLabelOf(candidate) }}.</template>
+                    <template v-if="candidate.evidence.unverified">
+                      {{ typePlural(candidate) }} are due every {{ candidate.evidence.unverified.threshold_days }} days.
+                    </template>
+                  </p>
+
+                  <p v-else-if="signal === 'possible_duplicate'" class="mr-box-body">
+                    <template v-if="duplicatesOf(candidate).length">
+                      Looks like
+                      <template v-for="(dup, di) in duplicatesOf(candidate).slice(0, 3)" :key="dup"><template v-if="di">, </template><code>{{ dup }}</code></template>.
+                    </template>
+                    <template v-else>It may say the same thing as another note.</template>
+                  </p>
+
+                  <p v-else-if="signal === 'unlinked'" class="mr-box-body">
+                    No other note links to it<template v-if="candidate.evidence.outbound_links.length">, though it links out to {{ candidate.evidence.outbound_links.length }}</template>.
+                    A link from the note it belongs to clears this.
+                  </p>
+
+                  <p v-else-if="signal === 'weak_provenance'" class="mr-box-body">
+                    Its frontmatter has no <code>updated:</code> date, tags or aliases, so nothing
+                    says when it was written or what it is about.
+                  </p>
+
+                  <p v-else class="mr-box-body">Flagged because {{ signalLabel(signal) }}.</p>
+                </div>
+              </template>
+
+              <p v-if="inlineExcerpt(candidate)" class="vr-excerpt-inline">{{ inlineExcerpt(candidate) }}</p>
+              <button
+                type="button"
+                class="vr-path"
+                :title="`Open ${candidate.path}`"
+                @click="openNote(candidate.path)"
+              >{{ candidate.path }}</button>
+            </div>
+
+            <div class="mr-actions vr-actions">
+              <button
+                type="button"
+                class="mr-btn"
+                :disabled="store.isBusy(candidate.candidate_id)"
+                title="Clear the row, and stamp the note's updated date as today when it has frontmatter to stamp"
+                @click="keepRow(candidate)"
+              >{{ store.isBusy(candidate.candidate_id) ? 'working…' : 'Still true' }}</button>
+              <button
+                type="button"
+                class="mr-btn mr-btn--quiet"
+                :disabled="store.isBusy(candidate.candidate_id)"
+                @click="trashRow(candidate)"
+              >Retire</button>
+              <button
+                type="button"
+                class="mr-link"
+                :disabled="chatBusy"
+                title="Open a chat about this note before deciding"
+                @click="discussRow(candidate)"
+              >Discuss</button>
+            </div>
+          </li>
+        </ul>
+      </template>
 
       <!-- The way back from a "Still true". A keep is suppressed by content
            hash, so short of editing the note there was no route from clearing
@@ -455,7 +551,8 @@ function clearedDate(note: VaultClearedNote): string {
         </summary>
         <p class="vr-hint vr-cleared-hint">
           Notes you marked <strong>Still true</strong>. They stay out of the queue until
-          the note changes; <strong>Add back</strong> returns one now.
+          the note changes; <strong>Add back</strong> returns one now. A note with no
+          frontmatter has nowhere to record the check, so Ciaobot says so when that happens.
         </p>
         <ul class="vr-rows">
           <li
@@ -465,15 +562,13 @@ function clearedDate(note: VaultClearedNote): string {
             :class="{ 'vr-row--busy': store.isBusy(note.candidate_id) }"
           >
             <div class="vr-row-body">
-              <div class="vr-row-top">
-                <span class="vr-title">{{ candidateLeaf(note.path) }}</span>
-              </div>
+              <h3 class="vr-title">{{ candidateLeaf(note.path) }}</h3>
               <p class="vr-meta">{{ note.path }}<span v-if="clearedDate(note)"> · cleared {{ clearedDate(note) }}</span></p>
             </div>
-            <div class="vr-actions">
+            <div class="mr-actions vr-actions">
               <button
                 type="button"
-                class="btn-small btn-chip"
+                class="mr-btn mr-btn--quiet"
                 :disabled="store.isBusy(note.candidate_id)"
                 title="Put this note back in the review queue"
                 @click="reopenRow(note)"
@@ -485,17 +580,13 @@ function clearedDate(note: VaultClearedNote): string {
     </template>
 
     <section v-else class="vr-trash" aria-label="Trash">
-      <p class="vr-lede">
-        Notes you retired. They stay here until you say otherwise — nothing is removed
-        on a timer. Restore is one click; deleting for good asks first.
-      </p>
       <p v-if="showInitialLoading" class="vr-empty" role="status">Loading retired notes…</p>
       <div v-else-if="showInitialError" class="vr-load-state vr-load-state--error" role="alert">
         <span>Could not load retired notes. {{ store.loadError }}</span>
         <button type="button" class="btn-small" @click="refresh">Retry</button>
       </div>
       <p v-else-if="hasCurrentSnapshot && !visibleTrashed.length" class="vr-empty">
-        Nothing retired yet. A note you retire from <strong>Notes to revisit</strong>
+        Nothing retired yet. A note you retire from <strong>To revisit</strong>
         waits here until you restore it or delete it for good.
       </p>
       <ul v-else-if="visibleTrashed.length" class="vr-rows">
@@ -506,21 +597,19 @@ function clearedDate(note: VaultClearedNote): string {
           :class="{ 'vr-row--busy': store.isBusy(note.candidate_id) }"
         >
           <div class="vr-row-body">
-            <div class="vr-row-top">
-              <span class="vr-title">{{ trashedTitle(note) }}</span>
-            </div>
+            <h3 class="vr-title">{{ trashedTitle(note) }}</h3>
             <p class="vr-meta">{{ note.original_path }}<span v-if="trashedDate(note)"> · retired {{ trashedDate(note) }}</span></p>
           </div>
-          <div class="vr-actions">
+          <div class="mr-actions vr-actions">
             <button
               type="button"
-              class="btn-small btn-primary"
+              class="mr-btn"
               :disabled="store.isBusy(note.candidate_id)"
               @click="restoreRow(note)"
             >{{ store.isBusy(note.candidate_id) ? 'working…' : 'Restore' }}</button>
             <button
               type="button"
-              class="btn-small btn-chip vr-danger"
+              class="mr-btn mr-btn--quiet vr-danger"
               :disabled="store.isBusy(note.candidate_id)"
               @click="deleteRow(note)"
             >Delete forever</button>
@@ -531,105 +620,39 @@ function clearedDate(note: VaultClearedNote): string {
   </div>
 </template>
 
+<style scoped src="./memoryReview.css"></style>
+
 <style scoped>
-/* Same one-column rhythm as the proposal queue: generous vertical spacing,
-   one shape per row, actions stacked so the text column keeps the width. */
+/* Hairline rows with the actions stacked on the right, the same shape as the
+   Suggested list beside it (both take their shared pieces from
+   memoryReview.css). */
 .vault-review {
   flex: 1;
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  /* Block padding only: the rows start on the page column's edge, like the
-     Suggested tab beside it, instead of sitting in a second inset. */
+  /* Block padding only: the rows start on the page column's edge. */
   padding: var(--space-4) 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-4);
 }
 
 .vr-head {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 6px;
 }
-
-/* The section heading: sentence-case 16px, the count in the same weight. */
-.vr-summary {
-  margin: 0;
-  color: var(--fg);
-  font-size: calc(16px * var(--font-scale, 1));
-  font-weight: 650;
-  letter-spacing: -0.02em;
-}
-.vr-summary strong { font-weight: inherit; }
-
-/* A section action is a text link at the heading's right edge. */
-.vr-refresh {
-  display: inline-flex;
-  align-items: center;
-  min-height: 30px;
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--accent);
-  font-family: var(--font);
-  font-size: var(--text-sm);
-  cursor: pointer;
-}
-.vr-refresh:hover { text-decoration: underline; text-underline-offset: 3px; }
-.vr-refresh:disabled { color: var(--fg3); cursor: default; text-decoration: none; }
-@media (pointer: coarse) { .vr-refresh { min-height: var(--touch); } }
 
 .vr-hint {
   margin: 0;
   color: var(--fg2);
-  font-size: 0.8rem;
-  line-height: 1.5;
-}
-
-/* The one sentence that says what this list is — full contrast, body size,
-   because it is the first thing read. */
-.vr-lede {
-  margin: 0;
-  color: var(--fg3);
   font-size: var(--text-sm);
   line-height: 1.5;
-  max-width: 62ch;
 }
-
-/* The per-button detail, folded away: closed it costs one line, and the
-   summary is a real disclosure control, so it is keyboard-reachable. */
-.vr-how {
-  margin: 0;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-}
-
-.vr-how-summary {
-  display: inline-flex;
-  align-items: center;
-  min-height: var(--touch);
-  color: var(--fg2);
-  cursor: pointer;
-}
-
-.vr-how-summary:hover { color: var(--fg); }
-.vr-how-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-.vr-how-body {
-  max-width: 62ch;
-  line-height: 1.5;
-}
-
-.vr-how-body p {
-  margin: 0 0 var(--space-2);
-}
-
-.vr-how-body p:last-child { margin-bottom: 0; }
 
 .vr-empty {
+  margin: 0;
   color: var(--fg2);
   font-size: 0.9rem;
   padding: var(--space-4) 0;
@@ -638,16 +661,17 @@ function clearedDate(note: VaultClearedNote): string {
 /* A correction, not part of the pass: quieter than the queue above it, and
    separated by a rule so the two lists never read as one. */
 .vr-cleared {
-  margin-top: var(--space-4);
   border-top: 1px solid var(--border);
   padding-top: var(--space-3);
 }
 
 .vr-cleared-summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
   cursor: pointer;
   color: var(--fg2);
-  font-size: 0.85rem;
-  padding: var(--space-1) 0;
+  font-size: var(--text-sm);
 }
 
 .vr-cleared-summary:focus-visible {
@@ -658,6 +682,7 @@ function clearedDate(note: VaultClearedNote): string {
 
 .vr-cleared-hint {
   margin: var(--space-2) 0 var(--space-3);
+  max-width: 64ch;
 }
 
 .vr-load-state {
@@ -686,11 +711,6 @@ function clearedDate(note: VaultClearedNote): string {
   flex: none;
 }
 
-.vr-error {
-  color: var(--error);
-  font-size: 0.85rem;
-}
-
 .vr-rows {
   list-style: none;
   margin: 0;
@@ -700,13 +720,12 @@ function clearedDate(note: VaultClearedNote): string {
   border-top: 1px solid var(--border);
 }
 
-/* Hairline rows, the page's list shape, rather than a filled card each. */
 .vr-row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
-  gap: var(--space-3);
-  padding: var(--space-3) 0;
+  gap: var(--space-2) var(--space-5, 24px);
+  padding: 18px 0;
   border-bottom: 1px solid var(--border);
 }
 
@@ -719,140 +738,151 @@ function clearedDate(note: VaultClearedNote): string {
   min-width: 0;
 }
 
-.vr-row-top {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
 .vr-title {
-  font-size: 0.95rem;
+  margin: 0;
+  color: var(--fg);
+  font-size: calc(15px * var(--font-scale, 1));
+  font-weight: 650;
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
 
-.vr-path {
-  background: none;
-  border: none;
+/* type · reason · backlinks */
+.vr-why {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  margin: 3px 0 0;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+}
+
+.vr-why-sep { color: var(--fg3); }
+
+/* The reason is a disclosure button. Text stays in the body colour (the
+   caution orange does not reach AA as small text in the light theme); the
+   dotted caution underline and the chevron carry the signal, and the words
+   carry the meaning. */
+.vr-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 24px;
   padding: 0;
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.72rem;
-  color: var(--accent);
-  text-align: left;
-  cursor: pointer;
-  overflow-wrap: anywhere;
-  min-height: var(--touch);
-}
-
-.vr-path:hover {
-  text-decoration: underline;
-}
-
-.vr-reasons {
-  margin: var(--space-1) 0 0;
-  padding-left: 1.1rem;
+  border: 0;
+  background: none;
   color: var(--fg);
-  font-size: 0.82rem;
-  line-height: 1.5;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline dotted color-mix(in srgb, var(--warning) 80%, transparent);
+  text-underline-offset: 3px;
 }
+
+.vr-flag:hover { color: var(--fg); text-decoration-style: solid; }
+
+.vr-flag-chev {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  fill: none;
+  stroke: var(--warning);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 120ms var(--ease);
+}
+
+.vr-flag[aria-expanded='true'] .vr-flag-chev { transform: rotate(90deg); }
+
+@media (pointer: coarse) {
+  .vr-flag { min-height: var(--touch); }
+}
+
+.vr-evidence { margin-top: var(--space-2); }
 
 .vr-meta {
   margin: 0.25rem 0 0;
-  color: var(--fg2);
-  font-size: 0.8rem;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
 }
 
 .vr-badge {
-  margin-left: var(--space-2);
-  font-size: 0.7rem;
+  font-size: var(--text-xs);
   padding: 0.1rem 0.4rem;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 .vr-badge.--warn {
-  background: rgba(210, 153, 34, 0.18);
-  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+  color: var(--fg);
 }
 
-/* The note's own words, visible without a click. Clamped rather than truncated
-   server-side alone: the excerpt is a sentence or two, and three lines is as
-   much as a row can give it without the actions drifting out of reach. */
+/* The note's own words, visible without a click, clamped to two lines. */
 .vr-excerpt-inline {
   margin: var(--space-2) 0 0;
-  font-size: 0.82rem;
-  line-height: 1.5;
+  max-width: 72ch;
   color: var(--fg2);
+  font-size: var(--text-base, 14px);
+  line-height: 1.55;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
   overflow-wrap: anywhere;
 }
 
-.vr-excerpt {
-  margin-top: var(--space-1);
-  font-size: 0.8rem;
-  color: var(--fg2);
-}
-
-.vr-excerpt summary {
-  cursor: pointer;
-  min-height: var(--touch);
+/* The path opens the whole note. */
+.vr-path {
   display: inline-flex;
   align-items: center;
-}
-
-.vr-excerpt-text {
-  margin: var(--space-2) 0 0;
-  padding: var(--space-2);
-  max-height: 12rem;
-  overflow: auto;
-  white-space: pre-wrap;
+  min-height: 24px;
+  margin-top: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
   overflow-wrap: anywhere;
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.75rem;
-  line-height: 1.5;
-  color: var(--fg2);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
 }
 
-.vr-actions {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: var(--space-1);
-  flex: none;
-  min-width: 8.5rem;
+.vr-path:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.vr-path:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+@media (pointer: coarse) {
+  .vr-path { min-height: var(--touch); }
 }
 
-/* Destructive, but not competing-pink: neutral chip in the error colour. */
+/* Destructive, but not competing-pink: the quiet button in the error colour. */
 .vr-danger {
   color: var(--error);
-  border-color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 55%, var(--border));
 }
 
-/* Its own tab now, so no separator rule and no heading: the tab above says
-   what this is, and the border only made sense when the trash was pinned
-   under the candidate list in the same scroll. */
 .vr-trash {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
 }
 
-/* Stacked column keeps text full-width on both desktop and mobile. */
 @media (max-width: 640px) {
   .vr-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .vr-load-state {
     align-items: stretch;
     flex-direction: column;
   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vr-flag-chev { transition: none; }
 }
 </style>

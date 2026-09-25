@@ -426,14 +426,19 @@ decline, and a finding that can never be cleared would pin the whole audit at
 The same state/event rule also decides how **age** is read on vault notes: an
 entity note (person, project) asserts current state, so going unverified past
 its type's horizon is a review candidate; logs and journals record events,
-which never go stale. `find_stale_notes` ages each note from frontmatter
-`updated:` (a deliberate "I re-checked this" claim) or file mtime, against
-per-type horizons (project 30d, person 90d, everything else 180d; `Workspace/`
-queue files exempt — flagging an inbox for being an inbox is noise). Like
-`superseded_state_candidates` these findings are informational: they surface in
-`os-audit`'s memory section, the Memory Map sidebar ("Needs review"), and the
-daily `system-memory-curation` run, which re-verifies each note and stamps
-`updated:` when the facts still hold.
+which never go stale. One predicate, `memory_audit.note_verification`, ages each note from
+frontmatter `updated:` (a deliberate "I re-checked this" claim) or file mtime,
+against per-type horizons (project 30d, person 90d, everything else 180d; types
+resolved through the vault's alias table; `log`, `journal` and `workspace`
+exempt — flagging an inbox for being an inbox is noise). `find_stale_notes`,
+the Memory Map's `stale` flag and the vault-review `unverified` signal all call
+it, so the three cannot disagree. The map additionally leaves `stale` off notes
+the review queue never lists (`Workspace/` paths, templates,
+`projects/completed/`), so its "unchecked" count is what the queue can show.
+Like `superseded_state_candidates` these findings are informational: they
+surface in `os-audit`'s memory section, the Memory Map, the vault-review queue,
+and the daily `system-memory-curation` run, which re-verifies each note and
+stamps `updated:` when the facts still hold.
 
 `ciao memory-audit` reads one file and skips the vault scan, so the daily
 `system-memory-curation` schedule can afford to call it and fix what it finds.

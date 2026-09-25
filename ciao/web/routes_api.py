@@ -3815,22 +3815,26 @@ async def vault_graph(request: Request) -> JSONResponse:
             # symlink) must not fail the whole graph request.
             return 0.0
 
-    # Aging uses the same thresholds as the audit and the daily curation pass,
-    # so the map's "needs review" list cannot disagree with what the routine
-    # acts on. One shared detector, three consumers.
-    from ciao.memory_audit import (
-        note_last_verified,
-        note_threshold_days,
-    )
+    # Aging uses the one predicate the audit and the review queue's
+    # `unverified` signal also use, so the map's "unchecked" count cannot
+    # disagree with the queue it sends the user to. Notes the queue never lists
+    # (Workspace/ files, templates, completed projects) and exempt types
+    # (logs, journals) keep their age but are never flagged.
+    from ciao.memory_audit import note_verification
+    from ciao.vault_review import never_queued
 
     current_date = datetime.now(UTC).date()
 
-    def _staleness(e) -> tuple[bool, int | None]:
-        verified, _source = note_last_verified(e.updated, _mtime(str(e.path)))
-        if verified is None:
-            return False, None
-        age_days = (current_date - verified).days
-        return age_days >= note_threshold_days((e.type or "").strip()), age_days
+    def _staleness(e) -> tuple[bool, int | None, int | None]:
+        verification = note_verification(
+            e.type or "", e.updated or "", _mtime(str(e.path)), today=current_date
+        )
+        if verification is None:
+            return False, None, None
+        stale = verification.stale and not never_queued(str(e.path))
+        # The horizon travels with the flag so the map can name the rule
+        # without keeping its own copy of the thresholds table.
+        return stale, verification.age_days, verification.threshold_days
 
     nodes = [
         {
@@ -3844,7 +3848,7 @@ async def vault_graph(request: Request) -> JSONResponse:
             "degree": len(graph.get(str(e.path), ())),
             "mtime": _mtime(str(e.path)),
             "updated": e.updated,
-            **dict(zip(("stale", "age_days"), _staleness(e))),
+            **dict(zip(("stale", "age_days", "threshold_days"), _staleness(e))),
         }
         for e in scoped
     ]
@@ -3902,7 +3906,7 @@ async def vault_review(request: Request) -> JSONResponse:
                 review.generate_candidates,
                 root,
                 workspace=workspace,
-                max_candidates=50,
+                max_candidates=review.MAX_CANDIDATES_CEILING,
                 write_queue=request.method != "GET",
             )
         )
@@ -3975,7 +3979,7 @@ async def _vault_review_snapshot(root: Path, workspace: str) -> dict[str, Any]:
             review.generate_candidates,
             root,
             workspace=workspace,
-            max_candidates=50,
+            max_candidates=review.MAX_CANDIDATES_CEILING,
             write_queue=True,
         )
     )

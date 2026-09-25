@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+from ciao.memory_audit import NoteVerification, note_verification
 from ciao.vault_index import canonical_type, scan_vault, temp_prefix
 from ciao.vault_lint import is_template_stem, run_validation
 
@@ -31,6 +32,12 @@ from ciao.vault_lint import is_template_stem, run_validation
 # refuses to do everywhere else, since the trash exists so that nothing leaves
 # the vault unattended. Trashed notes stay until someone deletes them.
 MAX_CANDIDATES = 5
+# The most a single listing may return, and what the readable
+# `Workspace/Vault-Review.md` projection always holds. It was 50 while the queue
+# only knew link and wording signals; once age became a signal a real vault had
+# ~70 candidates and the tail was silently cut off — including notes the Memory
+# Map was telling the user to go and review there.
+MAX_CANDIDATES_CEILING = 200
 REVIEW_STATUSES = frozenset({"candidate", "reviewed", "archived", "trashed", "deleted"})
 # No ``archive``: nothing here moves or marks an archived note, so accepting it
 # wrote a ledger row, left the note exactly where it was, and then suppressed
@@ -194,22 +201,96 @@ def _suppressed(decision: dict[str, Any]) -> bool:
     return disposition in {"keep", "improve_link", "trash", "delete"}
 
 
-def _says_it_was_superseded(text: str) -> bool:
-    """Whether the note says *it* was superseded, rather than mentioning the idea.
+_SUPERSEDED_LINE_CHARS = 300
+
+
+def _is_workspace_path(path: str) -> bool:
+    return any(part.casefold() == "workspace" for part in Path(path).parts)
+
+
+def _is_completed_project(path: str) -> bool:
+    parts = [part.casefold() for part in Path(path).parts]
+    return any(a == "projects" and b == "completed" for a, b in zip(parts, parts[1:]))
+
+
+def never_queued(path: str) -> bool:
+    """Whether the review queue refuses to ever list this note, whatever it says.
+
+    ``Workspace/`` queue files, templates and completed projects. Public so the
+    Memory Map can leave its ``stale`` flag off the same notes: a map that
+    counts notes as "unchecked" while the queue it sends you to can never show
+    them is two lists disagreeing.
+    """
+    return _is_workspace_path(path) or is_template_stem(Path(path).stem) or _is_completed_project(path)
+
+
+def _line_at(lines: list[str], index: int) -> str:
+    return lines[index].strip().lstrip("\ufeff").strip()[:_SUPERSEDED_LINE_CHARS]
+
+
+def _neighbour(lines: list[str], index: int, step: int) -> dict[str, Any] | None:
+    """The nearest non-blank, non-delimiter line before/after *index*."""
+    probe = index + step
+    while 0 <= probe < len(lines):
+        text = _line_at(lines, probe)
+        if text and text != "---":
+            return {"line": probe + 1, "text": text}
+        probe += step
+    return None
+
+
+def _superseded_match(text: str) -> dict[str, Any] | None:
+    """Where the note says *it* was superseded, rather than mentioning the idea.
 
     A note announces its own retirement at the top — in frontmatter, or in the
     lead paragraph under the title. Further down it is writing about something
     else: a log entry, a status column, an archive of other decisions.
+
+    Returns the evidence the queue shows — the 1-based line, that line, the
+    phrase as written, which region matched, and the nearest non-blank line on
+    either side — or None. Offsets are tracked into the original text, so the
+    line number is the one an editor shows (BOM and CRLF included).
     """
     frontmatter = _FRONTMATTER_RE.match(text)
     head = frontmatter.group(0) if frontmatter else ""
     if _ACTIVE_STATUS_RE.search(head):
-        return False
-    body = text[len(head):].lstrip()
-    body = _HEADING_RE.sub("", body, count=1).lstrip()
-    section = _SECTION_RE.search(body)
-    lead = body[: section.start()] if section else body
-    return bool(_SUPERSEDED_RE.search(head) or _SUPERSEDED_RE.search(lead[:_HEAD_CHARS]))
+        return None
+    where = "frontmatter"
+    match = _SUPERSEDED_RE.search(head)
+    offset = match.start() if match else 0
+    if match is None:
+        rest = text[len(head):]
+        start = len(head) + len(rest) - len(rest.lstrip())
+        # `_HEADING_RE` is anchored with `\A`, which `match(text, pos)` would
+        # never honour at `pos`, so it runs on the slice.
+        heading = _HEADING_RE.match(text[start:])
+        if heading:
+            start += heading.end()
+            after_heading = text[start:]
+            start += len(after_heading) - len(after_heading.lstrip())
+        body = text[start:]
+        section = _SECTION_RE.search(body)
+        lead = body[: section.start()] if section else body
+        match = _SUPERSEDED_RE.search(lead[:_HEAD_CHARS])
+        if match is None:
+            return None
+        where = "lead"
+        offset = start + match.start()
+    lines = text.split("\n")
+    index = text.count("\n", 0, offset)
+    return {
+        "line": index + 1,
+        "text": _line_at(lines, index),
+        "match": match.group(0),
+        "where": where,
+        "before": _neighbour(lines, index, -1),
+        "after": _neighbour(lines, index, 1),
+    }
+
+
+def _says_it_was_superseded(text: str) -> bool:
+    """Whether the note says *it* was superseded; see `_superseded_match`."""
+    return _superseded_match(text) is not None
 
 
 def _excerpt(text: str, limit: int = EXCERPT_CHARS) -> str:
@@ -333,7 +414,7 @@ def _generate_candidates(
     present_digests: set[str] = set()
     for entry in entries:
         path = str(entry.path)
-        if any(part.casefold() == "workspace" for part in Path(path).parts):
+        if _is_workspace_path(path):
             continue
         # A template is not a stale note: it has no facts to verify and nothing
         # links to it by design, so every rule here fires on one. The linter
@@ -345,6 +426,10 @@ def _generate_candidates(
             raw = disk_path.read_bytes()
         except (OSError, ValueError):
             continue
+        try:
+            mtime = disk_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
         present_paths.add(path)
         digest = content_hash(raw)
         present_digests.add(digest)
@@ -353,8 +438,7 @@ def _generate_candidates(
         # onto a `Closed …` file. Same class of exemption as templates. Skipped
         # only after it is counted as present, so a project moved from
         # active/ to completed/ reads as a move, not a vanished note.
-        parts = [part.casefold() for part in Path(path).parts]
-        if any(a == "projects" and b == "completed" for a, b in zip(parts, parts[1:])):
+        if _is_completed_project(path):
             continue
         text = raw.decode("utf-8", errors="replace")
         note_type = entry.type or "note"
@@ -377,12 +461,27 @@ def _generate_candidates(
         group = duplicate_by_path.get(path)
         if group:
             signals.append("possible_duplicate")
-        if canon_type not in _RECORD_TYPES and _says_it_was_superseded(text):
+        superseded = None if canon_type in _RECORD_TYPES else _superseded_match(text)
+        if superseded is not None:
             signals.append("superseded_language")
         if not (entry.updated or entry.tags or entry.aliases):
             signals.append("weak_provenance")
+        # Age is a signal too: the same predicate the Memory Map's "unchecked"
+        # flag and `memory-audit`'s stale notes use, so a note the map tells
+        # you to review is a note this queue can show. Logs, journals and
+        # queue files are exempt inside the predicate.
+        verification: NoteVerification | None = note_verification(
+            entry.type or "", entry.updated or "", mtime, today=today
+        )
+        unverified = verification if verification is not None and verification.stale else None
+        if unverified is not None:
+            signals.append("unverified")
         if not signals:
             continue
+        # `unlinked` on a lookup type describes the directory, not the note, so
+        # it cannot queue one alone. Anything else — `unverified` included —
+        # can: a linked person note unchecked for months is exactly the note
+        # this queue exists to bring back. Hence the original, narrow rule.
         if lookup_type in _LOOKUP_TYPES and signals == ["unlinked"]:
             continue
         # `digest` was computed once, right after the read above, and reused
@@ -395,18 +494,19 @@ def _generate_candidates(
             "duplicate_group": group or [],
             "last_update": entry.updated or "",
             "type": note_type,
-            "age_days": None,
+            "age_days": verification.age_days if verification is not None else None,
+            # Why `unverified` fired, with the horizon beside the age so a
+            # reader can disagree with the verdict without losing the evidence.
+            "unverified": unverified.as_evidence() if unverified is not None else None,
+            # Where the note says it was superseded, so the row can quote the
+            # line instead of asking the user to go and find it.
+            "superseded": superseded,
             # Carried in the queue payload rather than fetched per row: the
             # panel used to lazy-load the whole file through
             # `/api/workspace-file` behind a disclosure, which is why nothing
             # was visible until you opened fifty of them one at a time.
             "excerpt": _excerpt(text),
         }
-        if entry.updated:
-            try:
-                evidence["age_days"] = max(0, (today - datetime.fromisoformat(entry.updated).date()).days)
-            except ValueError:
-                pass
         backlinks = cast(list[str], evidence["backlinks"])
         # Connectedness makes a note LESS disposable, so both connectedness
         # terms subtract. An earlier revision added +2 for `bridge` while
@@ -414,20 +514,36 @@ def _generate_candidates(
         # four outbound links and no backlinks outranked genuine orphans for
         # the five candidate slots of a workflow whose terminal action is
         # deletion.
-        priority = len(signals) - min(len(backlinks), 2) - (1 if evidence["bridge"] else 0)
+        #
+        # `unverified` adds nothing: it says "check this", not "this may be
+        # disposable", and priority orders a queue whose terminal action is
+        # deletion. An orphan with a real disposability signal keeps ranking
+        # above a well-linked note that merely needs re-reading; among equal
+        # priorities, the note furthest past its horizon comes first.
+        disposability = [signal for signal in signals if signal != "unverified"]
+        priority = len(disposability) - min(len(backlinks), 2) - (1 if evidence["bridge"] else 0)
         item = ReviewCandidate(
             candidate_id=candidate_id(workspace, path, digest), workspace=workspace,
             path=path, content_hash=digest, signals=tuple(sorted(signals)),
             priority=priority, evidence=evidence,
         )
         candidates.append(item)
-    candidates.sort(key=lambda item: (-item.priority, item.path))
+    def overdue(item: ReviewCandidate) -> int:
+        info = item.evidence.get("unverified")
+        if not isinstance(info, dict):
+            return 0
+        return int(info["age_days"]) - int(info["threshold_days"])
+
+    candidates.sort(key=lambda item: (-item.priority, -overdue(item), item.path))
     decisions = _latest_decisions(root)
     active = [item for item in candidates if not _suppressed(decisions.get(item.candidate_id, {})) or decisions.get(item.candidate_id, {}).get("content_hash") != item.content_hash]
-    result = active[: max(1, min(int(max_candidates), 50))]
+    result = active[: max(1, min(int(max_candidates), MAX_CANDIDATES_CEILING))]
     if write_queue:
         _record_vanished(root, workspace, decisions, present_paths, present_digests)
-        _write_queue(root, result, decisions)
+        # The projection is the whole pending queue, not whatever slice this
+        # caller asked for: the agent tools list the top 5, the PWA the lot,
+        # and the file must not change shape depending on who wrote it last.
+        _write_queue(root, active[:MAX_CANDIDATES_CEILING], decisions)
     return result
 
 

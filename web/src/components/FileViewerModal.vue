@@ -328,7 +328,7 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import { errorMessage } from '../lib/errorMessage'
 import { useProjectStore } from '../stores/projects'
 import { router } from '../router'
-import { useMemoryMapStore } from '../stores/memoryMap'
+import { useMemoryMapStore, memorySectionPath } from '../stores/memoryMap'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
 import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
@@ -412,7 +412,7 @@ async function openInMemoryMap(): Promise<void> {
   // for the signal, and the graph load it does on arrival clears `selectedId`
   // anyway. The map drains this once its nodes are placed.
   memoryMapStore.requestFocusOnOpen(target)
-  await router.push('/memory')
+  await router.push(memorySectionPath('map'))
 }
 
 // Chat transcripts archived to the vault live at

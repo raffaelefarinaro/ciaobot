@@ -39,7 +39,7 @@ import { useProjectStore } from '../stores/projects'
 import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskStore } from '../stores/tasks'
-import { useMemoryMapStore } from '../stores/memoryMap'
+import { memorySectionPath } from '../stores/memoryMap'
 import { scheduleInWorkspace } from '../lib/automationWorkspace'
 
 type ReviewState = 'ready' | 'loading' | 'stale' | 'error'
@@ -56,7 +56,6 @@ const projects = useProjectStore()
 const proposals = useProposalsStore()
 const retirement = useVaultReviewStore()
 const tasks = useTaskStore()
-const memory = useMemoryMapStore()
 
 function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : pluralForm}`
@@ -188,10 +187,7 @@ function openItem(key: ReviewItem['key']) {
     void router.push('/schedules')
     return
   }
-  memory.view = 'review'
-  memory.reviewTab = key === 'retirement' ? 'retirement' : 'proposals'
-  if (key === 'retirement') memory.retirementTab = 'candidates'
-  void router.push('/proposals')
+  void router.push(memorySectionPath(key === 'retirement' ? 'revisit' : 'suggested'))
 }
 </script>
 

@@ -85,7 +85,7 @@ Never drop a durable fact merely to fit a cap. If a region remains over cap beca
 
 Run `ciao memory-audit --json` daily and act on `aging_state_entries`, `event_shaped_entries`, and `superseded_state_candidates` under the pass-2 contract.
 
-For the **weekly** pass, first run the scoped `vault_review` tool (or the equivalent review endpoint) and inspect its evidence, then run `ciao memory-audit --json --with-vault --vault-root <this workspace's vault>`. It may queue candidates, but unattended care must never trash or permanently delete a note. Keep and archiving non-destructively are allowed; trash and permanent deletion require an attended action. Leaving a candidate undecided is also fine — it stays queued for the next attended pass. Orphan status is only a linking signal, never proof that a note is disposable.
+For the **weekly** pass, first run the scoped `vault_review` tool (or the equivalent review endpoint) and inspect its evidence, then run `ciao memory-audit --json --with-vault --vault-root <this workspace's vault>`. It may queue candidates, but unattended care must never trash or permanently delete a note. Keep and archiving non-destructively are allowed; trash and permanent deletion require an attended action. Leaving a candidate undecided is also fine — it stays queued for the next attended pass. Orphan status is only a linking signal, never proof that a note is disposable. The queue's signals are `unverified` (facts unchecked past the type's horizon — the same notes `stale_notes` lists, so re-verify rather than retire), `unlinked`, `possible_duplicate`, `superseded_language` (evidence names the line) and `weak_provenance`.
 
 Act on these sections:
 

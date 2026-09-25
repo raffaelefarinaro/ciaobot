@@ -1,109 +1,43 @@
 <template>
   <div class="memory-map">
-    <PaneHeader page-tag="Memory" @open-sidebar="emit('open-sidebar')">
-      <!-- Review and Map are the page's two modes, so the switch sits in the
-           page's own header, once. The pending count lives on the Suggested
-           tab below rather than as a second badge here. -->
-      <template #actions>
-        <div class="memory-mode-actions" role="group" aria-label="Memory mode">
-          <button
-            type="button"
-            :class="{ active: mm.view === 'review' }"
-            :aria-pressed="mm.view === 'review'"
-            @click="mm.view = 'review'"
-          >Review</button>
-          <button
-            type="button"
-            :class="{ active: mm.view !== 'review' }"
-            :aria-pressed="mm.view !== 'review'"
-            @click="setMapView(mm.mapView)"
-          >Map</button>
-        </div>
-      </template>
-    </PaneHeader>
+    <!-- The sections are listed in the sidebar (like Settings' tabs), so the
+         header only names where you are: no mode switch, no tab row. -->
+    <PaneHeader :page-tag="`Memory · ${SECTION_LABELS[mm.section]}`" @open-sidebar="emit('open-sidebar')" />
 
-    <div v-if="mm.view === 'review'" class="mm-review-wrap">
+    <div v-if="mm.section !== 'map'" class="mm-review-wrap">
       <div class="page-grid mm-review-grid">
       <div class="page-main">
-      <!-- One navigation level for everything Review holds. It used to be two:
-           Proposals/Retirements here, then Queue/History inside the proposal
-           panel and To review/Trash inside the retirement one — so the trash
-           was a tab inside a tab inside a sidebar button, and no single row
-           said what there was to decide. The four destinations are peers: two
-           things waiting for a decision, two records of decisions already
-           made. The underlying state is unchanged, so every existing entry
-           point (the sidebar's "Needs review" list, a stale note's detail
-           panel, /proposals) still lands where it did. -->
-      <TabBar
-        v-model="reviewTab"
-        :tabs="reviewTabs"
-        label="Review"
-        id-prefix="mm-review"
-        class="mm-review-tabs"
-      />
-      <!-- TabBar points every tab at `<id-prefix>-panel-<key>` via
-           aria-controls, so those panels have to exist. Both components are
-           single-root, so these attributes fall through onto their root
-           element and change no layout.
-
-           The proposal panel is bound without `key`, so moving between
-           Suggested memories and History swaps its section rather than
-           remounting it — which would refetch the queue on every flip. -->
+      <!-- Suggested and History are the proposal panel's two sections; it is
+           bound without `key`, so moving between them swaps its section
+           rather than remounting it (which would refetch the queue). -->
       <ProposalReviewPanel
-        v-if="reviewTab === 'proposals' || reviewTab === 'history'"
-        :section="reviewTab === 'history' ? 'history' : 'queue'"
-        :id="`mm-review-panel-${reviewTab}`"
-        role="tabpanel"
-        :aria-labelledby="`mm-review-tab-${reviewTab}`"
+        v-if="mm.section === 'suggested' || mm.section === 'history'"
+        :section="mm.section === 'history' ? 'history' : 'queue'"
       />
       <!-- One component, two sections: the queue and the trash share the
            store, the busy set and the error toast, so splitting them into
            two components would only duplicate all three. -->
       <VaultReviewPanel
         v-else
-        :section="reviewTab === 'trash' ? 'trash' : 'candidates'"
-        :id="`mm-review-panel-${reviewTab}`"
-        role="tabpanel"
-        :aria-labelledby="`mm-review-tab-${reviewTab}`"
+        :section="mm.section === 'retired' ? 'trash' : 'candidates'"
       />
       </div>
-      <!-- What the review decisions feed: the vault's size and the always-
-           loaded budget. Both used to be tiles in the sidebar, beside a second
-           copy of the Review/Map switch. -->
-      <aside class="page-rail mm-review-rail" aria-label="Memory at a glance">
-        <section class="rail-section" aria-labelledby="mm-vault-title">
-          <h2 id="mm-vault-title" class="rail-title">Vault</h2>
-          <p v-if="mm.loading && !mm.nodes.length" class="rail-note" role="status">Loading the vault…</p>
-          <p v-else-if="mm.loadError && !mm.nodes.length" class="rail-note">Could not load the vault.</p>
-          <div v-else class="rail-kvs">
-            <div class="rail-kv"><span>Notes</span><strong>{{ mm.nodes.length.toLocaleString() }}</strong></div>
-            <div class="rail-kv"><span>Links</span><strong>{{ mm.edges.length.toLocaleString() }}</strong></div>
-            <div class="rail-kv"><span>Unlinked</span><strong>{{ mm.orphanNotes.length.toLocaleString() }}</strong></div>
-            <div class="rail-kv">
-              <span>Unverified</span>
-              <strong :class="{ 'rail-attention': mm.staleNotes.length > 0 }">{{ mm.staleNotes.length.toLocaleString() }}</strong>
-            </div>
-          </div>
-        </section>
+      <!-- What the review decisions feed: the always-loaded budget. The vault's
+           numbers live on the map's toolbar. -->
+      <aside class="page-rail mm-review-rail" aria-label="Always loaded">
         <MemoryGuideBudget />
       </aside>
       </div>
     </div>
 
-    <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode, 'mm-body--dragging-detail': isDraggingDetail }" :style="detailBodyStyle">
+    <!-- The map takes the whole pane: toolbar across the top, the drawing
+         under it, and a note's details in a docked tile at the right edge —
+         the same tile a pinned file opens in. The vault's numbers are one line
+         in the toolbar; what the old rail listed is elsewhere (Needs review is
+         To revisit, Unlinked is the Orphans filter, Most connected is List
+         sorted by links). -->
+    <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode, 'mm-body--dragging-detail': isDraggingDetail }">
       <div class="mm-surface">
-        <!-- The map uses the same page grid as every other pane: the drawing in
-             the main column, the vault's glanceable context in the rail. The
-             rail used to be the sidebar's second half (most connected, needs
-             review, recently written), which made the sidebar a dashboard; it
-             steps aside while a note's detail panel is open, since that panel
-             is the context then. -->
-        <div class="page-grid mm-map-grid" :class="{ 'page-grid--single': !!mm.selectedNode }">
-        <div class="page-main mm-map-main">
-        <!-- Graph and List are two drawings of one set of notes, so the choice
-             between them sits with the other "how should this look" controls.
-             One orphan menu replaces the two toggle buttons that could each
-             undo the other. -->
         <div v-if="!mm.loading && !mm.loadError" class="mm-toolbar">
           <div class="mm-seg mm-seg--sm" role="group" aria-label="View">
             <button
@@ -132,7 +66,17 @@
             <option value="hide">Linked only</option>
             <option value="only">Orphans only</option>
           </select>
-          <span class="mm-toolbar-count">{{ mm.visibleNodes.length.toLocaleString() }} notes · {{ mm.edges.length.toLocaleString() }} links</span>
+          <p class="mm-toolbar-stats" aria-label="Vault">
+            <span><strong>{{ mm.visibleNodes.length.toLocaleString() }}</strong> notes</span>
+            <span><strong>{{ mm.edges.length.toLocaleString() }}</strong> links</span>
+            <span><strong>{{ mm.orphanNotes.length.toLocaleString() }}</strong> unlinked</span>
+            <router-link
+              v-if="mm.staleNotes.length"
+              class="mm-toolbar-stale"
+              :to="memorySectionPath('revisit')"
+              title="Notes unchecked past their type's limit — review them in To revisit"
+            ><strong>{{ mm.staleNotes.length.toLocaleString() }}</strong> unchecked</router-link>
+          </p>
         </div>
         <div v-if="mm.loading" class="mm-skeleton" role="status" aria-live="polite" aria-label="Loading vault graph">
           <div class="mm-brain-skeleton" aria-hidden="true">
@@ -192,31 +136,18 @@
             <button type="button" title="Zoom out" aria-label="Zoom out" @click="zoom(0.8)">−</button>
             <button type="button" title="Fit the whole graph" aria-label="Fit the whole graph" @click="resetCamera(true)">⤢</button>
           </div>
-          <!-- Path endpoints for the current focus, mirrored from the list/detail
-               controls so a keyboard user can also set them without leaving the
-               canvas. Shown only while a focus exists. -->
-          <div v-if="mm.selectedNode" class="mm-path-controls" role="group" aria-label="Trace connections from the focused note">
-            <span class="mm-path-controls-label">{{ mm.selectedNode.title }}</span>
-            <button
-              v-for="s in PATH_SLOTS"
-              :key="s.slot"
-              type="button"
-              :class="['btn-chip', { active: pathSlotHolds(s.slot, mm.selectedNode.id) }]"
-              :aria-pressed="pathSlotHolds(s.slot, mm.selectedNode.id)"
-              @click="mm.choosePathEndpoint(mm.selectedNode.id, s.slot)"
-            >{{ s.chip }}</button>
-          </div>
           <div
             v-if="hoveredNode"
             class="mm-hover-tip"
             :style="{ left: hoverPos.x + 'px', top: hoverPos.y + 'px' }"
           >{{ hoveredNode.title }}</div>
+          <!-- How to work the drawing, over its bottom edge. -->
+          <p class="mm-canvas-note">
+            <span class="mm-legend-stale" aria-hidden="true"></span>Unchecked too long ·
+            <template v-if="zoomedOut">Hover or tap a note to name it, zoom in for titles, or use List to work by keyboard.</template>
+            <template v-else>Click a note to open it and light up its neighbours. Drag to pan.</template>
+          </p>
         </div>
-        <!-- How to work the drawing, under it rather than over it. -->
-        <p class="mm-canvas-note">
-          <template v-if="zoomedOut">Hover or tap a note to name it. Zoom in for titles, or use List to work by keyboard.</template>
-          <template v-else>Click a note to pin its neighbours. Drag to pan. Every note is also in List.</template>
-        </p>
         </template>
         <div v-else class="mm-list-wrap" tabindex="0" role="region" aria-label="Vault notes list">
           <table>
@@ -245,7 +176,6 @@
                     Checked<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('age') }}</span>
                   </button>
                 </th>
-                <th class="th-plain"><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
@@ -273,293 +203,68 @@
                 <td class="muted mm-tags">{{ n.tags.slice(0, 4).join(', ') }}</td>
                 <td class="deg-n">{{ n.degree }}</td>
                 <td class="mm-age" :class="{ 'stale-age': n.stale }">{{ mm.ageLabelOf(n) || '—' }}<span v-if="n.stale" class="stale-flag" title="Unverified past its type's horizon">Needs review</span></td>
-                <!-- Path endpoints, usable without the graph or a pointer: the
-                     list is the complete alternative to the canvas. They sit in
-                     one row menu rather than two bordered buttons on every row;
-                     the items stay in the DOM (v-show) so the menu opens with
-                     no layout work and each keeps its full accessible name. -->
-                <td class="path-cell" @click.stop>
-                  <div class="mm-row-menu" @keydown.esc.stop="closeRowMenu(n.id, true)">
-                    <button
-                      type="button"
-                      class="mm-row-menu-btn"
-                      :data-mm-menu="n.id"
-                      aria-haspopup="true"
-                      :aria-expanded="openRowMenu === n.id"
-                      :aria-controls="`mm-row-menu-${n.id}`"
-                      :aria-label="`Actions for ${n.title}`"
-                      @click="toggleRowMenu(n.id)"
-                    >⋯</button>
-                    <div
-                      v-show="openRowMenu === n.id"
-                      :id="`mm-row-menu-${n.id}`"
-                      class="mm-row-menu-pop"
-                      role="group"
-                      :aria-label="`Path for ${n.title}`"
-                    >
-                      <button
-                        v-for="s in PATH_SLOTS"
-                        :key="s.slot"
-                        type="button"
-                        class="mm-path-btn"
-                        :class="{ active: pathSlotHolds(s.slot, n.id) }"
-                        :aria-pressed="pathSlotHolds(s.slot, n.id)"
-                        :aria-label="pathSlotLabel(s.slot, n.title)"
-                        @click="mm.choosePathEndpoint(n.id, s.slot); closeRowMenu(n.id, true)"
-                      >{{ s.menu }}<span v-if="pathSlotHolds(s.slot, n.id)" class="mm-path-check" aria-hidden="true">✓</span></button>
-                    </div>
-                  </div>
-                </td>
               </tr>
             </tbody>
           </table>
         </div>
-        </div>
-
-        <!-- The vault at a glance, plus the ways into it that used to fill the
-             sidebar. Every entry focuses the note on the map. -->
-        <aside v-if="!mm.selectedNode" class="page-rail mm-map-rail" aria-label="Vault at a glance">
-          <section class="rail-section" aria-labelledby="mm-map-vault-title">
-            <h2 id="mm-map-vault-title" class="rail-title">Vault</h2>
-            <p v-if="mm.loading && !mm.nodes.length" class="rail-note" role="status">Loading the vault…</p>
-            <div v-else class="rail-kvs">
-              <div class="rail-kv"><span>Notes</span><strong>{{ mm.nodes.length.toLocaleString() }}</strong></div>
-              <div class="rail-kv"><span>Links</span><strong>{{ mm.edges.length.toLocaleString() }}</strong></div>
-              <div class="rail-kv"><span>Unlinked</span><strong>{{ mm.orphanNotes.length.toLocaleString() }}</strong></div>
-            </div>
-          </section>
-
-          <!-- Aging notes: facts nobody has verified within their type's
-               horizon. The daily curation routine reviews this same list. -->
-          <section v-if="mm.staleNotes.length" class="rail-section" aria-labelledby="mm-map-stale-title">
-            <h2 id="mm-map-stale-title" class="rail-title">Needs review</h2>
-            <div class="rail-list">
-              <button
-                v-for="n in mm.staleNotes.slice(0, staleLimit)"
-                :key="n.id"
-                type="button"
-                class="rail-item"
-                :title="`Unverified for ${n.ageDays ?? '?'} days`"
-                @click="mm.requestFocus(n.id)"
-              >
-                <span>{{ n.title }}</span>
-                <small class="rail-attention">{{ mm.ageLabelOf(n) }} unchecked</small>
-              </button>
-            </div>
-            <button
-              v-if="mm.staleNotes.length > staleLimit"
-              type="button"
-              class="mm-rail-link"
-              @click="staleLimit += 20"
-            >Show {{ Math.min(20, mm.staleNotes.length - staleLimit) }} more</button>
-            <p class="rail-note">Daily Memory curation checks these too. They stay here until you or that run resolves them.</p>
-            <button type="button" class="mm-rail-link" @click="openRetirementReview()">Open Notes to revisit</button>
-          </section>
-
-          <section v-if="mm.mostConnected.length" class="rail-section" aria-labelledby="mm-map-hubs-title">
-            <h2 id="mm-map-hubs-title" class="rail-title">Most connected</h2>
-            <div class="rail-kvs">
-              <button
-                v-for="n in mm.mostConnected"
-                :key="n.id"
-                type="button"
-                class="rail-kv mm-rail-kv-btn"
-                @click="mm.requestFocus(n.id)"
-              >
-                <span>{{ n.title }}</span><strong>{{ n.degree }}</strong>
-              </button>
-            </div>
-          </section>
-
-          <!-- The gap list: notes nothing links to. Each entry is either worth
-               linking or worth deleting. -->
-          <section v-if="mm.orphanNotes.length" class="rail-section" aria-labelledby="mm-map-orphans-title">
-            <h2 id="mm-map-orphans-title" class="rail-title">Unlinked</h2>
-            <div class="rail-list">
-              <button
-                v-for="n in mm.orphanNotes.slice(0, orphanLimit)"
-                :key="n.id"
-                type="button"
-                class="rail-item"
-                title="No note links to this one"
-                @click="mm.requestFocus(n.id)"
-              ><span>{{ n.title }}</span></button>
-            </div>
-            <button
-              v-if="mm.orphanNotes.length > orphanLimit"
-              type="button"
-              class="mm-rail-link"
-              @click="orphanLimit += 20"
-            >Show {{ Math.min(20, mm.orphanNotes.length - orphanLimit) }} more</button>
-          </section>
-
-          <!-- Entry points into the graph: the note you last touched is almost
-               always the one you opened the map about. -->
-          <section v-if="mm.recentNotes.length" class="rail-section" aria-labelledby="mm-map-recent-title">
-            <h2 id="mm-map-recent-title" class="rail-title">Recently written</h2>
-            <div class="rail-list">
-              <button
-                v-for="n in mm.recentNotes"
-                :key="n.id"
-                type="button"
-                class="rail-item"
-                title="Centre the map here"
-                @click="mm.requestFocus(n.id)"
-              ><span>{{ n.title }}</span></button>
-            </div>
-          </section>
-
-          <section class="rail-section" aria-labelledby="mm-map-path-title">
-            <h2 id="mm-map-path-title" class="rail-title">Path</h2>
-            <p class="rail-note">{{ mm.pathHint }}</p>
-            <button v-if="mm.pathStart || mm.pathEnd" type="button" class="mm-rail-link" @click="mm.resetPath()">Clear path</button>
-          </section>
-        </aside>
-        </div>
       </div>
+      <!-- The gap between the drawing and the tile is its resize handle, as it
+           is between a chat and a pinned file. -->
+      <div
+        v-if="mm.selectedNode && !isNarrow"
+        class="mm-tile-gutter"
+        title="Drag to resize"
+        aria-hidden="true"
+        @mousedown="startDetailDrag"
+      ></div>
       <aside
         v-if="mm.selectedNode"
         ref="detailPanel"
-        class="mm-detail"
+        class="mm-tile"
+        :style="isNarrow ? undefined : { width: detailWidth + 'px' }"
         role="dialog"
         :aria-modal="isNarrow ? 'true' : undefined"
         :aria-label="`Details for ${mm.selectedNode.title}`"
       >
-        <div
-          class="mm-detail-resizer"
-          @mousedown="startDetailDrag"
-          title="Drag to resize"
-          aria-hidden="true"
-        ></div>
-        <button
-          ref="detailCloseButton"
-          type="button"
-          class="mm-detail-close"
-          title="Close (Esc)"
-          aria-label="Close note detail"
-          @click="closeDetail"
-        >×</button>
-        <div class="mm-detail-type">{{ categoryLabelFor(mm.selectedNode) }}</div>
-        <div class="mm-detail-title">
-          {{ mm.selectedNode.title }}
-          <span v-if="mm.selectedNode.stale" class="stale-badge" title="Unverified past this note type's staleness horizon">needs review</span>
-        </div>
-        <div v-if="ageLabelOfSelected" class="mm-detail-verified">Last verified {{ ageLabelOfSelected }} ago</div>
-        <!-- Explicit, named path controls: the shift-click instructions on the
-             canvas describe a gesture a touch or keyboard user cannot perform,
-             and a note's path endpoints have to be settable from whichever
-             surface actually opened it. -->
-        <div class="mm-detail-path-controls" role="group" aria-label="Trace connections from this note">
-          <button
-            v-for="s in PATH_SLOTS"
-            :key="s.slot"
-            type="button"
-            class="btn-chip"
-            :class="{ active: pathSlotHolds(s.slot, mm.selectedNode.id) }"
-            :aria-pressed="pathSlotHolds(s.slot, mm.selectedNode.id)"
-            @click="mm.choosePathEndpoint(mm.selectedNode.id, s.slot)"
-          >{{ s.chip }}</button>
-          <button
-            v-if="mm.pathStart || mm.pathEnd"
-            type="button"
-            class="btn-chip"
-            @click="mm.resetPath()"
-          >Clear path</button>
-        </div>
-        <p v-if="mm.pathStart || mm.pathEnd" class="mm-detail-path-hint" role="status">{{ mm.pathHint }}</p>
-        <button
-          v-if="mm.selectedNode.stale"
-          type="button"
-          class="mm-detail-review-link"
-          @click="openRetirementReview"
-        >Review for retirement →</button>
-        <button
-          type="button"
-          class="mm-detail-path"
-          :aria-label="`Open ${mm.selectedNode.title}`"
-          @click="openNoteFile(mm.selectedNode.id)"
-        >{{ mm.selectedNode.id }}</button>
-
-        <div class="mm-detail-section mm-detail-preview">
-          <h4>Content</h4>
-          <div v-if="previewLoading" class="mm-preview-skeleton" aria-hidden="true">
-            <span class="mm-shimmer-line" style="width: 100%; height: 8px; margin-bottom: 6px;"></span>
-            <span class="mm-shimmer-line" style="width: 92%; height: 8px; margin-bottom: 6px;"></span>
-            <span class="mm-shimmer-line" style="width: 88%; height: 8px; margin-bottom: 6px;"></span>
-            <span class="mm-shimmer-line" style="width: 60%; height: 8px;"></span>
-          </div>
-          <div v-else-if="previewError" class="mm-preview-error">{{ previewError }}</div>
-          <template v-else>
-            <div v-if="previewContent" class="mm-preview-wrap" :class="{ 'mm-preview--collapsed': isTruncated && !expandedPreview }">
-              <pre class="mm-preview-text">{{ displayedPreview }}</pre>
-              <div v-if="isTruncated && !expandedPreview" class="mm-preview-fade" aria-hidden="true"></div>
-            </div>
-            <div v-if="!previewContent && !previewError" class="mm-hint">Empty note.</div>
-            <div v-if="previewContent" class="mm-preview-actions">
-              <button v-if="isTruncated" type="button" class="mm-link" @click="expandedPreview = !expandedPreview">{{ expandedPreview ? 'Show less' : 'Show more' }}</button>
-              <button type="button" class="mm-link mm-link--primary" @click="openNoteFile(mm.selectedNode.id)">Open full file →</button>
+        <PinnedFilePanel
+          :key="mm.selectedNode.id"
+          :file-path="mm.selectedNode.id"
+          in-memory-map
+          close-label="Close note"
+          @close="closeDetail"
+        >
+          <template #lead>
+            <div v-if="mm.selectedNode.stale" class="mm-tile-stale" role="note">
+              <p>
+                <strong>Unchecked for {{ staleAgeWords(mm.selectedNode) }}.</strong>
+                {{ staleRuleWords(mm.selectedNode) }}
+              </p>
+              <router-link class="mm-tile-stale-link" :to="memorySectionPath('revisit')">Review in To revisit</router-link>
             </div>
           </template>
-        </div>
-
-        <div v-if="mm.selectedNode.tags.length" class="mm-detail-section">
-          <h4>Tags</h4>
-          <span v-for="t in mm.selectedNode.tags" :key="t" class="pill">{{ t }}</span>
-        </div>
-        <div v-if="mm.selectedNode.aliases.length" class="mm-detail-section">
-          <h4>Aliases</h4>
-          <span v-for="a in mm.selectedNode.aliases" :key="a" class="pill">{{ a }}</span>
-        </div>
-
-        <div class="mm-detail-section">
-          <h4>Linked notes ({{ mm.neighborsOf(mm.selectedNode.id).length }})</h4>
-          <div v-if="!mm.neighborsOf(mm.selectedNode.id).length" class="mm-hint">No links found — orphaned note.</div>
-          <div
-            v-for="nb in mm.neighborsOf(mm.selectedNode.id)"
-            :key="nb.id"
-            class="mm-link-item"
-          >
-            <span class="dot" :style="{ background: colorForNode(nb) }" />
-            <!-- A native button, not a clickable span: opening a neighbor is a
-                 core part of inspecting a note and has to be reachable by
-                 keyboard and Enter/Space. -->
-            <button
-              type="button"
-              class="label mm-link-label mm-link-btn"
-              :data-mm-return="nb.id"
-              :aria-label="`Open ${nb.title}`"
-              @click="openNeighbor(nb.id, $event)"
-            >{{ nb.title }}</button>
-            <!-- Actions are grouped and non-shrinking so, at the panel's 220px
-                 minimum, they wrap to a second line instead of being pushed out
-                 of view by the note title. -->
-            <span class="mm-link-actions">
+          <template #after>
+            <section class="mm-tile-links" aria-labelledby="mm-tile-links-title">
+              <h3 id="mm-tile-links-title">Linked notes <span>{{ mm.neighborsOf(mm.selectedNode.id).length }}</span></h3>
+              <p v-if="!mm.neighborsOf(mm.selectedNode.id).length" class="mm-hint">Nothing links here, and it links nowhere.</p>
               <button
-                v-for="s in PATH_SLOTS"
-                :key="s.slot"
+                v-for="nb in mm.neighborsOf(mm.selectedNode.id)"
+                :key="nb.id"
                 type="button"
-                class="mm-path-btn"
-                :class="{ active: pathSlotHolds(s.slot, nb.id) }"
-                :aria-pressed="pathSlotHolds(s.slot, nb.id)"
-                :aria-label="pathSlotLabel(s.slot, nb.title)"
-                @click.stop="mm.choosePathEndpoint(nb.id, s.slot)"
-              >{{ s.compact }}</button>
-              <button
-                type="button"
-                class="mm-link-focus"
-                title="Locate in graph"
-                aria-label="Locate in graph"
-                @click.stop="focusNode(nb.id)"
-              >⌖</button>
-            </span>
-          </div>
-        </div>
-
-        <div class="mm-detail-section">
-          <button type="button" class="mm-delete-btn" :disabled="deletingNote" @click="deleteNote(mm.selectedNode.id)">
-            {{ deletingNote ? 'Deleting…' : 'Delete note' }}
-          </button>
-        </div>
+                class="mm-tile-link"
+                :data-mm-return="nb.id"
+                :aria-label="`Show ${nb.title} on the map`"
+                @click="openNeighbor(nb.id, $event)"
+              >
+                <span class="dot" :style="{ background: colorForNode(nb) }" />
+                <span class="mm-tile-link-title">{{ nb.title }}</span>
+                <small>{{ nb.degree }} {{ nb.degree === 1 ? 'link' : 'links' }}</small>
+              </button>
+              <button type="button" class="mm-delete-btn" :disabled="deletingNote" @click="deleteNote(mm.selectedNode.id)">
+                {{ deletingNote ? 'Deleting…' : 'Delete note' }}
+              </button>
+            </section>
+          </template>
+        </PinnedFilePanel>
       </aside>
     </div>
   </div>
@@ -573,18 +278,17 @@ import ProposalReviewPanel from './ProposalReviewPanel.vue'
 import VaultReviewPanel from './VaultReviewPanel.vue'
 import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
-import { router } from '../router'
 import { useProjectStore } from '../stores/projects'
-import { useFileViewerStore } from '../stores/fileViewer'
 import {
-  useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor,
-  type MemoryGraphNode,
+  useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, isMemorySection, memorySectionPath,
+  type MemoryGraphNode, type MemorySection,
 } from '../stores/memoryMap'
 import { askConfirm } from '../lib/confirm'
+import { ageInWords } from '../lib/vaultReviewLabels'
 import { useModalFocus } from '../composables/useModalFocus'
 import { isLightTheme } from '../lib/theme'
-import { parseFrontmatter } from '../lib/markdownFrontmatter'
-import TabBar, { type TabSpec } from './TabBar.vue'
+import PinnedFilePanel from './PinnedFilePanel.vue'
+import { useRoute, useRouter } from 'vue-router'
 import { easeOutCubic, prefersReducedMotion, tweenCamera, type CameraState } from '../lib/cameraTween'
 import { GraphGesture } from '../lib/graphGesture'
 import {
@@ -615,17 +319,17 @@ const emit = defineEmits<{ 'open-sidebar': [] }>()
 
 const store = useProjectStore()
 const mm = useMemoryMapStore()
-const fileViewer = useFileViewerStore()
 
-// ---------- detail panel resizer ----------
-// Mirrors ChatLayout's sidebar resizer: draggable, persisted, snaps to default.
-const DETAIL_DEFAULT_WIDTH = 320
-const DETAIL_MIN_WIDTH = 220
-const DETAIL_MAX_WIDTH = 560
+// ---------- note tile resizer ----------
+// Mirrors the chat's pinned-file split: draggable, persisted, snaps to default.
+// A document tile, not a sidebar, so it opens wide enough for the note's prose.
+const DETAIL_DEFAULT_WIDTH = 440
+const DETAIL_MIN_WIDTH = 300
+const DETAIL_MAX_WIDTH = 760
 const DETAIL_SNAP_THRESHOLD = 12
 function safeGetDetailWidth(): number {
   try {
-    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('ciao:mm-detail-width') : null
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('ciao:mm-tile-width') : null
     const n = raw ? Number(raw) : NaN
     return Number.isFinite(n) ? n : DETAIL_DEFAULT_WIDTH
   } catch {
@@ -634,30 +338,22 @@ function safeGetDetailWidth(): number {
 }
 function safeSetDetailWidth(v: number) {
   try {
-    if (typeof localStorage !== 'undefined') localStorage.setItem('ciao:mm-detail-width', String(v))
+    if (typeof localStorage !== 'undefined') localStorage.setItem('ciao:mm-tile-width', String(v))
   } catch {}
 }
 const detailWidth = ref(safeGetDetailWidth())
 const isDraggingDetail = ref(false)
-// The inline grid-template-columns would otherwise outrank the
-// `@media (max-width: 900px)` rule that restores a single full-width column
-// (and hides the panel). Only apply the persisted width above the desktop
-// breakpoint so a phone never reserves a 220-560px column for a hidden panel.
+// Below 900px the tile is a bottom sheet (CSS); the persisted width applies
+// only above it, and the sheet traps focus like any other modal.
 const isNarrow = ref(window.innerWidth <= 900)
 const detailPanel = ref<HTMLElement | null>(null)
-const detailCloseButton = ref<HTMLButtonElement | null>(null)
 const narrowDetailOpen = computed(() => isNarrow.value && Boolean(mm.selectedNode))
 useModalFocus(detailPanel, narrowDetailOpen, {
-  initialFocus: detailCloseButton,
   onEscape: closeDetail,
   restoreFocus: false,
 })
 function onResizeNarrow() { isNarrow.value = window.innerWidth <= 900 }
 if (typeof window !== 'undefined') window.addEventListener('resize', onResizeNarrow)
-const detailBodyStyle = computed(() => {
-  if (!mm.selectedNode || isNarrow.value) return undefined
-  return { gridTemplateColumns: `1fr ${detailWidth.value}px` } as Record<string, string>
-})
 let detailDragStartX = 0
 let detailDragStartWidth = 0
 function startDetailDrag(e: MouseEvent) {
@@ -740,77 +436,23 @@ const zoomedOut = computed(() => !labelsVisible(mm.visibleNodes.length, zoomRati
 // while this view isn't even mounted still lands correctly next time it is.
 watch(() => store.activeWorkspace, () => resetCamera())
 
-// ---------- selection / detail panel ----------
-// The sidebar's "most connected" list and this view's own neighbor links
-// both go through `mm.requestFocus`, which bumps `focusSignal` below; the
-// canvas is the only thing that knows how to pan/zoom, so it is the only
-// thing that reacts to it.
-function focusNode(id: string) {
+// ---------- selection / note tile ----------
+// The tile's linked notes and every outside entry point go through
+// `mm.requestFocus`, which bumps `focusSignal` below; the canvas is the only
+// thing that knows how to pan/zoom, so it is the only thing that reacts to it.
+/** A linked note in the tile: the map moves to it and the tile follows, as
+ * clicking its dot would. The file itself is one click away in the tile. */
+function openNoteOnMap(id: string) {
   mm.requestFocus(id)
-}
-function openNoteFile(id: string) {
-  // "Navigating" to a linked note from the detail panel should feel like
-  // clicking it in the graph: the map's highlight and the panel's own
-  // content follow, on top of opening the file.
-  mm.requestFocus(id)
-  void fileViewer.open(id)
 }
 /** Open a linked note, remembering the neighbor control so closing the detail
  * panel returns focus to it — unless that link unmounts when the panel content
  * is replaced (see `detailReturnFocus`), in which case the watcher falls back. */
 function openNeighbor(id: string, event: Event) {
   detailReturnFocus.value = { id, el: (event.currentTarget as HTMLElement | null) }
-  openNoteFile(id)
+  openNoteOnMap(id)
 }
 
-// ---------- path endpoints ----------
-// Four surfaces offer the same pair of buttons: the canvas overlay, each list
-// row, the detail panel and every neighbor row. Written out by hand that was
-// eight near-identical blocks, each carrying its own copy of the active class,
-// the `aria-pressed` expression and (for the compact pair) the `aria-label`
-// sentence — so a wording or ARIA change had eight places to land and could
-// silently reach only some of them. Each surface now renders one `v-for` over
-// this table, and the three bindings are computed here, once.
-const PATH_SLOTS = [
-  { slot: 'start' as const, chip: 'Start path', compact: 'start', menu: 'Set as path start' },
-  { slot: 'end' as const, chip: 'End path', compact: 'end', menu: 'Set as path end' },
-]
-/** The list row whose "⋯" path menu is open; one at a time. */
-const openRowMenu = ref<string | null>(null)
-function toggleRowMenu(id: string) {
-  openRowMenu.value = openRowMenu.value === id ? null : id
-}
-/** Close a row's menu, optionally returning focus to its trigger (after a
- * choice or Escape, so keyboard users are not dropped on the body). */
-function closeRowMenu(id: string, refocus = false) {
-  if (openRowMenu.value !== id) return
-  openRowMenu.value = null
-  if (refocus) {
-    void nextTick(() => {
-      const btn = document.querySelector<HTMLElement>(`[data-mm-menu="${id.replace(/["\\]/g, '\\$&')}"]`)
-      btn?.focus()
-    })
-  }
-}
-function onDocPointerDownForRowMenu(e: PointerEvent) {
-  if (!openRowMenu.value) return
-  const target = e.target as Element | null
-  if (target?.closest('.mm-row-menu')) return
-  openRowMenu.value = null
-}
-// The rail's long lists grow on demand rather than pushing the rest of the
-// rail out of reach on a real vault with hundreds of unlinked notes.
-const orphanLimit = ref(8)
-const staleLimit = ref(8)
-/** Whether `id` currently occupies `slot` — the active class and aria-pressed. */
-function pathSlotHolds(slot: 'start' | 'end', id: string): boolean {
-  return (slot === 'start' ? mm.pathStart : mm.pathEnd) === id
-}
-/** The accessible name for the compact buttons, whose visible text ("start")
- * is shared by every row and so names neither the note nor the action. */
-function pathSlotLabel(slot: 'start' | 'end', title: string): string {
-  return `Set ${title} as path ${slot}`
-}
 const deletingNote = ref(false)
 async function deleteNote(id: string) {
   if (deletingNote.value) return
@@ -827,55 +469,6 @@ async function deleteNote(id: string) {
     deletingNote.value = false
   }
 }
-
-// ---------- content preview in detail panel ----------
-const previewContent = ref('')
-const previewLoading = ref(false)
-const previewError = ref('')
-const expandedPreview = ref(false)
-const PREVIEW_LIMIT = 1200
-let previewToken = 0
-
-watch(() => mm.selectedId, async (id) => {
-  expandedPreview.value = false
-  if (!id) {
-    previewContent.value = ''
-    previewError.value = ''
-    previewLoading.value = false
-    return
-  }
-  previewLoading.value = true
-  previewError.value = ''
-  const token = ++previewToken
-  try {
-    const resp = await fetch(`/api/workspace-file?path=${encodeURIComponent(id)}`, { credentials: 'same-origin' })
-    if (token !== previewToken) return
-    if (!resp.ok) {
-      if (resp.status === 404) previewError.value = 'File not found.'
-      else if (resp.status === 413) previewError.value = 'File too large to preview.'
-      else if (resp.status === 403) previewError.value = 'Cannot preview this file.'
-      else previewError.value = `Failed to load (HTTP ${resp.status}).`
-      previewContent.value = ''
-      return
-    }
-    // Strip YAML frontmatter for a cleaner preview — the description/tags
-    // already surface frontmatter above, so showing raw `---` is noise. The
-    // shared splitter also handles a BOM, CRLF, and a missing closing fence.
-    previewContent.value = parseFrontmatter(await resp.text()).body.trimStart()
-  } catch (e) {
-    if (token !== previewToken) return
-    previewError.value = e instanceof Error ? e.message : String(e)
-    previewContent.value = ''
-  } finally {
-    if (token === previewToken) previewLoading.value = false
-  }
-})
-
-const isTruncated = computed(() => previewContent.value.length > PREVIEW_LIMIT)
-const displayedPreview = computed(() => {
-  if (!isTruncated.value || expandedPreview.value) return previewContent.value
-  return previewContent.value.slice(0, PREVIEW_LIMIT).trimEnd() + ' …'
-})
 
 // How far in a magnified focus zooms, as a multiple of the framed view. Past
 // LABEL_MIN_RATIO by a margin so the note that was just focused arrives with
@@ -1104,7 +697,7 @@ watch(() => mm.visibleIds, () => {
 // canvas kept showing whichever node was highlighted last. A selection
 // change doesn't need physics, just one more frame; waking the existing loop
 // is simpler than adding a second, physics-free redraw path.
-watch(() => [mm.selectedId, mm.pathStart, mm.pathEnd], () => wakeSimulation())
+watch(() => mm.selectedId, () => wakeSimulation())
 // Hiding orphans or showing only orphans changes *which* nodes exist in the
 // layout, so the graph has to be re-framed as well as re-settled — otherwise
 // filtering leaves the camera zoomed into empty space.
@@ -1215,11 +808,9 @@ function draw() {
   // is another few hundred thousand property reads to keep off the proxies.
   const vis = simNodes
   const visSet = mm.visibleIds
-  const highlightSet = mm.pathIds.size
-    ? mm.pathIds
-    : mm.selectedId
-      ? new Set([mm.selectedId, ...(mm.adjacency.get(mm.selectedId) || [])])
-      : null
+  const highlightSet = mm.selectedId
+    ? new Set([mm.selectedId, ...(mm.adjacency.get(mm.selectedId) || [])])
+    : null
 
   // Hovering a note previews its links. In a hairball the one question a dot
   // cannot answer is "what is this connected to?", and answering it only on
@@ -1232,19 +823,19 @@ function draw() {
     const a = simById.get(e.source)
     const b = simById.get(e.target)
     if (!a || !b) return
-    const onPath = mm.pathIds.has(e.source) && mm.pathIds.has(e.target)
+    // The open note's own links read as the brightest lines on the canvas:
+    // they are what the tile's "Linked notes" list is naming.
+    const onSelected = !!mm.selectedId && (e.source === mm.selectedId || e.target === mm.selectedId)
     const onHover = !!hoverId && (e.source === hoverId || e.target === hoverId)
     const dim = highlightSet && !(highlightSet.has(e.source) && highlightSet.has(e.target))
     const [ax, ay] = worldToScreen(a.x, a.y)
     const [bx, by] = worldToScreen(b.x, b.y)
-    ctx!.strokeStyle = onPath
-      ? '#ffd166'
-      : onHover
-        ? themeColors.edgeHot
-        : dim
-          ? themeColors.edgeDim
-          : themeColors.edge
-    ctx!.lineWidth = onPath ? 2.5 * dpr : onHover ? 1.8 * dpr : dpr
+    ctx!.strokeStyle = onSelected || onHover
+      ? themeColors.edgeHot
+      : dim
+        ? themeColors.edgeDim
+        : themeColors.edge
+    ctx!.lineWidth = onSelected ? 1.6 * dpr : onHover ? 1.8 * dpr : dpr
     ctx!.beginPath()
     ctx!.moveTo(ax, ay)
     ctx!.lineTo(bx, by)
@@ -1255,7 +846,7 @@ function draw() {
     const [sx, sy] = worldToScreen(n.x, n.y)
     const r = nodeRadius(n) * dpr * Math.max(0.7, Math.min(1.6, camera.scale))
     const dim = highlightSet && !highlightSet.has(n.id)
-    const isSel = n.id === mm.selectedId || mm.pathIds.has(n.id)
+    const isSel = n.id === mm.selectedId
     ctx!.beginPath()
     ctx!.arc(sx, sy, r, 0, Math.PI * 2)
     ctx!.fillStyle = dim ? hexToRgba(colorForNode(n), 0.18) : colorForNode(n)
@@ -1388,13 +979,13 @@ function drawLabels(vis: MemoryGraphNode[], highlightSet: Set<string> | null) {
   }
 
   const priority = (n: MemoryGraphNode) =>
-    n.id === mm.selectedId || mm.pathIds.has(n.id) ? Number.MAX_SAFE_INTEGER : n.degree
+    n.id === mm.selectedId ? Number.MAX_SAFE_INTEGER : n.degree
   const candidates = vis
     .filter(n => !(highlightSet && !highlightSet.has(n.id)))
     .sort((a, b) => priority(b) - priority(a))
 
   for (const n of candidates) {
-    const isSel = n.id === mm.selectedId || mm.pathIds.has(n.id)
+    const isSel = n.id === mm.selectedId
     if (!isSel && n.degree < floor) continue
     const [sx, sy] = worldToScreen(n.x, n.y)
     if (sx < 0 || sx > W || sy < 0 || sy > H) continue
@@ -1541,7 +1132,7 @@ function onPointerUp(e: PointerEvent) {
   if (gesture.activePointerId !== e.pointerId) return
   const result = gesture.end({ pointerId: e.pointerId })
   gestureNode = null
-  if (result.tap === 'node') mm.handleNodeClick(result.nodeId, result.additive)
+  if (result.tap === 'node') mm.handleNodeClick(result.nodeId)
   else if (result.tap === 'empty') mm.selectNode(null)
 }
 
@@ -1624,102 +1215,57 @@ function onWheel(e: WheelEvent) {
 // mirrors the shared `mm.view` state, seeding it from the URL on mount.
 const proposals = useProposalsStore()
 const vaultReview = useVaultReviewStore()
-// Tab badges, scoped like the lists they count: the workspace toggle scopes
-// both queues, so a global tally would claim rows the tab will not show.
-const proposalCount = computed(() => proposals.scopedRows(store.activeWorkspace).length)
-// Candidates only. The tally used to add the trash in, so a queue with nothing
-// left to decide still wore a badge counting notes already retired — a number
-// asking for attention no click could clear. Retired notes carry their own
-// count on their own tab, which is where a "how much is in there" number
-// belongs.
-const retirementCount = computed(() =>
-  vaultReview.loadedWorkspace === store.activeWorkspace ? vaultReview.candidates.length : 0,
-)
-const trashCount = computed(() =>
-  vaultReview.loadedWorkspace === store.activeWorkspace ? vaultReview.trashed.length : 0,
-)
-// Null until the ledger has loaded, and the badge stays hidden while it is: a
-// count rendered before the fetch read "History 0" on a ledger with hundreds
-// of rows. Unfiltered it reports the server's scoped total rather than the
-// rows we happen to hold, because the page is capped.
-const historyCount = computed(() => {
-  if (!proposals.historyLoaded) return null
-  if (proposals.historyFiltersActive) return proposals.visibleHistory(store.activeWorkspace).length
-  return proposals.historyTotal
-})
-
-/** Which of Review's four sections is on screen.
- *
- * Derived rather than stored: the underlying state (`mm.reviewTab`,
- * `mm.retirementTab`, `proposals.view`) is what every other entry point sets,
- * so flattening the navigation may not fork it into a fifth source of truth
- * that those entry points would have to learn about.
- */
-type ReviewTabKey = 'proposals' | 'retirement' | 'trash' | 'history'
-const reviewTab = computed<ReviewTabKey>({
-  get() {
-    if (mm.reviewTab === 'retirement') return mm.retirementTab === 'trash' ? 'trash' : 'retirement'
-    return proposals.view === 'history' ? 'history' : 'proposals'
-  },
-  set(key) {
-    if (key === 'retirement' || key === 'trash') {
-      mm.reviewTab = 'retirement'
-      mm.retirementTab = key === 'trash' ? 'trash' : 'candidates'
-      return
-    }
-    mm.reviewTab = 'proposals'
-    proposals.view = key === 'history' ? 'history' : 'queue'
-    if (key === 'history') void proposals.ensureHistoryLoaded(store.activeWorkspace)
-  },
-})
-
-// Labels name the decision, not the machinery. "Proposals" and "Retirements"
-// described the pipeline that produced the rows; these say what is in them.
-const reviewTabs = computed<TabSpec<ReviewTabKey>[]>(() => [
-  // `|| undefined` rather than 0: a zero pill on an empty queue is noise.
-  { key: 'proposals', label: 'Suggested', count: proposalCount.value || undefined },
-  { key: 'retirement', label: 'Notes to revisit', count: retirementCount.value || undefined },
-  { key: 'trash', label: 'Retired', count: trashCount.value || undefined },
-  { key: 'history', label: 'History', count: historyCount.value },
-])
-
-/** Switch the map's rendering. Both live at /memory, so there is no route to
- * push — only `mapView` to remember, so leaving Review comes back here. */
+/** Switch the map's rendering. Graph and List are one section (/memory/map),
+ * so there is no route to push — only `mapView` to remember. */
 function setMapView(next: 'graph' | 'list') {
   mm.view = next
   mm.mapView = next
 }
 
-// A stale note's detail panel lands directly on the retirement queue.
-function openRetirementReview() {
-  mm.reviewTab = 'retirement'
-  mm.retirementTab = 'candidates'
-  mm.view = 'review'
-  if (router.currentRoute.value.path !== '/proposals') void router.push('/proposals')
+const route = useRoute()
+const viewRouter = useRouter()
+const SECTION_LABELS: Record<MemorySection, string> = {
+  suggested: 'Suggested',
+  revisit: 'To revisit',
+  map: 'Map',
+  retired: 'Retired',
+  history: 'History',
 }
-// The badges need data even while the Retirement tab (which fetches on mount)
-// has never been opened. Joining the in-flight request when the panel mounts
-// keeps this to one GET.
-//
-// `immediate` matters: `mm.view` lives in the store, so remounting this
-// component while it already reads 'review' makes a plain watcher sufficient
-// for the data prefetch. A proposal deep link always selects Review; otherwise
-// a deliberate return to Graph/List is remembered, while the first visit stays
-// on Review so durable decisions remain the landing task.
-if (router.currentRoute.value.path.startsWith('/proposals')) mm.view = 'review'
-else if (mm.view !== 'review') mm.view = mm.mapView
-watch(() => mm.view, (view) => {
-  if (view === 'review') {
-    void proposals.ensureLoaded()
-    // The History tab's count now lives on the shared bar, which is on screen
-    // whichever section is showing — so the ledger has to be loaded even when
-    // the panel that used to prefetch it is not mounted.
-    if (store.activeWorkspace) {
-      void proposals.ensureHistoryLoaded(store.activeWorkspace)
-      void vaultReview.ensureLoaded(store.activeWorkspace)
-    }
+// The route owns the section. Bare /memory lands on the section last visited
+// (Suggested on a first visit), replaced rather than pushed so Back does not
+// bounce through the bare address.
+watch(() => route.params.section, (param) => {
+  if (!route.path.startsWith('/memory')) return
+  if (isMemorySection(param)) {
+    mm.setSection(param)
+    return
+  }
+  void viewRouter.replace(memorySectionPath(mm.section))
+}, { immediate: true })
+// Every section's count sits in the sidebar, whichever section is showing, so
+// the queues and the ledger load with the page rather than with their panel.
+watch(() => store.activeWorkspace, (workspace) => {
+  void proposals.ensureLoaded()
+  if (workspace) {
+    void proposals.ensureHistoryLoaded(workspace)
+    void vaultReview.ensureLoaded(workspace)
   }
 }, { immediate: true })
+watch(() => mm.section, (section) => {
+  proposals.view = section === 'history' ? 'history' : 'queue'
+}, { immediate: true })
+
+/** "3 months", from the note's age in days — the words To revisit uses. */
+function staleAgeWords(n: MemoryGraphNode): string {
+  return ageInWords(n.ageDays ?? 0)
+}
+/** The rule the note broke. The horizon comes from the server, which resolves
+ * the type through the vault's alias table; the map keeps no copy of it. */
+function staleRuleWords(n: MemoryGraphNode): string {
+  if (typeof n.thresholdDays !== 'number') return ''
+  return `Notes like this are due every ${n.thresholdDays} days.`
+}
+
 const sortKey = ref<'title' | 'type' | 'degree' | 'age'>('title')
 const sortDir = ref(1)
 type SortKey = 'title' | 'type' | 'degree' | 'age'
@@ -1737,12 +1283,6 @@ function ariaSort(key: SortKey): 'ascending' | 'descending' | 'none' {
   if (sortKey.value !== key) return 'none'
   return sortDir.value > 0 ? 'ascending' : 'descending'
 }
-/** Age for the detail heading; empty when the note carries no date at all. */
-const ageLabelOfSelected = computed(() => {
-  const n = mm.selectedNode
-  if (!n) return ''
-  return mm.ageLabelOf(n)
-})
 
 // Which control opened the note currently in the detail panel, and the element
 // to return focus to. Closing the panel returns focus there — otherwise a
@@ -1874,7 +1414,6 @@ onMounted(async () => {
   resetCamera()
   await nextTick()
   attachCanvas()
-  document.addEventListener('pointerdown', onDocPointerDownForRowMenu)
 })
 // The canvas paints resolved colours rather than CSS vars, so a theme flip has
 // to be pushed into it explicitly; the shared flag does the DOM observing.
@@ -1893,7 +1432,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('mousemove', handleDetailDrag)
   window.removeEventListener('mouseup', stopDetailDrag)
   window.removeEventListener('resize', onResizeNarrow)
-  document.removeEventListener('pointerdown', onDocPointerDownForRowMenu)
   document.body.classList.remove('is-dragging-layout')
 })
 </script>
@@ -1906,48 +1444,6 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 
-.memory-mode-actions {
-  display: flex;
-  flex: none;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg2);
-}
-
-.memory-mode-actions button {
-  min-width: 4.5rem;
-  min-height: 32px;
-  padding: 0 var(--space-3);
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--fg2);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--text-sm);
-  font-weight: 600;
-}
-
-.memory-mode-actions button:hover {
-  color: var(--fg);
-}
-
-.memory-mode-actions button.active {
-  background: var(--bg3);
-  color: var(--fg);
-}
-
-.memory-mode-actions button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-@media (pointer: coarse), (max-width: 700px) {
-  .memory-mode-actions button { min-height: var(--touch); }
-}
-
 /* The Review surface holds all four sections — two queues waiting on a
    decision and two records of decisions already made — under one tab bar. */
 .mm-review-wrap {
@@ -1958,186 +1454,163 @@ onBeforeUnmount(() => {
 .mm-review-grid {
   padding-block: var(--space-5) var(--space-6);
 }
-/* Layout only. The tab styling itself lives in TabBar, which this bar renders
-   through. It is now the only tab row on the Review surface; at a phone width
-   the four tabs scroll sideways inside it rather than wrapping, so the panel
-   below always starts at the same height. */
-.mm-review-tabs {
-  flex: none;
-}
-/* Counts on the tabs are quiet numbers, not pills: the tab label already
-   says what is waiting, the number only says how much. */
-.mm-review-tabs :deep(.tab-bar-count) {
-  min-width: 0;
-  padding: 0;
-  background: none;
-  color: var(--fg3);
-  font-weight: 500;
-  min-height: 0;
-}
-.mm-review-tabs :deep(.tab-bar-tab.active .tab-bar-count) { color: var(--fg2); }
-/* A stale note's way into the retirement queue, next to its last-verified
-   line. A text button, not a pink bar: deciding happens in Review, not here. */
-.mm-detail-review-link {
-  background: none;
-  border: none;
-  padding: 0;
-  min-height: var(--touch);
-  font-family: var(--font);
-  font-size: var(--text-xs);
-  color: var(--accent);
-  text-align: left;
-  cursor: pointer;
-}
-.mm-detail-review-link:hover { text-decoration: underline; }
-.mm-detail-review-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .mm-body {
   flex: 1;
   min-height: 0;
-  display: grid;
-  /* Same split as the chat's pinned-file panel: hidden takes no space at
-     all, so the graph gets the full width until a note is selected. */
-  grid-template-columns: 1fr;
-}
-.mm-body.mm-body--detail-open {
-  grid-template-columns: 1fr 320px;
+  display: flex;
 }
 .mm-body--dragging-detail {
   user-select: none;
 }
-.mm-body--dragging-detail .mm-detail {
-  transition: none;
-}
-@media (max-width: 900px) {
-  .mm-body.mm-body--detail-open { grid-template-columns: 1fr; }
-  .mm-detail {
-    position: fixed;
-    z-index: 900;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    width: 100%;
-    max-height: min(78dvh, 640px);
-    padding: var(--space-5) var(--space-4) calc(var(--space-4) + var(--safe-bottom));
-    border: 1px solid var(--border-strong);
-    border-bottom: 0;
-    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-    box-shadow: 0 -1rem 3rem rgb(0 0 0 / 34%);
-    animation: mm-detail-sheet-in 200ms var(--ease);
-  }
-  .mm-detail-resizer { display: none; }
-}
-@keyframes mm-detail-sheet-in {
-  from { opacity: 0; transform: translateY(18px); }
-  to { opacity: 1; transform: none; }
-}
-
-.mm-detail {
-  position: relative;
-  overflow-y: auto;
-  padding: var(--space-3);
+/* A note opens in the same docked tile as a pinned file (ChatLayout
+   .chat-split-side): inset from the pane's edges on the sidebar's surface, so
+   the drawing reads as the canvas between two layers. */
+.mm-tile {
+  flex: none;
+  min-width: 280px;
+  max-width: 60%;
+  margin: var(--space-2) var(--space-2) var(--space-2) 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--bg2);
-  border-left: 1px solid var(--border);
-  /* The panel is created by v-if, so a mount animation is all it needs. It
-     used to appear instantly, which reads as the layout jumping rather than a
-     panel opening — the graph column resizes at the same moment. */
-  animation: mm-detail-in 180ms ease-out;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 32px -14px rgb(0 0 0 / 45%);
+  animation: mm-tile-in 180ms var(--ease);
 }
-@keyframes mm-detail-in {
-  from { opacity: 0; transform: translateX(10px); }
-  to { opacity: 1; transform: none; }
+:global(:root.theme-light) .mm-tile {
+  box-shadow: 0 10px 28px -14px rgb(26 26 46 / 28%);
+}
+.mm-tile > * { flex: 1; min-height: 0; }
+@keyframes mm-tile-in {
+  from { opacity: 0; transform: translateX(12px) scale(0.985); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .mm-detail { animation: none; }
+  .mm-tile { animation: none; }
 }
-.mm-detail-resizer {
-  position: absolute;
-  top: 0;
-  left: 0;
-  bottom: 0;
-  width: 6px;
-  margin-left: -3px;
+/* The gap between drawing and tile is the resize handle, with a grip that
+   shows on hover, as between a chat and its pinned file. */
+.mm-tile-gutter {
+  position: relative;
+  flex: none;
+  width: var(--space-2);
   cursor: col-resize;
-  z-index: 2;
+  user-select: none;
   touch-action: none;
 }
-.mm-detail-resizer::after {
+.mm-tile-gutter::after {
   content: '';
   position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 3px;
-  width: 1px;
-  background: transparent;
-  transition: background 120ms;
+  top: 50%;
+  left: 2px;
+  width: 4px;
+  height: 32px;
+  margin-top: -16px;
+  border-radius: var(--radius-pill);
+  background: var(--border-strong);
+  opacity: 0;
+  transition: opacity 120ms var(--ease);
 }
-.mm-detail-resizer:hover::after,
-.mm-body--dragging-detail .mm-detail-resizer::after {
-  background: var(--accent);
+.mm-tile-gutter:hover::after,
+.mm-body--dragging-detail .mm-tile-gutter::after { opacity: 1; }
+/* Phones and narrow panes: the tile becomes a bottom sheet over the drawing. */
+@media (max-width: 900px) {
+  .mm-tile {
+    position: fixed;
+    z-index: 900;
+    left: var(--space-2);
+    right: var(--space-2);
+    bottom: calc(var(--space-2) + var(--safe-bottom));
+    max-width: none;
+    height: min(72dvh, 640px);
+    margin: 0;
+    box-shadow: 0 -1rem 3rem rgb(0 0 0 / 34%);
+    animation: mm-tile-sheet-in 200ms var(--ease);
+  }
 }
-.mm-detail-close {
-  position: absolute;
-  top: var(--space-2);
-  right: var(--space-2);
-  background: transparent;
-  border: none;
-  color: var(--fg3);
-  font-size: 18px;
-  line-height: 1;
-  width: var(--touch);
-  height: var(--touch);
+@keyframes mm-tile-sheet-in {
+  from { opacity: 0; transform: translateY(18px); }
+}
+
+/* What the tile adds around the note: a stale callout above it, the note's
+   links and the delete action under it. */
+.mm-tile-stale {
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border));
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  color: var(--fg);
+}
+.mm-tile-stale p { margin: 0; }
+.mm-tile-stale strong { color: var(--warning); }
+.mm-tile-stale-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  margin-top: var(--space-1);
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+.mm-tile-stale-link:hover { text-decoration: underline; }
+.mm-tile-links {
+  margin-top: var(--space-6);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+.mm-tile-links h3 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  color: var(--fg);
+}
+.mm-tile-links h3 span { color: var(--fg3); font-weight: 500; }
+.mm-tile-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 36px;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
   cursor: pointer;
-  border-radius: var(--radius-sm);
 }
-.mm-detail-close:hover { color: var(--fg); background: var(--bg3); }
+.mm-tile-link:first-of-type { border-top: 0; }
+.mm-tile-link:hover .mm-tile-link-title { color: var(--accent); }
+.mm-tile-link:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.mm-tile-link .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.mm-tile-link-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mm-tile-link small { color: var(--fg3); font-variant-numeric: tabular-nums; }
+@media (pointer: coarse) { .mm-tile-link { min-height: var(--touch); } }
+.mm-tile-links .mm-delete-btn { margin-top: var(--space-5); }
 
-.mm-detail h4 {
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--fg3);
-  margin: var(--space-4) 0 var(--space-2);
-}
 .mm-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0; }
-
-.mm-link-list { display: flex; flex-direction: column; gap: 2px; }
-/* A neighbor row wraps its action group below the title at narrow widths
-   instead of overflowing horizontally. */
-.mm-link-item {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 5px 6px; border-radius: var(--radius-sm);
-  font-size: var(--text-sm); color: var(--fg);
-}
-.mm-link-item:hover { background: var(--bg3); }
-.mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; align-self: center; }
-.mm-link-item .cnt { margin-left: auto; color: var(--fg3); }
-/* The neighbor's name is a real button: opening it is a core action, and a
-   clickable span is unreachable by keyboard. Reset to read like the text it
-   replaced, then give it the app's focus ring. `min-width: 0` lets a long title
-   shrink and wrap; the actions keep their own row when there is no room. */
-.mm-link-btn {
-  background: none; border: none; padding: 0; margin: 0; text-align: left;
-  font: inherit; color: inherit; cursor: pointer; min-height: var(--touch);
-  display: flex; align-items: center; flex: 1 1 auto; min-width: 0;
-  overflow-wrap: anywhere;
-}
-.mm-link-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
-.mm-link-label { cursor: pointer; }
-.mm-link-label:hover { text-decoration: underline; }
-.mm-link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.mm-link-focus {
-  background: none; border: none; color: var(--fg3); cursor: pointer; padding: 2px 4px;
-  border-radius: var(--radius-sm); font-size: var(--text-sm); line-height: 1; flex: none;
-  min-width: var(--touch); min-height: var(--touch);
-}
-.mm-link-focus:hover { background: var(--bg2); color: var(--fg); }
 
 .mm-canvas-wrap {
   position: relative; overflow: hidden; flex: 1; min-height: 0;
-  border: 1px solid var(--border); border-radius: var(--radius);
-  background: var(--bg2);
+  background: var(--bg);
 }
-.mm-canvas-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.mm-canvas-note { flex: none; margin: var(--space-2) 0 0; color: var(--fg3); font-size: var(--text-sm); }
+.mm-canvas-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* How to work the drawing, laid over its bottom-left corner. */
+.mm-canvas-note {
+  position: absolute; left: var(--space-4); bottom: var(--space-3); right: 72px;
+  margin: 0; color: var(--fg3); font-size: var(--text-xs);
+  pointer-events: none;
+}
+.mm-legend-stale {
+  display: inline-block; box-sizing: border-box;
+  width: 9px; height: 9px; margin-right: 5px; vertical-align: -1px;
+  border-radius: 50%; border: 2px solid var(--warning);
+}
 /* touch-action:none makes the canvas own its touches so a drag pans instead of
    scrolling the page underneath. It is scoped to the canvas on purpose: panning
    and pinch-zoom of the page remain available everywhere else, per DESIGN.md. */
@@ -2177,19 +1650,6 @@ onBeforeUnmount(() => {
 .mm-zoom-controls button:hover { background: var(--bg3); color: var(--fg); }
 .mm-zoom-controls button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 @media (pointer: coarse) { .mm-zoom-controls button { width: var(--touch); height: var(--touch); } }
-/* Path endpoints for the focused note, without requiring a shift-click on a
-   dot (impossible on touch, undiscoverable without a mouse). Sits under the
-   zoom controls so the two never overlap. */
-.mm-path-controls {
-  position: absolute; top: calc(var(--space-2) + 3 * var(--touch) + 12px); right: var(--space-2);
-  display: flex; flex-direction: column; gap: 4px; align-items: flex-end;
-  max-width: 200px;
-}
-.mm-path-controls-label {
-  font-size: var(--text-xs); color: var(--fg3); text-align: right;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px;
-}
-.mm-path-controls .btn-chip { min-height: var(--touch); }
 
 .mm-empty { color: var(--fg3); font-size: var(--text-sm); padding: var(--space-5); text-align: center; }
 
@@ -2313,42 +1773,7 @@ onBeforeUnmount(() => {
 }
 .mm-title-btn:hover { text-decoration: underline; }
 .mm-title-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.path-cell { white-space: nowrap; width: 1%; padding-right: 0 !important; text-align: right; cursor: default; }
-/* The row's path menu: one "⋯" trigger, a small popover of two choices. */
-.mm-row-menu { position: relative; display: inline-block; }
-.mm-row-menu-btn {
-  min-width: 36px; min-height: 36px; border: 0; border-radius: var(--radius-sm);
-  background: none; color: var(--fg2); font: inherit; font-size: 16px; line-height: 1; cursor: pointer;
-}
-.mm-row-menu-btn:hover, .mm-row-menu-btn[aria-expanded="true"] { background: var(--bg3); color: var(--fg); }
-.mm-row-menu-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-@media (pointer: coarse) { .mm-row-menu-btn { min-width: var(--touch); min-height: var(--touch); } }
-.mm-row-menu-pop {
-  position: absolute; right: 0; top: calc(100% + 4px); z-index: 5;
-  display: flex; flex-direction: column; min-width: 180px; padding: 4px;
-  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
-  background: var(--bg-elev); box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
-}
-.mm-row-menu-pop .mm-path-btn {
-  display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);
-  width: 100%; min-height: 36px; margin: 0; padding: 0 10px; border: 0; border-radius: 5px;
-  background: none; color: var(--fg); font-size: var(--text-sm); text-align: left;
-}
-.mm-row-menu-pop .mm-path-btn:hover { background: var(--bg3); border-color: transparent; }
-.mm-row-menu-pop .mm-path-btn.active { background: none; color: var(--fg); }
-.mm-path-check { color: var(--accent); }
-@media (pointer: coarse) { .mm-row-menu-pop .mm-path-btn { min-height: var(--touch); } }
-.mm-path-btn {
-  background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
-  color: var(--fg3); font-family: var(--font); font-size: var(--text-xs);
-  min-height: var(--touch); min-width: 44px; padding: 0 8px; margin-right: 4px; cursor: pointer;
-}
-.mm-path-btn:hover { color: var(--fg); border-color: var(--fg2); }
-.mm-path-btn.active { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-/* Inside the neighbor row the flex gap owns spacing, so drop the trailing
-   margin that the list cell needs. */
-.mm-link-actions .mm-path-btn { margin-right: 0; }
-.mm-path-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 .deg-n { color: var(--fg2); font-variant-numeric: tabular-nums; }
 .stale-age { color: var(--warning, #ff9800); white-space: nowrap; }
 .stale-flag {
@@ -2358,116 +1783,12 @@ onBeforeUnmount(() => {
   font-size: var(--text-xs); font-weight: 600;
 }
 
-.mm-detail-type { font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg3); }
-.mm-detail-title { font-size: var(--text-lg); font-weight: 600; margin: 4px 0 var(--space-2); }
-/* Age is a warning state, not a category, so it uses the app's warning token
-   rather than any type hue. */
-.stale-badge {
-  display: inline-block; vertical-align: middle;
-  background: color-mix(in srgb, var(--warning, #ff9800) 15%, transparent);
-  color: var(--warning, #ff9800);
-  border-radius: var(--radius-pill); padding: 1px 9px; margin-left: 6px;
-  font-size: var(--text-xs); font-weight: 500; letter-spacing: normal; text-transform: none;
-}
-.mm-detail-verified { color: var(--fg3); font-size: var(--text-xs); margin: -2px 0 var(--space-2); }
-.mm-detail-path-controls {
-  display: flex; flex-wrap: wrap; gap: var(--space-2);
-  margin: 0 0 var(--space-2);
-}
-.mm-detail-path-controls .btn-chip { min-height: var(--touch); }
-.mm-detail-path-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0 0 var(--space-2); }
-.mm-detail-path {
-  display: block; width: 100%; text-align: left; background: none; border: none; padding: 0;
-  font-family: var(--font); font-size: var(--text-xs); color: var(--fg3); word-break: break-all; cursor: pointer;
-}
-.mm-detail-path:hover { color: var(--fg2); text-decoration: underline; }
-.mm-detail-section { margin: var(--space-3) 0; }
 .mm-delete-btn {
   background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--fg3); font-family: var(--font); font-size: var(--text-sm); padding: 6px 12px; cursor: pointer;
 }
 .mm-delete-btn:hover:not(:disabled) { color: #f7768e; border-color: #f7768e; }
 .mm-delete-btn:disabled { opacity: 0.6; cursor: default; }
-.pill { display: inline-block; background: var(--bg3); border-radius: var(--radius-pill); padding: 2px 9px; font-size: var(--text-xs); margin: 0 4px 4px 0; color: var(--fg2); }
-
-.mm-detail-preview .mm-preview-skeleton {
-  padding: 4px 0;
-}
-.mm-detail-preview .mm-shimmer-line {
-  display: block;
-  background: var(--bg3);
-  border-radius: 4px;
-  animation: title-shimmer-sweep 1.4s ease-in-out infinite;
-}
-.mm-preview-wrap {
-  position: relative;
-  max-height: 260px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-}
-.mm-preview-wrap.mm-preview--collapsed {
-  max-height: 220px;
-}
-.mm-preview-text {
-  margin: 0;
-  padding: 10px 12px;
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 11px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--fg2);
-  max-height: 260px;
-  overflow: auto;
-}
-.mm-preview--collapsed .mm-preview-text {
-  max-height: 180px;
-  overflow: hidden;
-}
-.mm-preview-fade {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 48px;
-  background: linear-gradient(to bottom, transparent, var(--bg));
-  pointer-events: none;
-}
-.mm-preview-error {
-  color: var(--warning, #ff9800);
-  font-size: var(--text-xs);
-  padding: 6px 0;
-}
-.mm-preview-actions {
-  display: flex;
-  gap: var(--space-2);
-  margin-top: 8px;
-  flex-wrap: wrap;
-}
-.mm-detail-preview .mm-link {
-  background: none;
-  border: none;
-  padding: 0;
-  font-family: var(--font);
-  font-size: var(--text-xs);
-  color: var(--accent);
-  cursor: pointer;
-}
-.mm-detail-preview .mm-link:hover { text-decoration: underline; }
-.mm-detail-preview .mm-link--primary {
-  margin-left: auto;
-  color: var(--fg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 3px 8px;
-}
-.mm-detail-preview .mm-link--primary:hover {
-  color: var(--fg);
-  background: var(--bg3);
-  text-decoration: none;
-}
 
 /* Same segmented control as the header's Review/Map: a quiet track with the
    current choice lifted, not a pink fill competing with the page's actions. */
@@ -2478,62 +1799,44 @@ onBeforeUnmount(() => {
 .mm-seg button:hover { color: var(--fg); }
 .mm-seg button.active { background: var(--bg3); color: var(--fg); }
 
-/* The map's own column: a toolbar row above whichever rendering is showing.
-   The two renderings take the remaining height (`min-height: 0` so the canvas
-   can shrink and the list can scroll rather than stretching the page). */
+/* The map's own column: a toolbar across the top, whichever rendering is
+   showing under it, taking the rest of the pane's height. */
 .mm-surface {
+  flex: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
 }
-/* The page grid, stretched to the pane's height: the canvas and the list
-   fill the main column, and the rail scrolls on its own. */
-.mm-map-grid {
-  flex: 1;
-  min-height: 0;
-  align-items: stretch;
-  grid-template-rows: minmax(0, 1fr);
-  padding-block: var(--space-4);
-}
-.mm-map-main { display: flex; flex-direction: column; min-height: 0; }
-.mm-map-rail { position: static; min-height: 0; overflow-y: auto; }
-.mm-rail-link {
-  display: inline-flex; align-items: center; min-height: 36px; margin-top: 4px;
-  padding: 0; border: 0; background: none; color: var(--accent);
-  font: inherit; font-size: var(--text-sm); cursor: pointer;
-}
-.mm-rail-link:hover { text-decoration: underline; text-underline-offset: 3px; }
-.mm-rail-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.mm-rail-link + .rail-note { margin-top: 4px; }
-.mm-rail-kv-btn {
-  width: 100%; padding: 0; border-top: 0; border-left: 0; border-right: 0;
-  background: none; font: inherit; font-size: var(--text-sm); text-align: left; cursor: pointer;
-}
-.mm-rail-kv-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
-.mm-rail-kv-btn:hover span { color: var(--accent); }
-.mm-rail-kv-btn strong { color: var(--fg3); font-weight: 500; font-variant-numeric: tabular-nums; }
-.mm-rail-kv-btn:focus-visible, .mm-map-rail .rail-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-@media (pointer: coarse) { .mm-rail-kv-btn { min-height: var(--touch); } }
-/* A narrow pane stacks the rail under the drawing, so the grid scrolls as a
-   page and the canvas takes a fixed share of the viewport instead of 1fr. */
-@container chat-pane (max-width: 940px) {
-  .mm-map-grid { overflow-y: auto; grid-template-rows: none; align-items: start; align-content: start; }
-  /* Rows size to their content here; min-height: 0 would let the grid
-     squeeze them to share the pane's height and overlap. */
-  .mm-map-main, .mm-map-rail { min-height: auto; }
-  .mm-canvas-wrap { flex: none; height: min(62dvh, 560px); min-height: 280px; }
-  .mm-list-wrap { flex: none; max-height: 70dvh; }
-  .mm-map-rail { overflow: visible; }
-}
-/* Top of the main column, shared by both renderings. Wraps rather than
-   scrolls so a narrow pane stacks the controls. */
+/* Wraps rather than scrolls, so a narrow pane stacks the controls and the
+   vault's numbers drop to their own line. */
 .mm-toolbar {
   flex: none;
-  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2);
-  margin-bottom: var(--space-3);
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-5);
+  border-bottom: 1px solid var(--border);
 }
-.mm-toolbar-count { margin-left: auto; color: var(--fg3); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.mm-toolbar-stats {
+  margin: 0 0 0 auto;
+  display: flex; flex-wrap: wrap; gap: 2px var(--space-4);
+  color: var(--fg3); font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.mm-toolbar-stats strong { color: var(--fg); font-weight: 600; }
+.mm-toolbar-stale {
+  color: var(--warning);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--warning) 45%, transparent);
+  text-underline-offset: 3px;
+}
+.mm-toolbar-stale strong { color: inherit; }
+.mm-list-wrap { padding: 0 var(--space-5) var(--space-5); }
+@media (max-width: 700px) {
+  .mm-toolbar { padding-inline: var(--space-4); }
+  .mm-toolbar-stats { margin-left: 0; width: 100%; }
+  .mm-list-wrap { padding-inline: var(--space-4); }
+}
+
 .mm-filter {
   min-height: 34px; padding: 0 28px 0 10px;
   border: 1px solid var(--border); border-radius: 8px;
