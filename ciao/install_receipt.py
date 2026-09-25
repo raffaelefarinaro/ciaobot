@@ -11,10 +11,10 @@ one engine serves several logical workspaces.
 Two rules keep it trustworthy. Reading is fail-safe — a missing, corrupt,
 wrong-schema or unreadable file reads as "no receipt" and never raises, because
 the reader runs on the startup path. And the receipt only counts when it
-describes *this* process: its ``python`` must resolve to the running
-interpreter, so a receipt left behind by an uninstall (or a developer checkout
-sharing a machine with an installed engine) never turns the wrong process into
-``installer``.
+describes *this* process: its ``python`` must sit in the running interpreter's
+own environment, so a receipt left behind by an uninstall (or a developer
+checkout sharing a machine with an installed engine) never turns the wrong
+process into ``installer``.
 """
 
 from __future__ import annotations
@@ -44,6 +44,10 @@ _REQUIRED_FIELDS = (
     "service_label",
     "installed_at",
 )
+
+# Optional, but a string when present: a `previous_version` of `[1]` is a
+# corrupt receipt, not a release to coerce into "['1']".
+_OPTIONAL_STRING_FIELDS = ("previous_version", "previous_executable")
 
 
 def default_receipt_path() -> Path:
@@ -89,10 +93,18 @@ def read_receipt(path: Path | None = None) -> InstallReceipt | None:
         return None
     if any(not isinstance(data.get(field), str) for field in _REQUIRED_FIELDS):
         return None
+    if any(
+        field in data and not isinstance(data[field], str)
+        for field in _OPTIONAL_STRING_FIELDS
+    ):
+        return None
     if data["service_backend"] not in SERVICE_BACKENDS:
         return None
     if not (data["version"] and data["executable"] and data["python"]):
         return None
+    # Optional fields are strings when present, so these need no coercion.
+    previous_version: str = data.get("previous_version", "")
+    previous_executable: str = data.get("previous_executable", "")
     # Explicit keywords, never `InstallReceipt(**data)`: a file written by a
     # future installer carrying an extra key must still parse today.
     return InstallReceipt(
@@ -102,8 +114,8 @@ def read_receipt(path: Path | None = None) -> InstallReceipt | None:
         service_backend=data["service_backend"],
         service_label=data["service_label"],
         installed_at=data["installed_at"],
-        previous_version=str(data.get("previous_version") or ""),
-        previous_executable=str(data.get("previous_executable") or ""),
+        previous_version=previous_version,
+        previous_executable=previous_executable,
         schema=SCHEMA_VERSION,
     )
 
@@ -113,8 +125,9 @@ def write_receipt(receipt: InstallReceipt, path: Path | None = None) -> Path:
 
     Validated first, so a bad receipt fails before it creates a directory or
     replaces a good one. The write goes to a sibling temp file and is renamed
-    into place, so a reader never observes a half-written document and a
-    concurrent writer never leaves one behind.
+    into place, so a reader never observes a half-written document. A write that
+    fails part way — including a rename that never happens — leaves no temp file
+    behind, so a later write never trips over a stale one.
     """
     if receipt.service_backend not in SERVICE_BACKENDS:
         raise ValueError(f"Unknown service backend: {receipt.service_backend!r}")
@@ -126,24 +139,43 @@ def write_receipt(receipt: InstallReceipt, path: Path | None = None) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(target.parent, 0o700)
     tmp = target.with_name(target.name + ".tmp")
-    write_private_text(tmp, json.dumps(asdict(receipt), indent=2, sort_keys=True) + "\n")
-    os.replace(tmp, target)
+    try:
+        write_private_text(tmp, json.dumps(asdict(receipt), indent=2, sort_keys=True) + "\n")
+        os.replace(tmp, target)
+    finally:
+        # A no-op once the rename succeeded, a cleanup when it did not.
+        tmp.unlink(missing_ok=True)
     return target
+
+
+def _interpreter_dir(path: str) -> Path:
+    """The ``bin`` directory an interpreter path belongs to.
+
+    The directory is resolved, not the interpreter: a venv's ``bin/python`` is a
+    symlink to a shared base Python, so following it would make every
+    environment built on that base compare equal.
+    """
+    return Path(os.path.abspath(path)).parent.resolve()
 
 
 def receipt_matches_running(
     receipt: InstallReceipt, *, executable: str | None = None
 ) -> bool:
-    """True when ``receipt`` describes the interpreter running this process.
+    """True when ``receipt`` describes the environment running this process.
 
-    Resolving both sides is what makes the comparison meaningful: the installer
-    records a real path, but the same interpreter can be reached through a
-    symlink or a relative path from a different working directory.
+    What is compared is the interpreter's ``bin`` directory, not the
+    interpreter file. A venv or uv tool env links ``bin/python`` to the shared
+    base interpreter, so resolving the file would make any other environment on
+    that same base look like this one — including a developer's clean smoke-test
+    venv, which would then be reported as an installer engine. Comparing the
+    directory keeps the identity of the *environment* while still tolerating the
+    same interpreter reached through a symlink, a relative path, or a different
+    entry name (``python`` vs ``python3``).
     """
     try:
-        return Path(receipt.python).resolve() == Path(
+        return _interpreter_dir(receipt.python) == _interpreter_dir(
             executable or sys.executable
-        ).resolve()
+        )
     except (OSError, RuntimeError, ValueError):
         return False
 

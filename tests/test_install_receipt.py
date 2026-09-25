@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import sys
 from datetime import datetime
@@ -122,6 +123,14 @@ def test_read_ignores_unknown_keys(tmp_path: Path) -> None:
     assert read_receipt(_write_json(tmp_path / "r.json", _payload(extra=1))) == _receipt()
 
 
+def test_read_non_string_previous_returns_none(tmp_path: Path) -> None:
+    # `str([1])` is a plausible-looking release that is simply wrong, so an
+    # optional field is type-checked like a required one.
+    path = _write_json(tmp_path / "r.json", _payload(previous_version=[1]))
+
+    assert read_receipt(path) is None
+
+
 def test_write_rejects_invalid_backend(tmp_path: Path) -> None:
     target = tmp_path / "state" / "r.json"
 
@@ -139,6 +148,27 @@ def test_matches_running_other_interpreter(tmp_path: Path) -> None:
     receipt = _receipt(python=str(tmp_path / "other" / "python3"))
 
     assert receipt_matches_running(receipt) is False
+
+
+def test_matches_running_rejects_other_venv_on_same_base(tmp_path: Path) -> None:
+    # Two environments whose interpreters are symlinks to the same base Python,
+    # exactly like two venvs or two uv tool envs on one machine. Resolving the
+    # interpreter file would make them compare equal; comparing the environment
+    # must not.
+    def _link(env: str, name: str) -> str:
+        path = tmp_path / env / "bin" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(sys.executable, path)
+        return str(path)
+
+    env_a = _link("env_a", "python")
+    env_b = _link("env_b", "python")
+    receipt = _receipt(python=env_a)
+
+    assert receipt_matches_running(receipt, executable=env_b) is False
+    assert receipt_matches_running(receipt, executable=env_a) is True
+    # Same environment, different entry name inside it.
+    assert receipt_matches_running(receipt, executable=_link("env_a", "python3")) is True
 
 
 def test_running_receipt_uses_default_path(tmp_path: Path) -> None:
