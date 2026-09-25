@@ -5,13 +5,25 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import SettingsNotifications from '../settings/SettingsNotifications.vue'
 import { api } from '../../lib/api'
 
-vi.mock('../../lib/push', () => ({
-  pushSupported: () => true,
-  isPushEnabled: async () => true,
-  currentSubscription: async () => ({ endpoint: 'https://push.example/1' }),
-  enablePush: vi.fn(),
-  disablePush: vi.fn(),
-}))
+vi.mock('../../lib/push', async () => {
+  // The card now calls the shared helper instead of doing the POST itself, so
+  // the mock has to keep making it: these tests watch the request, not the call.
+  const { api } = await import('../../lib/api')
+  const currentSubscription = async () => ({ endpoint: 'https://push.example/1' })
+  return {
+    pushSupported: () => true,
+    isPushEnabled: async () => true,
+    currentSubscription,
+    enablePush: vi.fn(),
+    disablePush: vi.fn(),
+    sendTestNotification: async () => {
+      const sub = await currentSubscription()
+      if (!sub) return false
+      await api.post('/api/push/test', { endpoint: sub.endpoint })
+      return true
+    },
+  }
+})
 
 vi.mock('../../lib/api', () => ({
   api: {

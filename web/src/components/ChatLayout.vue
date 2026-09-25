@@ -115,6 +115,7 @@
                 <div class="home-main">
                   <HomeIntake />
                   <HousekeepingStrip />
+                  <HomeSetupCard />
                   <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
                   <div v-if="showGlobalNewChatActions" class="empty-actions">
                     <button
@@ -242,6 +243,7 @@
               <div class="home-main">
                 <HomeIntake />
                 <HousekeepingStrip />
+                <HomeSetupCard />
                 <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
                 <div v-if="showGlobalNewChatActions" class="empty-actions">
                   <button
@@ -300,6 +302,7 @@ import HomeRecentChats from './HomeRecentChats.vue'
 import HomeIntake from './HomeIntake.vue'
 import HomeReviewSummary from './HomeReviewSummary.vue'
 import HousekeepingStrip from './HousekeepingStrip.vue'
+import HomeSetupCard from './HomeSetupCard.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'

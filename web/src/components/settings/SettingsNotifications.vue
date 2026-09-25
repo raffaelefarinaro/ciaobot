@@ -69,7 +69,8 @@ import { computed, onMounted, ref } from 'vue'
 import { api } from '../../lib/api'
 import { errorMessage } from '../../lib/errorMessage'
 import { isDesktopApp } from '../../lib/desktop'
-import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../../lib/push'
+import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported, sendTestNotification } from '../../lib/push'
+import { isIos, isMacDesktop, isStandalone } from '../../lib/pwaPlatform'
 import type { RoutineSettings } from '../../lib/types'
 
 /** The Home tab renders this card too, so both surfaces stay one copy.
@@ -139,19 +140,6 @@ const status = computed<{ label: string; tone: Tone; detail: string }>(() => {
   }
   return { label: 'Off on this device', tone: 'off', detail: '' }
 })
-
-function isIos(): boolean {
-  return /iphone|ipad|ipod/i.test(navigator.userAgent)
-}
-function isMacDesktop(): boolean {
-  return /macintosh|mac os x/i.test(navigator.userAgent) && !isIos()
-}
-function isStandalone(): boolean {
-  return (
-    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
-    (navigator as Navigator & { standalone?: boolean }).standalone === true
-  )
-}
 
 onMounted(async () => {
   pushSupportedFlag.value = pushSupported()
@@ -223,12 +211,11 @@ async function sendTest() {
   testResult.value = ''
   pushError.value = ''
   try {
-    const sub = await currentSubscription()
-    if (!sub) {
+    const sent = await sendTestNotification()
+    if (!sent) {
       testResult.value = 'Enable notifications on this device first.'
       return
     }
-    await api.post('/api/push/test', { endpoint: sub.endpoint })
     // With Delivery off, the Mac's own browser still gets the test (it is
     // registered), but its real chat banners come from the menu bar instead.
     // Saying so avoids reading a green result as proof the Mac is covered.

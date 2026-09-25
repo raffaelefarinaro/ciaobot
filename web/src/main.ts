@@ -3,6 +3,7 @@ import { createPinia } from 'pinia'
 import { router } from './router'
 import App from './App.vue'
 import { installViewportPlumbing } from './lib/viewport'
+import { listenForInstallPrompt } from './lib/installPrompt'
 import { DEFAULT_FONT_SCALE, FONT_SCALE_STORAGE_KEY } from './composables/useFontScale'
 
 // Restore theme & font scale from localStorage as early as possible
@@ -59,6 +60,10 @@ app.mount('#app')
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {})
 }
+
+// Chromium fires beforeinstallprompt early and only once, so the listener has
+// to exist before any card is mounted.
+listenForInstallPrompt()
 
 // iOS viewport / keyboard plumbing (--app-h, .keyboard-open, scroll lock).
 installViewportPlumbing()

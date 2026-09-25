@@ -47,6 +47,14 @@ export async function enablePush(): Promise<void> {
   await api.post('/api/push/subscribe', { subscription: sub.toJSON() })
 }
 
+/** Send the test notification to this browser's own subscription. False when not subscribed. */
+export async function sendTestNotification(): Promise<boolean> {
+  const sub = await currentSubscription()
+  if (!sub) return false
+  await api.post('/api/push/test', { endpoint: sub.endpoint })
+  return true
+}
+
 export async function disablePush(): Promise<void> {
   const sub = await currentSubscription()
   if (!sub) return
