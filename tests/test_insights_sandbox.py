@@ -12,6 +12,7 @@ is a directory with a hyphen, not a package.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -1034,6 +1035,158 @@ def test_wait_for_boot_idle_waits_for_a_continuous_empty_window() -> None:
     with pytest.raises(sandbox.SandboxError) as excinfo:
         run.wait_for_boot_idle(never, seconds=0.0, timeout=0.05, poll=0.01)  # type: ignore[arg-type]
     assert "active chat" in str(excinfo.value)
+
+
+# ── the prompt names the original project ─────────────────────────────────
+
+
+class _FakeServer:
+    """The ``Instance`` the agent arm talks to, recorded instead of served.
+
+    Every ``post`` is kept with its path, because the payload the server would
+    have received is the only place a project name is ever visible: a prompt
+    built correctly in memory and formatted wrongly on the way out is the bug
+    this fake exists to catch. The container project answers with the
+    harness's own name, and the created chat is keyed by its title, which is
+    the only handle on which selected row a chat belongs to.
+    """
+
+    def __init__(self, projects: list[dict]) -> None:
+        self.projects = projects
+        self.posts: list[tuple[str, dict]] = []
+        self.chats: dict[str, dict] = {}
+
+    def get(self, path: str, **kw: object) -> list[dict]:
+        return self.projects
+
+    def post(self, path: str, payload: dict | None = None) -> dict:
+        body = payload or {}
+        self.posts.append((path, body))
+        if path == "/api/projects":
+            return {"project_id": "harness-1", "name": "Insights sandbox"}
+        if path.endswith("/chats"):
+            chat_id = str(body.get("title") or f"chat-{len(self.chats) + 1}")
+            # No `session_id`: there is no transcript behind this chat, so the
+            # arm's token accounting has to report "not read" rather than zero.
+            self.chats[chat_id] = {"chat_id": chat_id}
+            return {"chat_id": chat_id}
+        return {}
+
+    def active_chat_ids(self) -> set[str]:
+        return set()
+
+    def chat(self, chat_id: str) -> dict | None:
+        return self.chats.get(chat_id)
+
+
+def test_the_prompt_names_the_original_project_not_the_sandbox_container(
+    tmp_path: Path,
+) -> None:
+    """The project in the prompt is the chat's own, or ``none``.
+
+    Two projects are in play per chat and only one of them is the subject: the
+    chat is *created* on the harness's per-workspace container, while the
+    prompt has to name the project the conversation was about, because that is
+    what the agent is asked to reason over. Taking the name from the container
+    told every selected chat it belonged to "Insights sandbox" -- true of none
+    of them, and false in a way the agent would have written down: a General or
+    orphaned chat came back as if it had a project doc to fold into. Both arms
+    were then measured on an input no real chat ever had.
+
+    Asserted on the payload posted to ``/api/chats/{id}/prompt``, and on the
+    endpoint the chat was created against, because those are the two facts
+    that have to be true at the same time: the container hosts the chat, the
+    original project is what the prompt says.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _git(tmp_path, "init", str(clone), "-q")
+    _git(clone, "config", "user.email", "t@example.invalid")
+    _git(clone, "config", "user.name", "T")
+    # What the live clone's project map records: one real project, an auto
+    # bucket, a system project, and a chat with no project at all.
+    _write_json(
+        clone / ".runtime" / "web_projects.json",
+        {
+            "chats": {
+                "chat-named": {"project_id": "p-ledger"},
+                "chat-auto": {"project_id": "p-auto"},
+                "chat-system": {"project_id": "p-system"},
+                "chat-orphan": {"project_id": ""},
+            }
+        },
+    )
+    setup_sha = sandbox.commit_snapshot(clone, "harness: project setup")
+    inst = _FakeServer(
+        [
+            {
+                "project_id": "p-ledger",
+                "name": "Ledger",
+                "workspace": "work",
+                "is_auto": False,
+                "is_system": False,
+                "vault_doc_path": "memory-vault/work/Projects/Ledger.md",
+            },
+            {
+                "project_id": "p-auto",
+                "name": "General",
+                "workspace": "work",
+                "is_auto": True,
+                "vault_doc_path": "memory-vault/work/Projects/General.md",
+            },
+            {"project_id": "p-system", "name": "Insights", "workspace": "work", "is_system": True},
+        ]
+    )
+    rows = [
+        run.Row(
+            chat_id=chat_id,
+            workspace="work",
+            provider="claude",
+            effective_provider="claude",
+            model="opus",
+            archive_rel=Path("Logs/Chats") / chat_id / "claude" / "a.md",
+        )
+        for chat_id in ("chat-named", "chat-auto", "chat-system", "chat-orphan")
+    ]
+
+    refs = run.chat_projects(clone, inst, rows)
+    for row in rows:
+        ref = refs.get(row.chat_id) or run.ProjectRef("")
+        row.doc = ref.doc
+        row.project_name = ref.name
+    # The name travels with the doc, and an unusable project is neither.
+    assert (rows[0].project_name, rows[0].doc) == (
+        "Ledger",
+        "memory-vault/work/Projects/Ledger.md",
+    )
+    assert [(row.project_name, row.doc) for row in rows[1:]] == [("", "")] * 3
+
+    harness = run.create_harness_projects(inst, rows)
+    assert harness == {"work": "harness-1"}
+    # A zero timeout is not a way to skip the turn: it makes the arm settle
+    # nothing at once, so the test measures the prompt and not a live agent.
+    asyncio.run(
+        run.run_agent_arm(inst, clone, rows, harness, setup_sha, turn_timeout=0.0)
+    )
+
+    # The chat is created on the container...
+    created = {path for path, _ in inst.posts if path.endswith("/chats")}
+    assert created == {"/api/projects/harness-1/chats"}
+    # ... and the prompt says the conversation's own project, or `none`.
+    prompts = {
+        path.removeprefix("/api/chats/").removesuffix("/prompt"): body["prompt"]
+        for path, body in inst.posts
+        if path.endswith("/prompt")
+    }
+    assert set(prompts) == set(inst.chats)
+    named = prompts["sandbox chat-named"]
+    doc_in_clone = clone / "memory-vault/work/Projects/Ledger.md"
+    assert f"It belonged to project Ledger (canonical doc: {doc_in_clone})" in named
+    for chat_id in ("sandbox chat-auto", "sandbox chat-system", "sandbox chat-orphan"):
+        assert "It belonged to project none (canonical doc: none)" in prompts[chat_id]
+    # The container's name is in no prompt at all: it is where the chat lives,
+    # not what the chat was about.
+    assert all("Insights sandbox" not in prompt for prompt in prompts.values())
 
 
 # ── token accounting ─────────────────────────────────────────────────────

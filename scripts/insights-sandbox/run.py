@@ -185,7 +185,12 @@ class Row:
     effective_provider: str
     model: str
     archive_rel: Path
+    # Both halves of the chat's *original* project, resolved after boot. The
+    # agent prompt names the project the chat actually belonged to, so the
+    # name has to travel with the doc: the harness's own container project is
+    # where the chat is created, not where the conversation was.
     doc: str = ""
+    project_name: str = ""
 
 
 def select_rows(cache_dirs: list[Path], live: Path, limit: int) -> list[Row]:
@@ -264,17 +269,37 @@ def check_live_idle(live_url: str) -> None:
 # ── project map ──────────────────────────────────────────────────────────
 
 
-def project_docs(agent_clone: Path, inst: Instance, rows: list[Row]) -> dict[str, str]:
-    """chat id -> the canonical project doc path both arms are told about.
+@dataclass(frozen=True)
+class ProjectRef:
+    """The chat's *original* project: the name the prompt says and its doc.
+
+    Both halves come out of the same project row, so they cannot disagree, and
+    an unusable project is ``("", "")`` rather than a name with no doc or a doc
+    with no name.
+    """
+
+    name: str
+    doc: str = ""
+
+
+def chat_projects(agent_clone: Path, inst: Instance, rows: list[Row]) -> dict[str, ProjectRef]:
+    """chat id -> the original project both arms are told about.
 
     Mirrors ``ArchivePipeline._job_inputs``: a project's ``vault_doc_path`` is
     used only when the chat really belonged to a named, non-auto,
     non-system project. An auto or system project has no doc a person curates,
-    so pointing an agent at one would be inventing a destination.
+    so pointing an agent at one would be inventing a destination -- and its
+    name is the server's own label for a bucket, not a project the conversation
+    was about, so it is dropped with the doc and the prompt says ``none``.
+
+    The name is the part the agent is asked to reason about ("this was about
+    Ledger"), so it is resolved here, from the original project, rather than
+    from the container the harness hosts the chat in.
 
     Read from the agent clone's own ``web_projects.json`` -- the server has
     just booted on it and may have written to it.
     """
+    empty = {row.chat_id: ProjectRef("") for row in rows}
     map_rows: dict[str, dict[str, Any]] = {}
     for workspace in sorted({row.workspace for row in rows}):
         for project in inst.get("/api/projects", params={"workspace": workspace}):
@@ -284,11 +309,11 @@ def project_docs(agent_clone: Path, inst: Instance, rows: list[Row]) -> dict[str
             (agent_clone / ".runtime" / "web_projects.json").read_text(encoding="utf-8")
         )
     except (OSError, ValueError):
-        return {row.chat_id: "" for row in rows}
+        return empty
     chats = data.get("chats") if isinstance(data, dict) else None
     if not isinstance(chats, dict):
-        return {row.chat_id: "" for row in rows}
-    docs: dict[str, str] = {}
+        return empty
+    refs: dict[str, ProjectRef] = {}
     for row in rows:
         chat = chats.get(row.chat_id)
         project_id = str(chat.get("project_id") or "") if isinstance(chat, dict) else ""
@@ -296,8 +321,11 @@ def project_docs(agent_clone: Path, inst: Instance, rows: list[Row]) -> dict[str
         usable = bool(project) and not project.get("is_auto") and not project.get(
             "is_system"
         )
-        docs[row.chat_id] = str(project.get("vault_doc_path") or "") if usable else ""
-    return docs
+        refs[row.chat_id] = ProjectRef(
+            str(project.get("name") or "") if usable else "",
+            str(project.get("vault_doc_path") or "") if usable else "",
+        )
+    return refs
 
 
 # ── path containment ─────────────────────────────────────────────────────
@@ -949,33 +977,30 @@ async def _wait_for_turn(inst: Instance, chat_id: str, timeout_s: float) -> tupl
     return False, cards, round(time.monotonic() - started, 1)
 
 
-def create_harness_projects(
-    inst: Instance, rows: list[Row]
-) -> dict[str, tuple[str, str]]:
+def create_harness_projects(inst: Instance, rows: list[Row]) -> dict[str, str]:
     """One "Insights sandbox" project per selected workspace.
 
-    Returns ``{workspace: (project_id, name)}``. The projects have to exist
-    before the first chat, and creating them writes rows into
-    ``.runtime/web_projects.json`` in the clone -- so this is deliberately *not*
-    called from inside the arm's chat loop, where the write would be charged to
-    chat 1. ``run_arms`` creates them, commits, and only then starts the arm.
+    Returns ``{workspace: project_id}``. The projects have to exist before the
+    first chat, and creating them writes rows into ``.runtime/web_projects.json``
+    in the clone -- so this is deliberately *not* called from inside the arm's
+    chat loop, where the write would be charged to chat 1. ``run_arms`` creates
+    them, commits, and only then starts the arm.
+
+    Only the id is kept. The project is a container for the sandbox chat: its
+    name is the harness's own label, and reading it back into the prompt would
+    tell the agent every selected chat was about "Insights sandbox" -- true of
+    none of them. The prompt gets ``row.project_name`` instead.
     """
-    projects: dict[str, tuple[str, str]] = {}
+    projects: dict[str, str] = {}
     for workspace in sorted({row.workspace for row in rows}):
         created = inst.post(
             "/api/projects",
             {"name": "Insights sandbox", "workspace": workspace},
         )
         # The 201 body is the project dict; there is no GET for one project,
-        # only PATCH/DELETE, so the name comes from where it was created.
-        projects[workspace] = (
-            str(created["project_id"]),
-            str(created.get("name") or "none"),
-        )
-    print(
-        "agent: project per workspace "
-        + str({ws: pid for ws, (pid, _) in projects.items()})
-    )
+        # only PATCH/DELETE, so the id comes from where it was created.
+        projects[workspace] = str(created["project_id"])
+    print("agent: project per workspace " + str(projects))
     return projects
 
 
@@ -1001,10 +1026,14 @@ async def run_agent_arm(
     which would make the first chat look busier than it was. ``run_arms``
     commits boot and then ``harness: project setup``, so chat 1 is measured
     from a clone that already contains its own scaffolding.
-    """
-    project_ids = {workspace: pid for workspace, (pid, _) in projects.items()}
-    project_names = {workspace: name for workspace, (_, name) in projects.items()}
 
+    Two projects are in play per chat and only one of them is the subject: the
+    chat is created on the harness container (``projects``, the id), and the
+    prompt names the chat's *original* project (``row.project_name``, resolved
+    by :func:`chat_projects`), or ``none`` when the chat had no named,
+    non-auto, non-system project. Telling the agent the container's name would
+    hand both arms a different input than the conversation actually had.
+    """
     results: list[ArmResult] = []
     previous = setup_sha
     for row in rows:
@@ -1012,7 +1041,7 @@ async def run_agent_arm(
         started = time.monotonic()
         try:
             chat = inst.post(
-                f"/api/projects/{project_ids[row.workspace]}/chats",
+                f"/api/projects/{projects[row.workspace]}/chats",
                 {
                     "title": f"sandbox {row.chat_id}",
                     "mode": "bypass",
@@ -1032,7 +1061,7 @@ async def run_agent_arm(
                 {
                     "prompt": AGENT_PROMPT.format(
                         archive=agent_clone / row.archive_rel,
-                        project=project_names[row.workspace],
+                        project=row.project_name or "none",
                         doc=doc,
                     )
                 },
@@ -1326,9 +1355,11 @@ async def run_arms(
         print(f"agent server up on {base_url}")
         wait_for_boot_idle(inst)
         agent_baseline = commit_snapshot(clones["agent"], "harness: server boot")
-        docs = project_docs(clones["agent"], inst, rows)
+        refs = chat_projects(clones["agent"], inst, rows)
         for row in rows:
-            row.doc = docs.get(row.chat_id, "")
+            ref = refs.get(row.chat_id) or ProjectRef("")
+            row.doc = ref.doc
+            row.project_name = ref.name
         # The doc half of the containment check, which start_server could not
         # do: a project's `vault_doc_path` is only knowable once the project map
         # has been read from the booted server, and it may name a vault outside
@@ -1461,6 +1492,7 @@ def main() -> int:
 
     for row in rows:
         row.doc = ""
+        row.project_name = ""
     try:
         results = asyncio.run(
             run_arms(
