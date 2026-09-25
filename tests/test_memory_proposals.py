@@ -485,6 +485,127 @@ def test_proposals_from_archive_default_leaves_memory_untouched(tmp_path: Path) 
     assert "no em dashes" in out.read_text(encoding="utf-8")
 
 
+_ROUTE_SAMPLE = (
+    "## Decisions\n"
+    "- Chose Known over unknown because reviewed. [people: Known]\n"
+    "- Chose the new rule over the old because it is cheaper. [memory]\n"
+    "- Chose the old rule over the other because it still holds. [memory]\n"
+)
+
+
+def test_route_insights_is_pure_and_matches_archive_routing(
+    tmp_path: Path,
+) -> None:
+    """The comparison's routing is the pipeline's routing, minus the writes.
+
+    The insights-compare report is only worth reading if both modes are
+    scored by the same function the live pipeline uses, and it is only safe
+    to call that function from a dry run if it writes nothing.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    guide = write_guide(
+        tmp_path / "CLAUDE.md", memory_entries=["Chose the old rule over the other because it still holds."]
+    )
+
+    before = sorted(vault.rglob("*"))
+    result = mp.route_insights(_ROUTE_SAMPLE, vault, guide_path=guide)
+
+    kept = [p.text for p in result.kept]
+    assert len(kept) == 2
+    assert any("the new rule" in t for t in kept)
+    assert any(p.target == "people" and p.payload == "Known" for p in result.kept)
+    assert [p.text for p in result.suppressed] == [
+        "Chose the old rule over the other because it still holds."
+    ]
+    assert result.dropped == 0
+    # Nothing about the vault moved: no proposals file, no promotion record.
+    assert sorted(vault.rglob("*")) == before
+
+
+def test_archive_of_only_already_applied_facts_still_records_and_settles(
+    tmp_path: Path,
+) -> None:
+    """The re-run case: every fact is known, and the archive is the only news.
+
+    The suppression rows and the zeroed stats sat behind the same ``if kept``
+    guard, so an archive whose facts were *all* already applied — exactly the
+    archive a second pass over the same chats sees — recorded nothing, filed
+    nothing, and left ``stats`` untouched, so the caller reported neither the
+    verdict nor the absence of proposals.
+    """
+    vault = tmp_path / "vault"
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Chose the old rule over the other because it still holds."],
+    )
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose the old rule over the other because it still holds. [memory]\n",
+    )
+
+    stats: dict[str, int] = {}
+    out = mp.proposals_from_archive(archive, vault, guide_path=guide, stats=stats)
+
+    assert out is None
+    assert stats == {"proposed": 0, "promoted": 0}
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    rows = mp.read_decisions(queue)
+    assert [(r["action"], r["outcome"]) for r in rows] == [("accepted", "suppressed")]
+    # Recorded, not queued: the fact was already applied.
+    assert mp.list_proposals(queue) == []
+
+
+def test_proposals_from_archive_empty_and_dropped_only_stats_parity(
+    tmp_path: Path,
+) -> None:
+    """Extracting the routing must not change what `stats` says.
+
+    On `develop` the `stats["proposed"] = 0; stats["promoted"] = …; return
+    None` path sat inside the `if proposals:` guard, so it ran only for an
+    archive whose bullets all parsed and all came back already applied. An
+    archive that parsed nothing, or whose bullets routed nowhere, fell through
+    to `append_proposals([])`, which reports zero proposals and never mentions
+    promotions. The restored path does too: `promoted` is a key only an
+    archive with a verdict about promotions should grow.
+    """
+    vault = tmp_path / "vault"
+    guide = write_guide(tmp_path / "CLAUDE.md")
+
+    # `_archive` writes `chat.md` under the path it is given, so each case
+    # gets its own directory or the later ones overwrite the earlier.
+    def _one(name: str, body: str) -> Path:
+        case_dir = tmp_path / name
+        case_dir.mkdir()
+        return _archive(case_dir, body)
+
+    cases = {
+        # A section with nothing after the header at all.
+        "bare": _one("bare", ""),
+        # A section with prose in it and nothing to propose.
+        "empty": _one("empty", "\nnothing worth keeping here.\n"),
+        # A section whose only bullet the parser discards as a changelog line,
+        # so it parses and then routes nowhere.
+        "dropped": _one(
+            "dropped",
+            "## Decisions\n"
+            "- Added regression test `an_empty_drop_writes_no_grant`; "
+            "suite passes. [idx=1] [memory]\n",
+        ),
+    }
+
+    for name, archive in cases.items():
+        stats: dict[str, int] = {}
+        assert mp.proposals_from_archive(
+            archive, vault, guide_path=guide, stats=stats
+        ) is None
+        assert "promoted" not in stats, (name, stats)
+        assert stats.get("proposed", 0) == 0, (name, stats)
+        # Neither case wrote a queue: no proposals file, no regions.
+        assert not (vault / "Workspace" / "Memory-Proposals.md").exists()
+
+
 def test_promote_holds_back_no_op_rule_clause(tmp_path: Path) -> None:
     """'Durable rule: None.' style fillers never land in a bounded region."""
     guide = write_guide(tmp_path / "CLAUDE.md")
