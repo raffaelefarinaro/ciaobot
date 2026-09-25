@@ -81,36 +81,42 @@
       >{{ store.scheduleLoading ? 'Retrying…' : 'Retry' }}</button>
     </div>
 
-    <!-- New automation form -->
-    <div v-if="showNew" class="scroll-body scroll-body--padded">
-      <details class="field-info field-info--block">
-        <summary aria-label="What's possible with automations" title="What's possible with automations">i</summary>
-        <div class="field-info-panel">
-          <p>
-            An automation dispatches its prompt on a cadence you choose: at a time
-            of day (daily, weekly, monthly, or once), every N minutes, or only
-            when you click Run.
-          </p>
-          <p>
-            Point it at a <strong>project</strong> and each run opens a fresh chat
-            there with its own model and provider. Point it at a <strong>chat</strong>
-            and every run continues that conversation, inheriting its model and
-            mode — the way to keep context between runs.
-          </p>
-          <p>
-            Missed time-of-day runs (the app was off when one was due, or a run
-            stopped before it finished) are caught up on the next launch.
-            Interval runs are not replayed; their cadence just resumes. Any
-            automation can be run on demand, and paused without deleting it.
-          </p>
-          <p>
-            Set <strong>archive behavior</strong> to automatic and a classifier
-            reviews each clean run — routine results with nothing to judge (no
-            proposals, decisions, or warnings) get archived out of the way.
-          </p>
-        </div>
-      </details>
-      <NewScheduleForm @created="onCreated" />
+    <!-- New automation form: the same page grid as the detail view. The
+         "what's possible" notes sit at the foot of the preview rail. -->
+    <div v-if="showNew" class="scroll-body">
+      <div class="page-grid schedule-grid">
+        <NewScheduleForm @created="onCreated" @cancel="closeSchedule">
+          <template #rail>
+            <details class="rail-section new-about">
+              <summary>How automations run</summary>
+              <div class="new-about-body">
+                <p>
+                  An automation dispatches its prompt on a cadence you choose: at a time
+                  of day (daily, weekly, monthly, or once), every N minutes, or only
+                  when you click Run.
+                </p>
+                <p>
+                  Point it at a <strong>project</strong> and each run opens a fresh chat
+                  there with its own model and provider. Point it at a <strong>chat</strong>
+                  and every run continues that conversation, inheriting its model and
+                  mode — the way to keep context between runs.
+                </p>
+                <p>
+                  Missed time-of-day runs (the app was off when one was due, or a run
+                  stopped before it finished) are caught up on the next launch.
+                  Interval runs are not replayed; their cadence just resumes. Any
+                  automation can be run on demand, and paused without deleting it.
+                </p>
+                <p>
+                  Set <strong>Afterwards</strong> to archive and a classifier reviews
+                  each clean run: routine results with nothing to judge (no
+                  proposals, decisions, or warnings) get archived out of the way.
+                </p>
+              </div>
+            </details>
+          </template>
+        </NewScheduleForm>
+      </div>
     </div>
 
     <div
@@ -636,7 +642,7 @@
       <p class="empty-hint">
         An automation runs a prompt on a schedule — at a time of day or every
         N minutes — in a new chat each time, or continuing one you pick. Start
-        one with <strong>New Automation</strong> in the sidebar.
+        one with <strong>New</strong> next to Routines in the sidebar.
       </p>
     </div>
   </div>
@@ -1560,9 +1566,20 @@ function closeSchedule() {
   overflow-y: auto;
   padding: var(--space-6) 0 48px;
 }
-.scroll-body--padded {
-  padding-inline: var(--page-inset);
+.new-about { margin-top: var(--space-5); color: var(--fg2); }
+.new-about summary {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  color: var(--fg2);
+  cursor: pointer;
+  list-style: none;
 }
+.new-about summary::-webkit-details-marker { display: none; }
+.new-about summary::before { content: "›"; margin-right: 8px; color: var(--fg3); transition: transform 120ms var(--ease); }
+.new-about[open] summary::before { transform: rotate(90deg); }
+.new-about summary:hover { color: var(--fg); }
+.new-about-body p { margin: 0 0 8px; color: var(--fg3); font-size: var(--text-sm); line-height: 1.5; }
 
 .disabled-banner {
   margin: 0 0 var(--space-5);
@@ -1834,10 +1851,6 @@ function closeSchedule() {
   .system-workspace-control { grid-template-columns: 1fr; }
 }
 
-/* The "what is this page" disclosure above the new-automation form. Every
-   other .field-info sits inline next to a heading; this one is the only block
-   on its line, so it needs its own bottom margin. */
-.field-info--block { margin-bottom: 12px; }
 
 /* ── Overview ─────────────────────────────────────────────────────
    Sections with a plain heading over hairline rows: title and a plain
