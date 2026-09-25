@@ -30,6 +30,11 @@ const error = ref('')
  *  "Send test" could never be used in the very flow that enables it. It still
  *  auto-hides on the next mount, when both steps were already done. */
 const touched = ref(false)
+/** True once the push probe settled, one way or the other. Deciding `visible`
+ *  before that would flash the card on every Home visit for the users who
+ *  already finished setup, and would keep it up forever where push cannot
+ *  exist, because `pushOn` could never become true there. */
+const probed = ref(false)
 
 const installDone = computed(() => standalone.value || installed.value)
 const needsInstallFirst = computed(() => isIos() && !standalone.value)
@@ -41,7 +46,10 @@ const visible = computed(() => {
   // Neither install prompts nor push subscriptions exist without a secure
   // origin, so the steps would be instructions for something impossible.
   if (window.isSecureContext !== true) return false
-  return touched.value || !(installDone.value && pushOn.value)
+  if (!probed.value) return false
+  // A browser without push has no second step to complete, so an installed app
+  // there is done, not stuck.
+  return touched.value || !(installDone.value && (pushOn.value || !pushAvailable.value))
 })
 
 onMounted(async () => {
@@ -50,6 +58,7 @@ onMounted(async () => {
   try {
     pushOn.value = await isPushEnabled()
   } catch { /* keep the step visible: the user can still try to enable it */ }
+  probed.value = true
 })
 
 async function install() {

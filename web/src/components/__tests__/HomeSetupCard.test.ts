@@ -13,10 +13,10 @@ import {
 
 // Hoisted so the mocked factories can read them: a mock factory runs while the
 // test file's imports resolve, before the module body has run.
-const state = vi.hoisted(() => ({ pushEnabled: false, desktopApp: false }))
+const state = vi.hoisted(() => ({ pushEnabled: false, pushSupported: true, desktopApp: false }))
 
 vi.mock('../../lib/push', () => ({
-  pushSupported: () => true,
+  pushSupported: () => state.pushSupported,
   isPushEnabled: async () => state.pushEnabled,
   enablePush: vi.fn(),
   sendTestNotification: vi.fn(async () => true),
@@ -50,6 +50,7 @@ function hasButton(view: VueWrapper, label: string): boolean {
 beforeEach(() => {
   vi.clearAllMocks()
   state.pushEnabled = false
+  state.pushSupported = true
   state.desktopApp = false
   localStorage.clear()
   _resetInstallPromptForTests()
@@ -188,6 +189,46 @@ describe('HomeSetupCard', () => {
 
   it('renders nothing when installed and notifications are on', async () => {
     state.pushEnabled = true
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: (query: string) => ({
+        matches: query.includes('standalone'),
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    })
+
+    const view = await mountCard()
+    expect(view.find('.home-setup').exists()).toBe(false)
+  })
+
+  it('does not flash for a set-up device before the push probe resolves', async () => {
+    state.pushEnabled = true
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: (query: string) => ({
+        matches: query.includes('standalone'),
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    })
+
+    wrapper = mount(HomeSetupCard)
+    // `pushOn` is only known after the probe, and Home remounts on every
+    // return from a chat, so a first frame that guesses wrong would make the
+    // recent-chats list jump under the user's finger.
+    expect(wrapper.find('.home-setup').exists()).toBe(false)
+
+    await flushPromises()
+    expect(wrapper.find('.home-setup').exists()).toBe(false)
+  })
+
+  it('hides once installed when this browser has no push', async () => {
+    // Without a PushManager there is no second step, so "installed and on" is
+    // the only way to be done, and this device can never get there.
+    state.pushSupported = false
     Object.defineProperty(window, 'matchMedia', {
       configurable: true,
       value: (query: string) => ({
