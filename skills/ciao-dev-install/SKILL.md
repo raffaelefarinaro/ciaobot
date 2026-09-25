@@ -42,7 +42,7 @@ ls .venv/bin/python
 The install boots the engine out mid-swap, which would cut off anything running in it. Check before building:
 
 ```bash
-.venv/bin/ciao desktop-service status --json
+.venv/bin/ciao service status --json
 ```
 
 From the JSON, note:
@@ -95,8 +95,8 @@ bundle="desktop/src-tauri/target/release/bundle/macos/Ciaobot.app"
 uid=$(id -u)
 
 # Gate: refuse to cut the engine loose while chats are active. Same contract
-# as `desktop-service stop/restart` (macos_service.py) — never --force silently.
-status=$(.venv/bin/ciao desktop-service status --json)
+# as `service stop/restart` (macos_service.py) — never --force silently.
+status=$(.venv/bin/ciao service status --json)
 echo "$status" | python3 -c '
 import json, sys
 data = json.load(sys.stdin)["details"]

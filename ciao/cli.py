@@ -3665,14 +3665,91 @@ def _create_chat_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _desktop_service_command(args: argparse.Namespace) -> int:
+def _register_launchd_service(workspace: Path) -> Path:
+    """Write the server LaunchAgent for an already set-up workspace."""
     from ciao import macos_service
 
-    action = args.desktop_service_action
+    root = workspace.expanduser().resolve()
+    if not (root / ".env").is_file():
+        raise RuntimeError(
+            f"{root} is not a Ciaobot workspace (no .env). Run `ciao setup --workspace {root}` first."
+        )
+    if _looks_like_source_checkout(root):
+        raise RuntimeError(
+            f"{root} looks like the Ciaobot source checkout, not a workspace. "
+            "Pass your workspace folder to --workspace."
+        )
+    from ciao.setup_status import tcc_protected_location
+
+    protected = tcc_protected_location(root)
+    if protected:
+        raise RuntimeError(
+            f"{root} is inside ~/{protected}, which launchd cannot read. "
+            "Move the workspace out of Desktop/Documents/Downloads first."
+        )
+
+    from dotenv import dotenv_values
+
+    runtime_value = (dotenv_values(root / ".env").get("CIAO_RUNTIME_ROOT") or "").strip() or ".runtime"
+    runtime_root = Path(runtime_value).expanduser()
+    if not runtime_root.is_absolute():
+        runtime_root = root / runtime_root
+    return _write_launchd_plist(
+        workspace=root,
+        launch_agents_dir=default_launch_agents_dir(),
+        engine_path=os.environ.get("CIAO_ENGINE_PATH", "").strip() or sys.executable,
+        runtime_root=runtime_root,
+        port=_pwa_port_from_env(root, macos_service.DEFAULT_PORT),
+        path=os.environ.get("PATH", ""),
+    )
+
+
+def _service_command(args: argparse.Namespace) -> int:
+    from ciao import macos_service
+
+    action = args.service_action
+    as_json = bool(args.as_json)
+    if getattr(args, "deprecated_alias", False) and not as_json:
+        print("`ciao desktop-service` is deprecated; use `ciao service`.", file=sys.stderr)
+    if sys.platform != "darwin":
+        return macos_service.print_result(
+            macos_service.ServiceResult(
+                False,
+                str(action),
+                "`ciao service` manages the macOS LaunchAgent. On Linux use `ciao linux-service` and systemctl.",
+                {},
+            ),
+            as_json=as_json,
+        )
     if action == "status":
         result = macos_service.service_status()
     elif action == "start":
-        result = macos_service.start_service()
+        runtime = macos_service.discover_runtime()
+        workspace = getattr(args, "workspace", None)
+        if workspace is not None and Path(runtime.server_plist).is_file():
+            installed = _plist_workspace(default_launch_agents_dir())
+            requested = Path(workspace).expanduser().resolve()
+            if installed is not None and installed != requested:
+                return macos_service.print_result(
+                    macos_service.ServiceResult(
+                        False,
+                        "start",
+                        f"The installed LaunchAgent serves {installed}, not {requested}. "
+                        f"Run `ciao setup --workspace {requested} --load-launchd --yes` to repoint it.",
+                        {"installed_workspace": str(installed), "requested_workspace": str(requested)},
+                    ),
+                    as_json=as_json,
+                )
+        if workspace is not None and not Path(runtime.server_plist).is_file():
+            try:
+                _register_launchd_service(Path(workspace))
+            except (RuntimeError, OSError) as exc:
+                return macos_service.print_result(
+                    macos_service.ServiceResult(False, "start", str(exc), {"setup_required": True}),
+                    as_json=as_json,
+                )
+            runtime = macos_service.discover_runtime()
+        result = macos_service.start_service(runtime=runtime)
     elif action == "restart":
         result = macos_service.restart_service(force=bool(args.force))
     elif action == "stop":
@@ -3689,11 +3766,11 @@ def _desktop_service_command(args: argparse.Namespace) -> int:
         parser_error = macos_service.ServiceResult(
             False,
             str(action),
-            "Unknown desktop service action.",
+            "Unknown service action.",
             {},
         )
-        return macos_service.print_result(parser_error, as_json=bool(args.as_json))
-    return macos_service.print_result(result, as_json=bool(args.as_json))
+        return macos_service.print_result(parser_error, as_json=as_json)
+    return macos_service.print_result(result, as_json=as_json)
 
 
 def _linux_service_command(args: argparse.Namespace) -> int:
@@ -3766,37 +3843,61 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Run the Ciaobot server.")
     run_parser.set_defaults(func=lambda _args: _run_server())
 
-    desktop_service_parser = subparsers.add_parser(
-        "desktop-service",
-        help="Control the launchd-managed engine for Ciaobot.app.",
-    )
-    desktop_service_sub = desktop_service_parser.add_subparsers(
-        dest="desktop_service_action",
-        required=True,
-    )
-    for action in ("status", "start", "restart", "stop", "update-engine", "migrate", "rollback"):
-        action_parser = desktop_service_sub.add_parser(action)
-        action_parser.add_argument("--json", action="store_true", dest="as_json")
-        if action in {"restart", "stop", "update-engine"}:
-            action_parser.add_argument(
-                "--force",
-                action="store_true",
-                help="Proceed even when chats are active (after UI confirmation).",
+    def add_service_parser(
+        name: str,
+        help_text: str,
+        *,
+        deprecated: bool,
+    ) -> None:
+        service_parser = subparsers.add_parser(name, help=help_text)
+        service_sub = service_parser.add_subparsers(dest="service_action", required=True)
+        for action in ("status", "start", "restart", "stop", "update-engine", "migrate", "rollback"):
+            action_parser = service_sub.add_parser(action)
+            action_parser.add_argument("--json", action="store_true", dest="as_json")
+            if action in {"restart", "stop", "update-engine"}:
+                action_parser.add_argument(
+                    "--force",
+                    action="store_true",
+                    help="Proceed even when chats are active (after UI confirmation).",
+                )
+            if action == "migrate":
+                action_parser.add_argument(
+                    "--app-bundle",
+                    type=Path,
+                    required=True,
+                    help="Installed Ciaobot.app bundle requesting migration.",
+                )
+            if action == "start":
+                action_parser.add_argument(
+                    "--workspace",
+                    type=Path,
+                    default=None,
+                    help="Register the LaunchAgent for this workspace first if it is not installed.",
+                )
+            action_parser.set_defaults(
+                func=_service_command,
+                deprecated_alias=deprecated,
             )
-        if action == "migrate":
-            action_parser.add_argument(
-                "--app-bundle",
-                type=Path,
-                required=True,
-                help="Installed Ciaobot.app bundle requesting migration.",
-            )
-        action_parser.set_defaults(func=_desktop_service_command)
-    login_parser = desktop_service_sub.add_parser("login")
-    login_parser.add_argument("login_action", choices=("enable", "disable"))
-    login_parser.add_argument("--json", action="store_true", dest="as_json")
-    login_parser.set_defaults(func=_desktop_service_command)
+        login_parser = service_sub.add_parser("login")
+        login_parser.add_argument("login_action", choices=("enable", "disable"))
+        login_parser.add_argument("--json", action="store_true", dest="as_json")
+        login_parser.set_defaults(
+            func=_service_command,
+            deprecated_alias=deprecated,
+        )
 
-    # Separate from `desktop-service`, which controls the launchd engine. This
+    add_service_parser(
+        "service",
+        "Start, stop and inspect the launchd-managed Ciaobot engine (macOS).",
+        deprecated=False,
+    )
+    add_service_parser(
+        "desktop-service",
+        "Deprecated alias of `ciao service` (used by Ciaobot.app).",
+        deprecated=True,
+    )
+
+    # Separate from `service`, which controls the launchd engine. This
     # group only manages removal of an old app bundle. Installation and updates
     # are owned by scripts/install.sh and the signed Tauri updater.
     desktop_parser = subparsers.add_parser(

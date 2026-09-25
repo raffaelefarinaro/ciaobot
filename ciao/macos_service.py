@@ -245,7 +245,7 @@ def start_service(
         return ServiceResult(
             False,
             "start",
-            "The server LaunchAgent is not installed.",
+            "The server LaunchAgent is not installed. Run `ciao service start --workspace <dir>` to register it, or `ciao setup --workspace <dir> --load-launchd`.",
             {**asdict(runtime), "setup_required": True},
         )
     resolved_uid = os.getuid() if uid is None else uid
