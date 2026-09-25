@@ -42,7 +42,7 @@
       <div v-if="!inDesktopApp" class="notif-row">
         <span class="notif-key">Delivery</span>
         <span class="notif-value">
-          <span class="notif-detail">{{ pushAllDevices ? 'Every device, including this computer' : 'Other devices only; the Ciaobot menu bar shows this Mac\'s banners' }}</span>
+          <span class="notif-detail">{{ pushAllDevices ? 'Every device, including this computer' : 'Other devices only; Ciaobot.app\'s menu bar covers the computer it runs on' }}</span>
         </span>
         <span class="notif-end">
           <button class="btn-secondary btn-small" @click="toggleDelivery" :disabled="deliveryPending">
@@ -229,7 +229,12 @@ async function sendTest() {
       return
     }
     await api.post('/api/push/test', { endpoint: sub.endpoint })
-    testResult.value = 'Sent. If nothing appears within a few seconds, check this browser\'s notification permission in your system settings.'
+    // With Delivery off, the Mac's own browser still gets the test (it is
+    // registered), but its real chat banners come from the menu bar instead.
+    // Saying so avoids reading a green result as proof the Mac is covered.
+    testResult.value = !pushAllDevices.value && isMacDesktop()
+      ? "Sent. This Mac's chat notifications come from the menu bar unless Delivery is set to every device."
+      : 'Sent. If nothing appears within a few seconds, check this browser\'s notification permission in your system settings.'
   } catch (e) {
     pushError.value = errorMessage(e)
   } finally {

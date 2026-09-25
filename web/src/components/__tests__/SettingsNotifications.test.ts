@@ -27,6 +27,9 @@ vi.mock('../../lib/api', () => ({
 
 let wrapper: VueWrapper | null = null
 
+const MAC_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
+
 async function mountCard() {
   wrapper = mount(SettingsNotifications)
   await flushPromises()
@@ -49,6 +52,7 @@ afterEach(() => {
   wrapper = null
   document.body.innerHTML = ''
   vi.unstubAllGlobals()
+  delete (navigator as unknown as Record<string, unknown>).userAgent
 })
 
 describe('SettingsNotifications push controls', () => {
@@ -72,5 +76,19 @@ describe('SettingsNotifications push controls', () => {
 
     expect(api.patch).toHaveBeenCalledWith('/api/settings/routines', { push_all_devices: true })
     expect(view.text()).toContain('Every device, including this computer')
+  })
+
+  it('says the menu bar covers a Mac while Delivery is off', async () => {
+    Object.defineProperty(navigator, 'userAgent', { value: MAC_UA, configurable: true })
+    const view = await mountCard()
+
+    await button(view, 'Send test notification').trigger('click')
+    await flushPromises()
+
+    // The test reaches this browser even with Delivery off, but its chat
+    // banners come from the menu bar, so the text must not overclaim.
+    expect(view.text()).toContain(
+      "Sent. This Mac's chat notifications come from the menu bar unless Delivery is set to every device.",
+    )
   })
 })
