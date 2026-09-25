@@ -99,11 +99,18 @@ const trustedInput = ref('')
 const trustedEdited = ref(false)
 const saving = ref(false)
 const saveError = ref('')
+// A load can be superseded by a newer one: a slow first load that resolves after
+// the save's refresh would otherwise put the pre-save value back. Only the most
+// recent load is allowed to apply its result.
+let loadSeq = 0
 
 // `quiet` skips the loading flag: a refresh right after a save should not
 // flash "Looking up addresses…" over a list that is already on screen.
 async function load({ quiet = false }: { quiet?: boolean } = {}) {
-  if (!quiet) loading.value = true
+  const seq = ++loadSeq
+  // A quiet load is a refresh, so it must not flash the spinner over a list that
+  // is on screen, and it clears one a superseded first load left behind.
+  loading.value = !quiet
   error.value = ''
   try {
     const res = await api.get<{
@@ -111,6 +118,7 @@ async function load({ quiet = false }: { quiet?: boolean } = {}) {
       trusted_url: string | null
       addresses: DeviceAddress[]
     }>('/api/addresses')
+    if (seq !== loadSeq) return
     addresses.value = res.addresses || []
     if (typeof res.port === 'number') port.value = res.port
     // A quiet refresh follows a save, which already filled the field from the
@@ -123,9 +131,10 @@ async function load({ quiet = false }: { quiet?: boolean } = {}) {
       qrSvg.value = ''
     }
   } catch (e) {
+    if (seq !== loadSeq) return
     error.value = 'Could not read addresses: ' + errorMessage(e)
   } finally {
-    if (!quiet) loading.value = false
+    if (!quiet && seq === loadSeq) loading.value = false
   }
 }
 

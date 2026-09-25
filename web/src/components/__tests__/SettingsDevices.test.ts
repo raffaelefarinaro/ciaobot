@@ -113,6 +113,37 @@ describe('SettingsDevices', () => {
     )
   })
 
+  it('does not let a slow first load overwrite a finished save', async () => {
+    let resolveGet: (value: unknown) => void = () => {}
+    // The first load is still in flight when the user saves. It resolves later
+    // with the pre-save settings, which must not land in the field.
+    vi.mocked(api.get).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveGet = resolve
+      }) as never,
+    )
+    vi.mocked(api.get).mockResolvedValue({
+      ...ADDRESSES,
+      trusted_url: 'https://x.ts.net/',
+    } as never)
+
+    const wrapper = mount(SettingsDevices)
+    await wrapper.find('#trusted-url').setValue('https://x.ts.net')
+    await wrapper.find('form.device-trusted').trigger('submit')
+    await flushPromises()
+    // The stored (normalized) value from the PATCH response.
+    expect((wrapper.find('#trusted-url').element as HTMLInputElement).value).toBe(
+      'https://x.ts.net/',
+    )
+
+    resolveGet({ ...ADDRESSES, trusted_url: 'https://old.ts.net/' })
+    await flushPromises()
+
+    expect((wrapper.find('#trusted-url').element as HTMLInputElement).value).toBe(
+      'https://x.ts.net/',
+    )
+  })
+
   it('refreshes quietly after a save and shows the stored URL', async () => {
     const wrapper = await mountCard()
     await wrapper.findAll('.device-actions button')[1].trigger('click')

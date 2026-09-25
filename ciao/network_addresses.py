@@ -89,11 +89,25 @@ def normalize_trusted_url(raw: str) -> str:
         raise ValueError("trusted_url must start with https://")
     if not parts.hostname:
         raise ValueError("trusted_url needs a host name")
-    # urlsplit is permissive: a space or a non-numeric port survives parsing and
-    # would otherwise be stored and shown as the "Full app" address. Reject both
-    # with a message of our own rather than leaking Python's port ValueError.
-    if any(ch.isspace() for ch in parts.hostname):
-        raise ValueError("trusted_url host name must not contain spaces")
+    # urlsplit is permissive: a backslash, a space, an angle bracket or a comma
+    # all survive as part of the host, and a browser reads "\" as "/", so such a
+    # value would be stored and put in a QR code pointing somewhere else. Allow
+    # only what a real host name is made of, and accept a bracketed IPv6 literal
+    # (urlsplit has already stripped the brackets) on its own terms. A
+    # non-numeric port also survives parsing, so it gets a message of our own
+    # rather than leaking Python's port ValueError.
+    host_raw = parts.hostname
+    if ":" in host_raw:
+        import ipaddress
+
+        try:
+            ipaddress.IPv6Address(host_raw)
+        except ValueError:
+            raise ValueError("trusted_url has an invalid IPv6 address") from None
+    elif not re.fullmatch(r"[A-Za-z0-9.-]+", host_raw):
+        raise ValueError(
+            "trusted_url host name may only contain letters, digits, dots and hyphens"
+        )
     try:
         port_num = parts.port
     except ValueError:
