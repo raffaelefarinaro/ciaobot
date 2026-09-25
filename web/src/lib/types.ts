@@ -558,13 +558,6 @@ export interface PendingPermission {
   received_at: number
 }
 
-// ── Voice ───────────────────────────────────────────────────────────────
-
-export interface VoiceResult {
-  text: string
-  cost: number
-}
-
 // ── Schedules ───────────────────────────────────────────────────────────
 
 export type ScheduleArchivePolicy = 'manual' | 'auto'
@@ -648,7 +641,7 @@ export interface ModelsResponse {
 }
 
 // GET/PATCH /api/settings/routines — internal-routine model overrides and
-// voice transcription engine (Settings → Models tab).
+// model overrides (Settings → Models tab).
 export interface RoutineSettings {
   // Overrides as stored; empty string = automatic default.
   insights_model: string
@@ -678,22 +671,6 @@ export interface RoutineSettings {
   // shows the reason when the machine lacks it.
   apple_model_available?: boolean
   apple_model_unavailable_reason?: string
-  // Voice is on-device only: Apple dictation (macOS 26+) and
-  // AVSpeechSynthesizer, both via the bundled sidecar. There is no engine to
-  // choose any more, so the payload reports availability and a reason rather
-  // than a selection.
-  transcription: {
-    // BCP-47 language for the on-device engines.
-    locale: string
-    available: boolean
-    unavailable_reason: string
-  }
-  speech: {
-    // Empty = let macOS pick the best installed voice for the language.
-    local_voice: string
-    available: boolean
-    local_voices?: { id: string; name: string; locale: string; quality: string }[]
-  }
   model_options: {
     anthropic: string[]
   }

@@ -95,15 +95,14 @@ test.describe('narrow viewport', () => {
   })
 
   test('a selected memory note opens an actionable sheet on a phone', async ({ page }) => {
-    await boot(page, '/memory', '.mm-review-tabs')
-    await page.getByRole('button', { name: 'Map', exact: true }).click()
+    await boot(page, '/memory/map', '.mm-toolbar')
     await page.getByRole('button', { name: 'List', exact: true }).click()
     await page.getByRole('button', { name: 'Open Launch decision' }).click()
 
     const detail = page.getByRole('dialog', { name: 'Details for Launch decision' })
     await expect(detail).toBeVisible()
-    await expect(detail.getByRole('button', { name: 'Open Launch decision' })).toBeVisible()
-    await detail.getByRole('button', { name: 'Close note detail' }).click()
+    await expect(detail.getByRole('button', { name: 'Close note' })).toBeVisible()
+    await detail.getByRole('button', { name: 'Close note' }).click()
     await expect(detail).toBeHidden()
   })
 })

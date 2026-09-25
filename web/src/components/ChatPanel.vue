@@ -285,21 +285,7 @@
               <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/></svg>
               <span>{{ copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy' }}</span>
             </button>
-            <button
-              type="button"
-              class="message-action-btn"
-              :class="{ 'message-action-btn--busy': speakLoadingKey === `user-${i}` }"
-              :title="speakingMessageKey === `user-${i}` ? 'Stop' : 'Read aloud'"
-              :aria-label="speakingMessageKey === `user-${i}` ? 'Stop reading' : 'Read message aloud'"
-              :disabled="speakLoadingKey !== null && speakLoadingKey !== `user-${i}`"
-              @click="speakMessage(item.msg.content, `user-${i}`)"
-            >
-              <svg v-if="speakingMessageKey === `user-${i}`" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
-              <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-              <span>{{ speakingMessageKey === `user-${i}` ? 'Stop' : 'Read aloud' }}</span>
-            </button>
           </div>
-          <p v-if="speakError?.key === `user-${i}`" class="speak-error">{{ speakError.message }}</p>
         </div>
         <!-- Final assistant message -->
         <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant" :class="{ 'actions-tapped': tappedMessageKey === `assistant-${i}`, 'message-wrap--selected': tappedMessageKey === `assistant-${i}` }">
@@ -380,19 +366,6 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M18 10c0 4-6 3-12 7"/></svg>
               <span>{{ forkLoadingKey === `assistant-${i}` ? 'Forking…' : 'Fork from here' }}</span>
             </button>
-            <button
-              type="button"
-              class="message-action-btn"
-              :class="{ 'message-action-btn--busy': speakLoadingKey === `assistant-${i}` }"
-              :title="speakingMessageKey === `assistant-${i}` ? 'Stop' : 'Read aloud'"
-              :aria-label="speakingMessageKey === `assistant-${i}` ? 'Stop reading' : 'Read message aloud'"
-              :disabled="speakLoadingKey !== null && speakLoadingKey !== `assistant-${i}`"
-              @click="speakMessage(item.msg.content, `assistant-${i}`)"
-            >
-              <svg v-if="speakingMessageKey === `assistant-${i}`" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
-              <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-              <span>{{ speakingMessageKey === `assistant-${i}` ? 'Stop' : 'Read aloud' }}</span>
-            </button>
             </template>
             <!-- One footer per turn, on its last bubble: the merged answer carries
                  the model and token usage, the turn's last row the completion
@@ -402,7 +375,6 @@
               <span v-if="formatTokenUsage(item.meta.usage)" class="tokens-group"><template v-if="turnMetaText(item.meta)">&nbsp;·&nbsp;</template><span v-html="formatTokenUsage(item.meta.usage)"></span></span>
             </div>
           </div>
-          <p v-if="speakError?.key === `assistant-${i}`" class="speak-error">{{ speakError.message }}</p>
           <div v-if="item.msg.is_error" class="error-actions">
             <button
               v-if="lastUserBefore(i)"
@@ -1122,7 +1094,7 @@
       </template>
       <template v-else>
         <!-- The command surface: staged attachments, the prompt, then one bar
-             with the model, attach, dictation and the forward action. Same
+             with the model, attach and the forward action. Same
              shape as Home's composer so the two read as one control. -->
         <div class="composer-surface">
           <!-- Staged attachments. Images, chat comments and file comments share one
@@ -1241,12 +1213,6 @@
               <input type="file" accept="image/*" multiple hidden @change="handleFileSelect" />
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </label>
-            <!-- Voice recording is allowed during streaming too: the user's
-                 transcript becomes a queued follow-up, same as typed text. -->
-            <VoiceRecorder v-if="!transcribing" ref="voiceRecorderRef" @recorded="handleVoice" @error="handleVoiceError" />
-            <span v-else class="voice-transcribing" title="Transcribing...">
-              <span class="transcribe-spinner"></span>
-            </span>
             <span class="composer-spacer"></span>
             <span v-if="inputText.trim()" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
             <!-- While streaming: empty composer → stop; any draft → queue. -->
@@ -1389,7 +1355,6 @@ import {
   postprocessSummary,
 } from '../lib/postprocessView'
 import { useFileViewerStore } from '../stores/fileViewer'
-import VoiceRecorder from './VoiceRecorder.vue'
 // Subagent transcripts carry `turn_index` (the user turn that dispatched
 // them, parsed server-side from the session JSONL), so each panel anchors
 // under the turn that spawned its agents.
@@ -2243,8 +2208,6 @@ watch(tappedMessageKey, key => {
   else window.removeEventListener('keydown', onSelectedMessageKeydown, true)
 })
 onBeforeUnmount(() => window.removeEventListener('keydown', onSelectedMessageKeydown, true))
-const transcribing = ref(false)
-const voiceRecorderRef = ref<InstanceType<typeof VoiceRecorder> | null>(null)
 const commentComposeDraftRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
 const commentComposeEditRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
 const isNearBottom = ref(true)
@@ -3314,13 +3277,12 @@ async function handleDraftImageUpload(e: Event): Promise<void> {
   input.value = ''
 }
 
-// Selecting transcript text and typing (or pasting, or hitting Cmd+D) opens the
+// Selecting transcript text and typing (or pasting) opens the
 // composer directly, so the "Comment" pill is a hint rather than a required
-// click. Dictation has to wait for the popover to mount its recorder.
+// click.
 useTypeToComment({
   isActive: () => !!selectionAnchor.value && !commentDraft.value,
   open: (initialText: string) => openCommentForSelection(initialText),
-  dictate: () => nextTick(() => commentComposeDraftRef.value?.toggleDictation()),
   addImages: (files: File[]) => addDraftImages(files),
 })
 
@@ -3748,55 +3710,6 @@ async function forkConversation(message: ChatMessage, key: string): Promise<void
     forkLoadingKey.value = null
   }
 }
-
-// ── Read aloud ─────────────────────────────────────────────────────────
-const speakingMessageKey = ref<string | null>(null)
-const speakLoadingKey = ref<string | null>(null)
-const speakError = ref<{ key: string; message: string } | null>(null)
-let speakAudio: HTMLAudioElement | null = null
-
-function stopSpeaking(): void {
-  if (speakAudio) {
-    speakAudio.pause()
-    if (speakAudio.src.startsWith('blob:')) URL.revokeObjectURL(speakAudio.src)
-    speakAudio = null
-  }
-  speakingMessageKey.value = null
-}
-
-async function speakMessage(text: string, key: string): Promise<void> {
-  if (speakingMessageKey.value === key) {
-    stopSpeaking()
-    return
-  }
-  stopSpeaking()
-  const chatId = store.activeChatId
-  if (!chatId || !text.trim() || speakLoadingKey.value) return
-  speakLoadingKey.value = key
-  speakError.value = null
-  try {
-    const blob = await store.speakMessage(chatId, text)
-    // The user may have started another playback while this one synthesized.
-    stopSpeaking()
-    const audio = new Audio(URL.createObjectURL(blob))
-    speakAudio = audio
-    speakingMessageKey.value = key
-    audio.onended = audio.onerror = () => {
-      if (speakAudio === audio) stopSpeaking()
-    }
-    await audio.play()
-  } catch (e) {
-    stopSpeaking()
-    speakError.value = { key, message: e instanceof Error ? e.message : 'Speech failed' }
-    setTimeout(() => {
-      if (speakError.value?.key === key) speakError.value = null
-    }, 6000)
-  } finally {
-    if (speakLoadingKey.value === key) speakLoadingKey.value = null
-  }
-}
-
-onBeforeUnmount(stopSpeaking)
 
 // Subagent activity lines are tagged with the leading turnstile arrow by the
 // store's tool_use handler when an event arrives with parent_tool_use_id set.
@@ -4602,41 +4515,6 @@ async function continueChat() {
     isContinuing.value = false
   }
 }
-async function handleVoice(blob: Blob) {
-  transcribing.value = true
-  try {
-    const text = await store.transcribeVoice(chat.value.chat_id, blob)
-    if (text.trim()) {
-      inputText.value = text
-      nextTick(autoResize)
-      inputEl.value?.focus()
-    }
-  } catch (e) {
-    console.error('Voice error:', e)
-    store.pushErrorToast('Voice transcription failed', `${errorMessage(e)}`)
-  } finally {
-    transcribing.value = false
-  }
-}
-
-function handleVoiceError(message: string) {
-  store.pushErrorToast('Voice dictation unavailable', message)
-}
-// Cmd+D toggles a voice recording from the composer: first press starts,
-// second press stops (same as the on-screen mic/stop button).
-// When a comment compose popover is open, the shortcut is routed there instead
-// of the main chat composer.
-function toggleDictation() {
-  if (commentComposeDraftRef.value) {
-    commentComposeDraftRef.value.toggleDictation()
-    return
-  }
-  if (commentComposeEditRef.value) {
-    commentComposeEditRef.value.toggleDictation()
-    return
-  }
-  voiceRecorderRef.value?.toggleRecording()
-}
 
 // Cmd+Backspace mirrors the header archive button (including its confirm
 // dialog). Fires even while a text field is focused: that is the point of the
@@ -4647,7 +4525,7 @@ function archiveActiveChat() {
 }
 
 // Expose app-level shortcuts to the layout, which owns the global keydown.
-defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQuestionShortcut, handlePermissionShortcut, handleSendShortcut })
+defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, handlePermissionShortcut, handleSendShortcut })
 </script>
 
 <style scoped>
@@ -5419,17 +5297,11 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
 }
 
 .message-action-btn--busy {
-  animation: speak-pulse 1s ease-in-out infinite;
+  animation: action-busy-pulse 1s ease-in-out infinite;
 }
 
-@keyframes speak-pulse {
+@keyframes action-busy-pulse {
   50% { opacity: 0.35; }
-}
-
-.speak-error {
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: var(--error);
 }
 
 .message.assistant.error {
@@ -6281,24 +6153,6 @@ details[open] > .activity-summary::before {
 }
 
 
-/* Voice transcribing spinner */
-.voice-transcribing {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: var(--touch);
-  min-height: var(--touch);
-}
-
-.transcribe-spinner {
-  width: 18px;
-  height: 18px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
 /* Slash-command picker */
 .commands-picker {
   max-height: 240px;
@@ -6455,26 +6309,6 @@ details[open] > .activity-summary::before {
   min-width: 0;
   padding: 6px 2px 0 2px;
   border-top: 1px solid var(--border);
-}
-
-/* The dictation control sits in the bar as a quiet icon like attach, not a
-   bordered 44px tile (touch layouts get the 44px target back below). */
-.composer-bar :deep(.voice-btn:not(.recording)) {
-  min-width: 36px;
-  min-height: 36px;
-  border-color: transparent;
-  border-radius: 8px;
-}
-
-.composer-bar :deep(.voice-btn:not(.recording):hover) {
-  border-color: transparent;
-}
-
-@media (pointer: coarse), (max-width: 700px) {
-  .composer-bar :deep(.voice-btn) {
-    min-width: var(--touch);
-    min-height: var(--touch);
-  }
 }
 
 .composer-spacer { flex: 1; }
@@ -7351,7 +7185,6 @@ details[open] > .activity-summary::before {
     padding: 0;
   }
   .image-btn { min-height: var(--touch); min-width: var(--touch); }
-  :deep(.voice-btn) { min-height: var(--touch); min-width: var(--touch); }
 }
 
 /* Chat comment selection trigger + composer */

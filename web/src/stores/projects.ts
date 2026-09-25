@@ -27,7 +27,6 @@ import type {
   SubagentTranscript,
   WsEvent,
   EventsWsMessage,
-  VoiceResult,
   InAppToast,
   PackageStatus,
   PendingPermission,
@@ -4917,47 +4916,6 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  // ── Voice ───────────────────────────────────────────────────────────
-
-  /** Transcribe dictation. `chatId` null means no chat exists yet (the home
-   *  composer), which posts to the chat-independent route. */
-  async function transcribeVoice(chatId: string | null, audioBlob: Blob): Promise<string> {
-    const form = new FormData()
-    // Name the part after what the blob actually is: the server derives the
-    // saved file's extension from it, and on-device dictation can only read
-    // the containers CoreAudio understands (wav, m4a), not WebM.
-    const ext = audioBlob.type.includes('wav') ? 'wav'
-      : audioBlob.type.includes('mp4') || audioBlob.type.includes('m4a') ? 'm4a'
-        : audioBlob.type.includes('ogg') ? 'ogg'
-          : 'webm'
-    form.append('audio', audioBlob, `voice.${ext}`)
-    const res = await fetch(chatId ? `/api/chats/${chatId}/voice` : '/api/voice', {
-      method: 'POST',
-      body: form,
-      credentials: 'same-origin',
-    })
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: res.statusText }))
-      throw new Error(err.error || `Voice failed: ${res.status}`)
-    }
-    const data: VoiceResult = await res.json()
-    return data.text
-  }
-
-  async function speakMessage(chatId: string, text: string): Promise<Blob> {
-    const res = await fetch(`/api/chats/${chatId}/speak`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-      credentials: 'same-origin',
-    })
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: res.statusText }))
-      throw new Error(err.error || `Speech failed: ${res.status}`)
-    }
-    return res.blob()
-  }
-
   // ── Images ──────────────────────────────────────────────────────────
 
   async function uploadImages(chatId: string, files: File[]): Promise<string[]> {
@@ -5869,7 +5827,7 @@ export const useProjectStore = defineStore('projects', () => {
     setChatRetry, stopChatRetry, tryChatRetryNow, retryInsights,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
-    sendMessage, stopChat, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
+    sendMessage, stopChat, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,

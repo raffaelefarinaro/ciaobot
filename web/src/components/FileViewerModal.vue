@@ -1216,7 +1216,7 @@ function onArtifactOpenComment(p: { id: string; frameX: number; frameY: number }
 
 const composeDraftRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
 
-// Selecting text and typing (or pasting, or hitting Cmd+D) opens the composer
+// Selecting text and typing (or pasting) opens the composer
 // directly, so the "Comment" pill is a hint rather than a required click.
 useTypeToComment({
   isActive: () => !!selectionAnchor.value && !commentDraft.value,
@@ -1224,7 +1224,6 @@ useTypeToComment({
     if (isCsv.value) openCommentForCsvCell(initialText)
     else openCommentForSelection(initialText)
   },
-  dictate: () => nextTick(() => composeDraftRef.value?.toggleDictation()),
   addImages: (files: File[]) => addDraftImages(files),
 })
 

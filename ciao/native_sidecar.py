@@ -1,13 +1,11 @@
 """Shared plumbing for the ``ciaobot-native`` sidecar bundled in Ciaobot.app.
 
-The sidecar exists because several macOS frameworks are unreachable from
-Python: Apple's on-device dictation and its on-device LLM are Swift-only APIs,
-and the speech synthesizer would otherwise need a pyobjc dependency just to
-pick a voice. See ``desktop/native/main.swift`` for the full reasoning.
+The sidecar exists because Apple's on-device model APIs are Swift-only.
+See ``desktop/native/main.swift`` for the full reasoning.
 
 This module owns finding the binary, probing what the machine supports, and
-running one subcommand. The callers on top of it are ``ciao/voice.py`` (hear /
-speak) and ``respond`` below (chat titles, replacing the ``apfel`` CLI).
+running one subcommand. ``respond`` below uses it for chat titles and other
+one-shot on-device generation.
 
 On macOS, the server normally runs as a launchd agent. FoundationModels can
 report availability from that process but its model-manager connection is only
@@ -45,24 +43,16 @@ SIDECAR_NAME = "ciaobot-native"
 # Exit codes, mirrored from desktop/native/main.swift so a failure can be
 # reported as something the user can act on.
 EXIT_UNSUPPORTED_OS = 65
-EXIT_LOCALE_UNAVAILABLE = 66
-EXIT_AUDIO_UNREADABLE = 67
 EXIT_EMPTY_RESULT = 68
 EXIT_FAILURE = 69
 EXIT_MODEL_UNAVAILABLE = 70
 
-# Transcribing a long recording is the slow path; synthesis and generation are
-# bounded by their input. Generous enough that only a wedged process trips it.
 DEFAULT_TIMEOUT_S = 300.0
 # Titles run inline while a chat is being saved, so they get a short leash and
 # fall back to a cloud model rather than holding the request open.
 RESPOND_TIMEOUT_S = 30.0
 
-_EMPTY_PROBE: dict[str, Any] = {
-    "hear": {"available": False},
-    "speak": {"available": False},
-    "model": {"available": False},
-}
+_EMPTY_PROBE: dict[str, Any] = {"model": {"available": False}}
 
 
 class SidecarError(Exception):
@@ -110,20 +100,16 @@ def sidecar_path() -> Path | None:
 # binary is a couple of stat calls; the subprocess is what the cache is for.
 _probe_cache: dict[str | None, tuple[float, dict[str, Any]]] = {}
 
-# Voice downloads change the positive answer too: a Premium voice can become
-# available while the server is running. Re-probe periodically so Settings and
-# the automatic voice selector see it without requiring an app restart.
 _PROBE_TTL_S = 60.0
 
-# ...but `probe()` is a blocking subprocess that loads Speech, AVFoundation and
-# FoundationModels and enumerates every installed voice, and
+# ...but `probe()` is a blocking subprocess that loads FoundationModels, and
 # `apple_model_available()` is called from sync helpers on hot paths (every
 # chat title, three times per archived insight). Putting those on a 60s TTL
 # meant a periodic multi-hundred-millisecond stall of the event loop for an
 # answer that, once true, does not go back to false on its own — the one way it
 # can is a runtime failure, which `_model_failure` already tracks with its own
 # TTL. So a positive model answer is remembered for the process, and only the
-# voice-bearing sections keep paying the TTL.
+# negative model availability is retried after the TTL.
 _model_available_latch = False
 
 # Foundation Models has a much smaller context window than the cloud models
@@ -203,7 +189,7 @@ def reset_probe_cache() -> None:
 
 
 def section(name: str) -> dict[str, Any]:
-    """One section of the probe (``hear``, ``speak``, or ``model``)."""
+    """One section of the on-device model probe."""
     value = probe().get(name)
     return value if isinstance(value, dict) else {"available": False}
 
@@ -489,7 +475,7 @@ async def respond(
             "install Ciaobot with the one-line installer from the release page"
         )
     # Generation is the one subcommand that has to cross into the user
-    # session; hear/speak work fine from the agent. Keeping the hop here
+    # session; capabilities are independently probed.
     # rather than inside run() leaves run() a generic subcommand runner.
     if sys.platform == "darwin" and Path("/usr/bin/osascript").is_file():
         code, out, err = await _respond_in_user_session(

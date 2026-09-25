@@ -311,12 +311,12 @@ const store = useProjectStore()
 const fileViewer = useFileViewerStore()
 
 // Refs into the active ChatPanel, used by the global keyboard shortcuts to
-// reach composer-owned actions (dictation, archive).
+// reach composer-owned actions (archive).
 //
 // The template declares ChatPanel and HomeRecentChats twice, once under
 // `v-if="pinnedFilePath"` (split view) and once under the `v-else` (no pinned
 // file). Both copies must carry the ref: only one is ever mounted, so the ref
-// holds whichever that is, but tagging only the split-view copy left Cmd+D,
+// holds whichever that is, but tagging only the split-view copy left
 // Cmd+Backspace and the home arrow keys silently dead in the far more common
 // no-pinned-file layout.
 const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
@@ -766,8 +766,8 @@ function closeChat() {
 
 // ── Global keyboard shortcuts ───────────────────────────────────────
 // Bound in both the PWA and the desktop app, but on different modifiers: the
-// Tauri webview owns Cmd+T / Cmd+D, while a browser tab has already spent
-// them on new-tab / bookmark, so the PWA uses Option instead. See
+// Tauri webview owns Cmd+T, while a browser tab has already spent
+// it on new-tab, so the PWA uses Option instead. See
 // onShortcutKeydown for the pairs. Archive deliberately moved off Cmd+A
 // (which select-all owns inside text fields) to Cmd/Option+Backspace, which
 // fires everywhere including while typing.
@@ -996,7 +996,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // are meant to fire more than once per press: New Chat created a fresh
   // "New Chat" on every repeat (each POST racing the server's empty-chat
   // sweep against the one before it, so the panel kept snapping to a newer
-  // chat instead of opening directly), and dictation/sidebar/model-picker
+  // chat instead of opening directly), and sidebar/model-picker
   // would otherwise toggle back and forth for as long as the key was held.
   if (e.repeat) return
 
@@ -1036,14 +1036,6 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
-  // Dictation: Cmd+D (Desktop) or Option+D (Web/PWA).
-  if ((isDesktop && mod && (e.key === 'd' || e.key === 'D')) || (!isDesktop && alt && optionChord(e, ['KeyD'], ['d', 'D']))) {
-    if (!store.activeChat) return
-    e.preventDefault()
-    chatPanelRef.value?.toggleDictation()
-    return
-  }
-
   // Archive: Cmd+Backspace (Desktop) or Option+Backspace (Web/PWA). Unlike
   // the old Cmd+A it also fires while a text field is focused — that is the
   // point: archive from mid-thought without clicking out. The confirm dialog
@@ -1080,7 +1072,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
 
   // Model picker: Cmd+Shift+M (Desktop) or Option+M (Web/PWA). Plain Cmd+M is
   // reserved by macOS for Minimize Window and cannot be intercepted reliably.
-  // Not gated on the typing target, like dictation: opening the picker is the
+  // Not gated on the typing target: opening the picker is the
   // useful reading of the key even mid-compose, and the picker is a popover,
   // not a text mutation.
   if ((isDesktop && mod && e.shiftKey && !alt && (e.key === 'm' || e.key === 'M')) || (!isDesktop && alt && optionChord(e, ['KeyM'], ['m', 'M']))) {

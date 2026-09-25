@@ -200,7 +200,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   panels split out of Settings reuse that sheet rather than copying rules.
   Asset origin badges come from `lib/assetOrigin.ts`, which stays Vue-free.
 - Completed chat traces stay collapsed as one compact `Activity` row. Touched-file chips sit below the final answer under `Outputs` (including files created via `Write` or common Bash redirects/`touch`/`cp`); interrupted turns keep their file chips inside `Activity` so unfinished work remains visible. Newly created files are labelled `new` on the chip.
-- Conversation forks are initiated from the final assistant reply action group (Copy/Read aloud/Fork). The PWA sends the selected message slice up to that reply and redirects to the newly created chat, focusing the composer.
+- Conversation forks are initiated from the final assistant reply action group (Copy/Fork). The PWA sends the selected message slice up to that reply and redirects to the newly created chat, focusing the composer.
 - New PWA actions (state-changing routes) must be documented in `../PWA_API.md` → Agent recipes, or whitelisted in `../tests/test_pwa_api_docs.py`.
 
 ## Testing

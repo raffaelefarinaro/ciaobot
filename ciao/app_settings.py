@@ -2,8 +2,8 @@
 
 The env-backed :class:`ciao.config.CiaoConfig` stays the source of
 defaults; this store holds the small set of knobs the PWA Settings →
-Models tab can change at runtime (internal-routine models and the voice
-transcription engine). Values are applied as an overlay onto the live
+Models tab can change at runtime (internal-routine models).
+Values are applied as an overlay onto the live
 config object so call sites keep reading ``config.*`` and PATCHes take
 effect without a restart. Empty string means "no override, use the
 config/env default".
@@ -99,9 +99,6 @@ class AppSettings:
     # Model used by post-archive session-insights extraction.
     insights_model: str = ""
 
-    # macOS voice identifier for read-aloud; empty means the sidecar picks the
-    # best installed voice for the locale.
-    tts_local_voice: str = ""
     # Comma-separated list of models for the adversarial_review MCP tool.
     critique_models: str = ""
     # Per-runtime-provider default model for new chats, keyed by provider id.
@@ -264,7 +261,6 @@ class AppSettingsStore:
         if self._defaults is None:
             self._defaults = {
                 "insights_model_override": config.insights_model_override,
-                "tts_local_voice": config.tts_local_voice,
                 "critique_models": config.critique_models,
             }
             for descriptor in provider_registry.descriptors():
@@ -281,7 +277,6 @@ class AppSettingsStore:
         config.insights_enabled = s.insights_enabled
         config.trajectories_enabled = s.trajectories_enabled
         config.insights_model_override = s.insights_model or d["insights_model_override"]
-        config.tts_local_voice = s.tts_local_voice or d["tts_local_voice"]
         config.critique_models = s.critique_models or d["critique_models"]
         # Per-provider default models / thinking / routine models have no
         # env-backed default; absence means "use the provider's own default".

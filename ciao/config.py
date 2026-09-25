@@ -467,7 +467,6 @@ GWS_DEFAULT_PROFILE = "personal"
 
 # Upload size caps for chat attachments.
 MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
-MAX_VOICE_SIZE_BYTES = 25 * 1024 * 1024
 
 # Anthropic model aliases offered in the picker; the first is the default.
 CLAUDE_MODELS = ("opus", "sonnet", "haiku", "fable")
@@ -492,10 +491,6 @@ class CiaoConfig:
     vault_mode: str = "scratch"
     bootstrap_mode: bool = False
     vault_root: Path = Path("memory-vault")
-    # macOS voice identifier or name for read-aloud. Empty means "the best
-    # installed voice for the Mac's language (ciao.voice.system_locale)" -- the right default when the
-    # available voices differ on every machine.
-    tts_local_voice: str = ""
     claude_default_model: str = CLAUDE_MODELS[0]
     # Per-workspace default models and tool denylists live on the WorkspaceConfig
     # in this registry, set through `workspaces.json`. The former top-level

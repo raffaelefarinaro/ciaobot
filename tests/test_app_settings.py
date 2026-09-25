@@ -17,7 +17,6 @@ class FakeConfig:
         self.insights_model = "sonnet"
         self.insights_enabled = True
         self.trajectories_enabled = True
-        self.tts_local_voice = "af_heart"
         self.critique_models = ""
         # Per-provider default models / thinking / routine models; no
         # env-backed defaults.
@@ -183,19 +182,6 @@ def test_apply_overlays_and_clear_restores_defaults(tmp_path):
     store.update({"insights_model": ""})
     store.apply_to_config(config)
     assert config.insights_model_override == ""
-
-
-def test_tts_overrides_apply_and_clear(tmp_path):
-    store = AppSettingsStore(tmp_path / "app_settings.json")
-    config = FakeConfig()
-
-    store.update({"tts_local_voice": "im_nicola"})
-    store.apply_to_config(config)
-    assert config.tts_local_voice == "im_nicola"
-
-    store.update({"tts_local_voice": ""})
-    store.apply_to_config(config)
-    assert config.tts_local_voice == "af_heart"
 
 
 def test_insights_override_applies(tmp_path):

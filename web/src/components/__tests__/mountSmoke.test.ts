@@ -27,24 +27,6 @@ vi.mock('../../lib/api', () => {
 
     critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
 
-    transcription: {
-      engine: 'local',
-      cloud_model: 'gpt-transcribe',
-      locale: 'en-US',
-      local_available: true,
-      local_unavailable_reason: '',
-      cloud_available: true,
-    },
-    speech: {
-      engine: 'cloud',
-      cloud_voice: 'nova',
-      local_voice: '',
-      local_available: true,
-      local_voices: [
-        { id: 'com.apple.voice.compact.en-US.Samantha', name: 'Samantha', locale: 'en-US', quality: 'default' },
-      ],
-      cloud_available: true,
-    },
     model_options: {
       anthropic: ['haiku', 'sonnet', 'opus', 'fable'],
     },
@@ -313,7 +295,6 @@ const NoopStub = { name: 'NoopStub', render: () => h('div') }
 // module. Without the flag it hands the whole mock namespace to the renderer
 // as the component.
 const AsyncNoopStub = { default: NoopStub, __esModule: true }
-vi.mock('../VoiceRecorder.vue', () => ({ default: NoopStub }))
 vi.mock('../ChatPanel.vue', () => ({ default: NoopStub }))
 vi.mock('../SubagentPanel.vue', () => ({ default: NoopStub }))
 vi.mock('../PinnedFilePanel.vue', () => ({ default: NoopStub }))
@@ -803,7 +784,7 @@ describe('component mount smoke', () => {
     }
   })
 
-  it('SettingsView models tab stacks chat providers, background models, then voice', async () => {
+  it('SettingsView models tab stacks chat providers and background models', async () => {
     const router = makeRouter()
     await router.push('/settings/models')
     await router.isReady()
@@ -815,7 +796,7 @@ describe('component mount smoke', () => {
     await nextTick()
 
     const titles = wrapper.findAll('.section-title').map((el) => el.text())
-    expect(titles).toEqual(['Chat providers', 'Background models', 'Voice'])
+    expect(titles).toEqual(['Chat providers', 'Background models'])
     expect(wrapper.find('#chat-providers').exists()).toBe(true)
     wrapper.unmount()
   })
@@ -948,7 +929,6 @@ describe('component mount smoke', () => {
     // Provider auth goes through each CLI (`ciao auth <provider>`), so the old
     // key-entry rows and Save Keys button are gone — even if a stale payload
     // still advertises key metadata.
-    expect(wrapper.text()).not.toContain('OpenAI voice API key')
     expect(wrapper.findAll('input[type="password"]').length).toBe(0)
     expect(wrapper.text()).not.toContain('Save Keys')
     expect(wrapper.text()).not.toContain('Agent SDK ready')

@@ -120,7 +120,6 @@ async function mountPanel(messages: ChatMessage[] = []): Promise<VueWrapper> {
       stubs: {
         PaneHeader: PaneHeaderStub,
         ModelSelector: ChildStub,
-        VoiceRecorder: ChildStub,
         SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,

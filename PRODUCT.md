@@ -56,7 +56,7 @@ Durable constraints:
 - Automatic memory work must be legible and reviewable. Uncertain new knowledge is proposed rather than silently promoted, and managed mutations must retain recovery or undo evidence.
 - The product must not silently discard or rewrite an adopted notes folder during onboarding or workspace migration.
 - Ciaobot supports Claude Code and opencode as the current runtime providers. Other model access is reached through opencode rather than by multiplying first-party integrations.
-- Apple-only capabilities, including on-device voice and Foundation Models, must be presented as host-dependent enhancements rather than universal product requirements.
+- Apple-only capabilities, including Foundation Models, must be presented as host-dependent enhancements rather than universal product requirements.
 
 ## Brand Commitments
 
