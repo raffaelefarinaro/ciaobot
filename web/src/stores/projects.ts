@@ -4919,7 +4919,9 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Voice ───────────────────────────────────────────────────────────
 
-  async function transcribeVoice(chatId: string, audioBlob: Blob): Promise<string> {
+  /** Transcribe dictation. `chatId` null means no chat exists yet (the home
+   *  composer), which posts to the chat-independent route. */
+  async function transcribeVoice(chatId: string | null, audioBlob: Blob): Promise<string> {
     const form = new FormData()
     // Name the part after what the blob actually is: the server derives the
     // saved file's extension from it, and on-device dictation can only read
@@ -4929,7 +4931,7 @@ export const useProjectStore = defineStore('projects', () => {
         : audioBlob.type.includes('ogg') ? 'ogg'
           : 'webm'
     form.append('audio', audioBlob, `voice.${ext}`)
-    const res = await fetch(`/api/chats/${chatId}/voice`, {
+    const res = await fetch(chatId ? `/api/chats/${chatId}/voice` : '/api/voice', {
       method: 'POST',
       body: form,
       credentials: 'same-origin',

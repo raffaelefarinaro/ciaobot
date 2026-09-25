@@ -1,12 +1,12 @@
 <template>
   <div class="voice-recorder">
     <!-- Idle: show mic button -->
-    <button v-if="state === 'idle'" class="voice-btn" @click="startRecording" title="Record voice">
+    <button v-if="state === 'idle'" type="button" class="voice-btn" @click="startRecording" title="Record voice" aria-label="Record voice">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
     </button>
 
     <!-- Recording: show stop button + timer -->
-    <button v-if="state === 'recording'" class="voice-btn recording" @click="stopRecording" title="Stop recording">
+    <button v-if="state === 'recording'" type="button" class="voice-btn recording" @click="stopRecording" title="Stop recording" aria-label="Stop recording">
       <span class="rec-dot"></span>
       <span class="rec-time">{{ formattedTime }}</span>
     </button>

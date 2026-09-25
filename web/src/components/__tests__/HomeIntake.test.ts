@@ -239,4 +239,54 @@ describe('HomeIntake', () => {
     expect(wrapper.get('.home-intake-model-trigger').text()).not.toContain('sonnet')
     wrapper.unmount()
   })
+
+  it('stages dropped files and sends them with the first message of the new chat', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'general', name: 'General', workspace: 'personal', order: 0, vault_folder: 'Projects/General' },
+    ] as unknown as typeof store.projects
+    store.activeWorkspace = 'personal'
+    openPicker.mockResolvedValue('general')
+    vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'fresh' } as ChatInfo)
+    const uploadImages = vi.spyOn(store, 'uploadImages').mockResolvedValue(['img_1'])
+    const send = vi.spyOn(store, 'sendMessage').mockReturnValue(true)
+    const fetchMock = vi.fn(async (..._args: unknown[]) => new Response(JSON.stringify({ file_refs: [{ ref: 'drop_' + 'a'.repeat(32) }] }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const wrapper = mount(HomeIntake, { global: { stubs: { VoiceRecorder: true } } })
+    const doc = new File(['x'], 'brief.pdf', { type: 'application/pdf' })
+    const shot = new File(['y'], 'shot.png', { type: 'image/png' })
+    await wrapper.get('form').trigger('drop', { dataTransfer: { items: [], files: [doc, shot] } })
+    const chips = wrapper.findAll('.home-intake-attachment-name').map(chip => chip.text())
+    expect(chips).toEqual(['brief.pdf', 'shot.png'])
+    // Nothing is uploaded before the chat exists.
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    await wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').setValue('Summarise these')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(uploadImages).toHaveBeenCalledWith('fresh', [shot])
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/chats/fresh/attachments')
+    expect(send).toHaveBeenCalledWith('fresh', `Summarise these\n\n\`ciao-drop:drop_${'a'.repeat(32)}\``)
+    expect(wrapper.findAll('.home-intake-attachment')).toHaveLength(0)
+    vi.unstubAllGlobals()
+    wrapper.unmount()
+  })
+
+  it('dictates into the prompt without a chat', async () => {
+    const store = useProjectStore()
+    store.projects = [{ project_id: 'general', name: 'General', workspace: 'personal', order: 0 }] as unknown as typeof store.projects
+    store.activeWorkspace = 'personal'
+    const transcribe = vi.spyOn(store, 'transcribeVoice').mockResolvedValue('draft the brief')
+    const wrapper = mount(HomeIntake)
+    const recorder = wrapper.findComponent({ name: 'VoiceRecorder' })
+    expect(recorder.exists()).toBe(true)
+    recorder.vm.$emit('recorded', new Blob(['a'], { type: 'audio/webm' }))
+    await flushPromises()
+    expect(transcribe).toHaveBeenCalledWith(null, expect.any(Blob))
+    expect(wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').element.value).toBe('draft the brief')
+    wrapper.unmount()
+  })
 })
+

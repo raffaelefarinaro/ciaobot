@@ -34,7 +34,8 @@ test.describe('narrow viewport', () => {
     // push past the shell.
     const form = await page.locator('.home-intake-form').boundingBox()
     expect(form).not.toBeNull()
-    const controls = page.locator('.home-intake-form input, .home-intake-form textarea, .home-intake-form select, .home-intake-form button')
+    // The file input is hidden (the paperclip button opens it), so it has no box.
+    const controls = page.locator('.home-intake-form input:not([type=file]), .home-intake-form textarea, .home-intake-form select, .home-intake-form button')
     for (const control of await controls.all()) {
       const box = await control.boundingBox()
       expect(box).not.toBeNull()

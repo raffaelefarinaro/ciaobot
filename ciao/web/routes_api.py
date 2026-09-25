@@ -3146,7 +3146,20 @@ async def chat_voice(request: Request) -> JSONResponse:
     chat = pcm.get_chat(chat_id)
     if chat is None:
         return JSONResponse({"error": "chat not found"}, status_code=404)
+    return await _transcribe_voice_form(request)
 
+
+async def voice_transcribe(request: Request) -> JSONResponse:
+    """Transcribe a voice file before any chat exists (the home composer).
+
+    Transcription never depended on the chat: the per-chat route only checks
+    that the chat exists. This is the same upload, size limit and cleanup.
+    """
+    return await _transcribe_voice_form(request)
+
+
+async def _transcribe_voice_form(request: Request) -> JSONResponse:
+    pcm = request.app.state.project_chat_manager
     form = await request.form()
     upload = form.get("audio")
     if upload is None:
