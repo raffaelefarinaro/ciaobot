@@ -163,6 +163,18 @@ def test_embedded_release_key_matches_installer_verifier() -> None:
     assert literal.group(1).rsplit("\\n", 1)[-1] == RELEASE_PUBLIC_KEY
 
 
+def test_embedded_release_key_matches_tauri_updater() -> None:
+    config = json.loads(
+        (
+            Path(__file__).parents[1] / "desktop" / "src-tauri" / "tauri.conf.json"
+        ).read_text(encoding="utf-8")
+    )
+    pubkey = config["plugins"]["updater"]["pubkey"]
+    decoded = base64.b64decode(pubkey, validate=True).decode("utf-8")
+
+    assert [line for line in decoded.splitlines() if line.strip()][-1] == RELEASE_PUBLIC_KEY
+
+
 def test_verify_manifest_round_trip_and_schema_checks() -> None:
     priv, public_key, key_id = _keypair()
     document = build_manifest(
@@ -199,6 +211,14 @@ def test_missing_static_assets(tmp_path: Path) -> None:
     (assets / "b.css").write_text("b", encoding="utf-8")
 
     assert missing_static_assets(static) == []
+
+
+def test_missing_static_assets_rejects_placeholder_index(tmp_path: Path) -> None:
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    assert missing_static_assets(static) == ["/assets/* (index.html references none)"]
 
 
 def test_main_build_writes_manifest_and_rejects_wrong_version(tmp_path: Path) -> None:

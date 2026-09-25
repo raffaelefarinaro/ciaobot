@@ -116,9 +116,10 @@ jobs:
           set -euo pipefail
           version="${VERSION#v}"
           py="$RUNNER_TEMP/engine-check/bin/python"
-          "$py" -m ciao.release_manifest build --version "$version" --out ciaobot-engine-manifest.json dist/ciaobot-*.whl
+          ws="$GITHUB_WORKSPACE"
+          (cd "$RUNNER_TEMP" && "$py" -m ciao.release_manifest build --version "$version" --out "$ws/ciaobot-engine-manifest.json" "$ws"/dist/ciaobot-*.whl)
           (cd desktop && npx tauri signer sign ../ciaobot-engine-manifest.json)
-          "$py" -m ciao.release_manifest verify ciaobot-engine-manifest.json ciaobot-engine-manifest.json.sig
+          (cd "$RUNNER_TEMP" && "$py" -m ciao.release_manifest verify "$ws/ciaobot-engine-manifest.json" "$ws/ciaobot-engine-manifest.json.sig")
       - name: Attach release assets
         env:
           GH_TOKEN: ${{ github.token }}

@@ -180,10 +180,12 @@ def missing_static_assets(static_dir: Path) -> list[str]:
         html = index.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return ["index.html"]
+    refs = _ASSET_REF_RE.findall(html)
+    if not refs:
+        # A placeholder index would otherwise pass without checking anything.
+        return ["/assets/* (index.html references none)"]
     missing = {
-        ref
-        for ref in _ASSET_REF_RE.findall(html)
-        if not (static_dir / ref.lstrip("/")).is_file()
+        ref for ref in refs if not (static_dir / ref.lstrip("/")).is_file()
     }
     return sorted(missing)
 
