@@ -89,10 +89,23 @@ def normalize_trusted_url(raw: str) -> str:
         raise ValueError("trusted_url must start with https://")
     if not parts.hostname:
         raise ValueError("trusted_url needs a host name")
+    # urlsplit is permissive: a space or a non-numeric port survives parsing and
+    # would otherwise be stored and shown as the "Full app" address. Reject both
+    # with a message of our own rather than leaking Python's port ValueError.
+    if any(ch.isspace() for ch in parts.hostname):
+        raise ValueError("trusted_url host name must not contain spaces")
+    try:
+        port_num = parts.port
+    except ValueError:
+        raise ValueError("trusted_url has an invalid port") from None
     if parts.username or parts.password:
         raise ValueError("trusted_url must not contain a user name or password")
     if parts.path not in ("", "/") or parts.query or parts.fragment:
         raise ValueError("trusted_url must be just the address, without a path or query")
     host = parts.hostname.lower()
-    port = f":{parts.port}" if parts.port else ""
+    # urlsplit strips the brackets off an IPv6 literal, which would otherwise
+    # rebuild an unparseable "https://fd7a::1:8443/".
+    if ":" in host:
+        host = f"[{host}]"
+    port = f":{port_num}" if port_num else ""
     return f"https://{host}{port}/"

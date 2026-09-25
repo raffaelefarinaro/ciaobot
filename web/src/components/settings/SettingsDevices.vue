@@ -44,6 +44,7 @@
         inputmode="url"
         placeholder="https://your-mac.tailnet.ts.net"
         autocomplete="off"
+        @input="trustedEdited = true"
       />
       <button class="btn-primary btn-small" type="submit" :disabled="saving">
         {{ saving ? 'Saving…' : 'Save' }}
@@ -93,11 +94,16 @@ const shown = ref<string | null>(null)
 const qrSvg = ref('')
 const copied = ref<string | null>(null)
 const trustedInput = ref('')
+// A load can land after the user has started typing, and overwriting the field
+// then would throw their input away. Only an untouched field is refilled.
+const trustedEdited = ref(false)
 const saving = ref(false)
 const saveError = ref('')
 
-async function load() {
-  loading.value = true
+// `quiet` skips the loading flag: a refresh right after a save should not
+// flash "Looking up addresses…" over a list that is already on screen.
+async function load({ quiet = false }: { quiet?: boolean } = {}) {
+  if (!quiet) loading.value = true
   error.value = ''
   try {
     const res = await api.get<{
@@ -107,11 +113,19 @@ async function load() {
     }>('/api/addresses')
     addresses.value = res.addresses || []
     if (typeof res.port === 'number') port.value = res.port
-    trustedInput.value = res.trusted_url || ''
+    // A quiet refresh follows a save, which already filled the field from the
+    // PATCH response, so only a full load refills it — and never over typing.
+    if (!quiet && !trustedEdited.value) trustedInput.value = res.trusted_url || ''
+    // Keep an open QR code open across a refresh; only close it if the address
+    // it encodes is no longer offered.
+    if (shown.value && !addresses.value.some((entry) => entry.url === shown.value)) {
+      shown.value = null
+      qrSvg.value = ''
+    }
   } catch (e) {
     error.value = 'Could not read addresses: ' + errorMessage(e)
   } finally {
-    loading.value = false
+    if (!quiet) loading.value = false
   }
 }
 
@@ -143,10 +157,14 @@ async function saveTrusted() {
   saving.value = true
   saveError.value = ''
   try {
-    await api.patch<RoutineSettings>('/api/settings/routines', {
+    const saved = await api.patch<RoutineSettings>('/api/settings/routines', {
       trusted_url: trustedInput.value.trim(),
     })
-    await load()
+    // Show what the server stored (canonical case, trailing slash, IPv6
+    // brackets) rather than leaving the raw typing in the field.
+    if (typeof saved?.trusted_url === 'string') trustedInput.value = saved.trusted_url
+    trustedEdited.value = false
+    await load({ quiet: true })
   } catch (e) {
     saveError.value = errorMessage(e)
   } finally {

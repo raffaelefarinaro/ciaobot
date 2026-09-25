@@ -94,4 +94,40 @@ describe('SettingsDevices', () => {
       'trusted_url must start with https://',
     )
   })
+
+  it('keeps what the user typed while the first load is still in flight', async () => {
+    let resolveGet: (value: unknown) => void = () => {}
+    vi.mocked(api.get).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveGet = resolve
+      }) as never,
+    )
+    const wrapper = mount(SettingsDevices)
+    await wrapper.find('#trusted-url').setValue('https://typing.ts.net')
+
+    resolveGet(ADDRESSES)
+    await flushPromises()
+
+    expect((wrapper.find('#trusted-url').element as HTMLInputElement).value).toBe(
+      'https://typing.ts.net',
+    )
+  })
+
+  it('refreshes quietly after a save and shows the stored URL', async () => {
+    const wrapper = await mountCard()
+    await wrapper.findAll('.device-actions button')[1].trigger('click')
+    expect(wrapper.find('.device-qr').exists()).toBe(true)
+
+    await wrapper.find('#trusted-url').setValue('https://x.ts.net')
+    await wrapper.find('form.device-trusted').trigger('submit')
+    await flushPromises()
+
+    // The stored (normalized) value, not the raw typing.
+    expect((wrapper.find('#trusted-url').element as HTMLInputElement).value).toBe(
+      'https://x.ts.net/',
+    )
+    // No "Looking up addresses…" flash, and the open QR code stays open.
+    expect(wrapper.text()).not.toContain('Looking up addresses')
+    expect(wrapper.find('.device-qr').exists()).toBe(true)
+  })
 })

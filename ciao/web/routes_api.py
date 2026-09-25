@@ -8094,12 +8094,23 @@ async def addresses_endpoint(request: Request) -> JSONResponse:
     Session-protected: it enumerates LAN interfaces. URLs never carry a
     password or setup token; every device signs in on its own.
     """
-    from ciao.network_addresses import is_loopback_url, server_addresses
+    from ciao.network_addresses import (
+        is_loopback_url,
+        normalize_trusted_url,
+        server_addresses,
+    )
 
     config = request.app.state.config
     port = int(getattr(config, "pwa_port", 8443) or 8443)
     app_settings = getattr(request.app.state, "app_settings", None)
-    trusted = (getattr(getattr(app_settings, "settings", None), "trusted_url", "") or "").strip()
+    stored = getattr(getattr(app_settings, "settings", None), "trusted_url", "") or ""
+    # Re-validate what was stored: app_settings.json can be hand-edited, and a
+    # token smuggled into the stored value must never reach the QR code. A
+    # value the setter would have refused is treated as no trusted URL at all.
+    try:
+        trusted = normalize_trusted_url(stored)
+    except ValueError:
+        trusted = ""
     entries: list[dict[str, object]] = []
     if trusted:
         entries.append({"url": trusted, "kind": "trusted", "secure": True, "loopback": False})

@@ -100,6 +100,8 @@ def test_normalize_trusted_url_accepts_https_origins() -> None:
     # Canonical stored form: lowercase host, one trailing slash, port kept.
     assert normalize_trusted_url("https://Mini.Tailnet.ts.net") == "https://mini.tailnet.ts.net/"
     assert normalize_trusted_url("https://host:8443/") == "https://host:8443/"
+    # An IPv6 literal keeps its brackets, or the result is not a valid URL.
+    assert normalize_trusted_url("https://[FD7A::1]:8443") == "https://[fd7a::1]:8443/"
     # Empty (or whitespace) clears the setting.
     assert normalize_trusted_url(" ") == ""
 
@@ -107,7 +109,8 @@ def test_normalize_trusted_url_accepts_https_origins() -> None:
 def test_normalize_trusted_url_rejects_unsafe_values() -> None:
     # Anything a copied URL could smuggle past a QR code is refused rather
     # than stored: a scheme that is not HTTPS, no host, credentials, or a
-    # path/query/fragment that could carry a token.
+    # path/query/fragment that could carry a token. A space in the host and a
+    # non-numeric port slip past urlsplit, so they are refused explicitly too.
     for bad in (
         "http://host",
         "https://",
@@ -115,6 +118,8 @@ def test_normalize_trusted_url_rejects_unsafe_values() -> None:
         "https://host/path",
         "https://host/?token=x",
         "https://host/#x",
+        "https://ho st",
+        "https://host:abc",
         "ftp://host",
     ):
         with pytest.raises(ValueError):

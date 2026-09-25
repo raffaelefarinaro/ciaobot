@@ -76,6 +76,17 @@ def test_addresses_never_include_credentials(monkeypatch) -> None:
         assert "token" not in url
 
 
+def test_addresses_drop_invalid_stored_trusted_url(monkeypatch) -> None:
+    # app_settings.json can be hand-edited, so a stored value the setter would
+    # have refused must not be handed to the card: a query token here would end
+    # up printed as the "Full app" address and encoded into the QR code.
+    _patch_addresses(monkeypatch)
+    body = _client("https://host/?token=x").get("/api/addresses").json()
+
+    assert "trusted" not in [entry["kind"] for entry in body["addresses"]]
+    assert body["trusted_url"] is None
+
+
 def test_addresses_route_is_session_protected() -> None:
     # It enumerates LAN interfaces, so it must not sit in the loopback-public
     # allowlist next to /api/auth.

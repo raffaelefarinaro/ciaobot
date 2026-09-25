@@ -330,9 +330,9 @@
         </div>
 
         <!-- Other devices — where to open Ciaobot from a phone or another
-             computer. The desktop app is the one device, so the card drops
-             out there. -->
-        <SettingsDevices v-if="!inDesktopApp" />
+             computer. Shown in Ciaobot.app too: it is the one place there to
+             set the trusted HTTPS address. -->
+        <SettingsDevices />
 
         <!-- Notifications — the desktop app owns this in the tray, so the
              card drops out there rather than showing web-push controls the
