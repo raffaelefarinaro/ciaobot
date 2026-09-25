@@ -1,91 +1,120 @@
 <template>
   <div class="subagent-view">
-    <PaneHeader page-tag="subagent" @open-sidebar="emit('open-sidebar')">
+    <PaneHeader :brand="false" @open-sidebar="emit('open-sidebar')">
       <template #title>
-        <RouterLink :to="`/chat/${chatId}`" class="parent-link" :title="parentTitle">
-          <span aria-hidden="true">&#8592;</span> {{ parentTitle }}
-        </RouterLink>
+        <div class="header-left">
+          <RouterLink
+            :to="`/chat/${chatId}`"
+            class="btn-icon back-btn"
+            :aria-label="`Back to ${parentTitle}`"
+            :title="`Back to ${parentTitle}`"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M15 6l-6 6 6 6" />
+            </svg>
+          </RouterLink>
+          <div class="subagent-crumb">
+            <span class="pane-title agent-name">{{ agentLabel }}</span>
+            <span class="parent-crumb" :title="parentTitle">in {{ parentTitle }}</span>
+          </div>
+        </div>
       </template>
       <template #actions>
-        <span class="ro-chip" title="Subagent transcripts are a record, not a session you can steer">read-only</span>
+        <span class="ro-tag" title="Subagent transcripts are a record, not a session you can steer">Read only</span>
       </template>
     </PaneHeader>
 
-    <div class="subagent-meta">
-      <span v-if="subagent?.subagent_type" class="type-chip">{{ subagent.subagent_type }}</span>
-      <span class="agent-name">{{ agentLabel }}</span>
-      <span v-if="status" class="status-chip" :class="status">{{ status }}</span>
-      <span v-if="status === 'running'" class="running-spinner" aria-hidden="true" />
-    </div>
-
     <div class="subagent-body">
-      <p v-if="loading && !subagent" class="notice" role="status">Loading the subagent transcript…</p>
-      <p v-else-if="!subagent" class="notice" role="status">
-        This subagent's transcript is not available on this machine. Completed
-        subagents stay in the chat's Activity trace.
-      </p>
-      <template v-else>
-        <!-- The key carries the message's own shape, not just its index: the
-             poll replaces the whole transcript every few seconds, and any
-             change that is not a pure append shifts every later index. On a
-             bare index key Vue patches the existing nodes in place, so an
-             already-rendered bubble takes on a different message's role branch
-             and v-html. The index stays in the key so it is unique even when
-             two messages are genuinely identical. -->
-        <div
-          v-for="(m, i) in subagent.messages"
-          :key="`${i}:${m.role}:${m.tool_name || ''}:${m.content.length}`"
-          class="sub-msg"
-          :class="m.role"
-        >
-          <!-- Activity rollup from _extract_assistant_blocks: tool_name === '_activity' -->
-          <div v-if="m.tool_name === '_activity'" class="sub-activity">
+      <div class="page-grid subagent-grid">
+        <div class="page-main subagent-main">
+          <p v-if="loading && !subagent" class="subagent-loading" role="status">Loading the subagent transcript…</p>
+          <section v-else-if="!subagent" class="subagent-empty" role="status" aria-labelledby="subagent-empty-title">
+            <h2 id="subagent-empty-title">Transcript not on this machine</h2>
+            <p>
+              This subagent's transcript is not available on this machine. Finished
+              subagents keep their steps in the parent chat's Activity.
+              <RouterLink :to="`/chat/${chatId}`" class="subagent-empty-link">Open the parent chat</RouterLink>
+            </p>
+          </section>
+          <template v-else>
+            <!-- The key carries the message's own shape, not just its index: the
+                 poll replaces the whole transcript every few seconds, and any
+                 change that is not a pure append shifts every later index. On a
+                 bare index key Vue patches the existing nodes in place, so an
+                 already-rendered bubble takes on a different message's role branch
+                 and v-html. The index stays in the key so it is unique even when
+                 two messages are genuinely identical. -->
             <div
-              v-for="(line, k) in m.content.split('\n')"
-              :key="k"
-              class="sub-activity-line"
-              v-text="line"
-            ></div>
-          </div>
-          <div v-else-if="m.role === 'user'" class="bubble user">
-            <div class="bubble-role">
-              User
-              <!-- Both provider renderers omit `timestamp` on subagent
-                   messages, so it is drawn only when one is actually there. -->
-              <span v-if="m.timestamp" class="bubble-time">{{ m.timestamp }}</span>
+              v-for="(m, i) in subagent.messages"
+              :key="`${i}:${m.role}:${m.tool_name || ''}:${m.content.length}`"
+              class="sub-msg"
+              :class="m.role"
+            >
+              <!-- Activity rollup from _extract_assistant_blocks: tool_name === '_activity' -->
+              <div v-if="m.tool_name === '_activity'" class="sub-activity">
+                <div
+                  v-for="(line, k) in m.content.split('\n')"
+                  :key="k"
+                  class="sub-activity-line"
+                  v-text="line"
+                ></div>
+              </div>
+              <div v-else-if="m.role === 'user'" class="bubble user">
+                <div class="bubble-role">
+                  Prompt
+                  <!-- Both provider renderers omit `timestamp` on subagent
+                       messages, so it is drawn only when one is actually there. -->
+                  <span v-if="m.timestamp" class="bubble-time">{{ m.timestamp }}</span>
+                </div>
+                <div class="bubble-content" v-html="renderMarkdown(m.content)"></div>
+              </div>
+              <div v-else-if="m.role === 'assistant'" class="bubble assistant">
+                <div v-if="m.timestamp" class="bubble-role">
+                  <span class="bubble-time">{{ m.timestamp }}</span>
+                </div>
+                <div class="bubble-content" v-html="renderMarkdown(m.content)"></div>
+              </div>
+              <div v-else class="bubble system">
+                <div class="bubble-content" v-text="m.content"></div>
+              </div>
             </div>
-            <div class="bubble-content" v-html="renderMarkdown(m.content)"></div>
-          </div>
-          <div v-else-if="m.role === 'assistant'" class="bubble assistant">
-            <div class="bubble-role">
-              Assistant
-              <span v-if="m.timestamp" class="bubble-time">{{ m.timestamp }}</span>
-            </div>
-            <div class="bubble-content" v-html="renderMarkdown(m.content)"></div>
-          </div>
-          <div v-else class="bubble system">
-            <div class="bubble-content" v-text="m.content"></div>
-          </div>
+            <p v-if="!subagent.messages.length" class="subagent-loading">No captured turns.</p>
+          </template>
         </div>
-        <p v-if="!subagent.messages.length" class="notice">No captured turns.</p>
-      </template>
+
+        <aside class="page-rail subagent-rail" aria-labelledby="subagent-rail-title">
+          <h2 id="subagent-rail-title" class="rail-title">Run</h2>
+          <div class="rail-kvs">
+            <div class="rail-kv"><span>Agent</span><strong>{{ agentLabel }}</strong></div>
+            <div v-if="subagent?.subagent_type" class="rail-kv">
+              <span>Type</span><strong class="type-value">{{ subagent.subagent_type }}</strong>
+            </div>
+            <div v-if="status" class="rail-kv">
+              <span>State</span>
+              <strong class="status-value" :class="status">
+                <span v-if="status === 'running'" class="running-spinner" aria-hidden="true" />
+                {{ statusLabel }}
+              </strong>
+            </div>
+            <div v-if="subagent" class="rail-kv"><span>Messages</span><strong>{{ subagent.messages.length }}</strong></div>
+          </div>
+          <p class="rail-note">Started from {{ parentTitle }}.</p>
+        </aside>
+      </div>
     </div>
 
     <!-- Claude Code subagents are transcript files, not resumable sessions, so
-         there is nothing to send into. The composer is kept (disabled) rather
-         than dropped so the view still reads as a chat and the difference is
-         stated where the user would otherwise type. -->
-    <div class="composer">
-      <textarea
-        class="composer-input"
-        disabled
-        rows="1"
-        aria-label="Replying to a subagent is not possible"
-        placeholder="Read-only — reply in the parent chat instead"
-      ></textarea>
-      <RouterLink :to="`/chat/${chatId}`" class="btn-small composer-action">
-        Go to chat
-      </RouterLink>
+         there is nothing to send into. A note bar stands where the composer
+         would be, saying where replies go instead of showing a dead input. -->
+    <div class="readonly-bar">
+      <div class="readonly-note">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="5" y="11" width="14" height="9" rx="2" />
+          <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+        </svg>
+        <span>Replies go to the parent chat.</span>
+        <RouterLink :to="`/chat/${chatId}`" class="btn-small readonly-action">Go to chat</RouterLink>
+      </div>
     </div>
   </div>
 </template>
@@ -125,6 +154,11 @@ const status = computed(() => {
   const live = store.runningSubagentsFor(props.chatId)
     .some(s => sameAgent(s.agent_id, props.agentId))
   return live ? 'running' : (subagent.value?.status || '')
+})
+
+const statusLabel = computed(() => {
+  const s = status.value
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : ''
 })
 
 async function refresh(): Promise<void> {
@@ -223,54 +257,95 @@ function renderMarkdown(text: string): string {
   background: var(--bg);
 }
 
-.parent-link {
-  /* The only in-header way back to the parent chat, and the first
-     touch-reachable control in a PaneHeader title slot — PaneHeader's own 44px
-     compensation is scoped to its icon buttons and does not reach this. */
+.back-btn { color: var(--fg3); text-decoration: none; }
+.back-btn:hover { color: var(--fg); }
+
+/* Agent name as the title, then the parent chat as a muted crumb, on one
+   line like the chat header's title + project. */
+.subagent-crumb {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1;
+}
+.subagent-crumb .agent-name { flex: 0 1 auto; }
+.parent-crumb {
+  min-width: 0;
+  flex: 0 1 auto;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Squared state tag (DESIGN.md: --radius-xs), sentence case. */
+.ro-tag {
+  flex: none;
   display: inline-flex;
   align-items: center;
-  min-height: var(--touch, 44px);
-  color: var(--fg2);
-  text-decoration: none;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.parent-link:hover { color: var(--fg); }
-
-.ro-chip,
-.type-chip,
-.status-chip {
-  flex: none;
-  padding: 1px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
+  min-height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
   color: var(--fg2);
   font-size: var(--text-xs, 11px);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.status-chip.running { color: var(--accent2, var(--accent)); border-color: var(--accent2, var(--accent)); }
-.status-chip.failed { color: var(--error, #e5484d); border-color: var(--error, #e5484d); }
-
-.subagent-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border);
-  color: var(--fg2);
-  font-size: var(--text-sm, 13px);
-}
-
-.agent-name {
   font-weight: 600;
+  white-space: nowrap;
+}
+
+.subagent-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.subagent-grid {
+  padding-top: var(--space-6);
+  padding-bottom: var(--space-6);
+}
+.subagent-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.subagent-loading {
+  margin: 0;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+}
+
+/* Same shape as the chat's "Start with a request" empty state. */
+.subagent-empty { max-width: 640px; padding: var(--space-5) 0; }
+.subagent-empty h2 {
+  margin: 0 0 4px;
   color: var(--fg);
+  font-size: calc(20px * var(--font-scale));
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+.subagent-empty p {
+  margin: 0;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.subagent-empty-link { color: var(--accent); }
+
+.subagent-rail .rail-kv strong {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.status-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.status-value.failed { color: var(--error); }
 
 .running-spinner {
   width: 8px;
@@ -289,65 +364,49 @@ function renderMarkdown(text: string): string {
   .running-spinner { animation-duration: 2.2s; }
 }
 
-.subagent-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.notice {
-  color: var(--fg2);
-  font-style: italic;
-}
-
 .bubble {
   max-width: 90%;
   padding: 8px 12px;
-  border-radius: var(--radius, 6px);
-  line-height: 1.5;
+  border-radius: var(--radius-lg, 12px);
+  line-height: 1.6;
 }
 
 .bubble.user {
   align-self: flex-end;
-  background: var(--bg3);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
   color: var(--fg);
 }
 
 .bubble.assistant {
-  align-self: flex-start;
-  background: var(--bg2);
-  border: 1px solid var(--border);
+  align-self: stretch;
+  max-width: 100%;
+  padding: 0;
 }
 
 .bubble.system {
   align-self: flex-start;
-  color: var(--fg2);
-  font-size: var(--text-sm, 12px);
+  color: var(--fg3);
+  font-size: var(--text-sm);
 }
 
 .bubble-role {
   display: flex;
   gap: 8px;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--fg2);
-  margin-bottom: 3px;
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  color: var(--fg3);
+  margin-bottom: 2px;
 }
-
-.bubble-time { text-transform: none; letter-spacing: 0; }
 
 .bubble-content :deep(p) { margin: 4px 0; }
 .bubble-content :deep(a) { color: var(--accent); text-decoration: underline; }
 .bubble-content :deep(ul),
 .bubble-content :deep(ol) { padding-left: 22px; margin: 4px 0; }
 .bubble-content :deep(pre) {
-  background: var(--bg);
+  background: var(--bg2);
   padding: 6px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm, 6px);
   overflow-x: auto;
 }
 .bubble-content :deep(code) {
@@ -355,13 +414,12 @@ function renderMarkdown(text: string): string {
   font-size: 12px;
 }
 
+/* Tool activity as a quiet hairline step, like the chat's turn lines. */
 .sub-activity {
-  align-self: flex-start;
-  max-width: 90%;
-  background: var(--bg2);
-  border-radius: 4px;
-  padding: 4px 8px;
-  font-size: var(--text-sm, 12px);
+  align-self: stretch;
+  padding: 6px 0 6px 12px;
+  border-left: 1px solid var(--border);
+  font-size: var(--text-sm);
   color: var(--fg2);
 }
 
@@ -371,33 +429,32 @@ function renderMarkdown(text: string): string {
   word-break: break-word;
 }
 
-.composer {
+/* Sits on the page grid's column edges, where the composer sits in a chat. */
+.readonly-bar {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto;
+  padding: 0 var(--page-gutter) var(--space-4);
+}
+.readonly-note {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 16px;
-  border-top: 1px solid var(--border);
-}
-
-.composer-input {
-  flex: 1;
-  min-width: 0;
-  min-height: var(--touch);
-  padding: 8px 10px;
+  gap: var(--space-3);
+  padding: 8px 8px 8px 12px;
   border: 1px solid var(--border);
-  border-radius: var(--radius, 6px);
+  border-radius: var(--radius);
   background: var(--bg2);
   color: var(--fg2);
-  font: inherit;
-  resize: none;
-  cursor: not-allowed;
+  font-size: var(--text-sm);
 }
-
-.composer-action {
+.readonly-note > svg { flex: none; color: var(--fg3); }
+.readonly-note > span { flex: 1; min-width: 0; }
+.readonly-action {
   flex: none;
   min-height: var(--touch);
-  display: inline-flex;
-  align-items: center;
-  text-decoration: none;
+}
+@media (pointer: fine) {
+  .readonly-action { min-height: 34px; padding-block: 6px; }
 }
 </style>

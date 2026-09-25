@@ -61,7 +61,7 @@ describe('SubagentChatView', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders the transcript with the composer disabled', async () => {
+  it('renders the transcript with a read-only note instead of a composer', async () => {
     const wrapper = await mountView()
 
     expect(wrapper.text()).toContain('Sweep the callers')
@@ -72,8 +72,9 @@ describe('SubagentChatView', () => {
     expect(wrapper.findAll('.bubble.assistant')).toHaveLength(1)
     expect(wrapper.findAll('.sub-activity')).toHaveLength(1)
     // A subagent transcript is a record, not a session you can steer.
-    expect(wrapper.get('.composer-input').attributes('disabled')).toBeDefined()
-    expect(wrapper.text()).toContain('read-only')
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.get('.readonly-note').text()).toContain('Replies go to the parent chat.')
+    expect(wrapper.get('.ro-tag').text()).toBe('Read only')
     wrapper.unmount()
   })
 
@@ -83,6 +84,8 @@ describe('SubagentChatView', () => {
     const hrefs = wrapper.findAll('a').map(a => a.attributes('href'))
     expect(hrefs).toContain(`/chat/${CHAT_ID}`)
     expect(wrapper.text()).toContain('Refactor the store')
+    expect(wrapper.get('.back-btn').attributes('aria-label')).toBe('Back to Refactor the store')
+    expect(wrapper.get('.agent-name').text()).toBe('Sweep the callers')
     wrapper.unmount()
   })
 
@@ -105,6 +108,8 @@ describe('SubagentChatView', () => {
     const wrapper = await mountView('missing-agent')
 
     expect(wrapper.text()).toContain('not available on this machine')
+    expect(wrapper.get('#subagent-empty-title').text()).toBe('Transcript not on this machine')
+    expect(wrapper.get('.subagent-empty-link').attributes('href')).toBe(`/chat/${CHAT_ID}`)
     wrapper.unmount()
   })
 
@@ -118,7 +123,7 @@ describe('SubagentChatView', () => {
 
     const wrapper = await mountView()
 
-    expect(wrapper.get('.status-chip').text()).toBe('running')
+    expect(wrapper.get('.status-value').text()).toBe('Running')
     expect(wrapper.find('.running-spinner').exists()).toBe(true)
     wrapper.unmount()
   })
@@ -131,8 +136,8 @@ describe('SubagentChatView', () => {
 
     const wrapper = await mountView()
 
-    expect(wrapper.get('.status-chip').text()).toBe('stopped')
-    expect(wrapper.get('.status-chip').classes()).toContain('stopped')
+    expect(wrapper.get('.status-value').text()).toBe('Stopped')
+    expect(wrapper.get('.status-value').classes()).toContain('stopped')
     expect(wrapper.find('.running-spinner').exists()).toBe(false)
     wrapper.unmount()
   })
