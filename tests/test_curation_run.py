@@ -662,7 +662,10 @@ def test_curation_begin_releases_the_lease_on_a_quiet_night(
 
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)
-    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    # Relative to today, not a fixed date: the begin command reads
+    # date.today(), so a hard-coded marker turned the weekly pass due (and the
+    # run non-empty) once the calendar passed it by WEEKLY_PASS_DAYS.
+    _fresh_log(vault, last_full_pass=(date.today() - timedelta(days=1)).isoformat())
     printed = _capture(monkeypatch)
 
     code = _curation_begin_command(_args(tmp_path, vault, guide, holder="nightly"))
