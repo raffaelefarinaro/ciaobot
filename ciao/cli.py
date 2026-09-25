@@ -3687,11 +3687,20 @@ def _register_launchd_service(workspace: Path) -> Path:
         raise RuntimeError(
             f"{root} is not a Ciaobot workspace (no .env). Run `ciao setup --workspace {root}` first."
         )
+
+    from dotenv import dotenv_values
+
+    runtime_value = (dotenv_values(root / ".env").get("CIAO_RUNTIME_ROOT") or "").strip() or ".runtime"
+    runtime_root = Path(runtime_value).expanduser()
+    if not runtime_root.is_absolute():
+        runtime_root = root / runtime_root
     return _write_launchd_plist(
         workspace=root,
         launch_agents_dir=default_launch_agents_dir(),
-        python_path=sys.executable,
+        engine_path=os.environ.get("CIAO_ENGINE_PATH", "").strip() or sys.executable,
+        runtime_root=runtime_root,
         port=_pwa_port_from_env(root, macos_service.DEFAULT_PORT),
+        path=os.environ.get("PATH", ""),
     )
 
 
@@ -3717,6 +3726,20 @@ def _service_command(args: argparse.Namespace) -> int:
     elif action == "start":
         runtime = macos_service.discover_runtime()
         workspace = getattr(args, "workspace", None)
+        if workspace is not None and Path(runtime.server_plist).is_file():
+            installed = _plist_workspace(default_launch_agents_dir())
+            requested = Path(workspace).expanduser().resolve()
+            if installed is not None and installed != requested:
+                return macos_service.print_result(
+                    macos_service.ServiceResult(
+                        False,
+                        "start",
+                        f"The installed LaunchAgent serves {installed}, not {requested}. "
+                        f"Run `ciao setup --workspace {requested} --load-launchd --yes` to repoint it.",
+                        {"installed_workspace": str(installed), "requested_workspace": str(requested)},
+                    ),
+                    as_json=as_json,
+                )
         if workspace is not None and not Path(runtime.server_plist).is_file():
             try:
                 _register_launchd_service(Path(workspace))

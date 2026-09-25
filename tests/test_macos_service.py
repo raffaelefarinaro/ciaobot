@@ -374,6 +374,83 @@ def test_service_start_rejects_directory_without_env(
     assert calls == []
 
 
+def test_service_start_register_honors_runtime_root_and_engine_path(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from ciao import cli
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".env").write_text(
+        "PWA_PORT=9555\nCIAO_RUNTIME_ROOT=rt\n", encoding="utf-8"
+    )
+    engine = tmp_path / "bin" / "ciao"
+    calls: list[list[str]] = []
+    monkeypatch.setenv("CIAO_ENGINE_PATH", str(engine))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        macos_service,
+        "_launchctl",
+        lambda args, runner=None: calls.append(list(args))
+        or subprocess.CompletedProcess(["launchctl", *args], 0, "", ""),
+    )
+
+    rc = cli.main(
+        ["service", "start", "--workspace", str(workspace), "--json"]
+    )
+
+    plist_path = (
+        Path(os.environ["CIAO_LAUNCH_AGENTS_DIR"]) / "com.ciao.server.plist"
+    )
+    assert rc == 0
+    assert plist_path.is_file()
+    plist_data = plistlib.loads(plist_path.read_bytes())
+    assert (
+        plist_data["EnvironmentVariables"]["CIAO_RUNTIME_ROOT"]
+        == str((workspace / "rt").resolve())
+    )
+    assert plist_data["ProgramArguments"][0] == str(engine)
+    assert "-m" not in plist_data["ProgramArguments"]
+
+
+def test_service_start_refuses_workspace_mismatch(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from ciao import cli
+
+    ws_a = tmp_path / "ws_a"
+    ws_b = tmp_path / "ws_b"
+    for workspace in (ws_a, ws_b):
+        workspace.mkdir()
+        (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        macos_service,
+        "_launchctl",
+        lambda args, runner=None: calls.append(list(args))
+        or subprocess.CompletedProcess(["launchctl", *args], 0, "", ""),
+    )
+
+    assert cli.main(["service", "start", "--workspace", str(ws_a), "--json"]) == 0
+    calls.clear()
+    capsys.readouterr()
+
+    rc = cli.main(["service", "start", "--workspace", str(ws_b), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    plist_path = (
+        Path(os.environ["CIAO_LAUNCH_AGENTS_DIR"]) / "com.ciao.server.plist"
+    )
+    plist_data = plistlib.loads(plist_path.read_bytes())
+    assert rc == 1
+    assert str(ws_a.resolve()) in payload["message"]
+    assert calls == []
+    assert plist_data["EnvironmentVariables"]["CIAO_WORKSPACE"] == str(
+        ws_a.resolve()
+    )
+
+
 def test_service_refuses_on_non_macos(monkeypatch, capsys) -> None:
     from ciao import cli
 
