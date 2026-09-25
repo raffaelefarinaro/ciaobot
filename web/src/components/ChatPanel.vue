@@ -815,7 +815,7 @@
           >
             <span class="chat-work-output-icon" aria-hidden="true">↗</span>
             <span class="chat-work-output-name">{{ fileCardBasename(output.file_path) }}</span>
-            <span class="chat-work-output-action">{{ output.action }}</span>
+            <span class="chat-work-output-action">{{ outputActionTag(output.action) }}</span>
           </button>
         </div>
         <div v-else class="chat-work-empty">
@@ -1403,7 +1403,7 @@
             @click="openFileCard(output.file_path)"
           >
             <span>{{ fileCardBasename(output.file_path) }}</span>
-            <small>{{ output.action }}<template v-if="fileCardDirname(output.file_path)"> · {{ fileCardDirname(output.file_path) }}</template></small>
+            <small>{{ outputActionTag(output.action) }}<template v-if="fileCardDirname(output.file_path)"> · {{ fileCardDirname(output.file_path) }}</template></small>
           </button>
         </div>
         <p v-else-if="!mentionedFiles.length" class="rail-note">None yet.</p>
@@ -1480,6 +1480,7 @@ import {
   isImageFilePath,
   isSubagentLine,
   mentionedFilePaths,
+  mergeTraceOutputs,
   outputActionTag,
   traceSummaryMetaParts,
   type TraceOutput,
@@ -2084,20 +2085,9 @@ const inspectorTabs = [
   { key: 'activity' as const, label: 'Activity' },
   { key: 'output' as const, label: 'Output' },
 ]
-const inspectorOutputs = computed<TraceOutput[]>(() => {
-  const seen = new Set<string>()
-  const outputs: TraceOutput[] = []
-  for (const item of renderItems.value) {
-    if (item.kind !== 'trace' && item.kind !== 'assistant') continue
-    for (const output of item.outputs ?? []) {
-      const key = `${output.action}:${output.file_path}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      outputs.push(output)
-    }
-  }
-  return outputs
-})
+const inspectorOutputs = computed<TraceOutput[]>(() => mergeTraceOutputs(
+  renderItems.value.map(item => (item.kind === 'trace' || item.kind === 'assistant' ? item.outputs : undefined)),
+))
 // Every activity line this chat has produced: its turns, the subagents they
 // ran, and the turn in flight. The rail reads skills and MCP tools from it.
 const chatActivityLines = computed<string[]>(() => {

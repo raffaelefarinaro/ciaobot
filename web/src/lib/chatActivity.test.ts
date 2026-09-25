@@ -3,6 +3,7 @@ import {
   collectToolUsage,
   describeToolStep,
   mentionedFilePaths,
+  mergeTraceOutputs,
   buildTurnParts,
   collectTraceOutputs,
   findFinalAnswerIndex,
@@ -417,6 +418,20 @@ describe('describeToolStep', () => {
     expect(describeToolStep('🔧 skill {"name":"docs"}')).toBe('Using the docs skill')
     expect(describeToolStep('🔌 mcp__github__get_pull_request #418')).toBe('github · get pull request')
     expect(describeToolStep('📝 TodoWrite [...]')).toBe('Updating the plan')
+  })
+})
+
+describe('mergeTraceOutputs', () => {
+  it('lists a file once across turns, keeping the most telling action', () => {
+    expect(mergeTraceOutputs([
+      [{ file_path: 'work/memory-vault/journal/daily/2026-09-25.md', action: 'written' }],
+      [{ file_path: 'work/memory-vault/journal/daily/2026-09-25.md', action: 'edited' }],
+      [{ file_path: '/Users/me/ws/work/memory-vault/journal/daily/2026-09-25.md', action: 'created' }],
+      [{ file_path: 'docs/other.md', action: 'edited' }],
+    ])).toEqual([
+      { file_path: 'work/memory-vault/journal/daily/2026-09-25.md', action: 'created' },
+      { file_path: 'docs/other.md', action: 'edited' },
+    ])
   })
 })
 

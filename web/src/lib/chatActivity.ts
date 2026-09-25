@@ -109,6 +109,30 @@ export function collectTraceOutputs(
   return outputs
 }
 
+/** One list of files for a whole chat, from each turn's outputs: the same
+ *  file across turns (or spelled absolute vs relative) is one row, keeping
+ *  the first spelling and the most telling action. */
+export function mergeTraceOutputs(lists: Iterable<TraceOutput[] | undefined>): TraceOutput[] {
+  const keys: string[] = []
+  const merged: TraceOutput[] = []
+  for (const list of lists) {
+    for (const output of list ?? []) {
+      const key = normalizeOutputPath(output.file_path)
+      if (!key) continue
+      const at = keys.findIndex(k => isSameOutputFile(k, key))
+      if (at >= 0) {
+        if (output.action && outputActionRank(output.action) > outputActionRank(merged[at].action)) {
+          merged[at] = { ...merged[at], action: output.action }
+        }
+        continue
+      }
+      keys.push(key)
+      merged.push({ ...output })
+    }
+  }
+  return merged
+}
+
 export function formatTokenUsage(usage?: Record<string, unknown>): string {
   if (!usage) return ''
   const inputVal = (usage.input_tokens ?? usage.inputTokens) as unknown
