@@ -485,6 +485,44 @@ def test_proposals_from_archive_default_leaves_memory_untouched(tmp_path: Path) 
     assert "no em dashes" in out.read_text(encoding="utf-8")
 
 
+_ROUTE_SAMPLE = (
+    "## Decisions\n"
+    "- Chose Known over unknown because reviewed. [people: Known]\n"
+    "- Chose the new rule over the old because it is cheaper. [memory]\n"
+    "- Chose the old rule over the other because it still holds. [memory]\n"
+)
+
+
+def test_route_insights_is_pure_and_matches_archive_routing(
+    tmp_path: Path,
+) -> None:
+    """The comparison's routing is the pipeline's routing, minus the writes.
+
+    The insights-compare report is only worth reading if both modes are
+    scored by the same function the live pipeline uses, and it is only safe
+    to call that function from a dry run if it writes nothing.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    guide = write_guide(
+        tmp_path / "CLAUDE.md", memory_entries=["Chose the old rule over the other because it still holds."]
+    )
+
+    before = sorted(vault.rglob("*"))
+    result = mp.route_insights(_ROUTE_SAMPLE, vault, guide_path=guide)
+
+    kept = [p.text for p in result.kept]
+    assert len(kept) == 2
+    assert any("the new rule" in t for t in kept)
+    assert any(p.target == "people" and p.payload == "Known" for p in result.kept)
+    assert [p.text for p in result.suppressed] == [
+        "Chose the old rule over the other because it still holds."
+    ]
+    assert result.dropped == 0
+    # Nothing about the vault moved: no proposals file, no promotion record.
+    assert sorted(vault.rglob("*")) == before
+
+
 def test_promote_holds_back_no_op_rule_clause(tmp_path: Path) -> None:
     """'Durable rule: None.' style fillers never land in a bounded region."""
     guide = write_guide(tmp_path / "CLAUDE.md")

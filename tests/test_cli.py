@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import json
 import plistlib
 import sqlite3
@@ -198,6 +199,40 @@ def test_cli_workspace_census_dispatches_command(
     assert cli.main(["workspace-census", "--vault-root", "/tmp/vault", "--json"]) == 0
     assert str(called[0].vault_root) == "/tmp/vault"
     assert called[0].json is True
+
+
+def test_insights_compare_parses_args(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(
+        cli, "_insights_compare_command", lambda args: called.append(args) or 0
+    )
+
+    assert cli.main([
+        "insights-compare",
+        "--workspace", "personal",
+        "--last", "25",
+        "--sample", "recent",
+        "--seed", "7",
+        "--concurrency", "5",
+        "--run-id", "run-1",
+    ]) == 0
+    assert called[0].workspace == "personal"
+    assert called[0].last == 25
+    assert called[0].sample == "recent"
+    assert called[0].seed == 7
+    assert called[0].concurrency == 5
+    assert called[0].run_id == "run-1"
+    assert called[0].out is None
+
+    # The defaults are the ones the plan fixes, so a bare invocation is the
+    # 50-chat varied sample of today's date.
+    cli.main(["insights-compare"])
+    assert called[1].workspace == ""
+    assert called[1].last == 50
+    assert called[1].sample == "varied"
+    assert called[1].concurrency == 3
+    assert called[1].run_id == datetime.date.today().isoformat()
 
 
 def _write_healthy_audit_workspace(root: Path) -> None:
