@@ -241,6 +241,7 @@
 
         <!-- Inline comment edit popover -->
         <CommentComposePopover
+          inline
           :anchor="editingCommentId && editAnchor ? editAnchor : null"
           v-model="editDraftText"
           :images="editingCommentImages"
@@ -252,6 +253,7 @@
 
         <!-- Inline comment draft popover -->
         <CommentComposePopover
+          inline
           ref="composeDraftRef"
           :anchor="commentDraft && draftAnchor ? draftAnchor : null"
           v-model="composeText"
