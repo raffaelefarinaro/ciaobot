@@ -102,6 +102,19 @@ describe('ProjectSidebar review section', () => {
     expect(wrapper.find('.mm-search input').attributes('placeholder')).toBe('Search proposals…')
   })
 
+  it('marks workspaces with their key number and offers a new workspace', async () => {
+    const wrapper = await mountSidebar()
+    await wrapper.get('.workspace-scope-trigger').trigger('click')
+    const options = wrapper.findAll('.workspace-scope-option')
+    // Number tiles replace both the initial and the keycap on the right.
+    expect(options[0].get('.workspace-scope-mark').text()).toBe('1')
+    expect(options[1].get('.workspace-scope-mark').text()).toBe('2')
+    expect(wrapper.find('.workspace-scope-menu .sidebar-keycap').exists()).toBe(false)
+    const create = wrapper.get('.workspace-scope-new')
+    expect(create.text()).toContain('New workspace')
+    expect(create.attributes('href')).toBe('/settings/workspaces#new-workspace')
+  })
+
   it('opens the workspace scope as a keyboard menu and restores focus', async () => {
     const wrapper = await mountSidebar()
     const trigger = wrapper.get<HTMLButtonElement>('.workspace-scope-trigger')

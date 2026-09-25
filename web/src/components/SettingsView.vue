@@ -3561,6 +3561,20 @@ const archivedLoading = ref(false)
 const archivedLoadError = ref('')
 const restoringArchiveId = ref<string | null>(null)
 const showNewWorkspace = ref(false)
+// The sidebar's "New workspace" links to /settings/workspaces#new-workspace:
+// open the form and bring it into view instead of landing on the list.
+watch(
+  () => route.hash,
+  hash => {
+    if (hash !== '#new-workspace') return
+    showNewWorkspace.value = true
+    void nextTick(() => {
+      document.querySelector('.workspace-card--new')?.scrollIntoView?.({ block: 'start' })
+      document.querySelector<HTMLInputElement>('.workspace-card--new input')?.focus()
+    })
+  },
+  { immediate: true },
+)
 const workspaceModels = ref<ModelsResponse | null>(null)
 
 type WorkspaceForm = {

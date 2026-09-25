@@ -40,25 +40,25 @@
             class="workspace-scope-trigger"
             :data-workspace-color="colorForWorkspace(store.workspaceOptions.find(item => item.name === store.activeWorkspace))"
             :aria-label="`Workspace: ${workspaceLabel(store.activeWorkspace)}`"
-            :aria-haspopup="hasMultipleWorkspaces ? 'menu' : undefined"
-            :aria-expanded="hasMultipleWorkspaces ? workspaceScopeOpen : undefined"
-            :aria-controls="hasMultipleWorkspaces ? 'workspace-scope-menu' : undefined"
+            :aria-haspopup="canOpenWorkspaceMenu ? 'menu' : undefined"
+            :aria-expanded="canOpenWorkspaceMenu ? workspaceScopeOpen : undefined"
+            :aria-controls="canOpenWorkspaceMenu ? 'workspace-scope-menu' : undefined"
             :aria-keyshortcuts="workspaceShortcut(store.activeWorkspace) || undefined"
-            :disabled="!hasMultipleWorkspaces"
+            :disabled="!canOpenWorkspaceMenu"
             @click="toggleWorkspaceMenu"
             @keydown.down.prevent="openWorkspaceMenu"
           >
             <!-- The workspace colour lives in a tinted initial tile, not a dot:
                  a coloured dot is the app's "something needs you" signal. -->
-            <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceInitial(store.activeWorkspace) }}</span>
+            <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceShortcut(store.activeWorkspace) || workspaceInitial(store.activeWorkspace) }}</span>
             <span class="workspace-scope-name">{{ workspaceLabel(store.activeWorkspace) }}</span>
-            <svg v-if="hasMultipleWorkspaces" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" aria-hidden="true">
+            <svg v-if="canOpenWorkspaceMenu" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" aria-hidden="true">
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </button>
 
           <div
-            v-if="hasMultipleWorkspaces && workspaceScopeOpen"
+            v-if="canOpenWorkspaceMenu && workspaceScopeOpen"
             id="workspace-scope-menu"
             ref="workspaceScopeMenu"
             class="workspace-scope-menu"
@@ -77,10 +77,19 @@
               :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
               @click="selectWorkspaceScope(workspace.name)"
             >
-              <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceInitial(workspace.name) }}</span>
+              <!-- The tile carries the workspace's 1-9 key, in its colour. -->
+              <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceShortcut(workspace.name) || workspaceInitial(workspace.name) }}</span>
               <span class="workspace-scope-name">{{ workspaceLabel(workspace.name) }}</span>
-              <kbd v-if="workspaceShortcut(workspace.name)" class="sidebar-keycap" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</kbd>
             </button>
+            <router-link
+              to="/settings/workspaces#new-workspace"
+              role="menuitem"
+              class="workspace-scope-option workspace-scope-new"
+              @click="workspaceScopeOpen = false"
+            >
+              <span class="workspace-scope-mark workspace-scope-mark--new" aria-hidden="true">+</span>
+              <span class="workspace-scope-name">New workspace</span>
+            </router-link>
           </div>
         </div>
 
@@ -1067,7 +1076,9 @@ function promptTitle(prompt: string): string {
 
 // With a single workspace the toggle is pure noise — hide it and let the
 // content fill the space.
-const hasMultipleWorkspaces = computed(() => store.workspaceOptions.length > 1)
+// The scope menu opens even with one workspace: it is also where a new
+// workspace is started.
+const canOpenWorkspaceMenu = computed(() => store.workspaceOptions.length > 0)
 // Settings tabs, in rail order. /settings is the General tab (route kept as-is).
 const SETTINGS_NAV = [
   { to: '/settings', label: 'General' },
@@ -1131,7 +1142,7 @@ function workspaceInitial(workspace: string): string {
 }
 
 function openWorkspaceMenu(): void {
-  if (!hasMultipleWorkspaces.value) return
+  if (!canOpenWorkspaceMenu.value) return
   workspaceScopeOpen.value = true
   void nextTick(() => {
     workspaceScopeMenu.value
@@ -1147,7 +1158,7 @@ function closeWorkspaceMenu(restoreFocus = false): void {
 }
 
 function toggleWorkspaceMenu(): void {
-  if (!hasMultipleWorkspaces.value) return
+  if (!canOpenWorkspaceMenu.value) return
   if (workspaceScopeOpen.value) closeWorkspaceMenu(true)
   else openWorkspaceMenu()
 }
@@ -2824,6 +2835,20 @@ async function confirmDeleteChat(chatId: string) {
 
 .workspace-scope-option.active {
   color: var(--accent);
+}
+.workspace-scope-new {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 5px 5px;
+  color: var(--fg2);
+  text-decoration: none;
+}
+.workspace-scope-new:hover { color: var(--fg); }
+.workspace-scope-mark--new {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  color: var(--fg2);
+  font-size: var(--text-base);
 }
 
 @media (prefers-reduced-motion: reduce) {
