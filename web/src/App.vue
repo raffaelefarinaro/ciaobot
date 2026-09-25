@@ -58,6 +58,14 @@
       v-if="projectStore.serverRestarting"
       :message="projectStore.serverRestartMessage"
     />
+    <EngineOfflineView
+      v-if="showEngineOffline"
+      :state="engineState === 'updating' ? 'updating' : 'unreachable'"
+      :loopback="canUseDeviceControls"
+      :host="engineHost"
+      :retrying="engineRetrying"
+      @retry="retryEngine"
+    />
     <router-view />
     <InAppToast />
     <ConfirmDialog />
@@ -70,12 +78,14 @@
 import { ref, computed, onMounted, onUnmounted, provide, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import EngineOfflineView from './components/EngineOfflineView.vue'
 import InAppToast from './components/InAppToast.vue'
 import NewChatPicker from './components/NewChatPicker.vue'
 import PromptDialog from './components/PromptDialog.vue'
 import RestartNotice from './components/RestartNotice.vue'
 import StartupView from './components/StartupView.vue'
 import { askConfirm } from './lib/confirm'
+import { createEngineMonitor, type EngineState } from './lib/engineStatus'
 import { normalizeWorkspaceColor } from './lib/workspaceColors'
 import { contentHref, deviceHref, isLoopbackPage, navigateToDevice } from './lib/originNavigation'
 import { useProjectStore } from './stores/projects'
@@ -104,6 +114,28 @@ const clientHasSession = ref(false)
 const switchingToHost = ref(false)
 
 const showStartup = computed(() => !startupDone.value && !skipped.value)
+
+// An engine that stops answering (crash, `ciao service stop`, reboot) used to
+// leave a loaded tab with no honest state: API calls failed one at a time and
+// the WebSocket backed off silently. The monitor reports `unreachable` only
+// after two consecutive failed probes, so a single blip never flashes the
+// screen, and an announced restart reads as `updating` rather than an outage.
+const engineState = ref<EngineState>('ready')
+const engineRetrying = ref(false)
+const engineHost = window.location.host
+const engineMonitor = createEngineMonitor({
+  isUpdating: () => projectStore.serverRestarting,
+  onChange: (s) => { engineState.value = s },
+})
+// Over the app, never replacing it: the route, its scroll position and its
+// in-memory state have to survive the outage.
+const showEngineOffline = computed(() =>
+  !showStartup.value && (engineState.value === 'unreachable' || engineState.value === 'updating'),
+)
+async function retryEngine() {
+  engineRetrying.value = true
+  try { await engineMonitor.retry() } finally { engineRetrying.value = false }
+}
 // The device panel is about this machine, so the "you are seeing the host"
 // banner would contradict it.
 const onDevicePage = computed(() => route.path.startsWith('/device'))
@@ -232,6 +264,7 @@ onMounted(() => {
   pollStartup().then(scheduleNextPoll)
   void pollClientBanner()
   nodePollTimer = setInterval(() => { void pollClientBanner() }, 5000)
+  engineMonitor.start()
 })
 
 onUnmounted(() => {
@@ -240,6 +273,7 @@ onUnmounted(() => {
     clearInterval(nodePollTimer)
     nodePollTimer = null
   }
+  engineMonitor.stop()
 })
 
 watch(showStartup, (show) => {

@@ -25,6 +25,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/status": "internal status PATCH",
     "/api/push/subscribe": "browser push registration",
     "/api/push/unsubscribe": "browser push registration",
+    "/api/push/test": "browser Settings test-notification button",
     "/api/admin/snapshot": "admin internal; deploy is the agent-callable wrapper",
     "/api/package/update": "browser update action; production app updates through the signed Tauri updater",
     "/api/device/update": "browser Device panel; production app updates through the signed Tauri updater",

@@ -647,6 +647,7 @@ export interface RoutineSettings {
   insights_model: string
   insights_enabled?: boolean
   trajectories_enabled?: boolean
+  push_all_devices?: boolean
 
   critique_models: string
   // Per-provider default model for new chats; a missing entry = the provider's

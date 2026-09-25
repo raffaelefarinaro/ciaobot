@@ -75,6 +75,20 @@ def test_trajectories_enabled_rejects_non_boolean(tmp_path):
         store.update({"trajectories_enabled": "false"})
 
 
+def test_push_all_devices_defaults_off_and_persists(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+
+    assert store.settings.push_all_devices is False
+
+    store.update({"push_all_devices": True})
+    assert json.loads(path.read_text())["push_all_devices"] is True
+    assert AppSettingsStore(path).settings.push_all_devices is True
+
+    with pytest.raises(ValueError, match="must be a boolean"):
+        store.update({"push_all_devices": "yes"})
+
+
 def test_legacy_insights_opt_out_migrates_once(tmp_path):
     path = tmp_path / "app_settings.json"
     store = AppSettingsStore(path)
@@ -122,6 +136,7 @@ def test_both_legacy_privacy_opt_outs_migrate_together(tmp_path):
     assert json.loads(path.read_text()) == {
         "insights_enabled": False,
         "trajectories_enabled": False,
+        "push_all_devices": False,
     }
 
 
@@ -156,6 +171,7 @@ def test_update_persists_and_roundtrips(tmp_path):
     assert json.loads(path.read_text()) == {
         "insights_enabled": True,
         "trajectories_enabled": True,
+        "push_all_devices": False,
         "insights_model": "gemma4:12b-it-qat",
     }
     # Fresh instance sees the persisted value.
@@ -221,6 +237,7 @@ def test_provider_routine_models_persist_and_apply(tmp_path):
     assert json.loads(path.read_text()) == {
         "insights_enabled": True,
         "trajectories_enabled": True,
+        "push_all_devices": False,
         "provider_insights_models": {"opencode": "anthropic/claude-sonnet-4-6"},
         "provider_default_thinking": {"claude": "high"},
     }
