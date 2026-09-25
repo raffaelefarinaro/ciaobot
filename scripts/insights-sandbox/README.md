@@ -46,9 +46,18 @@ thing in it that reaches outside:
 - `.runtime/background/` is emptied — no orphaned task is woken on boot;
 - on the **agent** clone, `insights_enabled` and `trajectories_enabled` are
   set false — the harness's own chats must not trigger the archive pipeline;
-- every `.mcp.json` is deleted, `.env` is reduced to `CIAO_*` and `PWA_*` keys,
-  and each workspace's `allowed_mcp_servers`, `claude_ai_mcps` and
-  `gws_profile` are cleared — no integrations to reach through.
+- every `.mcp.json` is deleted, `.env` is reduced to `CIAO_*` and `PWA_*` keys
+  *minus any whose value is a path* (an absolute or `~`-prefixed location, or
+  one containing `..`; the dropped keys are named in `prep.log`), and each
+  workspace's `allowed_mcp_servers`, `claude_ai_mcps` and `gws_profile` are
+  cleared — no integrations to reach through.
+
+`--live` must be a **main repository**, not a linked git worktree. A linked
+worktree's `.git` is a text file pointing at the source repository's git
+directory, and `cp` copies it verbatim, so the copy is not a repository of its
+own: the first `git remote remove` would strip the *source's* remote and every
+per-chat commit would land in the source's metadata. The copy is refused
+before any git command runs, and deleted rather than left behind.
 
 The harness then refuses to run on the live path: every clone goes through
 `sandbox.assert_sandbox_path`, and the one-shot arm re-asserts that its own
@@ -67,6 +76,25 @@ every selected archive and every resolved project doc through
 `SandboxError` naming it. That is a refusal, not a rebasing: the pilot is
 refused on an install the clone cannot honestly measure, and the operator
 points `--live` at a workspace with relative roots instead.
+
+For the agent arm that check is done twice, because the server and the
+harness do not read the same configuration. The harness builds its config from
+an explicit env dict; the spawned `ciao run` calls `CiaoConfig.from_env()` with
+no arguments, which loads the clone's own `.env` on top — so a clone whose
+`.env` says `CIAO_VAULT_ROOT=/path/to/live-vault` resolves
+`<clone>/memory-vault` in the preflight and the live vault in the server,
+which then refreshes its index on boot. So before `Popen`, the harness asks a
+child process — with the exact env and cwd the server gets — to resolve the
+same configuration the same way, and every path it reports
+(`workspace_root`, `vault_root`, `runtime_root`, `sync_root`, and each
+workspace's `workspace_vault_root` and `agent_root`) goes through
+`sandbox.assert_contained` too. That same probe runs for the one-shot arm.
+
+`sync_root` is the repository git sync and branch backup actually push, which
+is the one containing the *vault*: with the vault outside the workspace in a
+repository of its own, the install root's remote is not the only one. The
+harness removes the remote from that repository too, before the server exists,
+and refuses (rather than touching a remote) if it is not inside the clone.
 
 ## Running it
 
@@ -120,8 +148,12 @@ created. Both would otherwise be charged to chat 1.
 
 Token columns in the report are read from each chat's own Claude session
 transcript (`message.usage`, deduped by `message.id`, because a transcript
-carries the same assistant record several times), not estimated. A chat on a
-provider whose usage the harness cannot read shows `-`.
+carries the same assistant record several times), not estimated. A chat runs
+with its workspace's agent root as its working directory, and that — not the
+install root — is what Claude encodes into the session's project directory, so
+the transcript is looked up under `config.agent_root(row.workspace)`. A chat on
+a provider whose usage the harness cannot read, or whose transcript is missing
+or entirely zero, shows `-` rather than a row of zeroes.
 
 The report contains counts and diffs, and **no verdict**. Which arm's writes
 are better is a judgement about real memory, and a summary that made it would

@@ -57,9 +57,11 @@ from sandbox import (  # noqa: E402 - after the sys.path insert above
     SandboxError,
     assert_contained,
     assert_sandbox_path,
+    assert_self_contained_repo,
     clone_workspace,
     commit_snapshot,
     diff_summary,
+    neutralise_remotes,
     pick_port,
     prepare_clone,
     strip_archives,
@@ -85,6 +87,51 @@ AGENT_PROMPT = (
     "outside memory and the vault: no messages, emails, commits, pushes or "
     "external calls. Finish with a short list of what you changed."
 )
+
+# The program that reports the configuration an arm's process will *actually*
+# build, as JSON on stdout. It is a module constant rather than an inline string
+# so the exact source the safety argument rests on is in one readable place, and
+# it is run in a child process (see `probe_effective_config`) because the only
+# honest way to learn what `ciao run` resolves is to let the same code resolve
+# it: `CiaoConfig.from_env()` with no arguments loads the clone's own `.env`,
+# which is exactly what the spawned server does and exactly what an
+# explicit-env config does *not* see.
+#
+# No writes: it only reads configuration and prints it. `from_env` does not
+# persist the registry, and the one file it would create --
+# `<runtime>/session-secret`, for an install with no `PWA_AUTH_TOKEN` -- is not
+# reached because both arms pass a token, and it is a read for the server too.
+PROBE_SRC = """
+import json
+import sys
+
+from ciao import local_session
+from ciao.config import CiaoConfig
+
+config = CiaoConfig.from_env()
+print(
+    json.dumps(
+        {
+            "workspace_root": str(config.workspace_root),
+            "vault_root": str(config.vault_root),
+            "runtime_root": str(config.state_path.parent),
+            "sync_root": str(local_session.sync_root(config)),
+            "workspaces": {
+                name: {
+                    "workspace_vault_root": str(config.workspace_vault_root(name)),
+                    "agent_root": str(config.agent_root(name)),
+                }
+                for name in json.loads(sys.argv[1])
+            },
+        }
+    )
+)
+"""
+
+# A probe that cannot answer is a refusal, not a smaller check: the whole point
+# is to validate the configuration the child will use, and an unvalidated run
+# is the failure this exists to prevent.
+_PROBE_TIMEOUT = 60
 
 
 class Instance:
@@ -335,6 +382,175 @@ def assert_clone_containment(
     assert_contained(paths, clone)
 
 
+def clone_env(clone: Path) -> dict[str, str]:
+    """The environment an arm's process gets, pinned to ``clone``.
+
+    The harness runs from an operator's shell, so every ``CIAO_*``/``PWA_*``
+    key it inherited describes the *live* install. Each is dropped and replaced
+    with one that names the clone, plus the interpreter and import path the
+    child needs: ``PYTHONPATH`` so the server runs the source under review
+    rather than the copy of ``ciao/`` inside the clone it serves, and ``PATH``
+    so the provider CLIs it shells out to are the ones this interpreter has.
+
+    The probe is handed this same mapping, which is what makes the two agree:
+    a validation run against a *different* environment than the one the child
+    receives would prove nothing.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("CIAO_") and not key.startswith("PWA_")
+    }
+    env.update(
+        {
+            "CIAO_WORKSPACE": str(clone),
+            "CIAO_RUNTIME_ROOT": str(clone / ".runtime"),
+            "PWA_AUTH_TOKEN": "sandbox",
+            "CIAO_NO_BROWSER": "1",
+            "PYTHONPATH": str(REPO_ROOT),
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}",
+        }
+    )
+    return env
+
+
+def probe_effective_config(
+    clone: Path, env: dict[str, str], workspaces: list[str]
+) -> dict:
+    """The configuration the arm's process will really build, read in a child.
+
+    ``CiaoConfig.from_env(env_dict)`` -- what the one-shot arm uses in process,
+    and what the pre-boot containment check used to use -- deliberately ignores
+    the workspace's ``.env``, because it was handed an explicit mapping. The
+    spawned server does the opposite: ``ciao run`` calls
+    ``CiaoConfig.from_env()`` with no arguments, which loads ``<clone>/.env``
+    on top of the environment. So a clone whose ``.env`` carries
+    ``CIAO_VAULT_ROOT=/path/to/live-vault`` resolves ``<clone>/memory-vault``
+    in the preflight and ``/path/to/live-vault`` in the server -- the process
+    that then refreshes the live vault's index on boot.
+
+    Rather than try to out-guess the loader, this asks it: a child with ``env``
+    and ``cwd=clone`` resolves the same configuration the same way and prints
+    it. The answer is checked before anything is spawned, and there is nothing
+    in the child to start, so a refusal lands while the run is still cheap.
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", PROBE_SRC, json.dumps(workspaces)],
+            cwd=clone,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=_PROBE_TIMEOUT,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SandboxError(
+            f"could not read the effective configuration in {clone}: "
+            f"{(exc.stderr or '').strip() or exc}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise SandboxError(
+            f"reading the effective configuration in {clone} did not finish in "
+            f"{_PROBE_TIMEOUT:.0f}s"
+        ) from exc
+    try:
+        effective = json.loads(result.stdout)
+    except ValueError as exc:
+        raise SandboxError(
+            f"the effective-configuration probe in {clone} printed no JSON: "
+            f"{result.stdout.strip()[:200]!r}"
+        ) from exc
+    if not isinstance(effective, dict):
+        raise SandboxError(
+            f"the effective-configuration probe in {clone} returned "
+            f"{type(effective).__name__}, not a mapping"
+        )
+    return effective
+
+
+def effective_paths(effective: dict) -> list[Path]:
+    """Every path a probe result reports, flat.
+
+    Fails closed on a shape it does not recognise. A probe answer that is
+    missing a key, or that reports an unresolvable workspace, is a
+    configuration the harness has *not* validated, and treating it as empty
+    would turn the check into a no-op.
+    """
+    paths: list[Path] = []
+    for key in ("workspace_root", "vault_root", "runtime_root", "sync_root"):
+        value = effective.get(key)
+        if not isinstance(value, str) or not value:
+            raise SandboxError(
+                f"the effective configuration did not report {key}; refusing to run"
+            )
+        paths.append(Path(value))
+    workspaces = effective.get("workspaces")
+    if not isinstance(workspaces, dict):
+        raise SandboxError(
+            "the effective configuration did not report its workspaces; refusing to run"
+        )
+    for name, entry in sorted(workspaces.items()):
+        if not isinstance(entry, dict):
+            raise SandboxError(
+                f"the effective configuration reported no roots for workspace {name!r}"
+            )
+        for key in ("workspace_vault_root", "agent_root"):
+            value = entry.get(key)
+            if not isinstance(value, str) or not value:
+                raise SandboxError(
+                    f"the effective configuration reported no {key} for workspace {name!r}"
+                )
+            paths.append(Path(value))
+    return paths
+
+
+def assert_effective_containment(effective: dict, clone: Path) -> None:
+    """Refuse unless every path the *probed* configuration resolves is in the clone.
+
+    The same rule as :func:`assert_clone_containment`, applied to the
+    configuration the child will build rather than to one this process built
+    from an explicit mapping. Together they cover both views: the archives and
+    the project docs, which only this process knows about, and the `.env`.
+    """
+    assert_contained(effective_paths(effective), clone)
+
+
+def neutralise_sync_root(effective: dict, clone: Path) -> None:
+    """Strip the remote from the repository the server would *push*.
+
+    :func:`sandbox.prepare_clone` removes the install root's remote, but
+    ``_branch_backup_loop`` pushes ``local_session.sync_root(config)`` -- the
+    repository containing the vault, which is a repository of its own when the
+    vault lives outside the workspace. That second remote survives the prep
+    untouched, and the agent arm is the arm that pushes every 30 seconds.
+
+    Only ever mutates a repository inside the clone. An outside sync root is a
+    refusal, never a ``git remote remove`` against the operator's real
+    repository, and a linked worktree nested in the clone is refused for the
+    same reason the clone itself is: its git metadata is somewhere else.
+    """
+    sync_root = Path(effective["sync_root"]).expanduser().resolve()
+    root = Path(clone).expanduser().resolve()
+    if not sync_root.is_relative_to(root):
+        raise SandboxError(
+            f"the git sync root {sync_root} is outside the clone {root}; refusing to run, "
+            "because the server's branch-backup loop would push the operator's repository"
+        )
+    if not (sync_root / ".git").exists():
+        # Not a repository, so there is nothing to push from and nothing to
+        # remove. `sync_root` falls back to the workspace root when the vault
+        # is not in a repo, and a real install root always has `.git`.
+        return
+    assert_self_contained_repo(sync_root, subject="the clone's git sync root")
+    removed = neutralise_remotes(sync_root)
+    if removed:
+        print(
+            f"git: removed {len(removed)} remote(s) from the vault's repository "
+            f"{sync_root} [{', '.join(removed)}]"
+        )
+
+
 # ── the agent-clone server ───────────────────────────────────────────────
 
 
@@ -356,8 +572,14 @@ def start_server(
     The agent arm's containment check runs here, before ``Popen``: this is the
     last point at which the run can be refused without a server -- and, once
     the agent clone has a server on it, a full agent with Bash -- already
-    running against it. The doc half of the check has to wait, because the
-    project map only exists after boot; the caller does that part.
+    running against it. It is also the only place the check can see the
+    environment the child really gets, because the child loads the clone's
+    ``.env`` and this process never does: the config ``ciao run`` builds is
+    probed in a child of its own (:func:`probe_effective_config`) and every
+    path it resolves is asserted inside the clone, and the vault's own
+    repository -- the one the branch-backup loop pushes -- loses its remote
+    before the process exists. The doc half of the check has to wait, because
+    the project map only exists after boot; the caller does that part.
 
     Everything after ``Popen`` sits in a ``try``. A server that exits during
     boot, and a login that turns out to have been answered by somebody else's
@@ -367,27 +589,26 @@ def start_server(
     returned.
     """
     port = pick_port(port)
-    # The config the server will build for itself, with no project docs yet:
-    # the roots, the archives, and nothing that only boot can know.
-    assert_clone_containment(clone_config(agent_clone), agent_clone, rows, docs=[])
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith("CIAO_") and not key.startswith("PWA_")
-    }
+    env = clone_env(agent_clone)
     token = secrets.token_urlsafe(24)
     env.update(
         {
-            "CIAO_WORKSPACE": str(agent_clone),
-            "CIAO_RUNTIME_ROOT": str(agent_clone / ".runtime"),
             "PWA_PORT": str(port),
             "PWA_HOST": "127.0.0.1",
             "PWA_AUTH_TOKEN": token,
-            "CIAO_NO_BROWSER": "1",
-            "PYTHONPATH": str(REPO_ROOT),
-            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}",
         }
     )
+    # The config the server will build for itself, with no project docs yet:
+    # the roots, the archives, and nothing that only boot can know.
+    assert_clone_containment(clone_config(agent_clone), agent_clone, rows, docs=[])
+    # ... and the config it will build from the clone's own `.env`, which is a
+    # different answer whenever that file carries a path. Both are asserted, so
+    # neither view of the clone can be the one that escapes.
+    effective = probe_effective_config(
+        agent_clone, env, sorted({row.workspace for row in rows if row.workspace})
+    )
+    assert_effective_containment(effective, agent_clone)
+    neutralise_sync_root(effective, agent_clone)
     log_path = run_dir / "agent-server.log"
     log = log_path.open("w", encoding="utf-8")
     proc: subprocess.Popen | None = None
@@ -556,21 +777,30 @@ class ArmResult:
 
 
 def chat_usage(
-    inst: Instance, agent_clone: Path, chat_id: str, provider: str
+    inst: Instance, agent_clone: Path, chat_id: str, provider: str, workspace: str
 ) -> dict[str, int]:
     """Token usage for one agent chat, or ``{}`` when it cannot be read.
 
     ``GET /api/chats`` carries no cost field, so the only honest source is
     Claude Code's own session transcript: the chat's ``session_id`` names a
-    ``<session_id>.jsonl`` under the agent clone's project directory, and every
-    assistant record in it reports ``message.usage``. That is the agent's real
-    spend, read rather than estimated, which is what makes the report's cost
-    column worth having.
+    ``<session_id>.jsonl`` under the project directory Claude encoded from the
+    chat's **working directory**, and every assistant record in it reports
+    ``message.usage``. That is the agent's real spend, read rather than
+    estimated, which is what makes the report's cost column worth having.
+
+    The working directory is ``config.agent_root(workspace)``, not the
+    install root: a chat runs with its workspace's agent root as its cwd, and
+    on a re-rooted install that is a *subdirectory* of the clone, so a
+    transcript under the install root's slug is a path that does not exist.
+    Reading the wrong slug directory returns zero tokens for every chat, which
+    reads in the report as "the pilot was free" rather than as a bug -- hence
+    the row's workspace, and not a guess about the layout.
 
     Claude only, deliberately. OpenCode keeps its own session store with a
     different shape, and guessing at it would put a number in the report that
-    is not a measurement. An arm that cannot be read reports ``{}`` and the
-    report prints ``-`` for it, which is the honest answer.
+    is not a measurement. A missing, unreadable or all-zero transcript reports
+    ``{}`` and the report prints ``-`` for it, which is the honest answer: a
+    truthy dict of four zeroes would be totalled as a real measurement.
     """
     if provider != "claude":
         return {}
@@ -579,7 +809,14 @@ def chat_usage(
         return {}
     from ciao.transcripts import _claude_projects_dir
 
-    return sum_claude_usage(_claude_projects_dir(agent_clone) / f"{session_id}.jsonl")
+    try:
+        agent_root = clone_config(agent_clone).agent_root(workspace)
+    except ValueError:
+        # A workspace name the config cannot resolve has no agent root, so
+        # there is no slug directory to read. The chat itself is recorded.
+        return {}
+    usage = sum_claude_usage(_claude_projects_dir(agent_root) / f"{session_id}.jsonl")
+    return usage if any(usage.values()) else {}
 
 
 async def run_oneshot_arm(clone: Path, rows: list[Row], baseline: str) -> list[ArmResult]:
@@ -624,6 +861,18 @@ async def run_oneshot_arm(clone: Path, rows: list[Row], baseline: str) -> list[A
     # absolute `vault_root`, a workspace `vault_root` or a project doc that
     # escapes the clone is refused here, before the first model call.
     assert_clone_containment(config, clone, rows)
+    # ... and the same check against the configuration the clone's own `.env`
+    # produces, probed with this arm's own env mapping and cwd. This arm
+    # resolves its roots from an explicit dict and never sees the `.env`, but a
+    # clone that names a path outside itself is a clone the harness cannot
+    # reason about: refusing here as well means the answer does not depend on
+    # which of the two views a future change happens to use.
+    effective = probe_effective_config(
+        clone,
+        clone_env(clone),
+        sorted({row.workspace for row in rows if row.workspace}),
+    )
+    assert_effective_containment(effective, clone)
     print(f"oneshot: config pinned to {config.workspace_root}")
 
     results: list[ArmResult] = []
@@ -808,7 +1057,7 @@ async def run_agent_arm(
             cost = (inst.chat(chat_id) or {}).get("cost_usd")
             result.cost_usd = float(cost) if isinstance(cost, (int, float)) else None
             result.usage = chat_usage(
-                inst, agent_clone, chat_id, row.effective_provider
+                inst, agent_clone, chat_id, row.effective_provider, row.workspace
             )
         except Exception as exc:  # noqa: BLE001 - one chat must not end the arm
             result.status = "error"

@@ -24,6 +24,7 @@ for the harness's own server.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import socket
@@ -54,6 +55,21 @@ _ENV_KEEP = re.compile(r"^(CIAO_|PWA_)")
 # classifier and the diff counter cannot drift apart.
 _PROPOSALS_SUFFIX = "Workspace/Memory-Proposals.md"
 _GUIDE_NAMES = ("AGENTS.md", "CLAUDE.md", "MEMORY.md")
+
+
+def _is_path_bearing(value: str) -> bool:
+    """A ``.env`` value that names a filesystem location rather than a setting.
+
+    Keeping ``CIAO_*``/``PWA_*`` is not enough on its own: a retained key can
+    still carry a path that points at the live install. ``CIAO_VAULT_ROOT`` is
+    the shape that bites -- a real workspace sets it, the prep keeps the key,
+    and the spawned ``ciao run`` loads the clone's ``.env`` and writes the
+    original vault. ``start_server`` refuses such a run from the effective
+    configuration it probes; this is the earlier of the two defences, so a
+    path-bearing value is not carried into the clone at all.
+    """
+    text = value.strip().strip("\"'")
+    return os.path.isabs(text) or text.startswith("~") or ".." in text
 
 
 # ── path safety ──────────────────────────────────────────────────────────
@@ -127,6 +143,70 @@ def assert_contained(paths: Iterable[Path], clone: Path) -> None:
             )
 
 
+# ── git shape ────────────────────────────────────────────────────────────
+
+
+def git_dirs(clone: Path) -> tuple[Path, Path]:
+    """``(git dir, common git dir)`` of the repository at ``clone``, absolute.
+
+    Two directories because a repository has two in a linked worktree: the
+    worktree's own ``.git/worktrees/<name>`` and the *common* directory the
+    main repository owns. Both matter here, since either one outside the copy
+    means the copy is not the repository ``git -C`` will touch.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(clone),
+                "rev-parse",
+                "--absolute-git-dir",
+                "--git-common-dir",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SandboxError(
+            f"{clone} is not a git repository ({exc.stderr.strip() or exc}); "
+            "the harness cannot attribute a per-chat diff without git"
+        ) from exc
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) != 2:
+        raise SandboxError(
+            f"could not read the git directories of {clone}: {result.stdout.strip()!r}"
+        )
+    git_dir = Path(lines[0])
+    common = Path(lines[1])
+    if not common.is_absolute():
+        # git prints the common dir relative to the repository it was asked
+        # about, which for an ordinary clone is simply `.git`.
+        common = Path(clone) / common
+    return git_dir.resolve(), common.resolve()
+
+
+def assert_self_contained_repo(clone: Path, *, subject: str) -> None:
+    """Refuse a repository whose git metadata is not inside ``clone``.
+
+    The shape this exists for is a **linked** worktree, whose ``.git`` is a
+    text file pointing at the main repository's absolute common git directory.
+    Copied or not, ``git -C`` on it operates on the *source* repository: the
+    prep's ``git remote remove`` would strip the source's remote, and every
+    per-chat snapshot commit would be written into the source's ``.git``. There
+    is no way to rebase that, so it is refused before the first git mutation
+    rather than repaired afterwards.
+    """
+    root = Path(clone).expanduser().resolve()
+    for label, path in zip(("git dir", "common git dir"), git_dirs(root)):
+        if not path.is_relative_to(root):
+            raise SandboxError(
+                f"{subject} is a linked git worktree: its {label} ({path}) lies "
+                f"outside the copy at {root}; clone its main repository instead"
+            )
+
+
 def clone_workspace(live: Path, dest: Path) -> None:
     """Copy the live workspace to ``dest`` with APFS clonefile (``cp -c -R``).
 
@@ -137,6 +217,16 @@ def clone_workspace(live: Path, dest: Path) -> None:
     An existing ``dest`` is refused rather than merged into: a leftover
     directory from an earlier run would silently be the baseline, and the
     whole measurement is only worth anything if the baseline is known.
+
+    A ``--live`` that is a **linked** git worktree is refused, and the copy is
+    deleted rather than left behind. ``cp`` copies a linked worktree's ``.git``
+    *file*, which points at the source repository's absolute common git
+    directory, so the copy is not a repository of its own: every later ``git
+    -C <clone>`` -- ``remote remove`` in the prep, ``add -A`` and ``commit``
+    per chat -- would operate on the source's metadata, and the first of those
+    removes the **source's** remote, which is the one thing the prep exists to
+    prevent. The check therefore runs before the first git mutation, and the
+    message says what to clone instead.
     """
     live_path = Path(live).expanduser()
     dest_path = Path(dest).expanduser()
@@ -146,6 +236,13 @@ def clone_workspace(live: Path, dest: Path) -> None:
         )
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["cp", "-c", "-R", str(live_path), str(dest_path)], check=True)
+    try:
+        assert_self_contained_repo(dest_path, subject="live workspace")
+    except SandboxError:
+        # The copy is a hazard, not a clone: leaving it would make a re-run
+        # refuse on "already exists" and hide why the first one stopped.
+        shutil.rmtree(dest_path, ignore_errors=True)
+        raise
 
 
 # ── port selection ───────────────────────────────────────────────────────
@@ -234,6 +331,30 @@ def _write_json(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
+def neutralise_remotes(repo: Path) -> list[str]:
+    """Remove every git remote from ``repo``; return the names it had.
+
+    More than the install root needs this: ``_branch_backup_loop`` pushes
+    ``local_session.sync_root(config)``, which is the repository containing the
+    *vault* -- the same directory as the install root for the default layout,
+    but a separate repository of its own when the vault lives elsewhere, which
+    is a supported install. A clone of that shape carries two remotes and only
+    the one at the top would be removed, so the second is handled the same way
+    before anything runs.
+
+    Asserts the result rather than trusting ``git remote remove``: a remote that
+    survives means the 30-second push loop is live, and the harness must not
+    find that out from a log line.
+    """
+    remotes = _git(repo, "remote").split()
+    for name in remotes:
+        _git(repo, "remote", "remove", name)
+    leftover = _git(repo, "remote").split()
+    if leftover:
+        raise SandboxError(f"{repo} still has git remotes after removal: {leftover}")
+    return remotes
+
+
 def _workspace_names(runtime: Path) -> list[str]:
     """Workspace names from ``.runtime/workspaces.json`` (a list of dicts)."""
     data = _read_json(runtime / "workspaces.json")
@@ -280,12 +401,7 @@ def prepare_clone(
 
     # 1. The git remote. `_branch_backup_loop` pushes every 30 s, so a clone
     #    left with one would publish the agent's work to the live repository.
-    remotes = _git(clone, "remote").split()
-    for name in remotes:
-        _git(clone, "remote", "remove", name)
-    leftover = _git(clone, "remote").split()
-    if leftover:
-        raise SandboxError(f"{clone} still has git remotes after removal: {leftover}")
+    remotes = neutralise_remotes(clone)
     notes.append(
         f"git: removed {len(remotes)} remote(s) [{', '.join(remotes) or 'none'}]"
     )
@@ -373,20 +489,35 @@ def prepare_clone(
         removed += 1
     notes.append(f"integrations: removed {removed} .mcp.json file(s)")
 
-    # 9. .env credentials: only the keys that address this clone survive.
+    # 9. .env credentials: only the keys that address this clone survive, and
+    #    a retained key may not carry a path -- see `_is_path_bearing`.
     env_path = clone / ".env"
     if env_path.exists():
         kept: list[str] = []
+        dropped: list[str] = []
         for line in env_path.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 kept.append(line)
                 continue
-            key = stripped.split("=", 1)[0].strip()
-            if _ENV_KEEP.match(key):
-                kept.append(line)
+            key, _, value = stripped.partition("=")
+            key = key.strip()
+            if not _ENV_KEEP.match(key):
+                continue
+            if _is_path_bearing(value):
+                dropped.append(key)
+                continue
+            kept.append(line)
         env_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
         notes.append(f"integrations: .env reduced to {len(kept)} line(s)")
+        if dropped:
+            # Named in `prep.log`, because a dropped key is a changed install
+            # and the next question is always which one and why.
+            notes.append(
+                "integrations: .env dropped path-bearing key(s) "
+                f"[{', '.join(sorted(dropped))}], which would address a path "
+                "outside this clone"
+            )
 
     # 10. The per-workspace integration switches, which is how an install
     #     enables a named MCP server or a Google Workspace profile.
