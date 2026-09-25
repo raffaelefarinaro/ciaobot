@@ -170,6 +170,42 @@ describe('MemoryMapView keyboard and touch access', () => {
     wrapper.unmount()
   })
 
+  it('keeps path endpoints in a row menu that Esc closes without leaving the page', async () => {
+    const { wrapper } = await mountList()
+    const row = wrapper.findAll('.mm-list-wrap tbody tr')[0]
+    const trigger = row.get('.mm-row-menu-btn')
+    expect(trigger.attributes('aria-label')).toBe('Actions for Note A')
+    expect(trigger.attributes('aria-expanded')).toBe('false')
+
+    await trigger.trigger('click')
+    expect(trigger.attributes('aria-expanded')).toBe('true')
+    expect(row.get('.mm-row-menu-pop').isVisible()).toBe(true)
+
+    // Esc closes the menu and stops there, so ChatLayout's window-level Esc
+    // (which leaves the page) never sees it.
+    const onWindowKey = vi.fn()
+    window.addEventListener('keydown', onWindowKey)
+    await row.get('.mm-path-btn').trigger('keydown', { key: 'Escape' })
+    window.removeEventListener('keydown', onWindowKey)
+    expect(onWindowKey).not.toHaveBeenCalled()
+    expect(trigger.attributes('aria-expanded')).toBe('false')
+    wrapper.unmount()
+  })
+
+  it('shows the vault at a glance in the rail beside the map', async () => {
+    const { wrapper } = await mountList()
+    const rail = wrapper.get('.mm-map-rail')
+    expect(rail.text()).toContain('Vault')
+    expect(rail.text()).toContain('Most connected')
+    expect(rail.text()).toContain('Recently written')
+    // One orphan menu replaces the two toggle buttons.
+    const filter = wrapper.get<HTMLSelectElement>('#mm-orphan-filter')
+    expect(filter.findAll('option').map(o => o.text())).toEqual(['All notes', 'Linked only', 'Orphans only'])
+    await filter.setValue('only')
+    expect(useMemoryMapStore().orphanFilter).toBe('only')
+    wrapper.unmount()
+  })
+
   it('returns focus to the title control after the detail panel closes', async () => {
     const { wrapper } = await mountList()
     const first = wrapper.findAll('.mm-title-btn')[0]

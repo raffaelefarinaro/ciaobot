@@ -139,22 +139,24 @@ describe('ProjectSidebar review section', () => {
     const wrapper = await mountSidebar()
 
     const labels = wrapper.findAll('.mm-link-item').map(i => i.text())
-    expect(labels.some(t => t.startsWith('all') && t.includes('3'))).toBe(true)
-    expect(labels.some(t => t.startsWith('memory') && t.includes('2'))).toBe(true)
-    expect(labels.some(t => t.startsWith('skill') && t.includes('1'))).toBe(true)
+    expect(labels.some(t => t.startsWith('All kinds') && t.includes('3'))).toBe(true)
+    expect(labels.some(t => t.startsWith('Memory') && t.includes('2'))).toBe(true)
+    expect(labels.some(t => t.startsWith('Skill') && t.includes('1'))).toBe(true)
   })
 
   it('clicking a kind filters the shared store, and reset clears it', async () => {
     const wrapper = await mountSidebar()
     const proposals = useProposalsStore()
 
-    const skill = wrapper.findAll('.mm-link-item').find(i => i.text().startsWith('skill'))
+    const skill = wrapper.findAll('.mm-link-item').find(i => i.text().startsWith('Skill'))
     await skill!.trigger('click')
 
     expect(proposals.kindFilter).toBe('skill')
     expect(proposals.visibleRows('personal').map(r => r.id)).toEqual(['p-skill'])
 
-    await wrapper.find('.mm-link').trigger('click')   // "reset"
+    expect(skill!.attributes('aria-pressed')).toBe('true')
+
+    await wrapper.find('.mm-link').trigger('click')   // "Reset"
     expect(proposals.kindFilter).toBe('all')
   })
 
@@ -167,9 +169,9 @@ describe('ProjectSidebar review section', () => {
     const wrapper = await mountSidebar()
 
     const labels = wrapper.findAll('.mm-link-item').map(i => i.text())
-    expect(labels.some(t => t.startsWith('memory') && t.includes('2'))).toBe(true)
-    expect(labels.some(t => t.startsWith('skill') && t.includes('1'))).toBe(true)
-    expect(labels.some(t => t.startsWith('all') && t.includes('3'))).toBe(true)
+    expect(labels.some(t => t.startsWith('Memory') && t.includes('2'))).toBe(true)
+    expect(labels.some(t => t.startsWith('Skill') && t.includes('1'))).toBe(true)
+    expect(labels.some(t => t.startsWith('All kinds') && t.includes('3'))).toBe(true)
   })
 
   it('leaves the Review/Map switch to the Memory page header', async () => {

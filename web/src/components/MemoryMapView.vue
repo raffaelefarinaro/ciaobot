@@ -92,12 +92,18 @@
 
     <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode, 'mm-body--dragging-detail': isDraggingDetail }" :style="detailBodyStyle">
       <div class="mm-surface">
+        <!-- The map uses the same page grid as every other pane: the drawing in
+             the main column, the vault's glanceable context in the rail. The
+             rail used to be the sidebar's second half (most connected, needs
+             review, recently written), which made the sidebar a dashboard; it
+             steps aside while a note's detail panel is open, since that panel
+             is the context then. -->
+        <div class="page-grid mm-map-grid" :class="{ 'page-grid--single': !!mm.selectedNode }">
+        <div class="page-main mm-map-main">
         <!-- Graph and List are two drawings of one set of notes, so the choice
-             between them sits with the other "how should this look" controls
-             rather than beside Review in the sidebar, where a rendering of the
-             map read as a third page. That also makes this a real toolbar row
-             shared by both views: floating over the canvas it had nowhere to
-             be in the list, which is why the list had no controls at all. -->
+             between them sits with the other "how should this look" controls.
+             One orphan menu replaces the two toggle buttons that could each
+             undo the other. -->
         <div v-if="!mm.loading && !mm.loadError" class="mm-toolbar">
           <div class="mm-seg mm-seg--sm" role="group" aria-label="View">
             <button
@@ -115,23 +121,18 @@
               @click="setMapView('list')"
             >List</button>
           </div>
-
-          <button
-            type="button"
-            class="mm-toggle"
-            :class="{ on: mm.orphanFilter === 'hide' }"
-            :aria-pressed="mm.orphanFilter === 'hide'"
-            :title="`${mm.orphanCount} notes have no links; hiding them declutters the layout`"
-            @click="mm.toggleHideOrphans()"
-          >{{ mm.orphanFilter === 'hide' ? 'Orphans hidden' : 'Hide orphans' }}</button>
-          <button
-            type="button"
-            class="mm-toggle"
-            :class="{ on: mm.orphanFilter === 'only' }"
-            :aria-pressed="mm.orphanFilter === 'only'"
-            :title="mm.orphanFilter === 'only' ? 'Showing only unlinked notes' : 'Show only unlinked notes — useful when you want to link them up'"
-            @click="mm.toggleOnlyOrphans()"
-          >{{ mm.orphanFilter === 'only' ? 'Only orphans ✓' : 'Only orphans' }}</button>
+          <select
+            id="mm-orphan-filter"
+            v-model="mm.orphanFilter"
+            class="mm-filter"
+            aria-label="Which notes to show"
+            :title="`${mm.orphanCount} notes have no links`"
+          >
+            <option value="all">All notes</option>
+            <option value="hide">Linked only</option>
+            <option value="only">Orphans only</option>
+          </select>
+          <span class="mm-toolbar-count">{{ mm.visibleNodes.length.toLocaleString() }} notes · {{ mm.edges.length.toLocaleString() }} links</span>
         </div>
         <div v-if="mm.loading" class="mm-skeleton" role="status" aria-live="polite" aria-label="Loading vault graph">
           <div class="mm-brain-skeleton" aria-hidden="true">
@@ -169,7 +170,8 @@
           </div>
         </div>
         <div v-else-if="mm.loadError" class="mm-empty">{{ mm.loadError }}</div>
-        <div v-else-if="mm.view === 'graph'" class="mm-canvas-wrap" ref="canvasWrap" tabindex="0" role="region" aria-label="Vault graph">
+        <template v-else-if="mm.view === 'graph'">
+        <div class="mm-canvas-wrap" ref="canvasWrap" tabindex="0" role="region" aria-label="Vault graph">
           <canvas
             ref="canvasEl"
             :class="{ 'mm-canvas--node-hover': !!hoveredNode }"
@@ -183,10 +185,12 @@
             @wheel.prevent="onWheel"
             @contextmenu.prevent
           />
-          <div class="mm-zoom-controls">
-            <button type="button" class="btn-icon touch-hit" title="Zoom in" aria-label="Zoom in" @click="zoom(1.25)">+</button>
-            <button type="button" class="btn-icon touch-hit" title="Zoom out" aria-label="Zoom out" @click="zoom(0.8)">−</button>
-            <button type="button" class="btn-icon touch-hit" title="Fit the whole graph" aria-label="Fit the whole graph" @click="resetCamera(true)">⤢</button>
+          <!-- One bordered group of named controls, so zoom reads as a tool
+               rather than three loose glyphs over the drawing. -->
+          <div class="mm-zoom-controls" role="group" aria-label="Zoom">
+            <button type="button" title="Zoom in" aria-label="Zoom in" @click="zoom(1.25)">+</button>
+            <button type="button" title="Zoom out" aria-label="Zoom out" @click="zoom(0.8)">−</button>
+            <button type="button" title="Fit the whole graph" aria-label="Fit the whole graph" @click="resetCamera(true)">⤢</button>
           </div>
           <!-- Path endpoints for the current focus, mirrored from the list/detail
                controls so a keyboard user can also set them without leaving the
@@ -202,26 +206,23 @@
               @click="mm.choosePathEndpoint(mm.selectedNode.id, s.slot)"
             >{{ s.chip }}</button>
           </div>
-          <div class="mm-hint-overlay">
-            <span>
-              {{ mm.visibleNodes.length }} notes ·
-              <template v-if="zoomedOut">tap or hover a note to name it · zoom in for titles · use the List view to work by keyboard</template>
-              <template v-else>tap or click to pin the neighbourhood · drag to pan · set path start/end from a note's actions</template>
-            </span>
-          </div>
           <div
             v-if="hoveredNode"
             class="mm-hover-tip"
             :style="{ left: hoverPos.x + 'px', top: hoverPos.y + 'px' }"
           >{{ hoveredNode.title }}</div>
         </div>
+        <!-- How to work the drawing, under it rather than over it. -->
+        <p class="mm-canvas-note">
+          <template v-if="zoomedOut">Hover or tap a note to name it. Zoom in for titles, or use List to work by keyboard.</template>
+          <template v-else>Click a note to pin its neighbours. Drag to pan. Every note is also in List.</template>
+        </p>
+        </template>
         <div v-else class="mm-list-wrap" tabindex="0" role="region" aria-label="Vault notes list">
           <table>
             <thead>
               <!-- Sortable headers state which way they are sorted, in both the
-                   caret and aria-sort. They were clickable with no indicator at
-                   all, so a second click on the same column looked like nothing
-                   had happened. -->
+                   caret and aria-sort. -->
               <tr>
                 <th :aria-sort="ariaSort('title')">
                   <button type="button" class="mm-sort" @click="setSort('title')">
@@ -244,7 +245,7 @@
                     Checked<span class="mm-sort-caret" aria-hidden="true">{{ sortCaret('age') }}</span>
                   </button>
                 </th>
-                <th class="th-plain">Path</th>
+                <th class="th-plain"><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
@@ -269,40 +270,152 @@
                   ><span class="dot" :style="{ background: colorForNode(n) }" />{{ n.title }}</button>
                 </td>
                 <td class="muted">{{ categoryLabelFor(n) }}</td>
-                <td>
-                  <span v-for="t in n.tags.slice(0, 4)" :key="t" class="tag-mini">{{ t }}</span>
-                </td>
-                <!-- Link count as a bar as well as a number: sorted by links,
-                     the shape of the distribution (a few hubs, a long tail of
-                     twos) is the useful reading, and a column of digits hides
-                     it. -->
-                <td class="deg-cell">
-                  <span class="deg-bar" aria-hidden="true"><span :style="{ width: degreeBarPct(n) + '%' }"></span></span>
-                  <span class="deg-n">{{ n.degree }}</span>
-                </td>
-                <td :class="{ 'stale-age': n.stale }">{{ mm.ageLabelOf(n) || '—' }}<span v-if="n.stale" class="stale-flag" title="Unverified past its type's horizon">needs review</span></td>
+                <td class="muted mm-tags">{{ n.tags.slice(0, 4).join(', ') }}</td>
+                <td class="deg-n">{{ n.degree }}</td>
+                <td class="mm-age" :class="{ 'stale-age': n.stale }">{{ mm.ageLabelOf(n) || '—' }}<span v-if="n.stale" class="stale-flag" title="Unverified past its type's horizon">Needs review</span></td>
                 <!-- Path endpoints, usable without the graph or a pointer: the
-                     list is the complete alternative to the canvas, so choosing
-                     a path may not depend on shift-clicking a dot. Names carry
-                     the note as well as the slot, since every row's control
-                     shares a visible label. -->
-                <td class="path-cell">
-                  <button
-                    v-for="s in PATH_SLOTS"
-                    :key="s.slot"
-                    type="button"
-                    class="mm-path-btn"
-                    :class="{ active: pathSlotHolds(s.slot, n.id) }"
-                    :aria-pressed="pathSlotHolds(s.slot, n.id)"
-                    :aria-label="pathSlotLabel(s.slot, n.title)"
-                    @click.stop="mm.choosePathEndpoint(n.id, s.slot)"
-                  >{{ s.compact }}</button>
+                     list is the complete alternative to the canvas. They sit in
+                     one row menu rather than two bordered buttons on every row;
+                     the items stay in the DOM (v-show) so the menu opens with
+                     no layout work and each keeps its full accessible name. -->
+                <td class="path-cell" @click.stop>
+                  <div class="mm-row-menu" @keydown.esc.stop="closeRowMenu(n.id, true)">
+                    <button
+                      type="button"
+                      class="mm-row-menu-btn"
+                      :data-mm-menu="n.id"
+                      aria-haspopup="true"
+                      :aria-expanded="openRowMenu === n.id"
+                      :aria-controls="`mm-row-menu-${n.id}`"
+                      :aria-label="`Actions for ${n.title}`"
+                      @click="toggleRowMenu(n.id)"
+                    >⋯</button>
+                    <div
+                      v-show="openRowMenu === n.id"
+                      :id="`mm-row-menu-${n.id}`"
+                      class="mm-row-menu-pop"
+                      role="group"
+                      :aria-label="`Path for ${n.title}`"
+                    >
+                      <button
+                        v-for="s in PATH_SLOTS"
+                        :key="s.slot"
+                        type="button"
+                        class="mm-path-btn"
+                        :class="{ active: pathSlotHolds(s.slot, n.id) }"
+                        :aria-pressed="pathSlotHolds(s.slot, n.id)"
+                        :aria-label="pathSlotLabel(s.slot, n.title)"
+                        @click="mm.choosePathEndpoint(n.id, s.slot); closeRowMenu(n.id, true)"
+                      >{{ s.menu }}<span v-if="pathSlotHolds(s.slot, n.id)" class="mm-path-check" aria-hidden="true">✓</span></button>
+                    </div>
+                  </div>
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
+        </div>
 
+        <!-- The vault at a glance, plus the ways into it that used to fill the
+             sidebar. Every entry focuses the note on the map. -->
+        <aside v-if="!mm.selectedNode" class="page-rail mm-map-rail" aria-label="Vault at a glance">
+          <section class="rail-section" aria-labelledby="mm-map-vault-title">
+            <h2 id="mm-map-vault-title" class="rail-title">Vault</h2>
+            <p v-if="mm.loading && !mm.nodes.length" class="rail-note" role="status">Loading the vault…</p>
+            <div v-else class="rail-kvs">
+              <div class="rail-kv"><span>Notes</span><strong>{{ mm.nodes.length.toLocaleString() }}</strong></div>
+              <div class="rail-kv"><span>Links</span><strong>{{ mm.edges.length.toLocaleString() }}</strong></div>
+              <div class="rail-kv"><span>Unlinked</span><strong>{{ mm.orphanNotes.length.toLocaleString() }}</strong></div>
+            </div>
+          </section>
+
+          <!-- Aging notes: facts nobody has verified within their type's
+               horizon. The daily curation routine reviews this same list. -->
+          <section v-if="mm.staleNotes.length" class="rail-section" aria-labelledby="mm-map-stale-title">
+            <h2 id="mm-map-stale-title" class="rail-title">Needs review</h2>
+            <div class="rail-list">
+              <button
+                v-for="n in mm.staleNotes.slice(0, staleLimit)"
+                :key="n.id"
+                type="button"
+                class="rail-item"
+                :title="`Unverified for ${n.ageDays ?? '?'} days`"
+                @click="mm.requestFocus(n.id)"
+              >
+                <span>{{ n.title }}</span>
+                <small class="rail-attention">{{ mm.ageLabelOf(n) }} unchecked</small>
+              </button>
+            </div>
+            <button
+              v-if="mm.staleNotes.length > staleLimit"
+              type="button"
+              class="mm-rail-link"
+              @click="staleLimit += 20"
+            >Show {{ Math.min(20, mm.staleNotes.length - staleLimit) }} more</button>
+            <p class="rail-note">Daily Memory curation checks these too. They stay here until you or that run resolves them.</p>
+            <button type="button" class="mm-rail-link" @click="openRetirementReview()">Open Notes to revisit</button>
+          </section>
+
+          <section v-if="mm.mostConnected.length" class="rail-section" aria-labelledby="mm-map-hubs-title">
+            <h2 id="mm-map-hubs-title" class="rail-title">Most connected</h2>
+            <div class="rail-kvs">
+              <button
+                v-for="n in mm.mostConnected"
+                :key="n.id"
+                type="button"
+                class="rail-kv mm-rail-kv-btn"
+                @click="mm.requestFocus(n.id)"
+              >
+                <span>{{ n.title }}</span><strong>{{ n.degree }}</strong>
+              </button>
+            </div>
+          </section>
+
+          <!-- The gap list: notes nothing links to. Each entry is either worth
+               linking or worth deleting. -->
+          <section v-if="mm.orphanNotes.length" class="rail-section" aria-labelledby="mm-map-orphans-title">
+            <h2 id="mm-map-orphans-title" class="rail-title">Unlinked</h2>
+            <div class="rail-list">
+              <button
+                v-for="n in mm.orphanNotes.slice(0, orphanLimit)"
+                :key="n.id"
+                type="button"
+                class="rail-item"
+                title="No note links to this one"
+                @click="mm.requestFocus(n.id)"
+              ><span>{{ n.title }}</span></button>
+            </div>
+            <button
+              v-if="mm.orphanNotes.length > orphanLimit"
+              type="button"
+              class="mm-rail-link"
+              @click="orphanLimit += 20"
+            >Show {{ Math.min(20, mm.orphanNotes.length - orphanLimit) }} more</button>
+          </section>
+
+          <!-- Entry points into the graph: the note you last touched is almost
+               always the one you opened the map about. -->
+          <section v-if="mm.recentNotes.length" class="rail-section" aria-labelledby="mm-map-recent-title">
+            <h2 id="mm-map-recent-title" class="rail-title">Recently written</h2>
+            <div class="rail-list">
+              <button
+                v-for="n in mm.recentNotes"
+                :key="n.id"
+                type="button"
+                class="rail-item"
+                title="Centre the map here"
+                @click="mm.requestFocus(n.id)"
+              ><span>{{ n.title }}</span></button>
+            </div>
+          </section>
+
+          <section class="rail-section" aria-labelledby="mm-map-path-title">
+            <h2 id="mm-map-path-title" class="rail-title">Path</h2>
+            <p class="rail-note">{{ mm.pathHint }}</p>
+            <button v-if="mm.pathStart || mm.pathEnd" type="button" class="mm-rail-link" @click="mm.resetPath()">Clear path</button>
+          </section>
+        </aside>
+        </div>
       </div>
       <aside
         v-if="mm.selectedNode"
@@ -659,9 +772,36 @@ function openNeighbor(id: string, event: Event) {
 // silently reach only some of them. Each surface now renders one `v-for` over
 // this table, and the three bindings are computed here, once.
 const PATH_SLOTS = [
-  { slot: 'start' as const, chip: 'Start path', compact: 'start' },
-  { slot: 'end' as const, chip: 'End path', compact: 'end' },
+  { slot: 'start' as const, chip: 'Start path', compact: 'start', menu: 'Set as path start' },
+  { slot: 'end' as const, chip: 'End path', compact: 'end', menu: 'Set as path end' },
 ]
+/** The list row whose "⋯" path menu is open; one at a time. */
+const openRowMenu = ref<string | null>(null)
+function toggleRowMenu(id: string) {
+  openRowMenu.value = openRowMenu.value === id ? null : id
+}
+/** Close a row's menu, optionally returning focus to its trigger (after a
+ * choice or Escape, so keyboard users are not dropped on the body). */
+function closeRowMenu(id: string, refocus = false) {
+  if (openRowMenu.value !== id) return
+  openRowMenu.value = null
+  if (refocus) {
+    void nextTick(() => {
+      const btn = document.querySelector<HTMLElement>(`[data-mm-menu="${id.replace(/["\\]/g, '\\$&')}"]`)
+      btn?.focus()
+    })
+  }
+}
+function onDocPointerDownForRowMenu(e: PointerEvent) {
+  if (!openRowMenu.value) return
+  const target = e.target as Element | null
+  if (target?.closest('.mm-row-menu')) return
+  openRowMenu.value = null
+}
+// The rail's long lists grow on demand rather than pushing the rest of the
+// rail out of reach on a real vault with hundreds of unlinked notes.
+const orphanLimit = ref(8)
+const staleLimit = ref(8)
 /** Whether `id` currently occupies `slot` — the active class and aria-pressed. */
 function pathSlotHolds(slot: 'start' | 'end', id: string): boolean {
   return (slot === 'start' ? mm.pathStart : mm.pathEnd) === id
@@ -1597,12 +1737,6 @@ function ariaSort(key: SortKey): 'ascending' | 'descending' | 'none' {
   if (sortKey.value !== key) return 'none'
   return sortDir.value > 0 ? 'ascending' : 'descending'
 }
-/** Link count as a share of the busiest visible note, for the list's bar. */
-const maxVisibleDegree = computed(() => mm.visibleNodes.reduce((m, n) => Math.max(m, n.degree), 0))
-function degreeBarPct(n: MemoryGraphNode): number {
-  if (!maxVisibleDegree.value) return 0
-  return Math.round((n.degree / maxVisibleDegree.value) * 100)
-}
 /** Age for the detail heading; empty when the note carries no date at all. */
 const ageLabelOfSelected = computed(() => {
   const n = mm.selectedNode
@@ -1740,6 +1874,7 @@ onMounted(async () => {
   resetCamera()
   await nextTick()
   attachCanvas()
+  document.addEventListener('pointerdown', onDocPointerDownForRowMenu)
 })
 // The canvas paints resolved colours rather than CSS vars, so a theme flip has
 // to be pushed into it explicitly; the shared flag does the DOM observing.
@@ -1758,6 +1893,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('mousemove', handleDetailDrag)
   window.removeEventListener('mouseup', stopDetailDrag)
   window.removeEventListener('resize', onResizeNarrow)
+  document.removeEventListener('pointerdown', onDocPointerDownForRowMenu)
   document.body.classList.remove('is-dragging-layout')
 })
 </script>
@@ -1995,7 +2131,13 @@ onBeforeUnmount(() => {
 }
 .mm-link-focus:hover { background: var(--bg2); color: var(--fg); }
 
-.mm-canvas-wrap { position: relative; overflow: hidden; background: var(--bg); flex: 1; min-height: 0; }
+.mm-canvas-wrap {
+  position: relative; overflow: hidden; flex: 1; min-height: 0;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg2);
+}
+.mm-canvas-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mm-canvas-note { flex: none; margin: var(--space-2) 0 0; color: var(--fg3); font-size: var(--text-sm); }
 /* touch-action:none makes the canvas own its touches so a drag pans instead of
    scrolling the page underneath. It is scoped to the canvas on purpose: panning
    and pinch-zoom of the page remain available everywhere else, per DESIGN.md. */
@@ -2021,12 +2163,25 @@ onBeforeUnmount(() => {
   pointer-events: none;
   z-index: 2;
 }
-.mm-zoom-controls { position: absolute; top: var(--space-3); right: var(--space-3); display: flex; flex-direction: column; gap: 6px; }
+.mm-zoom-controls {
+  position: absolute; top: var(--space-2); right: var(--space-2);
+  display: flex; flex-direction: column;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-elev); overflow: hidden;
+}
+.mm-zoom-controls button {
+  width: 34px; height: 34px; border: 0; background: none; color: var(--fg2);
+  font: inherit; font-size: 15px; line-height: 1; cursor: pointer;
+}
+.mm-zoom-controls button + button { border-top: 1px solid var(--border); }
+.mm-zoom-controls button:hover { background: var(--bg3); color: var(--fg); }
+.mm-zoom-controls button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (pointer: coarse) { .mm-zoom-controls button { width: var(--touch); height: var(--touch); } }
 /* Path endpoints for the focused note, without requiring a shift-click on a
    dot (impossible on touch, undiscoverable without a mouse). Sits under the
    zoom controls so the two never overlap. */
 .mm-path-controls {
-  position: absolute; top: calc(var(--space-3) + 3 * var(--touch) + 12px); right: var(--space-3);
+  position: absolute; top: calc(var(--space-2) + 3 * var(--touch) + 12px); right: var(--space-2);
   display: flex; flex-direction: column; gap: 4px; align-items: flex-end;
   max-width: 200px;
 }
@@ -2035,10 +2190,6 @@ onBeforeUnmount(() => {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px;
 }
 .mm-path-controls .btn-chip { min-height: var(--touch); }
-.mm-hint-overlay {
-  position: absolute; bottom: var(--space-3); left: var(--space-3); font-size: var(--text-xs); color: var(--fg3);
-  background: color-mix(in srgb, var(--bg) 70%, transparent); padding: 4px 8px; border-radius: var(--radius-sm);
-}
 
 .mm-empty { color: var(--fg3); font-size: var(--text-sm); padding: var(--space-5); text-align: center; }
 
@@ -2122,12 +2273,12 @@ onBeforeUnmount(() => {
   .mm-skeleton-bars .mm-shimmer-line { animation: none; }
 }
 
-.mm-list-wrap { overflow: auto; padding: var(--space-4); flex: 1; min-height: 0; }
-.mm-list-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.mm-list-wrap { overflow: auto; flex: 1; min-height: 0; }
+.mm-list-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .mm-list-wrap table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
 .mm-list-wrap thead th {
-  text-align: left; padding: 0; color: var(--fg3); font-weight: 500; font-size: var(--text-xs);
-  text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--border);
+  text-align: left; padding: 0; color: var(--fg3); font-weight: 600; font-size: var(--text-sm);
+  border-bottom: 1px solid var(--border-strong);
   position: sticky; top: 0; background: var(--bg); z-index: 1;
 }
 /* Sortable headers put their padding on the button so the whole cell is the
@@ -2141,7 +2292,10 @@ onBeforeUnmount(() => {
 .mm-sort:hover { color: var(--fg2); }
 .mm-sort:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .mm-sort-caret { font-size: 9px; line-height: 1; color: var(--accent); }
-.mm-list-wrap tbody td { padding: 6px 10px; border-bottom: 1px solid var(--bg3); }
+.mm-list-wrap tbody td { padding: 4px 10px; border-bottom: 1px solid var(--border); }
+.mm-list-wrap thead th:first-child .mm-sort, .mm-list-wrap tbody td:first-child { padding-left: 2px; }
+.mm-tags { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mm-age { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .mm-list-wrap tbody tr { cursor: pointer; }
 .mm-list-wrap tbody tr:hover { background: var(--bg3); }
 /* The row whose note the detail panel is showing. Without it, clicking a row
@@ -2159,7 +2313,31 @@ onBeforeUnmount(() => {
 }
 .mm-title-btn:hover { text-decoration: underline; }
 .mm-title-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.path-cell { white-space: nowrap; }
+.path-cell { white-space: nowrap; width: 1%; padding-right: 0 !important; text-align: right; cursor: default; }
+/* The row's path menu: one "⋯" trigger, a small popover of two choices. */
+.mm-row-menu { position: relative; display: inline-block; }
+.mm-row-menu-btn {
+  min-width: 36px; min-height: 36px; border: 0; border-radius: var(--radius-sm);
+  background: none; color: var(--fg2); font: inherit; font-size: 16px; line-height: 1; cursor: pointer;
+}
+.mm-row-menu-btn:hover, .mm-row-menu-btn[aria-expanded="true"] { background: var(--bg3); color: var(--fg); }
+.mm-row-menu-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (pointer: coarse) { .mm-row-menu-btn { min-width: var(--touch); min-height: var(--touch); } }
+.mm-row-menu-pop {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 5;
+  display: flex; flex-direction: column; min-width: 180px; padding: 4px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--bg-elev); box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
+}
+.mm-row-menu-pop .mm-path-btn {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);
+  width: 100%; min-height: 36px; margin: 0; padding: 0 10px; border: 0; border-radius: 5px;
+  background: none; color: var(--fg); font-size: var(--text-sm); text-align: left;
+}
+.mm-row-menu-pop .mm-path-btn:hover { background: var(--bg3); border-color: transparent; }
+.mm-row-menu-pop .mm-path-btn.active { background: none; color: var(--fg); }
+.mm-path-check { color: var(--accent); }
+@media (pointer: coarse) { .mm-row-menu-pop .mm-path-btn { min-height: var(--touch); } }
 .mm-path-btn {
   background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--fg3); font-family: var(--font); font-size: var(--text-xs);
@@ -2171,23 +2349,14 @@ onBeforeUnmount(() => {
    margin that the list cell needs. */
 .mm-link-actions .mm-path-btn { margin-right: 0; }
 .mm-path-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.deg-cell { white-space: nowrap; }
-.deg-bar {
-  display: inline-block; width: 46px; height: 4px; border-radius: 2px;
-  background: var(--bg3); overflow: hidden; vertical-align: middle; margin-right: 7px;
-}
-.deg-bar > span {
-  display: block; height: 100%; border-radius: 2px;
-  background: color-mix(in srgb, var(--accent) 70%, transparent);
-}
 .deg-n { color: var(--fg2); font-variant-numeric: tabular-nums; }
 .stale-age { color: var(--warning, #ff9800); white-space: nowrap; }
 .stale-flag {
-  display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--warning, #ff9800) 15%, transparent);
-  font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em;
+  display: inline-flex; align-items: center; min-height: 20px; margin-left: 8px; padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--warning, #ff9800) 45%, var(--border));
+  border-radius: var(--radius-xs, 4px);
+  font-size: var(--text-xs); font-weight: 600;
 }
-.tag-mini { display: inline-block; background: var(--bg3); color: var(--fg2); border-radius: 4px; padding: 1px 6px; font-size: var(--text-xs); margin: 0 3px 2px 0; }
 
 .mm-detail-type { font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg3); }
 .mm-detail-title { font-size: var(--text-lg); font-weight: 600; margin: 4px 0 var(--space-2); }
@@ -2309,9 +2478,6 @@ onBeforeUnmount(() => {
 .mm-seg button:hover { color: var(--fg); }
 .mm-seg button.active { background: var(--bg3); color: var(--fg); }
 
-/* Canvas toolbar: overlays the graph top-left, opposite the zoom controls.
-   Wraps rather than scrolls so a narrow window stacks the groups instead of
-   hiding the orphan toggle off the edge. */
 /* The map's own column: a toolbar row above whichever rendering is showing.
    The two renderings take the remaining height (`min-height: 0` so the canvas
    can shrink and the list can scroll rather than stretching the page). */
@@ -2321,28 +2487,65 @@ onBeforeUnmount(() => {
   min-width: 0;
   min-height: 0;
 }
-/* Static, not absolutely positioned over the canvas: the row is shared with
-   the list now, where an overlay would sit on top of the table header. The
-   `max-width` that used to keep it clear of the zoom controls goes with it. */
-/* Left edge on the page grid, like the header title above it. */
+/* The page grid, stretched to the pane's height: the canvas and the list
+   fill the main column, and the rail scrolls on its own. */
+.mm-map-grid {
+  flex: 1;
+  min-height: 0;
+  align-items: stretch;
+  grid-template-rows: minmax(0, 1fr);
+  padding-block: var(--space-4);
+}
+.mm-map-main { display: flex; flex-direction: column; min-height: 0; }
+.mm-map-rail { position: static; min-height: 0; overflow-y: auto; }
+.mm-rail-link {
+  display: inline-flex; align-items: center; min-height: 36px; margin-top: 4px;
+  padding: 0; border: 0; background: none; color: var(--accent);
+  font: inherit; font-size: var(--text-sm); cursor: pointer;
+}
+.mm-rail-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.mm-rail-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mm-rail-link + .rail-note { margin-top: 4px; }
+.mm-rail-kv-btn {
+  width: 100%; padding: 0; border-top: 0; border-left: 0; border-right: 0;
+  background: none; font: inherit; font-size: var(--text-sm); text-align: left; cursor: pointer;
+}
+.mm-rail-kv-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.mm-rail-kv-btn:hover span { color: var(--accent); }
+.mm-rail-kv-btn strong { color: var(--fg3); font-weight: 500; font-variant-numeric: tabular-nums; }
+.mm-rail-kv-btn:focus-visible, .mm-map-rail .rail-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (pointer: coarse) { .mm-rail-kv-btn { min-height: var(--touch); } }
+/* A narrow pane stacks the rail under the drawing, so the grid scrolls as a
+   page and the canvas takes a fixed share of the viewport instead of 1fr. */
+@container chat-pane (max-width: 940px) {
+  .mm-map-grid { overflow-y: auto; grid-template-rows: none; align-items: start; align-content: start; }
+  /* Rows size to their content here; min-height: 0 would let the grid
+     squeeze them to share the pane's height and overlap. */
+  .mm-map-main, .mm-map-rail { min-height: auto; }
+  .mm-canvas-wrap { flex: none; height: min(62dvh, 560px); min-height: 280px; }
+  .mm-list-wrap { flex: none; max-height: 70dvh; }
+  .mm-map-rail { overflow: visible; }
+}
+/* Top of the main column, shared by both renderings. Wraps rather than
+   scrolls so a narrow pane stacks the controls. */
 .mm-toolbar {
   flex: none;
-  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
-  padding: var(--space-2) var(--page-inset);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2);
+  margin-bottom: var(--space-3);
 }
+.mm-toolbar-count { margin-left: auto; color: var(--fg3); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.mm-filter {
+  min-height: 34px; padding: 0 28px 0 10px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-elev); color: var(--fg);
+  font: inherit; font-size: var(--text-sm); cursor: pointer;
+}
+.mm-filter:hover { border-color: var(--border-strong); }
+.mm-filter:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .mm-seg--sm button {
   min-width: 48px;
   min-height: 30px; }
-.mm-toggle {
-  min-height: 34px;
-  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
-  color: var(--fg2); font-family: var(--font); font-size: var(--text-sm); padding: 0 10px; cursor: pointer;
-}
-.mm-toggle:hover { border-color: var(--border-strong); color: var(--fg); }
-.mm-toggle.on { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--fg); }
 @media (pointer: coarse), (max-width: 700px) {
-  .mm-seg--sm button, .mm-toggle { min-height: var(--touch); }
+  .mm-seg--sm button, .mm-filter { min-height: var(--touch); }
 }
 </style>

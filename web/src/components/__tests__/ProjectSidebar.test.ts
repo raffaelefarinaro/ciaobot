@@ -7,6 +7,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ProjectSidebar from '../ProjectSidebar.vue'
 import { useProjectStore } from '../../stores/projects'
+import { useTaskStore } from '../../stores/tasks'
 import { useHousekeepingStore } from '../../stores/housekeeping'
 
 const chatId = 'chat-1234-abcd'
@@ -329,7 +330,7 @@ describe('ProjectSidebar global new chat', () => {
     vi.restoreAllMocks()
   })
 
-  async function mountSidebar(mode: 'chat' | 'memory') {
+  async function mountSidebar(mode: 'chat' | 'memory' | 'schedules') {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [{ path: '/', component: { template: '<div />' } }],
@@ -364,6 +365,36 @@ describe('ProjectSidebar global new chat', () => {
   it('hides the global New chat in modes without a project tree', async () => {
     const wrapper = await mountSidebar('memory')
     expect(wrapper.find('.sidebar-new-chat').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('puts New project and the archive on the Projects label, not in a footer', async () => {
+    useProjectStore().bootstrapped = true
+    const wrapper = await mountSidebar('chat')
+    const row = wrapper.get('.sidebar-label-row')
+    expect(row.text()).toContain('Projects')
+    expect(row.get('button[aria-label="New project"]').text()).toBe('New')
+    expect(row.find('button[aria-label="Completed projects"]').exists()).toBe(true)
+    expect(wrapper.find('.sidebar-footer').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('puts New automation on the Routines label', async () => {
+    const wrapper = await mountSidebar('schedules')
+    useTaskStore().loading = false
+    await nextTick()
+    const button = wrapper.get('button[aria-label="New automation"]')
+    expect(button.text()).toBe('New')
+    await button.trigger('click')
+    expect(wrapper.emitted('new-schedule')).toHaveLength(1)
+    expect(wrapper.find('.sidebar-footer').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('leaves the vault lists to the map rail', async () => {
+    const wrapper = await mountSidebar('memory')
+    expect(wrapper.text()).not.toContain('Most connected')
+    expect(wrapper.text()).not.toContain('Recently written')
     wrapper.unmount()
   })
 })

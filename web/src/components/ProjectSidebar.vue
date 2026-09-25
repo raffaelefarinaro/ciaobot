@@ -216,9 +216,9 @@
       </template>
     </div>
 
-    <!-- No section title here: the nav pill above already names this view, and
-         the create action sits in the footer like the chat sidebar's, so both
-         modes put "make a new one" in the same place. -->
+    <!-- No section title here: the nav pill above already names this view.
+         The create action sits on the Routines label, the way New sits on the
+         Projects label in the chat sidebar. -->
     <template v-if="!collapsed && (mode === 'schedules')">
       <div ref="schedulesListEl" class="schedules-list">
         <template v-if="taskStore.loading">
@@ -233,7 +233,6 @@
           </div>
         </template>
         <template v-else>
-          <div v-if="workspaceSchedules.length === 0" class="empty-hint">// no automations in this workspace</div>
 
           <template v-if="oneOffSchedules.length">
           <div class="schedule-group schedule-group--once">
@@ -255,10 +254,21 @@
           </div>
         </template>
 
-        <template v-if="userRoutines.length">
-          <div class="schedule-group">
-            <h2 class="schedule-group-header">Routines</h2>
-            <div class="schedule-group-items">
+        <!-- Routines always shows, so its label can carry the create action
+             (it used to be a footer button); an empty workspace says so. -->
+        <div class="schedule-group">
+            <div class="sidebar-label-row">
+              <h2 class="schedule-group-header">Routines</h2>
+              <button
+                type="button"
+                class="sidebar-label-link"
+                aria-label="New automation"
+                title="New automation"
+                @click="emit('new-schedule')"
+              >New</button>
+            </div>
+            <p v-if="!userRoutines.length" class="sidebar-empty-note">No routines in this workspace yet.</p>
+            <div v-else class="schedule-group-items">
               <router-link
                 v-for="s in userRoutines"
                 :key="s.schedule_id"
@@ -277,8 +287,7 @@
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
               </router-link>
             </div>
-          </div>
-        </template>
+        </div>
 
         <template v-if="systemAutomations.length">
           <div class="schedule-group schedule-group--system">
@@ -308,9 +317,6 @@
         </template>
       </div>
 
-      <div class="sidebar-footer">
-        <button class="add-automation-btn" @click="emit('new-schedule')">+ New Automation</button>
-      </div>
     </template>
 
     <template v-if="!collapsed && mode === 'settings'">
@@ -364,29 +370,33 @@
           </div>
 
         <div class="mm-row-between">
-          <h3>Kinds</h3>
-          <button type="button" class="mm-link" @click="proposals.resetFilters()">reset</button>
+          <h3 id="sidebar-kinds-title">Kinds</h3>
+          <button type="button" class="mm-link" @click="proposals.resetFilters()">Reset</button>
         </div>
-        <div class="mm-link-list">
-          <div
+        <div class="mm-link-list" role="group" aria-labelledby="sidebar-kinds-title">
+          <button
+            type="button"
             class="mm-link-item mm-link-item--filter"
             :class="{ off: proposals.kindFilter !== 'all' }"
+            :aria-pressed="proposals.kindFilter === 'all'"
             @click="proposals.kindFilter = 'all'"
           >
-            <span class="label">all</span>
+            <span class="label">All kinds</span>
             <span class="cnt">{{ reviewScoped }}</span>
-          </div>
-          <div
+          </button>
+          <button
             v-for="k in reviewKinds"
             :key="k.kind"
+            type="button"
             class="mm-link-item mm-link-item--filter"
             :class="{ off: proposals.kindFilter !== k.kind }"
+            :aria-pressed="proposals.kindFilter === k.kind"
             :title="`Show only ${reviewKindLabel(k.kind)} proposals`"
             @click="proposals.kindFilter = k.kind"
           >
-            <span class="label">{{ reviewKindLabel(k.kind) }}</span>
+            <span class="label">{{ sentenceCase(reviewKindLabel(k.kind)) }}</span>
             <span class="cnt">{{ k.count }}</span>
-          </div>
+          </button>
         </div>
         </template>
       </div>
@@ -414,7 +424,7 @@
 
         <div class="mm-row-between">
           <h3>Categories</h3>
-          <button type="button" class="mm-link" @click="mm.resetCategories()">reset</button>
+          <button type="button" class="mm-link" @click="mm.resetCategories()">Reset</button>
         </div>
         <div class="mm-chip-row">
           <div
@@ -427,125 +437,13 @@
             <span class="dot" :style="{ background: cat.color }" />
             <span class="label">{{ cat.label }}</span>
             <span class="cnt">{{ cat.count }}</span>
-            <button type="button" class="only" @click.stop="mm.isolateCategory(cat.key)">only</button>
+            <button type="button" class="only" @click.stop="mm.isolateCategory(cat.key)">Only</button>
           </div>
         </div>
 
-        <template v-if="mm.mostConnected.length">
-          <h3>Most connected</h3>
-          <div class="mm-link-list">
-            <div v-for="n in mm.mostConnected" :key="n.id" class="mm-link-item" role="button" tabindex="0" @click="mm.requestFocus(n.id)" @keydown.enter.prevent="mm.requestFocus(n.id)" @keydown.space.prevent="mm.requestFocus(n.id)">
-              <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
-              <span class="label">{{ n.title }}</span>
-              <span class="cnt">{{ n.degree }}</span>
-            </div>
-          </div>
-        </template>
-
-        <!-- The gap list: notes nothing links to. This is the actionable half
-             of the old "orphaned" tile — each entry is either worth linking or
-             worth deleting, and a count told you neither. -->
-        <template v-if="mm.orphanNotes.length">
-          <div class="mm-row-between">
-            <h3>Unlinked ({{ mm.orphanNotes.length }})</h3>
-            <div class="mm-row-actions">
-              <button
-                type="button"
-                class="mm-link"
-                :class="{ 'mm-link--active': mm.orphanFilter === 'only' }"
-                :title="mm.orphanFilter === 'only' ? 'Show all notes in graph' : 'Show only unlinked notes in graph'"
-                @click="mm.toggleOnlyOrphans()"
-              >{{ mm.orphanFilter === 'only' ? 'show all' : 'only' }}</button>
-              <span class="mm-sep" aria-hidden="true">·</span>
-              <button
-                type="button"
-                class="mm-link"
-                :title="mm.orphanFilter === 'hide' ? 'Show unlinked notes in graph' : 'Hide unlinked notes from graph'"
-                @click="mm.toggleHideOrphans()"
-              >{{ mm.orphanFilter === 'hide' ? 'show in graph' : 'hide in graph' }}</button>
-            </div>
-          </div>
-          <div class="mm-link-list">
-            <div
-              v-for="n in mm.orphanNotes.slice(0, orphanLimit)"
-              :key="n.id"
-              class="mm-link-item"
-              title="No note links to this one"
-              role="button" tabindex="0" @click="mm.requestFocus(n.id)" @keydown.enter.prevent="mm.requestFocus(n.id)" @keydown.space.prevent="mm.requestFocus(n.id)"
-            >
-              <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
-              <span class="label">{{ n.title }}</span>
-            </div>
-          </div>
-          <button
-            v-if="mm.orphanNotes.length > orphanLimit"
-            type="button"
-            class="mm-link"
-            @click="orphanLimit += 20"
-          >show {{ Math.min(20, mm.orphanNotes.length - orphanLimit) }} more</button>
-        </template>
-
-        <!-- Aging notes: facts nobody has verified within their type's
-             horizon. The actionable counterpart of "Recently written" — the
-             daily curation routine reviews this same list and may resolve an
-             entry, but a failed or disabled run leaves it for the user. -->
-        <template v-if="mm.staleNotes.length">
-          <div class="mm-row-between">
-            <h3>Needs review ({{ mm.staleNotes.length }})</h3>
-          </div>
-          <p class="mm-hint">
-            Daily Memory curation checks these notes too: it re-verifies, updates,
-            corrects, or removes them. They stay here until you or that run
-            resolves them.
-          </p>
-          <button
-            type="button"
-            class="mm-link mm-link--block"
-            @click="openRetirementReview()"
-          >Open retirement review →</button>
-          <div class="mm-link-list">
-            <div
-              v-for="n in mm.staleNotes.slice(0, staleLimit)"
-              :key="n.id"
-              class="mm-link-item"
-              :title="`Unverified for ${n.ageDays ?? '?'} days — click to open it in the map`"
-              role="button" tabindex="0" @click="mm.requestFocus(n.id)" @keydown.enter.prevent="mm.requestFocus(n.id)" @keydown.space.prevent="mm.requestFocus(n.id)"
-            >
-              <span class="dot mm-dot--stale" />
-              <span class="label">{{ n.title }}</span>
-              <span class="cnt">{{ mm.ageLabelOf(n) }}</span>
-            </div>
-          </div>
-          <button
-            v-if="mm.staleNotes.length > staleLimit"
-            type="button"
-            class="mm-link"
-            @click="staleLimit += 20"
-          >show {{ Math.min(20, mm.staleNotes.length - staleLimit) }} more</button>
-        </template>
-
-        <!-- Entry points into the graph: the note you last touched is almost
-             always the one you opened the map about. -->
-        <template v-if="mm.recentNotes.length">
-          <h3>Recently written</h3>
-          <div class="mm-link-list">
-            <div
-              v-for="n in mm.recentNotes"
-              :key="n.id"
-              class="mm-link-item"
-              :class="{ current: mm.selectedId === n.id }"
-              title="Centre the map here"
-              role="button" tabindex="0" @click="mm.requestFocus(n.id)" @keydown.enter.prevent="mm.requestFocus(n.id)" @keydown.space.prevent="mm.requestFocus(n.id)"
-            >
-              <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
-              <span class="label">{{ n.title }}</span>
-            </div>
-          </div>
-        </template>
-
-        <h3>Path finder</h3>
-        <p class="mm-hint">{{ mm.pathHint }}</p>
-        <button v-if="mm.pathStart || mm.pathEnd" type="button" class="mm-link" @click="mm.resetPath()">clear path</button>
+        <!-- Most connected, Unlinked, Needs review, Recently written and the
+             path finder live in the map's rail now: the sidebar filters what
+             the map shows, the rail says what is in it. -->
         </template>
       </div>
     </template>
@@ -608,7 +506,33 @@
         </div>
 
         <!-- Project list -->
-        <h2 v-if="store.workspaceProjects.length" class="sidebar-list-label">Projects</h2>
+        <!-- The label carries the list's actions: New (it used to be a
+             footer button) and the completed-projects archive. -->
+        <div class="sidebar-label-row">
+          <h2 class="sidebar-list-label">Projects</h2>
+          <button
+            type="button"
+            class="sidebar-label-link"
+            aria-label="New project"
+            title="New project"
+            @click="addProject"
+          >New</button>
+          <button
+            type="button"
+            class="sidebar-label-icon archive-btn"
+            title="Completed projects"
+            aria-label="Completed projects"
+            @click="openArchive"
+          >
+            <!-- Archive box: lid over a bin, the conventional "archived" glyph -->
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="4" />
+              <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
+              <line x1="10" y1="12" x2="14" y2="12" />
+            </svg>
+          </button>
+        </div>
         <div class="project-list">
           <div
             v-for="project in store.workspaceProjects"
@@ -900,24 +824,6 @@
         </template>
       </div>
 
-      <!-- Add project button + archived-projects entry point -->
-      <div class="sidebar-footer">
-        <button class="add-project-btn" @click="addProject">+ New Project</button>
-        <button
-          class="archive-btn"
-          @click="openArchive"
-          title="Completed projects"
-          aria-label="Completed projects"
-        >
-          <!-- Archive box: lid over a bin, the conventional "archived" glyph -->
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="4" />
-            <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
-            <line x1="10" y1="12" x2="14" y2="12" />
-          </svg>
-        </button>
-      </div>
     </template>
   </aside>
 
@@ -986,7 +892,7 @@ import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useFileViewerStore } from '../stores/fileViewer'
-import { useMemoryMapStore, categoryColorFor, catKeyFor } from '../stores/memoryMap'
+import { useMemoryMapStore } from '../stores/memoryMap'
 import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import ChatSignals from './ChatSignals.vue'
@@ -1040,34 +946,13 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', closeWorkspaceMenuOnOutside)
 })
 
-// The unlinked list is the one section that can run to hundreds of entries on a
-// real vault, so it grows on demand rather than pushing every other section off
-// the bottom of the sidebar.
-const orphanLimit = ref(8)
-const staleLimit = ref(8)
-
 const route = useRoute()
 const router = useRouter()
 
-/** The memory page's Memory/Review switcher. Review is the /proposals
- * route; graph and list are both /memory, so only those two need a push.
- *
- * A graph/list choice is also remembered in `mapView`, so the Memory button
- * returns to the drawing that was on screen rather than resetting to graph. */
-function setMemoryView(next: 'graph' | 'list' | 'review') {
-  mm.view = next
-  if (next !== 'review') mm.mapView = next
-  const target = next === 'review' ? '/proposals' : '/memory'
-  if (route.path !== target) void router.push(target)
-}
-
-/** The "Needs review" list lands directly on the retirement queue. */
-function openRetirementReview() {
-  mm.reviewTab = 'retirement'
-  // Always the queue, never the trash: this link means "show me what is
-  // waiting", and the sub-tab could be left on Trash from a previous visit.
-  mm.retirementTab = 'candidates'
-  setMemoryView('review')
+/** Kind labels are lower-case nouns ("memory", "skill"); the sidebar lists
+ * them as sentence-case names like every other filter row. */
+function sentenceCase(label: string): string {
+  return label ? label.charAt(0).toUpperCase() + label.slice(1) : label
 }
 
 function promptTitle(prompt: string): string {
@@ -2918,63 +2803,52 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 
-.sidebar-footer {
-  /* Match the sidebar/pane headers: 44px controls + 8px pad + 1px border. */
-  height: 61px;
-  padding: 8px;
-  border-top: 1px solid var(--border);
+/* A list label with its actions on the right: "Projects · New ⊟". The
+   actions are quiet text/icon controls at full touch size on coarse pointers. */
+.sidebar-label-row {
   display: flex;
-  gap: 6px;
   align-items: center;
-  flex-shrink: 0;
-  box-sizing: border-box;
+  gap: 2px;
+  margin-top: 4px;
+  padding-right: 4px;
 }
-
-.add-project-btn,
-.add-automation-btn {
-  flex: 1;
-  height: var(--touch);
-  padding: 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg3);
-  color: var(--fg);
+.sidebar-label-row .sidebar-list-label,
+.sidebar-label-row .schedule-group-header { flex: 1; min-width: 0; margin: 0; }
+.sidebar-label-link {
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--accent);
+  font: 600 var(--text-xs)/1 var(--font-sans);
   cursor: pointer;
-  font-family: var(--font);
-  font-size: var(--text-sm);
-  font-weight: 500;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
 }
-
-.add-project-btn:hover,
-.add-automation-btn:hover {
-  background: var(--bg);
-  border-color: var(--accent);
-  color: var(--fg);
-}
-
-.archive-btn {
-  flex-shrink: 0;
-  width: var(--touch);
-  height: var(--touch);
+.sidebar-label-link:hover { background: var(--bg3); }
+.sidebar-label-icon {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
   padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg3);
-  color: var(--fg2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg3);
   cursor: pointer;
-  transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
 }
-.archive-btn:hover {
-  background: var(--bg);
-  border-color: var(--accent);
-  color: var(--fg);
+.sidebar-label-icon:hover { background: var(--bg3); color: var(--fg); }
+.sidebar-label-link:focus-visible,
+.sidebar-label-icon:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (pointer: coarse) {
+  .sidebar-label-link { min-height: var(--touch); padding: 0 12px; }
+  .sidebar-label-icon { width: var(--touch); height: var(--touch); }
+}
+.sidebar-empty-note {
+  margin: 0;
+  padding: 4px 10px 8px;
+  color: var(--fg3);
+  font-size: var(--text-sm);
 }
 
 /* Completed-projects dialog */
@@ -3101,8 +2975,7 @@ async function confirmDeleteChat(chatId: string) {
     pointer-events: none;
   }
   .sidebar.collapsed .sidebar-header,
-  .sidebar.collapsed .project-list,
-  .sidebar.collapsed .sidebar-footer {
+  .sidebar.collapsed .project-list {
     visibility: hidden;
   }
   .add-chat-btn { opacity: 1; }
@@ -3233,12 +3106,6 @@ async function confirmDeleteChat(chatId: string) {
   background: var(--warning);
   flex-shrink: 0;
 }
-.empty-hint {
-  padding: 12px 16px;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  text-align: center;
-}
 
 /* Settings sub-page navigation */
 .settings-nav-list {
@@ -3308,14 +3175,7 @@ async function confirmDeleteChat(chatId: string) {
 .mm-row-between h3 { margin: 0; }
 .mm-row-between { padding-right: 8px; }
 .mm-row-between:first-child { margin-top: 0; }
-.mm-row-actions { display: inline-flex; align-items: baseline; gap: 6px; }
-.mm-sep { color: var(--fg3); font-size: var(--text-xs); }
-.mm-link--active { color: var(--fg); font-weight: 600; }
 .mm-link { background: none; border: none; color: var(--accent); font-size: var(--text-xs); cursor: pointer; padding: 0; }
-/* A standalone entry point, not an inline action: full touch target. */
-.mm-link--block { display: inline-flex; align-items: center; min-height: var(--touch); margin-bottom: var(--space-1); }
-.mm-link--block:hover { text-decoration: underline; }
-.mm-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0; }
 
 .mm-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
 .mm-stat-grid--3 { grid-template-columns: repeat(3, 1fr); }
@@ -3388,19 +3248,16 @@ async function confirmDeleteChat(chatId: string) {
   .mm-chip, .mm-link-item { min-height: var(--touch); }
 }
 .mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
-/* Aging note marker: the app warning token, not a category colour — age is
-   not a type, and reusing a hue would lie about what the dot means. */
-.mm-dot--stale { background: var(--warning, #ff9800); }
 .mm-link-item .cnt { margin-left: auto; color: var(--fg3); }
-/* Marks which note the map is currently centred on, so the recent list
-   doubles as a "you are here" indicator rather than just a jump list. */
-.mm-link-item.current { background: var(--bg3); color: var(--fg); }
 /* The review queue's kind rows are a filter, so the SELECTED one is the solid
    one and the rest recede — the inverse of the memory chips, where every chip is
    on until you switch it off. */
+button.mm-link-item {
+  width: 100%; border: 0; background: none; font: inherit; font-size: var(--text-sm); text-align: left;
+}
+button.mm-link-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .mm-link-item--filter.off { color: var(--fg3); }
 .mm-link-item--filter:not(.off) { background: var(--bg-elev); color: var(--fg); font-weight: 600; }
-.mm-link-item.current .label { font-weight: 600; }
 </style>
 
 <!-- Non-scoped: teleported context menus live outside this component's DOM -->
