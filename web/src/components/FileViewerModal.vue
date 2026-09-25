@@ -29,35 +29,24 @@
           >
             {{ isContinuing ? 'Continuing…' : 'Continue this chat' }}
           </button>
+          <!-- Two text actions and the pin stay visible; the file utilities
+               (copy path, download, open elsewhere, memory map) share one
+               menu instead of a row of look-alike icons. The menu renders
+               inside the dialog (no portal) so the dialog's focus trap and
+               outside-click handling keep working. -->
           <button
-            class="btn-icon"
-            :class="{ ok: copyState === 'ok' }"
-            @click="copyPath"
-            :title="copyState === 'ok' ? 'Copied!' : 'Copy path'"
-            :aria-label="copyState === 'ok' ? 'Copied' : 'Copy path'"
-          >
-            <svg v-if="copyState === 'ok'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-            <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          </button>
+            v-if="canEdit && !store.editing"
+            type="button"
+            class="fv-text-btn"
+            @click="store.startEditing"
+          >Edit</button>
           <button
-            class="btn-icon"
-            @click="downloadFile"
-            title="Download"
-            aria-label="Download"
-            :disabled="store.loading || !!store.error"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          </button>
-          <button
-            class="btn-icon"
-            :class="{ ok: openExternalState === 'ok' }"
-            @click="openExternally"
-            title="Open in default app"
-            aria-label="Open in default app"
-            :disabled="store.loading || !!store.error || openExternalState === 'loading'"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-          </button>
+            v-if="store.path"
+            type="button"
+            class="fv-text-btn"
+            title="Discuss in chat"
+            @click="discussInChat"
+          >Discuss</button>
           <button
             v-if="canPin"
             class="btn-icon"
@@ -68,33 +57,29 @@
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a3 3 0 0 0-6 0z"/></svg>
           </button>
-           <button
-             v-if="memoryPath"
-             class="btn-icon"
-             title="Open in memory map"
-             aria-label="Open in memory map"
-             @click="openInMemoryMap"
-           >
-             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="m7.7 7.1 2.9 8.1M16.3 7.1l-2.9 8.1M8 6h8"/></svg>
-           </button>
-           <button
-             v-if="canEdit && !store.editing"
-            class="btn-icon"
-            title="Edit"
-            aria-label="Edit"
-            @click="store.startEditing"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"/></svg>
-          </button>
-          <button
-            v-if="store.path"
-            class="btn-icon"
-            title="Discuss in chat"
-            aria-label="Discuss in chat"
-            @click="discussInChat"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
-          </button>
+          <DropdownMenuRoot :modal="false">
+            <DropdownMenuTrigger as-child>
+              <button type="button" class="btn-icon" aria-label="More file actions" title="More">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" /></svg>
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent as-child align="end" :side-offset="6" :collision-padding="8">
+              <div class="fv-actions-menu">
+                <DropdownMenuItem as-child @select.prevent="copyPath">
+                  <button type="button">{{ copyState === 'ok' ? 'Copied' : 'Copy path' }}</button>
+                </DropdownMenuItem>
+                <DropdownMenuItem as-child :disabled="store.loading || !!store.error" @select="downloadFile">
+                  <button type="button">Download</button>
+                </DropdownMenuItem>
+                <DropdownMenuItem as-child :disabled="store.loading || !!store.error || openExternalState === 'loading'" @select="openExternally">
+                  <button type="button">{{ openExternalState === 'ok' ? 'Opened' : 'Open in default app' }}</button>
+                </DropdownMenuItem>
+                <DropdownMenuItem v-if="memoryPath" as-child @select="openInMemoryMap">
+                  <button type="button">Open in memory map</button>
+                </DropdownMenuItem>
+              </div>
+            </DropdownMenuContent>
+          </DropdownMenuRoot>
           <button class="btn-icon" @click="requestClose" title="Close (Esc)" aria-label="Close">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
@@ -242,6 +227,7 @@
 
         <!-- Inline comment edit popover -->
         <CommentComposePopover
+          inline
           :anchor="editingCommentId && editAnchor ? editAnchor : null"
           v-model="editDraftText"
           :images="editingCommentImages"
@@ -253,6 +239,7 @@
 
         <!-- Inline comment draft popover -->
         <CommentComposePopover
+          inline
           ref="composeDraftRef"
           :anchor="commentDraft && draftAnchor ? draftAnchor : null"
           v-model="composeText"
@@ -273,7 +260,7 @@
           type="button"
           :title="isCsv ? 'Comment on this cell' : 'Comment on this selection'"
         >
-          <span class="fv-comment-trigger-icon">💬</span>
+          <svg class="fv-comment-trigger-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z" /></svg>
           Comment
         </button>
 
@@ -301,17 +288,15 @@
             @mousedown.stop
             @keydown="onPopupKeydown"
           >
-            <div class="fv-pop-header">
-              <span class="fv-sidebar-card-line" v-if="commentLineLabel(activePopupComment)">{{ commentLineLabel(activePopupComment) }}</span>
-              <div class="fv-sidebar-card-actions fv-pop-actions">
-                <button class="fv-sidebar-card-edit" @click.stop="editFromPopup(activePopupComment)" title="Edit">✎</button>
-                <button class="fv-sidebar-card-remove" @click.stop="deletePopupComment" title="Delete">×</button>
-              </div>
-            </div>
+            <div v-if="commentLineLabel(activePopupComment)" class="fv-pop-quote">{{ basename }} · line {{ commentLineLabel(activePopupComment) }}</div>
             <div v-if="activePopupComment.images?.length" class="fv-sidebar-card-images">
               <img v-for="img in activePopupComment.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="card-image-thumb" @click.stop />
             </div>
             <div class="fv-sidebar-card-note">{{ activePopupComment.comment }}</div>
+            <div class="fv-pop-actions">
+              <button type="button" class="fv-sidebar-card-edit" @click.stop="editFromPopup(activePopupComment)">Edit</button>
+              <button type="button" class="fv-sidebar-card-remove" @click.stop="deletePopupComment">Delete</button>
+            </div>
           </div>
         </FocusScope>
         </div>
@@ -331,6 +316,10 @@ import {
   DialogTitle,
   FocusScope,
   type PointerDownOutsideEvent,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRoot,
+  DropdownMenuTrigger,
 } from 'reka-ui'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from 'vue'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -1504,7 +1493,7 @@ watch(
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 14px;
+  padding: 10px 12px 10px 20px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
@@ -1513,15 +1502,15 @@ watch(
   min-width: 0;
 }
 .fv-title {
-  font-weight: 600;
-  font-size: 14px;
+  font-weight: 650;
+  font-size: var(--text-lg);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .fv-subtitle {
-  font-size: 11px;
-  color: var(--fg2);
+  font-size: var(--text-xs);
+  color: var(--fg3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1540,8 +1529,57 @@ watch(
   color: var(--fg);
 }
 .fv-actions .btn-icon.active {
-  background: var(--accent);
-  color: var(--bg);
+  background: var(--bg3);
+  color: var(--accent);
+}
+.fv-text-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.fv-text-btn:hover { border-color: var(--border-strong); }
+@media (pointer: coarse) {
+  .fv-text-btn { min-height: var(--touch); }
+}
+.fv-actions-menu {
+  z-index: 100;
+  min-width: 190px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 35%);
+}
+.fv-actions-menu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.fv-actions-menu button:hover,
+.fv-actions-menu button[data-highlighted] { background: var(--bg3); outline: none; }
+.fv-actions-menu button[data-disabled] { opacity: 0.45; cursor: default; }
+@media (pointer: coarse) {
+  .fv-actions-menu button { min-height: var(--touch); }
 }
 .fv-actions .btn-icon.ok {
   color: var(--success);
@@ -1551,14 +1589,15 @@ watch(
   cursor: not-allowed;
 }
 .fv-continue-btn {
-  margin-right: 6px;
-  padding: 4px 10px;
-  font-size: 12px;
+  margin-right: 4px;
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: var(--text-sm);
   font-weight: 600;
-  color: var(--bg);
+  color: var(--on-accent);
   background: var(--accent);
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -1622,7 +1661,7 @@ watch(
 }
 .fv-pre {
   margin: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -1682,7 +1721,7 @@ watch(
 }
 .fv-meta-name {
   color: var(--fg2);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   margin-left: 4px;
 }
@@ -1700,7 +1739,7 @@ watch(
   padding: 1px 6px;
   border: 1px solid var(--border);
   border-radius: 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 .fv-meta-summary {
   margin: 2px 0 0;
@@ -1725,7 +1764,7 @@ watch(
   padding: 1px 6px;
   border: 1px solid var(--border);
   border-radius: 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 .fv-meta-extra {
   margin: 8px 0 0;
@@ -1749,8 +1788,9 @@ watch(
 
 .fv-md {
   font-size: var(--text-base);
-  line-height: 1.6;
-  max-width: 88ch;
+  line-height: 1.65;
+  /* Readable measure for prose, as in the pinned panel. */
+  max-width: 680px;
 }
 .fv-md :deep(p) { margin: 0.6em 0; }
 .fv-md :deep(:first-child) { margin-top: 0; }
@@ -1857,19 +1897,20 @@ watch(
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: var(--fg);
+  color: var(--bg);
   font-size: var(--text-sm);
   font-weight: 600;
-  color: white;
-  background: var(--error);
-  border: none;
-  border-radius: 999px;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 8px 20px rgb(0 0 0 / 25%);
   user-select: none;
 }
-.fv-comment-trigger:hover { filter: brightness(1.08); }
-.fv-comment-trigger-icon { font-size: var(--text-sm); line-height: 1; }
+.fv-comment-trigger:hover { filter: none; opacity: 0.9; }
+.fv-comment-trigger-icon { flex: none; }
 .fv-comment-popover {
   position: absolute;
   z-index: 6;
@@ -2097,7 +2138,7 @@ watch(
 .fv-body {
   flex: 1;
   overflow: auto;
-  padding: 18px 28px 28px;
+  padding: 28px 32px 48px;
   position: relative;
   min-width: 0;
 }
@@ -2164,22 +2205,47 @@ watch(
   z-index: 32;
   width: 280px;
   max-width: calc(100% - 16px);
-  background: var(--bg2, rgba(20, 20, 40, 0.98));
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
+  background: var(--bg2);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 14px 36px rgb(0 0 0 / 28%);
   padding: 10px 12px;
   box-sizing: border-box;
+  font-size: var(--text-sm);
 }
-.fv-pop-header {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-bottom: 6px;
+.fv-pop-quote {
+  margin-bottom: 4px;
+  color: var(--fg3);
+  font-size: var(--text-xs);
 }
 .fv-pop-actions {
-  opacity: 1 !important;
-  margin-left: auto;
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+}
+.fv-pop-actions .fv-sidebar-card-edit,
+.fv-pop-actions .fv-sidebar-card-remove {
+  width: auto;
+  height: auto;
+  min-height: 28px;
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: 1.2;
+}
+.fv-pop-actions .fv-sidebar-card-edit:hover,
+.fv-pop-actions .fv-sidebar-card-remove:hover {
+  background: none;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+@media (pointer: coarse) {
+  .fv-pop-actions .fv-sidebar-card-edit,
+  .fv-pop-actions .fv-sidebar-card-remove { min-height: var(--touch); }
 }
 .fv-sidebar-header {
   display: flex;
@@ -2443,18 +2509,21 @@ watch(
    Use :deep() because markdown highlights are created dynamically via
    DOM manipulation and won't carry Vue's scoped attribute. */
 :deep(.comment-highlight) {
-  background: rgba(234, 179, 8, 0.25);
-  border-bottom: 2px solid rgba(234, 179, 8, 0.6);
+  /* Same violet as chat and the pinned panel: one colour for "you left a
+     note here" everywhere comments appear. */
+  background: color-mix(in srgb, var(--accent2) 26%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent2) 70%, transparent);
+  border-radius: 2px;
   cursor: pointer;
   transition: background 0.15s;
 }
 :deep(.comment-highlight:hover) {
-  background: rgba(234, 179, 8, 0.4);
+  background: color-mix(in srgb, var(--accent2) 40%, transparent);
 }
 :deep(.comment-highlight[data-comment-id="__draft__"]),
 .pre-line.comment-highlight[data-comment-id="__draft__"] {
-  background: rgba(234, 179, 8, 0.45);
-  border-bottom-color: rgba(234, 179, 8, 0.9);
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
 :deep(.comment-highlight.comment-pulse),
@@ -2463,9 +2532,14 @@ watch(
   animation: fv-comment-pulse 1.1s var(--ease, ease) 1;
 }
 @keyframes fv-comment-pulse {
-  0%   { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
-  25%  { background: rgba(234, 179, 8, 0.75); box-shadow: 0 0 0 6px rgba(234, 179, 8, 0.25); }
-  100% { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent2) 0%, transparent); }
+  25%  { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent2) 30%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent2) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  :deep(.comment-highlight.comment-pulse),
+  .pre-line.comment-highlight.comment-pulse,
+  .pre-line.comment-pulse { animation: none; }
 }
 
 /* Pre line wrappers */

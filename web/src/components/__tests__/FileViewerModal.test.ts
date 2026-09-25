@@ -314,4 +314,32 @@ describe('FileViewerModal', () => {
 
     expect(close).not.toHaveBeenCalled()
   })
+
+  it('keeps two text actions visible and puts the file utilities in one menu', async () => {
+    openViewer()
+    await settle()
+
+    const header = document.querySelector<HTMLElement>('.fv-header')!
+    const labels = Array.from(header.querySelectorAll('button')).map(b => b.getAttribute('aria-label') || b.textContent?.trim())
+    expect(labels).toContain('Discuss')
+    expect(labels).toContain('More file actions')
+    // The utilities are no longer a row of header icons.
+    expect(header.querySelector('[aria-label="Download"]')).toBeNull()
+    expect(header.querySelector('[aria-label="Copy path"]')).toBeNull()
+  })
+
+  it('renders the comment compose popover inside the dialog, not on <body>', async () => {
+    const { default: CommentComposePopover } = await import('../CommentComposePopover.vue')
+    const inline = mount(CommentComposePopover, {
+      attachTo: document.body,
+      props: { anchor: { top: 10, left: 10 } as never, modelValue: 'note', inline: true },
+      global: { stubs: { VoiceRecorder: true } },
+    })
+    await settle()
+    // Rendered in place: reka disables pointer events outside a modal dialog
+    // and closes it on an outside click, so a teleported popover was unusable.
+    expect(inline.find('.compose').exists()).toBe(true)
+    inline.unmount()
+  })
 })
+

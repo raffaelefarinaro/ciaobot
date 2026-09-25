@@ -1,5 +1,8 @@
 <template>
-  <Teleport to="body">
+  <!-- Inside a modal dialog the popover must stay in the dialog's DOM: reka
+       disables pointer events outside the dialog and treats a click there as
+       "close", so a body-teleported popover could be seen but not used. -->
+  <Teleport to="body" :disabled="inline">
     <FocusScope
       v-if="anchor"
       as-child
@@ -96,8 +99,11 @@ const props = withDefaults(defineProps<{
   anchor: ComposeAnchor | null
   modelValue: string
   images?: string[]
+  /** Render in place instead of teleporting to <body> (use inside dialogs). */
+  inline?: boolean
 }>(), {
   images: () => [],
+  inline: false,
 })
 
 const emit = defineEmits<{
@@ -250,7 +256,7 @@ defineExpose({ focus, toggleDictation })
 .compose {
   position: fixed;
   z-index: 41;
-  width: 320px;
+  width: 360px;
   max-width: calc(100vw - 16px);
   box-sizing: border-box;
   padding: 10px 12px;
@@ -332,6 +338,8 @@ defineExpose({ focus, toggleDictation })
   color: var(--fg);
 }
 .compose-btn {
+  flex: none;
+  white-space: nowrap;
   display: inline-flex;
   align-items: center;
   justify-content: center;
