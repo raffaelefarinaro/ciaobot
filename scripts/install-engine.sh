@@ -125,7 +125,9 @@ refuse_desktop_engine() {
         program=$("$PLISTBUDDY" -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null || true)
         case "$program" in
             *.app/*)
-                fail "Ciaobot.app manages the engine on this Mac. Migrating it to the terminal engine is not supported yet (#576); keep using Ciaobot.app or uninstall it first with: ciao desktop uninstall"
+                if [ -e "$program" ]; then
+                    fail "Ciaobot.app manages the engine on this Mac. Migrating it to the terminal engine is not supported yet (#576); keep using Ciaobot.app or uninstall it first with: ciao desktop uninstall"
+                fi
                 ;;
         esac
     fi
@@ -283,11 +285,12 @@ workspace=$(CDPATH= cd -- "$workspace" && pwd -P)
 
 # Idempotent, and it preserves an existing .env and its password. stderr is left
 # visible so setup's own guard message reaches the user.
-if [ -n "$setup_yes" ]; then
-    "$ciao" setup --workspace "$workspace" --python "$ciao" --yes >/dev/null || fail "ciao setup failed"
-else
-    "$ciao" setup --workspace "$workspace" --python "$ciao" >/dev/null || fail "ciao setup failed"
-fi
+set -- --workspace "$workspace" --python "$ciao"
+[ -z "$setup_yes" ] || set -- "$@" --yes
+# Reload the agent so launchd drops any job definition it already holds
+# (another engine's), otherwise `service start` restarts the old one.
+[ "$no_start" -ne 0 ] || set -- "$@" --load-launchd
+"$ciao" setup "$@" >/dev/null || fail "ciao setup failed"
 
 if [ "$no_start" -eq 0 ]; then
     "$ciao" service start --workspace "$workspace" --json >/dev/null \

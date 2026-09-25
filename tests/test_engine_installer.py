@@ -122,6 +122,19 @@ def test_verification_happens_before_install() -> None:
     assert SCRIPT_TEXT.index("shasum -a 256") < install
 
 
+def test_setup_reloads_launch_agent_before_start() -> None:
+    # `ciao setup` rewrites the plist but does not reload it, so launchd keeps
+    # serving the job definition it already holds - the previous engine's, for a
+    # source checkout or a pip install. `service start` then kickstarts that
+    # one, and the engine this script just installed never runs. Reloading the
+    # agent is what makes the takeover actually take, so it has to be requested
+    # from setup and only when the script is also going to start the service.
+    line = next(l for l in SCRIPT_TEXT.splitlines() if "--load-launchd" in l)
+
+    assert "no_start" in line
+    assert SCRIPT_TEXT.index("--load-launchd") < SCRIPT_TEXT.index("service start --workspace")
+
+
 def test_refuses_desktop_engine_and_foreign_ciao() -> None:
     refuse_desktop = _function_source("refuse_desktop_engine")
 
@@ -469,16 +482,22 @@ def test_engine_installer_rejects_cdpath_surprise(tmp_path: Path) -> None:
     assert f"setup --workspace {home / 'wsrel'} --python {ciao}\n" in calls
 
 
-def test_engine_installer_refuses_app_managed_engine(tmp_path: Path) -> None:
-    # PLISTBUDDY is a script variable, not an environment variable, so the
-    # function is run with it pointed at a stub reporting a bundled engine.
+def _run_refuse_desktop_engine(
+    tmp_path: Path, program: Path
+) -> subprocess.CompletedProcess[str]:
+    """Run refuse_desktop_engine against a plist whose ProgramArguments:0 is
+    `program`.
+
+    PLISTBUDDY is a script variable, not an environment variable, so the
+    function is run with it pointed at a stub printing that path.
+    """
     home = tmp_path / "home"
     (home / "Library" / "LaunchAgents").mkdir(parents=True)
     (home / "Library" / "LaunchAgents" / "com.ciao.server.plist").write_text(
         "<plist/>", encoding="utf-8"
     )
     plistbuddy = tmp_path / "PlistBuddy"
-    _write_exec(plistbuddy, "#!/bin/sh\necho /Applications/Ciaobot.app/Contents/MacOS/ciao\n")
+    _write_exec(plistbuddy, f"#!/bin/sh\necho {program}\n")
     body = "\n".join(
         [
             f"PLISTBUDDY={plistbuddy}",
@@ -488,8 +507,7 @@ def test_engine_installer_refuses_app_managed_engine(tmp_path: Path) -> None:
             "refuse_desktop_engine",
         ]
     )
-
-    result = subprocess.run(
+    return subprocess.run(
         ["sh", "-c", body],
         env={**os.environ, "HOME": str(home)},
         capture_output=True,
@@ -497,5 +515,29 @@ def test_engine_installer_refuses_app_managed_engine(tmp_path: Path) -> None:
         check=False,
     )
 
+
+def test_engine_installer_refuses_app_managed_engine(tmp_path: Path) -> None:
+    # The bundle is built under tmp_path, so the refusal means the same thing
+    # on a Mac with Ciaobot.app installed and on one without.
+    app_engine = tmp_path / "Ciaobot.app" / "Contents" / "MacOS" / "ciao"
+    app_engine.parent.mkdir(parents=True)
+    _write_exec(app_engine, "#!/bin/sh\nexit 0\n")
+
+    result = _run_refuse_desktop_engine(tmp_path, app_engine)
+
     assert result.returncode == 1
     assert "#576" in result.stderr
+
+
+def test_engine_installer_ignores_plist_of_deleted_app(tmp_path: Path) -> None:
+    # Ciaobot.app was moved to the Trash and left its plist behind. Refusing
+    # here would be a dead end: the advice in the message
+    # (`ciao desktop uninstall`) runs the shim, whose target is gone too, so
+    # the user could neither install nor uninstall.
+    result = _run_refuse_desktop_engine(
+        tmp_path,
+        tmp_path / "Applications" / "Ciaobot.app" / "Contents" / "MacOS" / "ciao",
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
