@@ -494,6 +494,39 @@ def test_an_archive_outside_the_clone_is_refused(
 # ── the effective configuration the child will build ─────────────────────
 
 
+@pytest.fixture
+def no_server_popen(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """``subprocess.Popen``, with the server command refused and the rest real.
+
+    A refusal test is only evidence while the thing it refuses is still
+    reachable: a record-and-delegate stub calls the real ``Popen`` for
+    ``ciao.cli run`` too, so the day the containment check moves after the
+    spawn -- or after the probe it depends on -- the test launches a Ciaobot
+    server, a full agent with Bash, and leaves it running with nothing to stop
+    it. So the server command raises here instead, and the raise *is* the
+    evidence: a run that reached the spawn ends with this message rather than
+    with a refusal, and the recorded attempts are what a test asserts on.
+
+    Everything else is delegated, because the effective-config probe is a real
+    child process and ``subprocess.run`` resolves ``Popen`` from the module at
+    call time: a blanket stub would take the probe down with the server. The
+    command is matched on its parts rather than compared whole, so a path or a
+    flag that carries ``ciao.cli`` still counts as a server.
+    """
+    real_popen = subprocess.Popen
+    attempts: list[list[str]] = []
+
+    def guarded_popen(command, *args, **kwargs):  # type: ignore[no-untyped-def]
+        parts = [str(part) for part in command]
+        if any("ciao.cli" in part for part in parts):
+            attempts.append(parts)
+            raise AssertionError("test tried to spawn a real ciao server")
+        return real_popen(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", guarded_popen)
+    return attempts
+
+
 def _dotenv_clone(tmp_path: Path) -> tuple[Path, Path, list[object]]:
     """A minimal clone whose ``.env`` names a vault outside it, and that vault.
 
@@ -524,7 +557,9 @@ def _dotenv_clone(tmp_path: Path) -> tuple[Path, Path, list[object]]:
     return clone, external, rows
 
 
-def test_probe_reads_the_configuration_the_server_will_build(tmp_path: Path) -> None:
+def test_probe_reads_the_configuration_the_server_will_build(
+    tmp_path: Path, no_server_popen: list[list[str]]
+) -> None:
     """The probe sees what ``ciao run`` sees, ``.env`` included.
 
     This is the whole reason the probe exists. A config built from an explicit
@@ -533,7 +568,9 @@ def test_probe_reads_the_configuration_the_server_will_build(tmp_path: Path) -> 
     arguments, which does. So for a clone whose ``.env`` sets an absolute
     ``CIAO_VAULT_ROOT`` the two disagree, and the child is the one that writes.
     The probe is run for real here, on a minimal workspace, so the disagreement
-    is a measurement rather than an assumption.
+    is a measurement rather than an assumption -- which is why this test takes
+    the stub that refuses a server and delegates everything else: the probe's
+    child has to actually run for the measurement to be one.
     """
     clone, external, _ = _dotenv_clone(tmp_path)
 
@@ -562,9 +599,13 @@ def test_probe_reads_the_configuration_the_server_will_build(tmp_path: Path) -> 
     assert clean["vault_root"] == str(clone / "memory-vault")
     run.assert_effective_containment(clean, clone)
 
+    # Reading the configuration spawns nothing: the probe is a child that prints
+    # a dict, and the stub is what would have said otherwise.
+    assert not no_server_popen, f"the probe must not start a server: {no_server_popen}"
+
 
 def test_start_server_refuses_external_vault_from_dotenv(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, no_server_popen: list[list[str]]
 ) -> None:
     """A live vault in the clone's ``.env`` stops the run before anything spawns.
 
@@ -574,28 +615,24 @@ def test_start_server_refuses_external_vault_from_dotenv(
     probe answers the question the preflight could not, and the refusal has to
     land before ``Popen``: once the process exists, a full agent with Bash is
     running against the clone.
+
+    The ordering is enforced rather than observed. ``no_server_popen`` raises
+    the moment anything asks for ``ciao.cli``, so a run that reached the spawn
+    would end with ``test tried to spawn a real ciao server`` -- and this
+    ``pytest.raises`` would not have been satisfied -- instead of quietly
+    leaving a real server behind for a green test run to abandon.
     """
     clone, external, rows = _dotenv_clone(tmp_path)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    spawned: list[list[str]] = []
-    real_popen = subprocess.Popen
-
-    def recording_popen(command, *args, **kwargs):  # type: ignore[no-untyped-def]
-        spawned.append([str(part) for part in command])
-        return real_popen(command, *args, **kwargs)
-
-    # `subprocess.run` resolves `Popen` from the module at call time, so
-    # recording rather than replacing is what lets the probe run for real
-    # while still proving the *server* was never spawned.
-    monkeypatch.setattr(subprocess, "Popen", recording_popen)
 
     with pytest.raises(sandbox.SandboxError) as excinfo:
         run.start_server(clone, run_dir, 0, rows)
     assert str(external) in str(excinfo.value)
 
-    server_spawns = [cmd for cmd in spawned if "ciao.cli" in cmd]
-    assert not server_spawns, f"the server must not be spawned: {server_spawns}"
+    assert not no_server_popen, f"the server must not be spawned: {no_server_popen}"
+    # The log is opened immediately before the spawn, so its absence is the same
+    # statement from the file's side of the boundary.
     assert not (run_dir / "agent-server.log").exists()
     # The preflight's own view -- an explicit env dict, which never reads the
     # ``.env`` -- is the one that would have passed.
