@@ -5843,6 +5843,36 @@ async def admin_restart(request: Request) -> JSONResponse:
     )
 
 
+async def admin_drain(request: Request) -> JSONResponse:
+    """Close admission for new turns (update drain); loopback-only, no session.
+
+    The updater's foreground half calls this before it hands the rest of the
+    transaction to the detached updater job, so a turn started after the drain
+    began cannot extend the downtime it is waiting out. The active chat IDs
+    come back in the same response the engine already publishes, so the caller
+    does not have to make a second request to find out what it is waiting for.
+    """
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        return JSONResponse({"error": "drain unavailable"}, status_code=503)
+    pcm.begin_restart_drain()
+    return JSONResponse({"draining": True, "active_chat_ids": pcm.active_chat_ids()})
+
+
+async def admin_drain_cancel(request: Request) -> JSONResponse:
+    """Reopen admission after an update's drain timed out; no session.
+
+    Without this a drain that never completes would leave the running engine
+    refusing turns forever, which is a far worse outcome than the update it was
+    meant to enable.
+    """
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        return JSONResponse({"error": "drain unavailable"}, status_code=503)
+    pcm.cancel_restart_drain()
+    return JSONResponse({"draining": False})
+
+
 async def admin_deploy(request: Request) -> JSONResponse:
     """Snapshot local work, pull latest, rebuild frontend, restart service."""
     from ciao.package_version import detect_install_mode

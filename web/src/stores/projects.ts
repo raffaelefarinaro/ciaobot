@@ -3963,6 +3963,12 @@ export const useProjectStore = defineStore('projects', () => {
       case 'server_restarting':
         beginServerRestart(msg.message)
         break
+      // The engine reopened admission: an update drain that timed out. The
+      // overlay would otherwise stick and block a perfectly working engine.
+      case 'server_restart_cancelled':
+        serverRestarting.value = false
+        serverRestartMessage.value = ''
+        break
       case 'chat_streaming_started':
         projectStreaming.value[msg.chat_id] = true
         // Note: backgroundAgents is NOT cleared here — agents from a prior

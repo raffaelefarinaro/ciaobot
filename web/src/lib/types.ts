@@ -508,6 +508,7 @@ export type EventsWsMessage =
   | { type: 'workspaces_changed' }
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
+  | { type: 'server_restart_cancelled' }
   | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
   // Client mode only: the local node proxy could not reach the host, so it
   // emits this on the proxied socket and closes. Delivered on /ws/events too,

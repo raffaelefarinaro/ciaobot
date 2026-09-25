@@ -4993,6 +4993,13 @@ class ProjectChatManager:
             "message": RESTART_DRAIN_MESSAGE,
         })
 
+    def cancel_restart_drain(self) -> None:
+        """Reopen admission after an aborted drain (e.g. an update whose drain timed out)."""
+        if not self._restart_draining:
+            return
+        self._restart_draining = False
+        self._events.publish({"type": "server_restart_cancelled"})
+
     @property
     def background_agent_counts(self) -> dict[str, int]:
         """Last announced running-background-subagent count per chat (>0 only)."""
