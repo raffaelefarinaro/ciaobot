@@ -3,7 +3,7 @@
     <div class="sidebar-header" :class="{ 'sidebar-header--expanded': !collapsed }">
       <div class="sidebar-brand-row">
         <template v-if="!collapsed">
-          <span class="sidebar-brand-glyph" aria-hidden="true">›</span>
+          <span class="sidebar-brand-mark" aria-hidden="true"><CiaoMark /></span>
           <BrandMark class="sidebar-brand" />
         </template>
       <button
@@ -991,6 +991,7 @@ import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import ChatSignals from './ChatSignals.vue'
 import BrandMark from './BrandMark.vue'
+import CiaoMark from './CiaoMark.vue'
 import { isApplePlatform, isDesktopApp } from '../lib/desktop'
 import { scheduleInWorkspace } from '../lib/automationWorkspace'
 import { colorForWorkspace } from '../lib/workspaceColors'
@@ -1888,16 +1889,12 @@ async function confirmDeleteChat(chatId: string) {
   margin-left: auto;
 }
 
-.sidebar-brand-glyph {
-  display: grid;
-  place-items: center;
-  flex: 0 0 22px;
-  width: 22px;
-  height: 22px;
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
+/* The Ciaobot face in the workspace accent (it is drawn in currentColor). */
+.sidebar-brand-mark {
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
   color: var(--accent);
-  font: 700 16px/1 var(--font-sans);
 }
 
 .sidebar-brand-row :deep(.sidebar-brand) {
