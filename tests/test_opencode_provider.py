@@ -23,6 +23,7 @@ from ciao.models import (
     TokenUsageEvent,
     ToolUseEvent,
 )
+from ciao.execution_modes import opencode_credential_deny_rules
 from ciao.providers.opencode import (
     OPENCODE_V2_REQUIRED,
     OpencodeProvider,
@@ -45,6 +46,7 @@ from ciao.providers.opencode import (
     mode_settings,
     opencode_collab_tree_counts,
     opencode_default_model,
+    readonly_agent_rules,
     resolve_opencode_binary,
     _session_handover_text,
     split_model,
@@ -267,6 +269,60 @@ def test_tools_can_be_disabled_for_one_shot_sessions():
     agent, rules = mode_settings("plan", tools_enabled=False)
     assert agent == "plan"
     assert rules == [{"action": "*", "resource": "*", "effect": "deny"}]
+
+
+# ── read-only memory agent ruleset ─────────────────────────────────────
+# The insights agent reads the vault and answers; it must not be able to
+# write, shell out, or search outside the root it was given.
+
+
+def test_readonly_agent_rules_scope(tmp_path: Path):
+    root = tmp_path / "vault"
+    rules = readonly_agent_rules([root])
+    base = str(root.resolve())
+
+    # Deny-all first: OpenCode resolves last-match-wins, so every carve-out
+    # has to follow the wildcard.
+    assert rules[0] == {"action": "*", "resource": "*", "effect": "deny"}
+    allowed = [
+        (r["action"], r["resource"])
+        for r in rules
+        if r["effect"] == "allow"
+    ]
+    assert allowed == [
+        ("read", base),
+        ("read", f"{base}/**"),
+        ("external_directory", base),
+        ("external_directory", f"{base}/**"),
+    ]
+    # V2 sends the search pattern, not the search root, so a search cannot be
+    # scoped at all: glob and grep stay denied.
+    for action in ("glob", "grep", "edit", "shell"):
+        assert not any(
+            r["action"] == action and r["effect"] == "allow" for r in rules
+        ), action
+    # The credential denies come last so nothing above can outrank them.
+    assert rules[len(rules) - len(opencode_credential_deny_rules()):] == (
+        opencode_credential_deny_rules()
+    )
+
+
+@pytest.mark.parametrize("mode", ["plan", "bypass"])
+def test_session_settings_prefers_custom_rules(tmp_path: Path, mode: BridgeMode):
+    request = AgentRequest(prompt="p", model="m", mode=mode, provider="opencode")
+
+    plain = OpencodeProvider(tmp_path)
+    assert plain._session_settings(request) == mode_settings(mode)
+
+    custom = [{"action": "*", "resource": "*", "effect": "deny"}]
+    scoped = OpencodeProvider(tmp_path, permission_rules=custom)
+    assert scoped._session_settings(request) == ("build", custom)
+    # A copy, not the caller's list: a session that mutates its ruleset
+    # cannot reach back into the provider's.
+    agent, rules = scoped._session_settings(request)
+    assert agent == "build"
+    assert rules == custom
+    assert rules is not custom
 
 
 class _SessionResponse:

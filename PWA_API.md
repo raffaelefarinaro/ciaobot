@@ -149,6 +149,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/push/unsubscribe` | Remove push subscription |
 | GET | `/api/push/status` | Read push setup status |
 | GET | `/api/push/subscription` | Check one subscription |
+| POST | `/api/push/test` | Send a test notification to the caller's own subscription (body `{endpoint}`; 10 s cooldown per subscription) |
 | GET | `/api/local/status` | Workspace git state: `git_repo`, current `branch` (nullable), dirty |
 | GET | `/api/local/preflight` | Git preflight check for dirty files, categories, blockers/warnings |
 | POST | `/api/local/handback` | Commit pending work, pull from origin, push the current branch |

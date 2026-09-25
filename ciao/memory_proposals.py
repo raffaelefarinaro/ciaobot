@@ -2884,6 +2884,93 @@ def _written_this_session(
 # ── Pipeline entry point ──────────────────────────────────────────────────
 
 
+@dataclass(slots=True)
+class RoutedInsights:
+    """What one insights body routed to, split by what should happen next.
+
+    ``kept`` is what a caller would queue (or auto-apply); ``suppressed`` is
+    what the already-applied guard removed; ``dropped`` counts the bullets
+    that reached no destination at all. Returned instead of acted on so a
+    caller that must not write — the dry-run insights comparison — can see
+    the same verdict :func:`proposals_from_archive` would act on.
+    """
+
+    kept: list[MemoryProposal]
+    suppressed: list[MemoryProposal]
+    dropped: int
+
+
+def route_insights(
+    body: str,
+    vault_root: Path,
+    *,
+    guide_path: Path | None = None,
+    project_doc_path: str = "",
+    project_fold_wrote: bool = False,
+) -> RoutedInsights:
+    """Parse an insights section and route it. Writes nothing.
+
+    The pure half of :func:`proposals_from_archive`: the same entity roster,
+    the same ``[project: …]`` / ``[people: …]`` addressing, the same
+    already-applied suppression — minus every ``record_promotion`` and log
+    line, which belong to the caller that decides to write.
+    """
+    proposals = propose_from_insights(body)
+    if not proposals:
+        return RoutedInsights(kept=[], suppressed=[], dropped=0)
+
+    projects, people = known_entities(vault_root)
+    own_doc = (
+        _resolve_doc_path(vault_root, project_doc_path).resolve()
+        if project_doc_path
+        else None
+    )
+
+    def route(p: MemoryProposal) -> MemoryProposal | None:
+        addressed = _address_tagged(
+            p,
+            projects,
+            people,
+            own_doc=own_doc,
+            own_doc_path=project_doc_path,
+            fold_wrote=project_fold_wrote,
+        )
+        if addressed is None:
+            return None
+        routed = _route_to_known_entity(addressed, projects, people)
+        if (
+            routed.target == "review"
+            and routed.source_section == "Decisions"
+            and not (p.target == "project" and p.payload)
+        ):
+            # Same rule as `propose_from_insights`, for the bare [project]
+            # decisions a General chat demoted to review above. A named
+            # project the roster could not resolve stays for a human.
+            return None
+        return routed
+
+    routed_all = [route(p) for p in proposals]
+    dropped = sum(1 for p in routed_all if p is None)
+    routed_list = [p for p in routed_all if p is not None]
+    session_changes = _session_vault_changes(body)
+
+    # Extra guard before creating a review card: if the chat already
+    # applied the change in-session (via memory_update/Edit/Write), the
+    # destination now contains the fact and the insight must not re-queue it.
+    kept: list[MemoryProposal] = []
+    suppressed: list[MemoryProposal] = []
+    for _p in routed_list:
+        if _written_this_session(
+            _p, session_changes, vault_root
+        ) or _is_already_applied(
+            _p, vault_root, guide_path, project_doc_path
+        ):
+            suppressed.append(_p)
+            continue
+        kept.append(_p)
+    return RoutedInsights(kept=kept, suppressed=suppressed, dropped=dropped)
+
+
 def proposals_from_archive(
     archive_path: Path,
     workspace_vault_root: Path,
@@ -2940,102 +3027,71 @@ def proposals_from_archive(
         body = _extract_insights_section(text)
         if not body:
             return None
-        proposals = propose_from_insights(body)
-
-        projects, people = known_entities(workspace_vault_root)
-        own_doc = (
-            _resolve_doc_path(workspace_vault_root, project_doc_path).resolve()
-            if project_doc_path
-            else None
+        result = route_insights(
+            body,
+            workspace_vault_root,
+            guide_path=guide_path,
+            project_doc_path=project_doc_path,
+            project_fold_wrote=project_fold_wrote,
         )
-        def route(p: MemoryProposal) -> MemoryProposal | None:
-            addressed = _address_tagged(
-                p,
-                projects,
-                people,
-                own_doc=own_doc,
-                own_doc_path=project_doc_path,
-                fold_wrote=project_fold_wrote,
-            )
-            if addressed is None:
-                return None
-            routed = _route_to_known_entity(addressed, projects, people)
-            if (
-                routed.target == "review"
-                and routed.source_section == "Decisions"
-                and not (p.target == "project" and p.payload)
-            ):
-                # Same rule as `propose_from_insights`, for the bare [project]
-                # decisions a General chat demoted to review above. A named
-                # project the roster could not resolve stays for a human.
-                return None
-            return routed
-
-        routed_all = [route(p) for p in proposals]
-        dropped = sum(1 for p in routed_all if p is None)
-        if dropped:
+        if result.dropped:
             logger.info(
                 "memory proposals: dropped %d fact(s) already folded, restated, "
                 "or with no destination from %s",
-                dropped,
+                result.dropped,
                 archive_path.name,
             )
-        proposals = [p for p in routed_all if p is not None]
-        session_changes = _session_vault_changes(body)
-
-        # Extra guard before creating a review card: if the chat already
-        # applied the change in-session (via memory_update/Edit/Write), the
-        # destination now contains the fact and the insight must not re-queue it.
-        if proposals:
-            filtered: list[MemoryProposal] = []
-            suppressed = 0
-            for _p in proposals:
-                if _written_this_session(
-                    _p, session_changes, workspace_vault_root
-                ) or _is_already_applied(
-                    _p, workspace_vault_root, guide_path, project_doc_path
-                ):
-                    suppressed += 1
-                    logger.info(
-                        "memory proposals: suppressed already-applied %r from %s",
-                        _p.text[:80],
-                        archive_path.name,
-                    )
-                    try:
-                        record_promotion(
-                            workspace_vault_root / _PROPOSALS_RELATIVE,
-                            text=_p.text,
-                            kind=_p.target,
-                            via="auto",
-                            source=archive_path.stem,
-                            outcome="suppressed",
-                            # Re-processing the same archive re-derives this
-                            # same verdict; record it once, not once per pass.
-                            once=True,
-                            # The fact was applied in-session, not promoted
-                            # through the queue. Keep the row out of the dedupe
-                            # readers so a later revert can be re-queued.
-                            history_only=True,
-                        )
-                    except Exception:  # noqa: BLE001 — recording must not break the pipeline
-                        logger.info(
-                            "memory proposals: could not record suppression for %r",
-                            _p.text[:80],
-                        )
-                    continue
-                filtered.append(_p)
-            if suppressed:
+        # A fact the session already applied is recorded wherever the routing
+        # left it. Guarding this on `kept` would lose the history row for an
+        # archive whose every fact was already applied — which is exactly the
+        # archive a re-run passes over.
+        if result.kept or result.suppressed:
+            for _p in result.suppressed:
                 logger.info(
-                    "memory proposals: suppressed %d already-applied fact(s) from %s",
-                    suppressed,
+                    "memory proposals: suppressed already-applied %r from %s",
+                    _p.text[:80],
                     archive_path.name,
                 )
-            proposals = filtered
-            if not proposals:
-                if stats is not None:
-                    stats["proposed"] = 0
-                    stats["promoted"] = stats.get("promoted", 0)
-                return None
+                try:
+                    record_promotion(
+                        workspace_vault_root / _PROPOSALS_RELATIVE,
+                        text=_p.text,
+                        kind=_p.target,
+                        via="auto",
+                        source=archive_path.stem,
+                        outcome="suppressed",
+                        # Re-processing the same archive re-derives this
+                        # same verdict; record it once, not once per pass.
+                        once=True,
+                        # The fact was applied in-session, not promoted
+                        # through the queue. Keep the row out of the dedupe
+                        # readers so a later revert can be re-queued.
+                        history_only=True,
+                    )
+                except Exception:  # noqa: BLE001 — recording must not break the pipeline
+                    logger.info(
+                        "memory proposals: could not record suppression for %r",
+                        _p.text[:80],
+                    )
+            if result.suppressed:
+                logger.info(
+                    "memory proposals: suppressed %d already-applied fact(s) from %s",
+                    len(result.suppressed),
+                    archive_path.name,
+                )
+        proposals = result.kept
+        # Before the routing was extracted this return sat inside the
+        # `if proposals:` guard, so it only ever ran for an archive whose
+        # bullets all parsed and all came back already applied. An archive
+        # that parsed nothing, or whose bullets routed nowhere, never reached
+        # it: it fell through to `append_proposals([])`, which reports zero
+        # proposals and leaves `promoted` alone. Keep that distinction — a
+        # caller reading `stats` cannot tell the two apart otherwise.
+        if not proposals and result.suppressed:
+            if stats is not None:
+                stats["proposed"] = 0
+                stats["promoted"] = stats.get("promoted", 0)
+            return None
 
         if auto_promote_memory and proposals and curation_in_progress(workspace_vault_root):
             # A curation run is mid-consolidation: it read the region minutes

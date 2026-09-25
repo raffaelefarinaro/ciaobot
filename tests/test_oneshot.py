@@ -344,3 +344,165 @@ async def test_run_oneshot_rejects_unknown_provider() -> None:
         await oneshot.run_oneshot(
             "hi", system_prompt="s", model="haiku", provider="nope"
         )
+
+
+# ── read-only agent ─────────────────────────────────────────────────────
+# The insights agent may Read/Grep/Glob the vault and nothing else. The
+# gate below is the entire sandbox for the Claude path, so a permissive
+# answer is a data leak; the opencode path hands the same question to the
+# server's ruleset instead.
+
+
+def test_path_allowed_blocks_outside_roots(tmp_path) -> None:
+    vault = tmp_path / "vault"
+    (vault / "People").mkdir(parents=True)
+    inside = vault / "People" / "ada.md"
+    inside.write_text("x", encoding="utf-8")
+    roots = [vault]
+    cwd = vault
+
+    assert oneshot.path_allowed("Read", {"file_path": str(inside)}, roots, cwd)
+    assert oneshot.path_allowed(
+        "Read", {"file_path": "People/ada.md"}, roots, cwd
+    )
+    assert oneshot.path_allowed("Glob", {"path": str(vault), "pattern": "*.md"}, roots, cwd)
+
+    # The root itself is readable: the agent has to be able to list it.
+    assert oneshot.path_allowed("Read", {"file_path": str(vault)}, roots, cwd)
+
+    assert not oneshot.path_allowed("Read", {"file_path": "/etc/passwd"}, roots, cwd)
+    assert not oneshot.path_allowed("Read", {"file_path": "../x"}, roots, cwd)
+    assert not oneshot.path_allowed("Grep", {"path": "/", "pattern": "secret"}, roots, cwd)
+    # A Glob pattern that climbs out of the allowed root reaches the same
+    # files a Grep on `/` would.
+    assert not oneshot.path_allowed(
+        "Glob", {"path": str(vault), "pattern": "../**"}, roots, cwd
+    )
+    # Anything that is not one of the three read tools is refused whatever its
+    # input says.
+    assert not oneshot.path_allowed("Bash", {"command": "ls"}, roots, cwd)
+
+
+@pytest.mark.asyncio
+async def test_run_readonly_agent_options_and_last_text(
+    monkeypatch, tmp_path
+) -> None:
+    """The tool surface is Read/Grep/Glob, and only the last turn is the answer."""
+    from claude_agent_sdk import ToolUseBlock
+
+    captured: dict = {}
+
+    async def fake_query(*, prompt, options):
+        captured["prompt"] = prompt
+        captured["options"] = options
+        # ``can_use_tool`` needs a streaming prompt, not a bare string.
+        assert prompt is not None
+        yield AssistantMessage(
+            content=[
+                TextBlock(text="Let me check People/ada.md."),
+                ToolUseBlock(id="t1", name="Read", input={}),
+            ],
+            model="haiku",
+        )
+        yield AssistantMessage(
+            content=[TextBlock(text="## Decisions\n- the real answer")], model="haiku"
+        )
+        yield _result(num_turns=3, total_cost_usd=0.01)
+
+    monkeypatch.setattr(oneshot, "query", fake_query)
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    result = await oneshot.run_readonly_agent(
+        "read it",
+        system_prompt="sys",
+        model="haiku",
+        cwd=vault,
+        allowed_roots=[vault],
+    )
+
+    options = captured["options"]
+    assert options.tools == ["Read", "Grep", "Glob"]
+    assert options.cwd == str(vault)
+    assert options.can_use_tool is not None
+    assert options.strict_mcp_config is True
+    assert options.max_turns == 30
+    # The narration of turn one is not the answer.
+    assert result.text == "## Decisions\n- the real answer"
+    assert result.tool_calls == 1
+    assert result.turns == 3
+    assert result.cost_usd == 0.01
+
+
+@pytest.mark.asyncio
+async def test_run_readonly_agent_opencode_uses_custom_rules(
+    monkeypatch, tmp_path
+) -> None:
+    """opencode gets the read-only ruleset, and denied calls are counted."""
+    from ciao.models import ResultEvent, ToolUseEvent
+    import ciao.providers.opencode as opencode_mod
+    from ciao.providers.opencode import readonly_agent_rules
+
+    captured: dict = {}
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    class CapturingProvider:
+        def __init__(
+            self,
+            workspace_root,
+            *,
+            developer_instructions="",
+            tools_enabled=True,
+            permission_rules=None,
+        ):
+            captured["workspace_root"] = workspace_root
+            captured["tools_enabled"] = tools_enabled
+            captured["permission_rules"] = permission_rules
+            captured["disconnected"] = False
+            captured["deleted"] = False
+
+        @property
+        def current_session_id(self):
+            return "agent-session"
+
+        async def run_streaming(self, request, register_handle):
+            captured["request"] = request
+            register_handle(None)
+            yield ToolUseEvent(type="tool_use", tool_name="read", tool_input="a.md")
+            yield ToolUseEvent(
+                type="tool_result",
+                tool_name="read",
+                tool_input="Permission denied: external_directory",
+            )
+            yield ResultEvent(
+                type="result", result="## Decisions\n- x", cost_usd=0.02
+            )
+
+        async def disconnect(self):
+            captured["disconnected"] = True
+
+        async def delete_current_session(self):
+            captured["deleted"] = True
+            return True
+
+    monkeypatch.setattr(opencode_mod, "OpencodeProvider", CapturingProvider)
+
+    result = await oneshot.run_readonly_agent(
+        "read it",
+        system_prompt="sys",
+        model="anthropic/claude-haiku-4.5",
+        cwd=vault,
+        allowed_roots=[vault],
+        provider="opencode",
+    )
+
+    assert captured["tools_enabled"] is True
+    assert captured["permission_rules"] == readonly_agent_rules([vault])
+    assert captured["request"].mode == "bypass"
+    assert result.text == "## Decisions\n- x"
+    assert result.tool_calls == 1
+    assert result.denied == 1
+    assert result.cost_usd == 0.02
+    assert captured["deleted"] is True
+    assert captured["disconnected"] is True
