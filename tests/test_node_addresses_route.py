@@ -10,11 +10,17 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.network_addresses import is_loopback_url, parse_inet_addresses, server_addresses
+from ciao.network_addresses import (
+    is_loopback_url,
+    normalize_trusted_url,
+    parse_inet_addresses,
+    server_addresses,
+)
 from ciao.web.routes_node import node_addresses_endpoint
 
 
@@ -88,3 +94,38 @@ en1: flags=8863
 def test_address_discovery_without_a_bonjour_name() -> None:
     urls = server_addresses(8443, ifconfig_text="", local_hostname="")
     assert urls == ["http://localhost:8443/"]
+
+
+def test_normalize_trusted_url_accepts_https_origins() -> None:
+    # Canonical stored form: lowercase host, one trailing slash, port kept.
+    assert normalize_trusted_url("https://Mini.Tailnet.ts.net") == "https://mini.tailnet.ts.net/"
+    assert normalize_trusted_url("https://host:8443/") == "https://host:8443/"
+    # An IPv6 literal keeps its brackets, or the result is not a valid URL.
+    assert normalize_trusted_url("https://[FD7A::1]:8443") == "https://[fd7a::1]:8443/"
+    # Empty (or whitespace) clears the setting.
+    assert normalize_trusted_url(" ") == ""
+
+
+def test_normalize_trusted_url_rejects_unsafe_values() -> None:
+    # Anything a copied URL could smuggle past a QR code is refused rather
+    # than stored: a scheme that is not HTTPS, no host, credentials, or a
+    # path/query/fragment that could carry a token. A space, a backslash, an
+    # angle bracket, a comma and a non-numeric port all slip past urlsplit, so
+    # they are refused explicitly too. "https://host\evil.com" is the dangerous
+    # one: a browser reads "\" as "/", so the code would open host/evil.com.
+    for bad in (
+        "http://host",
+        "https://",
+        "https://u:p@host",
+        "https://host/path",
+        "https://host/?token=x",
+        "https://host/#x",
+        "https://ho st",
+        "https://host\\evil.com",
+        "https://exa<mple>",
+        "https://a,b",
+        "https://host:abc",
+        "ftp://host",
+    ):
+        with pytest.raises(ValueError):
+            normalize_trusted_url(bad)

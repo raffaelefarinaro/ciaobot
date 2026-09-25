@@ -23,12 +23,11 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
-from ciao.jsonio import write_private_text
 
 SCHEMA_VERSION = 1
 SERVICE_BACKENDS = ("launchd", "systemd-user", "none")
@@ -47,7 +46,7 @@ _REQUIRED_FIELDS = (
 
 # Optional, but a string when present: a `previous_version` of `[1]` is a
 # corrupt receipt, not a release to coerce into "['1']".
-_OPTIONAL_STRING_FIELDS = ("previous_version", "previous_executable")
+_OPTIONAL_STRING_FIELDS = ("previous_version", "previous_executable", "uv")
 
 
 def default_receipt_path() -> Path:
@@ -64,6 +63,7 @@ class InstallReceipt:
     installed_at: str            # ISO-8601 UTC, e.g. "2026-09-25T16:00:00+00:00"
     previous_version: str = ""   # release this install replaced, "" for a fresh install
     previous_executable: str = ""
+    uv: str = ""                 # uv that built this env; the updater stages with it (#569)
     schema: int = SCHEMA_VERSION
 
 
@@ -89,7 +89,9 @@ def read_receipt(path: Path | None = None) -> InstallReceipt | None:
     if not isinstance(parsed, dict):
         return None
     data: dict[str, Any] = parsed
-    if data.get("schema") != SCHEMA_VERSION:
+    # `type(...) is int`, not `== SCHEMA_VERSION`: `True == 1`, so a receipt
+    # whose schema is a JSON `true` would otherwise pass as version 1.
+    if type(data.get("schema")) is not int or data["schema"] != SCHEMA_VERSION:
         return None
     if any(not isinstance(data.get(field), str) for field in _REQUIRED_FIELDS):
         return None
@@ -105,6 +107,7 @@ def read_receipt(path: Path | None = None) -> InstallReceipt | None:
     # Optional fields are strings when present, so these need no coercion.
     previous_version: str = data.get("previous_version", "")
     previous_executable: str = data.get("previous_executable", "")
+    uv: str = data.get("uv", "")
     # Explicit keywords, never `InstallReceipt(**data)`: a file written by a
     # future installer carrying an extra key must still parse today.
     return InstallReceipt(
@@ -116,6 +119,7 @@ def read_receipt(path: Path | None = None) -> InstallReceipt | None:
         installed_at=data["installed_at"],
         previous_version=previous_version,
         previous_executable=previous_executable,
+        uv=uv,
         schema=SCHEMA_VERSION,
     )
 
@@ -128,6 +132,11 @@ def write_receipt(receipt: InstallReceipt, path: Path | None = None) -> Path:
     into place, so a reader never observes a half-written document. A write that
     fails part way — including a rename that never happens — leaves no temp file
     behind, so a later write never trips over a stale one.
+
+    The temp name is unique per call, because the update coordinator (#569) is
+    now a second writer racing this one: a fixed ``.tmp`` name would let one
+    writer's ``finally`` cleanup delete the file the other is about to rename
+    into place.
     """
     if receipt.service_backend not in SERVICE_BACKENDS:
         raise ValueError(f"Unknown service backend: {receipt.service_backend!r}")
@@ -138,9 +147,13 @@ def write_receipt(receipt: InstallReceipt, path: Path | None = None) -> Path:
     target = path or default_receipt_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(target.parent, 0o700)
-    tmp = target.with_name(target.name + ".tmp")
+    # mkstemp creates the file 0600, so it is never briefly readable.
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
     try:
-        write_private_text(tmp, json.dumps(asdict(receipt), indent=2, sort_keys=True) + "\n")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(asdict(receipt), indent=2, sort_keys=True) + "\n")
+        os.chmod(tmp, 0o600)
         os.replace(tmp, target)
     finally:
         # A no-op once the rename succeeded, a cleanup when it did not.
@@ -213,6 +226,9 @@ def main(argv: list[str] | None = None) -> int:
         "--previous-executable", default="", help="executable being replaced"
     )
     write.add_argument(
+        "--uv", default="", help="path of the uv that built this environment (#569)"
+    )
+    write.add_argument(
         "--path", type=Path, default=None, help="receipt path (defaults to the standard one)"
     )
     args = parser.parse_args(argv)
@@ -226,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
         installed_at=datetime.now(UTC).isoformat(timespec="seconds"),
         previous_version=args.previous_version,
         previous_executable=args.previous_executable,
+        uv=args.uv,
     )
     try:
         written = write_receipt(receipt, args.path)
