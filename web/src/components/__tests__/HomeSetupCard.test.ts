@@ -118,6 +118,32 @@ describe('HomeSetupCard', () => {
     expect(view.text()).toContain('Sent.')
   })
 
+  it('stays visible after enabling in the installed app so the test can be sent', async () => {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: (query: string) => ({
+        matches: query.includes('standalone'),
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    })
+    const view = await mountCard()
+
+    await button(view, 'Enable').trigger('click')
+    await flushPromises()
+
+    // Enabling is what completes the card, so unmounting here would take the
+    // test step away in the installed app and on the iOS Home Screen.
+    expect(view.find('.home-setup').exists()).toBe(true)
+    const send = button(view, 'Send test')
+    expect(send.attributes('disabled')).toBeUndefined()
+    await send.trigger('click')
+    await flushPromises()
+
+    expect(view.text()).toContain('Sent.')
+  })
+
   it('keeps Send test disabled until notifications are on', async () => {
     const view = await mountCard()
     expect(button(view, 'Send test').attributes('disabled')).toBeDefined()
@@ -127,6 +153,22 @@ describe('HomeSetupCard', () => {
     vi.stubGlobal('Notification', { permission: 'denied' })
     const view = await mountCard()
 
+    expect(view.text()).toContain('Blocked. Allow notifications for this site')
+    expect(hasButton(view, 'Enable')).toBe(false)
+  })
+
+  it('explains the block after the user denies the prompt', async () => {
+    vi.mocked(enablePush).mockImplementationOnce(async () => {
+      vi.stubGlobal('Notification', { permission: 'denied' })
+      throw new Error('Notification permission denied')
+    })
+    const view = await mountCard()
+    expect(hasButton(view, 'Enable')).toBe(true)
+
+    await button(view, 'Enable').trigger('click')
+    await flushPromises()
+
+    // Only `permission` moved; nothing re-read it, so Enable used to linger.
     expect(view.text()).toContain('Blocked. Allow notifications for this site')
     expect(hasButton(view, 'Enable')).toBe(false)
   })

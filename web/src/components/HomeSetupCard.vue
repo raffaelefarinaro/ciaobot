@@ -26,6 +26,10 @@ const denied = ref(false)
 const busy = ref('')
 const testResult = ref('')
 const error = ref('')
+/** True once the user acts here: the card must not vanish mid-visit, or
+ *  "Send test" could never be used in the very flow that enables it. It still
+ *  auto-hides on the next mount, when both steps were already done. */
+const touched = ref(false)
 
 const installDone = computed(() => standalone.value || installed.value)
 const needsInstallFirst = computed(() => isIos() && !standalone.value)
@@ -37,7 +41,7 @@ const visible = computed(() => {
   // Neither install prompts nor push subscriptions exist without a secure
   // origin, so the steps would be instructions for something impossible.
   if (window.isSecureContext !== true) return false
-  return !(installDone.value && pushOn.value)
+  return touched.value || !(installDone.value && pushOn.value)
 })
 
 onMounted(async () => {
@@ -49,6 +53,7 @@ onMounted(async () => {
 })
 
 async function install() {
+  touched.value = true
   busy.value = 'install'
   try {
     await promptInstall()
@@ -60,12 +65,16 @@ async function install() {
 }
 
 async function enable() {
+  touched.value = true
   busy.value = 'notify'
   error.value = ''
   try {
     await enablePush()
     pushOn.value = true
   } catch (e) {
+    // The user may have just chosen Block, which only moves `permission` and
+    // leaves the Enable button guaranteed to fail again.
+    denied.value = typeof Notification !== 'undefined' && Notification.permission === 'denied'
     error.value = errorMessage(e)
   } finally {
     busy.value = ''
