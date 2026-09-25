@@ -70,12 +70,19 @@ Then the agent arm, on the same two chats:
 
 ```sh
 PYTHONPATH=$PWD python scripts/insights-sandbox/run.py \
-    --run-id pilot-2 --arms agent --limit 2 --port 8543
+    --run-id pilot-2 --arms agent --limit 2
 ```
 
 Useful flags: `--live` (default `~/repos/ciao`), `--sandbox-root` (default
 `~/ciao-sandbox`), `--arms oneshot,agent`, `--from-cache <dir>` (repeatable),
 `--limit N`, `--turn-timeout` (default 900 s).
+
+The agent-clone server takes `--port 0` by default, which means "pick a free
+port", so two runs — or a run alongside an instance you already have open —
+cannot collide. An explicit `--port N` is checked before the server starts and
+refused if anything already accepts connections on `127.0.0.1:N`; if the login
+is then answered by a server that rejects the harness token, the run stops and
+says so rather than talking to a stranger's instance.
 
 The harness refuses to start while the live instance has chats in flight, and
 refuses to reuse a `--run-id` whose directory already exists.

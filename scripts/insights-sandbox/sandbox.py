@@ -13,9 +13,12 @@ clone could escape are (a) a path that is not a clone at all, refused by
 install -- its git remote, its push subscriptions, its schedules, its startup
 triage, its integrations -- neutralised by :func:`prepare_clone`.
 
-Everything here is pure filesystem and ``git`` plumbing: no network, no model,
-no server. That is what keeps ``tests/test_insights_sandbox.py`` fast and
-offline, and it is why the safety argument can be tested instead of trusted.
+Everything here is filesystem, ``git`` plumbing and a loopback socket: no
+network off this machine, no model, no server. That is what keeps
+``tests/test_insights_sandbox.py`` fast and offline, and it is why the safety
+argument can be tested instead of trusted. :func:`pick_port` is the one place
+that touches a socket, and only ever on ``127.0.0.1``, to find or clear a port
+for the harness's own server.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import socket
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -108,6 +112,61 @@ def clone_workspace(live: Path, dest: Path) -> None:
         )
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["cp", "-c", "-R", str(live_path), str(dest_path)], check=True)
+
+
+# ── port selection ───────────────────────────────────────────────────────
+
+# A loopback probe that is refused should be refused immediately; a port that
+# is held by something that never answers would otherwise stall boot on a
+# multi-second TCP timeout.
+_PROBE_TIMEOUT = 1.0
+
+
+def pick_port(requested: int) -> int:
+    """The loopback port the harness's own server may bind, or a refusal.
+
+    ``0`` means "any free port", which is the default: bind ``("127.0.0.1", 0)``,
+    read back the port the kernel chose, close it. Picking it this way means
+    the harness can never collide with a Ciaobot server somebody else is
+    already running, which is not hypothetical -- a second instance on ``*:8543``
+    answers ``/api/auth`` with a 401 and the pilot dies before the first chat.
+
+    An explicit port is *checked*, not trusted, and checked two ways because
+    they fail for different reasons:
+
+    - a connection attempt finds a process already listening there. Ciaobot
+      binds ``*:port``, so a second instance cannot be bound on top of it and
+      the harness's own server would sit behind the stranger's, answering
+      nothing while the stranger answers everything.
+    - a trial ``bind(("0.0.0.0", port))`` finds a port something else already
+      holds, or one this machine will not let a fresh server have -- which the
+      connection attempt alone would report as merely "not up yet".
+
+    Neither check makes the port safe to share for the life of the run, so the
+    caller still has to confirm the server it reached is its own.
+    """
+    if requested < 0:
+        raise SandboxError(f"invalid port {requested}")
+    if requested == 0:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            return int(probe.getsockname()[1])
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(_PROBE_TIMEOUT)
+        if probe.connect_ex(("127.0.0.1", requested)) == 0:
+            raise SandboxError(
+                f"127.0.0.1:{requested} already accepts connections; another "
+                "server may own it. Pass --port 0 to let the harness pick a free port."
+            )
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind(("0.0.0.0", requested))
+        except OSError as exc:
+            raise SandboxError(
+                f"127.0.0.1:{requested} is not available for the harness server: {exc}. "
+                "Pass --port 0 to let the harness pick a free port."
+            ) from exc
+    return requested
 
 
 # ── clone preparation ────────────────────────────────────────────────────

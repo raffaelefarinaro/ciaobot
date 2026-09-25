@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import socket
 import subprocess
 from pathlib import Path
 
@@ -93,6 +94,49 @@ def test_assert_sandbox_path_refuses_live_and_outside(tmp_path: Path) -> None:
     assert sandbox.assert_sandbox_path(
         root / "run" / "base", sandbox_root=tmp_path, live=inner_live
     ) == (root / "run" / "base").resolve()
+
+
+# ── port selection ───────────────────────────────────────────────────────
+
+
+def test_pick_port_zero_returns_free_port() -> None:
+    """The default: a port the harness's own server can actually bind.
+
+    A second Ciaobot instance is enough to make a fixed port wrong -- it binds
+    ``*:port``, answers the harness's login with a 401, and the pilot dies
+    before the first chat. So the default is not "a port nobody uses", it is
+    "a port the kernel just gave us".
+    """
+    port = sandbox.pick_port(0)
+    assert 1024 < port < 65536
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", port))
+
+
+def test_pick_port_refuses_busy_port() -> None:
+    """A port somebody is listening on is refused, not adopted.
+
+    The stranger's server is left running, so adopting its port would put the
+    harness's agent token behind a Ciaobot instance that never issued it: the
+    login 401s, and the harness's own server sits on a port it cannot reach.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        with pytest.raises(sandbox.SandboxError) as excinfo:
+            sandbox.pick_port(port)
+    assert str(port) in str(excinfo.value)
+
+    # A free explicit port is the operator's to have, and is returned as asked.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    assert sandbox.pick_port(free) == free
+
+    # A negative port is not a port.
+    with pytest.raises(sandbox.SandboxError):
+        sandbox.pick_port(-1)
 
 
 # ── clone preparation ────────────────────────────────────────────────────

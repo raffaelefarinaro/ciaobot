@@ -59,6 +59,7 @@ from sandbox import (  # noqa: E402 - after the sys.path insert above
     clone_workspace,
     commit_snapshot,
     diff_summary,
+    pick_port,
     prepare_clone,
     strip_archives,
 )
@@ -263,7 +264,19 @@ def start_server(
     repository. Started *before* either arm because the project map comes from
     it, and the one-shot arm runs against a different clone, so there is no
     overlap in what either one touches.
+
+    ``port`` is resolved by :func:`sandbox.pick_port` before the process is
+    started, so a default run cannot land on a port somebody else is already
+    listening on.
+
+    Everything after ``Popen`` sits in a ``try``. A server that exits during
+    boot, and a login that turns out to have been answered by somebody else's
+    Ciaobot instance, are both failures -- and neither may leave a process
+    listening on the operator's loopback holding a full-access agent token,
+    because the caller's ``finally`` cannot stop a process this function never
+    returned.
     """
+    port = pick_port(port)
     env = {
         key: value
         for key, value in os.environ.items()
@@ -282,34 +295,80 @@ def start_server(
             "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}",
         }
     )
-    log = (run_dir / "agent-server.log").open("w", encoding="utf-8")
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "ciao.cli", "run"],
-        cwd=agent_clone,
-        env=env,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-    )
+    log_path = run_dir / "agent-server.log"
+    log = log_path.open("w", encoding="utf-8")
+    proc: subprocess.Popen | None = None
     base_url = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + 120.0
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "ciao.cli", "run"],
+            cwd=agent_clone,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        deadline = time.monotonic() + 120.0
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise SandboxError(
+                    f"the agent-clone server exited with {proc.returncode}:"
+                    f"{_log_tail(log_path)}"
+                )
+            try:
+                if httpx.get(f"{base_url}/api/active-chats", timeout=3.0).status_code == 200:
+                    break
+            except Exception:  # noqa: BLE001 - not up yet
+                pass
+            time.sleep(1.0)
+        else:
             raise SandboxError(
-                f"the agent-clone server exited with {proc.returncode}; "
-                f"see {run_dir / 'agent-server.log'}"
+                f"the agent-clone server did not answer on {base_url} within 120s:"
+                f"{_log_tail(log_path)}"
             )
         try:
-            if httpx.get(f"{base_url}/api/active-chats", timeout=3.0).status_code == 200:
-                break
-        except Exception:  # noqa: BLE001 - not up yet
-            pass
-        time.sleep(1.0)
-    else:
-        raise SandboxError(
-            f"the agent-clone server did not answer within 120s; "
-            f"see {run_dir / 'agent-server.log'}"
-        )
-    return proc, Instance(base_url, token), base_url
+            inst = Instance(base_url, token)
+        except httpx.HTTPStatusError as exc:
+            # A Ciaobot instance that does not know this token says 401, and
+            # the harness token is one nobody else can have: so the thing that
+            # answered is a Ciaobot server this run did not start.
+            if exc.response.status_code == 401:
+                raise SandboxError(
+                    f"server on {base_url} rejected the harness token; "
+                    "another server may own this port"
+                ) from exc
+            raise
+        # Ownership, second gate. The token is only proof if the instance let
+        # it in; an endpoint the harness actually uses proves there is a
+        # Ciaobot API on the other end at all, rather than something that
+        # happened to answer /api/auth.
+        inst.get("/api/projects")
+        assert_no_remote(agent_clone)
+        return proc, inst, base_url
+    except BaseException:
+        # The server is stopped here rather than by the caller, because the
+        # caller only knows about a process this function handed back.
+        # `stop_server` is a no-op on a process that already exited, and there
+        # is nothing to stop if Popen itself failed.
+        if proc is not None:
+            stop_server(proc)
+        log.close()
+        raise
+
+
+def _log_tail(path: Path, lines: int = 40) -> str:
+    """The last ``lines`` of a server log, indented onto the error message.
+
+    A pilot that dies on a port should not need a second command before the
+    operator can see what the server it *did* start said on its way out.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return " (no log)"
+    tail = [line for line in text.splitlines() if line.strip()][-lines:]
+    if not tail:
+        return " (the log is empty)"
+    return ":\n  " + "\n  ".join(tail)
 
 
 def stop_server(proc: subprocess.Popen) -> None:
@@ -738,14 +797,14 @@ async def run_arms(
     The server is started before either arm, because the project map comes
     from it, and it is stopped in a ``finally`` so an exception in one chat
     cannot leave a process listening on the operator's loopback with a
-    full-access agent on the other end.
+    full-access agent on the other end. ``start_server`` additionally stops it
+    itself if it never got far enough to hand it back.
     """
     results: dict[str, list[ArmResult]] = {}
     proc: subprocess.Popen | None = None
     try:
         proc, inst, base_url = start_server(clones["agent"], run_dir, port)
         print(f"agent server up on {base_url}")
-        assert_no_remote(clones["agent"])
         docs = project_docs(clones["agent"], inst, rows)
         for row in rows:
             row.doc = docs.get(row.chat_id, "")
@@ -806,7 +865,15 @@ def main() -> int:
     )
     parser.add_argument("--arms", default="oneshot,agent", help="Comma-separated arms to run.")
     parser.add_argument("--limit", type=int, default=0, help="Max chats; 0 means all.")
-    parser.add_argument("--port", type=int, default=8543, help="Loopback port for the agent-clone server.")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help=(
+            "Loopback port for the agent-clone server; 0 (the default) picks a free "
+            "one. An explicit port is refused if anything already listens on it."
+        ),
+    )
     parser.add_argument("--turn-timeout", type=float, default=900.0, help="Seconds to wait for one agent turn.")
     parser.add_argument("--live-url", default="http://127.0.0.1:8443", help="Live instance, for the idle check.")
     args = parser.parse_args()
