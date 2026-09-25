@@ -53,7 +53,7 @@
             <span class="transcribe-spinner"></span>
           </span>
         </div>
-        <span class="compose-hint">Sent with your next message</span>
+        <span class="compose-spacer" aria-hidden="true" />
         <button class="compose-btn" @click="emit('cancel')" type="button">Cancel</button>
         <button
           class="compose-btn primary"
@@ -378,6 +378,7 @@ defineExpose({ focus, toggleDictation })
   border-color: transparent;
   border-radius: 6px;
 }
+.compose-spacer { flex: 1; }
 .compose-hint {
   margin-right: auto;
   min-width: 0;

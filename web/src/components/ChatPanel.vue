@@ -207,6 +207,9 @@
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
     <div class="messages" :class="{ 'messages--empty': !blockingHistoryLoad && renderItems.length === 0 && !inputText.trim() }" ref="messagesEl" :aria-busy="store.messageHistoryLoading" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
+      <!-- Selecting a message (click or Enter) lifts it above a blurred veil
+         and shows its actions; clicking the veil or Esc puts it back. -->
+      <div v-if="tappedMessageKey" class="message-select-backdrop" aria-hidden="true" @click.stop="tappedMessageKey = null"></div>
       <div class="messages-content">
       <Transition name="history-loading">
         <!-- Placeholder for the transcript, in the transcript's own shape: a
@@ -294,8 +297,16 @@
           @expand-step="expandLazyStep"
         />
         <!-- User message -->
-        <div v-else-if="item.kind === 'user'" class="message-wrap user" :class="{ 'actions-tapped': tappedMessageKey === `user-${i}` }">
-          <div class="message-row" @click="toggleMessageActions(`user-${i}`, $event)">
+        <div v-else-if="item.kind === 'user'" class="message-wrap user" :class="{ 'actions-tapped': tappedMessageKey === `user-${i}`, 'message-wrap--selected': tappedMessageKey === `user-${i}` }">
+          <div
+            class="message-row"
+            tabindex="0"
+            :aria-expanded="tappedMessageKey === `user-${i}`"
+            aria-label="Message — press Enter for actions"
+            @click="toggleMessageActions(`user-${i}`, $event)"
+            @keydown.enter.self.prevent="toggleMessageActions(`user-${i}`, $event)"
+            @keydown.space.self.prevent="toggleMessageActions(`user-${i}`, $event)"
+          >
             <div class="message user" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-user-${i}`" :data-msg-index="i" data-msg-role="user">
               <div class="message-content">
                 <div v-if="item.msg.images?.length" class="message-images">
@@ -329,7 +340,7 @@
                side. Always shown on the latest reply; on older messages it
                appears on hover or focus (tap on touch) and overlays the gap, so
                a hidden row takes no height. -->
-          <div v-if="item.msg.content?.trim()" class="message-actions" :class="{ 'message-actions--pinned': false }">
+          <div v-if="item.msg.content?.trim()" class="message-actions">
             <button
               type="button"
               class="message-action-btn"
@@ -358,8 +369,16 @@
           <p v-if="speakError?.key === `user-${i}`" class="speak-error">{{ speakError.message }}</p>
         </div>
         <!-- Final assistant message -->
-        <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant" :class="{ 'actions-tapped': tappedMessageKey === `assistant-${i}` }">
-          <div class="message-row" @click="toggleMessageActions(`assistant-${i}`, $event)">
+        <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant" :class="{ 'actions-tapped': tappedMessageKey === `assistant-${i}`, 'message-wrap--selected': tappedMessageKey === `assistant-${i}` }">
+          <div
+            class="message-row"
+            tabindex="0"
+            :aria-expanded="tappedMessageKey === `assistant-${i}`"
+            aria-label="Message — press Enter for actions"
+            @click="toggleMessageActions(`assistant-${i}`, $event)"
+            @keydown.enter.self.prevent="toggleMessageActions(`assistant-${i}`, $event)"
+            @keydown.space.self.prevent="toggleMessageActions(`assistant-${i}`, $event)"
+          >
             <div class="message assistant" :class="{ error: item.msg.is_error }" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-asst-${i}`" :data-msg-index="i" data-msg-role="assistant">
               <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
               <div v-if="item.msg.is_error" class="error-attribution" role="status">
@@ -402,7 +421,7 @@
                side. Always shown on the latest reply; on older messages it
                appears on hover or focus (tap on touch) and overlays the gap, so
                a hidden row takes no height. -->
-          <div v-if="item.msg.content?.trim() || item.meta" class="message-actions" :class="{ 'message-actions--pinned': i === lastAssistantIndex }">
+          <div v-if="item.msg.content?.trim() || item.meta" class="message-actions">
             <template v-if="item.msg.content?.trim()">
             <button
               type="button"
@@ -2053,12 +2072,6 @@ function turnMetaText(meta: { timestamp?: string; duration_ms?: number; effectiv
 }
 
 // The reply whose action row stays visible: the newest assistant message.
-const lastAssistantIndex = computed(() => {
-  for (let i = renderItems.value.length - 1; i >= 0; i -= 1) {
-    if (renderItems.value[i].kind === 'assistant') return i
-  }
-  return -1
-})
 
 const inspectorOpen = ref(false)
 const inspectorTrigger = ref<HTMLButtonElement | null>(null)
@@ -2251,13 +2264,28 @@ const tappedMessageKey = ref<string | null>(null)
 // Touch: tap a message to toggle its action icons. Ignored on hover-capable
 // devices (they use hover) and when the tap targets a link/button or a text
 // selection is in progress.
-function toggleMessageActions(key: string, e: MouseEvent): void {
-  if (!window.matchMedia('(hover: none)').matches) return
+// Click (any pointer) or Enter selects a message and shows its actions. A
+// click that lands on something interactive, on a comment highlight, or that
+// ends a text selection (the start of a comment) is left alone.
+function toggleMessageActions(key: string, e: Event): void {
   const target = e.target as HTMLElement | null
-  if (target?.closest('a, button, input, textarea')) return
+  if (target?.closest('a, button, input, textarea, summary, .comment-highlight, [data-comment-id]')) return
   if (window.getSelection()?.toString()) return
   tappedMessageKey.value = tappedMessageKey.value === key ? null : key
 }
+
+function onSelectedMessageKeydown(e: KeyboardEvent): void {
+  if (e.key !== 'Escape' || !tappedMessageKey.value) return
+  // Claim it: Esc otherwise also closes the chat.
+  e.preventDefault()
+  e.stopPropagation()
+  tappedMessageKey.value = null
+}
+watch(tappedMessageKey, key => {
+  if (key) window.addEventListener('keydown', onSelectedMessageKeydown, true)
+  else window.removeEventListener('keydown', onSelectedMessageKeydown, true)
+})
+onBeforeUnmount(() => window.removeEventListener('keydown', onSelectedMessageKeydown, true))
 const transcribing = ref(false)
 const voiceRecorderRef = ref<InstanceType<typeof VoiceRecorder> | null>(null)
 const commentComposeDraftRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
@@ -5510,14 +5538,20 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
    hover, focus or tap for older ones, so every turn keeps the same rhythm
    and a hidden row never covers the next message. Under a request (right
    aligned) it overlays the gap below the bubble and takes no height. */
+/* Hidden until the message is selected; then it takes its place in the
+   flow. Nothing is reserved for it meanwhile, so turns stay tight. */
 .message-actions {
-  display: flex;
+  display: none;
   align-items: center;
   gap: 2px;
   height: 28px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;
+}
+.message-wrap--selected .message-actions,
+.message-actions:focus-within {
+  display: flex;
 }
 
 .message-wrap.assistant .message-actions {
@@ -5541,23 +5575,57 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   z-index: 2;
 }
 
-.message-actions.message-actions--pinned {
-  opacity: 1;
-  pointer-events: auto;
+
+
+/* The veil under a selected message: the transcript blurs back, the
+   message and its actions stay sharp above it. */
+.message-select-backdrop {
+  position: fixed;
+  inset: 0;
+  /* Above the sidebar's workspace scope (40) so the whole app blurs back. */
+  z-index: 45;
+  background: color-mix(in srgb, var(--bg) 40%, transparent);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  animation: message-veil-in 160ms var(--ease);
+}
+@keyframes message-veil-in { from { opacity: 0; } to { opacity: 1; } }
+
+.message-wrap--selected {
+  position: relative;
+  z-index: 46;
+}
+.message-wrap--selected.user .message {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent), 0 16px 40px rgb(0 0 0 / 28%);
+}
+/* Replies are plain prose, so a selected one gets a surface to lift. The
+   negative margin keeps the text from moving. */
+.message-wrap--selected.assistant .message-row {
+  margin: -10px -12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--bg2);
+  box-shadow: 0 0 0 1px var(--border-strong), 0 16px 40px rgb(0 0 0 / 28%);
+}
+.message-wrap--selected.assistant .message-actions {
+  position: relative;
+  margin-top: 14px;
+}
+.message-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .message-select-backdrop { animation: none; }
 }
 
-.message-wrap:focus-within .message-actions,
+.message-actions:focus-within,
 .message-wrap.actions-tapped .message-actions {
   opacity: 1;
   pointer-events: auto;
 }
 
-@media (hover: hover) {
-  .message-wrap:hover .message-actions {
-    opacity: 1;
-    pointer-events: auto;
-  }
-}
 
 .message-action-btn {
   position: relative;

@@ -157,24 +157,37 @@ describe('ChatPanel aligned layout', () => {
     wrapper.unmount()
   })
 
-  it('keeps the latest reply’s action row visible and overlays the older ones', async () => {
+  it('shows a message\'s actions only once it is selected, and Esc puts it back', async () => {
     const wrapper = await mountPanel(TURNS)
     const replies = wrapper.findAll('.message-wrap.assistant')
     expect(replies).toHaveLength(2)
+    expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
+    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
 
-    const older = replies[0].get('.message-actions')
-    const latest = replies[1].get('.message-actions')
-    expect(older.classes()).not.toContain('message-actions--pinned')
-    expect(latest.classes()).toContain('message-actions--pinned')
-    // Text actions, with the turn footer on the right of the latest row.
-    expect(latest.text()).toContain('Copy')
-    expect(latest.text()).toContain('Fork from here')
-    expect(latest.get('.message-meta').text()).toContain('7.0s')
+    // Click the reply (not a link or button inside it) to select it.
+    await replies[0].get('.message-row').trigger('click')
+    expect(replies[0].classes()).toContain('message-wrap--selected')
+    expect(wrapper.find('.message-select-backdrop').exists()).toBe(true)
+    const actions = replies[0].get('.message-actions')
+    expect(actions.text()).toContain('Copy')
+    expect(actions.text()).toContain('Fork from here')
 
-    // The user's own message offers Copy only.
-    const request = wrapper.findAll('.message-wrap.user')[0].get('.message-actions')
-    expect(request.text()).toContain('Copy')
-    expect(request.text()).not.toContain('Fork')
+    // Esc deselects without closing the chat.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await nextTick()
+    expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
+    expect(wrapper.emitted('close')).toBeUndefined()
+
+    // Enter on a focused message selects it too; the user's own offers Copy only.
+    const request = wrapper.findAll('.message-wrap.user')[0]
+    await request.get('.message-row').trigger('keydown', { key: 'Enter' })
+    expect(request.classes()).toContain('message-wrap--selected')
+    expect(request.get('.message-actions').text()).toContain('Copy')
+    expect(request.get('.message-actions').text()).not.toContain('Fork')
+
+    // Clicking the veil deselects.
+    await wrapper.get('.message-select-backdrop').trigger('click')
+    expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
     wrapper.unmount()
   })
 
