@@ -1385,9 +1385,9 @@
             <span class="chat-rail-tool"><small>Skill</small> {{ skill.name }}</span>
             <strong v-if="skill.count > 1">×{{ skill.count }}</strong>
           </div>
-          <div v-for="tool in toolUsage.mcp" :key="`mcp-${tool.name}`" class="rail-kv">
-            <span class="chat-rail-tool" :title="tool.name"><small>MCP</small> {{ tool.name }}</span>
-            <strong v-if="tool.count > 1">×{{ tool.count }}</strong>
+          <div v-for="server in toolUsage.mcp" :key="`mcp-${server.name}`" class="rail-kv">
+            <span class="chat-rail-tool" :title="server.tools?.join(', ')"><small>MCP</small> {{ server.name }}</span>
+            <strong v-if="server.count > 1" :title="`${server.count} calls`">×{{ server.count }}</strong>
           </div>
         </div>
       </section>

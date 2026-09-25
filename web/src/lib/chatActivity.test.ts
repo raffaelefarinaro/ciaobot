@@ -388,10 +388,11 @@ describe('collectToolUsage', () => {
       { name: 'ciao-dev-install', count: 2 },
       { name: 'docs', count: 1 },
     ])
-    expect(usage.mcp.map(entry => entry.name)).toEqual([
-      'claude_ai_scandbox · get_any_app',
-      'claude_ai_Slack · slack_search_public',
-      'scandbox_get_any_app',
+    // One row per server, with the tools kept for the tooltip; opencode's
+    // scandbox_get_any_app folds into the same server as Claude's call.
+    expect(usage.mcp).toEqual([
+      { name: 'scandbox', count: 2, tools: ['get_any_app'] },
+      { name: 'Slack', count: 1, tools: ['slack_search_public'] },
     ])
   })
 })

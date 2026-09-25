@@ -1,4 +1,5 @@
 import type { ChatMessage, SubagentTranscript } from './types'
+import { formatConnectorLabel } from './mcpLabels'
 import { isPlausibleFilePath } from './filePaths'
 
 export type TraceOutput = { file_path: string; action?: string }
@@ -448,6 +449,8 @@ export function fileCardIcon(filePath: string): FileCardIcon {
 export interface UsageEntry {
   name: string
   count: number
+  /** For an MCP server: the tools it was called with, most used first. */
+  tools?: string[]
 }
 
 export interface ToolUsage {
@@ -490,6 +493,14 @@ function bump(map: Map<string, number>, key: string): void {
 export function collectToolUsage(lines: Iterable<string>): ToolUsage {
   const skills = new Map<string, number>()
   const mcp = new Map<string, number>()
+  const mcpTools = new Map<string, Map<string, number>>()
+  const bumpTool = (server: string, tool: string) => {
+    const label = formatConnectorLabel(server)
+    bump(mcp, label)
+    const tools = mcpTools.get(label) ?? new Map<string, number>()
+    bump(tools, tool)
+    mcpTools.set(label, tools)
+  }
   for (const raw of lines) {
     const parsed = parseToolLine(raw)
     if (!parsed) continue
@@ -498,20 +509,31 @@ export function collectToolUsage(lines: Iterable<string>): ToolUsage {
       bump(skills, skillNameFrom(summary))
       continue
     }
+    // Grouped per server: which connector was used is the useful fact; the
+    // individual tools are detail, kept for the row's tooltip.
     const claudeMcp = /^mcp__(.+?)__(.+)$/.exec(name)
     if (claudeMcp) {
-      bump(mcp, `${claudeMcp[1]} · ${claudeMcp[2]}`)
+      bumpTool(claudeMcp[1], claudeMcp[2])
       continue
     }
     if (name.includes('_') && name === name.toLowerCase() && !OPENCODE_BUILTIN_TOOLS.has(name)) {
-      bump(mcp, name)
+      // opencode's `<server>_<tool>` has no fixed separator; the first
+      // segment is the best available server name.
+      const cut = name.indexOf('_')
+      bumpTool(name.slice(0, cut), name.slice(cut + 1))
     }
   }
   const toEntries = (map: Map<string, number>): UsageEntry[] =>
     [...map.entries()]
       .map(([entryName, count]) => ({ name: entryName, count }))
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
-  return { skills: toEntries(skills), mcp: toEntries(mcp) }
+  return {
+    skills: toEntries(skills),
+    mcp: toEntries(mcp).map(entry => ({
+      ...entry,
+      tools: toEntries(mcpTools.get(entry.name) ?? new Map()).map(tool => tool.name),
+    })),
+  }
 }
 
 /**

@@ -1829,6 +1829,7 @@
 </template>
 
 <script setup lang="ts">
+import { formatConnectorLabel } from '../lib/mcpLabels'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
@@ -3663,12 +3664,6 @@ function disallowedToolsPayload(raw: string): string[] | null {
   return cleaned.split(',').map((s) => s.trim()).filter(Boolean)
 }
 
-function formatConnectorLabel(name: string): string {
-  let clean = name.replace(/^mcp__claude_ai_/, '').replace(/^mcp__/, '')
-  if (clean === 'Google_Cloud_BigQuery') return 'BigQuery'
-  if (clean === 'incident_io') return 'incident.io'
-  return clean
-}
 
 
 
