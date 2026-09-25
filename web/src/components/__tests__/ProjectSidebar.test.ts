@@ -76,7 +76,7 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
-  it('shows the global attention count on the chats rail item', async () => {
+  it('shows the workspace attention count on the Today item', async () => {
     const store = useProjectStore()
     store.chats[0].last_activity_at = '2026-08-12T10:00:00Z'
     store.chats[0].last_read_at = '2026-08-12T09:00:00Z'
@@ -95,7 +95,8 @@ describe('ProjectSidebar chat actions', () => {
 
     const chatsLink = wrapper.get('a[href="/"]')
     // A dot, not a number; the accessible name carries the count.
-    expect(chatsLink.get('.nav-item-badge--static').text()).toBe('')
+    // A subtle number from a data attribute, not a dot or a pill.
+    expect(chatsLink.attributes('data-count')).toBe('1')
     expect(chatsLink.attributes('aria-label')).toBe('Today — 1 chat needs attention')
 
     wrapper.unmount()
@@ -359,7 +360,7 @@ describe('ProjectSidebar update badge', () => {
     }))
   }
 
-  it('shows a pulsing dot on the settings nav item when an update is available', async () => {
+  it('marks the settings nav item with a short note when an update is available', async () => {
     const store = useProjectStore()
     store.packageStatus = {
       current_version: '0.9.1',
@@ -371,7 +372,7 @@ describe('ProjectSidebar update badge', () => {
     await nextTick()
 
     const settingsLink = wrapper.get('a[href="/settings"]')
-    expect(settingsLink.find('.nav-item-badge').exists()).toBe(true)
+    expect(settingsLink.attributes('data-note')).toBe('update')
 
     wrapper.unmount()
   })
@@ -393,7 +394,7 @@ describe('ProjectSidebar update badge', () => {
     wrapper.unmount()
   })
 
-  it('shows one warning dot for a blocking housekeeping action', async () => {
+  it('marks the settings nav item for a blocking housekeeping action', async () => {
     const housekeeping = useHousekeepingStore()
     housekeeping.actions = [{
       id: 'gws-login',
@@ -416,7 +417,7 @@ describe('ProjectSidebar update badge', () => {
     const settingsLink = wrapper.get('a[href="/settings"]')
 
     expect(settingsLink.classes()).toContain('nav-item--warning')
-    expect(settingsLink.find('.nav-item-badge--warning').exists()).toBe(true)
+    expect(settingsLink.attributes('data-note')).toBe('check')
     expect(settingsLink.attributes('aria-label')).toBe('settings — action required')
 
     wrapper.unmount()

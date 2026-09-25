@@ -39,7 +39,7 @@
             type="button"
             class="workspace-scope-trigger"
             :data-workspace-color="colorForWorkspace(store.workspaceOptions.find(item => item.name === store.activeWorkspace))"
-            :aria-label="workspaceActionCount(store.activeWorkspace) ? `Workspace: ${workspaceLabel(store.activeWorkspace)} — ${workspaceActionCount(store.activeWorkspace)} items need attention` : `Workspace: ${workspaceLabel(store.activeWorkspace)}`"
+            :aria-label="`Workspace: ${workspaceLabel(store.activeWorkspace)}`"
             :aria-haspopup="hasMultipleWorkspaces ? 'menu' : undefined"
             :aria-expanded="hasMultipleWorkspaces ? workspaceScopeOpen : undefined"
             :aria-controls="hasMultipleWorkspaces ? 'workspace-scope-menu' : undefined"
@@ -48,9 +48,9 @@
             @click="toggleWorkspaceMenu"
             @keydown.down.prevent="openWorkspaceMenu"
           >
-            <span class="workspace-scope-dot" aria-hidden="true" />
-            <!-- Name only: counts and key hints live in the menu, next to the
-                 workspaces they would switch to. -->
+            <!-- The workspace colour lives in a tinted initial tile, not a dot:
+                 a coloured dot is the app's "something needs you" signal. -->
+            <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceInitial(store.activeWorkspace) }}</span>
             <span class="workspace-scope-name">{{ workspaceLabel(store.activeWorkspace) }}</span>
             <svg v-if="hasMultipleWorkspaces" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" aria-hidden="true">
               <polyline points="6 9 12 15 18 9" />
@@ -77,9 +77,8 @@
               :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
               @click="selectWorkspaceScope(workspace.name)"
             >
-              <span class="workspace-scope-dot" aria-hidden="true" />
+              <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceInitial(workspace.name) }}</span>
               <span class="workspace-scope-name">{{ workspaceLabel(workspace.name) }}</span>
-              <span v-if="workspaceActionCount(workspace.name)" class="badge">{{ workspaceActionCount(workspace.name) }}</span>
               <kbd v-if="workspaceShortcut(workspace.name)" class="sidebar-keycap" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</kbd>
             </button>
           </div>
@@ -112,7 +111,8 @@
               'nav-item--working': isAnyChatWorking
             }"
             title="Today"
-            :aria-label="store.attentionChatCount > 0 ? `Today — ${store.attentionChatCount} chat${store.attentionChatCount === 1 ? '' : 's'} need${store.attentionChatCount === 1 ? 's' : ''} attention` : (isAnyChatWorking ? 'Today (assistant is working)' : 'Today')"
+            :data-count="todayCount || undefined"
+            :aria-label="todayCount > 0 ? `Today — ${todayCount} chat${todayCount === 1 ? '' : 's'} need${todayCount === 1 ? 's' : ''} attention` : (isAnyChatWorking ? 'Today (assistant is working)' : 'Today')"
           >
             <span class="nav-item-icon" aria-hidden="true">
               <!-- Stacked message lines: sharper, more "log-window" than a speech bubble -->
@@ -123,12 +123,7 @@
                 <line x1="6" y1="13" x2="18" y2="13" />
                 <polyline points="8 18 8 21 11 18" />
               </svg>
-              <!-- A dot, not a number: the count is on Today itself, and the
-                   link's accessible name still states it. -->
-              <span
-                v-if="store.attentionChatCount > 0"
-                class="nav-item-badge nav-item-badge--static"
-              />
+
             </span>
             <span class="nav-item-label" aria-hidden="true">Today</span>
           </router-link>
@@ -140,7 +135,8 @@
               'nav-item--warning': hasAutomationWarning
             }"
             title="automations"
-            :aria-label="hasAutomationWarning ? 'automations (attention required)' : 'automations'"
+            :data-count="automationsCount || undefined"
+            :aria-label="automationsCount ? `automations — ${automationsCount} missed run${automationsCount === 1 ? '' : 's'}` : (hasAutomationWarning ? 'automations (attention required)' : 'automations')"
           >
             <span class="nav-item-icon" aria-hidden="true">
               <!-- Clock face with hour markers: more diagrammatic than calendar grid -->
@@ -161,7 +157,8 @@
             class="nav-item"
             :class="{ 'nav-item--active': mode === 'memory' || mode === 'proposals' }"
             :title="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} suggested across all workspaces` : 'memory'"
-            :aria-label="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} suggested memories across all workspaces` : 'memory'"
+            :data-count="memoryCount || undefined"
+            :aria-label="memoryCount > 0 ? `memory — ${memoryCount} to review in this workspace` : 'memory'"
           >
             <!-- Book/tray: rectilinear like the rest of the rail, which the
                  organic-curve brain never was. It also now covers review, since
@@ -188,6 +185,7 @@
             class="nav-item"
             :class="{ 'nav-item--active': mode === 'settings', 'nav-item--warning': hasBlockingHousekeeping }"
             :title="settingsNeedsAttention ? (store.packageStatus?.update_available && hasBlockingHousekeeping ? 'settings — update available and action required' : store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings — action required') : 'settings'"
+            :data-note="settingsNote || undefined"
             :aria-label="settingsNeedsAttention ? (store.packageStatus?.update_available && hasBlockingHousekeeping ? 'settings — update available and action required' : store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings — action required') : 'settings'"
           >
             <!-- Sliders / equalizer: more direct than a gear, mono-grid friendly -->
@@ -201,11 +199,6 @@
                 <rect x="7" y="10" width="4" height="4" fill="currentColor" />
                 <rect x="15" y="15" width="4" height="4" fill="currentColor" />
               </svg>
-              <span
-                v-if="settingsNeedsAttention"
-                class="nav-item-badge"
-                :class="{ 'nav-item-badge--warning': hasBlockingHousekeeping }"
-              />
             </span>
             <span class="nav-item-label" aria-hidden="true">Settings</span>
           </router-link>
@@ -1097,9 +1090,29 @@ const workspaceScopeMenu = ref<HTMLElement | null>(null)
 // Review + retirement work waiting in a workspace, used only as the scope
 // trigger's attention badge. The retirement queue is only loaded for the active workspace,
 // so their count is the proposals queue alone.
-function workspaceActionCount(workspace: string): number {
+// Section counts, all scoped to the selected workspace so they agree with
+// what each page shows. They replace the per-workspace badge in the scope
+// menu: the number sits next to the place that resolves it.
+const todayCount = computed(() => store.chats.reduce((sum, chat) => {
+  if (chat.archived) return sum
+  if (store.projectFor(chat.chat_id)?.workspace !== store.activeWorkspace) return sum
+  return sum + (store.chatNeedsInput(chat.chat_id) || store.chatUnread(chat.chat_id) > 0 ? 1 : 0)
+}, 0))
+const automationsCount = computed(() => missedCountFor(store.activeWorkspace))
+const memoryCount = computed(() => {
+  const workspace = store.activeWorkspace
   const retirement = vaultReview.loadedWorkspace === workspace ? vaultReview.candidates.length : 0
-  return proposals.scopedRows(workspace).length + retirement + missedCountFor(workspace)
+  return proposals.scopedRows(workspace).length + retirement
+})
+// Settings has no count; a word says what kind of attention it wants.
+const settingsNote = computed(() => {
+  if (hasBlockingHousekeeping.value) return 'check'
+  if (store.packageStatus?.update_available) return 'update'
+  return ''
+})
+
+function workspaceInitial(workspace: string): string {
+  return (workspaceLabel(workspace).trim()[0] || '·').toUpperCase()
 }
 
 function openWorkspaceMenu(): void {
@@ -2157,32 +2170,21 @@ async function confirmDeleteChat(chatId: string) {
   justify-content: center;
 }
 
-/* Persistent system-state signal, not a count: a pulsing dot reads better than
-   a numeral for update and blocking-housekeeping warnings. */
-.nav-item-badge {
-  position: absolute;
-  top: calc(50% - 4px);
-  right: 12px;
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--accent, #4c8bf5);
-  box-shadow: 0 0 0 2px var(--bg2);
-  animation: nav-item-badge-pulse 2s ease-in-out infinite;
+/* Subtle section counts: plain numerals on the right of the row, drawn from
+   a data attribute so they stay out of the link's text (its aria-label
+   carries the full sentence). Needs-you on Today uses the accent colour;
+   everything else stays muted. */
+.nav-item[data-count]::after,
+.nav-item[data-note]::after {
+  margin-left: auto;
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
 }
-
-.nav-item-badge--warning {
-  background: var(--warning);
-}
-
-.nav-item-badge--static {
-  animation: none;
-}
-
-@keyframes nav-item-badge-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.55; transform: scale(0.85); }
-}
+.nav-item[data-count]::after { content: attr(data-count); }
+.nav-item[data-note]::after { content: attr(data-note); color: var(--warning); font-family: var(--font-sans); }
+.nav-item[href="/"][data-count]::after { color: var(--accent); font-weight: 600; }
 
 /* Coarse pointers get the full 44px target on every rail row. */
 @media (pointer: coarse) {
@@ -2725,13 +2727,21 @@ async function confirmDeleteChat(chatId: string) {
   background: var(--bg3);
 }
 
-.workspace-scope-dot {
-  width: 9px;
-  height: 9px;
-  flex: 0 0 9px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+/* Workspace identity: a tinted initial tile in the workspace's accent. A
+   shape and a letter, so it can never be mistaken for an attention dot. */
+.workspace-scope-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  line-height: 1;
 }
 
 .workspace-scope-name {

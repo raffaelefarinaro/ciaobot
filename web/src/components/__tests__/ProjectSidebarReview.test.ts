@@ -82,17 +82,19 @@ describe('ProjectSidebar review section', () => {
 
     // The count lives on the memory pulse, not on the nav: the link only
     // states it in its accessible name.
+    // A subtle count on the section itself, scoped to this workspace.
     const memoryLink = wrapper.get('a[href="/memory"]')
-    expect(memoryLink.find('.nav-item-badge').exists()).toBe(false)
-    expect(memoryLink.attributes('aria-label')).toContain('4 suggested')
+    expect(memoryLink.attributes('data-count')).toBe('3')
+    expect(memoryLink.attributes('aria-label')).toBe('memory — 3 to review in this workspace')
     // The workspace scope is one dropdown at the top of the rail now, not a
     // per-mode row of pills.
     const workspaceTrigger = wrapper.get('.workspace-scope-trigger')
     expect(workspaceTrigger.text()).toContain('Personal')
     await workspaceTrigger.trigger('click')
+    // No counts at the workspace level: the options carry name and key only.
     const workspaceOptions = wrapper.findAll('.workspace-scope-option')
-    expect(workspaceOptions[0].text()).toContain('3')
-    expect(workspaceOptions[1].text()).toContain('1')
+    expect(workspaceOptions[0].find('.badge').exists()).toBe(false)
+    expect(workspaceOptions[1].find('.badge').exists()).toBe(false)
 
     // No stat tiles: the Suggested tab counts the queue and the batch bar
     // counts the selection. The sidebar keeps only what filters the list.
@@ -162,7 +164,7 @@ describe('ProjectSidebar review section', () => {
     expect(wrapper.find('.view-toggle').exists()).toBe(false)
   })
 
-  it('counts both review queues on the workspace scope, not just the proposals one', async () => {
+  it('counts both review queues on the Memory section, not just the proposals one', async () => {
     // "Is there anything to decide here" has two queues behind it. Counting
     // one of them said "3" beside two more notes waiting on the other tab.
     const vaultReview = useVaultReviewStore()
@@ -173,12 +175,10 @@ describe('ProjectSidebar review section', () => {
     ]
 
     const wrapper = await mountSidebar()
-    await wrapper.get('.workspace-scope-trigger').trigger('click')
-
     // Three proposals in `personal` plus two notes to revisit.
-    expect(wrapper.findAll('.workspace-scope-option')[0]!.get('.badge').text()).toBe('5')
+    expect(wrapper.get('a[href="/memory"]').attributes('data-count')).toBe('5')
     expect(wrapper.get('a[href="/memory"]').attributes('aria-label'))
-      .toBe('memory — 4 suggested memories across all workspaces')
+      .toBe('memory — 5 to review in this workspace')
   })
 
   it('leaves retired notes out of that count', async () => {
@@ -192,9 +192,7 @@ describe('ProjectSidebar review section', () => {
     ]
 
     const wrapper = await mountSidebar()
-    await wrapper.get('.workspace-scope-trigger').trigger('click')
-
-    expect(wrapper.findAll('.workspace-scope-option')[0]!.get('.badge').text()).toBe('3')
+    expect(wrapper.get('a[href="/memory"]').attributes('data-count')).toBe('3')
   })
 
   it('shows no proposal filters while Notes to revisit is open', async () => {
