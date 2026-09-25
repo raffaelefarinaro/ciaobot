@@ -16,9 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from ciao.operator_actions import (
-    _review_queue_depths,
     DetectionContext,
-    REVIEW_QUEUE_DEPTH,
     detect_actions,
     run_action,
 )
@@ -107,7 +105,7 @@ def _starred(tmp_path: Path) -> None:
 
 
 def test_empty_on_a_healthy_install(tmp_path: Path) -> None:
-    """A conformant install with no receipts and a shallow review queue is empty."""
+    """A conformant install with no receipts is empty."""
     config = _FakeConfig(tmp_path)
     # Mark the vocabulary receipt present and resolved so that detector is silent.
     (tmp_path / ".runtime" / "migration").mkdir(parents=True, exist_ok=True)
@@ -119,6 +117,28 @@ def test_empty_on_a_healthy_install(tmp_path: Path) -> None:
     )
     _starred(tmp_path)
     assert detect_actions(context) == []
+
+
+def test_a_full_proposal_queue_raises_no_tile(tmp_path: Path) -> None:
+    """Pending proposals are Home's "What changed" rail's job, not the strip's.
+
+    The old review-queue tile counted raw queue bullets and skill-proposal
+    files while the rail counts the scoped /api/proposals rows, so the two
+    showed different numbers on the same screen for the same queue.
+    """
+    _starred(tmp_path)
+    config = _FakeConfig(tmp_path, workspaces=("personal",))
+    root = config.workspace_vault_root("personal") / "Workspace"
+    (root / "Skill-Proposals").mkdir(parents=True, exist_ok=True)
+    (root / "Memory-Proposals.md").write_text(
+        "\n".join(f"- [memory] Pending {i}." for i in range(50)), encoding="utf-8"
+    )
+    for i in range(50):
+        (root / "Skill-Proposals" / f"p{i}.md").write_text("# p\n", encoding="utf-8")
+    context = DetectionContext(
+        config=config, runtime_dir=_runtime(tmp_path), schedule_store=_Store()
+    )
+    assert [a for a in detect_actions(context) if "proposal" in a.title.lower()] == []
 
 
 def test_package_update_fires_only_on_available(tmp_path: Path) -> None:
@@ -440,101 +460,6 @@ def test_missed_schedules_honors_fire_time_of_day(tmp_path: Path) -> None:
     assert len(tiles) == 1
 
 
-def test_review_queue_depth_counts_skill_proposal_files(tmp_path: Path) -> None:
-    """Skill-proposal FILES count toward the depth, and counting them must not raise.
-
-    The other queue-depth test writes only Memory-Proposals.md, so the
-    Skill-Proposals branch never ran and a `len()` on the generator returned by
-    Path.glob went unnoticed. detect_actions catches every exception from a
-    detector, so that TypeError silently removed the whole review-queue tile,
-    and only on an install that actually has a Skill-Proposals folder. The
-    reference vault has 49 such files.
-    """
-    config = _FakeConfig(tmp_path, workspaces=("personal",))
-    root = config.workspace_vault_root("personal")
-    skills = root / "Workspace" / "Skill-Proposals"
-    skills.mkdir(parents=True, exist_ok=True)
-    for i in range(REVIEW_QUEUE_DEPTH):
-        (skills / f"proposal-{i}.md").write_text("# proposal\n", encoding="utf-8")
-
-    context = DetectionContext(
-        config=config, runtime_dir=_runtime(tmp_path), schedule_store=_Store([])
-    )
-
-    # Depth is reached by files alone, with no bullets in the queue file at all.
-    assert _review_queue_depths(context) == {"personal": REVIEW_QUEUE_DEPTH}
-    tiles = [a for a in detect_actions(context) if a.kind == "review-queue-depth"]
-    assert [t.id for t in tiles] == ["review-queue-depth:personal"]
-    assert tiles[0].workspace == "personal"
-    assert str(REVIEW_QUEUE_DEPTH) in tiles[0].title
-
-
-def test_review_queue_depth_fires_above_threshold(tmp_path: Path) -> None:
-    config = _FakeConfig(tmp_path, workspaces=("personal",))
-    # Fill the review queue with enough bullets and files.
-    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
-    queue.parent.mkdir(parents=True, exist_ok=True)
-    queue.write_text(
-        "\n".join(
-            f"- [memory] Pending fact number {i}." for i in range(REVIEW_QUEUE_DEPTH)
-        ),
-        encoding="utf-8",
-    )
-    context = DetectionContext(
-        config=config, runtime_dir=_runtime(tmp_path), schedule_store=_Store([])
-    )
-    ids = [a.id for a in detect_actions(context)]
-    assert "review-queue-depth:personal" in ids
-
-    # Below the threshold it is silent.
-    queue.write_text("- [memory] One straggler.", encoding="utf-8")
-    ids = [a.id for a in detect_actions(context)]
-    assert "review-queue-depth:personal" not in ids
-
-
-def test_review_queue_depth_is_per_workspace_not_summed(tmp_path: Path) -> None:
-    """Each workspace's tile carries its own count, and only past-threshold ones.
-
-    The summed tile let one busy workspace summon a review tile into every
-    other workspace's strip, and the /proposals page it opens scopes its rows
-    to the active workspace, so the number claimed work the page could not
-    show. A sibling under the threshold must stay invisible from here.
-    """
-    config = _FakeConfig(tmp_path, workspaces=("personal", "work"))
-    for name, count in (("personal", REVIEW_QUEUE_DEPTH + 2), ("work", 1)):
-        queue = (
-            config.workspace_vault_root(name) / "Workspace" / "Memory-Proposals.md"
-        )
-        queue.parent.mkdir(parents=True, exist_ok=True)
-        queue.write_text(
-            "\n".join(f"- [memory] Pending {name} {i}." for i in range(count)),
-            encoding="utf-8",
-        )
-    context = DetectionContext(
-        config=config, runtime_dir=_runtime(tmp_path), schedule_store=_Store([])
-    )
-
-    tiles = [a for a in detect_actions(context) if a.kind == "review-queue-depth"]
-    assert [t.id for t in tiles] == ["review-queue-depth:personal"]
-    assert tiles[0].workspace == "personal"
-    assert str(REVIEW_QUEUE_DEPTH + 2) in tiles[0].title
-
-    # Work crossing the threshold on its own earns its own tile, still not a sum.
-    queue = config.workspace_vault_root("work") / "Workspace" / "Memory-Proposals.md"
-    queue.write_text(
-        "\n".join(f"- [memory] Pending work {i}." for i in range(REVIEW_QUEUE_DEPTH)),
-        encoding="utf-8",
-    )
-    tiles = [a for a in detect_actions(context) if a.kind == "review-queue-depth"]
-    assert sorted(t.id for t in tiles) == [
-        "review-queue-depth:personal",
-        "review-queue-depth:work",
-    ]
-    for tile in tiles:
-        own = _review_queue_depths(context)[tile.workspace]
-        assert str(own) in tile.title
-
-
 def test_every_action_offers_run_or_chat(tmp_path: Path) -> None:
     """Contract 4: no action is a bare notice with neither a run nor a chat."""
     # Force every detector to fire so the whole registry is exercised.
@@ -543,12 +468,6 @@ def test_every_action_offers_run_or_chat(tmp_path: Path) -> None:
     (runtime / "migration").mkdir(parents=True, exist_ok=True)
     (runtime / "migration" / "vault-vocabulary.json").write_text(
         json.dumps({"renamed": [], "unresolved": {"log": ["x.md"]}}), encoding="utf-8"
-    )
-    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
-    queue.parent.mkdir(parents=True, exist_ok=True)
-    queue.write_text(
-        "\n".join(f"- [memory] Pending {i}." for i in range(REVIEW_QUEUE_DEPTH)),
-        encoding="utf-8",
     )
     now = datetime(2026, 1, 20, 0, 0, tzinfo=UTC)
     store = _Store([_Entry(frequency="once", run_at_date="2026-01-18", schedule_id="s1")])
@@ -677,19 +596,6 @@ def test_unmigrated_links_tile_does_not_assert_wikilinks_it_cannot_verify(
 
 
 # -- the queue tile the operator saw on screen -------------------------------
-
-
-def test_the_queue_tile_points_at_the_panel_that_has_the_buttons() -> None:
-    """It offered "Review in chat" alone, so the operator was asked to work
-    through 109 items in prose while the per-row accept/dismiss, the destination
-    picker and the batch operations sat one route away."""
-    import inspect
-
-    from ciao import operator_actions as oa
-
-    source = inspect.getsource(oa._detect_review_queue)
-    assert 'view_route="/proposals"' in source
-    assert "view_label=" in source
 
 
 # -- the mandatory re-rooting gate -------------------------------------------
