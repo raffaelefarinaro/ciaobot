@@ -625,6 +625,26 @@ def mode_settings(
     return _MODE_AGENTS[key], rules
 
 
+def readonly_agent_rules(roots: Sequence[Path]) -> list[dict[str, str]]:
+    """Deny everything except reading inside ``roots`` (read-only memory agent).
+
+    The opencode counterpart of the Claude read-only tool gate
+    (``ciao.providers.oneshot.path_allowed``): same question, answered by the
+    server's own ruleset. ``glob`` and ``grep`` stay denied even with the
+    roots allowed, because V2 sends the *search pattern* as the resource
+    rather than the search root, so a search cannot be scoped to a directory
+    at all. The agent reads notes by path instead.
+    """
+    rules = _rules(("*", "deny"))
+    for root in roots:
+        base = str(Path(root).resolve())
+        for action in ("read", "external_directory"):
+            rules.append({"action": action, "resource": base, "effect": "allow"})
+            rules.append({"action": action, "resource": f"{base}/**", "effect": "allow"})
+    rules.extend(opencode_credential_deny_rules())
+    return rules
+
+
 def _session_permission_matches(
     payload: object, expected: list[dict[str, str]]
 ) -> bool:
@@ -1201,6 +1221,7 @@ class OpencodeProvider(BaseSDKProvider):
         config: object | None = None,
         developer_instructions: str | None = None,
         tools_enabled: bool = True,
+        permission_rules: list[dict[str, str]] | None = None,
     ) -> None:
         super().__init__(workspace_root, config=config)
         # ``None`` means a normal Ciaobot chat and receives the compact shared
@@ -1210,6 +1231,10 @@ class OpencodeProvider(BaseSDKProvider):
             None if developer_instructions is None else developer_instructions.strip()
         )
         self._tools_enabled = tools_enabled
+        # A custom ruleset replaces the mode's one entirely. The read-only
+        # memory agent needs exactly one shape, and no Ciaobot mode is it; see
+        # `readonly_agent_rules`. `None` keeps `mode_settings`.
+        self._permission_rules = permission_rules
         self._process: asyncio.subprocess.Process | None = None
         # Reads the server's stderr for its whole life; see
         # `_start_stderr_reader` for why leaving the pipe unread is not an option.
@@ -1378,6 +1403,25 @@ class OpencodeProvider(BaseSDKProvider):
             return str(Path(state_path).parent.resolve())
         except (OSError, ValueError):
             return ""
+
+    def _session_settings(
+        self, request: AgentRequest
+    ) -> tuple[str, list[dict[str, str]]]:
+        """The (agent, permission rules) this turn's session runs under.
+
+        A caller that supplied ``permission_rules`` is not running a Ciaobot
+        mode — it is the read-only memory agent — so its ruleset is used
+        verbatim and the mode only picks the agent. Everyone else gets
+        :func:`mode_settings`, unchanged.
+        """
+        if self._permission_rules is not None:
+            return "build", [dict(rule) for rule in self._permission_rules]
+        return mode_settings(
+            request.mode,
+            tools_enabled=self._tools_enabled,
+            runtime_root=self._runtime_root(),
+            workspace_root=self.workspace_root,
+        )
 
     async def _ensure_server(self, request: AgentRequest) -> httpx.AsyncClient:
         """Start (or reuse) this chat's server and return its HTTP client.
@@ -1660,12 +1704,7 @@ class OpencodeProvider(BaseSDKProvider):
         """Resume, fork, or create the V2 session this turn runs in."""
         client = self._client
         assert client is not None
-        agent, permissions = mode_settings(
-            request.mode,
-            tools_enabled=self._tools_enabled,
-            runtime_root=self._runtime_root(),
-            workspace_root=self.workspace_root,
-        )
+        agent, permissions = self._session_settings(request)
         provider_id, model_id = split_model(request.model)
         if model_id and not provider_id:
             self._turn_model = await self._resolve_model(client, request.model)
