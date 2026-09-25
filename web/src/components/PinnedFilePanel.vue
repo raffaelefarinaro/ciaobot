@@ -158,39 +158,41 @@
           </div>
 
           <template v-else>
-            <!-- Metadata card synthesized from YAML frontmatter -->
-            <div v-if="frontmatter" class="pfp-meta-card">
-              <div class="pfp-meta-row">
-                <span v-if="fmType" class="pfp-meta-pill pfp-meta-pill-type">{{ fmType }}</span>
-                <span v-if="fmStatus" class="pfp-meta-pill" :class="`pfp-meta-pill-status-${fmStatus}`">{{ fmStatus }}</span>
-                <span v-if="fmName && fmName !== basename.replace(/\.md$/, '')" class="pfp-meta-name" :title="fmName">{{ fmName }}</span>
-                <span class="pfp-meta-spacer"></span>
-                <span v-if="fmUpdated" class="pfp-meta-date" :title="`Updated ${fmUpdated}`">↻ {{ fmUpdated }}</span>
-                <span v-else-if="fmCreated" class="pfp-meta-date" :title="`Created ${fmCreated}`">+ {{ fmCreated }}</span>
+            <!-- Document properties from YAML frontmatter: a quiet header in
+                 the document's own measure, not a card of uppercase pills. -->
+            <section v-if="frontmatter" class="pfp-meta" aria-label="Document properties">
+              <div class="pfp-meta-line">
+                <span class="pfp-meta-kind">
+                  <template v-if="fmType">{{ humanizeMeta(fmType) }}</template>
+                  <template v-if="fmType && fmStatus"> · </template>
+                  <span v-if="fmStatus" class="pfp-meta-status" :class="`pfp-meta-status--${fmStatus}`">{{ humanizeMeta(fmStatus) }}</span>
+                </span>
+                <span v-if="fmUpdated" class="pfp-meta-date">Updated {{ fmUpdated }}</span>
+                <span v-else-if="fmCreated" class="pfp-meta-date">Created {{ fmCreated }}</span>
               </div>
-              <div v-if="fmTags.length" class="pfp-meta-row pfp-meta-tags">
-                <span v-for="t in fmTags" :key="t" class="pfp-meta-tag">#{{ t }}</span>
-              </div>
+              <p v-if="fmName && fmName !== basename.replace(/\.md$/, '')" class="pfp-meta-name" :title="fmName">{{ fmName }}</p>
               <p v-if="fmProse" class="pfp-meta-summary">{{ fmProse }}</p>
-              <div
-                v-for="listExtra in fmListExtras"
-                :key="listExtra.key"
-                class="pfp-meta-row pfp-meta-links"
-              >
-                <span class="pfp-meta-links-label">{{ listExtra.key }}</span>
-                <template v-for="(item, i) in listExtra.items" :key="i">
-                  <a
-                    v-if="item.path"
-                    class="pfp-meta-link file-link"
-                    href="#"
-                    @click.prevent="openRelated(item.path)"
-                  >{{ item.label }}</a>
-                  <span v-else class="pfp-meta-link">{{ item.label }}</span>
+              <p v-if="fmTags.length" class="pfp-meta-tags">
+                <span v-for="t in fmTags" :key="t" class="pfp-meta-tag">#{{ t }}</span>
+              </p>
+              <dl v-if="fmListExtras.length || fmExtraEntries.length" class="pfp-meta-fields">
+                <template v-for="listExtra in fmListExtras" :key="listExtra.key">
+                  <dt>{{ humanizeMeta(listExtra.key) }}</dt>
+                  <dd>
+                    <template v-for="(item, i) in listExtra.items" :key="i">
+                      <a
+                        v-if="item.path"
+                        class="pfp-meta-link file-link"
+                        href="#"
+                        :title="item.path"
+                        @click.prevent="openRelated(item.path)"
+                      >{{ item.label }}</a>
+                      <span v-else class="pfp-meta-value">{{ item.label }}</span>
+                    </template>
+                  </dd>
                 </template>
-              </div>
-              <dl v-if="fmExtraEntries.length" class="pfp-meta-extra">
                 <template v-for="entry in fmExtraEntries" :key="entry.key">
-                  <dt>{{ entry.key }}</dt>
+                  <dt>{{ humanizeMeta(entry.key) }}</dt>
                   <dd>
                     <a
                       v-if="isUrl(entry.value)"
@@ -202,7 +204,7 @@
                   </dd>
                 </template>
               </dl>
-            </div>
+            </section>
             <div
               v-if="isMarkdown"
               class="pfp-md"
@@ -440,6 +442,11 @@ const basename = computed(() => {
   return idx === -1 ? p : p.slice(idx + 1)
 })
 const fileBasenameForPop = computed(() => basename.value)
+// Frontmatter words for display: "in-discussion" -> "In discussion".
+function humanizeMeta(value: string): string {
+  const text = String(value).replace(/[_-]+/g, ' ').trim()
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : text
+}
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(cleanPath.value))
 const isCsv = computed(() => isCsvPath(cleanPath.value))
 
@@ -1574,127 +1581,65 @@ defineExpose({ isBusyAuthoring })
 }
 
 /* ── Metadata card (parsed frontmatter) ─────────────────────────── */
-.pfp-meta-card {
-  margin: 0 0 16px;
-  padding: 10px 12px;
-  background: var(--bg2, rgba(255, 255, 255, 0.03));
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-width: 100%;
+/* Document properties: sits above the prose in the same measure, reads as
+   metadata (muted, sentence case, normal font), and ends on a hairline. */
+.pfp-meta {
+  width: 100%;
+  max-width: 680px;
+  margin: 0 0 20px;
+  padding: 0 0 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-sm);
 }
-.pfp-meta-row {
+.pfp-meta-line {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  min-height: 22px;
+  align-items: baseline;
+  gap: var(--space-3);
+  color: var(--fg2);
 }
-.pfp-meta-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  background: var(--border);
+.pfp-meta-kind { flex: 1; min-width: 0; font-weight: 600; }
+.pfp-meta-status { font-weight: 600; }
+.pfp-meta-status--active,
+.pfp-meta-status--in-progress { color: var(--success); }
+.pfp-meta-status--draft,
+.pfp-meta-status--in-discussion { color: var(--warning); }
+.pfp-meta-status--completed,
+.pfp-meta-status--archived { color: var(--fg3); }
+.pfp-meta-date { flex: none; color: var(--fg3); font-variant-numeric: tabular-nums; }
+.pfp-meta-name { margin: 6px 0 0; color: var(--fg2); }
+.pfp-meta-summary {
+  margin: 8px 0 0;
   color: var(--fg);
-  white-space: nowrap;
-}
-.pfp-meta-pill-type {
-  background: rgba(96, 165, 250, 0.18);
-  color: #93c5fd;
-}
-.pfp-meta-pill-status-active {
-  background: rgba(34, 197, 94, 0.18);
-  color: #86efac;
-}
-.pfp-meta-pill-status-completed,
-.pfp-meta-pill-status-archived {
-  background: rgba(148, 163, 184, 0.18);
-  color: #cbd5e1;
-}
-.pfp-meta-pill-status-draft {
-  background: rgba(250, 204, 21, 0.18);
-  color: #fde68a;
-}
-.pfp-meta-name {
-  color: var(--fg2);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  margin-left: 4px;
-}
-.pfp-meta-spacer {
-  flex: 1;
-  min-width: 0;
-}
-.pfp-meta-date {
-  color: var(--fg2);
-  font-size: 11px;
-  white-space: nowrap;
+  font-size: var(--text-base);
+  line-height: 1.6;
 }
 .pfp-meta-tags {
-  margin-top: -2px;
-}
-.pfp-meta-tag {
-  font-size: 11px;
-  color: var(--fg2);
-  background: transparent;
-  padding: 1px 6px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  font-family: var(--font-mono);
-}
-.pfp-meta-summary {
-  margin: 2px 0 0;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-  font-size: 13px;
-  line-height: 1.55;
-  color: var(--fg);
-}
-.pfp-meta-links {
-  gap: 4px 6px;
-}
-.pfp-meta-links-label {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--fg2);
-  margin-right: 2px;
-}
-.pfp-meta-link {
-  font-size: 11px;
-  color: var(--fg2);
-  padding: 1px 6px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  font-family: var(--font-mono);
-}
-.pfp-meta-extra {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
   margin: 8px 0 0;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
+}
+.pfp-meta-tag { color: var(--fg3); }
+.pfp-meta-fields {
   display: grid;
-  grid-template-columns: max-content 1fr;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 16px;
+  margin: 12px 0 0;
+}
+.pfp-meta-fields dt { color: var(--fg3); }
+.pfp-meta-fields dd {
+  display: flex;
+  flex-wrap: wrap;
   gap: 2px 12px;
-  font-size: 12px;
-}
-.pfp-meta-extra dt {
-  color: var(--fg2);
-  font-weight: 600;
-  text-transform: lowercase;
-}
-.pfp-meta-extra dd {
+  min-width: 0;
   margin: 0;
   color: var(--fg);
-  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.pfp-meta-link { color: var(--accent); }
+@media (max-width: 700px) {
+  .pfp-meta-fields { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
+  .pfp-meta-fields dd { margin-bottom: 6px; }
 }
 
 .pfp-md {
