@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import plistlib
 import subprocess
+import sys
 from pathlib import Path
 
 from ciao import macos_service
@@ -256,13 +258,156 @@ def test_desktop_service_parser_contract() -> None:
         ]
     )
 
-    assert restart.desktop_service_action == "restart"
+    assert restart.service_action == "restart"
+    assert restart.deprecated_alias is True
     assert restart.force is True
     assert restart.as_json is True
-    assert update.desktop_service_action == "update-engine"
+    assert update.service_action == "update-engine"
     assert update.force is True
     assert login.login_action == "disable"
     assert migrate.app_bundle == Path("/Applications/Ciaobot.app")
+
+
+def test_service_parser_contract() -> None:
+    from ciao.cli import build_parser
+
+    parser = build_parser()
+
+    start = parser.parse_args(
+        ["service", "start", "--workspace", "/tmp/ws", "--json"]
+    )
+    login = parser.parse_args(["service", "login", "enable"])
+    stop = parser.parse_args(["service", "stop", "--force"])
+
+    assert start.service_action == "start"
+    assert start.workspace == Path("/tmp/ws")
+    assert start.as_json is True
+    assert start.deprecated_alias is False
+    assert login.login_action == "enable"
+    assert stop.force is True
+
+
+def test_service_start_registers_missing_launch_agent(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from ciao import cli
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        macos_service,
+        "_launchctl",
+        lambda args, runner=None: calls.append(list(args))
+        or subprocess.CompletedProcess(["launchctl", *args], 0, "", ""),
+    )
+
+    rc = cli.main(
+        ["service", "start", "--workspace", str(workspace), "--json"]
+    )
+
+    plist_path = (
+        Path(os.environ["CIAO_LAUNCH_AGENTS_DIR"]) / "com.ciao.server.plist"
+    )
+    assert rc == 0
+    assert plist_path.is_file()
+    plist_data = plistlib.loads(plist_path.read_bytes())
+    environment = plist_data["EnvironmentVariables"]
+    assert environment["CIAO_WORKSPACE"] == str(workspace.resolve())
+    assert environment["CIAO_PORT"] == "9555"
+    assert ["bootstrap", f"gui/{os.getuid()}", str(plist_path)] in calls
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_service_start_without_workspace_reports_setup_hint(
+    monkeypatch, capsys
+) -> None:
+    from ciao import cli
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        macos_service,
+        "_launchctl",
+        lambda args, runner=None: calls.append(list(args))
+        or subprocess.CompletedProcess(["launchctl", *args], 0, "", ""),
+    )
+
+    rc = cli.main(["service", "start", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["details"]["setup_required"] is True
+    assert "--workspace" in payload["message"]
+    assert calls == []
+
+
+def test_service_start_rejects_directory_without_env(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from ciao import cli
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    calls: list[list[str]] = []
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        macos_service,
+        "_launchctl",
+        lambda args, runner=None: calls.append(list(args))
+        or subprocess.CompletedProcess(["launchctl", *args], 0, "", ""),
+    )
+
+    rc = cli.main(
+        ["service", "start", "--workspace", str(workspace), "--json"]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    plist_path = (
+        Path(os.environ["CIAO_LAUNCH_AGENTS_DIR"]) / "com.ciao.server.plist"
+    )
+    assert rc == 1
+    assert "no .env" in payload["message"]
+    assert not plist_path.exists()
+    assert calls == []
+
+
+def test_service_refuses_on_non_macos(monkeypatch, capsys) -> None:
+    from ciao import cli
+
+    def unexpected_launchctl(*_args, **_kwargs):
+        raise AssertionError("launchctl must not run on non-macOS")
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(macos_service, "_launchctl", unexpected_launchctl)
+
+    rc = cli.main(["service", "status", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert "linux-service" in payload["message"]
+
+
+def test_desktop_service_alias_warns_only_without_json(monkeypatch, capsys) -> None:
+    from ciao import cli
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        macos_service,
+        "service_status",
+        lambda **_: macos_service.ServiceResult(True, "status", "ok", {}),
+    )
+
+    assert cli.main(["desktop-service", "status"]) == 0
+    first = capsys.readouterr()
+    assert "deprecated" in first.err
+
+    assert cli.main(["desktop-service", "status", "--json"]) == 0
+    second = capsys.readouterr()
+    assert second.err == ""
+    assert json.loads(second.out)["ok"] is True
 
 
 def test_update_engine_requires_confirmation_before_upgrading_active_chats(
