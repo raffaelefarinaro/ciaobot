@@ -163,3 +163,80 @@ def test_notification_log_is_trimmed(tmp_path: Path) -> None:
     entries = _read_log(tmp_path)
     assert len(entries) <= NOTIFICATION_LOG_MAX * 2
     assert entries[-1]["body"] == f"msg {NOTIFICATION_LOG_MAX * 2 + 4}"
+
+
+def _pushed(monkeypatch) -> list[dict]:
+    """Capture every webpush call's payload, endpoint included."""
+    import pywebpush
+
+    calls: list[dict] = []
+
+    def record(**kwargs):
+        calls.append({
+            "endpoint": kwargs["subscription_info"]["endpoint"],
+            "payload": json.loads(kwargs["data"]),
+        })
+
+    monkeypatch.setattr(pywebpush, "webpush", record)
+    return calls
+
+
+def test_push_all_devices_pushes_local_subscriptions_and_skips_tray_log(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """With push_all_devices on there is no menu bar, so this machine's own
+    subscription is the only channel and the tray log must stay empty (a
+    still-running tray would show the same notification twice)."""
+    calls = _pushed(monkeypatch)
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost", push_all=lambda: True)
+    manager.add({"endpoint": "https://push.example/local"}, local=True)
+    manager.add({"endpoint": "https://push.example/phone"}, local=False)
+
+    manager.send({"title": "t", "body": "hi", "chat_id": "c1"})
+
+    assert [call["endpoint"] for call in calls] == [
+        "https://push.example/local",
+        "https://push.example/phone",
+    ]
+    assert manager.read_log() == []
+
+
+def test_push_all_devices_off_keeps_tray_split(tmp_path: Path, monkeypatch) -> None:
+    calls = _pushed(monkeypatch)
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost", push_all=lambda: False)
+    manager.add({"endpoint": "https://push.example/local"}, local=True)
+    manager.add({"endpoint": "https://push.example/phone"}, local=False)
+
+    manager.send({"title": "t", "body": "hi", "chat_id": "c1"})
+
+    assert [call["endpoint"] for call in calls] == ["https://push.example/phone"]
+    assert len(manager.read_log()) == 1
+
+
+def test_push_all_devices_lookup_error_falls_back_to_tray_split(tmp_path: Path, monkeypatch) -> None:
+    def boom() -> bool:
+        raise RuntimeError("settings store unavailable")
+
+    calls = _pushed(monkeypatch)
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost", push_all=boom)
+    manager.add({"endpoint": "https://push.example/local"}, local=True)
+    manager.add({"endpoint": "https://push.example/phone"}, local=False)
+
+    manager.send({"title": "t", "body": "hi", "chat_id": "c1"})
+
+    assert [call["endpoint"] for call in calls] == ["https://push.example/phone"]
+    assert len(manager.read_log()) == 1
+
+
+def test_send_test_targets_only_that_endpoint_and_skips_log(tmp_path: Path, monkeypatch) -> None:
+    calls = _pushed(monkeypatch)
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
+    manager.add({"endpoint": "https://push.example/one"}, local=True)
+    manager.add({"endpoint": "https://push.example/two"}, local=False)
+
+    assert manager.send_test("https://push.example/one") == 1
+
+    assert [call["endpoint"] for call in calls] == ["https://push.example/one"]
+    assert calls[0]["payload"]["kind"] == "test"
+    assert manager.read_log() == []
+    assert manager.send_test("https://push.example/unknown") == 0

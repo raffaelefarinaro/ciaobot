@@ -28,6 +28,28 @@
           </button>
         </span>
       </div>
+      <div v-if="pushEnabledFlag && !inDesktopApp" class="notif-row">
+        <span class="notif-key">Test</span>
+        <span class="notif-value">
+          <span class="notif-detail">Sends a notification to this device only.</span>
+        </span>
+        <span class="notif-end">
+          <button class="btn-secondary btn-small" @click="sendTest" :disabled="testPending">
+            {{ testPending ? 'Sending...' : 'Send test notification' }}
+          </button>
+        </span>
+      </div>
+      <div v-if="!inDesktopApp" class="notif-row">
+        <span class="notif-key">Delivery</span>
+        <span class="notif-value">
+          <span class="notif-detail">{{ pushAllDevices ? 'Every device, including this computer' : 'Other devices only; the Ciaobot menu bar shows this Mac\'s banners' }}</span>
+        </span>
+        <span class="notif-end">
+          <button class="btn-secondary btn-small" @click="toggleDelivery" :disabled="deliveryPending">
+            {{ pushAllDevices ? 'Use the menu bar on this Mac' : 'Push to every device' }}
+          </button>
+        </span>
+      </div>
     </div>
     <!-- Mac without web push: the menu bar already covers it; web push is an
          optional upgrade, not a required action. -->
@@ -37,6 +59,7 @@
       (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;),
       then enable it here.
     </p>
+    <p v-if="testResult" class="hint notif-note" role="status">{{ testResult }}</p>
     <p v-if="pushError" class="action-result" role="alert">{{ pushError }}</p>
   </div>
 </template>
@@ -47,6 +70,7 @@ import { api } from '../../lib/api'
 import { errorMessage } from '../../lib/errorMessage'
 import { isDesktopApp } from '../../lib/desktop'
 import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../../lib/push'
+import type { RoutineSettings } from '../../lib/types'
 
 /** The Home tab renders this card too, so both surfaces stay one copy.
  *
@@ -65,6 +89,10 @@ const pushPending = ref(false)
 const pushError = ref('')
 const permissionDenied = ref(false)
 const needsIosInstall = ref(false)
+const pushAllDevices = ref(false)
+const deliveryPending = ref(false)
+const testPending = ref(false)
+const testResult = ref('')
 
 const showToggle = computed(
   () => !inDesktopApp && !needsIosInstall.value && !permissionDenied.value && pushSupportedFlag.value,
@@ -102,7 +130,7 @@ const status = computed<{ label: string; tone: Tone; detail: string }>(() => {
     }
   }
   if (pushEnabledFlag.value) return { label: 'On for this device', tone: 'ok', detail: '' }
-  if (isMacDesktop()) {
+  if (isMacDesktop() && !pushAllDevices.value) {
     return {
       label: 'Covered by the menu bar',
       tone: 'ok',
@@ -152,6 +180,11 @@ onMounted(async () => {
       } catch { /* best-effort */ }
     }
   }
+  // Delivery is an install-wide setting, not this browser's: read it once and
+  // never let an unavailable settings endpoint break the card.
+  try {
+    pushAllDevices.value = Boolean((await api.get<RoutineSettings>('/api/settings/routines')).push_all_devices)
+  } catch { /* settings unavailable: keep default */ }
 })
 
 async function togglePush() {
@@ -169,6 +202,38 @@ async function togglePush() {
     pushError.value = errorMessage(e)
   } finally {
     pushPending.value = false
+  }
+}
+
+async function toggleDelivery() {
+  deliveryPending.value = true
+  pushError.value = ''
+  try {
+    const res = await api.patch<RoutineSettings>('/api/settings/routines', { push_all_devices: !pushAllDevices.value })
+    pushAllDevices.value = Boolean(res.push_all_devices)
+  } catch (e) {
+    pushError.value = errorMessage(e)
+  } finally {
+    deliveryPending.value = false
+  }
+}
+
+async function sendTest() {
+  testPending.value = true
+  testResult.value = ''
+  pushError.value = ''
+  try {
+    const sub = await currentSubscription()
+    if (!sub) {
+      testResult.value = 'Enable notifications on this device first.'
+      return
+    }
+    await api.post('/api/push/test', { endpoint: sub.endpoint })
+    testResult.value = 'Sent. If nothing appears within a few seconds, check this browser\'s notification permission in your system settings.'
+  } catch (e) {
+    pushError.value = errorMessage(e)
+  } finally {
+    testPending.value = false
   }
 }
 </script>

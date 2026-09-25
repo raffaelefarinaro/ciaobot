@@ -208,6 +208,15 @@ self.addEventListener('push', (event) => {
     ]))
     return
   }
+  if (data.kind === 'test') {
+    event.waitUntil(self.registration.showNotification(title, {
+      body: data.body || '',
+      icon: ICON,
+      badge: BADGE,
+      tag: 'ciaobot-test',
+    }))
+    return
+  }
   const options = {
     body: data.body || '',
     icon: ICON,
