@@ -446,8 +446,35 @@ describe('component mount smoke', () => {
     expect(wrapper.text()).toContain('Skills')
     expect(wrapper.text()).toContain('airtable-projects')
     expect(wrapper.text()).toContain('Custom skills')
-    expect(wrapper.text()).toContain('Stock skills')
+    expect(wrapper.text()).toContain('Built-in skills')
     wrapper.unmount()
+  })
+
+  it('SettingsView shows the skills empty state when the inventory has no skills list', async () => {
+    // A partial response ({} from an older engine or a stub) used to throw in
+    // render (`skills.filter` on undefined) and blank the whole Settings pane.
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const original = testApi.getResponse('/api/admin/skills')
+    testApi.setResponse('/api/admin/skills', {})
+    const router = makeRouter()
+    await router.push('/settings/skills')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    try {
+      await flushPromises()
+      await nextTick()
+      expect(wrapper.text()).toContain('No custom skills yet.')
+      expect(wrapper.find('.settings-rail-assets').text()).toContain('Custom')
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/admin/skills', original)
+    }
   })
 
   it('SettingsView renders the notifications card on /settings/notifications', async () => {
@@ -462,7 +489,7 @@ describe('component mount smoke', () => {
     await nextTick()
 
     expect(wrapper.text()).toContain('Notifications')
-    expect(wrapper.text()).toContain('Get a notification when a chat replies')
+    expect(wrapper.text()).toContain('notifies you when a chat replies')
     wrapper.unmount()
   })
 
@@ -481,7 +508,7 @@ describe('component mount smoke', () => {
       await flushPromises()
       await nextTick()
 
-      expect(wrapper.text()).toContain('menu-bar')
+      expect(wrapper.text()).toContain('Handled by the menu bar')
       expect(wrapper.text()).toContain('Native Notifications')
       expect(wrapper.text()).not.toContain('Enable on this device')
       wrapper.unmount()
@@ -593,10 +620,11 @@ describe('component mount smoke', () => {
     await nextTick()
 
     // The effective panel arrives comma-joined with no spaces. It is shown
-    // rejoined with ", " in a wrapping summary so it cannot overflow on a
-    // phone, and the ellipsized trigger carries the full value as its title.
+    // rejoined with ", " as the picker's placeholder, and the ellipsized
+    // trigger carries the full value as its title. With nothing picked there
+    // is no second summary control beside it.
     const defaultLabel = 'Automatic default (anthropic/claude-sonnet-4.5, anthropic/claude-haiku-4.5)'
-    expect(wrapper.find('.critique-picker-default').text()).toBe(defaultLabel)
+    expect(wrapper.find('.critique-picker-default').exists()).toBe(false)
     expect(
       wrapper.find('.critique-model-picker .model-selector__trigger').attributes('title'),
     ).toBe(defaultLabel)
@@ -646,7 +674,7 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    const addButton = wrapper.findAll('button').find((button) => button.text().includes('Add workspace'))
+    const addButton = wrapper.findAll('button').find((button) => button.text() === 'New workspace')
     expect(addButton).toBeTruthy()
     await addButton!.trigger('click')
     await nextTick()
@@ -697,6 +725,9 @@ describe('component mount smoke', () => {
     await nextTick()
 
     try {
+      // Rows are collapsed; Edit opens the workspace's fields in place.
+      await wrapper.get('[aria-label="Edit workspace legacy"]').trigger('click')
+      await nextTick()
       const providerField = wrapper.findAll('label.settings-field')
         .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
       expect(providerField).toBeTruthy()
@@ -746,7 +777,13 @@ describe('component mount smoke', () => {
     await nextTick()
 
     try {
-      await wrapper.find('.workspace-actions .btn-small').trigger('click')
+      // Save appears only after a change in the opened row.
+      await wrapper.get('[aria-label="Edit workspace personal"]').trigger('click')
+      await nextTick()
+      expect(wrapper.find('.workspace-save').exists()).toBe(false)
+      await wrapper.get('.workspace-color-swatch[aria-label="Terminal Cyan"]').trigger('click')
+      await nextTick()
+      await wrapper.get('.workspace-save').trigger('click')
       await flushPromises()
 
       const result = wrapper.find('.action-result[role="alert"]')

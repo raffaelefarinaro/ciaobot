@@ -482,17 +482,17 @@
               </div>
             </div>
 
-            <div v-if="providerKeys.connections" class="provider-connections">
-              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row">
-                <div class="setting-row-main setting-row-main--inline">
-                  <div class="routine-info">
-                    <span class="routine-name">{{ conn.label || connKey }}</span>
-                    <p class="hint hint--compact provider-connection-detail">
+            <div v-if="providerKeys.connections" class="provider-connections set-list">
+              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row set-row">
+                <div class="set-row-head provider-row-head">
+                  <div class="routine-info set-row-main">
+                    <span class="routine-name set-row-title">{{ conn.label || connKey }}</span>
+                    <p class="set-row-sub provider-connection-detail">
                       <span v-if="conn.version">{{ conn.version }}</span>
                       <span v-if="conn.account">{{ conn.account }}</span>
                       <span v-if="!conn.version && conn.detail">{{ conn.detail }}</span>
                     </p>
-                    <p v-if="conn.auth === 'not_installed'" class="hint hint--compact">
+                    <p v-if="conn.auth === 'not_installed'" class="set-row-sub">
                       {{ conn.detail }}
                       Install it with <code>{{ conn.command }}</code>
                       <template v-if="conn.path_command">
@@ -508,32 +508,76 @@
                     </p>
                     <p
                       v-if="conn.auth !== 'not_installed' && conn.path_command"
-                      class="hint hint--compact"
+                      class="set-row-sub"
                     >
                       Your terminal cannot find this CLI yet — put it on your PATH with
                       <code>{{ conn.path_command }}</code>
                     </p>
                   </div>
-                  <span class="settings-conn-state" :class="conn.ok ? 'settings-conn-state--ok' : 'settings-conn-state--error'">
-                    {{ conn.ok ? `Connected · ${conn.auth}` : 'Not connected' }}
-                  </span>
+                  <div class="set-row-actions provider-connection-actions">
+                    <span class="settings-conn-state" :class="conn.ok ? 'settings-conn-state--ok' : 'settings-conn-state--error'">
+                      {{ conn.ok ? 'Connected' : 'Not connected' }}
+                    </span>
+                    <!-- Connect is the row's one primary only while it is needed;
+                         once connected, the rare Reconnect / Log out live in the menu. -->
+                    <button
+                      v-if="!conn.ok"
+                      type="button"
+                      class="btn-primary btn-small"
+                      :disabled="providerConnectionPending === connKey"
+                      @click="providerConnectionAction(String(connKey), 'connect')"
+                    >Connect</button>
+                    <button
+                      type="button"
+                      class="set-link"
+                      :disabled="providerConnectionPending === connKey"
+                      @click="providerConnectionAction(String(connKey), 'verify')"
+                    >Verify</button>
+                    <DropdownMenuRoot
+                      v-if="conn.ok"
+                      :open="settingsMenu === `provider:${connKey}`"
+                      :modal="false"
+                      @update:open="setSettingsMenu(`provider:${connKey}`, $event)"
+                    >
+                      <DropdownMenuTrigger as-child>
+                        <button
+                          type="button"
+                          class="set-menu-btn"
+                          :aria-label="`More actions for ${conn.label || connKey}`"
+                          :disabled="providerConnectionPending === connKey"
+                        >&middot;&middot;&middot;</button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent as-child align="end" :side-offset="4" :collision-padding="8">
+                        <div class="settings-menu" @keydown.esc="closeSettingsMenuOnEscape">
+                          <DropdownMenuItem as-child @select="providerConnectionAction(String(connKey), 'connect')">
+                            <button type="button" class="settings-menu-item">Reconnect</button>
+                          </DropdownMenuItem>
+                          <DropdownMenuItem as-child @select="providerConnectionAction(String(connKey), 'logout')">
+                            <button type="button" class="settings-menu-item settings-menu-item--danger">Log out</button>
+                          </DropdownMenuItem>
+                        </div>
+                      </DropdownMenuContent>
+                    </DropdownMenuRoot>
+                  </div>
                 </div>
                 <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
-                  <label class="settings-field">
-                    <span class="ws-label">Default model</span>
-                    <ModelSelector
-                      v-if="getProviderSection(String(connKey))?.configurable"
-                      :model-value="providerDefaultModelSelectorValue(String(connKey) as AliasProviderKey)"
-                      :sections="providerDefaultModelSectionsFor(String(connKey) as AliasProviderKey)"
-                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
-                      @update:model-value="saveProviderDefaultModel(String(connKey) as AliasProviderKey, $event)"
-                    />
-                    <span v-else class="hint hint--compact">Automatic — {{ (conn.label || connKey) }} picks its own default.</span>
-                  </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Permission mode</span>
+                  <div class="set-subrow">
+                    <span class="ws-label set-subrow-label">Default model</span>
+                    <div class="set-subrow-control">
+                      <ModelSelector
+                        v-if="getProviderSection(String(connKey))?.configurable"
+                        :model-value="providerDefaultModelSelectorValue(String(connKey) as AliasProviderKey)"
+                        :sections="providerDefaultModelSectionsFor(String(connKey) as AliasProviderKey)"
+                        :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                        @update:model-value="saveProviderDefaultModel(String(connKey) as AliasProviderKey, $event)"
+                      />
+                      <span v-else class="hint hint--compact">Automatic — {{ (conn.label || connKey) }} picks its own default.</span>
+                    </div>
+                  </div>
+                  <label class="set-subrow">
+                    <span class="ws-label set-subrow-label">Permission mode</span>
                     <select
-                      class="routine-select"
+                      class="routine-select set-subrow-control"
                       :value="providerDefaultModeValue(String(connKey) as AliasProviderKey)"
                       :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
                       @change="saveProviderDefaultMode(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
@@ -543,30 +587,45 @@
                       </option>
                     </select>
                   </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Default thinking</span>
-                    <select
-                      class="routine-select"
-                      :value="providerDefaultThinkingValue(String(connKey) as AliasProviderKey)"
-                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
-                      @change="saveProviderDefaultThinking(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
-                    >
-                      <option
-                        v-for="option in providerThinkingOptions(String(connKey) as AliasProviderKey)"
-                        :key="option.value"
-                        :value="option.value"
+                  <div class="set-subrow">
+                    <span :id="`thinking-label-${connKey}`" class="ws-label set-subrow-label">Default thinking</span>
+                    <div class="set-subrow-control">
+                      <!-- A short closed set reads best as a segmented control; a
+                           long provider list falls back to a select. -->
+                      <div
+                        v-if="providerThinkingOptions(String(connKey) as AliasProviderKey).length <= 5"
+                        class="set-seg"
+                        role="radiogroup"
+                        :aria-labelledby="`thinking-label-${connKey}`"
                       >
-                        {{ option.label }}
-                      </option>
-                    </select>
-                  </label>
-                </div>
-                <div class="action-row provider-connection-actions">
-                  <button class="btn-primary btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'connect')">
-                    {{ conn.ok ? 'Reconnect' : 'Connect' }}
-                  </button>
-                  <button class="btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'verify')">Verify</button>
-                  <button v-if="conn.ok" class="btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'logout')">Log out</button>
+                        <button
+                          v-for="option in providerThinkingOptions(String(connKey) as AliasProviderKey)"
+                          :key="option.value"
+                          type="button"
+                          role="radio"
+                          :aria-checked="providerDefaultThinkingValue(String(connKey) as AliasProviderKey) === option.value"
+                          :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                          @click="saveProviderDefaultThinking(String(connKey) as AliasProviderKey, option.value)"
+                        >{{ thinkingOptionLabel(option) }}</button>
+                      </div>
+                      <select
+                        v-else
+                        class="routine-select"
+                        :aria-labelledby="`thinking-label-${connKey}`"
+                        :value="providerDefaultThinkingValue(String(connKey) as AliasProviderKey)"
+                        :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                        @change="saveProviderDefaultThinking(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
+                      >
+                        <option
+                          v-for="option in providerThinkingOptions(String(connKey) as AliasProviderKey)"
+                          :key="option.value"
+                          :value="option.value"
+                        >
+                          {{ option.label }}
+                        </option>
+                      </select>
+                    </div>
+                  </div>
                 </div>
                 <!-- What the CLI brings on its own. Long chip lists, so they sit
                      behind a disclosure, collapsed by default. -->
@@ -683,37 +742,34 @@
 
             <div class="routine-row">
               <div class="routine-info">
-                <span class="routine-name">Critique models</span>
-                <span class="routine-detail">Select one or more models for adversarial review.</span>
+                <span class="routine-name">Critique panel</span>
+                <span class="routine-detail">Models asked for an adversarial review.</span>
               </div>
               <div class="critique-model-picker">
-                <div class="critique-picker-header">
-                  <div class="critique-picker-summary">
-                    <div v-if="selectedCritiqueModels.length" class="critique-chip-list">
-                      <button
-                        v-for="model in selectedCritiqueModels"
-                        :key="model"
-                        type="button"
-                        class="critique-chip"
-                        :disabled="routinesSaving"
-                        :title="`Remove ${model}`"
-                        :aria-label="`Remove ${model}`"
-                        @click="removeCritiqueModel(model)"
-                      >
-                        <span>{{ model }}</span>
-                        <span aria-hidden="true">&times;</span>
-                      </button>
-                    </div>
-                    <span v-else class="critique-picker-default">{{ critiqueDefaultLabel }}</span>
+                <!-- One control: the multi-select picker. Picked models show as
+                     removable chips; "Use automatic" clears the list. -->
+                <div v-if="selectedCritiqueModels.length" class="critique-picker-header">
+                  <div class="critique-chip-list">
+                    <button
+                      v-for="model in selectedCritiqueModels"
+                      :key="model"
+                      type="button"
+                      class="critique-chip"
+                      :disabled="routinesSaving"
+                      :title="`Remove ${model}`"
+                      :aria-label="`Remove ${model}`"
+                      @click="removeCritiqueModel(model)"
+                    >
+                      <span>{{ model }}</span>
+                      <span aria-hidden="true">&times;</span>
+                    </button>
                   </div>
                   <button
                     type="button"
-                    class="btn-small"
-                    :disabled="routinesSaving || selectedCritiqueModels.length === 0"
+                    class="set-link set-link--quiet"
+                    :disabled="routinesSaving"
                     @click="setCritiqueModels([])"
-                  >
-                    Reset
-                  </button>
+                  >Use automatic</button>
                 </div>
                 <ModelSelector
                   multiple
@@ -850,15 +906,15 @@
               <div>
                 <p class="section-title">Workspaces</p>
                 <p class="hint">
-                  Logical chat spaces that route projects, chats, vault names, model defaults, and integration profiles.
+                  Each workspace keeps its own projects, chats, memory, model defaults and Google account.
                 </p>
               </div>
-              <button class="btn-small" @click="showNewWorkspace = !showNewWorkspace">
-                {{ showNewWorkspace ? 'Cancel' : '+ Add workspace' }}
+              <button class="btn-small" :aria-expanded="showNewWorkspace" @click="showNewWorkspace = !showNewWorkspace">
+                {{ showNewWorkspace ? 'Cancel' : 'New workspace' }}
               </button>
             </div>
 
-            <div v-if="showNewWorkspace" class="workspace-card workspace-card--new">
+            <div v-if="showNewWorkspace" id="new-workspace" class="workspace-card workspace-card--new settings-form-panel">
               <div class="workspace-card-header">
                 <div>
                   <p class="workspace-title">New workspace</p>
@@ -926,45 +982,69 @@
                 </label>
               </div>
               <div class="action-row settings-actions">
+                <button class="set-link set-link--quiet" type="button" :disabled="workspacesSaving === 'new'" @click="showNewWorkspace = false">Cancel</button>
                 <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
                   {{ workspacesSaving === 'new' ? 'Creating...' : 'Create workspace' }}
                 </button>
               </div>
             </div>
 
-            <div class="workspace-list">
+            <div class="workspace-list set-list">
               <div
                 v-for="form in workspaceForms"
                 :key="form.name"
-                class="workspace-card"
+                class="workspace-card set-row"
+                :class="{ 'workspace-card--open': openWorkspace === form.name }"
               >
-                <div class="workspace-card-header">
-                  <div>
-                    <p class="workspace-title">{{ form.name }}</p>
+                <div class="workspace-card-header set-row-head">
+                  <span class="set-dot" aria-hidden="true" :style="{ '--swatch': workspaceSwatch(form.color) }"></span>
+                  <div class="set-row-main">
+                    <p class="workspace-title set-row-title">{{ form.name }}</p>
+                    <p class="set-row-sub">{{ workspaceSummary(form) }}</p>
                   </div>
-                  <div class="workspace-actions">
+                  <div class="workspace-actions set-row-actions">
                     <button
-                      class="btn-small"
-                      @click="saveWorkspace(form.name)"
-                      :disabled="workspacesSaving === form.name || archivingWorkspace === form.name"
-                    >
-                      {{ workspacesSaving === form.name ? 'Saving...' : 'Save' }}
-                    </button>
-                    <button
+                      v-if="openWorkspace !== form.name"
+                      type="button"
+                      class="set-link"
+                      :aria-label="`Edit workspace ${form.name}`"
+                      :aria-expanded="false"
+                      @click="openWorkspace = form.name"
+                    >Edit</button>
+                    <DropdownMenuRoot
                       v-if="workspaceArchivable(form.name)"
-                      class="btn-small btn-caution"
-                      :aria-label="`Archive workspace ${form.name}`"
-                      @click="archiveWorkspace(form.name)"
-                      :disabled="workspacesSaving === form.name || archivingWorkspace === form.name"
-                    >{{ archivingWorkspace === form.name ? 'Archiving...' : 'Archive' }}</button>
+                      :open="settingsMenu === `ws:${form.name}`"
+                      :modal="false"
+                      @update:open="setSettingsMenu(`ws:${form.name}`, $event)"
+                    >
+                      <DropdownMenuTrigger as-child>
+                        <button
+                          type="button"
+                          class="set-menu-btn"
+                          :aria-label="`Actions for workspace ${form.name}`"
+                          :disabled="archivingWorkspace === form.name"
+                        >&middot;&middot;&middot;</button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent as-child align="end" :side-offset="4" :collision-padding="8">
+                        <div class="settings-menu" @keydown.esc="closeSettingsMenuOnEscape">
+                          <DropdownMenuItem as-child @select="archiveWorkspace(form.name)">
+                            <button
+                              type="button"
+                              class="settings-menu-item settings-menu-item--caution"
+                              :aria-label="`Archive workspace ${form.name}`"
+                            >{{ archivingWorkspace === form.name ? 'Archiving...' : 'Archive' }}</button>
+                          </DropdownMenuItem>
+                        </div>
+                      </DropdownMenuContent>
+                    </DropdownMenuRoot>
                   </div>
                 </div>
 
-                <div class="settings-field-grid">
-                  <div class="settings-field settings-field--wide">
-                    <span class="ws-label" :id="`workspace-color-${form.name}`">Accent color</span>
+                <div v-if="openWorkspace === form.name" class="set-row-body">
+                  <div class="set-subrow">
+                    <span class="set-subrow-label" :id="`workspace-color-${form.name}`">Accent</span>
                     <div
-                      class="workspace-color-swatches"
+                      class="workspace-color-swatches set-subrow-control"
                       role="radiogroup"
                       :aria-labelledby="`workspace-color-${form.name}`"
                     >
@@ -984,26 +1064,17 @@
                       />
                     </div>
                   </div>
-                  <label class="settings-field"><span class="ws-label">{{ workspaceProviderFieldLabel }}</span>
-                    <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
+                  <label class="settings-field set-subrow">
+                    <span class="ws-label set-subrow-label">{{ workspaceProviderFieldLabel }}</span>
+                    <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
                       <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
                         {{ provider.label }}
                       </option>
                     </select>
                   </label>
-                  <label class="settings-field">
-                    <div class="settings-label-row">
-                      <span class="ws-label">Google profile</span>
-                      <details class="field-info">
-                        <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
-                        <div class="field-info-panel">
-                          <p>
-                            Selects which Google account this workspace uses. Accounts are added and connected in the Google Workspace card below.
-                          </p>
-                        </div>
-                      </details>
-                    </div>
-                    <select class="routine-input workspace-select" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
+                  <label class="settings-field set-subrow">
+                    <span class="ws-label set-subrow-label" title="Which Google account this workspace uses. Accounts are added under Google Workspace below.">Google profile</span>
+                    <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
                       <option value="">{{ gwsUnlinkedOptionLabel }}</option>
                       <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
                         {{ profile.label }} ({{ profile.email || profile.name }})
@@ -1013,6 +1084,21 @@
                       </option>
                     </select>
                   </label>
+                  <div class="workspace-edit-actions">
+                    <button
+                      v-if="workspaceDirty(form)"
+                      type="button"
+                      class="btn-primary btn-small workspace-save"
+                      :disabled="workspacesSaving === form.name || archivingWorkspace === form.name"
+                      @click="saveWorkspace(form.name)"
+                    >{{ workspacesSaving === form.name ? 'Saving...' : 'Save changes' }}</button>
+                    <button
+                      type="button"
+                      class="set-link set-link--quiet"
+                      :disabled="workspacesSaving === form.name"
+                      @click="discardWorkspace(form.name)"
+                    >{{ workspaceDirty(form) ? 'Discard' : 'Done' }}</button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1455,21 +1541,16 @@
             <div>
               <p class="section-title">Skills</p>
               <p class="hint">
-                Skills are local folders: place <code>skills/&lt;name&gt;/SKILL.md</code> (or upload a validated zip) then <code>ciao sync-skills</code>. Workspace git sync propagates to other operators. No GitHub fetch.
+                Shared with Claude Code and opencode. Each skill is a folder with a <code>SKILL.md</code> in <code>skills/</code>; workspace git sync carries it to other machines.
               </p>
             </div>
             <div class="settings-card-header-actions">
-              <button class="btn-small" @click="createSkillViaChat">Add via chat</button>
-              <button class="btn-primary btn-small" @click="toggleAddSkill">
-                {{ showAddSkill ? 'Cancel' : '+ Add skill' }}
+              <button class="set-link set-link--quiet" type="button" @click="createSkillViaChat">Ask Ciao to write one</button>
+              <button class="btn-small" type="button" :aria-expanded="showAddSkill" @click="toggleAddSkill">
+                {{ showAddSkill ? 'Cancel' : 'New skill' }}
               </button>
             </div>
           </div>
-
-          <p class="hint hint--info skill-scope-note">
-             Ciaobot runs chats through Claude Code or opencode. Ciaobot-managed skills are synchronized into both runtimes where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed stock and custom skills — see
-            <RouterLink to="/settings/models#chat-providers">Models &amp; providers</RouterLink> for what each CLI brings on its own.
-          </p>
 
           <!-- Add Skill Form: folder note + zip upload -->
           <div v-if="showAddSkill" class="settings-form-panel">
@@ -1518,7 +1599,11 @@
             <!-- Custom Skills Section -->
             <div class="skill-section">
               <p class="subsection-title subsection-title--spaced">Custom skills</p>
-              <p v-if="!customSkills.length" class="hint hint--section-empty">No custom skills yet. Add a folder <code>skills/&lt;name&gt;/SKILL.md</code> or upload a zip.</p>
+              <p v-if="!customSkills.length" class="set-empty">
+                <strong>No custom skills yet.</strong>
+                A skill teaches Ciao a repeatable task, such as a review checklist or a report format.
+                <button class="set-link" type="button" @click="createSkillViaChat">Ask Ciao to write one</button>
+              </p>
               <div v-else class="skill-list skill-list--section">
                 <div
                   v-for="skill in customSkills"
@@ -1531,6 +1616,7 @@
                     <div class="skill-title-row">
                       <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
                       <span class="skill-name">{{ skill.name }}</span>
+                      <span class="skill-badges"><span class="set-tag set-tag--custom">Custom</span></span>
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
@@ -1547,8 +1633,11 @@
 
             <!-- Stock Skills Section -->
             <div class="skill-section skill-section--spaced">
-              <p class="subsection-title subsection-title--spaced">Stock skills</p>
-              <p v-if="!stockSkills.length" class="hint hint--section-empty">No stock skills installed.</p>
+              <p class="subsection-title subsection-title--spaced">Built-in skills</p>
+              <p v-if="!stockSkills.length" class="set-empty">
+                <strong>No built-in skills installed.</strong>
+                They come with the app and are restored by <code>ciao sync-skills</code>.
+              </p>
               <div v-else class="skill-list skill-list--section">
                 <div
                   v-for="skill in stockSkills"
@@ -1561,6 +1650,7 @@
                     <div class="skill-title-row">
                       <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
                       <span class="skill-name">{{ skill.name }}</span>
+                      <span class="skill-badges"><span class="set-tag">Built in</span></span>
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
@@ -1585,12 +1675,15 @@
             <div>
               <p class="section-title">Subagents</p>
               <p class="hint">
-                 Shared subagents available to Claude Code and opencode. Custom definitions are saved in <code>subagents/</code>, mirrored into the vault, and synchronized into each runtime's native format.
+                Shared with Claude Code and opencode. Saved in <code>subagents/</code> and kept in the vault.
               </p>
             </div>
-            <button class="btn-small" @click="toggleAddSubagent">
-              {{ showAddSubagent ? 'Cancel' : '+ New subagent' }}
-            </button>
+            <div class="settings-card-header-actions">
+              <button class="set-link set-link--quiet" type="button" @click="createAssetViaChat('subagent')">Ask Ciao to write one</button>
+              <button class="btn-small" type="button" :aria-expanded="showAddSubagent" @click="toggleAddSubagent">
+                {{ showAddSubagent ? 'Cancel' : 'New subagent' }}
+              </button>
+            </div>
           </div>
 
           <div v-if="showAddSubagent" class="settings-form-panel">
@@ -1619,7 +1712,11 @@
             <p class="hint hint--warn">{{ agentAssetsError }}</p>
           </template>
           <template v-else>
-            <p v-if="!subagentAssets.length" class="hint hint--section-empty">No subagents found.</p>
+            <p v-if="!subagentAssets.length" class="set-empty">
+              <strong>No subagents yet.</strong>
+              A subagent is a specialist Ciao hands part of a task to, with its own instructions.
+              <button class="set-link" type="button" @click="toggleAddSubagent">Create one</button>
+            </p>
             <div v-else class="skill-list">
               <div
                 v-for="agent in subagentAssets"
@@ -1635,6 +1732,13 @@
                     <span class="skill-badges">
                       <span :class="assetOriginClass(subagentOrigin(agent))">{{ assetOriginLabel(subagentOrigin(agent)) }}</span>
                       <span v-if="agent.scope && agent.scope !== 'custom' && agent.scope !== 'built-in'" class="badge badge--muted command-source">{{ agent.scope }}</span>
+                      <button
+                        v-if="agent.editable"
+                        type="button"
+                        class="set-link"
+                        :aria-label="`Edit subagent ${agent.name}`"
+                        @click.stop="openSubagentEditor(agent)"
+                      >Edit</button>
                     </span>
                   </div>
                   <p v-if="agent.description" class="skill-description">{{ agent.description }}</p>
@@ -1685,12 +1789,13 @@
             <div>
               <p class="section-title">Commands</p>
               <p class="hint">
-                 Shared commands available to Claude Code and opencode. Custom commands are saved in <code>commands/</code>, mirrored into the vault, and exposed through each runtime's native format.
+                Slash commands shared with Claude Code and opencode. Saved in <code>commands/</code> and kept in the vault.
               </p>
             </div>
             <div class="settings-card-header-actions">
-              <button class="btn-small" @click="toggleAddCommand">
-                {{ showAddCommand ? 'Cancel' : '+ New command' }}
+              <button class="set-link set-link--quiet" type="button" @click="createAssetViaChat('command')">Ask Ciao to write one</button>
+              <button class="btn-small" type="button" :aria-expanded="showAddCommand" @click="toggleAddCommand">
+                {{ showAddCommand ? 'Cancel' : 'New command' }}
               </button>
             </div>
           </div>
@@ -1725,7 +1830,11 @@
             <p class="hint hint--warn">{{ agentAssetsError }}</p>
           </template>
           <template v-else>
-            <p v-if="!commandAssets.length" class="hint hint--section-empty">No slash commands found.</p>
+            <p v-if="!commandAssets.length" class="set-empty">
+              <strong>No slash commands yet.</strong>
+              A command is a saved prompt you run by typing <code>/name</code> in a chat.
+              <button class="set-link" type="button" @click="toggleAddCommand">Create one</button>
+            </p>
             <div v-else class="skill-list">
               <div
                 v-for="command in commandAssets"
@@ -1742,6 +1851,13 @@
                     <span class="skill-badges">
                       <span :class="assetOriginClass(commandOrigin(command))">{{ assetOriginLabel(commandOrigin(command)) }}</span>
                       <span v-if="command.scope && command.scope !== 'custom' && command.scope !== 'built-in'" class="badge badge--muted command-source">{{ command.scope }}</span>
+                      <button
+                        v-if="command.editable"
+                        type="button"
+                        class="set-link"
+                        :aria-label="`Edit command /${command.name}`"
+                        @click.stop="openCommandEditor(command)"
+                      >Edit</button>
                     </span>
                   </div>
                   <p v-if="command.description" class="skill-description">{{ command.description }}</p>
@@ -1809,19 +1925,51 @@
       <!-- On this page: built from the rendered sections of the current tab,
            so it follows whatever the tab actually shows (conditional sections
            included) instead of a second hand-kept list. -->
-      <aside v-if="tocItems.length > 1" class="page-rail settings-rail" aria-labelledby="settings-toc-title">
-        <h2 id="settings-toc-title" class="rail-title">On this page</h2>
-        <nav class="settings-toc" aria-label="Sections on this page">
-          <button
-            v-for="item in tocItems"
-            :key="item.id"
-            type="button"
-            class="settings-toc-item"
-            :class="{ active: item.id === activeTocId }"
-            :aria-current="item.id === activeTocId ? 'location' : undefined"
-            @click="scrollToSection(item.id)"
-          >{{ item.label }}</button>
-        </nav>
+      <aside v-if="tocItems.length > 1 || assetRail" class="page-rail settings-rail" aria-label="About this page">
+        <section v-if="tocItems.length > 1" class="rail-section">
+          <h2 id="settings-toc-title" class="rail-title">On this page</h2>
+          <nav class="settings-toc" aria-label="Sections on this page">
+            <button
+              v-for="item in tocItems"
+              :key="item.id"
+              type="button"
+              class="settings-toc-item"
+              :class="{ active: item.id === activeTocId }"
+              :aria-current="item.id === activeTocId ? 'location' : undefined"
+              @click="scrollToSection(item.id)"
+            >{{ item.label }}</button>
+          </nav>
+        </section>
+        <!-- Models: a glance at whether each CLI is working. -->
+        <section
+          v-if="currentTab === 'models' && providerKeys?.connections"
+          class="rail-section settings-rail-status"
+          aria-labelledby="settings-rail-status-title"
+        >
+          <h2 id="settings-rail-status-title" class="rail-title">Status</h2>
+          <div class="rail-kvs">
+            <div v-for="(conn, connKey) in providerKeys.connections" :key="`rail-${connKey}`" class="rail-kv">
+              <span>{{ conn.label || connKey }}</span>
+              <strong :class="{ 'rail-attention': !conn.ok }">{{ conn.ok ? 'Connected' : 'Not connected' }}</strong>
+            </div>
+          </div>
+        </section>
+        <!-- Skills, subagents, commands: how many exist and where they live. -->
+        <section v-if="assetRail" class="rail-section settings-rail-assets" aria-labelledby="settings-rail-assets-title">
+          <h2 id="settings-rail-assets-title" class="rail-title">{{ assetRail.title }}</h2>
+          <div class="rail-kvs">
+            <div class="rail-kv"><span>Custom</span><strong>{{ assetRail.custom }}</strong></div>
+            <div class="rail-kv"><span>Built in</span><strong>{{ assetRail.builtin }}</strong></div>
+            <div v-if="assetRail.other" class="rail-kv"><span>Other</span><strong>{{ assetRail.other }}</strong></div>
+          </div>
+          <p class="rail-note">
+            Saved in <code>{{ assetRail.folder }}</code>.
+            <template v-if="currentTab === 'skills'">
+              Skills you install directly in a CLI stay available too; see
+              <RouterLink to="/settings/models#chat-providers">Models &amp; providers</RouterLink>.
+            </template>
+          </p>
+        </section>
       </aside>
       </div>
     </div>
@@ -1880,6 +2028,12 @@ import { archiveConfirmMessage, restoreConfirmMessage, restoredMessage } from '.
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import { useHousekeepingStore } from '../stores/housekeeping'
+import {
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRoot,
+  DropdownMenuTrigger,
+} from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -2446,6 +2600,12 @@ function providerThinkingOptions(provider: AliasProviderKey): { value: string; l
     },
     ...levels.map((level) => ({ value: level, label: level })),
   ]
+}
+
+/** Segment label: the automatic entry is just "Auto"; levels are capitalised. */
+function thinkingOptionLabel(option: { value: string; label: string }): string {
+  if (option.value === DEFAULT_THINKING_SELECTION) return 'Auto'
+  return option.label.charAt(0).toUpperCase() + option.label.slice(1)
 }
 
 async function saveProviderDefaultThinking(provider: AliasProviderKey, value: string) {
@@ -3114,16 +3274,47 @@ async function fixWorkspaceHealth() {
   }
 }
 
+// `skills` is optional on the wire in practice: a partial or malformed
+// response ({} from a stub or an older engine) must render the empty state,
+// not throw in render and blank the whole Settings pane.
 const stockSkills = computed(() => {
-  return skillsInventory.value?.skills.filter(s => s.label === 'stock') || []
+  return skillsInventory.value?.skills?.filter(s => s.label === 'stock') || []
 })
 
 const customSkills = computed(() => {
-  return skillsInventory.value?.skills.filter(s => s.label === 'custom') || []
+  return skillsInventory.value?.skills?.filter(s => s.label === 'custom') || []
 })
 
 const subagentAssets = computed(() => agentAssets.value?.subagents || [])
 const commandAssets = computed(() => agentAssets.value?.commands || [])
+
+type AssetRail = { title: string; custom: number; builtin: number; other: number; folder: string }
+
+function originCounts(items: { editable?: boolean; scope?: string }[]): Pick<AssetRail, 'custom' | 'builtin' | 'other'> {
+  const counts = { custom: 0, builtin: 0, other: 0 }
+  for (const item of items) {
+    const origin = commandOrigin(item)
+    if (origin === 'custom') counts.custom += 1
+    else if (origin === 'builtin') counts.builtin += 1
+    else counts.other += 1
+  }
+  return counts
+}
+
+// Rail content for the asset list tabs; null elsewhere or while loading.
+const assetRail = computed<AssetRail | null>(() => {
+  if (currentTab.value === 'skills' && skillsLoaded.value && !skillsError.value) {
+    return { title: 'Skills', custom: customSkills.value.length, builtin: stockSkills.value.length, other: 0, folder: 'skills/' }
+  }
+  if (!agentAssetsLoaded.value || agentAssetsError.value) return null
+  if (currentTab.value === 'subagents') {
+    return { title: 'Subagents', ...originCounts(subagentAssets.value), folder: 'subagents/' }
+  }
+  if (currentTab.value === 'commands') {
+    return { title: 'Commands', ...originCounts(commandAssets.value), folder: 'commands/' }
+  }
+  return null
+})
 const workspaceHealth = computed<WorkspaceHealthResponse | null>(() => agentAssets.value?.health || null)
 const prioritizedHealthChecks = computed(() => {
   const checks = workspaceHealth.value?.checks || []
@@ -3258,6 +3449,12 @@ async function addCommand() {
   }
 }
 
+// Row-level Edit: open the row and its editor in one step.
+function openSubagentEditor(agent: SubagentAsset) {
+  expandedSubagents.value[`${agent.source}:${agent.name}:${agent.path}`] = true
+  startEditSubagent(agent)
+}
+
 function startEditSubagent(agent: SubagentAsset) {
   if (!agent.editable) return
   editingSubagent.value = agent.name
@@ -3317,6 +3514,11 @@ async function deleteSubagent(agent: SubagentAsset) {
   } finally {
     savingSubagent.value = null
   }
+}
+
+function openCommandEditor(command: CommandAsset) {
+  expandedCommands.value[commandKey(command)] = true
+  startEditCommand(command)
 }
 
 function startEditCommand(command: CommandAsset) {
@@ -3442,7 +3644,26 @@ async function uploadSkillZip() {
   }
 }
 
-async function createSkillViaChat() {
+const ASSET_CHAT_PROMPTS = {
+  skill: {
+    title: 'New Custom Skill',
+    prompt: 'I want to create a new custom skill. Please guide me through writing a new skill (creating the SKILL.md under the skills/ directory).',
+  },
+  subagent: {
+    title: 'New Subagent',
+    prompt: 'I want to create a new shared subagent. Please guide me through writing its definition under the subagents/ directory.',
+  },
+  command: {
+    title: 'New Slash Command',
+    prompt: 'I want to create a new shared slash command. Please guide me through writing it under the commands/ directory.',
+  },
+} as const
+
+function createSkillViaChat() {
+  return createAssetViaChat('skill')
+}
+
+async function createAssetViaChat(kind: keyof typeof ASSET_CHAT_PROMPTS) {
   const activeProj = projectStore.activeProject
   let projectId = activeProj?.project_id
   if (!projectId) {
@@ -3457,10 +3678,9 @@ async function createSkillViaChat() {
   }
 
   try {
-    const chat = await projectStore.createChat(projectId, 'New Custom Skill')
+    const chat = await projectStore.createChat(projectId, ASSET_CHAT_PROMPTS[kind].title)
     if (chat) {
-      const prompt = 'I want to create a new custom skill. Please guide me through writing a new skill (creating the SKILL.md under the skills/ directory).'
-      projectStore.sendMessage(chat.chat_id, prompt)
+      projectStore.sendMessage(chat.chat_id, ASSET_CHAT_PROMPTS[kind].prompt)
     }
   } catch (e) {
     notifyFailed('Could not start chat', errorMessage(e))
@@ -3651,6 +3871,55 @@ function workspaceModelSectionsForForm(form: WorkspaceForm): ModelSection[] {
 
 const workspaceForms = ref<WorkspaceForm[]>([])
 const newWorkspaceForm = ref<WorkspaceForm>(blankWorkspaceForm())
+// One row "..." menu open at a time, keyed by row. Esc closes it here and
+// marks the press handled: ChatLayout's window Esc handler leaves Settings
+// unless the event was already handled, and Reka's own window listener is
+// registered later, too late to mark it.
+const settingsMenu = ref<string | null>(null)
+
+function setSettingsMenu(key: string, open: boolean): void {
+  if (open) settingsMenu.value = key
+  else if (settingsMenu.value === key) settingsMenu.value = null
+}
+
+function closeSettingsMenuOnEscape(event: KeyboardEvent): void {
+  event.preventDefault()
+  settingsMenu.value = null
+}
+
+// Rows are collapsed to a summary; Edit opens one in place. The baseline is
+// the saved form, so Save appears only once something actually changed.
+const openWorkspace = ref<string | null>(null)
+const workspaceBaseline = ref<Record<string, string>>({})
+
+function workspaceDirty(form: WorkspaceForm): boolean {
+  const saved = workspaceBaseline.value[form.name]
+  return saved !== undefined && saved !== JSON.stringify(form)
+}
+
+function discardWorkspace(name: string): void {
+  const saved = workspaceBaseline.value[name]
+  const index = workspaceForms.value.findIndex((f) => f.name === name)
+  if (saved !== undefined && index >= 0) {
+    workspaceForms.value[index] = JSON.parse(saved) as WorkspaceForm
+  }
+  openWorkspace.value = null
+}
+
+function workspaceSwatch(color: WorkspaceColorId): string {
+  return WORKSPACE_COLOR_PRESETS.find((preset) => preset.id === color)?.swatch || 'var(--accent)'
+}
+
+function workspaceSummary(form: WorkspaceForm): string {
+  const provider = workspaceProviderOptions.value.find((option) => option.value === form.default_provider)?.label
+    || form.default_provider
+  const profile = form.gws_profile
+    ? gwsProfileOptions.value.find((option) => option.name === form.gws_profile)?.label || form.gws_profile
+    : ''
+  const parts = [provider, profile ? `Google: ${profile}` : 'No Google account']
+  if (form.name === primaryWorkspace.value) parts.push('Main workspace')
+  return parts.join(' · ')
+}
 
 const workspaceProviderOptions = computed(() =>
   projectStore.workspaceProviderOptions.length
@@ -3698,6 +3967,12 @@ async function fetchWorkspacesList() {
     const res = await projectStore.fetchWorkspaces()
     primaryWorkspace.value = res?.primary ?? null
     workspaceForms.value = projectStore.workspaces.map(workspaceToForm)
+    workspaceBaseline.value = Object.fromEntries(
+      workspaceForms.value.map((form) => [form.name, JSON.stringify(form)]),
+    )
+    if (openWorkspace.value && !workspaceForms.value.some((f) => f.name === openWorkspace.value)) {
+      openWorkspace.value = null
+    }
     newWorkspaceForm.value.default_provider = normalizeWorkspaceProvider(newWorkspaceForm.value.default_provider)
   } catch (e) {
     workspacesError.value = `Failed to load workspaces: ${errorMessage(e)}`
@@ -3737,6 +4012,7 @@ async function saveWorkspace(name: string) {
       color: form.color,
     })
     notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
+    openWorkspace.value = null
     await fetchWorkspacesList()
   } catch (e) {
     const detail = apiErrorMessage(e, 'The workspace could not be saved.')
@@ -5643,30 +5919,25 @@ a.btn-secondary {
 .workspace-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  margin-top: var(--space-2);
 }
-/* One workspace = one hairline-separated row group, not a box in a box. */
+/* One workspace = one collapsed hairline row (.set-row); Edit opens its
+   fields in place underneath. */
 .workspace-card {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-4) 0;
-  border: 0;
-  border-bottom: 1px solid var(--border);
   border-radius: 0;
   background: transparent;
 }
 /* The unsaved new workspace keeps a light frame: it is a draft form, and it
    has to read as not-yet-real next to the saved rows. */
 .workspace-card--new {
-  padding: var(--space-3);
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
 }
 .workspace-card-header {
   display: flex;
-  align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
 }
@@ -5674,7 +5945,17 @@ a.btn-secondary {
   margin: 0;
   color: var(--fg);
   font-size: var(--text-base);
-  font-weight: 700;
+  font-weight: 600;
+}
+.workspace-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.workspace-edit-actions .btn-small {
+  flex: 0 0 auto;
 }
 .workspace-actions {
   display: flex;
@@ -5699,19 +5980,19 @@ a.btn-secondary {
 .archived-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
   margin: 0;
   padding: 0;
   list-style: none;
+  border-top: 1px solid var(--border);
 }
 .archived-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius);
+  min-height: 52px;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
 }
 .archived-item-text {
   display: flex;
@@ -5734,12 +6015,6 @@ a.btn-secondary {
   cursor: not-allowed;
   transform: none;
 }
-/* Same size as the Save button beside it; the compact caution variant is
-   sized for denser rows. */
-.workspace-actions .btn-caution.btn-small {
-  padding: 8px 16px;
-  font-weight: 600;
-}
 .provider-defaults {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -5759,18 +6034,10 @@ a.btn-secondary {
   font-weight: 600;
   color: var(--fg);
 }
+/* The provider's defaults are indented hairline rows (.set-subrow) under its
+   head, not a boxed grid of selects. */
 .provider-inline-defaults {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-3);
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  background: color-mix(in srgb, var(--bg) 76%, transparent);
-  margin-bottom: var(--space-3);
-}
-@media (max-width: 720px) {
-  .provider-inline-defaults { grid-template-columns: 1fr; }
+  display: block;
 }
 @media (max-width: 720px) {
   .provider-defaults {
@@ -5780,28 +6047,37 @@ a.btn-secondary {
 .workspace-color-swatches {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: 6px;
   align-items: center;
 }
+/* 26px swatch; the selected one carries a ring in the text colour so the
+   choice reads without relying on the swatch hue. */
 .workspace-color-swatch {
-  width: var(--touch);
-  height: var(--touch);
+  width: 26px;
+  height: 26px;
   padding: 0;
-  border: 2px solid var(--border);
+  border: 0;
   border-radius: 50%;
-  background:
-    radial-gradient(circle at center, var(--swatch) 0 58%, transparent 60%),
-    var(--bg);
+  background: var(--swatch);
   cursor: pointer;
-  transition: border-color 120ms var(--ease), transform 120ms var(--ease);
+  transition: box-shadow 120ms var(--ease), transform 120ms var(--ease);
 }
 .workspace-color-swatch:hover:not(:disabled) {
-  border-color: var(--border-strong);
-  transform: translateY(-1px);
+  transform: scale(1.08);
 }
 .workspace-color-swatch.active {
-  border-color: var(--swatch);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--swatch) 35%, transparent);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--fg);
+}
+@media (pointer: coarse) {
+  .workspace-color-swatch {
+    width: var(--touch);
+    height: var(--touch);
+    background: radial-gradient(circle at center, var(--swatch) 0 13px, transparent 14px);
+  }
+  .workspace-color-swatch.active {
+    box-shadow: none;
+    background: radial-gradient(circle at center, var(--swatch) 0 13px, var(--bg) 14px 15px, var(--fg) 16px 17px, transparent 18px);
+  }
 }
 .workspace-color-swatch:focus-visible {
   outline: 2px solid var(--accent);
@@ -5921,16 +6197,6 @@ a.btn-secondary {
   .voice-warning {
     align-items: stretch;
     flex-direction: column;
-  }
-  .workspace-card-header {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .workspace-actions {
-    width: 100%;
-  }
-  .workspace-actions .btn-small {
-    flex: 1 1 auto;
   }
   .archived-item {
     flex-direction: column;

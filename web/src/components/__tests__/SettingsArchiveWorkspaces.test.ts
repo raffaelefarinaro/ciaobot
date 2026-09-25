@@ -103,6 +103,25 @@ function cardFor(wrapper: Awaited<ReturnType<typeof mountWorkspacesTab>>, name: 
   return card!
 }
 
+type Card = ReturnType<typeof cardFor>
+
+// Archive lives in the row's "..." menu; open it the way a keyboard user
+// would and return the labels of the rendered menu items.
+async function openActions(card: Card) {
+  const trigger = card.find('.set-menu-btn')
+  if (!trigger.exists()) return []
+  await trigger.trigger('keydown', { key: 'Enter' })
+  await flushPromises()
+  await nextTick()
+  return card.findAll('.settings-menu-item')
+}
+
+async function archiveItem(card: Card) {
+  const item = (await openActions(card)).find(b => b.text() === 'Archive')
+  expect(item, 'no Archive item').toBeTruthy()
+  return item!
+}
+
 describe('Settings > Workspaces archive', () => {
   beforeEach(async () => {
     setActivePinia(createPinia())
@@ -118,12 +137,12 @@ describe('Settings > Workspaces archive', () => {
     const wrapper = await mountWorkspacesTab()
     try {
       const work = cardFor(wrapper, 'work')
-      const labels = work.findAll('.workspace-actions button').map(b => b.text())
+      const labels = (await openActions(work)).map(b => b.text())
       expect(labels).toContain('Archive')
       expect(labels).not.toContain('Delete')
       const personal = cardFor(wrapper, 'personal')
-      expect(personal.findAll('.workspace-actions button').map(b => b.text()))
-        .not.toContain('Archive')
+      expect(personal.find('.set-menu-btn').exists()).toBe(false)
+      expect((await openActions(personal)).map(b => b.text())).not.toContain('Archive')
     } finally {
       wrapper.unmount()
     }
@@ -133,7 +152,7 @@ describe('Settings > Workspaces archive', () => {
     state.workspaces = workspaces(['solo'], 'solo')
     const wrapper = await mountWorkspacesTab()
     try {
-      expect(cardFor(wrapper, 'solo').findAll('.workspace-actions button').map(b => b.text()))
+      expect((await openActions(cardFor(wrapper, 'solo'))).map(b => b.text()))
         .not.toContain('Archive')
     } finally {
       wrapper.unmount()
@@ -154,8 +173,7 @@ describe('Settings > Workspaces archive', () => {
     })
     const wrapper = await mountWorkspacesTab()
     try {
-      const button = cardFor(wrapper, 'work').findAll('.workspace-actions button')
-        .find(b => b.text() === 'Archive')!
+      const button = await archiveItem(cardFor(wrapper, 'work'))
       expect(button.attributes('aria-label')).toBe('Archive workspace work')
       await button.trigger('click')
       await nextTick()
@@ -193,8 +211,7 @@ describe('Settings > Workspaces archive', () => {
     const { pendingConfirm } = await import('../../lib/confirm')
     const wrapper = await mountWorkspacesTab()
     try {
-      await cardFor(wrapper, 'work').findAll('.workspace-actions button')
-        .find(b => b.text() === 'Archive')!.trigger('click')
+      await (await archiveItem(cardFor(wrapper, 'work'))).trigger('click')
       await nextTick()
       pendingConfirm.value!.resolve(false)
       await flushPromises()
