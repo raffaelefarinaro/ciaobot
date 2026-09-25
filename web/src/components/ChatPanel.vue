@@ -5258,8 +5258,12 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   /* The column already carries the page gutter; the transcript only keeps
-     breathing room above and below, plus room for focus rings at the sides. */
-  padding: 28px 4px 24px;
+     breathing room above and below. The scroll box reaches 14px past the
+     column on each side and pads it back, so the text stays aligned while
+     focus rings and a selected message's lifted card are not clipped by the
+     horizontal overflow guard below. */
+  margin-inline: -14px;
+  padding: 28px 18px 24px;
   min-height: 0;
   position: relative;
 }
@@ -5605,6 +5609,33 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   position: relative;
   margin-top: 14px;
 }
+/* On a selected message the actions are the point: real buttons on a
+   surface, full-strength text, not the quiet text links of the row. */
+.message-wrap--selected .message-actions {
+  gap: 6px;
+  height: auto;
+}
+.message-wrap--selected .message-action-btn {
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-weight: 600;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 22%);
+}
+.message-wrap--selected .message-action-btn:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-elev));
+}
+.message-wrap--selected .message-action-btn svg {
+  width: 16px;
+  height: 16px;
+}
+@media (pointer: coarse) {
+  .message-wrap--selected .message-action-btn { height: var(--touch); }
+}
 .message-row:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
@@ -5631,7 +5662,7 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--fg3);
+  color: var(--fg2);
   cursor: pointer;
   font: inherit;
   font-size: var(--text-sm);
@@ -7661,6 +7692,11 @@ details[open] > .activity-summary::before {
   display: flex;
   min-height: 0;
   overflow: hidden;
+  /* Its clip box reaches 14px past the text column (padded back), so the
+     transcript's widened scroll box - and a selected message's lifted card -
+     fit inside it instead of being cut at the column edge. */
+  margin-inline: -14px;
+  padding-inline: 14px;
 }
 .chat-with-sidebar > .messages {
   flex: 1;
