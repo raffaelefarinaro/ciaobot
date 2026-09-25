@@ -11,6 +11,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
+from ciao.install_receipt import InstallReceipt, write_receipt
 from ciao.package_version import detect_install_mode, update_package
 from ciao.web.routes_node import package_update_endpoint
 
@@ -18,6 +19,20 @@ from ciao.web.routes_node import package_update_endpoint
 _BUNDLE_PYTHON = (
     "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/python/arm64/bin/python3.12"
 )
+
+
+def _installer_receipt(**overrides) -> InstallReceipt:
+    """A receipt describing an engine this process could be."""
+    fields = {
+        "version": "0.9.2",
+        "executable": "/u/.local/bin/ciao",
+        "python": sys.executable,
+        "service_backend": "launchd",
+        "service_label": "com.ciao.server",
+        "installed_at": "2026-09-25T16:00:00+00:00",
+    }
+    fields.update(overrides)
+    return InstallReceipt(**fields)
 
 
 def _fake_ciao_module(monkeypatch, path) -> None:
@@ -112,6 +127,51 @@ def test_detect_install_mode_unknown_without_package_manager(monkeypatch, tmp_pa
     assert detect_install_mode() == "unknown"
 
 
+def _no_bundle_site_packages(monkeypatch, tmp_path) -> None:
+    """Stage a plain site-packages import: neither a bundle nor a checkout."""
+    monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "ciao",
+        types.SimpleNamespace(
+            __file__=str(tmp_path / "site-packages" / "ciao" / "__init__.py")
+        ),
+    )
+
+
+def test_detect_install_mode_installer_from_matching_receipt(monkeypatch, tmp_path) -> None:
+    _no_bundle_site_packages(monkeypatch, tmp_path)
+    write_receipt(_installer_receipt())
+
+    assert detect_install_mode() == "installer"
+
+
+def test_detect_install_mode_ignores_receipt_for_other_interpreter(
+    monkeypatch, tmp_path
+) -> None:
+    # A receipt for a different engine on the same machine (an uninstalled
+    # engine, or a colleague's install) must not relabel this process.
+    _no_bundle_site_packages(monkeypatch, tmp_path)
+    write_receipt(_installer_receipt(python=str(tmp_path / "other" / "python3")))
+
+    assert detect_install_mode() == "unknown"
+
+
+def test_detect_install_mode_checkout_beats_receipt(monkeypatch, tmp_path) -> None:
+    # `ciao dev` from a shell on an installed machine: the receipt names this
+    # interpreter, but the import comes from a checkout, which redeploys.
+    repo = tmp_path / "repo"
+    (repo / "ciao").mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / "pyproject.toml").write_text("", encoding="utf-8")
+    venv_python = str(repo / ".venv" / "bin" / "python3")
+    monkeypatch.setattr(sys, "executable", venv_python)
+    _fake_ciao_module(monkeypatch, repo / "ciao" / "__init__.py")
+    write_receipt(_installer_receipt(python=venv_python))
+
+    assert detect_install_mode() == "editable"
+
+
 def test_update_package_points_bundled_app_at_installer(monkeypatch) -> None:
     # The bundled app is macOS-only; on Linux every install mode gets the
     # administrator workflow instead.
@@ -135,6 +195,18 @@ def test_update_package_editable_requires_git_pull(monkeypatch) -> None:
     assert result["ok"] is False
     assert result["command"] == "git pull"
     assert "Editable checkouts" in result["error"]
+
+
+def test_update_package_installer_mode_points_at_installer(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "installer")
+
+    result = update_package()
+
+    assert result["ok"] is False
+    assert result["mode"] == "installer"
+    assert "install.sh" in result["command"]
+    assert "installer" in result["error"]
 
 
 def test_linux_source_export_never_recommends_the_mac_installer(monkeypatch) -> None:
@@ -174,3 +246,33 @@ def test_package_update_endpoint_explains_app_owned_updates() -> None:
 
     assert response.status_code == 400
     assert response.json()["mode"] == "bundled_app"
+
+
+def test_package_update_endpoint_installer_is_guidance() -> None:
+    # An installer install has nothing to report as a server failure either:
+    # 400 carrying the re-run-installer guidance, not the 500 the UI would
+    # render as a broken update check.
+    app = Starlette(
+        routes=[Route("/api/package/update", package_update_endpoint, methods=["POST"])]
+    )
+    app.state.config = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "test-token",
+            "PWA_AUTH_REQUIRED": "false",
+            "CIAO_WORKSPACE": "/tmp/ciaobot-test-workspace",
+        }
+    )
+
+    with patch(
+        "ciao.web.routes_node.update_package",
+        return_value={
+            "ok": False,
+            "mode": "installer",
+            "error": "This engine was installed by the Ciaobot installer.",
+            "command": "curl -fsSL .../install.sh | sh",
+        },
+    ):
+        response = TestClient(app).post("/api/package/update")
+
+    assert response.status_code == 400
+    assert response.json()["mode"] == "installer"

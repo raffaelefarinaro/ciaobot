@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
     pass
 
-from ciao import __version__
+from ciao import __version__, install_receipt
 
 
 DEFAULT_GITHUB_REPO = "raffaelefarinaro/ciaobot"
@@ -301,7 +301,7 @@ def running_from_app_bundle() -> bool:
 
 
 def detect_install_mode() -> str:
-    """Return the runtime distribution mode used by the current process."""
+    """Return the runtime distribution mode: bundled_app, editable, installer or unknown."""
     # Bundle location is authoritative when the package itself lives inside
     # the app bundle. A package imported from a git checkout is `editable`
     # even on the bundled interpreter (see ``running_from_app_bundle``). An
@@ -318,6 +318,12 @@ def detect_install_mode() -> str:
 
         if _in_source_checkout(ciao.__file__):
             return "editable"
+    except Exception:
+        pass
+
+    try:
+        if install_receipt.running_receipt() is not None:
+            return "installer"
     except Exception:
         pass
 
@@ -448,6 +454,13 @@ def update_package(
             "already_current": True,
             "mode": mode,
             "error": "The bundled app and engine update together through Ciaobot.app.",
+            "command": "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh",
+        }
+    if mode == "installer":
+        return {
+            "ok": False,
+            "mode": mode,
+            "error": "This engine was installed by the Ciaobot installer. Re-run the installer to update; in-app updates are not available yet.",
             "command": "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh",
         }
     return {

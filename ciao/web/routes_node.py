@@ -85,7 +85,7 @@ async def package_update_endpoint(request: Request) -> JSONResponse:
         asyncio.create_task(_do_restart())
         return JSONResponse(res)
     else:
-        status_code = 400 if res.get("mode") in {"bundled_app", "editable", "unknown"} else 500
+        status_code = 400 if res.get("mode") in {"bundled_app", "editable", "installer", "unknown"} else 500
         return JSONResponse(res, status_code=status_code)
 
 

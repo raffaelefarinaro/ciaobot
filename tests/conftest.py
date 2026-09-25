@@ -89,6 +89,21 @@ def _isolate_launch_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.fixture(autouse=True)
+def _isolate_install_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let a test read or write the machine's real install receipt.
+
+    `detect_install_mode()` now consults the installer receipt, so a developer's
+    own terminal install would classify the test process as `installer` and a
+    test that exercised the receipt would rewrite the receipt their real engine
+    depends on. Autouse for the same reason as the fixtures above.
+    """
+    monkeypatch.setattr(
+        "ciao.install_receipt.default_receipt_path",
+        lambda: tmp_path / "state" / "install-receipt.json",
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_bootstrap_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Never let a test mint a token under the developer's own `~/.ciao`.
 
