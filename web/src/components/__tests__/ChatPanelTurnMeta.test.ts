@@ -166,7 +166,7 @@ describe('ChatPanel turn footer placement', () => {
     ]
     await flushPromises()
 
-    const bubbles = wrapper.findAll('.message.assistant')
+    const bubbles = wrapper.findAll('.message-wrap.assistant')
     expect(bubbles.length).toBe(2)
     expect(bubbles[0].find('.message-meta').exists()).toBe(false)
 
@@ -204,9 +204,9 @@ describe('ChatPanel turn footer placement', () => {
     ]
     await flushPromises()
 
-    const footers = wrapper.findAll('.message.assistant .message-meta')
+    const footers = wrapper.findAll('.message-wrap.assistant .message-meta')
     expect(footers.length).toBe(1)
-    const bubbles = wrapper.findAll('.message.assistant')
+    const bubbles = wrapper.findAll('.message-wrap.assistant')
     // On the bubble that closes the turn, carrying both halves' facts.
     expect(bubbles[0].find('.message-meta').exists()).toBe(false)
     expect(bubbles[bubbles.length - 1].find('.message-meta').text()).toContain('openai/gpt-5.6-luna')
@@ -227,7 +227,7 @@ describe('ChatPanel turn footer placement', () => {
     ]
     await flushPromises()
 
-    const bubbles = wrapper.findAll('.message.assistant')
+    const bubbles = wrapper.findAll('.message-wrap.assistant')
     expect(bubbles.length).toBe(1)
     expect(bubbles[0].find('.message-meta').html()).toContain('sonnet')
   })

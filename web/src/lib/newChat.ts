@@ -8,19 +8,26 @@ import { ref } from 'vue'
  * to whoever opened it. The resolved value is the chosen project id, or null
  * when the user cancelled.
  */
+export interface NewChatPickerOptions {
+  workspace?: string
+  projectId?: string
+}
+
 export interface NewChatPickerState {
+  options: NewChatPickerOptions
   resolve: (projectId: string | null) => void
 }
 
 export const pendingNewChat = ref<NewChatPickerState | null>(null)
 
-export function openNewChatPicker(): Promise<string | null> {
+export function openNewChatPicker(options: NewChatPickerOptions = {}): Promise<string | null> {
   // A second request would orphan the first one's promise, leaving its caller
   // awaiting forever. Resolve the outstanding one as cancelled first.
   pendingNewChat.value?.resolve(null)
   return new Promise<string | null>(resolve => {
     let settled = false
     pendingNewChat.value = {
+      options,
       resolve: (projectId: string | null) => {
         if (settled) return
         settled = true

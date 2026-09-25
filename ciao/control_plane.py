@@ -860,12 +860,19 @@ class CiaoControlPlane:
             )
         # `list` and `inspect` are declared read-only to the MCP host, so they
         # must not refresh the queue projection either.
+        #
+        # Generated at the full ceiling so an id or path the PWA shows (it lists
+        # the whole queue) resolves here too; only the `list` reply is trimmed
+        # to the short batch an agent works through.
         candidates = review.generate_candidates(
-            root, workspace=workspace, write_queue=action not in {"list", "inspect"}
+            root,
+            workspace=workspace,
+            max_candidates=review.MAX_CANDIDATES_CEILING,
+            write_queue=action not in {"list", "inspect"},
         )
         by_id = {item.candidate_id: item for item in candidates}
         if action == "list":
-            return _ok({"candidates": [item.as_dict() for item in candidates]})
+            return _ok({"candidates": [item.as_dict() for item in candidates[: review.MAX_CANDIDATES]]})
         item = by_id.get(candidate_id)
         if item is None and path:
             item = next((candidate for candidate in candidates if candidate.path == path), None)

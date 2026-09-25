@@ -1,26 +1,36 @@
 <template>
-  <div class="page device-page">
-    <header class="page-header device-header">
-      <div>
-        <h2>this device</h2>
-        <p class="hint">
-          Everything on this page is about
+  <div class="device-page">
+    <header class="device-header">
+      <a class="device-back" :href="deviceHref('/device/return')">
+        <span aria-hidden="true">&larr;</span> Back to Ciaobot
+      </a>
+      <h2>This device</h2>
+    </header>
+
+    <div class="page-grid device-grid">
+      <div class="page-main">
+        <p class="hint device-intro">
+          Everything here is about
           <code>{{ deviceName }}</code>, the computer in front of you.
           <template v-if="isClient">
             Chats, automations and Settings belong to the host and are shown as they are there.
           </template>
-          <template v-else-if="nodeStatusUnknown">
-            The saved node role could not be verified; device recovery is available below.
-          </template>
         </p>
+        <DevicePanel ref="panel" />
       </div>
-      <div class="device-header-actions">
-        <span class="badge" :class="nodeStatusUnknown ? 'badge--warn' : isClient ? 'badge--warn' : 'badge--success'">{{ roleLabel }}</span>
-        <a class="btn-small" :href="deviceHref('/device/return')">back to app</a>
-      </div>
-    </header>
-
-    <DevicePanel ref="panel" />
+      <aside class="page-rail device-rail" aria-label="About this page">
+        <h3 class="rail-title">Why this page</h3>
+        <div class="rail-kvs">
+          <div class="rail-kv">
+            <span>Role</span>
+            <strong :class="{ 'rail-attention': nodeStatusUnknown }">{{ roleLabel }}</strong>
+          </div>
+        </div>
+        <p class="rail-note">
+          It stays on this machine's own address, so it works even when the host is unreachable.
+        </p>
+      </aside>
+    </div>
   </div>
 </template>
 
@@ -40,7 +50,7 @@ const isClient = computed(() => {
 const nodeStatusUnknown = computed(
   () => !nodeStatus.value || nodeStatus.value.state_valid === false || nodeStatus.value.role === 'invalid',
 )
-const roleLabel = computed(() => (nodeStatusUnknown.value ? 'unknown' : isClient.value ? 'client' : 'host'))
+const roleLabel = computed(() => (nodeStatusUnknown.value ? 'Unknown' : isClient.value ? 'Client' : 'Host'))
 const deviceName = computed(() => nodeStatus.value?.node_id || 'this machine')
 
 function parseNodeStatus(value: unknown): NodeStatus {
@@ -72,23 +82,51 @@ onMounted(() => {
 
 <style scoped>
 /* Standalone route (not inside ChatLayout) so it stays usable with the host
-   down: no sidebar, no chat stores, only never-proxied calls. */
+   down: no sidebar, no chat stores, only never-proxied calls. It still uses
+   the shared page grid so it reads like every other pane. */
 .device-page {
-  max-width: 1040px;
-  gap: var(--space-4);
-  padding: calc(var(--space-5) + var(--safe-top)) calc(var(--space-5) + var(--safe-right))
-           calc(var(--space-5) + var(--safe-bottom)) calc(var(--space-5) + var(--safe-left));
+  height: 100%;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: var(--safe-top) var(--safe-right) calc(var(--space-6) + var(--safe-bottom)) var(--safe-left);
 }
 .device-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-4);
-  flex-wrap: wrap;
-}
-.device-header-actions {
+  box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-3);
+  min-height: 56px;
+  max-width: var(--page-max);
+  margin: 0 auto var(--space-5);
+  padding-inline: var(--page-gutter);
+  border-bottom: 1px solid var(--border);
+}
+.device-header h2 {
+  margin: 0;
+  font-size: calc(16px * var(--font-scale));
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.device-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  text-decoration: none;
+  border-radius: var(--radius-sm);
+}
+.device-back:hover { color: var(--fg); }
+.device-intro { margin-bottom: var(--space-5); }
+/* The shared page grid collapses on the chat-pane container, which this
+   standalone route does not have: collapse on the viewport instead. */
+@media (max-width: 940px) {
+  .device-grid { grid-template-columns: minmax(0, 1fr); gap: var(--space-6); }
+  .device-rail { position: static; }
+}
+@media (pointer: coarse) {
+  .device-back { min-height: var(--touch); }
 }
 </style>

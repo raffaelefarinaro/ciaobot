@@ -44,6 +44,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
   const loading = ref(false)
   const busyIds = ref<Set<string>>(new Set())
   const error = ref('')
+  const loadError = ref('')
   // Set when an action succeeded but did not do everything its label claims —
   // "Still true" on a note with no frontmatter clears the row without writing
   // a date. Silence there left the button looking broken: the row went away
@@ -54,6 +55,16 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
   let fetchWorkspace: string | null = null
   /** Ticket for the newest in-flight list request; older responses are dropped. */
   let fetchSeq = 0
+  /** Newest mutation response whose returned queue has been adopted. */
+  let latestMutationSnapshot = 0
+  let mutationSeq = 0
+  // Request-start order does not say which snapshot is freshest: a POST that
+  // started later can land first, and the earlier one's reply — which may
+  // hold both mutations — is then discarded by the ticket check. When that
+  // happens, re-fetch once the burst of concurrent mutations has settled, so
+  // the queue ends on the server's state rather than on the order of replies.
+  let mutationsInFlight = 0
+  let discardedSnapshotFor: string | null = null
 
   function isBusy(id: string): boolean {
     return busyIds.value.has(id)
@@ -98,7 +109,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     fetchWorkspace = workspace
     const request = (async () => {
       loading.value = true
-      error.value = ''
+      loadError.value = ''
       try {
         const data = await api.get<VaultReviewResponse>(reviewUrl(workspace, true))
         if (seq !== fetchSeq) return
@@ -108,7 +119,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
         loadedWorkspace.value = workspace
       } catch (e) {
         if (seq !== fetchSeq) return
-        error.value = e instanceof Error ? e.message : 'Could not load retirement candidates'
+        loadError.value = e instanceof Error ? e.message : 'Could not load retirement candidates'
       } finally {
         if (seq === fetchSeq) loading.value = false
       }
@@ -144,6 +155,8 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     id: string,
     body: Record<string, unknown>,
   ): Promise<{ ok: boolean; result: VaultReviewDecisionResult | null }> {
+    const mutationTicket = ++mutationSeq
+    mutationsInFlight += 1
     setBusy(id, true)
     error.value = ''
     notice.value = ''
@@ -157,7 +170,11 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
         // Only adopt it for the workspace we asked about: the user may have
         // switched scopes while the POST was in flight, and a late response
         // must not repaint the new scope with the old one's rows.
-        if (loadedWorkspace.value === workspace || loadedWorkspace.value === null) {
+        if (
+          (loadedWorkspace.value === workspace || loadedWorkspace.value === null)
+          && mutationTicket >= latestMutationSnapshot
+        ) {
+          latestMutationSnapshot = mutationTicket
           // Take a fresh list ticket so a GET issued before this POST landed
           // cannot repaint the pre-mutation queue over it — the decided row
           // would come back as if nothing had happened. The old code got this
@@ -177,6 +194,9 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
           trashed.value = data.trashed ?? []
           cleared.value = data.cleared ?? []
           loadedWorkspace.value = workspace
+          loadError.value = ''
+        } else if (loadedWorkspace.value === workspace || loadedWorkspace.value === null) {
+          discardedSnapshotFor = workspace
         }
       } else {
         await fetch(workspace, { force: true })
@@ -187,6 +207,12 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
       return { ok: false, result: null }
     } finally {
       setBusy(id, false)
+      mutationsInFlight -= 1
+      if (mutationsInFlight === 0 && discardedSnapshotFor) {
+        const stale = discardedSnapshotFor
+        discardedSnapshotFor = null
+        if (loadedWorkspace.value === stale) void fetch(stale, { force: true })
+      }
     }
   }
 
@@ -271,6 +297,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     loading,
     isBusy,
     error,
+    loadError,
     notice,
     loadedWorkspace,
     fetch,

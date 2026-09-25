@@ -1,6 +1,37 @@
 <template>
   <aside class="sidebar" :class="{ collapsed }" v-bind="$attrs">
-    <div class="sidebar-header">
+    <div class="sidebar-header" :class="{ 'sidebar-header--expanded': !collapsed }">
+      <div class="sidebar-brand-row">
+        <template v-if="!collapsed">
+          <span class="sidebar-brand-mark" aria-hidden="true"><CiaoMark /></span>
+          <BrandMark class="sidebar-brand" />
+          <!-- Back / forward through in-app navigation, just before the
+               collapse control; a hairline keeps the three from reading as
+               one group. Collapsed, the pair drops below the header. -->
+          <div class="sidebar-history" role="group" aria-label="History">
+        <button
+          type="button"
+          class="history-btn touch-hit"
+          :disabled="!historyNav.canBack.value"
+          :title="historyNav.canBack.value ? `${historyNav.backLabel.value}${historyChordHint('[')}` : undefined"
+          :aria-label="historyNav.backLabel.value"
+          @click="historyNav.back"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6" /></svg>
+        </button>
+        <button
+          type="button"
+          class="history-btn touch-hit"
+          :disabled="!historyNav.canForward.value"
+          :title="historyNav.canForward.value ? `${historyNav.forwardLabel.value}${historyChordHint(']')}` : undefined"
+          :aria-label="historyNav.forwardLabel.value"
+          @click="historyNav.forward"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
+        </button>
+      </div>
+          <span class="history-divider" aria-hidden="true"></span>
+        </template>
       <button
         class="toggle-btn touch-hit"
         :class="{ 'toggle-btn--collapsed': collapsed }"
@@ -18,20 +49,105 @@
           <line x1="9" y1="4" x2="9" y2="20" />
         </svg>
       </button>
+      </div>
       <template v-if="!collapsed">
-        <!-- The wordmark used to sit here, between the toggle and these icons.
-             It is `BrandMark` in the pane header now, where it is centred and
-             does not have to share the sidebar's width. -->
+        <!-- Prototype A's rail: brand row, workspace scope, one New chat, then
+             the destinations as a labelled vertical list. The pane header drops
+             its own centred wordmark on wide panes because this row carries it. -->
+        <!-- One workspace scope for the whole rail. It used to be repeated as a
+             per-mode row of pills (chat, automations, memory), which said the
+             same thing in three places and pushed each mode's own content down
+             the column. Selecting a workspace here commits the scope for
+             whichever mode is open and keeps the 1-9 shortcuts. -->
+        <div v-if="store.workspaceOptions.length" ref="workspaceScopeEl" class="workspace-scope">
+          <button
+            ref="workspaceScopeTrigger"
+            type="button"
+            class="workspace-scope-trigger"
+            :data-workspace-color="colorForWorkspace(store.workspaceOptions.find(item => item.name === store.activeWorkspace))"
+            :aria-label="`Workspace: ${workspaceLabel(store.activeWorkspace)}`"
+            :aria-haspopup="canOpenWorkspaceMenu ? 'menu' : undefined"
+            :aria-expanded="canOpenWorkspaceMenu ? workspaceScopeOpen : undefined"
+            :aria-controls="canOpenWorkspaceMenu ? 'workspace-scope-menu' : undefined"
+            :aria-keyshortcuts="workspaceShortcut(store.activeWorkspace) || undefined"
+            :disabled="!canOpenWorkspaceMenu"
+            @click="toggleWorkspaceMenu"
+            @keydown.down.prevent="openWorkspaceMenu"
+          >
+            <!-- The workspace colour lives in a tinted initial tile, not a dot:
+                 a coloured dot is the app's "something needs you" signal. -->
+            <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceShortcut(store.activeWorkspace) || workspaceInitial(store.activeWorkspace) }}</span>
+            <span class="workspace-scope-name">{{ workspaceLabel(store.activeWorkspace) }}</span>
+            <svg v-if="canOpenWorkspaceMenu" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" aria-hidden="true">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
+
+          <div
+            v-if="canOpenWorkspaceMenu && workspaceScopeOpen"
+            id="workspace-scope-menu"
+            ref="workspaceScopeMenu"
+            class="workspace-scope-menu"
+            role="menu"
+            aria-label="Choose workspace"
+            @keydown="onWorkspaceMenuKeydown"
+          >
+            <button
+              v-for="workspace in store.workspaceOptions"
+              :key="workspace.name"
+              type="button"
+              role="menuitem"
+              class="workspace-scope-option"
+              :class="{ active: workspace.name === store.activeWorkspace }"
+              :data-workspace-color="colorForWorkspace(workspace)"
+              :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
+              @click="selectWorkspaceScope(workspace.name)"
+            >
+              <!-- The tile carries the workspace's 1-9 key, in its colour. -->
+              <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceShortcut(workspace.name) || workspaceInitial(workspace.name) }}</span>
+              <span class="workspace-scope-name">{{ workspaceLabel(workspace.name) }}</span>
+            </button>
+            <router-link
+              to="/settings/workspaces#new-workspace"
+              role="menuitem"
+              class="workspace-scope-option workspace-scope-new"
+              @click="workspaceScopeOpen = false"
+            >
+              <span class="workspace-scope-mark workspace-scope-mark--new" aria-hidden="true">+</span>
+              <span class="workspace-scope-name">New workspace</span>
+            </router-link>
+          </div>
+        </div>
+
+        <!-- One global New chat, directly under the scope it belongs to. It opens the same shared project picker as
+             everywhere else, so the sidebar never grows a second
+             project-selection path. Project-local "+" buttons stay, because
+             they preselect their own project. -->
+        <button
+          v-if="!mode || mode === 'chat' || mode === 'project'"
+          type="button"
+          class="sidebar-new-chat"
+          aria-haspopup="dialog"
+          :aria-label="`New chat in ${workspaceLabel(store.activeWorkspace)}`"
+          :aria-keyshortcuts="newChatKeyshortcuts"
+          :title="`New chat (${newChatShortcut})`"
+          @click="chooseNewChat(store.activeWorkspace)"
+        >
+          <span class="sidebar-new-chat-plus" aria-hidden="true">+</span>
+          <span>New chat</span>
+        </button>
+
         <nav class="nav-links" aria-label="Primary navigation">
           <router-link
             to="/"
-            class="nav-item touch-hit"
+            class="nav-item"
             :class="{
               'nav-item--active': mode === 'chat' || mode === 'project',
               'nav-item--working': isAnyChatWorking
             }"
-            title="chats"
-            :aria-label="store.attentionChatCount > 0 ? `chats — ${store.attentionChatCount} need attention` : (isAnyChatWorking ? 'chats (assistant is working)' : 'chats')"
+            title="Home"
+            :data-count="todayCount || undefined"
+            :aria-label="todayCount > 0 ? `Home — ${todayCount} chat${todayCount === 1 ? '' : 's'} need${todayCount === 1 ? 's' : ''} attention` : (isAnyChatWorking ? 'Home (assistant is working)' : 'Home')"
           >
             <span class="nav-item-icon" aria-hidden="true">
               <!-- Stacked message lines: sharper, more "log-window" than a speech bubble -->
@@ -42,22 +158,20 @@
                 <line x1="6" y1="13" x2="18" y2="13" />
                 <polyline points="8 18 8 21 11 18" />
               </svg>
-              <span
-                v-if="store.attentionChatCount > 0"
-                class="nav-item-badge nav-item-badge--count"
-              >{{ store.attentionChatCount }}</span>
+
             </span>
-            <span class="nav-item-label" aria-hidden="true">chats</span>
+            <span class="nav-item-label" aria-hidden="true">Home</span>
           </router-link>
           <router-link
             to="/schedules"
-            class="nav-item touch-hit"
+            class="nav-item"
             :class="{
               'nav-item--active': mode === 'schedules',
               'nav-item--warning': hasAutomationWarning
             }"
             title="automations"
-            :aria-label="hasAutomationWarning ? 'automations (attention required)' : 'automations'"
+            :data-count="automationsCount || undefined"
+            :aria-label="automationsCount ? `automations — ${automationsCount} missed run${automationsCount === 1 ? '' : 's'}` : (hasAutomationWarning ? 'automations (attention required)' : 'automations')"
           >
             <span class="nav-item-icon" aria-hidden="true">
               <!-- Clock face with hour markers: more diagrammatic than calendar grid -->
@@ -71,14 +185,15 @@
                 <polyline points="12 8 12 12 15 14" />
               </svg>
             </span>
-            <span class="nav-item-label" aria-hidden="true">automations</span>
+            <span class="nav-item-label" aria-hidden="true">Automations</span>
           </router-link>
           <router-link
             to="/memory"
-            class="nav-item touch-hit"
+            class="nav-item"
             :class="{ 'nav-item--active': mode === 'memory' || mode === 'proposals' }"
             :title="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} suggested across all workspaces` : 'memory'"
-            :aria-label="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} suggested memories across all workspaces` : 'memory'"
+            :data-count="memoryCount || undefined"
+            :aria-label="memoryCount > 0 ? `memory — ${memoryCount} to review in this workspace` : 'memory'"
           >
             <!-- Book/tray: rectilinear like the rest of the rail, which the
                  organic-curve brain never was. It also now covers review, since
@@ -91,12 +206,9 @@
                 <path d="M4 16h16v4H4z" />
                 <line x1="8" y1="8" x2="16" y2="8" />
               </svg>
-              <span
-                v-if="proposals.rows.length > 0"
-                class="nav-item-badge nav-item-badge--count"
-              >{{ proposals.rows.length }}</span>
+
             </span>
-            <span class="nav-item-label" aria-hidden="true">memory</span>
+            <span class="nav-item-label" aria-hidden="true">Memory</span>
           </router-link>
           <!-- mode, not active-class: every settings tab is its own route
                (/settings/models, /settings/workspaces, ...) and none of them match
@@ -105,9 +217,10 @@
                sibling links already key off mode for the same reason. -->
           <router-link
             to="/settings"
-            class="nav-item touch-hit"
+            class="nav-item"
             :class="{ 'nav-item--active': mode === 'settings', 'nav-item--warning': hasBlockingHousekeeping }"
             :title="settingsNeedsAttention ? (store.packageStatus?.update_available && hasBlockingHousekeeping ? 'settings — update available and action required' : store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings — action required') : 'settings'"
+            :data-note="settingsNote || undefined"
             :aria-label="settingsNeedsAttention ? (store.packageStatus?.update_available && hasBlockingHousekeeping ? 'settings — update available and action required' : store.packageStatus?.update_available ? `settings — update to ${store.packageStatus.latest_version} available` : 'settings — action required') : 'settings'"
           >
             <!-- Sliders / equalizer: more direct than a gear, mono-grid friendly -->
@@ -121,47 +234,42 @@
                 <rect x="7" y="10" width="4" height="4" fill="currentColor" />
                 <rect x="15" y="15" width="4" height="4" fill="currentColor" />
               </svg>
-              <span
-                v-if="settingsNeedsAttention"
-                class="nav-item-badge"
-                :class="{ 'nav-item-badge--warning': hasBlockingHousekeeping }"
-              />
             </span>
-            <span class="nav-item-label" aria-hidden="true">settings</span>
+            <span class="nav-item-label" aria-hidden="true">Settings</span>
           </router-link>
         </nav>
+
       </template>
     </div>
-
-    <!-- No section title here: the nav pill above already names this view, and
-         the create action sits in the footer like the chat sidebar's, so both
-         modes put "make a new one" in the same place. -->
-    <template v-if="!collapsed && (mode === 'schedules')">
-      <div v-if="hasMultipleWorkspaces" class="workspace-toggle">
+    <div v-if="collapsed" class="sidebar-history-rail">
+      <div class="sidebar-history sidebar-history--rail" role="group" aria-label="History">
         <button
-          v-for="workspace in store.workspaceOptions"
-          :key="workspace.name"
-          :class="{ active: store.activeWorkspace === workspace.name }"
-          :aria-pressed="store.activeWorkspace === workspace.name"
-          :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
-          :data-workspace-color="colorForWorkspace(workspace)"
-          :title="workspaceShortcut(workspace.name) ? `Switch to ${workspaceLabel(workspace.name)} (${workspaceShortcut(workspace.name)})` : undefined"
-          @click="selectAutomationWorkspace(workspace.name)"
+          type="button"
+          class="history-btn touch-hit"
+          :disabled="!historyNav.canBack.value"
+          :title="historyNav.canBack.value ? `${historyNav.backLabel.value}${historyChordHint('[')}` : undefined"
+          :aria-label="historyNav.backLabel.value"
+          @click="historyNav.back"
         >
-          <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
-          <!-- Wrapped, not a bare text node: the buttons are nowrap so a long
-               workspace name needs a shrinkable element to ellipse inside, or it
-               overflows into its neighbour. The button's title carries the full
-               name. -->
-          <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
-          <span
-            v-if="missedCountFor(workspace.name) > 0"
-            class="badge badge--missed"
-            :title="`${missedCountFor(workspace.name)} missed`"
-            :aria-label="`${missedCountFor(workspace.name)} missed`"
-          >{{ missedCountFor(workspace.name) }}</span>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6" /></svg>
+        </button>
+        <button
+          type="button"
+          class="history-btn touch-hit"
+          :disabled="!historyNav.canForward.value"
+          :title="historyNav.canForward.value ? `${historyNav.forwardLabel.value}${historyChordHint(']')}` : undefined"
+          :aria-label="historyNav.forwardLabel.value"
+          @click="historyNav.forward"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
         </button>
       </div>
+    </div>
+
+    <!-- No section title here: the nav pill above already names this view.
+         The create action sits on the Routines label, the way New sits on the
+         Projects label in the chat sidebar. -->
+    <template v-if="!collapsed && (mode === 'schedules')">
       <div ref="schedulesListEl" class="schedules-list">
         <template v-if="taskStore.loading">
           <div class="mm-loading-heading" role="status" aria-live="polite">
@@ -175,14 +283,10 @@
           </div>
         </template>
         <template v-else>
-          <div v-if="workspaceSchedules.length === 0" class="empty-hint">// no automations in this workspace</div>
 
           <template v-if="oneOffSchedules.length">
           <div class="schedule-group schedule-group--once">
-            <div class="schedule-group-header">
-              <span>One-offs <span class="schedule-group-hint">delete after run</span></span>
-              <span class="schedule-group-count">{{ oneOffSchedules.length }}</span>
-            </div>
+            <h2 class="schedule-group-header" title="One-off automations delete themselves after they run">One-offs</h2>
             <div class="schedule-group-items">
               <router-link
                 v-for="s in oneOffSchedules"
@@ -192,21 +296,29 @@
                 :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
-                <span class="schedule-time">{{ s.run_at_date?.slice(5) }} {{ s.daily_time_utc }}</span>
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
+                <span class="schedule-time">{{ s.run_at_date?.slice(5) }} {{ s.daily_time_utc }}</span>
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
               </router-link>
             </div>
           </div>
         </template>
 
-        <template v-if="userRoutines.length">
-          <div class="schedule-group">
-            <div class="schedule-group-header">
-              <span>Custom Routines</span>
-              <span class="schedule-group-count">{{ userRoutines.length }}</span>
+        <!-- Routines always shows, so its label can carry the create action
+             (it used to be a footer button); an empty workspace says so. -->
+        <div class="schedule-group">
+            <div class="sidebar-label-row">
+              <h2 class="schedule-group-header">Routines</h2>
+              <button
+                type="button"
+                class="sidebar-label-link"
+                aria-label="New automation"
+                title="New automation"
+                @click="emit('new-schedule')"
+              >New</button>
             </div>
-            <div class="schedule-group-items">
+            <p v-if="!userRoutines.length" class="sidebar-empty-note">No routines in this workspace yet.</p>
+            <div v-else class="schedule-group-items">
               <router-link
                 v-for="s in userRoutines"
                 :key="s.schedule_id"
@@ -215,8 +327,8 @@
                 :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
-                <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
+                <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span
                   v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
                   class="spinner-dot"
@@ -225,15 +337,11 @@
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
               </router-link>
             </div>
-          </div>
-        </template>
+        </div>
 
         <template v-if="systemAutomations.length">
           <div class="schedule-group schedule-group--system">
-            <div class="schedule-group-header">
-              <span>System Routines</span>
-              <span class="schedule-group-count">{{ systemAutomations.length }}</span>
-            </div>
+            <h2 class="schedule-group-header">System</h2>
             <div class="schedule-group-items">
               <router-link
                 v-for="s in systemAutomations"
@@ -243,8 +351,8 @@
                 :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
-                <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
+                <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span
                   v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
                   class="spinner-dot"
@@ -259,276 +367,55 @@
         </template>
       </div>
 
-      <div class="sidebar-footer">
-        <button class="add-automation-btn" @click="emit('new-schedule')">+ New Automation</button>
-      </div>
     </template>
 
     <template v-if="!collapsed && mode === 'settings'">
-      <div class="sidebar-section-header">
-        <span class="sidebar-section-title">settings</span>
-      </div>
-      <div class="settings-nav-list">
+      <nav class="settings-nav-list" aria-label="Settings sections">
+        <h2 class="sidebar-list-label">Settings</h2>
         <router-link
-          to="/settings"
+          v-for="item in SETTINGS_NAV"
+          :key="item.to"
+          :to="item.to"
           class="settings-nav-item"
-          :class="{ active: route.path === '/settings' }"
-        >
-          home
-        </router-link>
-        <router-link
-          to="/settings/workspaces"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/workspaces' }"
-        >
-          workspaces
-        </router-link>
-        <router-link
-          to="/settings/models"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/models' }"
-        >
-          models &amp; providers
-        </router-link>
-        <router-link
-          to="/settings/skills"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/skills' }"
-        >
-          skills
-        </router-link>
-        <router-link
-          to="/settings/subagents"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/subagents' }"
-        >
-          subagents
-        </router-link>
-        <router-link
-          to="/settings/commands"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/commands' }"
-        >
-          commands
-        </router-link>
-        <router-link
-          to="/settings/mcp"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/mcp' }"
-        >
-          mcp
-        </router-link>
-        <router-link
-          to="/settings/automations"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/automations' }"
-        >
-          automations
-        </router-link>
-        <router-link
-          to="/settings/notifications"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/notifications' }"
-        >
-          notifications
-        </router-link>
-      </div>
+          :class="{ active: route.path === item.to }"
+          :aria-current="route.path === item.to ? 'page' : undefined"
+        >{{ item.label }}</router-link>
+      </nav>
     </template>
 
-    <!-- The workspace toggle covers review as well as the graph: scoping the
-         proposal queue is the same act as scoping the map, and the review view
-         had no sidebar at all, so the workspace was buried in a heading per
-         group instead of living where every other page keeps it. -->
+    <!-- Memory lists its sections the way Settings lists its tabs: one level
+         of navigation, each a route. The map's own filters (search,
+         categories) follow under the list only while the map is showing,
+         because they act on nothing else. -->
     <template v-if="!collapsed && (mode === 'memory' || mode === 'proposals')">
-      <div v-if="hasMultipleWorkspaces" class="workspace-toggle">
-        <button
-          v-for="workspace in store.workspaceOptions"
-          :key="workspace.name"
-          :class="{ active: store.activeWorkspace === workspace.name }"
-          :aria-pressed="store.activeWorkspace === workspace.name"
-          :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
-          :data-workspace-color="colorForWorkspace(workspace)"
-          :title="workspaceShortcut(workspace.name) ? `Switch to ${workspaceLabel(workspace.name)} (${workspaceShortcut(workspace.name)})` : undefined"
-          @click="store.switchWorkspace(workspace.name, { transition: false })"
-        >
-           <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
-           <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
-           <span
-             v-if="proposals.scopedRows(workspace.name).length > 0"
-             class="badge"
-             :title="`${proposals.scopedRows(workspace.name).length} items to review`"
-             :aria-label="`${proposals.scopedRows(workspace.name).length} items to review`"
-           >{{ proposals.scopedRows(workspace.name).length }}</span>
-         </button>
-      </div>
-
-      <!-- The Memory/Review switcher lives here rather than in the pane
-           header: picking what the memory page shows is the same act as
-           scoping it to a workspace, and this keeps every memory control in
-           one column.
-
-           Two buttons, not three. Graph and List are two drawings of the same
-           notes and belong on one level; sitting beside Review they read as
-           three peers, one of which is a different page with a different job.
-           Graph/List now lives in the map's own toolbar, where the rest of the
-           "how should this look" controls already are. -->
-      <div class="workspace-toggle view-toggle">
-        <button
-          type="button"
-          :class="{ active: mm.view !== 'review' }"
-          :aria-pressed="mm.view !== 'review'"
-          @click="setMemoryView(mm.mapView)"
-        >Memory</button>
-        <button
-          type="button"
-          :class="{ active: mm.view === 'review' }"
-          :aria-pressed="mm.view === 'review'"
-          :title="decisionsWaiting ? `${decisionsWaiting} waiting on a decision in ${workspaceLabel(store.activeWorkspace)}` : undefined"
-          :aria-label="decisionsWaiting ? `Review — ${decisionsWaiting} waiting on a decision in ${workspaceLabel(store.activeWorkspace)}` : 'Review'"
-          @click="setMemoryView('review')"
-        >
-          <!-- Scoped, not the global tally: the workspace toggle directly
-               above scopes the queues, so a global count here claimed items the
-               Review list would not show — 12 next to a selected workspace
-               whose list is empty.
-
-               Both queues, not just the proposals one: this button is the
-               answer to "is there anything to decide", and a badge that
-               counted one of the two tabs behind it said no while the other
-               held five notes. -->
-          Review<span v-if="decisionsWaiting" class="view-count">{{ decisionsWaiting }}</span>
-        </button>
-      </div>
-
-      <!-- Retirements is a different queue from Proposals, and this column used
-           to report the proposals one whatever tab was open: a panel showing
-           five notes to review sat beside "0 of 0 shown". The stats follow the
-           tab, and the proposals-only search and kind chips stay with it. -->
-      <div v-if="mode === 'proposals' && mm.reviewTab === 'retirement'" class="mm-sidebar-scroll">
-        <h3>Notes to revisit</h3>
-        <!-- Three states, not one: a zero is a claim about the vault and may
-             only be printed once a load for this workspace has succeeded. -->
-        <template v-if="retirementPending">
-          <div class="mm-loading-heading" role="status" aria-live="polite">
-            <span class="history-loading-spinner" aria-hidden="true"></span>
-            <span>Loading candidates…</span>
-          </div>
-          <div class="mm-stat-grid mm-stat-grid--3" aria-hidden="true">
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
-          </div>
-        </template>
-        <p v-else-if="retirementFailed" class="empty-hint" role="status">
-          // could not load the retirement queue
-        </p>
-        <div v-else class="mm-stat-grid mm-stat-grid--3">
-          <div class="mm-stat">
-            <div class="n">{{ retirementScoped }}</div>
-            <div class="l">to revisit</div>
-          </div>
-          <div class="mm-stat">
-            <div class="n">{{ retirementTrashed }}</div>
-            <div class="l">retired</div>
-          </div>
-          <div class="mm-stat">
-            <div class="n">{{ retirementSignals }}</div>
-            <div class="l">reasons</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Review: the same shape as the memory map's sidebar — stats, a search,
-           then chips that both report and filter. The kind filter used to be a
-           segmented control in the panel header while this column sat empty,
-           which put the queue's controls somewhere different from every other
-           memory view's. -->
-      <div v-else-if="mode === 'proposals'" class="mm-sidebar-scroll">
-        <template v-if="proposals.loading">
-          <h3>Suggested memories</h3>
-          <div class="mm-loading-heading" role="status" aria-live="polite">
-            <span class="history-loading-spinner" aria-hidden="true"></span>
-            <span>Loading proposals…</span>
-          </div>
-          <div class="mm-stat-grid mm-stat-grid--3" aria-hidden="true">
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
-          </div>
-          <div class="mm-search">
-            <input type="text" placeholder="Search proposals…" autocomplete="off" disabled />
-          </div>
-          <div class="mm-skeleton-block" aria-hidden="true">
-            <span class="mm-shimmer-line" style="width: 40%; margin-bottom: 10px;"></span>
-            <span class="mm-shimmer-line" style="width: 100%; height: 28px; margin-bottom: 6px;"></span>
-            <span class="mm-shimmer-line" style="width: 92%; height: 28px; margin-bottom: 6px;"></span>
-            <span class="mm-shimmer-line" style="width: 88%; height: 28px;"></span>
-          </div>
-        </template>
-        <template v-else>
-          <h3>Suggested memories</h3>
-          <div class="mm-stat-grid mm-stat-grid--3">
-            <div class="mm-stat">
-              <div class="n">{{ reviewVisible }}</div>
-              <div class="l">of {{ reviewScoped }} shown</div>
-            </div>
-            <div class="mm-stat">
-              <div class="n">{{ proposals.selected.size }}</div>
-              <div class="l">selected</div>
-            </div>
-            <div class="mm-stat">
-              <div class="n">{{ reviewElsewhere }}</div>
-              <div class="l">other workspaces</div>
-            </div>
-          </div>
-
-          <div class="mm-search">
-            <input
-              v-model="proposals.search"
-              type="text"
-              placeholder="Search proposals…"
-              autocomplete="off"
-            />
-          </div>
-
-        <div class="mm-row-between">
-          <h3>Kinds</h3>
-          <button type="button" class="mm-link" @click="proposals.resetFilters()">reset</button>
-        </div>
-        <div class="mm-link-list">
-          <div
-            class="mm-link-item"
-            :class="{ off: proposals.kindFilter !== 'all' }"
-            @click="proposals.kindFilter = 'all'"
+      <nav class="settings-nav-list memory-nav-list" aria-label="Memory sections">
+        <template v-for="group in MEMORY_NAV" :key="group.label">
+          <h2 class="sidebar-list-label">{{ group.label }}</h2>
+          <router-link
+            v-for="item in group.items"
+            :key="item.section"
+            :to="memorySectionPath(item.section)"
+            class="settings-nav-item memory-nav-item"
+            :class="{ active: mm.section === item.section }"
+            :aria-current="mm.section === item.section ? 'page' : undefined"
+            :aria-label="memoryNavLabel(item)"
           >
-            <span class="label">all</span>
-            <span class="cnt">{{ reviewScoped }}</span>
-          </div>
-          <div
-            v-for="k in reviewKinds"
-            :key="k.kind"
-            class="mm-link-item"
-            :class="{ off: proposals.kindFilter !== k.kind }"
-            :title="`Show only ${reviewKindLabel(k.kind)} proposals`"
-            @click="proposals.kindFilter = k.kind"
-          >
-            <span class="label">{{ reviewKindLabel(k.kind) }}</span>
-            <span class="cnt">{{ k.count }}</span>
-          </div>
-        </div>
+            <span class="memory-nav-label">{{ item.label }}</span>
+            <span
+              v-if="memoryNavCount(item.section) !== null"
+              class="memory-nav-count"
+              :class="{ 'memory-nav-count--due': item.due && (memoryNavCount(item.section) ?? 0) > 0 }"
+              aria-hidden="true"
+            >{{ memoryNavCount(item.section)?.toLocaleString() }}</span>
+          </router-link>
         </template>
-      </div>
+      </nav>
 
-      <div v-if="mode === 'memory'" class="mm-sidebar-scroll">
+      <div v-if="mm.section === 'map'" class="mm-sidebar-scroll">
         <template v-if="mm.loading">
-          <h3>Vault</h3>
           <div class="mm-loading-heading" role="status" aria-live="polite">
             <span class="history-loading-spinner" aria-hidden="true"></span>
             <span>Loading vault graph…</span>
-          </div>
-          <div class="mm-stat-grid" aria-hidden="true">
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
-            <div class="mm-stat mm-stat--skeleton"><span class="mm-shimmer-line mm-shimmer-line--n"></span><span class="mm-shimmer-line mm-shimmer-line--l"></span></div>
           </div>
           <div class="mm-search">
             <input type="text" placeholder="Search notes, tags…" autocomplete="off" disabled />
@@ -541,72 +428,13 @@
           </div>
         </template>
         <template v-else>
-          <h3>Vault</h3>
-          <!-- Two tiles: "notes shown" and "total" were separate tiles showing
-               the same number whenever nothing was filtered, so the total moved
-               into the sublabel. Orphans left the grid entirely — as a bare
-               number it was not actionable, and it is now a list. -->
-          <div class="mm-stat-grid">
-            <div class="mm-stat">
-              <div class="n">{{ mm.visibleNodes.length }}</div>
-              <div class="l">of {{ mm.nodes.length }} shown</div>
-            </div>
-            <div class="mm-stat"><div class="n">{{ mm.visibleEdgeCount }}</div><div class="l">links</div></div>
-          </div>
-
-          <!-- Workspace guide (AGENTS.md; CLAUDE.md pre-migration) — the only file every chat loads.
-               Surfaced here because the vault graph hides it (it is not a vault note)
-               yet its bounded regions budget every session. -->
-          <div class="guide-card" :class="{ 'guide-card--over': guideOverCap }">
-            <div class="guide-card-head">
-              <div class="guide-card-title">
-                <span class="guide-card-icon" aria-hidden="true">◆</span>
-                {{ guidePathLabel }}
-                <span v-if="guideOverCap" class="guide-card-badge guide-card-badge--warn" title="A bounded region is over its advisory cap">over cap</span>
-                <span v-else-if="guideLoading" class="guide-card-badge">loading…</span>
-              </div>
-              <div class="guide-card-actions">
-                <button type="button" class="guide-card-btn" :disabled="guideLoading || !!guideError" @click="openGuideFile" :title="`Open ${guidePathLabel}`">Open</button>
-                <button type="button" class="guide-card-btn guide-card-btn--primary" :disabled="!canDiscussGuide" @click="discussGuide" title="Start a chat about this guide">Discuss</button>
-              </div>
-            </div>
-            <div v-if="guideError" class="guide-card-error">{{ guideError }}</div>
-            <template v-else-if="guideStats">
-              <div class="guide-card-regions">
-                <div v-for="r in guideStats.regions" :key="r.key" class="guide-region">
-                  <div class="guide-region-head">
-                    <span class="guide-region-name">{{ r.label }}</span>
-                    <span class="guide-region-count" :class="{ 'guide-region-count--warn': r.overCap }">{{ r.usedChars }} / {{ r.charLimit }} chars</span>
-                    <span class="guide-region-tokens" :title="`${r.usedChars} chars ≈ ${r.tokens} tokens`">≈ {{ r.tokens }} tokens</span>
-                  </div>
-                  <div class="guide-region-bar" :class="{ 'guide-region-bar--warn': r.overCap, 'guide-region-bar--high': !r.overCap && r.pct >= 80 }" :title="`${r.pct}% of cap`">
-                    <span :style="{ width: Math.min(100, r.pct) + '%' }"></span>
-                  </div>
-                  <div class="guide-region-meta">
-                    {{ r.entryCount }} {{ r.entryCount === 1 ? 'entry' : 'entries' }} · {{ r.pct }}%
-                    <span v-if="r.expiredCount"> · {{ r.expiredCount }} expired</span>
-                    <span v-if="r.malformedCount" class="guide-region-meta--warn"> · {{ r.malformedCount }} malformed tag</span>
-                  </div>
-                </div>
-              </div>
-              <div class="guide-card-foot">
-                <span class="guide-card-foot-info" :title="guideContent ? `${guideContent.length} chars on disk` : ''">
-                  {{ guideContent ? `${guideContent.length.toLocaleString()} chars` : '' }} · {{ guideStats.totalTokens }} tokens total
-                </span>
-              </div>
-            </template>
-            <template v-else-if="!guideLoading">
-              <div class="guide-card-hint">No guide file found for this workspace.</div>
-            </template>
-          </div>
-
           <div class="mm-search">
             <input v-model="mm.search" type="text" placeholder="Search notes, tags…" autocomplete="off" />
           </div>
 
         <div class="mm-row-between">
           <h3>Categories</h3>
-          <button type="button" class="mm-link" @click="mm.resetCategories()">reset</button>
+          <button type="button" class="mm-link" @click="mm.resetCategories()">Reset</button>
         </div>
         <div class="mm-chip-row">
           <div
@@ -614,174 +442,20 @@
             :key="cat.key"
             class="mm-chip"
             :class="{ off: !mm.activeCats.has(cat.key) }"
-            @click="mm.toggleCategory(cat.key)"
+            role="button" tabindex="0" @click="mm.toggleCategory(cat.key)" @keydown.enter.prevent="mm.toggleCategory(cat.key)" @keydown.space.prevent="mm.toggleCategory(cat.key)"
           >
             <span class="dot" :style="{ background: cat.color }" />
             <span class="label">{{ cat.label }}</span>
             <span class="cnt">{{ cat.count }}</span>
-            <button type="button" class="only" @click.stop="mm.isolateCategory(cat.key)">only</button>
+            <button type="button" class="only" @click.stop="mm.isolateCategory(cat.key)">Only</button>
           </div>
         </div>
 
-        <template v-if="mm.mostConnected.length">
-          <h3>Most connected</h3>
-          <div class="mm-link-list">
-            <div v-for="n in mm.mostConnected" :key="n.id" class="mm-link-item" @click="mm.requestFocus(n.id)">
-              <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
-              <span class="label">{{ n.title }}</span>
-              <span class="cnt">{{ n.degree }}</span>
-            </div>
-          </div>
-        </template>
-
-        <!-- The gap list: notes nothing links to. This is the actionable half
-             of the old "orphaned" tile — each entry is either worth linking or
-             worth deleting, and a count told you neither. -->
-        <template v-if="mm.orphanNotes.length">
-          <div class="mm-row-between">
-            <h3>Unlinked ({{ mm.orphanNotes.length }})</h3>
-            <div class="mm-row-actions">
-              <button
-                type="button"
-                class="mm-link"
-                :class="{ 'mm-link--active': mm.orphanFilter === 'only' }"
-                :title="mm.orphanFilter === 'only' ? 'Show all notes in graph' : 'Show only unlinked notes in graph'"
-                @click="mm.toggleOnlyOrphans()"
-              >{{ mm.orphanFilter === 'only' ? 'show all' : 'only' }}</button>
-              <span class="mm-sep" aria-hidden="true">·</span>
-              <button
-                type="button"
-                class="mm-link"
-                :title="mm.orphanFilter === 'hide' ? 'Show unlinked notes in graph' : 'Hide unlinked notes from graph'"
-                @click="mm.toggleHideOrphans()"
-              >{{ mm.orphanFilter === 'hide' ? 'show in graph' : 'hide in graph' }}</button>
-            </div>
-          </div>
-          <div class="mm-link-list">
-            <div
-              v-for="n in mm.orphanNotes.slice(0, orphanLimit)"
-              :key="n.id"
-              class="mm-link-item"
-              title="No note links to this one"
-              @click="mm.requestFocus(n.id)"
-            >
-              <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
-              <span class="label">{{ n.title }}</span>
-            </div>
-          </div>
-          <button
-            v-if="mm.orphanNotes.length > orphanLimit"
-            type="button"
-            class="mm-link"
-            @click="orphanLimit += 20"
-          >show {{ Math.min(20, mm.orphanNotes.length - orphanLimit) }} more</button>
-        </template>
-
-        <!-- Aging notes: facts nobody has verified within their type's
-             horizon. The actionable counterpart of "Recently written" — the
-             daily curation routine reviews this same list and may resolve an
-             entry, but a failed or disabled run leaves it for the user. -->
-        <template v-if="mm.staleNotes.length">
-          <div class="mm-row-between">
-            <h3>Needs review ({{ mm.staleNotes.length }})</h3>
-          </div>
-          <p class="mm-hint">
-            Daily Memory curation checks these notes too: it re-verifies, updates,
-            corrects, or removes them. They stay here until you or that run
-            resolves them.
-          </p>
-          <button
-            type="button"
-            class="mm-link mm-link--block"
-            @click="openRetirementReview()"
-          >Open retirement review →</button>
-          <div class="mm-link-list">
-            <div
-              v-for="n in mm.staleNotes.slice(0, staleLimit)"
-              :key="n.id"
-              class="mm-link-item"
-              :title="`Unverified for ${n.ageDays ?? '?'} days — click to open it in the map`"
-              @click="mm.requestFocus(n.id)"
-            >
-              <span class="dot mm-dot--stale" />
-              <span class="label">{{ n.title }}</span>
-              <span class="cnt">{{ mm.ageLabelOf(n) }}</span>
-            </div>
-          </div>
-          <button
-            v-if="mm.staleNotes.length > staleLimit"
-            type="button"
-            class="mm-link"
-            @click="staleLimit += 20"
-          >show {{ Math.min(20, mm.staleNotes.length - staleLimit) }} more</button>
-        </template>
-
-        <!-- Entry points into the graph: the note you last touched is almost
-             always the one you opened the map about. -->
-        <template v-if="mm.recentNotes.length">
-          <h3>Recently written</h3>
-          <div class="mm-link-list">
-            <div
-              v-for="n in mm.recentNotes"
-              :key="n.id"
-              class="mm-link-item"
-              :class="{ current: mm.selectedId === n.id }"
-              title="Centre the map here"
-              @click="mm.requestFocus(n.id)"
-            >
-              <span class="dot" :style="{ background: categoryColorFor(catKeyFor(n)) }" />
-              <span class="label">{{ n.title }}</span>
-            </div>
-          </div>
-        </template>
-
-        <h3>Path finder</h3>
-        <p class="mm-hint">{{ mm.pathHint }}</p>
-        <button v-if="mm.pathStart || mm.pathEnd" type="button" class="mm-link" @click="mm.resetPath()">clear path</button>
         </template>
       </div>
     </template>
 
     <template v-if="!collapsed && (!mode || mode === 'chat' || mode === 'project')">
-      <!-- Workspace toggle -->
-      <div v-if="hasMultipleWorkspaces" class="workspace-toggle">
-        <button
-          v-for="workspace in store.workspaceOptions"
-          :key="workspace.name"
-          :class="{ active: store.activeWorkspace === workspace.name }"
-          :aria-pressed="store.activeWorkspace === workspace.name"
-          :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
-          :data-workspace-color="colorForWorkspace(workspace)"
-          :title="workspaceShortcut(workspace.name) ? `Switch to ${workspaceLabel(workspace.name)} (${workspaceShortcut(workspace.name)})` : undefined"
-          @click="store.switchWorkspace(workspace.name)"
-        >
-          <!-- Shortcut badge comes from workspaceShortcut(), which also backs the
-               aria-keyshortcuts on this button and returns '' past the 9th
-               workspace. Marks follow the signal grammar: needs-you outranks
-               working, and unread is a separate count. -->
-          <span v-if="workspaceShortcut(workspace.name)" class="workspace-shortcut" aria-hidden="true">{{ workspaceShortcut(workspace.name) }}</span>
-          <span class="workspace-name">{{ workspaceLabel(workspace.name) }}</span>
-          <span
-            v-if="store.workspaceNeedsInput(workspace.name) > 0"
-            class="workspace-status-dot"
-            title="A chat needs your answer"
-            aria-label="A chat needs your answer"
-          />
-          <span
-            v-else-if="store.workspaceIsStreaming(workspace.name)"
-            class="workspace-status-ring"
-            title="A chat is working"
-            aria-label="A chat is working"
-          ><span class="workspace-status-core" aria-hidden="true" /></span>
-          <span
-            v-if="store.workspaceUnread(workspace.name) > 0"
-            class="badge"
-            :title="`${store.workspaceUnread(workspace.name)} unread chats`"
-            :aria-label="`${store.workspaceUnread(workspace.name)} unread chats`"
-          >{{ store.workspaceUnread(workspace.name) }}</span>
-        </button>
-      </div>
-
       <!-- Scrollable area for chats/projects -->
       <div class="chats-scroll-area">
         <template v-if="!store.bootstrapped && store.projects.length === 0">
@@ -839,6 +513,33 @@
         </div>
 
         <!-- Project list -->
+        <!-- The label carries the list's actions: New (it used to be a
+             footer button) and the completed-projects archive. -->
+        <div class="sidebar-label-row">
+          <h2 class="sidebar-list-label">Projects</h2>
+          <button
+            type="button"
+            class="sidebar-label-link"
+            aria-label="New project"
+            title="New project"
+            @click="addProject"
+          >New</button>
+          <button
+            type="button"
+            class="sidebar-label-icon archive-btn"
+            title="Completed projects"
+            aria-label="Completed projects"
+            @click="openArchive"
+          >
+            <!-- Archive box: lid over a bin, the conventional "archived" glyph -->
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="4" />
+              <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
+              <line x1="10" y1="12" x2="14" y2="12" />
+            </svg>
+          </button>
+        </div>
         <div class="project-list">
           <div
             v-for="project in store.workspaceProjects"
@@ -871,7 +572,7 @@
                   :title="expandedProjects.has(project.project_id) ? 'Collapse' : 'Expand'"
                   :aria-label="`${expandedProjects.has(project.project_id) ? 'Collapse' : 'Expand'} ${project.name}`"
                   :aria-expanded="expandedProjects.has(project.project_id)"
-                >{{ expandedProjects.has(project.project_id) ? '▾' : '▸' }}</button>
+                ><svg class="project-chevron" :class="{ open: expandedProjects.has(project.project_id) }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg></button>
                 <button
                   type="button"
                   class="project-name"
@@ -882,24 +583,26 @@
                 >
                   {{ project.name }}
                   <span v-if="project.is_auto" class="system-chip" title="Auto-managed project">auto</span>
-                  <span
-                    v-if="store.projectNeedsInput(project.project_id) > 0"
-                    class="rollup-needs-dot"
-                    title="A chat in this project needs your answer"
-                    aria-label="A chat in this project needs your answer"
-                  />
-                  <span
-                    v-else-if="store.projectIsStreaming(project.project_id)"
-                    class="rollup-ring"
-                    title="A chat in this project is working"
-                    aria-label="A chat in this project is working"
-                  ><span class="rollup-ring-core" aria-hidden="true" /></span>
-                  <span
-                    v-if="store.projectUnread(project.project_id) > 0"
-                    class="badge"
-                    :title="`${store.projectUnread(project.project_id)} unread chats`"
-                    :aria-label="`${store.projectUnread(project.project_id)} unread chats`"
-                  >{{ store.projectUnread(project.project_id) }}</span>
+                  <!-- Only a collapsed project summarises its chats: expanded,
+                       each chat row already carries its own signal. One static
+                       dot when a chat wants the user (accent if it waits for an
+                       answer), else the working ring - never a count. -->
+                  <template v-if="!expandedProjects.has(project.project_id)">
+                    <span
+                      v-if="projectAttention(project.project_id)"
+                      class="project-dot"
+                      :class="{ 'project-dot--needs': store.projectNeedsInput(project.project_id) > 0 }"
+                      role="img"
+                      :title="projectAttentionLabel(project.project_id)"
+                      :aria-label="projectAttentionLabel(project.project_id)"
+                    />
+                    <span
+                      v-else-if="store.projectIsStreaming(project.project_id)"
+                      class="rollup-ring"
+                      title="A chat in this project is working"
+                      aria-label="A chat in this project is working"
+                    ><span class="rollup-ring-core" aria-hidden="true" /></span>
+                  </template>
                 </button>
                 <input
                   v-else
@@ -929,7 +632,8 @@
                   class="add-chat-btn"
                   :class="{ 'add-chat-btn--creating': store.creatingChatProjectIds[project.project_id] }"
                   :disabled="store.creatingChatProjectIds[project.project_id]"
-                  @click.stop="addChat(project.project_id)"
+                  aria-haspopup="dialog"
+                  @click.stop="chooseNewChat(project.workspace, project.project_id)"
                   title="New chat"
                   :aria-label="`New chat in ${project.name}`"
                 >{{ store.creatingChatProjectIds[project.project_id] ? '...' : '+' }}</button>
@@ -970,7 +674,7 @@
                   <div
                     class="chat-item"
                     :class="{
-                      active: chat.chat_id === store.activeChatId && !activeSubagentId,
+                      active: chat.chat_id === store.activeChatId,
                       remote: chat.local === false,
                       dragging: dragChatId === chat.chat_id,
                     }"
@@ -986,15 +690,6 @@
                     :aria-disabled="chat.local === false"
                     :title="chat.local === false ? 'This chat lives on another instance' : 'Drag to move to another project'"
                   >
-                    <button
-                      v-if="subagentsFor(chat.chat_id).length"
-                      type="button"
-                      class="subagent-toggle"
-                      :aria-expanded="subagentsExpanded(chat.chat_id)"
-                      :aria-label="(subagentsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subagents for ' + chat.title"
-                      :title="(subagentsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subagents'"
-                      @click.stop="toggleSubagents(chat.chat_id)"
-                    >{{ subagentsExpanded(chat.chat_id) ? '▾' : '▸' }}</button>
                     <span
                       v-if="chat.title_status === 'pending'"
                       class="title-shimmer"
@@ -1091,35 +786,6 @@
                   </DropdownMenuPortal>
                 </DropdownMenuRoot>
 
-                <!-- Subagents this chat has working right now. They are not
-                     chats: the row opens a read-only view of the agent's own
-                     transcript, and it disappears when the agent finishes
-                     (the completed transcript stays in the chat's Activity
-                     trace). -->
-                <template v-if="subagentsExpanded(chat.chat_id)">
-                  <RouterLink
-                    v-for="sub in subagentsFor(chat.chat_id)"
-                    :key="sub.agent_id"
-                    class="chat-item subagent-item"
-                    :class="{ active: isActiveSubagent(chat.chat_id, sub.agent_id) }"
-                    :to="subagentPath(chat.chat_id, sub.agent_id)"
-                    :title="subagentLabel(sub) + ' — running in ' + chat.title"
-                    @click="emit('chat-selected')"
-                  >
-                    <span class="subagent-mark" aria-hidden="true">&#8627;</span>
-                    <span class="chat-title">{{ subagentLabel(sub) }}</span>
-                    <span
-                      v-if="sub.subagent_type"
-                      class="subagent-chip"
-                    >{{ sub.subagent_type }}</span>
-                    <span
-                      class="subagent-spinner"
-                      role="img"
-                      aria-label="Working"
-                      title="Working"
-                    />
-                  </RouterLink>
-                </template>
               </template>
             </div>
           </div>
@@ -1127,24 +793,6 @@
         </template>
       </div>
 
-      <!-- Add project button + archived-projects entry point -->
-      <div class="sidebar-footer">
-        <button class="add-project-btn" @click="addProject">+ New Project</button>
-        <button
-          class="archive-btn"
-          @click="openArchive"
-          title="Completed projects"
-          aria-label="Completed projects"
-        >
-          <!-- Archive box: lid over a bin, the conventional "archived" glyph -->
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="4" />
-            <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
-            <line x1="10" y1="12" x2="14" y2="12" />
-          </svg>
-        </button>
-      </div>
     </template>
   </aside>
 
@@ -1196,7 +844,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import {
   DropdownMenuContent,
   DropdownMenuItem,
@@ -1209,23 +857,26 @@ import {
 } from 'reka-ui'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
+import { useHistoryNav } from '../composables/useHistoryNav'
 import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useFileViewerStore } from '../stores/fileViewer'
-import { useMemoryMapStore, categoryColorFor, catKeyFor } from '../stores/memoryMap'
+import { useMemoryMapStore, memorySectionPath, type MemorySection } from '../stores/memoryMap'
 import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import ChatSignals from './ChatSignals.vue'
+import BrandMark from './BrandMark.vue'
+import CiaoMark from './CiaoMark.vue'
+import { isApplePlatform, isDesktopApp } from '../lib/desktop'
 import { scheduleInWorkspace } from '../lib/automationWorkspace'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import { ARCHIVE_CONFIRM_MESSAGE, ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
 import { workspaceLabel } from '../lib/workspaceLabel'
-import { kindLabel as reviewKindLabel } from '../lib/proposalKinds'
 import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
-import { startFileDiscussion } from '../lib/fileDiscussion'
+import { openNewChatPicker } from '../lib/newChat'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
@@ -1238,41 +889,46 @@ const mm = useMemoryMapStore()
 const proposals = useProposalsStore()
 const vaultReview = useVaultReviewStore()
 
-// Review-queue figures for the sidebar. Scoped counts come from the store so
-// they use the same workspace rule as the list — a chip that disagreed with the
-// rows under it would be worse than no chip.
-// Retirement counts mirror `retirementCount`/`trashCount` in MemoryMapView:
-// the store holds one workspace at a time, so a load for another workspace
-// must read as zero here rather than as the previous workspace's queue.
-const retirementLoaded = computed(() => vaultReview.loadedWorkspace === store.activeWorkspace)
-// `retirementLoaded` alone collapsed three states into one number: the queue
-// not fetched yet, a fetch that failed (the store swallows the error and
-// leaves `loadedWorkspace` where it was), and a queue that really is empty.
-// The first two rendered a hard 0/0/0 beside a panel saying "Loading
-// candidates…" — the stats-vs-rows contradiction this column exists to avoid.
-// The Proposals column above solves it with a skeleton; so does this one.
-const retirementPending = computed(() => !retirementLoaded.value && !vaultReview.error)
-const retirementFailed = computed(() => !retirementLoaded.value && Boolean(vaultReview.error))
-const retirementScoped = computed(() => (retirementLoaded.value ? vaultReview.candidates.length : 0))
-const retirementTrashed = computed(() => (retirementLoaded.value ? vaultReview.trashed.length : 0))
-// Distinct reasons across the queue, not a sum: one note flagged unlinked and
-// weak_provenance is two signals on one row, and the number is there to say
-// what kind of work the queue holds.
-const retirementSignals = computed(() => {
-  if (!retirementLoaded.value) return 0
-  const seen = new Set<string>()
-  for (const c of vaultReview.candidates) for (const s of c.signals) seen.add(s)
-  return seen.size
-})
-
-const reviewScoped = computed(() => proposals.scopedRows(store.activeWorkspace).length)
-// What the Review button promises: everything in this workspace still waiting
-// on a decision, across both of its queues. Retired notes and the decision
-// ledger are records, not work, so neither counts here.
-const decisionsWaiting = computed(() => reviewScoped.value + retirementScoped.value)
-const reviewVisible = computed(() => proposals.visibleRows(store.activeWorkspace).length)
-const reviewElsewhere = computed(() => proposals.rows.length - reviewScoped.value)
-const reviewKinds = computed(() => proposals.kindCounts(store.activeWorkspace))
+// Memory's sections and their counts. Scoped counts come from the stores so
+// they use the same workspace rule as each page's list — a count that
+// disagreed with the rows under it would be worse than none. The retirement
+// store holds one workspace at a time, so a load for another workspace reads
+// as "not loaded" here rather than as the previous workspace's queue.
+type MemoryNavItem = { section: MemorySection; label: string; due?: boolean }
+const MEMORY_NAV: { label: string; items: MemoryNavItem[] }[] = [
+  { label: 'To decide', items: [
+    { section: 'suggested', label: 'Suggested', due: true },
+    { section: 'revisit', label: 'To revisit', due: true },
+  ] },
+  { label: 'Explore', items: [{ section: 'map', label: 'Map' }] },
+  { label: 'Records', items: [
+    { section: 'retired', label: 'Retired' },
+    { section: 'history', label: 'History' },
+  ] },
+]
+/** A section's count, scoped to the selected workspace; null hides it (not
+ * loaded yet, or a zero on a queue where zero is the news). */
+function memoryNavCount(section: MemorySection): number | null {
+  const workspace = store.activeWorkspace
+  const retirementLoaded = vaultReview.loadedWorkspace === workspace
+  // The ledger is fetched per workspace too; until the switch's refetch lands
+  // it still holds the previous workspace's total.
+  const historyLoaded = proposals.historyLoaded && (proposals.historyWorkspace ?? '') === workspace
+  switch (section) {
+    case 'suggested': return proposals.scopedRows(workspace).length || null
+    case 'revisit': return retirementLoaded ? vaultReview.candidates.length || null : null
+    case 'retired': return retirementLoaded ? vaultReview.trashed.length || null : null
+    case 'map': return mm.loadedWorkspace === workspace ? mm.nodes.length || null : null
+    case 'history': return historyLoaded ? proposals.historyTotal || null : null
+  }
+}
+function memoryNavLabel(item: MemoryNavItem): string {
+  const count = memoryNavCount(item.section)
+  if (count === null) return item.label
+  if (item.section === 'map') return `${item.label}, ${count} notes`
+  if (item.due) return `${item.label}, ${count} waiting`
+  return `${item.label}, ${count}`
+}
 const hasBlockingHousekeeping = computed(() => housekeeping.actions.some(action => action.blocking))
 const settingsNeedsAttention = computed(() => Boolean(store.packageStatus?.update_available || hasBlockingHousekeeping.value))
 
@@ -1281,194 +937,22 @@ onMounted(() => {
   // never been opened. Both store initializers are idempotent.
   housekeeping.init()
   void proposals.ensureLoaded()
+  void vaultReview.ensureLoaded(store.activeWorkspace)
+  document.addEventListener('click', closeWorkspaceMenuOnOutside)
 })
 
-// The unlinked list is the one section that can run to hundreds of entries on a
-// real vault, so it grows on demand rather than pushing every other section off
-// the bottom of the sidebar.
-const orphanLimit = ref(8)
-const staleLimit = ref(8)
-
-// ---------- workspace guide card (AGENTS.md; CLAUDE.md pre-migration) ----------
-const GUIDE_DEFAULTS: Record<string, { label: string; limit: number }> = {
-  memory: { label: 'Agent memory', limit: 3000 },
-  profile: { label: 'User profile', limit: 1375 },
-}
-const guideContent = ref('')
-const guideLoading = ref(false)
-const guideError = ref('')
-const guideResolvedPath = ref('') // actual file that existed: AGENTS.md, or a legacy CLAUDE.md
-const guidePathLabel = computed(() => guideResolvedPath.value || 'AGENTS.md')
-const GUIDE_REGION_RE: Record<string, RegExp> = {
-  memory: /<!--\s*ciao:memory:start(?:\s+cap=(\d+))?\s*-->([\s\S]*?)<!--\s*ciao:memory:end\s*-->/i,
-  profile: /<!--\s*ciao:profile:start(?:\s+cap=(\d+))?\s*-->([\s\S]*?)<!--\s*ciao:profile:end\s*-->/i,
-}
-function parseEntriesForRegion(raw: string): string[] {
-  const headingStripped = raw.replace(/^\s*##\s*(Agent memory|User profile)\s*\n?/, '')
-  const parts = headingStripped.split(/\n?§\n?/)
-  return parts.map(p => p.trim()).filter(Boolean)
-}
-function serializeLen(entries: string[]): number {
-  if (!entries.length) return 0
-  return entries.join('\n§\n').length + 1 // +1 trailing \n mirrors python serialize_entries
-}
-function tokensFor(chars: number): number { return Math.ceil(chars / 4) || 0 }
-function expirationInfo(entry: string): { expired: boolean; malformed: boolean } {
-  const hasPrefix = /\[expires\s*:/i.test(entry)
-  const m = entry.match(/\[expires:\s*([^\]]*)\]/i)
-  if (!m) return { expired: false, malformed: hasPrefix }
-  const raw = m[1].trim()
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return { expired: false, malformed: true }
-  // Reject impossible dates (e.g. 2026-02-30): JS normalizes them to a later
-  // day, so Number.isNaN alone would report them as valid. Round-trip the
-  // parsed year/month/day back to the original string to agree with the
-  // backend validator, which rejects these as malformed.
-  const [y, mo, da] = raw.split('-').map(Number)
-  const d = new Date(y, mo - 1, da)
-  const roundTrips = d.getFullYear() === y && d.getMonth() === mo - 1 && d.getDate() === da
-  if (!roundTrips) return { expired: false, malformed: true }
-  const today = new Date(); today.setHours(0,0,0,0)
-  return { expired: d < today, malformed: false }
-}
-const guideStats = computed(() => {
-  const content = guideContent.value
-  if (!content) return null
-  const regions: Array<{
-    key: string; label: string; usedChars: number; charLimit: number; pct: number;
-    tokens: number; entryCount: number; expiredCount: number; malformedCount: number; overCap: boolean
-  }> = []
-  let totalChars = 0
-  for (const key of ['memory', 'profile'] as const) {
-    const re = GUIDE_REGION_RE[key]
-    const match = content.match(re)
-    let cap = GUIDE_DEFAULTS[key].limit
-    let body = ''
-    if (match) {
-      if (match[1]) { const n = Number(match[1]); if (Number.isFinite(n)) cap = n }
-      body = match[2] || ''
-    }
-    const entries = body ? parseEntriesForRegion(body) : []
-    const used = serializeLen(entries)
-    totalChars += used
-    let expired = 0, malformed = 0
-    for (const e of entries) { const info = expirationInfo(e); if (info.expired) expired++; if (info.malformed) malformed++ }
-    const pct = cap ? Math.round((used / cap) * 100 * 10) / 10 : 0
-    regions.push({
-      key, label: GUIDE_DEFAULTS[key].label,
-      usedChars: used, charLimit: cap, pct, tokens: tokensFor(used),
-      entryCount: entries.length, expiredCount: expired, malformedCount: malformed,
-      overCap: used > cap,
-    })
-  }
-  return { regions, totalTokens: tokensFor(content.length), totalChars: content.length }
+onBeforeUnmount(() => {
+  document.removeEventListener('click', closeWorkspaceMenuOnOutside)
 })
-const guideOverCap = computed(() => !!guideStats.value?.regions.some(r => r.overCap))
-const canDiscussGuide = computed(() => !!guideResolvedPath.value && !guideLoading.value && !guideError.value)
-let guideFetchSeq = 0
-async function fetchGuide(): Promise<void> {
-  const seq = ++guideFetchSeq
-  guideLoading.value = true
-  guideError.value = ''
-  // AGENTS.md is the workspace guide; CLAUDE.md is only what an install that
-  // has not run the guide migration still has (ciao/workspace_guide.py), so it
-  // is tried second and will stop appearing once installs have upgraded.
-  //
-  // After the workspace re-root migration each guide lives under
-  // `<workspace>/AGENTS.md`, so a bare basename would let /api/workspace-file's
-  // fuzzy lookup silently resolve to the lexicographically-first workspace's
-  // guide. Try the workspace-qualified path first (retained for Open/Discuss/
-  // pin), then fall back to the bare basename for installs that have not
-  // re-rooted (guide still at the install root).
-  const ws = store.activeWorkspace
-  const qualified = [`${ws}/AGENTS.md`, `${ws}/CLAUDE.md`]
-  const bare = ['AGENTS.md', 'CLAUDE.md']
-  let lastError = ''
-  let qualifiedErrored = false
-  for (const candidate of [...qualified, ...bare]) {
-    // A bare basename can fuzzy-resolve to a DIFFERENT workspace's guide
-    // (routes_helpers._resolve_workspace_path anchors relative paths to the
-    // primary root), so it is only a legitimate fallback when every
-    // workspace-qualified probe genuinely 404'd. If one of them errored we
-    // do not know whether this workspace has a guide, and showing another
-    // one's — with Open/Discuss/pin acting on it — is worse than showing
-    // nothing.
-    if (bare.includes(candidate) && qualifiedErrored) break
-    try {
-      // `exact=1`: no fuzzy fallback. Without it, asking for
-      // `<ws>/AGENTS.md` on a workspace that has no guide yet
-      // filename-matches another workspace's and returns it with a 200,
-      // so the card would render someone else's guide as this one's.
-      const resp = await fetch(`/api/workspace-file?exact=1&path=${encodeURIComponent(candidate)}`, { credentials: 'same-origin' })
-      if (seq !== guideFetchSeq) return
-      if (resp.status === 404) continue
-      // Keep trying the remaining candidates rather than giving up on the
-      // first non-404: a transient 503 (the engine restarting) on the first
-      // name used to blank the card even though a later name would have
-      // served it. The error is only shown if every candidate fails.
-      if (!resp.ok) {
-        lastError = `Failed to load ${candidate} (HTTP ${resp.status})`
-        if (qualified.includes(candidate)) qualifiedErrored = true
-        continue
-      }
-      const text = await resp.text()
-      if (seq !== guideFetchSeq) return
-      guideContent.value = text
-      guideResolvedPath.value = candidate
-      guideError.value = ''
-      guideLoading.value = false
-      return
-    } catch (e) {
-      if (qualified.includes(candidate)) qualifiedErrored = true
-      if (seq === guideFetchSeq) { guideError.value = e instanceof Error ? e.message : String(e) }
-    }
-  }
-  if (seq !== guideFetchSeq) return
-  guideContent.value = ''
-  // Every candidate 404'd (no guide yet) or errored. Surface the last real
-  // error if there was one; a plain "not found" stays silent, because a
-  // workspace with no guide yet is an ordinary state, not a failure.
-  if (!guideError.value) guideError.value = lastError
-  guideResolvedPath.value = ''
-  guideLoading.value = false
-}
-watch(() => store.activeWorkspace, () => { void fetchGuide() }, { immediate: true })
-function openGuideFile(): void {
-  if (!guideResolvedPath.value) return
-  void fileViewer.open(guideResolvedPath.value)
-}
-async function discussGuide(): Promise<void> {
-  if (!guideResolvedPath.value) return
-  const path = guideResolvedPath.value
-  // Reuse the generic file-discuss flow (creates a chat and pins the guide).
-  await discussFileInChat(path, `Let's review the workspace guide \`${path}\`. Help me audit it — what should we trim, clarify, or promote from the bounded regions?`)
-}
-async function discussFileInChat(path: string, prompt?: string): Promise<void> {
-  await startFileDiscussion(store, { path, seed: prompt || `Let's discuss the file \`${path}\`.` })
-}
-// Expose for template's generic file discuss (also used by FileViewerModal/PinnedFilePanel via a shared helper fallback)
-// and for the guide card's "Discuss" button.
+
 const route = useRoute()
 const router = useRouter()
-
-/** The memory page's Memory/Review switcher. Review is the /proposals
- * route; graph and list are both /memory, so only those two need a push.
- *
- * A graph/list choice is also remembered in `mapView`, so the Memory button
- * returns to the drawing that was on screen rather than resetting to graph. */
-function setMemoryView(next: 'graph' | 'list' | 'review') {
-  mm.view = next
-  if (next !== 'review') mm.mapView = next
-  const target = next === 'review' ? '/proposals' : '/memory'
-  if (route.path !== target) void router.push(target)
-}
-
-/** The "Needs review" list lands directly on the retirement queue. */
-function openRetirementReview() {
-  mm.reviewTab = 'retirement'
-  // Always the queue, never the trash: this link means "show me what is
-  // waiting", and the sub-tab could be left on Trash from a previous visit.
-  mm.retirementTab = 'candidates'
-  setMemoryView('review')
+const historyNav = useHistoryNav()
+// The desktop app binds ⌘[ / ⌘] (ChatLayout); in a browser the browser's own
+// back/forward chord does the same thing.
+function historyChordHint(key: '[' | ']'): string {
+  if (isDesktopApp() || isApplePlatform()) return ` (⌘${key})`
+  return key === '[' ? ' (Alt+←)' : ' (Alt+→)'
 }
 
 function promptTitle(prompt: string): string {
@@ -1478,7 +962,133 @@ function promptTitle(prompt: string): string {
 
 // With a single workspace the toggle is pure noise — hide it and let the
 // content fill the space.
-const hasMultipleWorkspaces = computed(() => store.workspaceOptions.length > 1)
+// The scope menu opens even with one workspace: it is also where a new
+// workspace is started.
+const canOpenWorkspaceMenu = computed(() => store.workspaceOptions.length > 0)
+// Settings tabs, in rail order. /settings is the General tab (route kept as-is).
+const SETTINGS_NAV = [
+  { to: '/settings', label: 'General' },
+  { to: '/settings/workspaces', label: 'Workspaces' },
+  { to: '/settings/models', label: 'Models & providers' },
+  { to: '/settings/skills', label: 'Skills' },
+  { to: '/settings/subagents', label: 'Subagents' },
+  { to: '/settings/commands', label: 'Commands' },
+  { to: '/settings/mcp', label: 'MCP servers' },
+  { to: '/settings/automations', label: 'Automations' },
+  { to: '/settings/notifications', label: 'Notifications' },
+] as const
+// The chord ChatLayout binds for New chat: Cmd+T in the desktop shell (the
+// browser keeps Cmd+T for itself), Option/Alt+N everywhere else.
+const newChatShortcut = isDesktopApp() ? '⌘T' : isApplePlatform() ? '⌥N' : 'Alt+N'
+const newChatKeyshortcuts = isDesktopApp() ? 'Meta+T' : 'Alt+N'
+const workspaceScopeOpen = ref(false)
+const workspaceScopeEl = ref<HTMLElement | null>(null)
+const workspaceScopeTrigger = ref<HTMLButtonElement | null>(null)
+const workspaceScopeMenu = ref<HTMLElement | null>(null)
+
+// Review + retirement work waiting in a workspace, used only as the scope
+// trigger's attention badge. The retirement queue is only loaded for the active workspace,
+// so their count is the proposals queue alone.
+// Section counts, all scoped to the selected workspace so they agree with
+// what each page shows. They replace the per-workspace badge in the scope
+// menu: the number sits next to the place that resolves it.
+const todayCount = computed(() => store.chats.reduce((sum, chat) => {
+  if (chat.archived) return sum
+  if (store.projectFor(chat.chat_id)?.workspace !== store.activeWorkspace) return sum
+  return sum + (store.chatNeedsInput(chat.chat_id) || store.chatUnread(chat.chat_id) > 0 ? 1 : 0)
+}, 0))
+const automationsCount = computed(() => missedCountFor(store.activeWorkspace))
+const memoryCount = computed(() => {
+  const workspace = store.activeWorkspace
+  const retirement = vaultReview.loadedWorkspace === workspace ? vaultReview.candidates.length : 0
+  return proposals.scopedRows(workspace).length + retirement
+})
+// Settings has no count; a word says what kind of attention it wants.
+const settingsNote = computed(() => {
+  if (hasBlockingHousekeeping.value) return 'check'
+  if (store.packageStatus?.update_available) return 'update'
+  return ''
+})
+
+function projectAttention(projectId: string): number {
+  return store.projectNeedsInput(projectId) + store.projectUnread(projectId)
+}
+
+function projectAttentionLabel(projectId: string): string {
+  const needs = store.projectNeedsInput(projectId)
+  const unread = store.projectUnread(projectId)
+  const parts: string[] = []
+  if (needs) parts.push(`${needs} waiting for your answer`)
+  if (unread) parts.push(`${unread} unread`)
+  return parts.join(', ')
+}
+
+function workspaceInitial(workspace: string): string {
+  return (workspaceLabel(workspace).trim()[0] || '·').toUpperCase()
+}
+
+function openWorkspaceMenu(): void {
+  if (!canOpenWorkspaceMenu.value) return
+  workspaceScopeOpen.value = true
+  void nextTick(() => {
+    workspaceScopeMenu.value
+      ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
+      ?.focus()
+  })
+}
+
+function closeWorkspaceMenu(restoreFocus = false): void {
+  if (!workspaceScopeOpen.value) return
+  workspaceScopeOpen.value = false
+  if (restoreFocus) void nextTick(() => workspaceScopeTrigger.value?.focus())
+}
+
+function toggleWorkspaceMenu(): void {
+  if (!canOpenWorkspaceMenu.value) return
+  if (workspaceScopeOpen.value) closeWorkspaceMenu(true)
+  else openWorkspaceMenu()
+}
+
+function selectWorkspaceScope(workspace: string): void {
+  closeWorkspaceMenu(true)
+  if (props.mode === 'schedules') {
+    void selectAutomationWorkspace(workspace)
+    return
+  }
+  void store.switchWorkspace(workspace, { transition: false })
+}
+
+function onWorkspaceMenuKeydown(event: KeyboardEvent): void {
+  const items = Array.from(workspaceScopeMenu.value?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])
+  if (!items.length) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    closeWorkspaceMenu(true)
+    return
+  }
+  if (event.key === 'Tab') {
+    closeWorkspaceMenu(false)
+    return
+  }
+  const current = items.indexOf(document.activeElement as HTMLButtonElement)
+  let next = current
+  if (event.key === 'Home') next = 0
+  else if (event.key === 'End') next = items.length - 1
+  else if (current < 0) next = event.key === 'ArrowUp' ? items.length - 1 : 0
+  else if (event.key === 'ArrowDown') next = (current + 1) % items.length
+  else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length
+  else return
+  event.preventDefault()
+  items[next]?.focus()
+}
+
+function closeWorkspaceMenuOnOutside(event: MouseEvent): void {
+  if (!workspaceScopeOpen.value) return
+  const target = event.target as Node | null
+  if (target && workspaceScopeEl.value?.contains(target)) return
+  closeWorkspaceMenu(false)
+}
 
 // Schedule list split: one-offs first (sorted by datetime), then recurring.
 const workspaceSchedules = computed(() =>
@@ -1593,8 +1203,7 @@ function missedCountFor(workspace: string): number {
   ).length
 }
 
-import type { ChatInfo, ProjectInfo, RunningSubagent, Schedule } from '../lib/types'
-import { bareAgentId, shortAgentId, subagentPath } from '../lib/subagentIds'
+import type { ChatInfo, ProjectInfo, Schedule } from '../lib/types'
 function openProject(projectId: string) {
   router.push(`/project/${projectId}`)
   emit('chat-selected') // collapse sidebar on mobile
@@ -1605,7 +1214,6 @@ const expandedProjects = reactive(new Set<string>())
 // working, so hiding it behind a closed disclosure would defeat the point.
 // Deliberately component-local, matching the project disclosure state above
 // and the chat context disclosure in ChatPanel.
-const collapsedSubagentParents = reactive(new Set<string>())
 const projectMenu = ref<string | null>(null)
 const chatMenu = ref<string | null>(null)
 type MenuReference = HTMLElement | { getBoundingClientRect: () => DOMRect }
@@ -1768,13 +1376,6 @@ watch(() => store.workspaceProjects, (projects) => {
   }
 }, { immediate: true })
 
-// Opening a subagent view must never leave its row hidden behind a collapsed
-// disclosure — the route is reachable from the chat's Activity trace too.
-watch(() => route.params.agentId, (agentId) => {
-  const chatId = route.params.chatId as string
-  if (agentId && chatId) collapsedSubagentParents.delete(chatId)
-}, { immediate: true })
-
 watch(() => store.activeChatId, (chatId) => {
   if (!chatId) return
   const project = store.projectFor(chatId)
@@ -1883,35 +1484,6 @@ function toggleProject(id: string) {
   }
 }
 
-function subagentsFor(chatId: string): RunningSubagent[] {
-  return store.runningSubagentsFor(chatId)
-}
-
-function subagentsExpanded(chatId: string): boolean {
-  return !collapsedSubagentParents.has(chatId)
-}
-
-function toggleSubagents(chatId: string) {
-  if (subagentsExpanded(chatId)) {
-    collapsedSubagentParents.add(chatId)
-  } else {
-    collapsedSubagentParents.delete(chatId)
-  }
-}
-
-const activeSubagentId = computed(() => (route.params.agentId as string) || '')
-
-function isActiveSubagent(chatId: string, agentId: string): boolean {
-  return (
-    route.params.chatId === chatId
-    && activeSubagentId.value === bareAgentId(agentId)
-  )
-}
-
-function subagentLabel(sub: RunningSubagent): string {
-  return (sub.description || '').trim() || shortAgentId(sub.agent_id)
-}
-
 // `window.prompt` cannot be used here: wry's WKUIDelegate never shows it, so in
 // the desktop app it returned null and this button did nothing at all. See
 // lib/prompt.
@@ -2008,9 +1580,14 @@ async function confirmDeleteProject(id: string) {
   await store.deleteProject(id)
 }
 
-async function addChat(projectId: string) {
+// One shared project picker for every visible New action. The project-local "+"
+// preselects its own project; the global New chat above the tree opens the same
+// dialog on the active workspace.
+async function chooseNewChat(workspace: string, preferredProjectId?: string) {
+  const projectId = await openNewChatPicker({ workspace, projectId: preferredProjectId })
+  if (!projectId) return
   expandedProjects.add(projectId)
-  await store.createChat(projectId)
+  await store.newChatInProject(projectId)
 }
 
 function startRenameChat(chatId: string) {
@@ -2127,16 +1704,105 @@ async function confirmDeleteChat(chatId: string) {
   display: flex;
   align-items: center;
   gap: 8px;
-  /* Queried below so the nav label answers to the width it actually has -
-     the sidebar is drag-resizable and remembers its width per user, so a
-     viewport media query cannot know whether "automations" fits. */
-  container-type: inline-size;
-  /* Keep the collapsed rail aligned with the expanded nav and pane headers. */
+  /* Keep the collapsed rail aligned with the pane header. */
   height: 61px;
   flex-shrink: 0;
   padding: 8px;
   border-bottom: 1px solid var(--border);
 }
+
+/* Expanded: prototype A's stacked rail top - brand row, workspace scope,
+   New chat, then the destinations as a labelled list. */
+.sidebar-header--expanded {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  height: auto;
+  padding: 10px 12px 12px;
+}
+
+.sidebar-brand-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.sidebar-header--expanded .sidebar-brand-row {
+  margin: 0 0 10px 4px;
+}
+
+.sidebar-header--expanded .toggle-btn {
+  margin-left: auto;
+}
+
+/* The Ciaobot face in the workspace accent (it is drawn in currentColor). */
+.sidebar-brand-mark {
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  color: var(--accent);
+}
+
+.sidebar-brand-row :deep(.sidebar-brand) {
+  min-height: 30px;
+}
+
+/* Key hints: the chord or digit that reaches this control. */
+.sidebar-keycap {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  color: var(--fg3);
+  font: 700 10px/1 var(--font-mono);
+}
+
+.sidebar-history {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+.sidebar-history-rail {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0;
+}
+.sidebar-history--rail {
+  flex-direction: column;
+  margin-left: 0;
+  gap: 2px;
+}
+.history-btn {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg2);
+  cursor: pointer;
+  transition: color 120ms var(--ease);
+}
+.history-btn:hover:not(:disabled) { color: var(--fg); }
+.history-btn:disabled { color: var(--fg3); opacity: 0.45; cursor: default; }
+.history-btn:disabled::before { background: transparent; }
+.history-divider {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
+  background: var(--border);
+}
+/* The history pair already pushes the row's trailing group right. */
+.sidebar-header--expanded .sidebar-history + .history-divider + .toggle-btn { margin-left: 0; }
 
 .toggle-btn {
   background: none;
@@ -2343,63 +2009,70 @@ async function confirmDeleteChat(chatId: string) {
   text-overflow: ellipsis;
 }
 
-.nav-links {
+.sidebar-new-chat {
   display: flex;
   align-items: center;
-  /* The wordmark used to take the middle of this row, leaving these four icons
-     huddled at a 4px gap against the right edge. It is in the pane header now, and
-     the ~90px it gives back is spent here: the icons spread across a 200px strip,
-     so each 30px glyph gets ~27px of air and its 44px touch target no longer
-     overlaps its neighbour's. The glyphs stay 30px, because the pane header sizes
-     its own icons to match the sidebar - see the note there.
-     `space-between` over a capped basis rather than a fixed gap, because that
-     degrades in both directions: a sidebar dragged out to 500px does not fling the
-     icons to the far edge (the strip stops at 200px), and one dragged down to its
-     180px minimum packs them back to the --space-1 floor instead of overflowing
-      the rail. The strip is narrower on mobile, where labels hide - see below. */
-  /* Sized to content now rather than a fixed strip: the active item carries an
-     expanding label, so the row's width depends on which page you are on. */
-  flex: 0 1 auto;
-  justify-content: flex-end;
-  /* Wider than the old icon-only 4px: the active item now ends in text, and a
-     4px gap between a word and the next glyph reads as a collision. */
-  gap: var(--space-2);
+  gap: 9px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 40px;
+  margin: 10px 0 0;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+}
+
+.sidebar-new-chat:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, var(--bg2));
+}
+
+.sidebar-new-chat-plus {
+  color: var(--accent);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.sidebar-new-chat .sidebar-keycap {
   margin-left: auto;
+}
+
+/* The destinations, as a labelled vertical list. They used to be four icons
+   squeezed into the header row beside the workspace scope and New chat, which
+   left no room for either at the default sidebar width. */
+.nav-links {
+  display: grid;
+  gap: 3px;
+  margin: 12px 0 0;
   min-width: 0;
 }
 
 .nav-item {
   position: relative;
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  justify-content: center;
-  /* No gap: the label carries its own leading space instead. A collapsed label
-     is max-width:0, but a flex gap is reserved whether or not the item beside
-     it has width - so on an icons-only row the 4px still counted, pushing the
-     glyph 2px left of the pill's centre and leaving twice as much air on its
-     right. As padding on the label it disappears with the label, because
-     border-box folds it into that max-width:0. */
-  gap: 0;
-  /* min-width, not width: the active item grows to fit its label. */
-  min-width: 30px;
-  height: 30px;
-  /* Padding is left to .touch-hit, uniformly. Trading the inline half down to
-     var(--space-1) packed the rail by 6px per item, but .touch-hit paints its
-     pill by insetting that padding on every side: at 4px the highlight landed
-     3px *inside* the glyph, clipping the icon instead of padding it, and the
-     matching negative margin shrank each item's footprint to 24px. Uniform
-      padding restores the 30px control with a 44px touch target, matching the
-      other rail controls. */
-  border-radius: var(--radius-sm);
-  position: relative;
-  isolation: isolate;
+  gap: 10px;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
   color: var(--fg2);
   text-decoration: none;
-  transition: color 120ms var(--ease);
+  transition: color 120ms var(--ease), background 120ms var(--ease), border-color 120ms var(--ease);
 }
 
+/* Static, so the badge inside it anchors to the row and lands at the right
+   edge (prototype A's nav-badge) instead of covering the glyph. */
 .nav-item-icon {
-  position: relative;
+  position: static;
   display: inline-flex;
   width: 18px;
   height: 18px;
@@ -2408,102 +2081,46 @@ async function confirmDeleteChat(chatId: string) {
   justify-content: center;
 }
 
-/* The page you are on names itself, next to its own icon, instead of a separate
-   tag elsewhere in the window. Inactive items stay glyph-only, so the row reads
-   as one selected item among icons rather than a list of words. Collapsed with
-   max-width so it animates, and aria-hidden because .nav-item already carries a
-   full aria-label - otherwise the accessible name would read "automations
-   automations". */
-/* Persistent system-state signal, not a count: a pulsing dot reads better than
-   a numeral for update and blocking-housekeeping warnings. */
-.nav-item-badge {
-  position: absolute;
-  top: -5px;
-  right: -6px;
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--accent, #4c8bf5);
-  box-shadow: 0 0 0 2px var(--bg-elev, #1b1e26);
-  animation: nav-item-badge-pulse 2s ease-in-out infinite;
-}
-
-.nav-item-badge--warning {
-  background: var(--warning);
-}
-
-.nav-item-badge--count {
-  width: auto;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  background: var(--error);
-  color: #fff;
-  box-shadow: 0 0 0 2px var(--bg-elev, #1b1e26);
-  font: 600 10px/16px var(--font-mono, monospace);
-  text-align: center;
-  animation: none;
-}
-
-@keyframes nav-item-badge-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.55; transform: scale(0.85); }
-}
-
-.nav-item-label {
-  max-width: 0;
-  overflow: hidden;
-  /* The gap that used to live on .nav-item; see the note there. */
-  padding-inline-start: var(--space-1);
-  color: inherit;
+/* Subtle section counts: plain numerals on the right of the row, drawn from
+   a data attribute so they stay out of the link's text (its aria-label
+   carries the full sentence). Needs-you on Home uses the accent colour;
+   everything else stays muted. */
+.nav-item[data-count]::after,
+.nav-item[data-note]::after {
+  margin-left: auto;
+  color: var(--fg3);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+}
+.nav-item[data-count]::after { content: attr(data-count); }
+.nav-item[data-note]::after { content: attr(data-note); color: var(--warning); font-family: var(--font-sans); }
+.nav-item[href="/"][data-count]::after { color: var(--accent); font-weight: 600; }
+
+/* Coarse pointers get the full 44px target on every rail row. */
+@media (pointer: coarse) {
+  .nav-item,
+  .sidebar-new-chat { min-height: var(--touch); }
+}
+
+/* aria-hidden because .nav-item already carries the full aria-label. */
+.nav-item-label {
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  font-size: var(--text-base);
+  text-overflow: ellipsis;
   white-space: nowrap;
-  opacity: 0;
-  transition: max-width 160ms var(--ease), opacity 120ms var(--ease);
-}
-
-.nav-item--active .nav-item-label {
-  /* Room for the longest label ("automations", 11 characters) plus a little, so
-     it is never clipped mid-word. At 9ch it read as "automatio" hard against the
-     next glyph. */
-  max-width: 13ch;
-  opacity: 1;
-}
-
-/* Below this the rail cannot hold a full label and every glyph at once, so trade
-   the label away rather than the icons. */
-@media (max-width: 900px) {
-  .nav-item--active .nav-item-label { max-width: 0; opacity: 0; }
-}
-
-/* The row's contents need roughly: toggle (44) + active item with label (~118)
-   + three bare items (132) + gaps (24) = 318. Under that the flex row
-   shrinks the only thing that can give - the label - and "automations" rendered
-   as "automation" jammed against the pill edge. Drop the label instead of
-   clipping a word in half; the icon and its tooltip still say what it is.
-   Keyed to the header's own width, so a user who drags the sidebar narrow (or
-   kept a width saved from before it grew) gets the icons-only row.
-
-   A container query resolves against the container's *content* box, so this
-   compares against 318 with the header's own 16px padding already excluded -
-   not against the sidebar's outer width. At the 340px default the header
-   measures 340 - 1 (sidebar border) - 16 (its padding) - any --safe-left inset
-   = 323 on a desktop window, which clears it. On a device with a left inset the
-   headroom shrinks and the label hides earlier, which is the intended
-   degradation rather than a clipped word.
-
-   Known limit: the cap above is in ch and this threshold is in px, so at a
-   large --font-scale the label can outgrow the budget and clip again. Fixing
-   that properly needs measurement rather than a breakpoint. */
-@container (max-width: 317px) {
-  .nav-item--active .nav-item-label { max-width: 0; opacity: 0; }
 }
 
 .nav-item:hover {
   color: var(--fg);
+  background: var(--bg-elev);
+}
+
+.nav-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .nav-item--working svg {
@@ -2549,11 +2166,13 @@ async function confirmDeleteChat(chatId: string) {
 
 .nav-item--active,
 .nav-item--active:hover {
-  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--fg);
 }
 
-.nav-item--active::before {
-  background: var(--bg3);
+.nav-item--active .nav-item-icon {
+  color: var(--accent);
 }
 
 .workspace-toggle {
@@ -2582,22 +2201,6 @@ async function confirmDeleteChat(chatId: string) {
   gap: 6px;
   white-space: nowrap;
   transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
-}
-
-.workspace-shortcut {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 3px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xs);
-  color: var(--fg3);
-  font-size: 10px;
-  line-height: 1;
-  font-weight: 700;
-  flex: 0 0 auto;
 }
 
 .workspace-toggle button:hover {
@@ -2636,18 +2239,25 @@ async function confirmDeleteChat(chatId: string) {
   margin-left: var(--space-2);
 }
 
+/* Prototype A's side-section label. */
+.sidebar-list-label {
+  margin: 4px 0 0;
+  padding: 6px 10px 5px;
+  color: var(--fg3);
+  font: 600 var(--text-xs)/1.2 var(--font-sans);
+}
+
+/* Flat rows rather than a bordered box per project: the tree keeps its
+   structure (project header, its chats indented beneath) at list density. */
 .project-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
   flex-shrink: 0;
 }
 
 .project-group {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
+  border-radius: 7px;
 }
 
 .project-header {
@@ -2655,17 +2265,31 @@ async function confirmDeleteChat(chatId: string) {
   align-items: center;
   gap: 4px;
   padding: 6px 10px;
-  font-size: var(--text-sm);
-  color: var(--fg2);
+  border-radius: 7px;
+  font-size: var(--text-base);
+  /* The project is the group heading: full-strength text. Its chats sit
+     beneath in the muted register, so the two levels never look alike. */
+  color: var(--fg);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-  background: var(--bg2);
   min-height: var(--touch);
 }
 
 .project-header:hover {
-  background: var(--bg3);
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+
+/* Fine pointers take prototype A's 36px row. The header's controls keep their
+   44px boxes (negative margins); only the row's own padding shrinks. */
+@media (pointer: fine) {
+  .project-header {
+    min-height: 36px;
+    padding-block: 2px;
+  }
+
+  .project-list .chat-item {
+    min-height: 36px;
+  }
 }
 
 /* Drag-to-reorder affordances. The header shows a grab cursor when draggable,
@@ -2682,39 +2306,39 @@ async function confirmDeleteChat(chatId: string) {
   background: var(--bg3);
 }
 
-.project-group:has(.chat-list) .project-header {
-  border-bottom: 1px solid var(--border);
-}
-
-.project-header.is-system {
-  opacity: 0.85;
-}
 .project-header.is-system .project-name {
-  font-weight: 500;
   text-transform: none;
   letter-spacing: 0;
-  color: var(--fg2);
 }
 .project-header.is-system:hover .project-name { color: var(--fg); }
 
+/* Auto-managed marker: a muted word, not a boxed uppercase chip. */
 .system-chip {
-  display: inline-flex;
-  align-items: center;
-  height: 14px;
-  padding: 0 5px;
   margin-left: 6px;
-  border-radius: var(--radius-xs);
-  background: var(--bg3);
-  color: var(--fg2);
-  font-size: calc(9px * var(--font-scale));
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  vertical-align: baseline;
+}
+
+.project-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: var(--space-2);
+  border-radius: 50%;
+  background: var(--fg3);
   vertical-align: middle;
+}
+.project-dot--needs {
+  background: var(--accent);
 }
 
 .project-icon {
-  font-size: calc(10px * var(--font-scale));
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  color: var(--fg3);
   width: var(--touch);
   height: var(--touch);
   margin: -6px 0 -6px -10px;
@@ -2727,6 +2351,16 @@ async function confirmDeleteChat(chatId: string) {
   user-select: none;
 }
 .project-icon:hover { color: var(--fg); }
+.project-chevron { transition: transform 120ms var(--ease); }
+.project-chevron.open { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .project-chevron { transition: none; } }
+
+/* A project's chats hang off a thin guide under its chevron, with their
+   titles aligned to the project name, so membership reads at a glance. */
+.chat-list {
+  margin: 2px 0 2px 21px;
+  border-left: 1px solid var(--border);
+}
 
 .project-name {
   flex: 1;
@@ -2825,96 +2459,14 @@ async function confirmDeleteChat(chatId: string) {
   align-items: center;
   gap: 6px;
   min-height: var(--touch);
-  padding: 0 4px 0 20px;
+  padding: 0 4px 0 22px;
+  margin-left: 4px;
+  border-radius: 7px;
   cursor: pointer;
   font-size: var(--text-base);
   color: var(--fg2);
   overflow: hidden;
   white-space: nowrap;
-  border-bottom: 1px solid var(--border);
-}
-
-.chat-item:last-child {
-  border-bottom: none;
-}
-
-/* A subagent row is not a chat: it opens a read-only transcript, so it drops
-   the actions menu and shifts right to read as owned by the chat above it.
-   Indent is on padding rather than margin so the hover/active background
-   still spans the full sidebar width. */
-.chat-item.subagent-item {
-  padding-left: 34px;
-  text-decoration: none;
-  color: var(--fg2);
-}
-
-.subagent-mark {
-  flex: none;
-  color: var(--fg3, var(--fg2));
-  font-size: var(--text-sm, 0.85em);
-  line-height: 1;
-}
-
-/* The agent's type ("Explore", "general-purpose"), when the CLI recorded one.
-   Muted: the description is the row's subject, this only qualifies it. */
-.subagent-chip {
-  flex: none;
-  padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  color: var(--fg3, var(--fg2));
-  font-size: var(--text-xs, 0.75em);
-  line-height: 16px;
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Live signal. Same pulse as the in-chat SubagentPanel spinner so the two
-   surfaces read as one state. */
-.subagent-spinner {
-  flex: none;
-  margin-left: auto;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent2, var(--accent));
-  animation: subagent-row-pulse 1.1s ease-in-out infinite;
-}
-
-@keyframes subagent-row-pulse {
-  0%, 100% { transform: scale(0.55); opacity: 0.35; }
-  50% { transform: scale(1); opacity: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .subagent-spinner { animation-duration: 2.2s; }
-}
-
-/* A chat's subagent disclosure sits inside the chat row. It uses the same
-   44px hit area as the project disclosure while keeping the glyph compact, so
-   collapsing a busy chat does not make the child rows unreachable on a
-   touch device. */
-.subagent-toggle {
-  flex: 0 0 var(--touch);
-  width: var(--touch);
-  height: var(--touch);
-  margin: 0 0 0 -14px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--fg3, var(--fg2));
-  cursor: pointer;
-  font: inherit;
-  line-height: 1;
-  text-align: center;
-}
-.subagent-toggle:hover { color: var(--fg); }
-.subagent-toggle:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-  border-radius: var(--radius-sm);
 }
 
 /* Interval-automation marker on a chat row. Accent while the cadence is live,
@@ -2945,7 +2497,7 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 .chat-item:hover {
-  background: var(--bg3);
+  background: var(--bg-elev);
   color: var(--fg);
 }
 
@@ -2962,8 +2514,7 @@ async function confirmDeleteChat(chatId: string) {
 .chat-item.active {
   background: var(--bg3);
   color: var(--fg);
-  border-left: 2px solid var(--accent);
-  padding-left: 18px;
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .chat-title {
@@ -2974,17 +2525,11 @@ async function confirmDeleteChat(chatId: string) {
   white-space: nowrap;
 }
 
+/* Unread is full-strength text plus the row's dot, not bold: bold chat
+   titles read as a second level of headings next to the projects. */
 .chat-title--unread {
   color: var(--fg);
-  font-weight: 600;
-}
-
-.workspace-shortcut {
-  flex: 0 0 auto;
-  color: var(--accent);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 700;
+  font-weight: 500;
 }
 
 .workspace-name {
@@ -2992,6 +2537,124 @@ async function confirmDeleteChat(chatId: string) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* One workspace scope for the whole rail. */
+.workspace-scope {
+  position: relative;
+  z-index: 40;
+  margin: 0;
+}
+
+.workspace-scope-trigger,
+.workspace-scope-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--touch);
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+}
+
+.workspace-scope-trigger {
+  min-height: 48px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-elev);
+  cursor: pointer;
+}
+
+.workspace-scope-trigger:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.workspace-scope-trigger:not(:disabled):hover,
+.workspace-scope-trigger[aria-expanded="true"] {
+  border-color: var(--border-strong);
+  background: var(--bg3);
+}
+
+/* Workspace identity: a tinted initial tile in the workspace's accent. A
+   shape and a letter, so it can never be mistaken for an attention dot. */
+.workspace-scope-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.workspace-scope-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+
+.workspace-scope-trigger > svg {
+  flex: none;
+  color: var(--fg2);
+}
+
+.workspace-scope-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  left: 0;
+  z-index: 50;
+  overflow: hidden;
+  padding: var(--space-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  box-shadow: 0 1rem 2.5rem rgb(0 0 0 / 38%);
+}
+
+.workspace-scope-option {
+  padding: 0 var(--space-2);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.workspace-scope-option:hover,
+.workspace-scope-option:focus-visible,
+.workspace-scope-option.active {
+  border-color: var(--border);
+  background: var(--bg3);
+}
+
+.workspace-scope-option.active {
+  color: var(--accent);
+}
+.workspace-scope-new {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 5px 5px;
+  color: var(--fg2);
+  text-decoration: none;
+}
+.workspace-scope-new:hover { color: var(--fg); }
+.workspace-scope-mark--new {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  color: var(--fg2);
+  font-size: var(--text-base);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3064,63 +2727,52 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 
-.sidebar-footer {
-  /* Match the sidebar/pane headers: 44px controls + 8px pad + 1px border. */
-  height: 61px;
-  padding: 8px;
-  border-top: 1px solid var(--border);
+/* A list label with its actions on the right: "Projects · New ⊟". The
+   actions are quiet text/icon controls at full touch size on coarse pointers. */
+.sidebar-label-row {
   display: flex;
-  gap: 6px;
   align-items: center;
-  flex-shrink: 0;
-  box-sizing: border-box;
+  gap: 2px;
+  margin-top: 4px;
+  padding-right: 4px;
 }
-
-.add-project-btn,
-.add-automation-btn {
-  flex: 1;
-  height: var(--touch);
-  padding: 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg3);
-  color: var(--fg);
+.sidebar-label-row .sidebar-list-label,
+.sidebar-label-row .schedule-group-header { flex: 1; min-width: 0; margin: 0; }
+.sidebar-label-link {
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--accent);
+  font: 600 var(--text-xs)/1 var(--font-sans);
   cursor: pointer;
-  font-family: var(--font);
-  font-size: var(--text-sm);
-  font-weight: 500;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
 }
-
-.add-project-btn:hover,
-.add-automation-btn:hover {
-  background: var(--bg);
-  border-color: var(--accent);
-  color: var(--fg);
-}
-
-.archive-btn {
-  flex-shrink: 0;
-  width: var(--touch);
-  height: var(--touch);
+.sidebar-label-link:hover { background: var(--bg3); }
+.sidebar-label-icon {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
   padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg3);
-  color: var(--fg2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg3);
   cursor: pointer;
-  transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
 }
-.archive-btn:hover {
-  background: var(--bg);
-  border-color: var(--accent);
-  color: var(--fg);
+.sidebar-label-icon:hover { background: var(--bg3); color: var(--fg); }
+.sidebar-label-link:focus-visible,
+.sidebar-label-icon:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (pointer: coarse) {
+  .sidebar-label-link { min-height: var(--touch); padding: 0 12px; }
+  .sidebar-label-icon { width: var(--touch); height: var(--touch); }
+}
+.sidebar-empty-note {
+  margin: 0;
+  padding: 4px 10px 8px;
+  color: var(--fg3);
+  font-size: var(--text-sm);
 }
 
 /* Completed-projects dialog */
@@ -3247,12 +2899,12 @@ async function confirmDeleteChat(chatId: string) {
     pointer-events: none;
   }
   .sidebar.collapsed .sidebar-header,
-  .sidebar.collapsed .project-list,
-  .sidebar.collapsed .sidebar-footer {
+  .sidebar.collapsed .project-list {
     visibility: hidden;
   }
   .add-chat-btn { opacity: 1; }
-  .nav-links { flex-basis: 150px; }
+  .nav-item,
+  .sidebar-new-chat { min-height: var(--touch); }
   /* No containment on the drawer's header. `container-type: inline-size` makes
      the element its own rasterization root, and here that root sits inside a
      `position: fixed` layer that the transform above keeps composited - the
@@ -3301,137 +2953,76 @@ async function confirmDeleteChat(chatId: string) {
   gap: 12px;
 }
 
-/* Grouped schedule sections — aligned to HomeRecentChats .home-tier language:
-   tier header is a low, mono, lowercase label with a bottom rule; rows are
-   home-chat-item rows with a left hue rail. The card box was adding a second
-   border and a background the homepage never has, which made the two sidebars
-   read as different systems. */
+/* Grouped schedule sections: a sentence-case label over plain 36px rows,
+   the same list language as the Projects tree - title on the left, the muted
+   time or cadence on the right. */
 .schedule-group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
   min-width: 0;
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  overflow: visible;
-  margin-bottom: 0;
   flex-shrink: 0;
 }
-.schedule-group--once,
-.schedule-group--system {
-  border-left: none;
-}
 .schedule-group-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding-bottom: var(--space-1);
-  border-bottom: 1px solid var(--border);
+  margin: 4px 0 0;
+  padding: 6px 10px 5px;
   color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  text-transform: none;
-  letter-spacing: 0;
-  font-weight: 400;
-  background: transparent;
-}
-.schedule-group-hint {
-  font-weight: 400;
-  text-transform: none;
-  letter-spacing: 0;
-  color: var(--fg3);
-  opacity: 0.7;
-  font-size: var(--text-xs);
-  margin-left: 4px;
-}
-.schedule-group-count {
-  margin-left: auto;
-  font-size: var(--text-xs);
-  background: transparent;
-  padding: 0;
-  border-radius: 0;
-  color: var(--fg3);
-  min-width: auto;
-  text-align: right;
+  font: 600 var(--text-xs)/1.2 var(--font-sans);
 }
 .schedule-group-items {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-}
-.schedule-item--once .schedule-time {
-  color: var(--accent, #ff5566);
-  font-weight: 600;
+  gap: 2px;
 }
 .schedule-item {
   display: flex;
   width: 100%;
   min-width: 0;
-  min-height: var(--touch, 44px);
+  min-height: 36px;
+  box-sizing: border-box;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px;
+  padding: 0 10px;
   border: 0;
-  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  border-radius: 7px;
   background: transparent;
-  color: var(--fg);
+  color: var(--fg2);
   font: inherit;
-  font-size: var(--text-sm);
+  font-size: var(--text-base);
   text-align: left;
   text-decoration: none;
   cursor: pointer;
-  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+  transition: background 120ms var(--ease), color 120ms var(--ease);
 }
-.schedule-item:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); color: var(--fg); }
+@media (pointer: coarse) {
+  .schedule-item { min-height: var(--touch); }
+}
+.schedule-item:hover { background: var(--bg-elev); color: var(--fg); }
 .schedule-item:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  box-shadow: 0 0 0 2px var(--bg);
+  outline-offset: 1px;
 }
 .schedule-item.active {
-  background: color-mix(in srgb, var(--accent) 8%, var(--bg2));
+  background: var(--bg3);
   color: var(--fg);
-  font-weight: 600;
-  border-left: 2px solid var(--accent);
-  padding-left: 10px;
+  box-shadow: inset 2px 0 0 var(--accent);
 }
-.schedule-item .schedule-time {
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  color: var(--fg3);
-  flex-shrink: 0;
-  font-size: var(--text-xs);
-  font-family: var(--font-mono);
-}
-.schedule-item.active .schedule-time { color: var(--fg); }
 .schedule-item .schedule-label {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--fg2);
-  font-size: var(--text-sm);
 }
-.schedule-item.active .schedule-label { color: var(--fg); }
-.schedule-group--system .schedule-item {
-  border-left-color: color-mix(in srgb, var(--accent2) 45%, transparent);
+.schedule-item .schedule-time {
+  flex-shrink: 0;
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
 }
-.schedule-group--system .schedule-item:hover {
-  background: color-mix(in srgb, var(--accent2) 7%, transparent);
-}
-.schedule-group--system .schedule-item.active {
-  background: color-mix(in srgb, var(--accent2) 8%, var(--bg2));
-  border-left-color: var(--accent2);
-}
-.schedule-group--system .schedule-item:focus-visible {
-  outline-color: var(--accent2);
-}
-.schedule-item--missed { border-left-color: var(--warning) !important; }
 .schedule-item--missed .schedule-time { color: var(--warning); }
-.schedule-item--disabled { opacity: 0.55; }
+.schedule-item--disabled .schedule-label { color: var(--fg3); }
 .schedule-item .missed-dot {
   width: 6px;
   height: 6px;
@@ -3439,26 +3030,23 @@ async function confirmDeleteChat(chatId: string) {
   background: var(--warning);
   flex-shrink: 0;
 }
-.empty-hint {
-  padding: 12px 16px;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  text-align: center;
-}
 
 /* Settings sub-page navigation */
 .settings-nav-list {
   display: flex;
   flex-direction: column;
-  padding: 8px;
+  padding: 4px 12px 12px;
   gap: 2px;
+}
+.settings-nav-list .sidebar-list-label {
+  margin: 0;
 }
 .settings-nav-item {
   display: flex;
   align-items: center;
-  min-height: 44px;
-  padding: 8px 12px;
-  border-radius: var(--radius-sm);
+  min-height: 36px;
+  padding: 0 10px;
+  border-radius: 7px;
   text-decoration: none;
   color: var(--fg2);
   font-size: var(--text-base);
@@ -3466,28 +3054,44 @@ async function confirmDeleteChat(chatId: string) {
   transition: background 120ms var(--ease), color 120ms var(--ease);
 }
 .settings-nav-item:hover {
-  background: var(--bg);
+  background: var(--bg-elev);
   color: var(--fg);
+}
+.settings-nav-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 .settings-nav-item.active {
   background: var(--bg3);
   color: var(--fg);
-  border-right: 2px solid var(--accent);
+}
+@media (pointer: coarse) {
+  .settings-nav-item { min-height: var(--touch); }
 }
 
-/* Memory Map sidebar (vault stats, search, categories, path finder) */
+/* Memory's sections: Settings' list with a count at the row's end. */
+.memory-nav-list .sidebar-list-label { margin-top: 8px; }
+.memory-nav-list .sidebar-list-label:first-child { margin-top: 0; }
+.memory-nav-item { gap: 8px; }
+.memory-nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-nav-count { color: var(--fg3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.memory-nav-count--due { color: var(--accent); font-weight: 650; }
+.memory-nav-item.active { font-weight: 600; }
+
+/* Memory Map sidebar (search, categories) */
 .mm-sidebar-scroll {
   overflow-y: auto;
   padding: var(--space-3);
   flex: 1;
   min-height: 0;
 }
+/* Same register as the chat rail's "Projects" label: 11px sans, sentence
+   case. The old uppercase tracked labels read as a second kind of heading. */
 .mm-sidebar-scroll h3 {
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  font: 600 var(--text-xs)/1.2 var(--font-sans);
   color: var(--fg3);
-  margin: var(--space-4) 0 var(--space-2);
+  margin: var(--space-4) 0 var(--space-1);
+  padding: 0 8px;
 }
 .mm-sidebar-scroll h3:first-child { margin-top: 0; }
 /* A heading inside this row (e.g. "Categories" + reset) is a flex item, so
@@ -3502,15 +3106,9 @@ async function confirmDeleteChat(chatId: string) {
   margin-bottom: var(--space-2);
 }
 .mm-row-between h3 { margin: 0; }
+.mm-row-between { padding-right: 8px; }
 .mm-row-between:first-child { margin-top: 0; }
-.mm-row-actions { display: inline-flex; align-items: baseline; gap: 6px; }
-.mm-sep { color: var(--fg3); font-size: var(--text-xs); }
-.mm-link--active { color: var(--fg); font-weight: 600; }
 .mm-link { background: none; border: none; color: var(--accent); font-size: var(--text-xs); cursor: pointer; padding: 0; }
-/* A standalone entry point, not an inline action: full touch target. */
-.mm-link--block { display: inline-flex; align-items: center; min-height: var(--touch); margin-bottom: var(--space-1); }
-.mm-link--block:hover { text-decoration: underline; }
-.mm-hint { color: var(--fg3); font-size: var(--text-xs); margin: 0; }
 
 .mm-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
 .mm-stat-grid--3 { grid-template-columns: repeat(3, 1fr); }
@@ -3557,123 +3155,12 @@ async function confirmDeleteChat(chatId: string) {
 .mm-search { margin-top: var(--space-3); }
 .mm-search input { width: 100%; font-size: var(--text-sm); }
 
-/* Workspace guide card (AGENTS.md; CLAUDE.md pre-migration) — bounded memory health, always visible */
-.guide-card {
-  margin-top: var(--space-3);
-  padding: 10px 10px 8px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.guide-card--over { border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }
-.guide-card-head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 8px;
-}
-.guide-card-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  overflow-wrap: anywhere;
-  flex: 1 1 auto;
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--fg2);
-  font-family: var(--font-mono);
-}
-.guide-card-icon { color: var(--accent); font-size: 10px; }
-.guide-card-badge {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--fg3);
-  background: var(--bg3);
-  padding: 1px 6px;
-  border-radius: var(--radius-pill);
-}
-.guide-card-badge--warn { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
-.guide-card-actions { display: inline-flex; gap: 6px; flex-shrink: 0; }
-.guide-card-btn {
-  font-size: var(--text-xs);
-  padding: 3px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--bg2);
-  color: var(--fg2);
-  cursor: pointer;
-  font-family: var(--font);
-  /* Touch-safe hit area: the visible 3px/8px padding is too small to tap
-     reliably on the mobile sidebar, so guarantee a 44px minimum target. */
-  min-width: var(--touch);
-  min-height: var(--touch);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.guide-card-btn:disabled { opacity: 0.5; cursor: default; }
-.guide-card-btn:hover:not(:disabled) { background: var(--bg3); color: var(--fg); }
-.guide-card-btn--primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-.guide-card-btn--primary:hover:not(:disabled) { filter: brightness(1.08); color: var(--on-accent); }
-.guide-card-error { color: var(--warning); font-size: var(--text-xs); }
-.guide-card-hint { color: var(--fg3); font-size: var(--text-xs); }
-.guide-card-regions { display: flex; flex-direction: column; gap: 10px; }
-.guide-region-head {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  flex-wrap: wrap;
-  font-size: var(--text-xs);
-}
-.guide-region-name { font-weight: 600; color: var(--fg2); flex: 1; }
-.guide-region-count { color: var(--fg3); font-variant-numeric: tabular-nums; }
-.guide-region-count--warn { color: var(--warning); font-weight: 600; }
-.guide-region-tokens { color: var(--fg3); font-family: var(--font-mono); font-size: 11px; }
-.guide-region-bar {
-  height: 6px;
-  border-radius: 3px;
-  background: var(--bg3);
-  overflow: hidden;
-  margin-top: 4px;
-}
-.guide-region-bar > span {
-  display: block;
-  height: 100%;
-  border-radius: 3px;
-  background: var(--accent);
-  transition: width 200ms;
-}
-.guide-region-bar--high > span { background: #d6a600; }
-.guide-region-bar--warn > span { background: var(--warning); }
-.guide-region-meta { font-size: 11px; color: var(--fg3); margin-top: 3px; }
-.guide-region-meta--warn { color: var(--warning); }
-.guide-card-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border);
-  font-size: var(--text-xs);
-  color: var(--fg3);
-}
-.guide-card-foot-info { font-variant-numeric: tabular-nums; }
-
 .mm-chip-row { display: flex; flex-direction: column; gap: 2px; }
 .mm-chip {
-  display: flex; align-items: center; gap: 7px; padding: 5px 6px; border-radius: var(--radius-sm);
+  display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 8px; border-radius: 7px;
   cursor: pointer; font-size: var(--text-sm); color: var(--fg2);
 }
-.mm-chip:hover { background: var(--bg3); }
+.mm-chip:hover { background: var(--bg-elev); color: var(--fg); }
 .mm-chip.off { opacity: 0.35; }
 .mm-chip .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .mm-chip .cnt { margin-left: auto; color: var(--fg3); font-variant-numeric: tabular-nums; }
@@ -3686,24 +3173,24 @@ async function confirmDeleteChat(chatId: string) {
 
 .mm-link-list { display: flex; flex-direction: column; gap: 2px; }
 .mm-link-item {
-  display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: var(--radius-sm);
-  cursor: pointer; font-size: var(--text-sm); color: var(--fg);
+  display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 8px; border-radius: 7px;
+  cursor: pointer; font-size: var(--text-sm); color: var(--fg2);
 }
-.mm-link-item:hover { background: var(--bg3); }
+.mm-link-item:hover { background: var(--bg-elev); color: var(--fg); }
+@media (pointer: coarse) {
+  .mm-chip, .mm-link-item { min-height: var(--touch); }
+}
 .mm-link-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
-/* Aging note marker: the app warning token, not a category colour — age is
-   not a type, and reusing a hue would lie about what the dot means. */
-.mm-dot--stale { background: var(--warning, #ff9800); }
 .mm-link-item .cnt { margin-left: auto; color: var(--fg3); }
-/* Marks which note the map is currently centred on, so the recent list
-   doubles as a "you are here" indicator rather than just a jump list. */
-.mm-link-item.current { background: var(--bg3); color: var(--fg); }
 /* The review queue's kind rows are a filter, so the SELECTED one is the solid
    one and the rest recede — the inverse of the memory chips, where every chip is
    on until you switch it off. */
-.mm-link-item.off { opacity: 0.55; }
-.mm-link-item:not(.off) { background: var(--bg3); color: var(--fg); }
-.mm-link-item.current .label { font-weight: 600; }
+button.mm-link-item {
+  width: 100%; border: 0; background: none; font: inherit; font-size: var(--text-sm); text-align: left;
+}
+button.mm-link-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.mm-link-item--filter.off { color: var(--fg3); }
+.mm-link-item--filter:not(.off) { background: var(--bg-elev); color: var(--fg); font-weight: 600; }
 </style>
 
 <!-- Non-scoped: teleported context menus live outside this component's DOM -->

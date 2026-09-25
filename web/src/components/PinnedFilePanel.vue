@@ -6,67 +6,63 @@
     <PaneHeader :brand="false" @open-sidebar="$emit('close')">
       <template #title>
         <div class="header-left">
-          <button class="close-btn desktop-only" @click="$emit('close')" title="Unpin file">&times;</button>
           <div class="header-breadcrumb">
             <span class="chat-title" :title="filePath">{{ basename }}</span>
+            <span v-if="docDir" class="pfp-dir" :title="docDir">{{ shortDirname(cleanPath) }}</span>
           </div>
         </div>
       </template>
       <template #actions>
+        <!-- Edit is the panel's one text action; the rest stay quiet icons. -->
         <button
           v-if="(kind === 'text' || (kind === 'html' && htmlView === 'code' && sourceLoaded)) && !isEditingText"
-          class="btn-icon"
+          class="pfp-edit-btn"
           @click="startEditingText"
           title="Edit"
           aria-label="Edit"
           :disabled="loading || !!error"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
-            <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"></path>
-          </svg>
-        </button>
-        <button
-          class="btn-icon"
-          :class="{ ok: refreshed }"
-          @click="refresh"
-          title="Refresh"
-          aria-label="Refresh"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-        </button>
-        <button
-          class="btn-icon"
-          @click="downloadFile"
-          title="Download"
-          aria-label="Download"
-          :disabled="loading || !!error"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        </button>
-        <button
-          class="btn-icon"
-          :class="{ ok: openExternalState === 'ok' }"
-          @click="openExternally"
-          title="Open in default app"
-          aria-label="Open in default app"
-          :disabled="loading || !!error || openExternalState === 'loading'"
-        >
-           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-         </button>
-        <button
-          v-if="memoryPath"
-          class="btn-icon"
-          @click="void openInMemoryMap()"
-          title="Open in memory map"
-          aria-label="Open in memory map"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="m7.7 7.1 2.9 8.1M16.3 7.1l-2.9 8.1M8 6h8"/></svg>
+        >Edit</button>
+        <!-- File utilities share one menu, like the file viewer modal, instead
+             of a row of look-alike icons. -->
+        <DropdownMenuRoot :modal="false">
+          <DropdownMenuTrigger as-child>
+            <button type="button" class="btn-icon" aria-label="More file actions" title="More">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" /></svg>
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuPortal>
+            <DropdownMenuContent as-child align="end" :side-offset="6" :collision-padding="8">
+              <div class="pfp-actions-menu">
+                <DropdownMenuItem as-child @select="refresh">
+                  <button type="button">Refresh</button>
+                </DropdownMenuItem>
+                <DropdownMenuItem as-child @select.prevent="copyPath">
+                  <button type="button">{{ copyState === 'ok' ? 'Copied' : 'Copy path' }}</button>
+                </DropdownMenuItem>
+                <DropdownMenuItem as-child :disabled="loading || !!error" @select="downloadFile">
+                  <button type="button">Download</button>
+                </DropdownMenuItem>
+                <DropdownMenuItem as-child :disabled="loading || !!error || openExternalState === 'loading'" @select="openExternally">
+                  <button type="button">{{ openExternalState === 'ok' ? 'Opened' : 'Open in default app' }}</button>
+                </DropdownMenuItem>
+                <DropdownMenuItem v-if="memoryPath && !inMemoryMap" as-child @select="void openInMemoryMap()">
+                  <button type="button">Open in memory map</button>
+                </DropdownMenuItem>
+              </div>
+            </DropdownMenuContent>
+          </DropdownMenuPortal>
+        </DropdownMenuRoot>
+        <!-- Close sits last, where a window's close lives; the tile is a window. -->
+        <button class="btn-icon close-btn" :class="{ 'desktop-only': !inMemoryMap }" @click="$emit('close')" :title="closeLabel || 'Unpin file'" :aria-label="closeLabel || 'Unpin file'">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
         </button>
       </template>
     </PaneHeader>
     <div class="pfp-main" ref="mainEl">
       <div class="pfp-body" :class="{ 'pfp-body-csv': isCsv }" ref="bodyEl">
+        <!-- A host's own context for the file (the memory map's stale-note
+             callout), above the document. -->
+        <slot name="lead" />
         <div v-if="loading" class="pfp-skeleton" role="status" aria-live="polite" aria-label="Loading file" aria-busy="true">
           <div class="pfp-skeleton-meta" aria-hidden="true">
             <span class="pfp-skeleton-pill pfp-skeleton-pill--type"></span>
@@ -159,39 +155,41 @@
           </div>
 
           <template v-else>
-            <!-- Metadata card synthesized from YAML frontmatter -->
-            <div v-if="frontmatter" class="pfp-meta-card">
-              <div class="pfp-meta-row">
-                <span v-if="fmType" class="pfp-meta-pill pfp-meta-pill-type">{{ fmType }}</span>
-                <span v-if="fmStatus" class="pfp-meta-pill" :class="`pfp-meta-pill-status-${fmStatus}`">{{ fmStatus }}</span>
-                <span v-if="fmName && fmName !== basename.replace(/\.md$/, '')" class="pfp-meta-name" :title="fmName">{{ fmName }}</span>
-                <span class="pfp-meta-spacer"></span>
-                <span v-if="fmUpdated" class="pfp-meta-date" :title="`Updated ${fmUpdated}`">↻ {{ fmUpdated }}</span>
-                <span v-else-if="fmCreated" class="pfp-meta-date" :title="`Created ${fmCreated}`">+ {{ fmCreated }}</span>
+            <!-- Document properties from YAML frontmatter: a quiet header in
+                 the document's own measure, not a card of uppercase pills. -->
+            <section v-if="frontmatter" class="pfp-meta" aria-label="Document properties">
+              <div class="pfp-meta-line">
+                <span class="pfp-meta-kind">
+                  <template v-if="fmType">{{ humanizeMeta(fmType) }}</template>
+                  <template v-if="fmType && fmStatus"> · </template>
+                  <span v-if="fmStatus" class="pfp-meta-status" :class="`pfp-meta-status--${fmStatus}`">{{ humanizeMeta(fmStatus) }}</span>
+                </span>
+                <span v-if="fmUpdated" class="pfp-meta-date">Updated {{ fmUpdated }}</span>
+                <span v-else-if="fmCreated" class="pfp-meta-date">Created {{ fmCreated }}</span>
               </div>
-              <div v-if="fmTags.length" class="pfp-meta-row pfp-meta-tags">
-                <span v-for="t in fmTags" :key="t" class="pfp-meta-tag">#{{ t }}</span>
-              </div>
+              <p v-if="showFmName" class="pfp-meta-name" :title="fmName">{{ fmName }}</p>
               <p v-if="fmProse" class="pfp-meta-summary">{{ fmProse }}</p>
-              <div
-                v-for="listExtra in fmListExtras"
-                :key="listExtra.key"
-                class="pfp-meta-row pfp-meta-links"
-              >
-                <span class="pfp-meta-links-label">{{ listExtra.key }}</span>
-                <template v-for="(item, i) in listExtra.items" :key="i">
-                  <a
-                    v-if="item.path"
-                    class="pfp-meta-link file-link"
-                    href="#"
-                    @click.prevent="openRelated(item.path)"
-                  >{{ item.label }}</a>
-                  <span v-else class="pfp-meta-link">{{ item.label }}</span>
+              <p v-if="fmTags.length" class="pfp-meta-tags">
+                <span v-for="t in fmTags" :key="t" class="pfp-meta-tag">#{{ t }}</span>
+              </p>
+              <dl v-if="fmListExtras.length || fmExtraEntries.length" class="pfp-meta-fields">
+                <template v-for="listExtra in fmListExtras" :key="listExtra.key">
+                  <dt>{{ humanizeMeta(listExtra.key) }}</dt>
+                  <dd>
+                    <template v-for="(item, i) in listExtra.items" :key="i">
+                      <a
+                        v-if="item.path"
+                        class="pfp-meta-link file-link"
+                        href="#"
+                        :title="item.path"
+                        @click.prevent="openRelated(item.path)"
+                      >{{ item.label }}</a>
+                      <span v-else class="pfp-meta-value">{{ item.label }}</span>
+                    </template>
+                  </dd>
                 </template>
-              </div>
-              <dl v-if="fmExtraEntries.length" class="pfp-meta-extra">
                 <template v-for="entry in fmExtraEntries" :key="entry.key">
-                  <dt>{{ entry.key }}</dt>
+                  <dt>{{ humanizeMeta(entry.key) }}</dt>
                   <dd>
                     <a
                       v-if="isUrl(entry.value)"
@@ -203,7 +201,7 @@
                   </dd>
                 </template>
               </dl>
-            </div>
+            </section>
             <div
               v-if="isMarkdown"
               class="pfp-md"
@@ -238,6 +236,8 @@
             >{{ line }}</span></code></pre>
           </template>
         </template>
+        <!-- …and under it (the memory map's linked notes). -->
+        <slot name="after" />
       </div>
 
       <CommentComposePopover
@@ -287,17 +287,15 @@
           @mouseleave="onPopoverLeave"
           @keydown="onPfpKeydown"
         >
-          <div class="pfp-pop-header">
-            <span class="pfp-sidebar-card-line" v-if="commentLineLabel(popoverComment)">{{ commentLineLabel(popoverComment) }}</span>
-            <div class="pfp-sidebar-card-actions pfp-pop-actions">
-              <button class="pfp-sidebar-card-edit" @click.stop="editFromPopover(popoverComment)" title="Edit">✎</button>
-              <button class="pfp-sidebar-card-remove" @click.stop="deleteFromPopover(popoverComment.id)" title="Delete">×</button>
-            </div>
-          </div>
+          <div v-if="commentLineLabel(popoverComment)" class="pfp-pop-quote">{{ fileBasenameForPop }} · line {{ commentLineLabel(popoverComment) }}</div>
           <div v-if="popoverComment.images?.length" class="pfp-sidebar-card-images">
             <img v-for="img in popoverComment.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="card-image-thumb" @click.stop />
           </div>
           <div class="pfp-sidebar-card-note">{{ popoverComment.comment }}</div>
+          <div class="pfp-pop-actions">
+            <button type="button" class="pfp-sidebar-card-edit" @click.stop="editFromPopover(popoverComment)">Edit</button>
+            <button type="button" class="pfp-sidebar-card-remove" @click.stop="deleteFromPopover(popoverComment.id)">Delete</button>
+          </div>
         </div>
       </FocusScope>
 
@@ -311,7 +309,7 @@
         type="button"
         :title="isCsv ? 'Comment on this cell' : 'Comment on this selection'"
       >
-        <span class="pfp-comment-trigger-icon">💬</span>
+        <svg class="pfp-comment-trigger-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z" /></svg>
         Comment
       </button>
     </div>
@@ -319,7 +317,14 @@
 </template>
 
 <script setup lang="ts">
-import { FocusScope } from 'reka-ui'
+import {
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuPortal,
+  DropdownMenuRoot,
+  DropdownMenuTrigger,
+  FocusScope,
+} from 'reka-ui'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
@@ -327,6 +332,7 @@ import { renderFileMarkdown } from '../lib/safeMarkdown'
 import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isCsvPath } from '../lib/csv'
+import { shortDirname } from '../lib/chatActivity'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
@@ -337,12 +343,19 @@ import PaneHeader from './PaneHeader.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import { fileViewerKindForPath, useFileViewerStore } from '../stores/fileViewer'
 import type { FileViewerKind, HtmlArtifactView } from '../stores/fileViewer'
-import { useMemoryMapStore } from '../stores/memoryMap'
+import { useMemoryMapStore, memorySectionPath } from '../stores/memoryMap'
 import { router } from '../router'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
-const props = defineProps<{ filePath: string }>()
+const props = defineProps<{
+  filePath: string
+  /** Mounted as the memory map's note tile: "Open in memory map" would open
+   * the page it is already on, so the menu drops it. */
+  inMemoryMap?: boolean
+  /** The close control's name; the chat's tile unpins, the map's closes. */
+  closeLabel?: string
+}>()
 defineEmits<{ (e: 'close'): void }>()
 
 const projectsStore = useProjectStore()
@@ -364,7 +377,7 @@ async function openInMemoryMap(): Promise<void> {
   // panel, so requesting it before the prompt would leave the map jumping to
   // this note the next time /memory opens, after a navigation that was cancelled.
   memoryMapStore.requestFocusOnOpen(target)
-  await router.push('/memory')
+  await router.push(memorySectionPath('map'))
 }
 
 // ── Loading & rendering ──────────────────────────────────────────────
@@ -380,6 +393,16 @@ const sourceLoading = ref(false)
 const sourceError = ref('')
 const sourceLoaded = ref(false)
 const refreshed = ref(false)
+const copyState = ref<'idle' | 'ok'>('idle')
+async function copyPath(): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(cleanPath.value)
+    copyState.value = 'ok'
+    setTimeout(() => { copyState.value = 'idle' }, 1500)
+  } catch {
+    /* clipboard unavailable: leave the label as is */
+  }
+}
 const openExternalState = ref<'' | 'loading' | 'ok'>('')
 const isEditingText = ref(false)
 const editBuffer = ref('')
@@ -442,6 +465,12 @@ const basename = computed(() => {
   const idx = p.lastIndexOf('/')
   return idx === -1 ? p : p.slice(idx + 1)
 })
+const fileBasenameForPop = computed(() => basename.value)
+// Frontmatter words for display: "in-discussion" -> "In discussion".
+function humanizeMeta(value: string): string {
+  const text = String(value).replace(/[_-]+/g, ' ').trim()
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : text
+}
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(cleanPath.value))
 const isCsv = computed(() => isCsvPath(cleanPath.value))
 
@@ -490,6 +519,14 @@ const renderedMarkdown = computed(() => {
 // `title` is the canonical human label in the vault schema; `name` is the
 // retired synonym still present on older pages. Prefer title, fall back.
 const fmName = computed(() => fmString('title') || fmString('name'))
+// The title usually repeats the file name or the body's first heading; show it
+// only when it says something neither of those does.
+const showFmName = computed(() => {
+  const name = fmName.value.trim()
+  if (!name || name === basename.value.replace(/\.md$/, '')) return false
+  const heading = /^#\s+(.+?)\s*#*\s*$/m.exec(splitContent.value.body || '')
+  return !heading || heading[1].trim() !== name
+})
 const fmType = computed(() => fmString('type'))
 const fmStatus = computed(() => fmString('status'))
 const fmTags = computed(() => fmList('tags'))
@@ -519,7 +556,9 @@ const _linkPathSet = computed(() => new Set(markdownPaths.value || []))
 function resolveListItem(raw: string): { label: string; path: string | null } {
   const inner = raw.replace(/^\[\[(.+)\]\]$/, '$1').trim()
   const [ref, alias] = inner.split('|')
-  const label = (alias ?? ref).trim()
+  // A related note reads by its name, not its vault path; the full path stays
+  // in the link's title.
+  const label = (alias ?? (ref.split('/').pop() || ref).replace(/\.md$/i, '')).trim()
   const path = ref.trim()
     ? resolveVaultLinkTarget(ref.trim(), cleanPath.value, _linkIndex.value, _linkPathSet.value)
     : null
@@ -533,7 +572,7 @@ const fmListExtras = computed(() => {
     if (!items.length) continue
     const resolved = _LINK_LIST_KEYS.has(key)
       ? items.map(resolveListItem)
-      : items.map((raw) => ({ label: raw, path: null }))
+      : [{ label: items.join(', '), path: null }]
     out.push({ key, items: resolved })
   }
   return out
@@ -1374,8 +1413,19 @@ defineExpose({ isBusyAuthoring })
   flex-direction: column;
   height: 100%;
   overflow: hidden;
-  background: var(--bg);
+  /* The tile's own tone (ChatLayout .chat-split-side): the sidebar's surface. */
+  background: var(--bg2);
   position: relative;
+}
+
+/* A window title bar, not a page header: shorter than the chat's, on the tile
+   surface, with its own tight inset instead of the page grid's gutter. 52px =
+   the chat header's 61px less the tile's 8px inset and 1px border, so the two
+   header rules meet on one line across the gap. */
+.pinned-file-panel > :deep(.pane-header) {
+  height: 52px;
+  padding: 0 4px 0 12px;
+  background: transparent;
 }
 
 /* Unified Header styles matching ChatPanel */
@@ -1388,21 +1438,41 @@ defineExpose({ isBusyAuthoring })
 }
 
 .close-btn {
-  background: none;
-  border: none;
   color: var(--fg2);
-  cursor: pointer;
-  font-size: 20px;
-  padding: 0 4px;
-  line-height: 1;
-  font-family: var(--font);
-  min-width: 30px;
-  min-height: 30px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
 }
 .close-btn:hover { color: var(--fg); }
+
+/* The file's folder, muted after its name: where it lives, not a second title. */
+.pfp-dir {
+  /* Gives way long before the filename does. */
+  flex: 0 1000 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pfp-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.pfp-edit-btn:hover:not(:disabled) { border-color: var(--border-strong); }
+.pfp-edit-btn:disabled { cursor: default; opacity: 0.55; }
+@media (pointer: coarse) {
+  .pfp-edit-btn { min-height: var(--touch); }
+}
 
 .header-breadcrumb {
   display: flex;
@@ -1418,12 +1488,15 @@ defineExpose({ isBusyAuthoring })
      and a literal here stopped answering the Appearance font-scale setting —
      so raising the scale grew the chat title and left this one behind. */
   font-size: var(--text-lg);
-  font-weight: 600;
+  font-weight: 650;
   color: var(--fg);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  flex: 1;
+  /* The filename keeps its width and the folder takes the squeeze; only a name
+     longer than the whole row ellipses. */
+  flex: 0 0 auto;
+  max-width: 100%;
 }
 
 .desktop-only { display: inline-flex; }
@@ -1443,10 +1516,14 @@ defineExpose({ isBusyAuthoring })
 .pfp-body {
   flex: 1;
   overflow: auto;
-  padding: 14px 20px 20px;
+  /* A document, not a code pane: generous, equal margins on both sides. */
+  padding: 28px 32px 48px;
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+@media (max-width: 700px) {
+  .pfp-body { padding: 20px 16px 40px; }
 }
 .pfp-body-csv {
   overflow: hidden !important;
@@ -1531,7 +1608,7 @@ defineExpose({ isBusyAuthoring })
 }
 .pfp-pre {
   margin: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -1547,155 +1624,134 @@ defineExpose({ isBusyAuthoring })
   padding: 0 4px;
 }
 .pre-line.comment-highlight {
-  background: rgba(250, 204, 21, 0.18);
+  background: color-mix(in srgb, var(--accent2) 22%, transparent);
   cursor: pointer;
 }
 
 /* ── Metadata card (parsed frontmatter) ─────────────────────────── */
-.pfp-meta-card {
-  margin: 0 0 16px;
-  padding: 10px 12px;
-  background: var(--bg2, rgba(255, 255, 255, 0.03));
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-width: 100%;
+/* Document properties: sits above the prose in the same measure, reads as
+   metadata (muted, sentence case, normal font), and ends on a hairline. */
+.pfp-actions-menu {
+  z-index: 100;
+  min-width: 190px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 35%);
 }
-.pfp-meta-row {
+.pfp-actions-menu button {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
-  min-height: 22px;
-}
-.pfp-meta-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  background: var(--border);
+  width: 100%;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--fg);
-  white-space: nowrap;
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
 }
-.pfp-meta-pill-type {
-  background: rgba(96, 165, 250, 0.18);
-  color: #93c5fd;
+.pfp-actions-menu button:hover,
+.pfp-actions-menu button[data-highlighted] { background: var(--bg3); }
+.pfp-actions-menu button[data-disabled] { color: var(--fg3); cursor: default; }
+.pfp-actions-menu button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (pointer: coarse) {
+  .pfp-actions-menu button { min-height: var(--touch); }
 }
-.pfp-meta-pill-status-active {
-  background: rgba(34, 197, 94, 0.18);
-  color: #86efac;
+
+.pfp-meta {
+  width: 100%;
+  margin: 0 0 20px;
+  padding: 0 0 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-sm);
 }
-.pfp-meta-pill-status-completed,
-.pfp-meta-pill-status-archived {
-  background: rgba(148, 163, 184, 0.18);
-  color: #cbd5e1;
-}
-.pfp-meta-pill-status-draft {
-  background: rgba(250, 204, 21, 0.18);
-  color: #fde68a;
-}
-.pfp-meta-name {
+.pfp-meta-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
   color: var(--fg2);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  margin-left: 4px;
 }
-.pfp-meta-spacer {
-  flex: 1;
-  min-width: 0;
-}
-.pfp-meta-date {
+.pfp-meta-kind { flex: 1; min-width: 0; font-weight: 600; }
+.pfp-meta-status { font-weight: 600; }
+.pfp-meta-status--active,
+.pfp-meta-status--in-progress { color: var(--success); }
+.pfp-meta-status--draft,
+.pfp-meta-status--in-discussion { color: var(--warning); }
+.pfp-meta-status--completed,
+.pfp-meta-status--archived { color: var(--fg3); }
+.pfp-meta-date { flex: none; color: var(--fg3); font-variant-numeric: tabular-nums; }
+.pfp-meta-name { margin: 6px 0 0; color: var(--fg2); }
+.pfp-meta-summary {
+  margin: 8px 0 0;
   color: var(--fg2);
-  font-size: 11px;
-  white-space: nowrap;
+  line-height: 1.55;
 }
 .pfp-meta-tags {
-  margin-top: -2px;
-}
-.pfp-meta-tag {
-  font-size: 11px;
-  color: var(--fg2);
-  background: transparent;
-  padding: 1px 6px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-.pfp-meta-summary {
-  margin: 2px 0 0;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-  font-size: 13px;
-  line-height: 1.55;
-  color: var(--fg);
-}
-.pfp-meta-links {
-  gap: 4px 6px;
-}
-.pfp-meta-links-label {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--fg2);
-  margin-right: 2px;
-}
-.pfp-meta-link {
-  font-size: 11px;
-  color: var(--fg2);
-  padding: 1px 6px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-.pfp-meta-extra {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
   margin: 8px 0 0;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
+}
+.pfp-meta-tag { color: var(--fg3); }
+.pfp-meta-fields {
   display: grid;
-  grid-template-columns: max-content 1fr;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 16px;
+  margin: 12px 0 0;
+}
+.pfp-meta-fields dt { color: var(--fg3); }
+.pfp-meta-fields dd {
+  display: flex;
+  flex-wrap: wrap;
   gap: 2px 12px;
-  font-size: 12px;
-}
-.pfp-meta-extra dt {
-  color: var(--fg2);
-  font-weight: 600;
-  text-transform: lowercase;
-}
-.pfp-meta-extra dd {
+  min-width: 0;
   margin: 0;
   color: var(--fg);
-  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.pfp-meta-link { color: var(--accent); }
+@media (max-width: 700px) {
+  .pfp-meta-fields { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
+  .pfp-meta-fields dd { margin-bottom: 6px; }
 }
 
 .pfp-md {
   font-size: var(--text-base);
-  line-height: 1.6;
-  max-width: 100%;
+  line-height: 1.65;
+  /* Fills the tile: the tile's own width is the measure (it is a docked
+     side panel the user sizes by dragging), and the body's padding keeps
+     equal margins left and right. A fixed cap left a dead strip on the right
+     whenever the tile was wider than the cap. Code and tables keep their own
+     scroll. */
+  width: 100%;
 }
+/* Same violet as chat comments: one colour means "you left a note here". */
 .pfp-md :deep(.comment-highlight) {
-  background: rgba(250, 204, 21, 0.18);
-  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent2) 26%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent2) 70%, transparent);
+  border-radius: 2px;
   padding: 0 1px;
   cursor: pointer;
-  /* Animate the colour transition so the pulse fade-back feels natural. */
   transition: background-color 220ms ease-out, box-shadow 220ms ease-out;
+}
+.pfp-md :deep(.comment-highlight:hover) {
+  background: color-mix(in srgb, var(--accent2) 40%, transparent);
 }
 .pfp-md :deep(.comment-highlight.comment-pulse) {
   animation: pfp-comment-pulse 1s ease-out 1;
 }
 @keyframes pfp-comment-pulse {
-  0%   { background: rgba(250, 204, 21, 0.18); box-shadow: 0 0 0 0 rgba(250, 204, 21, 0); }
-  20%  { background: rgba(250, 204, 21, 0.55); box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.45); }
-  60%  { background: rgba(250, 204, 21, 0.40); box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.20); }
-  100% { background: rgba(250, 204, 21, 0.18); box-shadow: 0 0 0 0 rgba(250, 204, 21, 0); }
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent2) 0%, transparent); }
+  25%  { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent2) 35%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent2) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pfp-md :deep(.comment-highlight.comment-pulse) { animation: none; }
 }
 .pfp-md :deep(p) { margin: 0.6em 0; }
 .pfp-md :deep(:first-child) { margin-top: 0; }
@@ -1947,8 +2003,32 @@ defineExpose({ isBusyAuthoring })
 }
 .pfp-sidebar-card-note {
   color: var(--fg);
+  line-height: 1.45;
   word-break: break-word;
   white-space: pre-wrap;
+}
+.pfp-pop-quote {
+  margin-bottom: 4px;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+}
+.pfp-pop-actions .pfp-sidebar-card-edit,
+.pfp-pop-actions .pfp-sidebar-card-remove {
+  min-height: 28px;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+}
+.pfp-pop-actions .pfp-sidebar-card-edit:hover,
+.pfp-pop-actions .pfp-sidebar-card-remove:hover {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+@media (pointer: coarse) {
+  .pfp-pop-actions .pfp-sidebar-card-edit,
+  .pfp-pop-actions .pfp-sidebar-card-remove { min-height: var(--touch); }
 }
 .pfp-sidebar-draft-images {
   display: flex;
@@ -2028,18 +2108,22 @@ defineExpose({ isBusyAuthoring })
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
-  background: var(--error);
-  color: white;
+  min-height: 30px;
+  padding: 0 10px;
   border: none;
-  border-radius: 999px;
+  border-radius: 8px;
+  background: var(--fg);
+  color: var(--bg);
   cursor: pointer;
   font-size: var(--text-sm);
   font-weight: 600;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 8px 20px rgb(0 0 0 / 25%);
 }
 .pfp-comment-trigger:hover { filter: brightness(1.08); }
-.pfp-comment-trigger-icon { font-size: var(--text-sm); line-height: 1; }
+.pfp-comment-trigger-icon { flex: none; }
+@media (pointer: coarse) {
+  .pfp-comment-trigger { min-height: var(--touch); }
+}
 
 /* Header "💬 N" pill: toggles the comment drawer. */
 .pfp-comments-toggle {
@@ -2068,23 +2152,22 @@ defineExpose({ isBusyAuthoring })
   z-index: 32;
   width: 280px;
   max-width: calc(100% - 16px);
-  background: var(--bg);
-  border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--accent, #60a5fa);
-  border-radius: 8px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
-  padding: 10px 12px;
   box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg2);
+  box-shadow: 0 14px 36px rgb(0 0 0 / 28%);
+  font-size: var(--text-sm);
 }
 .pfp-pop-header {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-bottom: 6px;
+  display: none;
 }
 .pfp-pop-actions {
-  opacity: 1 !important;
-  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
 }
 
 /* Sidebar draft composer: sits between header and the scrollable list. */
@@ -2201,6 +2284,20 @@ defineExpose({ isBusyAuthoring })
     right: 8px;
     width: auto;
     max-width: none;
+  }
+}
+@media (pointer: coarse) {
+  .image-btn-sm,
+  .pfp-comment-trigger {
+    min-width: var(--touch);
+    min-height: var(--touch);
+  }
+
+  .draft-image-remove {
+    box-sizing: content-box;
+    top: -12px;
+    right: -12px;
+    padding: 14px;
   }
 }
 </style>

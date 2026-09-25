@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import datetime
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -473,6 +474,82 @@ def note_last_verified(
     return None, ""
 
 
+def _stale_type_key(note_type: str) -> str:
+    """The type a note ages as: its canonical form, else the lowered raw value.
+
+    Resolved through the vault's own alias table so a spelling cannot move a
+    note onto the wrong horizon: ``type: Person`` ages like ``person`` and
+    ``type: hackathon-log`` (an alias of ``journal``) is a dated record that
+    never ages at all. Imported lazily: this module is otherwise dependency-free
+    and ``vault_index`` pulls in YAML.
+    """
+    from ciao.vault_index import canonical_type
+
+    raw = (note_type or "").strip()
+    return canonical_type(raw) or raw.lower()
+
+
+def is_stale_exempt_type(note_type: str) -> bool:
+    """Whether notes of this type never age out (logs, journals, queues)."""
+    return _stale_type_key(note_type) in STALE_NOTE_EXEMPT_TYPES
+
+
+@dataclass(frozen=True, slots=True)
+class NoteVerification:
+    """How long a note's facts have gone unverified, against its horizon.
+
+    The one answer to "is this note stale?" shared by ``find_stale_notes``
+    (memory-audit), the Memory Map's ``stale`` flag and the vault-review
+    ``unverified`` signal — three surfaces that used to compute it separately
+    and disagreed on which notes counted.
+    """
+
+    age_days: int
+    threshold_days: int
+    last_verified: datetime.date
+    source: str  # "frontmatter" | "mtime"
+    exempt: bool
+
+    @property
+    def stale(self) -> bool:
+        return not self.exempt and self.age_days >= self.threshold_days
+
+    def as_evidence(self) -> dict[str, Any]:
+        return {
+            "age_days": self.age_days,
+            "threshold_days": self.threshold_days,
+            "last_verified": self.last_verified.isoformat(),
+            "source": self.source,
+        }
+
+
+def note_verification(
+    note_type: str,
+    updated: str,
+    mtime: float | None,
+    *,
+    today: datetime.date | None = None,
+) -> NoteVerification | None:
+    """Age and horizon for one note, or None when neither date is usable.
+
+    Unverifiable is not stale — calling it so would be a guess. Exempt types
+    still get an age (the map shows it) but are never ``stale``. Ages are
+    clamped at zero so a future ``updated:`` reads as "verified today".
+    """
+    verified, source = note_last_verified(updated, mtime)
+    if verified is None:
+        return None
+    current = today or datetime.date.today()
+    key = _stale_type_key(note_type)
+    return NoteVerification(
+        age_days=max(0, (current - verified).days),
+        threshold_days=note_threshold_days(key),
+        last_verified=verified,
+        source=source,
+        exempt=key in STALE_NOTE_EXEMPT_TYPES,
+    )
+
+
 def find_stale_notes(
     entries: list[Any],
     *,
@@ -502,10 +579,9 @@ def find_stale_notes(
 
     for entry in entries:
         note_type = (entry.type or "").strip()
-        if note_type in STALE_NOTE_EXEMPT_TYPES:
+        if is_stale_exempt_type(note_type):
             exempt += 1
             continue
-        threshold = note_threshold_days(note_type)
         rendered = str(entry.path)
         if mtimes is not None:
             mtime = mtimes.get(rendered, 0.0)
@@ -521,23 +597,19 @@ def find_stale_notes(
                 mtime = 0.0
         else:
             mtime = 0.0
-        verified, source = note_last_verified(entry.updated, mtime)
-        if verified is None:
+        verification = note_verification(note_type, entry.updated, mtime, today=current)
+        if verification is None:
             # Unverifiable is not stale: calling it so would be a guess.
             continue
         checked += 1
-        age_days = (current - verified).days
-        if age_days < threshold:
+        if not verification.stale:
             continue
         findings.append(
             {
                 "path": rendered,
                 "title": entry.title,
                 "type": note_type or "note",
-                "age_days": age_days,
-                "threshold_days": threshold,
-                "last_verified": verified.isoformat(),
-                "source": source,
+                **verification.as_evidence(),
             }
         )
 

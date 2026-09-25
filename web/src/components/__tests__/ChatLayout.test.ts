@@ -1517,7 +1517,9 @@ describe('ChatLayout home arrow navigation', () => {
   it('drops the global new-chat buttons once any chat exists', async () => {
     const wrapper = await mountHome()
     expect(wrapper.find('.empty-actions').exists()).toBe(false)
-    expect(wrapper.findAll('.home-lane-new').length).toBeGreaterThan(0)
+    // The composer is home's one way to start work; the selected lane no
+    // longer repeats it with its own "+ new".
+    expect(wrapper.find('.home-intake-new').exists()).toBe(true)
     wrapper.unmount()
   })
 

@@ -875,6 +875,33 @@ describe('deferred send visibility and re-send de-duplication', () => {
     }
   })
 
+  test('context_entities attaches the matched notes to its user bubble', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-deferred-entities'
+      store.activeChatId = chatId
+
+      store.sendMessage(chatId, 'ask Mo')
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+      socket.onmessage?.({ data: JSON.stringify({ type: 'user_echo', text: 'ask Mo', turn_index: 0 }) })
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'context_entities',
+          turn_index: 0,
+          entities: [{ name: 'Mo', path: 'work/People/Mo.md', category: 'person' }],
+        }),
+      })
+
+      const [bubble] = userBubbles(store, chatId, 'ask Mo')
+      expect(bubble.context_entities).toEqual([{ name: 'Mo', path: 'work/People/Mo.md', category: 'person' }])
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
   test('a deferred send that lands mid-turn becomes one queue entry, not a bubble plus a chip', async () => {
     try {
       const store = useProjectStore()

@@ -16,6 +16,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/projects/{project_id}/files": "browser multipart upload; agents edit vault files directly",
     "/api/desktop-drop": "native app bridge; consumes a short-lived Finder-drop grant created outside HTTP",
     "/api/chats/{chat_id}/voice": "browser voice upload",
+    "/api/voice": "browser voice upload from the home composer, before a chat exists",
     "/api/chats/{chat_id}/speak": "browser read-aloud playback; returns audio bytes",
     "/api/chats/{chat_id}/images": "browser image upload",
     "/api/chats/{chat_id}/attachments": "browser chat attachment upload",

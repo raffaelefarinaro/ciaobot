@@ -34,10 +34,16 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
   if (!response) return []
   const sections: ModelSection[] = []
 
+  // Tag each provider's default so the picker says what Automatic resolves to.
+  const defaultBadge = (model: string | undefined, models: string[]) =>
+    model && models.includes(model) ? { modelBadges: { [model]: ['Default'] } } : {}
+
+  const anthropicModels = orderedUnique(response.models || [])
   sections.push({
     key: 'anthropic',
     label: 'Anthropic',
-    models: orderedUnique(response.models || []),
+    models: anthropicModels,
+    ...defaultBadge(response.provider_defaults?.claude || response.default, anthropicModels),
   })
 
   // opencode is bring-your-own-provider: its catalog is whatever backends the
@@ -50,6 +56,7 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
       key: 'opencode',
       label: 'opencode',
       models: opencodeModels,
+      ...defaultBadge(response.provider_defaults?.opencode, opencodeModels),
     })
   }
 

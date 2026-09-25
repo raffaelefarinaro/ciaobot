@@ -25,6 +25,9 @@ export interface MemoryGraphNode {
   stale: boolean
   /** Days since last verification; null when the note carries no usable date. */
   ageDays: number | null
+  /** The note type's staleness horizon in days, from the server's table;
+   * null when the note has no usable date or the server is older. */
+  thresholdDays?: number | null
   // simulation state, owned by the canvas but persisted here so the graph
   // does not re-scatter every time the sidebar touches the store.
   x: number
@@ -89,7 +92,7 @@ function matchesSearch(n: MemoryGraphNode, term: string): boolean {
  * Vault graph data and filter state for the Memory Map (`/memory`).
  *
  * Shared between `MemoryMapView` (the canvas/list surface) and
- * `ProjectSidebar` (the vault stats, search, categories, and path-finder
+ * `ProjectSidebar` (the section list, search and categories
  * controls that live in the sidebar for memory mode) — the same split used
  * for schedules/loops via `useTaskStore`. The active workspace is not owned
  * here: it follows `useProjectStore().activeWorkspace`, the one switcher
@@ -97,6 +100,17 @@ function matchesSearch(n: MemoryGraphNode, term: string): boolean {
  * change (sidebar toggle, number-key shortcut, etc.) regardless of which
  * component triggered it.
  */
+/** The memory page's sections, in sidebar order. */
+export const MEMORY_SECTIONS = ['suggested', 'revisit', 'map', 'retired', 'history'] as const
+export type MemorySection = typeof MEMORY_SECTIONS[number]
+export function isMemorySection(value: unknown): value is MemorySection {
+  return typeof value === 'string' && (MEMORY_SECTIONS as readonly string[]).includes(value)
+}
+/** Where a section lives. */
+export function memorySectionPath(section: MemorySection): string {
+  return `/memory/${section}`
+}
+
 export const useMemoryMapStore = defineStore('memoryMap', () => {
   const nodes = ref<MemoryGraphNode[]>([])
   const edges = ref<MemoryGraphEdge[]>([])
@@ -105,8 +119,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   const search = ref('')
   const activeCats = reactive(new Set<string>())
   const selectedId = ref<string | null>(null)
-  const pathStart = ref<string | null>(null)
-  const pathEnd = ref<string | null>(null)
   /**
    * Orphans are 21% of a real vault and have no edges, so in the layout they
    * only feel centering and repulsion — they push the connected structure
@@ -125,7 +137,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
    * sidebar next to the workspace toggle, so this state is shared between
    * `ProjectSidebar` (the buttons) and `MemoryMapView` (the surfaces).
    */
-  const view = ref<'graph' | 'list' | 'review'>('graph')
+  const view = ref<'graph' | 'list' | 'review'>('review')
   /**
    * Which rendering the map surface uses. Graph and list are two drawings of
    * one thing — the same notes, the same workspace, the same filters — so the
@@ -147,6 +159,25 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
    * queue put thirty rows between you and the note you had just retired.
    */
   const retirementTab = ref<'candidates' | 'trash'>('candidates')
+  /**
+   * Which of the memory page's five sections is on screen. The sidebar lists
+   * them the way it lists Settings' tabs, and each one is a route
+   * (`/memory/<section>`), so back/forward and deep links land on the same
+   * place. `view`, `reviewTab` and `retirementTab` stay as the panels' own
+   * state; `setSection` is the one writer that keeps them in step.
+   */
+  const section = ref<MemorySection>('suggested')
+  function setSection(next: MemorySection) {
+    section.value = next
+    if (next === 'map') {
+      view.value = mapView.value
+      return
+    }
+    view.value = 'review'
+    reviewTab.value = next === 'revisit' || next === 'retired' ? 'retirement' : 'proposals'
+    if (next === 'revisit') retirementTab.value = 'candidates'
+    if (next === 'retired') retirementTab.value = 'trash'
+  }
   // Bumped whenever something outside the canvas (the sidebar's "most
   // connected" list, a neighbor link) asks the canvas to pan/zoom onto a
   // node. The canvas owns camera state and only needs to watch this signal.
@@ -237,36 +268,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     const days = n.ageDays ?? Math.floor((Date.now() / 1000 - n.mtime) / 86400)
     return formatAgeDays(days)
   }
-
-  const pathIds = computed<Set<string>>(() => {
-    if (!pathStart.value || !pathEnd.value) return new Set()
-    const visited = new Map<string, string | null>([[pathStart.value, null]])
-    const queue = [pathStart.value]
-    while (queue.length) {
-      const cur = queue.shift() as string
-      if (cur === pathEnd.value) break
-      for (const nb of adjacency.value.get(cur) || []) {
-        if (!visited.has(nb)) {
-          visited.set(nb, cur)
-          queue.push(nb)
-        }
-      }
-    }
-    if (!visited.has(pathEnd.value)) return new Set()
-    const chain: string[] = []
-    let cur: string | null = pathEnd.value
-    while (cur !== null) {
-      chain.push(cur)
-      cur = visited.get(cur) ?? null
-    }
-    return new Set(chain)
-  })
-  const pathHint = computed(() => {
-    if (!pathStart.value) return 'Pick a note\'s “start” action — or shift-click a dot on the graph — to set the path start.'
-    if (!pathEnd.value) return `Start: ${nodesById.value.get(pathStart.value)?.title || pathStart.value}. Now pick another note’s “end” action.`
-    if (pathIds.value.size === 0) return 'No path found between those two notes.'
-    return `${pathIds.value.size} notes on the path.`
-  })
 
   function neighborsOf(id: string): MemoryGraphNode[] {
     return (adjacency.value.get(id) || []).map(nid => nodesById.value.get(nid)).filter(Boolean) as MemoryGraphNode[]
@@ -364,6 +365,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
         updated: typeof n.updated === 'string' ? n.updated : '',
         stale: n.stale === true,
         ageDays: typeof n.age_days === 'number' ? n.age_days : null,
+        thresholdDays: typeof n.threshold_days === 'number' ? n.threshold_days : null,
         x: (Math.random() - 0.5) * 800,
         y: (Math.random() - 0.5) * 800,
         vx: 0,
@@ -412,8 +414,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       selectedId.value = previousSelection && incoming.some(n => n.id === previousSelection)
         ? previousSelection
         : null
-      pathStart.value = null
-      pathEnd.value = null
     } catch (err) {
       // A silent background refresh must not replace the graph on screen with
       // an error card; the data we are showing is still the data we had. Nor
@@ -514,43 +514,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     pendingFocus.value = null
     return resolveNodeId(path)
   }
-  function resetPath() {
-    pathStart.value = null
-    pathEnd.value = null
-  }
-  /**
-   * Set a path endpoint from an explicit control — the list rows' actions and
-   * the detail panel's buttons, which are the keyboard/touch equivalent of
-   * shift-clicking a dot.
-   *
-   * `'start'`/`'end'` name the slot outright so a mouse-less user is never
-   * relying on "the first one you pick becomes the start". `'toggle'` is the
-   * single-button form: the first pick is the start, the second the end, and a
-   * third *new* note starts over. Re-picking a note that already holds a slot
-   * releases that slot, which is what makes the gesture a toggle — and, more
-   * importantly, is why it can never seat one note in both slots.
-   */
-  function choosePathEndpoint(id: string, which: 'start' | 'end' | 'toggle') {
-    if (which === 'start') {
-      pathStart.value = id
-      if (pathEnd.value === id) pathEnd.value = null
-      return
-    }
-    if (which === 'end') {
-      pathEnd.value = id
-      if (pathStart.value === id) pathStart.value = null
-      return
-    }
-    // Dedupe first, like the named slots above. Without it, shift-clicking the
-    // dot already sitting in `pathStart` dropped the same id into the empty
-    // `pathEnd`: `pathIds` then BFS-terminates on the start node and the hint
-    // reports a degenerate "1 notes on the path".
-    if (pathStart.value === id) { pathStart.value = null; return }
-    if (pathEnd.value === id) { pathEnd.value = null; return }
-    if (!pathStart.value) pathStart.value = id
-    else if (!pathEnd.value) pathEnd.value = id
-    else { pathStart.value = id; pathEnd.value = null }
-  }
   /**
    * Permanently delete a note. The backend strips dangling references from
    * every note that linked to it before removing the file, so we only need
@@ -569,8 +532,6 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       if (neighbor) neighbor.degree = Math.max(0, neighbor.degree - 1)
     }
     if (selectedId.value === id) selectedId.value = null
-    if (pathStart.value === id) pathStart.value = null
-    if (pathEnd.value === id) pathEnd.value = null
     // The cached snapshot holds the arrays we just replaced; leaving it stale
     // would resurrect the deleted note on the next visit to this workspace.
     const snap = graphCache.get(loadedWorkspace.value)
@@ -581,11 +542,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     }
   }
 
-  function handleNodeClick(id: string, shiftKey: boolean) {
-    if (shiftKey) {
-      choosePathEndpoint(id, 'toggle')
-      return
-    }
+  function handleNodeClick(id: string) {
     // Clicking a node directly on the canvas should feel the same as
     // clicking it from the sidebar or a linked-note link: it becomes
     // selected AND the camera centers on it, not just a highlight in place.
@@ -594,16 +551,16 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   }
 
   return {
-    nodes, edges, loading, loadError, search, activeCats, selectedId, pathStart, pathEnd, focusSignal,
+    nodes, edges, loading, loadError, search, activeCats, selectedId, focusSignal, loadedWorkspace,
     pendingFocus,
-    hideOrphans, orphanFilter, view, mapView, reviewTab, retirementTab,
+    hideOrphans, orphanFilter, view, mapView, reviewTab, retirementTab, section, setSection,
     nodesById, adjacency, categoryList, visibleNodes, visibleIds, visibleEdgeCount, orphanCount,
-    mostConnected, selectedNode, pathIds, pathHint,
+    mostConnected, selectedNode,
     orphanNotes, recentNotes, staleNotes, ageLabelOf,
     neighborsOf, loadGraph, toggleCategory, isolateCategory, resetCategories,
     toggleHideOrphans, toggleOnlyOrphans, setOrphanFilter,
     selectNode, requestFocus, requestFocusOnOpen, consumePendingFocus, resolveNodeId,
-    resetPath, choosePathEndpoint, handleNodeClick, deleteNote,
+    handleNodeClick, deleteNote,
     graphIsWarm, markGraphWarm, ensureGraph,
   }
 })

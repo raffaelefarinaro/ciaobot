@@ -1,333 +1,362 @@
 <template>
   <div v-if="project" class="project-view">
-    <PaneHeader page-tag="project" @open-sidebar="emit('open-sidebar')">
+    <PaneHeader page-tag="Project" @open-sidebar="emit('open-sidebar')">
       <template #title>
         <div class="header-left">
-          <button class="close-btn desktop-only" @click="$emit('close')" title="Close">&times;</button>
+          <button class="btn-icon close-btn desktop-only" @click="$emit('close')" title="Close" aria-label="Close project">&times;</button>
           <input
             v-if="editingName"
             class="title-input"
             v-model="nameDraft"
+            aria-label="Project name"
             @keyup.enter="saveName"
             @keyup.escape="editingName = false"
             @blur="saveName"
             autofocus
           />
+          <!-- The project name is the title. Its workspace is named once, in
+               the sidebar's workspace scope, so it is not repeated here. -->
           <h2 v-else class="project-title" @dblclick="startEditName">{{ project.name }}</h2>
-          <span class="workspace-badge">{{ project.workspace }}</span>
         </div>
       </template>
       <template #actions>
+        <button type="button" class="btn-small project-new-chat" aria-haspopup="dialog" @click="newChat">New chat</button>
         <button
           v-if="project.vault_folder && !project.is_auto"
           class="btn-small"
           @click="doComplete"
         >Complete</button>
-        <button
+        <div
           v-if="!project.vault_folder && !project.is_auto"
-          class="btn-small danger"
-          @click="doDelete"
-        >Delete</button>
+          ref="projectActionsEl"
+          class="project-actions"
+        >
+          <button
+            ref="projectActionsTrigger"
+            type="button"
+            class="btn-icon"
+            aria-label="Project actions"
+            aria-haspopup="menu"
+            aria-controls="project-actions-menu"
+            :aria-expanded="actionsOpen"
+            @click="toggleProjectActions"
+          >•••</button>
+          <div
+            v-if="actionsOpen"
+            id="project-actions-menu"
+            ref="projectActionsMenu"
+            class="project-actions-menu"
+            role="menu"
+            aria-label="Project actions"
+            @keydown="onProjectActionsKeydown"
+          >
+            <button type="button" role="menuitem" class="danger" @click="doDelete">Delete project</button>
+          </div>
+        </div>
       </template>
     </PaneHeader>
 
-    <!-- Counts only, ordered by urgency. "Created" used to sit here as a date
-         styled like a metric, while the count that matters - how many chats want
-         you - was missing entirely. Dates moved to the caption below. -->
-    <div class="project-stats">
-      <div class="stat" :class="{ 'stat--hot': needsInputCount > 0 }">
-        <div class="stat-value">{{ needsInputCount }}</div>
-        <div class="stat-label">Need you</div>
-      </div>
-      <div class="stat">
-        <div class="stat-value">{{ workingCount }}</div>
-        <div class="stat-label">Working</div>
-      </div>
-      <div class="stat">
-        <div class="stat-value">{{ totalUnread }}</div>
-        <div class="stat-label">Unread</div>
-      </div>
-      <div class="stat">
-        <div class="stat-value">{{ activeChats.length }}</div>
-        <div class="stat-label">Active</div>
-      </div>
-    </div>
-    <p class="project-caption">
-      created {{ formatDate(project.created_at) }}
-      <template v-if="archivedChats.length"> · {{ archivedChats.length }} archived</template>
-    </p>
-
-    <TabBar
-      v-model="activeTab"
-      :tabs="projectTabs"
-      label="Project sections"
-      :id-prefix="uid"
-    />
-
-    <!-- The overview panel needs a real element to carry role="tabpanel", and
-         .project-view lays its children out with a flex gap — so this wrapper
-         re-declares the column gap or the rhythm between the cards collapses. -->
-    <div
-      v-if="activeTab === 'overview'"
-      :id="panelId('overview')"
-      class="tab-panel"
-      role="tabpanel"
-      :aria-labelledby="tabId('overview')"
-      tabindex="0"
-    >
-    <section class="card">
-      <div class="card-header">
-        <h3>project context</h3>
-        <div class="card-actions">
-          <span v-if="contextStatus" class="status" :class="contextStatus">{{ contextStatusLabel }}</span>
-          <button
-            class="btn-small"
-            :disabled="!contextDirty || contextSaving"
-            @click="saveContext"
-          >{{ contextSaving ? 'Saving...' : 'Save' }}</button>
-        </div>
-      </div>
-      <textarea
-        v-model="contextDraft"
-        class="context-textarea"
-        placeholder="Describe what this project is about."
-        rows="8"
-      ></textarea>
-      <!-- Saving writes this into the canonical doc's `description:`
-           frontmatter, and a doc edit flows back here. Say so, or the write
-           into a vault file is invisible from the button that causes it. -->
-      <p class="context-hint">
-        sent with every message.
-        <template v-if="project.vault_doc_path">
-          saved to <button class="link-btn" @click="openContextDoc">{{ project.vault_doc_path }}</button>
-        </template>
-      </p>
-    </section>
-
-    <section class="card">
-      <div class="card-header">
-        <h3>active chats ({{ activeChats.length }})</h3>
-        <button class="btn-small" @click="newChat">+ New chat</button>
-      </div>
-      <div v-if="activeChats.length" class="chat-list">
-        <div
-          v-for="chat in activeChats"
-          :key="chat.chat_id"
-          class="chat-row"
-          :class="{ remote: chat.local === false }"
-          @click="chat.local !== false && openChat(chat.chat_id)"
-          :title="chat.local === false ? 'This chat lives on another instance' : ''"
-        >
-          <div class="chat-row-main">
-            <!-- Chat-level unread is title weight, not a digit: chatUnread() is
-                 binary, so a badge could only ever read "1". -->
-            <span
-              class="chat-name"
-              :class="{ 'chat-name--unread': store.chatUnread(chat.chat_id) > 0 }"
-            >{{ chat.title }}</span>
-            <ChatSignals :chat-id="chat.chat_id" density="row" :hue="workspaceHue" />
-            <span v-if="chat.local === false" class="remote-chip">remote</span>
+    <div class="page-grid project-grid">
+      <div class="page-main">
+        <section class="project-section project-context" aria-labelledby="project-context-title">
+          <div class="section-head">
+            <h3 id="project-context-title">Context</h3>
+            <div class="section-actions">
+              <span v-if="contextStatus" class="status" :class="contextStatus">{{ contextStatusLabel }}</span>
+              <button
+                v-if="!editingContext"
+                type="button"
+                class="text-action"
+                @click="startEditContext"
+              >Edit</button>
+              <template v-else>
+                <button type="button" class="btn-small" :disabled="contextSaving" @click="cancelContextEdit">Cancel</button>
+                <button
+                  type="button"
+                  class="btn-small btn-primary"
+                  :disabled="!contextDirty || contextSaving"
+                  @click="saveContext"
+                >{{ contextSaving ? 'Saving…' : 'Save' }}</button>
+              </template>
+            </div>
           </div>
-          <div class="chat-row-meta">
-            <span>{{ chat.model }}</span>
-            <span class="dot">·</span>
-            <span>{{ formatRelative(chatActivity(chat), { suffix: true, absoluteAfterDays: 7 }) }}</span>
+          <label v-if="editingContext" class="sr-only" :for="`${uid}-project-context`">Project context</label>
+          <textarea
+            v-if="editingContext"
+            :id="`${uid}-project-context`"
+            v-model="contextDraft"
+            class="context-textarea"
+            placeholder="Describe the outcome, constraints, and useful sources for this project."
+            rows="6"
+          ></textarea>
+          <p v-else class="context-display" :class="{ 'context-display--empty': !project.context }">
+            {{ project.context || 'No project context yet. Add the outcome, constraints, and sources Ciao should keep in mind.' }}
+          </p>
+          <!-- Saving writes this into the canonical doc's `description:`
+               frontmatter, and a doc edit flows back here. Say so, or the write
+               into a vault file is invisible from the button that causes it. -->
+          <p class="context-hint">
+            Sent with every message in this project.
+            <template v-if="project.vault_doc_path">
+              Saved to <button type="button" class="link-btn" @click="openContextDoc">{{ project.vault_doc_path }}</button>
+            </template>
+          </p>
+        </section>
+
+        <section class="project-section" aria-labelledby="project-chats-title">
+          <div class="section-head">
+            <h3 id="project-chats-title">Chats</h3>
           </div>
-        </div>
-      </div>
-      <div v-else class="empty-row">// no active chats in this project</div>
-    </section>
-
-    <section v-if="showFilesSection" class="card" @dragover.prevent="onDragOver" @dragleave="onDragLeave" @drop.prevent="onDrop" :class="{ 'drag-over': dragOver }">
-      <div class="card-header">
-        <h3>files ({{ files.length }})</h3>
-        <div class="card-actions">
-          <span v-if="filesLoading" class="status">Loading…</span>
-          <span v-else-if="uploading" class="status">Uploading…</span>
-          <button class="btn-small" @click="triggerUpload" :disabled="uploading">+ Upload</button>
-          <input
-            ref="uploadInput"
-            type="file"
-            multiple
-            class="hidden-input"
-            @change="onFilePicked"
-          />
-        </div>
-      </div>
-
-      <div v-if="filesError" class="upload-errors">
-        <div class="upload-error">{{ filesError }}</div>
-      </div>
-
-      <div v-if="uploadErrors.length" class="upload-errors">
-        <div v-for="(err, i) in uploadErrors" :key="i" class="upload-error">
-          {{ err.filename }}: {{ err.error }}
-        </div>
-        <button class="btn-tiny" @click="uploadErrors = []">dismiss</button>
-      </div>
-
-      <div v-if="!files.length && !filesLoading && !filesError" class="empty-row">
-        // no files yet. drag one in or hit Upload.
-      </div>
-
-      <div v-if="markdownFiles.length" class="file-group">
-        <div class="file-group-label">Markdown</div>
-        <div
-          v-for="f in markdownFiles"
-          :key="f.path"
-          class="file-row"
-          @click="openFile(f)"
-        >
-          <AppIcon class="file-icon" name="doc" :size="18" />
-          <span class="file-name">{{ f.path }}</span>
-          <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
-        </div>
-      </div>
-
-      <div v-if="imageFiles.length" class="file-group">
-        <div class="file-group-label">Images</div>
-        <div
-          v-for="f in imageFiles"
-          :key="f.path"
-          class="file-row"
-          @click="openFile(f)"
-        >
-          <img
-            class="file-thumb"
-            :src="`/api/workspace-image?path=${encodeURIComponent(f.vault_path)}`"
-            :alt="f.path"
-            loading="lazy"
-          />
-          <span class="file-name">{{ f.path }}</span>
-          <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
-        </div>
-      </div>
-
-      <div v-if="otherFiles.length" class="file-group">
-        <div class="file-group-label">Other</div>
-        <div
-          v-for="f in otherFiles"
-          :key="f.path"
-          class="file-row"
-          @click="openFile(f)"
-        >
-          <AppIcon class="file-icon" name="file" :size="18" />
-          <span class="file-name">{{ f.path }}</span>
-          <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
-        </div>
-      </div>
-    </section>
-
-    <section class="card" v-if="archivedChats.length">
-      <div class="card-header">
-        <h3>archived ({{ archivedChats.length }})</h3>
-      </div>
-      <div class="chat-list">
-        <div
-          v-for="chat in pagedArchivedChats"
-          :key="chat.chat_id"
-          class="chat-row archived"
-          :class="{ clickable: chat.archive_path, tidying: store.chatIsPostprocessing(chat.chat_id) }"
-          @click="chat.archive_path && openArchive(chat)"
-        >
-          <div class="chat-row-main">
-            <span class="chat-name">{{ chat.title }}</span>
-            <!-- What Ciaobot is taking from this chat, or took. Doubles as an
-                 index: it separates archives that produced durable knowledge
-                 from the ones that were dead ends. -->
-            <span
-              v-if="store.chatIsPostprocessing(chat.chat_id)"
-              class="chat-archive-note"
+          <div v-if="activeChats.length" class="chat-list">
+            <button
+              v-for="chat in activeChats"
+              :key="chat.chat_id"
+              type="button"
+              class="chat-row"
+              :class="{ remote: chat.local === false }"
+              :disabled="chat.local === false"
+              @click="openChat(chat.chat_id)"
+              :title="chat.local === false ? 'This chat lives on another instance' : ''"
             >
-              <span class="chat-archive-dot" aria-hidden="true" />
-              {{ postprocessLabel(store.chatPostprocess(chat.chat_id)) }}…
-            </span>
-            <span
-              v-else-if="archiveSummary(chat.chat_id)"
-              class="chat-archive-note"
-              :class="{ failed: postprocessFailed(store.chatPostprocess(chat.chat_id)) }"
-            >{{ archiveSummary(chat.chat_id) }}</span>
+              <span class="chat-row-main">
+                <span class="chat-row-heading">
+                  <!-- Chat-level unread is title weight, not a digit: chatUnread() is
+                       binary, so a badge could only ever read "1". -->
+                  <span
+                    class="chat-name"
+                    :class="{ 'chat-name--unread': store.chatUnread(chat.chat_id) > 0 }"
+                  >{{ chat.title }}</span>
+                  <ChatSignals :chat-id="chat.chat_id" density="row" :hue="workspaceHue" />
+                  <span v-if="chat.local === false" class="remote-chip">remote</span>
+                </span>
+                <!-- Same status grammar as Home's rows, read from the same
+                     signals, so a chat never reads differently in two places. -->
+                <span class="chat-row-sub" :class="{ 'chat-row-sub--needs': store.chatNeedsInput(chat.chat_id) }">{{ chatStatusPhrase(chat) }}</span>
+              </span>
+              <span class="chat-row-time">{{ formatRelative(chatActivity(chat)) }}</span>
+            </button>
           </div>
-          <div class="chat-row-meta">
-            <span>{{ chat.model }}</span>
-            <span class="dot">·</span>
-            <span>{{ formatDate(chat.created_at) }}</span>
-          </div>
-        </div>
-      </div>
-      <div v-if="archivedChats.length > ARCHIVED_PER_PAGE" class="pagination">
-        <button
-          class="btn-small"
-          :disabled="archivedPage === 0"
-          @click="archivedPage--"
-        >Previous</button>
-        <span class="page-info">{{ archivedPage + 1 }} / {{ totalArchivedPages }}</span>
-        <button
-          class="btn-small"
-          :disabled="archivedPage >= totalArchivedPages - 1"
-          @click="archivedPage++"
-        >Next</button>
-      </div>
-    </section>
-    </div>
+          <p v-else class="empty-row">No active chats in this project. <button type="button" class="link-btn" @click="newChat">Start one</button></p>
+        </section>
 
-    <section
-      v-else-if="activeTab === 'schedules'"
-      :id="panelId('schedules')"
-      class="card automation-card"
-      role="tabpanel"
-      :aria-labelledby="tabId('schedules')"
-      tabindex="0"
-    >
-      <div class="card-header">
-        <div>
-          <h3>automations <span v-if="scheduleCount !== undefined">({{ scheduleCount }})</span></h3>
-          <p class="card-hint">Prompts dispatched into this project or one of its chats on a cadence.</p>
-        </div>
-      </div>
-      <div v-if="projectSchedules.length" class="automation-list">
-        <button
-          v-for="schedule in projectSchedules"
-          :key="schedule.schedule_id"
-          type="button"
-          class="automation-row"
-          @click="openAutomation(schedule.schedule_id)"
+        <section
+          v-if="showFilesSection"
+          class="project-section project-files"
+          :class="{ 'drag-over': dragOver }"
+          aria-labelledby="project-files-title"
+          @dragover.prevent="onDragOver"
+          @dragleave="onDragLeave"
+          @drop.prevent="onDrop"
         >
-          <span class="automation-row-main">
-            <span class="automation-title">{{ schedule.title || promptTitle(schedule.prompt) }}</span>
-            <span class="automation-status" :class="{ running: schedule.enabled }">
-              {{ schedule.enabled ? 'enabled' : 'paused' }}
-            </span>
-          </span>
-          <span class="automation-row-meta">
-            <span>{{ scheduleFrequencyLabel(schedule) }}</span>
-            <span class="dot">·</span>
-            <span>{{ scheduleTargetLabel(schedule) }}</span>
-            <span class="dot">·</span>
-            <span>next {{ automationTimestamp(schedule.next_run) }}</span>
-          </span>
-        </button>
+          <div class="section-head">
+            <h3 id="project-files-title">Files<span v-if="files.length" class="section-count">{{ files.length }}</span></h3>
+            <div class="section-actions">
+              <span v-if="filesLoading" class="status">Loading…</span>
+              <span v-else-if="uploading" class="status">Uploading…</span>
+              <button type="button" class="text-action" @click="triggerUpload" :disabled="uploading">Upload</button>
+              <input
+                ref="uploadInput"
+                type="file"
+                multiple
+                class="hidden-input"
+                @change="onFilePicked"
+              />
+            </div>
+          </div>
+
+          <div v-if="filesError" class="upload-errors">
+            <div class="upload-error">{{ filesError }}</div>
+          </div>
+
+          <div v-if="uploadErrors.length" class="upload-errors">
+            <div v-for="(err, i) in uploadErrors" :key="i" class="upload-error">
+              {{ err.filename }}: {{ err.error }}
+            </div>
+            <button class="btn-tiny" @click="uploadErrors = []">Dismiss</button>
+          </div>
+
+          <p v-if="!files.length && !filesLoading && !filesError" class="empty-row">
+            No files yet. Drop one here or use Upload.
+          </p>
+
+          <div v-if="markdownFiles.length" class="file-group">
+            <div class="file-group-label">Markdown</div>
+            <button
+              v-for="f in markdownFiles"
+              type="button"
+              :key="f.path"
+              class="file-row"
+              @click="openFile(f)"
+            >
+              <AppIcon class="file-icon" name="doc" :size="18" />
+              <span class="file-name">{{ f.path }}</span>
+              <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
+            </button>
+          </div>
+
+          <div v-if="imageFiles.length" class="file-group">
+            <div class="file-group-label">Images</div>
+            <button
+              v-for="f in imageFiles"
+              type="button"
+              :key="f.path"
+              class="file-row"
+              @click="openFile(f)"
+            >
+              <img
+                class="file-thumb"
+                :src="`/api/workspace-image?path=${encodeURIComponent(f.vault_path)}`"
+                :alt="f.path"
+                loading="lazy"
+              />
+              <span class="file-name">{{ f.path }}</span>
+              <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
+            </button>
+          </div>
+
+          <div v-if="otherFiles.length" class="file-group">
+            <div class="file-group-label">Other</div>
+            <button
+              v-for="f in otherFiles"
+              type="button"
+              :key="f.path"
+              class="file-row"
+              @click="openFile(f)"
+            >
+              <AppIcon class="file-icon" name="file" :size="18" />
+              <span class="file-name">{{ f.path }}</span>
+              <span class="file-meta">{{ formatSize(f.size) }} · {{ formatFileTime(f.mtime) }}</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="project-section project-automations" aria-labelledby="project-automations-title">
+          <div class="section-head">
+            <div>
+              <h3 id="project-automations-title">Automations<span v-if="scheduleCount" class="section-count">{{ scheduleCount }}</span></h3>
+              <p class="section-hint">Prompts dispatched into this project or one of its chats on a cadence.</p>
+            </div>
+          </div>
+          <div v-if="projectSchedules.length" class="automation-list">
+            <button
+              v-for="schedule in projectSchedules"
+              :key="schedule.schedule_id"
+              type="button"
+              class="automation-row"
+              @click="openAutomation(schedule.schedule_id)"
+            >
+              <span class="automation-row-main">
+                <span class="automation-title" :class="{ 'automation-title--paused': !schedule.enabled }">{{ schedule.title || promptTitle(schedule.prompt) }}</span>
+                <span class="automation-row-meta">
+                  <span>{{ scheduleFrequencyLabel(schedule) }}</span>
+                  <span class="dot">·</span>
+                  <span>{{ scheduleTargetLabel(schedule) }}</span>
+                </span>
+              </span>
+              <span class="automation-next">{{ schedule.enabled ? `next ${automationTimestamp(schedule.next_run)}` : 'Paused' }}</span>
+            </button>
+            <div v-if="taskStore.scheduleLoadError" class="automation-stale" role="status">
+              Could not refresh automations. Showing the last successful load.
+              <button type="button" class="btn-small" @click="loadAutomations">Retry</button>
+            </div>
+          </div>
+          <p v-else-if="schedulesState === 'loading'" class="empty-row">Loading automations…</p>
+          <p v-else-if="schedulesState === 'error'" class="empty-row" role="alert">
+            Could not load automations.
+            <button type="button" class="btn-small" @click="loadAutomations">Retry</button>
+          </p>
+          <p v-else class="empty-row">No automations deliver prompts to this project.</p>
+        </section>
+
+        <section v-if="archivedChats.length" class="project-section" aria-labelledby="project-archived-title">
+          <div class="section-head">
+            <h3 id="project-archived-title">Archived<span class="section-count">{{ archivedChats.length }}</span></h3>
+          </div>
+          <div class="chat-list">
+            <button
+              v-for="chat in pagedArchivedChats"
+              :key="chat.chat_id"
+              type="button"
+              class="chat-row archived"
+              :class="{ clickable: chat.archive_path, tidying: store.chatIsPostprocessing(chat.chat_id) }"
+              :disabled="!chat.archive_path"
+              @click="openArchive(chat)"
+            >
+              <span class="chat-row-main">
+                <span class="chat-name">{{ chat.title }}</span>
+                <!-- What Ciaobot is taking from this chat, or took. Doubles as an
+                     index: it separates archives that produced durable knowledge
+                     from the ones that were dead ends. -->
+                <span
+                  v-if="store.chatIsPostprocessing(chat.chat_id)"
+                  class="chat-archive-note"
+                >
+                  <span class="chat-archive-dot" aria-hidden="true" />
+                  {{ postprocessLabel(store.chatPostprocess(chat.chat_id)) }}…
+                </span>
+                <span
+                  v-else-if="archiveSummary(chat.chat_id)"
+                  class="chat-archive-note"
+                  :class="{ failed: postprocessFailed(store.chatPostprocess(chat.chat_id)) }"
+                >{{ archiveSummary(chat.chat_id) }}</span>
+              </span>
+              <span class="chat-row-time">{{ formatDate(chat.created_at) }}</span>
+            </button>
+          </div>
+          <div v-if="archivedChats.length > ARCHIVED_PER_PAGE" class="pagination">
+            <button
+              class="btn-small"
+              :disabled="archivedPage === 0"
+              @click="archivedPage--"
+            >Previous</button>
+            <span class="page-info">{{ archivedPage + 1 }} / {{ totalArchivedPages }}</span>
+            <button
+              class="btn-small"
+              :disabled="archivedPage >= totalArchivedPages - 1"
+              @click="archivedPage++"
+            >Next</button>
+          </div>
+        </section>
       </div>
-      <div v-else-if="schedulesState === 'loading'" class="empty-row">// loading automations…</div>
-      <div v-else-if="schedulesState === 'error'" class="empty-row">// could not load automations</div>
-      <div v-else class="empty-row">// no automations deliver prompts to this project</div>
-    </section>
+
+      <aside class="page-rail project-rail" aria-label="Project summary">
+        <section class="rail-section">
+          <h3 class="rail-title">Now</h3>
+          <div class="rail-kvs">
+            <div class="rail-kv"><span>Need you</span><strong :class="{ 'rail-attention': needsInputCount > 0 }">{{ needsInputCount }}</strong></div>
+            <div class="rail-kv"><span>Working</span><strong>{{ workingCount }}</strong></div>
+            <div class="rail-kv"><span>Unread</span><strong>{{ totalUnread }}</strong></div>
+            <div class="rail-kv"><span>Active chats</span><strong>{{ activeChats.length }}</strong></div>
+            <div v-if="archivedChats.length" class="rail-kv"><span>Archived</span><strong>{{ archivedChats.length }}</strong></div>
+            <div v-if="project.created_at" class="rail-kv"><span>Created</span><strong>{{ formatDate(project.created_at) }}</strong></div>
+          </div>
+        </section>
+        <section class="rail-section">
+          <h3 class="rail-title">Lives in</h3>
+          <p v-if="project.vault_folder" class="rail-path"><code>{{ project.vault_folder }}</code></p>
+          <p v-else class="rail-note">No vault folder: this project's chats and context live in Ciaobot.</p>
+          <p v-if="project.vault_doc_path" class="rail-note">
+            Project doc <button type="button" class="link-btn" @click="openContextDoc">{{ project.vault_doc_path }}</button>
+          </p>
+        </section>
+      </aside>
+    </div>
   </div>
-  <div v-else class="empty-state">// project not found.</div>
+  <div v-else class="empty-state">Project not found.</div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, useId } from 'vue'
+import { ref, computed, watch, onBeforeUnmount, onMounted, nextTick, useId } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { askConfirm } from '../lib/confirm'
-import TabBar, { type TabSpec } from './TabBar.vue'
 import { formatRelative } from '../lib/relativeTime'
 import { chatActivityTimestamp } from '../lib/homeLanes'
 import { postprocessFailed, postprocessLabel, postprocessSummary } from '../lib/postprocessView'
 import { colorForWorkspace } from '../lib/workspaceColors'
+import { openNewChatPicker } from '../lib/newChat'
 import PaneHeader from './PaneHeader.vue'
 import ChatSignals from './ChatSignals.vue'
 import AppIcon from './AppIcon.vue'
@@ -350,21 +379,9 @@ const router = useRouter()
 
 const project = computed(() => store.projects.find(p => p.project_id === props.projectId) || null)
 
-type ProjectTab = 'overview' | 'schedules'
-const activeTab = ref<ProjectTab>('overview')
-
-// Unique per mounted instance so the tab/panel id pairs stay valid even if two
-// project views are ever alive at once. Handed to TabBar as its id-prefix, so
-// these two helpers must keep matching its `<prefix>-tab-`/`<prefix>-panel-`
-// scheme — the tabs it renders point at the panels below via aria-controls.
+// Unique per mounted instance, so the context editor's label/textarea pair
+// stays valid even if two project views are ever alive at once.
 const uid = useId()
-const tabId = (key: ProjectTab) => `${uid}-tab-${key}`
-const panelId = (key: ProjectTab) => `${uid}-panel-${key}`
-
-const projectTabs = computed<TabSpec<ProjectTab>[]>(() => [
-  { key: 'overview', label: 'Overview' },
-  { key: 'schedules', label: 'Automations', count: scheduleCount.value },
-])
 
 watch(project, (p) => {
   if (p && p.workspace && p.workspace !== store.activeWorkspace) {
@@ -381,16 +398,10 @@ const projectSchedules = computed(() =>
   ),
 )
 
-// The task store is filled by ChatLayout's fire-and-forget fetch, so an empty
-// list here could mean "none", "still loading" or "the request failed" — three
-// different answers that all rendered as "no automations". Track the load so the
-// panel can say which, and so a tab omits a count it cannot vouch for.
-const automationLoad = ref<'loading' | 'ready' | 'error'>('loading')
-
 function automationState(count: number): 'list' | 'loading' | 'error' | 'none' {
   if (count > 0) return 'list'
-  if (automationLoad.value === 'loading') return 'loading'
-  if (automationLoad.value === 'error') return 'error'
+  if (taskStore.scheduleLoadError) return 'error'
+  if (taskStore.scheduleLoading || !taskStore.schedulesLoaded) return 'loading'
   return 'none'
 }
 const schedulesState = computed(() => automationState(projectSchedules.value.length))
@@ -406,9 +417,8 @@ const scheduleCount = computed(() =>
 async function loadAutomations(): Promise<void> {
   try {
     await taskStore.fetchSchedules()
-    automationLoad.value = 'ready'
   } catch {
-    automationLoad.value = 'error'
+    // The shared task store retains the error and the last successful snapshot.
   }
 }
 const activeChats = computed(() =>
@@ -439,6 +449,15 @@ const workspaceHue = computed(() =>
 
 function chatActivity(chat: ChatInfo): string {
   return chatActivityTimestamp(chat)
+}
+
+// Home's tier order: a question or permission beats work in flight, which
+// beats an unread reply.
+function chatStatusPhrase(chat: ChatInfo): string {
+  if (store.chatNeedsInput(chat.chat_id)) return 'waiting for you'
+  if (store.chatIsWorking(chat.chat_id)) return 'agent is working'
+  if (store.chatUnread(chat.chat_id) > 0) return 'new reply'
+  return 'no new activity'
 }
 
 function promptTitle(prompt: string): string {
@@ -521,13 +540,70 @@ async function saveName() {
 }
 
 // ── Context edit ───────────────────────────────────────────────────────
+const editingContext = ref(false)
+const actionsOpen = ref(false)
+const projectActionsEl = ref<HTMLElement | null>(null)
+const projectActionsTrigger = ref<HTMLButtonElement | null>(null)
+const projectActionsMenu = ref<HTMLElement | null>(null)
+
+function closeProjectActions(restoreFocus = false) {
+  if (!actionsOpen.value) return
+  actionsOpen.value = false
+  if (restoreFocus) void nextTick(() => projectActionsTrigger.value?.focus())
+}
+
+function toggleProjectActions() {
+  if (actionsOpen.value) {
+    closeProjectActions(true)
+    return
+  }
+  actionsOpen.value = true
+  void nextTick(() => {
+    projectActionsMenu.value?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
+  })
+}
+
+function onProjectActionsKeydown(event: KeyboardEvent) {
+  const items = Array.from(projectActionsMenu.value?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])
+  if (!items.length) return
+  const current = items.indexOf(document.activeElement as HTMLButtonElement)
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    closeProjectActions(true)
+    return
+  }
+  if (event.key === 'Tab') {
+    closeProjectActions(false)
+    return
+  }
+  let next = current
+  if (event.key === 'ArrowDown') next = (current + 1) % items.length
+  else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length
+  else if (event.key === 'Home') next = 0
+  else if (event.key === 'End') next = items.length - 1
+  else return
+  event.preventDefault()
+  items[next]?.focus()
+}
+
+function closeProjectActionsOnOutside(event: MouseEvent) {
+  if (!actionsOpen.value) return
+  if (event.target instanceof Node && projectActionsEl.value?.contains(event.target)) return
+  closeProjectActions(false)
+}
 const contextDraft = ref('')
 const contextSaving = ref(false)
 const contextStatus = ref<'' | 'saved' | 'error'>('')
 
 watch(
-  () => project.value?.context,
-  (ctx) => { contextDraft.value = ctx || '' },
+  () => [props.projectId, project.value?.context] as const,
+  ([, ctx]) => {
+    contextDraft.value = ctx || ''
+    editingContext.value = false
+    editingName.value = false
+    closeProjectActions(false)
+  },
   { immediate: true }
 )
 
@@ -538,16 +614,34 @@ const contextStatusLabel = computed(() => {
   return ''
 })
 
+function startEditContext() {
+  if (!project.value) return
+  contextDraft.value = project.value.context || ''
+  contextStatus.value = ''
+  editingContext.value = true
+}
+
+function cancelContextEdit() {
+  if (!project.value || contextSaving.value) return
+  contextDraft.value = project.value.context || ''
+  contextStatus.value = ''
+  editingContext.value = false
+}
+
 async function saveContext() {
   if (!project.value || !contextDirty.value) return
+  const projectId = project.value.project_id
+  const context = contextDraft.value
   contextSaving.value = true
   contextStatus.value = ''
   try {
-    await store.updateProject(project.value.project_id, { context: contextDraft.value })
+    await store.updateProject(projectId, { context })
+    if (project.value?.project_id !== projectId) return
     contextStatus.value = 'saved'
+    editingContext.value = false
     setTimeout(() => { if (contextStatus.value === 'saved') contextStatus.value = '' }, 2000)
   } catch {
-    contextStatus.value = 'error'
+    if (project.value?.project_id === projectId) contextStatus.value = 'error'
   } finally {
     contextSaving.value = false
   }
@@ -556,8 +650,13 @@ async function saveContext() {
 // ── Actions ────────────────────────────────────────────────────────────
 async function newChat() {
   if (!project.value) return
-  const c = await store.createChat(project.value.project_id)
-  router.push(`/chat/${c.chat_id}`)
+  const projectId = await openNewChatPicker({
+    workspace: project.value.workspace,
+    projectId: project.value.project_id,
+  })
+  if (!projectId) return
+  const chat = await store.newChatInProject(projectId)
+  if (chat) router.push(`/chat/${chat.chat_id}`)
 }
 
 function openChat(chatId: string) {
@@ -571,6 +670,7 @@ function openArchive(chat: { archive_path?: string }) {
 
 async function doComplete() {
   if (!project.value) return
+  closeProjectActions(false)
   if (!await askConfirm(`Complete "${project.value.name}"? This will move the vault entry to completed/ and remove the project from the PWA.`, {
     title: 'Complete project',
     confirmLabel: 'Complete project',
@@ -581,6 +681,9 @@ async function doComplete() {
 
 async function doDelete() {
   if (!project.value) return
+  closeProjectActions(false)
+  await nextTick()
+  projectActionsTrigger.value?.focus()
   if (!await askConfirm('Delete this project and archive all its chats?', {
     title: 'Delete project',
     confirmLabel: 'Delete project',
@@ -747,11 +850,16 @@ async function reloadAll() {
   archivedPage.value = 0
   await Promise.all([loadFiles(), loadAutomations()])
 }
-onMounted(reloadAll)
+onMounted(() => {
+  document.addEventListener('click', closeProjectActionsOnOutside)
+  void reloadAll()
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('click', closeProjectActionsOnOutside)
+})
 // Re-fetch when the user navigates between projects without unmounting
 // the component (Vue keeps it alive across :projectId changes).
 watch(() => props.projectId, async () => {
-  activeTab.value = 'overview'
   await reloadAll()
 })
 </script>
@@ -762,8 +870,12 @@ watch(() => props.projectId, async () => {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
-  gap: 16px;
-  padding: 0 16px;
+  min-width: 0;
+}
+
+.project-grid {
+  padding-top: var(--space-6);
+  padding-bottom: var(--space-6);
 }
 
 .header-left {
@@ -794,202 +906,288 @@ watch(() => props.projectId, async () => {
 .close-btn:hover { color: var(--fg); }
 
 .project-title {
-  font-size: 16px;
-  font-weight: 700;
+  min-width: 0;
   margin: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: text;
 }
 
 .title-input {
-  font-size: 16px;
-  font-weight: 700;
+  font-size: var(--text-lg);
+  font-weight: 650;
   background: var(--bg);
   border: 1px solid var(--accent);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--fg);
   padding: 4px 8px;
   font-family: var(--font);
-  width: 320px;
+  width: min(320px, 60vw);
 }
 
-.workspace-badge {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  color: var(--fg2);
+.project-new-chat {
+  white-space: nowrap;
+}
+
+.project-actions {
+  position: relative;
+}
+
+.project-actions-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  min-width: 10rem;
+  padding: var(--space-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  box-shadow: 0 0.75rem 2rem rgb(0 0 0 / 28%);
+}
+
+.project-actions-menu button {
+  width: 100%;
+  min-height: var(--touch);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-actions-menu button:hover {
   background: var(--bg3);
-  padding: 2px 8px;
-  border-radius: 4px;
 }
 
-.btn-small.danger {
-  border-color: var(--error);
+.project-actions-menu .danger {
   color: var(--error);
 }
-.btn-small.danger:hover { background: var(--error); color: white; }
 
-.project-stats {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 10px;
+/* Sections, not cards: a 16px heading with its one action on the right, then
+   hairline rows. Same vocabulary as Home and the other aligned pages. */
+.project-section + .project-section {
+  margin-top: 36px;
 }
 
-.stat {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-/* Only the urgent tile carries the accent, so a glance answers "does anything
-   here want me?" before any number is read. */
-.stat--hot {
-  border-left: 2px solid var(--accent);
-}
-
-.stat--hot .stat-value {
-  color: var(--accent);
-}
-
-.stat-value {
-  font-size: var(--text-lg);
-  font-weight: 700;
-  color: var(--fg);
-  font-variant-numeric: tabular-nums;
-}
-
-.stat-label {
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  color: var(--fg2);
-}
-
-.project-caption {
-  margin: 0 0 var(--space-4);
-  padding: 0 var(--space-4);
-  font-size: var(--text-xs);
-  color: var(--fg3);
-}
-
-/* The overview panel's own children are the cards, and .project-view spaces its
-   children with a flex gap — so the panel repeats that column layout. */
-.tab-panel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
-
-.card {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.card-header {
+.section-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
 }
 
-.card-header h3 {
-  font-size: 13px;
-  font-weight: 700;
+.section-head h3 {
   margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  color: var(--fg2);
+  color: var(--fg);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.02em;
 }
 
-.card-hint {
-  margin: var(--space-1) 0 0;
+.section-count {
+  margin-left: var(--space-2);
   color: var(--fg3);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  letter-spacing: 0;
 }
 
-.card-actions {
+.section-hint {
+  margin: 2px 0 0;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+}
+
+.section-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
+  flex: none;
 }
 
-.status { font-size: 11px; color: var(--fg2); }
+.text-action,
+.link-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.text-action {
+  min-height: 32px;
+  font-size: var(--text-sm);
+}
+
+.text-action:hover:not(:disabled),
+.link-btn:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.text-action:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.text-action:focus-visible,
+.link-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+.status { font-size: var(--text-xs); color: var(--fg2); }
 .status.saved { color: var(--success); }
 .status.error { color: var(--error); }
+
+.context-display {
+  margin: 0;
+  max-width: 75ch;
+  color: var(--fg);
+  font-size: var(--text-base);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.context-display--empty {
+  color: var(--fg2);
+}
 
 .context-textarea {
   width: 100%;
   resize: vertical;
   min-height: 120px;
-  font-size: 13px;
+  font-size: var(--text-base);
   line-height: 1.5;
   padding: 10px 12px;
 }
 
 .context-hint {
   margin: var(--space-2) 0 0;
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   color: var(--fg3);
+  overflow-wrap: anywhere;
 }
 
 .context-hint .link-btn {
-  background: none;
-  border: 0;
-  padding: 0;
-  font: inherit;
   color: var(--fg2);
   text-decoration: underline;
-  cursor: pointer;
 }
 
-.context-hint .link-btn:hover {
-  color: var(--fg);
+.chat-list,
+.automation-list {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
 }
 
-.chat-list { display: flex; flex-direction: column; }
-
+/* Home's row: title over a status sub-line, time on the right. */
 .chat-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 4px;
+  gap: var(--space-4);
+  width: 100%;
+  min-height: 60px;
+  padding: 9px 2px;
+  border: 0;
   border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
   cursor: pointer;
-  gap: 12px;
 }
-.chat-row:last-child { border-bottom: none; }
-.chat-row:hover { background: var(--bg3); }
-.chat-row.archived { opacity: 0.6; cursor: default; }
-.chat-row.archived:hover { background: transparent; }
+.chat-row:hover .chat-name { color: var(--accent); }
+.chat-row:focus-visible,
+.automation-row:focus-visible,
+.file-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+.chat-row.archived { min-height: var(--touch); cursor: default; }
+.chat-row.archived .chat-name { color: var(--fg2); font-weight: 500; }
+.chat-row.archived:hover .chat-name { color: var(--fg2); }
 .chat-row.archived.clickable { cursor: pointer; }
-.chat-row.archived.clickable:hover { background: var(--bg3); }
-/* Archived rows are dimmed as a class, but a row with work actually happening
-   in it is not "past" yet — it earns full strength back until it settles. */
-.chat-row.archived.tidying { opacity: 1; }
+.chat-row.archived.clickable:hover .chat-name { color: var(--accent); }
+/* A row with work actually happening in it is not "past" yet. */
+.chat-row.archived.tidying .chat-name { color: var(--fg); }
+.chat-row.remote { opacity: 0.5; cursor: default; }
+.chat-row.remote:hover .chat-name { color: var(--fg); }
+.chat-row:disabled { opacity: 0.55; }
 
-/* Archived rows stack title over note. Active rows keep the single-line flex
-   layout, where the title sits beside its signals. */
-.chat-row.archived .chat-row-main {
+.chat-row-main {
+  display: flex;
+  flex: 1;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 0;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-row-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: var(--text-base);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 120ms var(--ease);
+}
+
+/* Unread is weight, not a digit (chatUnread() is binary). Read rows step back. */
+.chat-row:not(.archived) .chat-name:not(.chat-name--unread) {
+  color: var(--fg2);
+  font-weight: 500;
+}
+
+.chat-name--unread {
+  color: var(--fg);
+  font-weight: 650;
+}
+
+.chat-row-sub {
+  color: var(--fg3);
+  font-size: var(--text-sm);
+}
+
+.chat-row-sub--needs {
+  color: var(--accent);
+}
+
+.chat-row-time {
+  flex: none;
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: nowrap;
 }
 
 .chat-archive-note {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 3px;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   color: var(--fg3);
   min-width: 0;
 }
@@ -1012,12 +1210,6 @@ watch(() => props.projectId, async () => {
   50%      { opacity: 0.9; }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .chat-archive-dot { animation: none; opacity: 0.75; }
-}
-.chat-row.remote { opacity: 0.5; cursor: default; }
-.chat-row.remote:hover { background: transparent; }
-
 .pagination {
   display: flex;
   align-items: center;
@@ -1026,39 +1218,8 @@ watch(() => props.projectId, async () => {
   margin-top: 10px;
 }
 .page-info {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--fg2);
-}
-
-.chat-row-main {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.chat-name {
-  font-size: var(--text-base);
-  color: var(--fg2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Chat-level unread reads as title weight; the digit belongs to the project
-   and workspace rollups, which are real counts. */
-.chat-name--unread {
-  color: var(--fg);
-  font-weight: 600;
-}
-
-.chat-row-meta {
-  font-size: 11px;
-  color: var(--fg2);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
 }
 
 .dot { opacity: 0.5; }
@@ -1068,33 +1229,46 @@ watch(() => props.projectId, async () => {
   align-items: center;
   height: 16px;
   padding: 0 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg3);
   color: var(--fg2);
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
+  font-size: var(--text-xs);
+  font-weight: 600;
 }
 
 .empty-row {
-  font-size: 12px;
-  color: var(--fg2);
-  font-style: italic;
-  padding: 4px 0;
+  margin: 0;
+  padding: 12px 2px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg3);
+  font-size: var(--text-sm);
 }
 
-/* Raw px on purpose: keeps a mostly-empty automations card from collapsing to a
-   two-line sliver. No token expresses "minimum card body height". */
-.automation-card { min-height: 180px; }
-.automation-list { display: flex; flex-direction: column; }
+.automation-stale {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 8%, var(--bg2));
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.automation-stale .btn-small { flex: none; }
+
 .automation-row {
   display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
   width: 100%;
-  min-height: var(--touch);
-  padding: var(--space-2) var(--space-1);
+  min-height: 56px;
+  padding: 9px 2px;
   border: 0;
   border-bottom: 1px solid var(--border);
   background: transparent;
@@ -1103,38 +1277,36 @@ watch(() => props.projectId, async () => {
   font: inherit;
   text-align: left;
 }
-.automation-row:last-child { border-bottom: none; }
-.automation-row:hover { background: var(--bg3); }
-/* Tab panels carry tabindex="0" per the ARIA tabs pattern, so they need a
-   visible ring too — a focusable region with no ring is a lost keyboard user. */
-.automation-row:focus-visible,
-.tab-panel:focus-visible,
-.automation-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.automation-row-main,
-.automation-row-meta {
+.automation-row:hover .automation-title { color: var(--accent); }
+.automation-row-main {
   display: flex;
-  align-items: center;
-  gap: var(--space-2);
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
 }
 .automation-title {
   overflow: hidden;
+  color: var(--fg);
+  font-size: var(--text-base);
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--text-base);
 }
-.automation-status {
-  flex-shrink: 0;
-  color: var(--fg3);
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.35px;
-}
-.automation-status.running { color: var(--success); }
+.automation-title--paused { color: var(--fg3); }
 .automation-row-meta {
+  display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--fg3);
+  font-size: var(--text-sm);
+}
+.automation-next {
+  flex: none;
   color: var(--fg2);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
+  white-space: nowrap;
 }
 
 .empty-state {
@@ -1146,9 +1318,14 @@ watch(() => props.projectId, async () => {
 }
 
 /* Files section ------------------------------------------------------- */
-.card.drag-over {
-  border-color: var(--accent);
-  background: var(--bg3);
+.project-files {
+  border-radius: var(--radius-sm);
+  transition: background 120ms var(--ease), box-shadow 120ms var(--ease);
+}
+
+.project-files.drag-over {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 .hidden-input {
@@ -1160,10 +1337,11 @@ watch(() => props.projectId, async () => {
   border: 1px solid var(--border);
   color: var(--fg2);
   border-radius: var(--radius-sm);
-  padding: 2px 6px;
-  font-size: 10px;
+  padding: 2px 8px;
+  font-size: var(--text-xs);
   cursor: pointer;
   font-family: var(--font);
+  align-self: flex-start;
 }
 .btn-tiny:hover { color: var(--fg); border-color: var(--fg2); background: var(--bg3); }
 
@@ -1171,48 +1349,52 @@ watch(() => props.projectId, async () => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  background: rgba(248, 113, 113, 0.08);
+  margin-bottom: var(--space-2);
+  background: color-mix(in srgb, var(--error) 8%, transparent);
   border: 1px solid var(--error);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 8px 10px;
 }
 .upload-error {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--error);
 }
 
 .file-group {
   display: flex;
   flex-direction: column;
-  margin-top: 6px;
+  margin-top: var(--space-2);
 }
 
 .file-group-label {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  color: var(--fg2);
-  padding: 6px 4px 2px;
+  padding: 6px 2px 4px;
   border-bottom: 1px solid var(--border);
+  color: var(--fg3);
+  font-size: var(--text-xs);
 }
 
 .file-row {
   display: flex;
   align-items: center;
+  width: 100%;
+  min-height: var(--touch);
   gap: 10px;
-  padding: 6px 4px;
+  padding: 6px 2px;
+  border: 0;
   border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   min-width: 0;
 }
-.file-row:last-child { border-bottom: none; }
-.file-row:hover { background: var(--bg3); }
+.file-row:hover .file-name { color: var(--accent); }
 
 .file-icon {
   width: 24px;
   text-align: center;
   flex-shrink: 0;
-  font-size: 14px;
   color: var(--fg2);
 }
 
@@ -1220,14 +1402,14 @@ watch(() => props.projectId, async () => {
   width: 32px;
   height: 32px;
   object-fit: cover;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg3);
   flex-shrink: 0;
 }
 
 .file-name {
   flex: 1;
-  font-size: 13px;
+  font-size: var(--text-base);
   color: var(--fg);
   white-space: nowrap;
   overflow: hidden;
@@ -1236,16 +1418,46 @@ watch(() => props.projectId, async () => {
 }
 
 .file-meta {
-  font-size: 11px;
-  color: var(--fg2);
+  font-size: var(--text-xs);
+  color: var(--fg3);
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
 }
 
+/* Rail ----------------------------------------------------------------- */
+.project-rail .rail-title {
+  margin-top: 0;
+}
+
+.rail-path {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.rail-path code {
+  color: var(--fg2);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.project-rail .link-btn {
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+@media (pointer: coarse) {
+  .text-action { min-height: var(--touch); }
+}
+
 @media (max-width: 768px) {
-  .project-stats { grid-template-columns: repeat(2, 1fr); }
   .file-meta { display: none; }
-  .automation-row-meta { display: block; line-height: 1.5; }
-  .automation-row-meta .dot { margin: 0 var(--space-1); }
+  .automation-row { flex-wrap: wrap; row-gap: 2px; }
+  .automation-next { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-archive-dot { animation: none; opacity: 0.75; }
+  .chat-name,
+  .project-files { transition: none; }
 }
 </style>

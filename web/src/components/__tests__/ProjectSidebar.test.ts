@@ -7,6 +7,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ProjectSidebar from '../ProjectSidebar.vue'
 import { useProjectStore } from '../../stores/projects'
+import { useTaskStore } from '../../stores/tasks'
 import { useHousekeepingStore } from '../../stores/housekeeping'
 
 const chatId = 'chat-1234-abcd'
@@ -76,7 +77,7 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
-  it('shows the global attention count on the chats rail item', async () => {
+  it('shows the workspace attention count on the Home item', async () => {
     const store = useProjectStore()
     store.chats[0].last_activity_at = '2026-08-12T10:00:00Z'
     store.chats[0].last_read_at = '2026-08-12T09:00:00Z'
@@ -94,9 +95,43 @@ describe('ProjectSidebar chat actions', () => {
     })
 
     const chatsLink = wrapper.get('a[href="/"]')
-    expect(chatsLink.get('.nav-item-badge--count').text()).toBe('1')
-    expect(chatsLink.attributes('aria-label')).toBe('chats — 1 need attention')
+    // A subtle number from a data attribute, not a dot or a pill.
+    expect(chatsLink.attributes('data-count')).toBe('1')
+    expect(chatsLink.attributes('aria-label')).toBe('Home — 1 chat needs attention')
 
+    wrapper.unmount()
+  })
+
+  it('summarises a project only while it is collapsed, with a dot and no count', async () => {
+    const store = useProjectStore()
+    store.chats[0].last_activity_at = '2026-08-12T10:00:00Z'
+    store.chats[0].last_read_at = '2026-08-12T09:00:00Z'
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat' },
+      global: { plugins: [router] },
+    })
+    await nextTick()
+
+    const projectId = store.chats[0].project_id
+    const group = () => wrapper.findAll('.project-group').find(g => g.find('.project-name').text().includes(
+      store.projects.find(p => p.project_id === projectId)!.name,
+    ))!
+    const chevron = () => group().get('.project-icon')
+    // Make sure the project is expanded, then collapsed, whatever it starts as.
+    if (chevron().attributes('aria-expanded') !== 'true') await chevron().trigger('click')
+    expect(group().find('.project-dot').exists()).toBe(false)
+    await chevron().trigger('click')
+    expect(chevron().attributes('aria-expanded')).toBe('false')
+    const dot = group().get('.project-dot')
+    expect(dot.text()).toBe('')
+    expect(dot.attributes('aria-label')).toBe('1 unread')
     wrapper.unmount()
   })
 
@@ -191,59 +226,9 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
-  it('collapses and expands a chat\'s running-subagent group', async () => {
-    const store = useProjectStore()
-    store.runningSubagents = {
-      [chatId]: [
-        { agent_id: 'a1b2c3d4', description: 'Sweep the callers', subagent_type: 'Explore', status: 'running' },
-      ],
-    }
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [
-        { path: '/', component: { template: '<div />' } },
-        { path: '/chat/:chatId/subagent/:agentId', component: { template: '<div />' } },
-      ],
-    })
-    await router.push('/')
-    await router.isReady()
-
-    const wrapper = mount(ProjectSidebar, {
-      attachTo: document.body,
-      props: { collapsed: false, mode: 'chat' },
-      global: {
-        plugins: [router],
-      },
-    })
-
-    // The chat row plus its one subagent row (which reuses .chat-item).
-    expect(wrapper.findAll('.chat-item')).toHaveLength(2)
-    const row = wrapper.get('.subagent-item')
-    expect(row.text()).toContain('Sweep the callers')
-    expect(row.attributes('href')).toBe(`/chat/${chatId}/subagent/a1b2c3d4`)
-
-    const toggle = wrapper.get('[aria-label="Collapse subagents for Copy me"]')
-    expect(toggle.attributes('aria-expanded')).toBe('true')
-
-    await toggle.trigger('click')
-
-    expect(wrapper.findAll('.chat-item')).toHaveLength(1)
-    expect(toggle.attributes('aria-expanded')).toBe('false')
-
-    // Opening the subagent's own view must reopen the group it lives in.
-    await router.push(`/chat/${chatId}/subagent/a1b2c3d4`)
-    await nextTick()
-
-    expect(wrapper.findAll('.chat-item')).toHaveLength(2)
-    expect(toggle.attributes('aria-expanded')).toBe('true')
-    expect(wrapper.get('.subagent-item').classes()).toContain('active')
-
-    wrapper.unmount()
-  })
-
-  // A finished subagent is not archived and leaves no row behind: the poll
-  // stops listing it, and the transcript stays in the chat's Activity trace.
-  it('drops a subagent row once the agent stops running', async () => {
+  // Running subagents are listed in the chat's Work details rail, not as
+  // rows under the chat in this tree.
+  it('does not list running subagents as rows in the tree', async () => {
     const store = useProjectStore()
     store.runningSubagents = {
       [chatId]: [{ agent_id: 'a1b2c3d4', description: 'Sweep the callers', status: 'running' }],
@@ -255,7 +240,7 @@ describe('ProjectSidebar chat actions', () => {
         { path: '/chat/:chatId/subagent/:agentId', component: { template: '<div />' } },
       ],
     })
-    await router.push('/')
+    await router.push(`/chat/${chatId}/subagent/a1b2c3d4`)
     await router.isReady()
 
     const wrapper = mount(ProjectSidebar, {
@@ -263,14 +248,99 @@ describe('ProjectSidebar chat actions', () => {
       props: { collapsed: false, mode: 'chat' },
       global: { plugins: [router] },
     })
-    expect(wrapper.findAll('.subagent-item')).toHaveLength(1)
-
-    store.runningSubagents = {}
-    await nextTick()
-
-    expect(wrapper.findAll('.subagent-item')).toHaveLength(0)
     expect(wrapper.findAll('.chat-item')).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('Sweep the callers')
+    expect(wrapper.find('.subagent-toggle').exists()).toBe(false)
 
+    wrapper.unmount()
+  })
+})
+
+describe('ProjectSidebar global new chat', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    const store = useProjectStore()
+    store.workspaces = [{
+      name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '',
+    }]
+    store.activeWorkspace = 'personal'
+    store.projects = [{
+      project_id: 'project-1', name: 'General', workspace: 'personal', context: '',
+      created_at: '2026-07-29T00:00:00Z', order: 0, vault_folder: 'general', is_auto: true,
+    }]
+    store.chats = []
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  async function mountSidebar(mode: 'chat' | 'memory' | 'schedules') {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+    return mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode },
+      global: { plugins: [router] },
+    })
+  }
+
+  it('offers one New chat above the tree, opening the shared picker', async () => {
+    const { pendingNewChat } = await import('../../lib/newChat')
+    const wrapper = await mountSidebar('chat')
+    const button = wrapper.get('.sidebar-new-chat')
+
+    expect(button.attributes('aria-haspopup')).toBe('dialog')
+    expect(button.attributes('aria-label')).toBe('New chat in Personal')
+    expect(button.text()).toContain('New chat')
+
+    await button.trigger('click')
+    // The shared picker is the one project-selection path; the sidebar just
+    // opens it in the active workspace rather than growing its own selector.
+    expect(pendingNewChat.value?.options).toEqual({ workspace: 'personal', projectId: undefined })
+    pendingNewChat.value?.resolve(null)
+    await nextTick()
+    wrapper.unmount()
+  })
+
+  it('hides the global New chat in modes without a project tree', async () => {
+    const wrapper = await mountSidebar('memory')
+    expect(wrapper.find('.sidebar-new-chat').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('puts New project and the archive on the Projects label, not in a footer', async () => {
+    useProjectStore().bootstrapped = true
+    const wrapper = await mountSidebar('chat')
+    const row = wrapper.get('.sidebar-label-row')
+    expect(row.text()).toContain('Projects')
+    expect(row.get('button[aria-label="New project"]').text()).toBe('New')
+    expect(row.find('button[aria-label="Completed projects"]').exists()).toBe(true)
+    expect(wrapper.find('.sidebar-footer').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('puts New automation on the Routines label', async () => {
+    const wrapper = await mountSidebar('schedules')
+    useTaskStore().loading = false
+    await nextTick()
+    const button = wrapper.get('button[aria-label="New automation"]')
+    expect(button.text()).toBe('New')
+    await button.trigger('click')
+    expect(wrapper.emitted('new-schedule')).toHaveLength(1)
+    expect(wrapper.find('.sidebar-footer').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('leaves the vault lists to the map rail', async () => {
+    const wrapper = await mountSidebar('memory')
+    expect(wrapper.text()).not.toContain('Most connected')
+    expect(wrapper.text()).not.toContain('Recently written')
     wrapper.unmount()
   })
 })
@@ -299,7 +369,7 @@ describe('ProjectSidebar update badge', () => {
     }))
   }
 
-  it('shows a pulsing dot on the settings nav item when an update is available', async () => {
+  it('marks the settings nav item with a short note when an update is available', async () => {
     const store = useProjectStore()
     store.packageStatus = {
       current_version: '0.9.1',
@@ -311,7 +381,7 @@ describe('ProjectSidebar update badge', () => {
     await nextTick()
 
     const settingsLink = wrapper.get('a[href="/settings"]')
-    expect(settingsLink.find('.nav-item-badge').exists()).toBe(true)
+    expect(settingsLink.attributes('data-note')).toBe('update')
 
     wrapper.unmount()
   })
@@ -333,7 +403,7 @@ describe('ProjectSidebar update badge', () => {
     wrapper.unmount()
   })
 
-  it('shows one warning dot for a blocking housekeeping action', async () => {
+  it('marks the settings nav item for a blocking housekeeping action', async () => {
     const housekeeping = useHousekeepingStore()
     housekeeping.actions = [{
       id: 'gws-login',
@@ -356,7 +426,7 @@ describe('ProjectSidebar update badge', () => {
     const settingsLink = wrapper.get('a[href="/settings"]')
 
     expect(settingsLink.classes()).toContain('nav-item--warning')
-    expect(settingsLink.find('.nav-item-badge--warning').exists()).toBe(true)
+    expect(settingsLink.attributes('data-note')).toBe('check')
     expect(settingsLink.attributes('aria-label')).toBe('settings — action required')
 
     wrapper.unmount()

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 /**
- * The workspace guide card reads `<workspace>/AGENTS.md`.
+ * The Memory rail's always-loaded budget reads `<workspace>/AGENTS.md`.
  *
  * A bare `AGENTS.md` would let /api/workspace-file's fuzzy lookup resolve to
  * whichever workspace sorts first, so the card — and its Open/Discuss actions —
@@ -13,9 +13,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { createMemoryHistory, createRouter } from 'vue-router'
 import { flushPromises, mount } from '@vue/test-utils'
-import ProjectSidebar from '../ProjectSidebar.vue'
+import MemoryGuideBudget from '../MemoryGuideBudget.vue'
 import { useProjectStore } from '../../stores/projects'
 
 vi.mock('../../lib/api', () => ({
@@ -47,23 +46,13 @@ function guidePaths(fetchMock: ReturnType<typeof vi.fn>): string[] {
     .map(u => new URL(u, 'http://localhost').searchParams.get('path') || '')
 }
 
-async function mountSidebar() {
-  const router = createRouter({
-    history: createMemoryHistory(),
-    routes: [{ path: '/', component: { template: '<div />' } }],
-  })
-  await router.push('/')
-  await router.isReady()
-  const wrapper = mount(ProjectSidebar, {
-    attachTo: document.body,
-    props: { collapsed: false, mode: 'memory' },
-    global: { plugins: [router] },
-  })
+async function mountBudget() {
+  const wrapper = mount(MemoryGuideBudget, { attachTo: document.body })
   await flushPromises()
   return wrapper
 }
 
-describe('ProjectSidebar workspace guide card', () => {
+describe('MemoryGuideBudget', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     const store = useProjectStore()
@@ -84,7 +73,7 @@ describe('ProjectSidebar workspace guide card', () => {
 
   it('asks for the active workspace guide before any bare basename', async () => {
     const fetchMock = stubWorkspaceFile({ 'work/AGENTS.md': guideFile('A note') })
-    const wrapper = await mountSidebar()
+    const wrapper = await mountBudget()
 
     expect(guidePaths(fetchMock)[0]).toBe('work/AGENTS.md')
     expect(guidePaths(fetchMock)).not.toContain('AGENTS.md')
@@ -93,7 +82,7 @@ describe('ProjectSidebar workspace guide card', () => {
 
   it('still finds a pre-migration CLAUDE.md, after AGENTS.md', async () => {
     const fetchMock = stubWorkspaceFile({ 'work/CLAUDE.md': guideFile('A note') })
-    const wrapper = await mountSidebar()
+    const wrapper = await mountBudget()
 
     // AGENTS.md is asked for first and 404s; the legacy name still resolves,
     // so an install that has not run the guide migration keeps its card.
@@ -113,7 +102,7 @@ describe('ProjectSidebar workspace guide card', () => {
       }
       return original(input)
     })
-    const wrapper = await mountSidebar()
+    const wrapper = await mountBudget()
 
     expect(wrapper.find('.guide-card-title').text()).toContain('work/CLAUDE.md')
     expect(wrapper.text()).not.toContain('HTTP 503')
@@ -124,7 +113,7 @@ describe('ProjectSidebar workspace guide card', () => {
       'work/AGENTS.md': guideFile('Work note'),
       'personal/AGENTS.md': guideFile('Personal note'),
     })
-    const wrapper = await mountSidebar()
+    const wrapper = await mountBudget()
     const store = useProjectStore()
     store.activeWorkspace = 'personal'
     await flushPromises()
@@ -135,7 +124,7 @@ describe('ProjectSidebar workspace guide card', () => {
 
   it('falls back to the bare basename only when the qualified path is missing', async () => {
     const fetchMock = stubWorkspaceFile({ 'AGENTS.md': guideFile('Root note') })
-    const wrapper = await mountSidebar()
+    const wrapper = await mountBudget()
 
     expect(guidePaths(fetchMock).slice(0, 2)).toEqual(['work/AGENTS.md', 'work/CLAUDE.md'])
     expect(wrapper.find('.guide-card-title').text()).toContain('AGENTS.md')
@@ -143,14 +132,14 @@ describe('ProjectSidebar workspace guide card', () => {
 
   it('counts an impossible calendar date as malformed, not valid', async () => {
     stubWorkspaceFile({ 'work/AGENTS.md': guideFile('Expires soon [expires: 2026-02-30]') })
-    const wrapper = await mountSidebar()
+    const wrapper = await mountBudget()
 
     expect(wrapper.find('.guide-card-regions').text()).toContain('1 malformed tag')
   })
 
   it('accepts a real calendar date', async () => {
     stubWorkspaceFile({ 'work/AGENTS.md': guideFile('Expires soon [expires: 2026-02-28]') })
-    const wrapper = await mountSidebar()
+    const wrapper = await mountBudget()
 
     expect(wrapper.find('.guide-card-regions').text()).not.toContain('malformed')
   })
@@ -168,7 +157,7 @@ describe('ProjectSidebar workspace guide card', () => {
       }
       return original(input)
     })
-    const wrapper = await mountSidebar()
+    const wrapper = await mountBudget()
 
     expect(wrapper.text()).not.toContain('another workspace')
     expect(guidePaths(fetchMock)).not.toContain('AGENTS.md')

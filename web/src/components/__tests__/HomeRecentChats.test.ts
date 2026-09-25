@@ -67,7 +67,8 @@ describe('HomeRecentChats lanes and tiers', () => {
   it('renders only the active workspace lane', async () => {
     const wrapper = await mountHome()
     expect(wrapper.findAll('.home-lane')).toHaveLength(1)
-    expect(wrapper.find('.home-lane-name').text()).toBe('personal')
+    // The sidebar scope names the workspace; the lane does not repeat it.
+    expect(wrapper.find('.home-lane-name').exists()).toBe(false)
     expect(wrapper.find('[data-lane-key="personal"]').exists()).toBe(true)
     expect(wrapper.find('[data-lane-key="work"]').exists()).toBe(false)
     wrapper.unmount()
@@ -120,6 +121,21 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(wrapper.findAll('.home-chat-item')).toHaveLength(2)
   })
 
+  it('gives every row a project and status sub-line read from its tier', async () => {
+    const wrapper = await mountHome()
+    const needs = wrapper.find('.home-tier--needsYou .home-chat-item')
+    expect(needs.find('.home-chat-project').text()).toBe('Personal project')
+    expect(needs.find('.home-chat-status').text()).toBe('waiting for you')
+    expect(wrapper.find('.home-tier--quiet .home-chat-status').text()).toBe('no new activity')
+
+    // The work chat has a background agent running, which is what puts it in
+    // the working tier; the sub-line says so rather than inventing activity.
+    useProjectStore().activeWorkspace = 'work'
+    await nextTick()
+    expect(wrapper.find('.home-tier--working .home-chat-status').text()).toBe('agent is working')
+    wrapper.unmount()
+  })
+
   it('lists older chats inline with quiet instead of behind a disclosure', async () => {
     const store = seedChats()
     // The seeded old chat lives in the other workspace; pull it into the
@@ -153,7 +169,7 @@ describe('HomeRecentChats lanes and tiers', () => {
     const wrapper = await mountHome()
     const labels = wrapper.findAll('.home-tier-label').map(n => n.text())
     expect(labels).toContain('needs you')
-    expect(labels).toContain('quiet')
+    expect(labels).toContain('earlier')
     expect(labels.some(l => l === l.toUpperCase() && /[A-Z]/.test(l))).toBe(false)
   })
 
@@ -442,23 +458,6 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(document.activeElement).toBe(workCards[0].element)
     wrapper.unmount()
   })
-
-  // Regression: focus landing on a lane's "+ new" header control (via Tab or a
-  // click) used to make the next arrow jump to the first lane. It now stays in
-  // the lane that holds the focused control.
-  it('keeps arrows in the lane whose header control has focus', async () => {
-    const wrapper = await mountHome()
-    const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
-
-    const personalNew = wrapper.find('[data-lane-key="personal"] .home-lane-new').element as HTMLElement
-    personalNew.focus()
-    expect(document.activeElement).toBe(personalNew)
-
-    expect(vm.onArrow('ArrowDown')).toBe(true)
-    const personalCards = wrapper.find('[data-lane-key="personal"]').findAll('.home-chat-item')
-    expect(document.activeElement).toBe(personalCards[0].element)
-    wrapper.unmount()
-  })
 })
 
 
@@ -532,16 +531,14 @@ describe('the lane header line', () => {
     if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
   })
 
-  it('keeps the status phrase on the same line as the workspace name', async () => {
+  it('keeps the selected lane header for screen readers only', async () => {
     const wrapper = await mountHome()
     const lane = wrapper.find('[data-lane-key="personal"]')
-    const topline = lane.find('.home-lane-topline')
-    expect(topline.exists()).toBe(true)
-    // The name and the status phrase are siblings inside the same topline row.
-    expect(topline.find('.home-lane-name').exists()).toBe(true)
-    expect(topline.find('.home-lane-status-text').exists()).toBe(true)
-    // No separate status row under the line anymore.
-    expect(lane.find('.home-lane-status').exists()).toBe(false)
+    const header = lane.get('.home-lane-header')
+    expect(header.classes()).toContain('home-lane-header--quiet')
+    expect(header.find('.home-lane-name').exists()).toBe(false)
+    expect(header.find('.home-lane-shortcut').exists()).toBe(false)
+    expect(header.get('.home-lane-status-text').attributes('aria-live')).toBe('polite')
     wrapper.unmount()
   })
 
@@ -596,119 +593,38 @@ describe('the lane header line', () => {
   })
 })
 
-describe('HomeRecentChats new-chat project picker', () => {
+describe('HomeRecentChats new-chat entry', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.restoreAllMocks()
     if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
   })
 
-  it('keeps "+ new" one click to General and offers the rest behind the caret', async () => {
+  it('leaves new work to the composer on the selected lane', async () => {
     const wrapper = await mountHome()
-    const lane = wrapper.find('[data-lane-key="personal"]')
-
-    await lane.find('.home-lane-new').trigger('click')
-    expect(wrapper.emitted('new-workspace-chat')?.[0]).toEqual([
-      { workspace: 'personal', projectId: 'personal-general', isCreating: false },
-    ])
-
-    await lane.find('.home-lane-new-caret').trigger('click')
-    // General leads: it is what the plain button creates in.
-    expect(lane.findAll('.home-lane-project-option').map(n => n.text())).toEqual([
-      'General',
-      'Personal project',
-    ])
+    expect(wrapper.find('[data-lane-key="personal"] .home-lane-new').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('creates in the picked project and closes the menu', async () => {
-    const wrapper = await mountHome()
-    const lane = wrapper.find('[data-lane-key="personal"]')
-    await lane.find('.home-lane-new-caret').trigger('click')
-
-    const options = lane.findAll('.home-lane-project-option')
-    await options[1].trigger('click')
-
-    expect(wrapper.emitted('new-workspace-chat')?.[0]).toEqual([
-      { workspace: 'personal', projectId: 'personal-project', isCreating: false },
-    ])
-    expect(lane.find('.home-lane-project-menu').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  // Hover does not exist on a phone, so the caret is dimmed rather than hidden
-  // and has to stay reachable by keyboard: Esc must hand focus back rather than
-  // dropping it on the body.
-  it('closes on Escape and returns focus to the caret', async () => {
-    const wrapper = await mountHome()
-    const lane = wrapper.find('[data-lane-key="personal"]')
-    const caret = lane.find('.home-lane-new-caret')
-    await caret.trigger('click')
-    await nextTick()
-
-    await lane.find('.home-lane-project-menu').trigger('keydown.esc')
-    await nextTick()
-
-    expect(lane.find('.home-lane-project-menu').exists()).toBe(false)
-    expect(document.activeElement).toBe(caret.element)
-    wrapper.unmount()
-  })
-
-  // ChatLayout binds arrows on window to roam the chat grid, and defers to any
-  // key a nested popup already consumed. The menu therefore has to mark arrows
-  // handled, or focus lands on a chat card while the menu stays open — and
-  // Enter then opens an unrelated chat.
-  it('marks arrow keys handled so the chat grid does not roam', async () => {
-    const wrapper = await mountHome()
-    const lane = wrapper.find('[data-lane-key="personal"]')
-    await lane.find('.home-lane-new-caret').trigger('click')
-    await nextTick()
-
-    const options = lane.findAll('.home-lane-project-option')
-    expect(document.activeElement).toBe(options[0].element)
-
-    const seen: KeyboardEvent[] = []
-    const spy = (event: Event) => seen.push(event as KeyboardEvent)
-    window.addEventListener('keydown', spy)
-    await lane.find('.home-lane-project-menu').trigger('keydown.down')
-    window.removeEventListener('keydown', spy)
-
-    expect(document.activeElement).toBe(options[1].element)
-    expect(seen.at(-1)?.defaultPrevented).toBe(true)
-    wrapper.unmount()
-  })
-
-  it('returns focus to the caret after picking a project', async () => {
-    const wrapper = await mountHome()
-    const lane = wrapper.find('[data-lane-key="personal"]')
-    const caret = lane.find('.home-lane-new-caret')
-    await caret.trigger('click')
-    await nextTick()
-
-    await lane.findAll('.home-lane-project-option')[1].trigger('click')
-    await nextTick()
-
-    expect(document.activeElement).toBe(caret.element)
-    wrapper.unmount()
-  })
-
-  it('hides the caret when the workspace has only one project', async () => {
+  it('keeps a New action on a rescue lane and routes it to the shared picker', async () => {
     const store = seedChats()
-    store.projects = store.projects.filter(
-      project => project.project_id !== 'personal-project',
-    )
+    store.projects = [
+      ...store.projects,
+      { project_id: 'stale-general', name: 'General', workspace: 'renamed-away' },
+    ] as unknown as typeof store.projects
     store.chats = store.chats.map(chat =>
-      chat.project_id === 'personal-project'
-        ? { ...chat, project_id: 'personal-general' }
-        : chat,
+      chat.chat_id === 'quiet' ? { ...chat, project_id: 'stale-general' } : chat,
     ) as unknown as typeof store.chats
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
 
-    const lane = wrapper.find('[data-lane-key="personal"]')
-    expect(lane.find('.home-lane-new').exists()).toBe(true)
-    expect(lane.find('.home-lane-new-caret').exists()).toBe(false)
+    const rescue = wrapper.get('[data-lane-key="renamed-away"]')
+    expect(rescue.get('.home-lane-name').text()).toBe('renamed away')
+    const button = rescue.get('.home-lane-new')
+    expect(button.attributes('aria-haspopup')).toBe('dialog')
+    await button.trigger('click')
+    expect(wrapper.emitted('choose-new-chat')?.[0]).toEqual(['renamed-away'])
     wrapper.unmount()
   })
 })

@@ -288,6 +288,14 @@ export interface ChatRetryInfo {
   interval_seconds: number
 }
 
+/** One entity hint the context capsule carried: a vault note, by name. */
+export interface ContextEntity {
+  name: string
+  /** Vault-root-relative note path, e.g. `work/People/Mo.md`. */
+  path: string
+  category: string
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
@@ -306,6 +314,10 @@ export interface ChatMessage {
   // user_echo events replayed on WS reconnect against already-rendered
   // history or an optimistic local push. Only present on user messages.
   turn_index?: number
+  // Vault notes the entity matcher linked this user message to (links only;
+  // the note bodies are not sent). Read back from the stored context capsule
+  // on history loads, and set live by the `context_entities` event.
+  context_entities?: ContextEntity[]
   // Server-reported agent latency for the final assistant bubble of a turn,
   // in milliseconds. Drives the footer "· 7.3s" label.
   duration_ms?: number
@@ -396,6 +408,9 @@ export type WsEvent =
   | { type: 'thinking'; text: string; parent_tool_use_id?: string }
   | { type: 'status'; message: string }
   | { type: 'model_changed'; model: string }
+  // The vault notes this turn's message was matched to; sent once per turn,
+  // right after its context capsule is built (an empty list included).
+  | { type: 'context_entities'; entities: ContextEntity[]; turn_index?: number }
   // Running token totals for the in-flight turn (cumulative, monotonic).
   // Emitted from partial stream events so the live trace can show a token
   // count as the model works; the authoritative totals still land on `result`.
@@ -1448,6 +1463,35 @@ export interface VaultReviewEvidence {
    * Optional because a server older than this client does not send it; the
    * panel falls back to its lazy per-row fetch when it is absent. */
   excerpt?: string
+  /** Why an `unverified` candidate is due: how old its last check is, the
+   * limit for its type, and where that date came from. Optional (and null
+   * when the signal is absent) so an older server simply leaves it out. */
+  unverified?: VaultReviewUnverified | null
+  /** Where a `superseded_language` candidate says so: the 1-based line, the
+   * line itself, the phrase that matched, and the nearest line either side. */
+  superseded?: VaultReviewSuperseded | null
+}
+
+export interface VaultReviewUnverified {
+  age_days: number
+  threshold_days: number
+  /** `YYYY-MM-DD`. */
+  last_verified: string
+  /** `frontmatter` when read off the note's `updated:` field, `mtime` when the
+   * note has none and the file's modified date stood in. */
+  source: 'frontmatter' | 'mtime'
+}
+
+export interface VaultReviewQuotedLine {
+  line: number
+  text: string
+}
+
+export interface VaultReviewSuperseded extends VaultReviewQuotedLine {
+  match: string
+  where: 'frontmatter' | 'lead'
+  before: VaultReviewQuotedLine | null
+  after: VaultReviewQuotedLine | null
 }
 
 /** One stale-note retirement candidate from `GET /api/vault/review`. */

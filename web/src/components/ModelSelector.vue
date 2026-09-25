@@ -370,7 +370,7 @@ onMounted(() => {
               v-model="query"
               type="text"
               class="model-selector__search"
-              placeholder="Search models..."
+              placeholder="Search models"
               @keydown="onKeydown"
             />
           </div>
@@ -411,6 +411,9 @@ onMounted(() => {
                 <span v-if="multiple" class="model-selector__check" aria-hidden="true">
                   <span v-if="isSelected(model)" class="model-selector__checkmark">✓</span>
                 </span>
+                <!-- Single select marks the current model with a check on the
+                     hover surface, not a filled accent row that reads as a button. -->
+                <span v-else class="model-selector__tick" aria-hidden="true">{{ isActive(model) ? '✓' : '' }}</span>
                 <span class="model-selector__item-main">
                   <span class="model-selector__item-label">{{ modelLabel(section, model) }}</span>
                   <span v-if="modelBadges(section, model).length" class="model-selector__item-badges">
@@ -580,19 +583,17 @@ onMounted(() => {
 }
 
 .model-selector__section-label {
-  font-size: 10px;
+  font-size: var(--text-sm);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--fg2);
+  color: var(--fg3);
 }
 
 .model-selector__badge {
   font-size: 10px;
   padding: 2px 6px;
   border-radius: 999px;
-  background: var(--accent2);
-  color: white;
+  background: color-mix(in srgb, var(--accent2) 22%, transparent);
+  color: var(--fg);
 }
 
 .model-selector__hint {
@@ -600,6 +601,10 @@ onMounted(() => {
   font-size: 11px;
   color: var(--fg2);
   line-height: 1.35;
+}
+
+@media (pointer: coarse) {
+  .model-selector__item { min-height: var(--touch, 44px); }
 }
 
 .model-selector__item {
@@ -631,13 +636,21 @@ onMounted(() => {
 }
 
 .ms-item--active {
-  background: var(--accent);
-  color: var(--on-accent);
+  background: var(--bg3);
+  font-weight: 600;
 }
 
 .ms-item--active:hover,
 .ms-item--active:focus {
-  background: var(--accent-strong);
+  background: color-mix(in srgb, var(--bg3) 80%, var(--fg) 8%);
+}
+
+.model-selector__tick {
+  width: 16px;
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 12px;
+  text-align: center;
 }
 
 .model-selector__check {
@@ -689,7 +702,7 @@ onMounted(() => {
   align-items: center;
   min-height: 16px;
   padding: 1px 5px;
-  border-radius: 999px;
+  border-radius: var(--radius-xs, 4px);
   font-size: 10px;
   line-height: 1.2;
   color: var(--fg);
@@ -698,9 +711,9 @@ onMounted(() => {
 }
 
 .model-selector__item-badge--tier {
-  color: white;
-  background: var(--accent2);
-  border-color: transparent;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--accent2) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent2) 45%, var(--border));
 }
 
 .model-selector__item-badge--local {
@@ -708,11 +721,7 @@ onMounted(() => {
   background: var(--bg-elev);
 }
 
-.ms-item--active .model-selector__item-badge {
-  color: white;
-  background: rgba(255, 255, 255, 0.18);
-  border-color: rgba(255, 255, 255, 0.28);
-}
+
 
 .model-selector__empty {
   padding: 16px;

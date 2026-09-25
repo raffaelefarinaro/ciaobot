@@ -38,6 +38,12 @@ import type {
   WorkspacesResponse,
 } from '../lib/types'
 import { bareAgentId, sameAgent } from '../lib/subagentIds'
+
+/** Model/provider a new chat should start on instead of the workspace default. */
+export interface NewChatRuntime {
+  model: string
+  provider: RuntimeProvider
+}
 import {
   chatWsReconnectDelayMs,
   isHostConnectionUnavailableMessage,
@@ -1340,7 +1346,12 @@ export const useProjectStore = defineStore('projects', () => {
   // Cmd+T picker: open a fresh, empty chat in the chosen project, switching to
   // its workspace first if needed. Returns the created chat, or undefined when
   // the project could not be found.
-  async function newChatInProject(projectId: string): Promise<ChatInfo | undefined> {
+  async function newChatInProject(
+    projectId: string,
+    initialText = '',
+    title = DEFAULT_CHAT_TITLE,
+    runtime?: NewChatRuntime,
+  ): Promise<ChatInfo | undefined> {
     const project = projects.value.find(p => p.project_id === projectId)
     if (!project) {
       pushErrorToast('Cannot open a new chat', 'No project found to create the chat in.')
@@ -1355,7 +1366,10 @@ export const useProjectStore = defineStore('projects', () => {
     activeWorkspace.value = project.workspace
     persistState()
     try {
-      return await createChat(project.project_id)
+      if (runtime) return await createChat(project.project_id, title, initialText || undefined, runtime)
+      return initialText
+        ? await createChat(project.project_id, title, initialText)
+        : await createChat(project.project_id)
     } catch (err) {
       // The switch is committed before the POST, so a rejected creation used
       // to leave the app scoped to the new workspace while still showing (and
@@ -2225,7 +2239,12 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Chat actions ────────────────────────────────────────────────────
 
-  async function createChat(projectId: string, title = DEFAULT_CHAT_TITLE, seedDraft?: string) {
+  async function createChat(
+    projectId: string,
+    title = DEFAULT_CHAT_TITLE,
+    seedDraft?: string,
+    runtime?: NewChatRuntime,
+  ) {
     // Join an already-in-flight creation for this project instead of firing
     // a second POST: see the comment on pendingChatCreations above.
     const pending = pendingChatCreations[projectId]
@@ -2234,7 +2253,12 @@ export const useProjectStore = defineStore('projects', () => {
     const promise = (async () => {
       creatingChatProjectIds.value[projectId] = true
       try {
-        const c = await api.post<ChatInfo>(`/api/projects/${projectId}/chats`, { title })
+        // A runtime override (home's model picker) rides the create call; the
+        // server otherwise starts the chat on the workspace default.
+        const c = await api.post<ChatInfo>(
+          `/api/projects/${projectId}/chats`,
+          runtime ? { title, model: runtime.model, provider: runtime.provider } : { title },
+        )
         // The server also broadcasts chat_created for this same chat. The
         // broadcast can arrive before the POST response, so reconcile through
         // the ID-aware helper instead of pushing a possible duplicate.
@@ -4895,7 +4919,9 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Voice ───────────────────────────────────────────────────────────
 
-  async function transcribeVoice(chatId: string, audioBlob: Blob): Promise<string> {
+  /** Transcribe dictation. `chatId` null means no chat exists yet (the home
+   *  composer), which posts to the chat-independent route. */
+  async function transcribeVoice(chatId: string | null, audioBlob: Blob): Promise<string> {
     const form = new FormData()
     // Name the part after what the blob actually is: the server derives the
     // saved file's extension from it, and on-device dictation can only read
@@ -4905,7 +4931,7 @@ export const useProjectStore = defineStore('projects', () => {
         : audioBlob.type.includes('ogg') ? 'ogg'
           : 'webm'
     form.append('audio', audioBlob, `voice.${ext}`)
-    const res = await fetch(`/api/chats/${chatId}/voice`, {
+    const res = await fetch(chatId ? `/api/chats/${chatId}/voice` : '/api/voice', {
       method: 'POST',
       body: form,
       credentials: 'same-origin',
@@ -5491,6 +5517,15 @@ export const useProjectStore = defineStore('projects', () => {
           messages.value[chatId] = normalizeMessages([...msgs])
           persistMessages()
         }
+        break
+      }
+
+      case 'context_entities': {
+        // The user bubble is already there (user_echo precedes the turn).
+        const target = event.turn_index != null
+          ? msgs.find(m => m.role === 'user' && m.turn_index === event.turn_index)
+          : [...msgs].reverse().find(m => m.role === 'user')
+        if (target) target.context_entities = Array.isArray(event.entities) ? event.entities : []
         break
       }
 

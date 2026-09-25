@@ -64,7 +64,7 @@ describe('ProposalHistoryList', () => {
     const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(wrapper.find('.ph-empty').text()).toBe('No decisions yet.')
+    expect(wrapper.find('.ph-empty').text()).toBe('No decisions yet. Suggestions you accept or dismiss show up here.')
     wrapper.unmount()
   })
 
@@ -143,14 +143,14 @@ describe('ProposalHistoryList', () => {
     await flushPromises()
     expect(wrapper.findAll('.ph-row')).toHaveLength(3)
 
-    await wrapper.findAll('.ph-chip-row')[0]!.findAll('button')
-      .find(b => b.text() === 'dismissed')!.trigger('click')
+    await wrapper.findAll('.ph-seg')[0]!.findAll('button')
+      .find(b => b.text() === 'Dismissed')!.trigger('click')
     expect(wrapper.findAll('.ph-row')).toHaveLength(1)
 
-    await wrapper.findAll('.ph-chip-row')[0]!.findAll('button')
-      .find(b => b.text() === 'all')!.trigger('click')
-    await wrapper.findAll('.ph-chip-row')[1]!.findAll('button')
-      .find(b => b.text() === 'automatic')!.trigger('click')
+    await wrapper.findAll('.ph-seg')[0]!.findAll('button')
+      .find(b => b.text() === 'All')!.trigger('click')
+    await wrapper.findAll('.ph-seg')[1]!.findAll('button')
+      .find(b => b.text() === 'Automatic')!.trigger('click')
     expect(wrapper.findAll('.ph-row')).toHaveLength(1)
     expect(wrapper.text()).toContain('automatic')
     wrapper.unmount()

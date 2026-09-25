@@ -28,6 +28,20 @@ test.describe('narrow viewport', () => {
       overflow,
       `document scrolls ${overflow}px past the viewport; widest unclipped: ${JSON.stringify(culprits)}`,
     ).toBeLessThanOrEqual(0)
+
+    // The workbench command canvas must keep its controls inside the surface at
+    // phone width: the project chip and the New action are the two that can
+    // push past the shell.
+    const form = await page.locator('.home-intake-form').boundingBox()
+    expect(form).not.toBeNull()
+    // The file input is hidden (the paperclip button opens it), so it has no box.
+    const controls = page.locator('.home-intake-form input:not([type=file]), .home-intake-form textarea, .home-intake-form select, .home-intake-form button')
+    for (const control of await controls.all()) {
+      const box = await control.boundingBox()
+      expect(box).not.toBeNull()
+      expect(box!.x).toBeGreaterThanOrEqual(form!.x - 1)
+      expect(box!.x + box!.width).toBeLessThanOrEqual(form!.x + form!.width + 1)
+    }
   })
 
   test('an open chat does not scroll sideways at 390px', async ({ page }) => {
@@ -60,5 +74,36 @@ test.describe('narrow viewport', () => {
 
     const small = boxes.filter((box) => box.w < 44 || box.h < 44)
     expect(small, `controls below the 44px touch minimum: ${JSON.stringify(small)}`).toEqual([])
+  })
+
+  test('the home composer controls meet the 44px touch minimum at phone width', async ({ page }) => {
+    await boot(page)
+
+    const boxes = await page.locator('.home-intake-form button:visible, .home-intake-form textarea:visible').evaluateAll((els) =>
+      els.map((el) => {
+        const r = el.getBoundingClientRect()
+        return {
+          name: (el.getAttribute('aria-label') || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+        }
+      }),
+    )
+    expect(boxes.length, 'no home composer controls were measured').toBeGreaterThanOrEqual(2)
+    const small = boxes.filter((box) => box.h < 44)
+    expect(small, `home composer controls below the 44px touch minimum: ${JSON.stringify(small)}`).toEqual([])
+  })
+
+  test('a selected memory note opens an actionable sheet on a phone', async ({ page }) => {
+    await boot(page, '/memory', '.mm-review-tabs')
+    await page.getByRole('button', { name: 'Map', exact: true }).click()
+    await page.getByRole('button', { name: 'List', exact: true }).click()
+    await page.getByRole('button', { name: 'Open Launch decision' }).click()
+
+    const detail = page.getByRole('dialog', { name: 'Details for Launch decision' })
+    await expect(detail).toBeVisible()
+    await expect(detail.getByRole('button', { name: 'Open Launch decision' })).toBeVisible()
+    await detail.getByRole('button', { name: 'Close note detail' }).click()
+    await expect(detail).toBeHidden()
   })
 })

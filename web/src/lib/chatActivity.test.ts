@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  collectToolUsage,
+  describeToolStep,
+  mentionedFilePaths,
+  mergeTraceOutputs,
+  collapseOutputsByName,
+  shortDirname,
   buildTurnParts,
   collectTraceOutputs,
   findFinalAnswerIndex,
@@ -364,6 +370,94 @@ describe('traceSummaryMeta', () => {
       { agent_id: 'sub-1', messages: [] },
       { agent_id: 'sub-2', messages: [] }
     ])).toBe('2 thoughts · 2 notes · 2 files · 2 subagents')
+  })
+})
+
+describe('collectToolUsage', () => {
+  it('reads skills and MCP tools from both providers\' activity lines', () => {
+    const usage = collectToolUsage([
+      '🧩 Skill ciao-dev-install',
+      '🧩 Skill ciao-dev-install',
+      '🔌 mcp__claude_ai_scandbox__get_any_app demo',
+      '↳ 🔌 mcp__claude_ai_Slack__slack_search_public "launch"',
+      '🔧 skill {"name":"docs"}',
+      '🔧 scandbox_get_any_app {"name":"x"}',
+      '📖 Read src/app.ts',
+      '🔧 read src/app.ts',
+      '🔧 todowrite []',
+    ])
+    expect(usage.skills).toEqual([
+      { name: 'ciao-dev-install', count: 2 },
+      { name: 'docs', count: 1 },
+    ])
+    // One row per server, with the tools kept for the tooltip; opencode's
+    // scandbox_get_any_app folds into the same server as Claude's call.
+    expect(usage.mcp).toEqual([
+      { name: 'scandbox', count: 2, tools: ['get_any_app'] },
+      { name: 'Slack', count: 1, tools: ['slack_search_public'] },
+    ])
+  })
+})
+
+describe('mentionedFilePaths', () => {
+  it('finds workspace paths in code spans and links, not URLs or prose', () => {
+    expect(mentionedFilePaths(
+      'Full write-up saved to `memory-vault/work/review-pr418.md`. See [notes](docs/notes.md), ' +
+      '`npm run build`, `https://example.com/a.md` and `.github/workflows/build-docs.yml:57`.',
+    )).toEqual([
+      'memory-vault/work/review-pr418.md',
+      'docs/notes.md',
+    ])
+  })
+})
+
+describe('describeToolStep', () => {
+  it('turns both providers\' live tool lines into words', () => {
+    expect(describeToolStep('$ Bash List vault review candidates to find BPR slide-0 notes'))
+      .toBe('List vault review candidates to find BPR slide-0 notes')
+    expect(describeToolStep('📖 Read memory-vault/work/projects/brief.md')).toBe('Reading brief.md')
+    expect(describeToolStep('🔧 edit src/app.ts')).toBe('Editing app.ts')
+    expect(describeToolStep('🧩 Skill pr-review')).toBe('Using the pr-review skill')
+    expect(describeToolStep('🔧 skill {"name":"docs"}')).toBe('Using the docs skill')
+    expect(describeToolStep('🔌 mcp__github__get_pull_request #418')).toBe('github · get pull request')
+    expect(describeToolStep('📝 TodoWrite [...]')).toBe('Updating the plan')
+    expect(describeToolStep('🔧 ToolSearch select:mcp__claude_ai_Airtable__list_records_for_table')).toBe('Loading tools')
+  })
+})
+
+describe('mergeTraceOutputs', () => {
+  it('lists a file once across turns, keeping the most telling action', () => {
+    expect(mergeTraceOutputs([
+      [{ file_path: 'work/memory-vault/journal/daily/2026-09-25.md', action: 'written' }],
+      [{ file_path: 'work/memory-vault/journal/daily/2026-09-25.md', action: 'edited' }],
+      [{ file_path: '/Users/me/ws/work/memory-vault/journal/daily/2026-09-25.md', action: 'created' }],
+      [{ file_path: 'docs/other.md', action: 'edited' }],
+    ])).toEqual([
+      { file_path: 'work/memory-vault/journal/daily/2026-09-25.md', action: 'created' },
+      { file_path: 'docs/other.md', action: 'edited' },
+    ])
+  })
+})
+
+describe('collapseOutputsByName', () => {
+  it('shows one row per file name, opening the most specific path', () => {
+    expect(collapseOutputsByName([
+      { file_path: 'work/memory-vault/projects/active/lvmh/lvmh-ocr.md', action: 'edited' },
+      { file_path: 'q4-2026-planning/lvmh-ocr.md', action: 'created' },
+      { file_path: 'lvmh-ocr.md', action: 'edited' },
+      { file_path: 'log.md', action: 'edited' },
+    ])).toEqual([
+      { file_path: 'work/memory-vault/projects/active/lvmh/lvmh-ocr.md', action: 'created' },
+      { file_path: 'log.md', action: 'edited' },
+    ])
+  })
+})
+
+describe('shortDirname', () => {
+  it('keeps the last two folders', () => {
+    expect(shortDirname('work/memory-vault/projects/active/q4/plan.md')).toBe('…/active/q4')
+    expect(shortDirname('docs/plan.md')).toBe('docs')
+    expect(shortDirname('plan.md')).toBe('')
   })
 })
 

@@ -22,7 +22,7 @@
         ref="inputEl"
         :value="modelValue"
         class="compose-input"
-        placeholder="Add a comment…"
+        placeholder="Add a note for Ciao"
         rows="3"
         @input="onInput"
       ></textarea>
@@ -53,6 +53,7 @@
             <span class="transcribe-spinner"></span>
           </span>
         </div>
+        <span class="compose-spacer" aria-hidden="true" />
         <button class="compose-btn" @click="emit('cancel')" type="button">Cancel</button>
         <button
           class="compose-btn primary"
@@ -255,33 +256,32 @@ defineExpose({ focus, toggleDictation })
 .compose {
   position: fixed;
   z-index: 41;
-  width: 280px;
+  width: 360px;
   max-width: calc(100vw - 16px);
-  background: var(--bg);
-  border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--accent, #60a5fa);
-  border-radius: 8px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
-  padding: 10px 12px;
   box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg2);
+  box-shadow: 0 14px 36px rgb(0 0 0 / 28%);
 }
 .compose-input {
   width: 100%;
   resize: vertical;
-  min-height: 60px;
+  min-height: 64px;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
   font-family: inherit;
   font-size: var(--text-base);
   line-height: 1.45;
-  color: var(--fg);
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
-  box-sizing: border-box;
 }
 .compose-input:focus {
   outline: none;
-  border-color: var(--accent, #60a5fa);
+  border-color: var(--accent);
 }
 .compose-images {
   display: flex;
@@ -328,37 +328,39 @@ defineExpose({ focus, toggleDictation })
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
   color: var(--fg2);
-  margin-right: auto;
 }
 .compose-attach:hover {
   background: var(--bg3);
   color: var(--fg);
-  border-color: var(--fg2);
 }
 .compose-btn {
+  flex: none;
+  white-space: nowrap;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 4px;
+  min-height: 32px;
+  padding: 0 12px;
   border: 1px solid var(--border);
-  background: transparent;
+  border-radius: 8px;
+  background: var(--bg-elev);
   color: var(--fg);
   cursor: pointer;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
 }
 .compose-btn:hover {
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
+  border-color: var(--border-strong);
 }
 .compose-btn.primary {
-  background: var(--accent, #60a5fa);
-  border-color: var(--accent, #60a5fa);
-  color: var(--bg);
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--on-accent);
 }
 .compose-btn.primary:disabled {
   opacity: 0.5;
@@ -369,11 +371,26 @@ defineExpose({ focus, toggleDictation })
   align-items: center;
 }
 .compose-voice :deep(.voice-btn) {
-  min-width: 28px;
-  min-height: 28px;
-  width: 28px;
-  height: 28px;
-  border-radius: 4px;
+  min-width: 30px;
+  min-height: 30px;
+  width: 30px;
+  height: 30px;
+  border-color: transparent;
+  border-radius: 6px;
+}
+.compose-spacer { flex: 1; }
+.compose-hint {
+  margin-right: auto;
+  min-width: 0;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  line-height: 1.3;
+}
+.compose-attach { margin-right: 0; }
+@media (pointer: coarse) {
+  .compose-btn { min-height: var(--touch); }
+  .compose-attach,
+  .compose-voice :deep(.voice-btn) { width: var(--touch); height: var(--touch); min-width: var(--touch); min-height: var(--touch); }
 }
 .compose-voice :deep(.voice-btn svg) {
   width: 16px;
@@ -404,6 +421,24 @@ defineExpose({ focus, toggleDictation })
     right: 8px;
     width: auto;
     max-width: none;
+  }
+}
+@media (pointer: coarse) {
+  .compose-attach,
+  .compose-btn,
+  .compose-voice :deep(.voice-btn),
+  .voice-transcribing {
+    min-width: var(--touch);
+    min-height: var(--touch);
+    width: var(--touch);
+    height: var(--touch);
+  }
+
+  .compose-image-remove {
+    box-sizing: content-box;
+    top: -12px;
+    right: -12px;
+    padding: 14px;
   }
 }
 </style>

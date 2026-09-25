@@ -5,8 +5,8 @@
  *
  * The list used to open a note only through a `<tr @click>`, which no keyboard
  * can reach; the canvas used mouse-only handlers. These tests pin the
- * replacements: a native title button, named path controls, and neighbor links
- * that are real buttons. The pointer state machine itself is covered by
+ * replacements: a native title button and neighbor links that are real
+ * buttons. The pointer state machine itself is covered by
  * `lib/graphGesture.test.ts`; here we assert the DOM a keyboard user drives.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -25,22 +25,32 @@ vi.mock('../../lib/api', () => ({
 }))
 
 const Stub = { template: '<div />' }
+// The note tile is the pinned-file panel, which fetches and renders the file;
+// here it only has to show the slots the map fills and emit its close.
+const PinnedFilePanelStub = {
+  props: ['filePath', 'closeLabel', 'inMemoryMap'],
+  emits: ['close'],
+  template: `<div class="pfp-stub" :data-file="filePath">
+    <button type="button" class="pfp-close" :aria-label="closeLabel" @click="$emit('close')">x</button>
+    <slot name="lead" /><slot name="after" />
+  </div>`,
+}
 
-async function mountView() {
+async function mountView(path = '/memory/map') {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
       { path: '/', component: Stub },
-      { path: '/memory', component: Stub },
-      { path: '/proposals', component: Stub },
+      { path: '/memory/:section?', component: Stub },
     ],
   })
-  await router.push('/memory')
+  await router.push(path)
   await router.isReady()
-  return mount(MemoryMapView, {
+  const wrapper = mount(MemoryMapView, {
     attachTo: document.body,
-    global: { plugins: [router] },
+    global: { plugins: [router], stubs: { PinnedFilePanel: PinnedFilePanelStub } },
   })
+  return Object.assign(wrapper, { router })
 }
 
 function graphPayload() {
@@ -94,8 +104,9 @@ describe('MemoryMapView keyboard and touch access', () => {
   async function mountGraph() {
     const wrapper = await mountView()
     await flushPromises()
-    await nextTick()
     const mm = useMemoryMapStore()
+    mm.view = 'graph'
+    await nextTick()
     const a = mm.nodes.find(n => n.id === 'a')!
     const b = mm.nodes.find(n => n.id === 'b')!
     a.x = 0; a.y = 0; a.vx = 0; a.vy = 0
@@ -152,20 +163,42 @@ describe('MemoryMapView keyboard and touch access', () => {
     wrapper.unmount()
   })
 
-  it('sets both path endpoints from named row controls', async () => {
+  it('offers no path finder anywhere: rows, tile and canvas carry no start/end', async () => {
     const { wrapper, mm } = await mountList()
-    const rows = wrapper.findAll('.mm-list-wrap tbody tr')
-    const startA = rows[0].findAll('.mm-path-btn')[0]
-    const endB = rows[1].findAll('.mm-path-btn')[1]
-    expect(startA.attributes('aria-label')).toBe('Set Note A as path start')
-    expect(endB.attributes('aria-label')).toBe('Set Note B as path end')
+    expect(wrapper.find('.mm-path-btn').exists()).toBe(false)
+    expect(wrapper.find('.mm-row-menu-btn').exists()).toBe(false)
+    mm.selectNode('a')
+    await nextTick()
+    expect(wrapper.text()).not.toMatch(/start path|end path/i)
+    expect('pathStart' in mm).toBe(false)
+    wrapper.unmount()
+  })
 
-    await startA.trigger('click')
-    await endB.trigger('click')
-    expect(mm.pathStart).toBe('a')
-    expect(mm.pathEnd).toBe('b')
-    expect(mm.pathIds.has('a')).toBe(true)
-    expect(mm.pathIds.has('b')).toBe(true)
+  it('puts the vault numbers in the toolbar, with no rail beside the map', async () => {
+    const { wrapper } = await mountList()
+    expect(wrapper.find('.page-rail').exists()).toBe(false)
+    const stats = wrapper.get('.mm-toolbar-stats').text()
+    expect(stats).toContain('2 notes')
+    expect(stats).toContain('1 links')
+    // One orphan menu replaces the two toggle buttons.
+    const filter = wrapper.get<HTMLSelectElement>('#mm-orphan-filter')
+    expect(filter.findAll('option').map(o => o.text())).toEqual(['All notes', 'Linked only', 'Orphans only'])
+    await filter.setValue('only')
+    expect(useMemoryMapStore().orphanFilter).toBe('only')
+    wrapper.unmount()
+  })
+
+  it('opens the selected note in the docked tile, with its links under it', async () => {
+    const { wrapper, mm } = await mountList()
+    mm.selectNode('a')
+    await nextTick()
+    const tile = wrapper.get('.mm-tile')
+    expect(tile.get('.pfp-stub').attributes('data-file')).toBe('a')
+    expect(tile.get('.pfp-close').attributes('aria-label')).toBe('Close note')
+    const link = tile.get('.mm-tile-link')
+    expect(link.attributes('aria-label')).toBe('Show Note B on the map')
+    await link.trigger('click')
+    expect(mm.selectedId).toBe('b')
     wrapper.unmount()
   })
 
@@ -176,7 +209,7 @@ describe('MemoryMapView keyboard and touch access', () => {
     await first.trigger('click')
     await nextTick()
 
-    await wrapper.find('.mm-detail-close').trigger('click')
+    await wrapper.find('.pfp-close').trigger('click')
     await flushPromises()
     await nextTick()
     await nextTick()
@@ -204,7 +237,7 @@ describe('MemoryMapView keyboard and touch access', () => {
     await nextTick()
     expect(mm.selectedId).toBe('b')
 
-    const close = wrapper.find('.mm-detail-close')
+    const close = wrapper.find('.pfp-close')
     ;(close.element as HTMLElement).focus()
     await close.trigger('click')
     await flushPromises()
@@ -216,42 +249,6 @@ describe('MemoryMapView keyboard and touch access', () => {
     // actually on screen.
     expect(document.activeElement).not.toBe(first.element)
     expect(document.activeElement).toBe(wrapper.findAll('.mm-title-btn')[1].element)
-    wrapper.unmount()
-  })
-
-  it('renders a neighbor as a named button and offers its path controls', async () => {
-    const { wrapper, mm } = await mountList()
-    await wrapper.findAll('.mm-title-btn')[0].trigger('click')
-    await nextTick()
-
-    const neighbor = wrapper.find('.mm-link-btn')
-    expect(neighbor.exists()).toBe(true)
-    expect(neighbor.attributes('aria-label')).toBe('Open Note B')
-
-    const detail = wrapper.find('.mm-detail')
-    const starts = detail.findAll('.mm-path-btn')
-    expect(starts.map(b => b.attributes('aria-label'))).toEqual([
-      'Set Note B as path start',
-      'Set Note B as path end',
-    ])
-    await starts[0].trigger('click')
-    expect(mm.pathStart).toBe('b')
-    wrapper.unmount()
-  })
-
-  it('offers explicit path controls for the focused note in the detail panel', async () => {
-    const { wrapper, mm } = await mountList()
-    await wrapper.findAll('.mm-title-btn')[0].trigger('click')
-    await nextTick()
-
-    const controls = wrapper.find('.mm-detail-path-controls')
-    expect(controls.exists()).toBe(true)
-    const buttons = controls.findAll('.btn-chip')
-    expect(buttons.map(b => b.text())).toEqual(['Start path', 'End path'])
-    await buttons[0].trigger('click')
-    expect(mm.pathStart).toBe('a')
-    // The hint explains the state in words, not just colour.
-    expect(wrapper.find('.mm-detail-path-hint').text()).toContain('Start: Note A')
     wrapper.unmount()
   })
 
@@ -370,7 +367,7 @@ describe('MemoryMapView keyboard and touch access', () => {
     mm.selectNode('a')
     await nextTick()
 
-    const neighbor = wrapper.find('.mm-link-btn')
+    const neighbor = wrapper.find('.mm-tile-link')
     expect(neighbor.exists()).toBe(true)
     ;(neighbor.element as HTMLElement).focus()
     await neighbor.trigger('click')
@@ -378,7 +375,7 @@ describe('MemoryMapView keyboard and touch access', () => {
     // The panel now shows B, so the link that opened it is gone.
     expect(mm.selectedId).toBe('b')
 
-    await wrapper.find('.mm-detail-close').trigger('click')
+    await wrapper.find('.pfp-close').trigger('click')
     await flushPromises()
     await nextTick()
     await nextTick()
@@ -391,23 +388,6 @@ describe('MemoryMapView keyboard and touch access', () => {
     wrapper.unmount()
   })
 
-  it('groups the neighbor actions for wrapping at narrow panel widths', async () => {
-    const { wrapper, mm } = await mountGraph()
-    mm.selectNode('a')
-    await nextTick()
-
-    const row = wrapper.find('.mm-link-item')
-    // The title and its actions are peers the stylesheet can wrap, rather than
-    // inline buttons after the title. The wrapper is non-shrinking so the
-    // actions keep a full touch target instead of being squeezed out of view.
-    const actions = row.find('.mm-link-actions')
-    expect(actions.exists()).toBe(true)
-    expect(actions.findAll('.mm-path-btn')).toHaveLength(2)
-    expect(actions.find('.mm-link-focus').exists()).toBe(true)
-    // The title button is before the actions and remains the open control.
-    expect(row.find('.mm-link-btn').attributes('aria-label')).toBe('Open Note B')
-    wrapper.unmount()
-  })
 })
 
 /**
@@ -523,16 +503,15 @@ describe('MemoryMapView list sorting', () => {
 })
 
 /**
- * Review navigation: one tab bar, four sections.
+ * Section navigation: one level, in the sidebar.
  *
- * Review used to nest three tab rows — Proposals/Retirements here, then
- * Queue/History inside the proposal panel and To review/Trash inside the
- * retirement one — so the trash was a tab inside a tab inside a sidebar
- * button. These pin the flat bar, the labels that name the decision rather
- * than the pipeline, and the entry points that still have to land where they
- * always did.
+ * The page used to carry a Review/Map switch in its header and a tab bar
+ * under it, while Settings listed its sections in the sidebar. The sections
+ * are routes now (/memory/<section>), listed in the sidebar; the page itself
+ * only names where you are. These pin the routes, the panels each one shows,
+ * and the absence of the old header switch and tab row.
  */
-describe('MemoryMapView review navigation', () => {
+describe('MemoryMapView sections', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     apiGet.mockReset()
@@ -594,89 +573,90 @@ describe('MemoryMapView review navigation', () => {
     vi.restoreAllMocks()
   })
 
-  async function mountReview() {
-    const wrapper = await mountView()
-    const mm = useMemoryMapStore()
-    mm.view = 'review'
+  async function mountSection(section: string) {
+    const wrapper = await mountView(`/memory/${section}`)
     await flushPromises()
     await nextTick()
     await flushPromises()
-    return { wrapper, mm }
+    return { wrapper, mm: useMemoryMapStore() }
   }
 
-  function tabs(wrapper: ReturnType<typeof mount>) {
-    return wrapper.findAll('[role="tab"]')
-  }
-
-  it('renders exactly one tab bar, holding all four sections', async () => {
-    const { wrapper } = await mountReview()
-
-    expect(wrapper.findAll('[role="tablist"]')).toHaveLength(1)
-    expect(tabs(wrapper).map(t => t.text().replace(/\d+$/, '').trim())).toEqual([
-      'Suggested memories', 'Notes to revisit', 'Retired', 'History',
-    ])
+  it('has no tab row and no mode switch; the header names the section', async () => {
+    const { wrapper } = await mountSection('revisit')
+    expect(wrapper.findAll('[role="tablist"]')).toHaveLength(0)
+    const header = wrapper.get('.pane-header')
+    expect(header.find('.memory-mode-actions').exists()).toBe(false)
+    expect(header.text()).toContain('Memory · To revisit')
     wrapper.unmount()
   })
 
-  it('reaches the retired notes in one click, not a tab inside a tab', async () => {
-    const { wrapper, mm } = await mountReview()
+  it('shows the notes to revisit on /memory/revisit', async () => {
+    const { wrapper, mm } = await mountSection('revisit')
+    expect([mm.section, mm.reviewTab, mm.retirementTab]).toEqual(['revisit', 'retirement', 'candidates'])
+    expect(wrapper.text()).toContain('Mo')
+    wrapper.unmount()
+  })
 
-    await tabs(wrapper)[2]!.trigger('click')
-    await flushPromises()
-
-    expect(mm.reviewTab).toBe('retirement')
+  it('reaches the retired notes at their own address', async () => {
+    const { wrapper, mm } = await mountSection('retired')
     expect(mm.retirementTab).toBe('trash')
     expect(wrapper.text()).toContain('Old')
     wrapper.unmount()
   })
 
-  it('shows the decision ledger from the same bar', async () => {
-    const { wrapper } = await mountReview()
-
-    await tabs(wrapper)[3]!.trigger('click')
-    await flushPromises()
-
+  it('shows the decision ledger on /memory/history', async () => {
+    const { wrapper } = await mountSection('history')
     expect(wrapper.text()).toContain('Remember the thing')
     wrapper.unmount()
   })
 
-  it('selects the notes-to-revisit tab when a stale note asks for it', async () => {
-    // The stale note's detail panel and the sidebar's "Needs review" list both
-    // set the old two-part state; flattening the bar may not break them.
-    const { wrapper, mm } = await mountReview()
-    mm.reviewTab = 'retirement'
-    mm.retirementTab = 'candidates'
-    await nextTick()
-
-    expect(tabs(wrapper)[1]!.attributes('aria-selected')).toBe('true')
-    expect(wrapper.text()).toContain('Mo')
+  it('follows the route when the sidebar moves to another section', async () => {
+    const { wrapper, mm } = await mountSection('suggested')
+    await wrapper.router.push('/memory/map')
+    await flushPromises()
+    expect(mm.section).toBe('map')
+    expect(wrapper.find('.mm-toolbar').exists()).toBe(true)
+    expect(wrapper.find('.mm-review-wrap').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('counts each queue on its own tab, scoped to the workspace', async () => {
-    const { wrapper } = await mountReview()
-
-    const counts = tabs(wrapper).map(t => (
-      t.find('.tab-bar-count').exists() ? t.find('.tab-bar-count').text() : null
-    ))
-    // One queued proposal, one candidate, one retired note, and the ledger's
-    // server-side total rather than the page size.
-    expect(counts).toEqual(['1', '1', '1', '500'])
+  it('sends bare /memory to the section last visited', async () => {
+    const mm = useMemoryMapStore()
+    mm.setSection('retired')
+    const wrapper = await mountView('/memory')
+    await flushPromises()
+    expect(wrapper.router.currentRoute.value.path).toBe('/memory/retired')
     wrapper.unmount()
   })
 
-  it('renders no History count while the ledger is still unloaded', async () => {
-    // Null, not zero: "History 0" on a ledger with hundreds of rows is the
-    // opposite of what a badge is for.
-    apiGet.mockImplementation((url: string) => {
-      if (url.includes('/api/vault/graph')) return Promise.resolve(graphPayload())
-      if (url.startsWith('/api/proposals/history')) return Promise.reject(new Error('nope'))
-      if (url.startsWith('/api/proposals')) return Promise.resolve({ rows: [] })
-      return Promise.resolve({ candidates: [], trashed: [], cleared: [] })
-    })
-    const { wrapper } = await mountReview()
+  it('names the workspace only in the sidebar scope, not in the review body', async () => {
+    const { wrapper } = await mountSection('suggested')
+    const body = wrapper.get('.mm-review-wrap .page-main').text()
+    expect(body).not.toContain('to decide in')
+    expect(body.toLowerCase()).not.toContain('personal')
+    wrapper.unmount()
+  })
 
-    expect(tabs(wrapper)[3]!.find('.tab-bar-count').exists()).toBe(false)
+  it('keeps only the always-loaded budget on the review rail', async () => {
+    const guide = '# Guide\n\n<!-- ciao:memory:start -->\nPrefers short briefs\n<!-- ciao:memory:end -->\n'
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input), 'http://localhost').searchParams.get('path')
+      return path === 'personal/AGENTS.md'
+        ? { ok: true, status: 200, text: async () => guide } as unknown as Response
+        : { ok: false, status: 404, text: async () => '' } as unknown as Response
+    }))
+    const { wrapper } = await mountSection('suggested')
+    await flushPromises()
+
+    const rail = wrapper.get('.mm-review-rail')
+    // The vault's numbers live on the map's toolbar now.
+    expect(rail.find('.rail-kv').exists()).toBe(false)
+    expect(rail.get('.guide-budget-path').text()).toBe('personal/AGENTS.md')
+    const regions = rail.findAll('.guide-region')
+    expect(regions[0]!.get('.guide-region-name').text()).toBe('Agent memory')
+    // 20 chars of entry plus the trailing newline, against the 3000 default cap.
+    expect(regions[0]!.get('.guide-region-count').text()).toBe('21 / 3,000')
+    expect(regions[0]!.get('[role="meter"]').attributes('aria-valuenow')).toBe('21')
     wrapper.unmount()
   })
 })

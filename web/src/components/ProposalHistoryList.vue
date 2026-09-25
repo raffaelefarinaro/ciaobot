@@ -76,16 +76,16 @@ watch(() => projectStore.activeWorkspace, ws => {
 })
 
 const ACTION_FILTERS: { key: 'all' | 'accepted' | 'dismissed'; label: string }[] = [
-  { key: 'all', label: 'all' },
-  { key: 'accepted', label: 'accepted' },
-  { key: 'dismissed', label: 'dismissed' },
+  { key: 'all', label: 'All' },
+  { key: 'accepted', label: 'Accepted' },
+  { key: 'dismissed', label: 'Dismissed' },
 ]
 
 const ACTOR_FILTERS: { key: 'all' | 'pwa' | 'agent' | 'auto'; label: string }[] = [
-  { key: 'all', label: 'anyone' },
-  { key: 'pwa', label: 'you' },
-  { key: 'agent', label: 'agent' },
-  { key: 'auto', label: 'automatic' },
+  { key: 'all', label: 'Anyone' },
+  { key: 'pwa', label: 'You' },
+  { key: 'agent', label: 'Agent' },
+  { key: 'auto', label: 'Automatic' },
 ]
 
 const filteredRows = computed(() => store.visibleHistory(projectStore.activeWorkspace))
@@ -175,33 +175,36 @@ const filtersHideEverything = computed(
       on its own.
     </p>
 
+    <!-- Two segmented controls, the same quiet track as the Review/Map
+         switch: sentence case, the current choice lifted rather than a
+         pink-outlined pill. -->
     <div class="ph-filters">
-      <div class="ph-chip-row">
+      <div class="ph-seg" role="group" aria-label="Decision">
         <button
           v-for="f in ACTION_FILTERS"
           :key="f.key"
           type="button"
-          class="btn-small btn-chip"
           :class="{ active: store.historyActionFilter === f.key }"
+          :aria-pressed="store.historyActionFilter === f.key"
           @click="store.historyActionFilter = f.key"
         >{{ f.label }}</button>
       </div>
-      <div class="ph-chip-row">
+      <div class="ph-seg" role="group" aria-label="Decided by">
         <button
           v-for="f in ACTOR_FILTERS"
           :key="f.key"
           type="button"
-          class="btn-small btn-chip"
           :class="{ active: store.historyActorFilter === f.key }"
+          :aria-pressed="store.historyActorFilter === f.key"
           @click="store.historyActorFilter = f.key"
         >{{ f.label }}</button>
-        <button
-          v-if="filtersActive"
-          type="button"
-          class="ph-clear-filter"
-          @click="store.resetFilters()"
-        >clear filters</button>
       </div>
+      <button
+        v-if="filtersActive"
+        type="button"
+        class="ph-clear-filter"
+        @click="store.resetFilters()"
+      >Clear filters</button>
     </div>
 
     <p v-if="store.historyError" class="ph-error" role="alert">{{ store.historyError }}</p>
@@ -217,7 +220,7 @@ const filtersHideEverything = computed(
       No decisions match the current filters<template v-if="store.historyCanLoadMore"> in the
       decisions loaded so far</template>.
     </p>
-    <p v-else-if="!filteredRows.length" class="ph-empty">No decisions yet.</p>
+    <p v-else-if="!filteredRows.length" class="ph-empty">No decisions yet. Suggestions you accept or dismiss show up here.</p>
 
     <template v-else>
       <section v-for="group in groups" :key="group.key" class="ph-group">
@@ -337,21 +340,44 @@ const filtersHideEverything = computed(
 }
 
 .ph-hint {
-  color: var(--fg2);
-  font-size: 0.85rem;
+  color: var(--fg3);
+  font-size: var(--text-sm);
   margin: 0;
 }
 
 .ph-filters {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
+  align-items: center;
   gap: var(--space-2);
 }
 
-.ph-chip-row {
-  display: flex;
+/* Matches MemoryMapView's .mm-seg (the Graph/List switch). */
+.ph-seg {
+  display: inline-flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.ph-seg button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg2);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.ph-seg button:hover { color: var(--fg); }
+.ph-seg button.active { background: var(--bg3); color: var(--fg); }
+@media (pointer: coarse) {
+  .ph-seg button { min-height: var(--touch); }
 }
 
 .ph-empty {
@@ -370,10 +396,9 @@ const filtersHideEverything = computed(
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
-  color: var(--fg2);
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  font-weight: 600;
 }
 
 .ph-rows {
@@ -382,13 +407,14 @@ const filtersHideEverything = computed(
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  border-top: 1px solid var(--border);
 }
 
+/* Hairline rows, like the rest of the page, rather than a bordered card per
+   decision. */
 .ph-row {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-3) 0;
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
@@ -403,14 +429,9 @@ const filtersHideEverything = computed(
 
 .ph-kind {
   flex: none;
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 0.1rem 0.4rem;
-  border-radius: 4px;
-  background: var(--bg3);
-  color: var(--fg2);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: 600;
 }
 
 .ph-actor {
@@ -586,12 +607,11 @@ const filtersHideEverything = computed(
    tab: the kind chips and search are shared, so the reset has to be reachable
    from whichever tab the filter is hiding rows on. */
 .ph-clear-filter {
-  margin-left: var(--space-2);
   background: none;
   border: none;
   padding: 0;
   color: var(--accent);
-  font-size: 0.78rem;
+  font-size: var(--text-sm);
   cursor: pointer;
 }
 

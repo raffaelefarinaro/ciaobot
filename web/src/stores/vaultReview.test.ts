@@ -64,6 +64,45 @@ describe('vaultReview store', () => {
     expect(store.loadedWorkspace).toBe('personal')
   })
 
+  it('keeps load failures separate from action failures and preserves the last snapshot', async () => {
+    get.mockResolvedValueOnce({ candidates: [candidate()], trashed: [] })
+    const store = useVaultReviewStore()
+    await store.fetch('personal')
+
+    get.mockRejectedValueOnce(new Error('offline'))
+    await store.fetch('personal', { force: true })
+
+    expect(store.loadError).toBe('offline')
+    expect(store.error).toBe('')
+    expect(store.loadedWorkspace).toBe('personal')
+    expect(store.candidates).toHaveLength(1)
+
+    post.mockRejectedValueOnce(new Error('action failed'))
+    await store.trash('personal', 'cid1')
+    expect(store.error).toBe('action failed')
+    expect(store.loadError).toBe('offline')
+  })
+
+  it('clears a stale-load warning when a mutation returns a fresh queue', async () => {
+    get.mockResolvedValueOnce({ candidates: [candidate()], trashed: [] })
+    const store = useVaultReviewStore()
+    await store.fetch('personal')
+    get.mockRejectedValueOnce(new Error('offline'))
+    await store.fetch('personal', { force: true })
+    expect(store.loadError).toBe('offline')
+
+    post.mockResolvedValueOnce({
+      ok: true,
+      candidates: [candidate({ candidate_id: 'next-candidate' })],
+      trashed: [],
+      cleared: [],
+      result: null,
+    })
+    expect(await store.decide('personal', 'abc123abc123abc123abc123', 'keep')).toBe(true)
+    expect(store.loadError).toBe('')
+    expect(store.candidates[0]?.candidate_id).toBe('next-candidate')
+  })
+
   it('ensureLoaded skips the request when the workspace is already loaded', async () => {
     // The endpoint scans every note in the vault three times, and the two
     // callers fire on every mount and every Memory Map view change. `fetch`
@@ -337,6 +376,70 @@ describe('vaultReview store', () => {
     // The reason is read off this call's own answer, so a result about
     // another row can only mean the engine answered about something else.
     expect(store.notice).toBe('')
+  })
+
+  it('keeps the newest returned queue when concurrent POSTs finish out of order', async () => {
+    const other = 'zzz999zzz999zzz999zzz999'
+    let settleFirst!: (value: unknown) => void
+    let settleSecond!: (value: unknown) => void
+    post.mockImplementationOnce(() => new Promise(resolve => { settleFirst = resolve }))
+    post.mockImplementationOnce(() => new Promise(resolve => { settleSecond = resolve }))
+    const store = useVaultReviewStore()
+    store.loadedWorkspace = 'personal'
+    store.candidates = [candidate()]
+
+    const first = store.decide('personal', ID, 'keep')
+    const second = store.decide('personal', other, 'keep')
+    settleSecond({
+      ok: true,
+      result: null,
+      candidates: [candidate({ candidate_id: 'newest' })],
+      trashed: [],
+      cleared: [],
+    })
+    await second
+    settleFirst({
+      ok: true,
+      result: null,
+      candidates: [candidate({ candidate_id: 'older' })],
+      trashed: [],
+      cleared: [],
+    })
+    await first
+
+    // The earlier-started reply is discarded on arrival (it may predate the
+    // later one's mutation, or hold both — the client cannot tell), and once
+    // the burst settles the queue is re-read from the server.
+    expect(get).toHaveBeenCalledTimes(1)
+  })
+
+  it('ends on the server\'s queue when an out-of-order reply was the fresher one', async () => {
+    const other = 'zzz999zzz999zzz999zzz999'
+    let settleFirst!: (value: unknown) => void
+    let settleSecond!: (value: unknown) => void
+    post.mockImplementationOnce(() => new Promise(resolve => { settleFirst = resolve }))
+    post.mockImplementationOnce(() => new Promise(resolve => { settleSecond = resolve }))
+    // What the server holds after both mutations: neither row is pending.
+    get.mockResolvedValueOnce({ candidates: [], trashed: [], cleared: [] })
+    const store = useVaultReviewStore()
+    store.loadedWorkspace = 'personal'
+    store.candidates = [candidate(), candidate({ candidate_id: other })]
+
+    const first = store.decide('personal', ID, 'keep')
+    const second = store.decide('personal', other, 'keep')
+    // The later POST lands first, before the earlier one mutated the ledger:
+    // its snapshot still lists row one as pending.
+    settleSecond({ ok: true, result: null, candidates: [candidate()], trashed: [], cleared: [] })
+    await second
+    expect(store.candidates.map(row => row.candidate_id)).toEqual([ID])
+    // The earlier POST's snapshot holds both mutations, but arrives second.
+    settleFirst({ ok: true, result: null, candidates: [], trashed: [], cleared: [] })
+    await first
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(get).toHaveBeenCalledTimes(1)
+    expect(store.candidates).toEqual([])
   })
 
   it('reads its own POST answer when two decisions are in flight', async () => {

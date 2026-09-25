@@ -1,49 +1,72 @@
 <template>
   <div class="device-panel">
     <!-- Role and host connection -->
-    <div class="card">
-      <div class="device-card-header">
-        <div>
-          <p class="section-title">role</p>
-          <p class="hint">
-            <template v-if="!nodeStatus">Loading&hellip;</template>
-            <template v-else-if="isClient">
-              This device is a <strong>client</strong>: tray and PWA tunnel to the host below,
-              and automations run there, not here.
-            </template>
-            <template v-else-if="nodeStatusUnknown">
-              This device's saved role could not be verified. Recovery is available from the
-              device controls, but host and client actions stay disabled.
-            </template>
-            <template v-else>
-              This device is the <strong>host</strong>: schedules, loops and vault writes run here.
-            </template>
-          </p>
-        </div>
-        <div v-if="nodeStatus" class="device-card-actions">
-          <span class="badge" :class="nodeStatusUnknown ? 'badge--warn' : isClient ? 'badge--warn' : 'badge--success'">{{ roleLabel }}</span>
-        </div>
+    <section class="device-section" aria-labelledby="device-role-title">
+      <div class="device-section-head">
+        <h3 id="device-role-title">Role</h3>
       </div>
 
       <div v-if="!nodeStatus" class="loading">Loading node status&hellip;</div>
       <template v-else>
+        <div class="device-kvs">
+          <div class="device-kv device-kv--top">
+            <span class="device-k">Current role</span>
+            <span class="device-v">
+              <span class="device-state">
+                <span class="device-dot" :class="roleTone" aria-hidden="true"></span>
+                {{ roleLabel }}
+              </span>
+              <span class="device-sub">
+                <template v-if="isClient">
+                  Tray and PWA tunnel to the host below, and automations run there, not here.
+                </template>
+                <template v-else-if="nodeStatusUnknown">
+                  The saved role could not be verified. Repair it before using host or client actions.
+                </template>
+                <template v-else>
+                  Schedules, loops and vault writes run here.
+                </template>
+              </span>
+            </span>
+          </div>
+          <template v-if="isClient">
+            <div class="device-kv">
+              <span class="device-k">This device</span>
+              <code class="device-v device-code" :title="deviceName">{{ deviceName }}</code>
+            </div>
+            <div class="device-kv">
+              <span class="device-k">Host</span>
+              <code class="device-v device-code" :title="hostUrl || undefined">{{ hostLabel }}</code>
+            </div>
+            <div v-if="nodeStatus.host_reachable != null" class="device-kv">
+              <span class="device-k">Connection</span>
+              <span class="device-v device-state">
+                <span class="device-dot" :class="nodeStatus.host_reachable ? 'device-dot--ok' : 'device-dot--warn'" aria-hidden="true"></span>
+                {{ nodeStatus.host_reachable ? 'Reachable' : 'Unreachable' }}
+              </span>
+            </div>
+          </template>
+        </div>
+
         <template v-if="nodeStatusUnknown">
-          <p class="hint hint--warn">Repair or replace the saved node state before using device controls.</p>
+          <div v-if="nodeActionResult" class="action-result" :class="{ 'action-result--error': nodeActionError }">
+            {{ nodeActionResult }}
+          </div>
           <div class="action-row">
-            <button
-              class="btn-danger btn-small"
-              @click="becomeHost(true)"
-              :disabled="nodePending !== null"
-              title="Discard the unverifiable role and make this device the host"
-            >
-              Force become host
-            </button>
             <button
               class="btn-small"
               @click="showConnectForm = !showConnectForm"
               :disabled="nodePending !== null"
             >
               {{ showConnectForm ? 'Cancel' : 'Connect as client…' }}
+            </button>
+            <button
+              class="btn-danger btn-small"
+              @click="forceHostFromUnknown"
+              :disabled="nodePending !== null"
+              title="Discard the unverifiable role and make this device the host"
+            >
+              Make this the host…
             </button>
           </div>
           <template v-if="showConnectForm">
@@ -87,27 +110,6 @@
         </template>
         <!-- Client: this device → host -->
         <template v-else-if="isClient">
-          <div class="node-path" aria-label="Client connection">
-            <div class="node-path-endpoint">
-              <span class="node-path-label">this device</span>
-              <code class="node-path-value" :title="deviceName">{{ deviceName }}</code>
-            </div>
-            <div class="node-path-link">
-              <span class="node-path-arrow" aria-hidden="true">&rarr;</span>
-              <span
-                v-if="nodeStatus.host_reachable != null"
-                class="badge"
-                :class="nodeStatus.host_reachable ? 'badge--success' : 'badge--warn'"
-              >
-                {{ nodeStatus.host_reachable ? 'reachable' : 'unreachable' }}
-              </span>
-            </div>
-            <div class="node-path-endpoint node-path-endpoint--host">
-              <span class="node-path-label">host</span>
-              <code class="node-path-value" :title="hostUrl || undefined">{{ hostLabel }}</code>
-            </div>
-          </div>
-
           <div v-if="nodeActionResult" class="action-result" :class="{ 'action-result--error': nodeActionError }">
             {{ nodeActionResult }}
           </div>
@@ -144,7 +146,7 @@
           </template>
           <div class="action-row">
             <button
-              class="btn-primary btn-small"
+              class="btn-small"
               @click="() => becomeHost(false)"
               :disabled="nodePending !== null"
             >
@@ -166,9 +168,12 @@
 
         <!-- Host: reachable addresses, connected clients, opt into client mode -->
         <template v-else>
-          <NodeAddresses />
           <div class="device-subsection">
-            <p class="section-title">connected clients</p>
+            <h4 class="device-subtitle">Addresses</h4>
+            <NodeAddresses />
+          </div>
+          <div class="device-subsection">
+            <h4 class="device-subtitle">Connected clients</h4>
             <ConnectedClients />
           </div>
           <div v-if="nodeActionResult" class="action-result" :class="{ 'action-result--error': nodeActionError }">
@@ -224,46 +229,49 @@
           </template>
         </template>
       </template>
-    </div>
+    </section>
 
     <!-- The local install, which no other screen can update in client mode -->
-    <div class="card">
-      <div class="device-card-header">
-        <div>
-          <p class="section-title">local app</p>
-          <p class="hint">
-            The Ciaobot install on {{ deviceName }}.
-            <template v-if="isClient">
-              Settings &rarr; package update reports the host instead, so this is the only place
-              that upgrades this computer.
-            </template>
-          </p>
-        </div>
-        <div v-if="packageStatus" class="device-card-actions">
+    <section class="device-section" aria-labelledby="device-app-title">
+      <div class="device-section-head">
+        <h3 id="device-app-title">Local app</h3>
+        <div v-if="packageStatus" class="device-section-end">
           <button
-            :class="packageStatus.update_available ? 'btn-primary btn-small' : 'btn-small'"
+            v-if="packageStatus.update_available"
+            class="btn-primary btn-small"
             @click="openUpdatePanel"
-            :disabled="!packageStatus.update_available || updating || showUpdatePanel"
+            :disabled="updating || showUpdatePanel"
           >
-            {{ packageStatus.update_available ? `Update to ${packageStatus.latest_version}` : 'Up to date' }}
+            Update to {{ packageStatus.latest_version }}
           </button>
+          <span v-else class="device-uptodate">Up to date</span>
         </div>
       </div>
+      <p class="hint">
+        The Ciaobot install on {{ deviceName }}.
+        <template v-if="isClient">
+          Settings &rarr; package update reports the host instead, so this is the only place
+          that upgrades this computer.
+        </template>
+      </p>
 
-      <dl class="device-facts">
-        <div>
-          <dt>installed here</dt>
-          <dd><code>{{ localVersion || '—' }}</code></dd>
+      <div class="device-kvs">
+        <div class="device-kv">
+          <span class="device-k">Installed here</span>
+          <code class="device-v device-code">{{ localVersion || '—' }}</code>
         </div>
-        <div v-if="isClient">
-          <dt>running on host</dt>
-          <dd><code>{{ nodeStatus?.host_version || '—' }}</code></dd>
+        <div v-if="isClient" class="device-kv">
+          <span class="device-k">Running on host</span>
+          <code class="device-v device-code">{{ nodeStatus?.host_version || '—' }}</code>
         </div>
-        <div>
-          <dt>local engine</dt>
-          <dd>{{ localReady ? 'ready' : 'starting…' }}</dd>
+        <div class="device-kv">
+          <span class="device-k">Local engine</span>
+          <span class="device-v device-state">
+            <span class="device-dot" :class="localReady ? 'device-dot--ok' : 'device-dot--warn'" aria-hidden="true"></span>
+            {{ localReady ? 'Ready' : 'Starting…' }}
+          </span>
         </div>
-      </dl>
+      </div>
 
       <p v-if="versionSkew" class="hint hint--warn">
         This device runs {{ localVersion }} while the host runs {{ nodeStatus?.host_version }}.
@@ -277,7 +285,7 @@
       </p>
 
       <div v-if="showUpdatePanel" class="device-form">
-        <p class="section-title">What&rsquo;s new in {{ packageStatus?.latest_version }}</p>
+        <h4 class="device-subtitle">What&rsquo;s new in {{ packageStatus?.latest_version }}</h4>
         <div v-if="changelogLoading" class="loading">Loading changelog&hellip;</div>
         <template v-else>
           <ul v-if="changelog.commits && changelog.commits.length" class="device-changelog">
@@ -298,7 +306,7 @@
         </div>
       </div>
       <div v-if="updateResult" class="action-result">{{ updateResult }}</div>
-    </div>
+    </section>
   </div>
 </template>
 
@@ -353,7 +361,8 @@ const isClient = computed(() => {
 const nodeStatusUnknown = computed(
   () => nodeStatusError.value || nodeStatus.value?.state_valid === false || nodeStatus.value?.role === 'invalid',
 )
-const roleLabel = computed(() => (nodeStatusUnknown.value ? 'unknown' : isClient.value ? 'client' : 'host'))
+const roleLabel = computed(() => (nodeStatusUnknown.value ? 'Unknown' : isClient.value ? 'Client' : 'Host'))
+const roleTone = computed(() => (nodeStatusUnknown.value || isClient.value ? 'device-dot--warn' : 'device-dot--ok'))
 const deviceName = computed(() => nodeStatus.value?.node_id || 'this machine')
 const hostUrl = computed(() => nodeStatus.value?.host_url || nodeStatus.value?.active_peer_url || '')
 const hostLabel = computed(() => {
@@ -509,6 +518,16 @@ async function reconnectHostSession() {
   nodePending.value = null
 }
 
+// Recovery from an unverifiable role discards the saved state, so it asks
+// first even though the forced handover itself never does.
+async function forceHostFromUnknown() {
+  if (!await askConfirm(
+    'Discard the saved role and make this device the host? Automations and vault writes will run here.',
+    { title: 'Make this the host?', confirmLabel: 'Make this the host', destructive: true },
+  )) return
+  return becomeHost(true)
+}
+
 async function becomeHost(force = false) {
   if (
     !force &&
@@ -590,23 +609,99 @@ onMounted(() => {
 .native-session-warning {
   color: var(--warning);
 }
-.device-card-actions {
+.device-section + .device-section {
+  margin-top: var(--space-6);
+}
+.device-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.device-section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 34px;
+}
+.device-section-head h3 {
+  margin: 0;
+  font-size: calc(16px * var(--font-scale));
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+.device-section-end {
+  margin-left: auto;
   display: flex;
   align-items: center;
   gap: var(--space-2);
 }
-.device-card-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-4);
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--border);
+.device-uptodate {
+  color: var(--fg3);
+  font-size: var(--text-sm);
 }
 .device-subsection {
   display: flex;
   flex-direction: column;
+  gap: var(--space-1);
+}
+.device-subtitle {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--fg);
+}
+/* Hairline key/value rows, the same vocabulary as the page rails. */
+.device-kvs {
+  border-top: 1px solid var(--border);
+}
+.device-kv {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-height: 44px;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-sm);
+}
+.device-kv--top { align-items: flex-start; }
+.device-k {
+  flex: 0 0 132px;
+  color: var(--fg3);
+}
+.device-v {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--fg);
+}
+.device-code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.device-state {
+  display: inline-flex;
+  align-items: center;
   gap: var(--space-2);
+  color: var(--fg);
+}
+.device-sub {
+  display: block;
+  margin-top: 2px;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+.device-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--fg3);
+}
+.device-dot--ok { background: var(--success); }
+.device-dot--warn { background: var(--warning); }
+@media (max-width: 480px) {
+  .device-kv { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .device-k { flex-basis: auto; }
 }
 .device-form {
   display: flex;
@@ -639,24 +734,6 @@ onMounted(() => {
   min-height: 38px;
   box-sizing: border-box;
 }
-.device-facts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-5);
-  margin: 0;
-}
-.device-facts dt {
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  color: var(--fg3, var(--fg2));
-}
-.device-facts dd {
-  margin: 4px 0 0;
-  font-size: var(--text-sm);
-  color: var(--fg);
-}
 .device-changelog {
   margin: 0;
   padding-left: var(--space-4);
@@ -668,55 +745,6 @@ onMounted(() => {
 .device-changelog code {
   margin-right: var(--space-2);
   color: var(--fg2);
-}
-.node-path {
-  display: flex;
-  align-items: stretch;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-}
-.node-path-endpoint {
-  flex: 1 1 140px;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-}
-.node-path-endpoint--host {
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
-  background: color-mix(in srgb, var(--accent) 5%, var(--bg));
-}
-.node-path-label {
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  color: var(--fg3, var(--fg2));
-}
-.node-path-value {
-  color: var(--fg);
-  font-size: var(--text-sm);
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-.node-path-link {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  min-width: 72px;
-}
-.node-path-arrow {
-  color: var(--accent);
-  font-size: calc(18px * var(--font-scale));
-  font-weight: 700;
-  line-height: 1;
 }
 .action-row {
   display: flex;

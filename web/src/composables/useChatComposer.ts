@@ -1,5 +1,5 @@
 import { ref, toValue, watch, nextTick, type MaybeRefOrGetter, type Ref } from 'vue'
-import { formatAttachedFilePath } from '../lib/chatAttachments'
+import { importDesktopDrop, uploadChatAttachments } from '../lib/chatAttachments'
 import { readChatDraft, readSentPromptHistory, writeChatDraft } from '../lib/chatDrafts'
 
 /**
@@ -40,27 +40,9 @@ export interface ChatComposerOptions {
   fetchImpl?: typeof fetch
 }
 
-type FileRef = {
-  ref: string
-  name?: string
-}
-
-type ProjectUploadResult = {
-  file_refs?: FileRef[]
-  errors?: { filename: string; error: string }[]
-  error?: string
-}
-
 export type NativeFileDropDetail = {
   grantId?: string
   names?: string[]
-  error?: string
-}
-
-type NativeFileDropResult = {
-  file_refs?: FileRef[]
-  image_refs?: string[]
-  errors?: { filename: string; error: string }[]
   error?: string
 }
 
@@ -105,10 +87,6 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
 
   const chatId = () => toValue(options.chatId)
 
-  function fileRefText(ref: string | undefined): string | null {
-    if (!ref || !/^drop_[0-9a-f]{32}$/.test(ref)) return null
-    return formatAttachedFilePath(`ciao-drop:${ref}`)
-  }
 
   // Persist synchronously to avoid losing the last keystroke when switching
   // chats immediately after typing.
@@ -181,7 +159,7 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     if (!el) return
     el.style.height = 'auto'
     // Floor at the shared touch target so an empty composer stays aligned
-    // with the sidebar "+ New Project" row (both 44px inside 61px footers).
+    // at the shared 44px touch target inside the 61px footer.
     const next = Math.min(Math.max(el.scrollHeight, 44), 200)
     el.style.height = next + 'px'
     const bar = el.closest('.input-bar')
@@ -251,36 +229,18 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
       return
     }
     try {
-      const response = await doFetch('/api/desktop-drop', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(window.location.hostname === '127.0.0.1'
-            ? { 'X-Ciao-Local-Control': '1' }
-            : {}),
-        },
-        redirect: 'manual',
-        body: JSON.stringify({
-          grant_id: detail.grantId,
-          project_id: toValue(options.projectId) || '',
-          chat_id: chatId(),
-        }),
-      })
-      const result = await response.json().catch(() => ({})) as NativeFileDropResult
-      if (!response.ok) {
-        throw new Error(result.error || `Native file import failed (HTTP ${response.status})`)
-      }
-      for (const failure of result.errors || []) {
+      const result = await importDesktopDrop(
+        detail.grantId,
+        { chatId: chatId(), projectId: toValue(options.projectId) || '' },
+        doFetch,
+      )
+      for (const failure of result.failures) {
         store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
       }
-      const refs = (result.file_refs || [])
-        .map((entry) => fileRefText(entry.ref))
-        .filter((value): value is string => Boolean(value))
-      if (refs.length) {
-        insertTextAtCursor(refs.join(' '))
+      if (result.fileRefs.length) {
+        insertTextAtCursor(result.fileRefs.join(' '))
       }
-      store.addPendingImageRefs(chatId(), result.image_refs || [])
+      store.addPendingImageRefs(chatId(), result.imageRefs)
     } catch (error) {
       store.pushErrorToast(
         'Could not attach file',
@@ -306,27 +266,11 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     if (!toValue(options.vaultFolder)) {
       throw new Error('This project has no folder for uploaded files.')
     }
-    const form = new FormData()
-    files.forEach((file, index) => form.append(`file${index}`, file, file.name))
-    const response = await doFetch(`/api/chats/${encodeURIComponent(chatId())}/attachments?opaque=1`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: window.location.hostname === '127.0.0.1'
-        ? { 'X-Ciao-Local-Control': '1' }
-        : undefined,
-      redirect: 'manual',
-      body: form,
-    })
-    const result = await response.json().catch(() => ({})) as ProjectUploadResult
-    if (!response.ok) {
-      throw new Error(result.error || `Upload failed (HTTP ${response.status})`)
-    }
-    for (const failure of result.errors || []) {
+    const result = await uploadChatAttachments(chatId(), files, doFetch)
+    for (const failure of result.failures) {
       store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
     }
-    return (result.file_refs || [])
-      .map((entry) => fileRefText(entry.ref))
-      .filter((value): value is string => Boolean(value))
+    return result.fileRefs
   }
 
   async function handleDrop(e: DragEvent): Promise<void> {

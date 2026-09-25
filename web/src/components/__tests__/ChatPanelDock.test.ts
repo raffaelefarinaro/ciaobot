@@ -2,8 +2,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent, h } from 'vue'
-import { flushPromises, shallowMount } from '@vue/test-utils'
+import { defineComponent, h, nextTick } from 'vue'
+import { flushPromises, RouterLinkStub, shallowMount } from '@vue/test-utils'
 import { api } from '../../lib/api'
 import type { ChatInfo, ProjectInfo, Schedule } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
@@ -135,6 +135,7 @@ async function mountPanel(
   })
 
   const wrapper = shallowMount(ChatPanel, {
+    attachTo: document.body,
     global: {
       plugins: [pinia],
       stubs: {
@@ -144,7 +145,7 @@ async function mountPanel(
         SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
-        RouterLink: ChildStub,
+        RouterLink: RouterLinkStub,
       },
     },
   })
@@ -198,6 +199,34 @@ describe('ChatPanel context bar', () => {
     await wrapper.get('.ctx-summary').trigger('click')
     expect(wrapper.find('.ctx-detail').exists()).toBe(true)
     expect(wrapper.find('.loop-banner-row').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  // With Work details shown as a rail, the automation is one line at the top of
+  // it naming where the chat came from; cadence and controls stay on its page.
+  it('names the automation at the top of the Work details rail on a wide pane', async () => {
+    const observers: Array<() => void> = []
+    vi.stubGlobal('ResizeObserver', class {
+      private cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe() {
+        observers.push(() => this.cb([{ contentRect: { width: 1200 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver))
+      }
+      disconnect() {}
+      unobserve() {}
+    })
+    const { wrapper } = await mountPanel(undefined, [makeIntervalSchedule('schedule-1')])
+    observers.forEach(fire => fire())
+    await nextTick()
+
+    expect(wrapper.find('.ctx-bar').exists()).toBe(false)
+    const rail = wrapper.get('#chat-work-rail')
+    expect(rail.element.firstElementChild?.classList.contains('chat-rail-origin')).toBe(true)
+    const origin = rail.get('.chat-rail-origin')
+    expect(origin.text()).toBe('This chat comes from the automation schedule-1.')
+    expect(origin.getComponent(RouterLinkStub).props('to')).toBe('/schedules/schedule-1')
+    expect(origin.findAll('button')).toHaveLength(0)
+    vi.unstubAllGlobals()
     wrapper.unmount()
   })
 })
@@ -302,58 +331,31 @@ describe('ChatPanel action dock', () => {
 })
 
 
-describe('ChatPanel workspace breadcrumb', () => {
+describe('ChatPanel project context breadcrumb', () => {
   beforeEach(() => {
     Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
   })
   afterEach(() => vi.restoreAllMocks())
 
-  // The number badge is gone: it existed to teach the 1-9 shortcut, and it does
-  // that on the home lanes and the sidebar pills where pressing the key visibly
-  // does something. In a chat header there is nothing to switch, so it read as a
-  // number with no referent. The shortcut survives in the tooltip.
-  it('names the workspace and hues it, without a number badge', async () => {
-    const { wrapper } = await mountPanel()
-    const crumb = wrapper.find('.breadcrumb-workspace')
-    expect(crumb.exists()).toBe(true)
-    expect(crumb.text()).toBe('personal')
-    expect(crumb.attributes('data-workspace-color')).toBe('emerald')
-    expect(wrapper.find('.breadcrumb-key').exists()).toBe(false)
-    expect(crumb.attributes('title')).toContain('press 1')
+  it('links the project to its page and hides the workspace', async () => {
+    const { wrapper, store } = await mountPanel()
+    expect(wrapper.find('.breadcrumb-workspace').exists()).toBe(false)
+    const project = wrapper.getComponent<typeof RouterLinkStub>('.breadcrumb-project')
+    expect(project.text()).toContain('Upwordo')
+    expect(project.props('to')).toBe(`/project/${store.projects[0].project_id}`)
+    expect(wrapper.find('#project-context-popup').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  // Workspace and project are one unit - the scope the chat sits in - so they
-  // share a wrapper, with one divider between them and none after: the scope is
-  // an eyebrow on its own line, so the line break separates it from the title.
-  it('groups workspace and project into one scope crumb above the title', async () => {
-    const { wrapper } = await mountPanel()
-    const scope = wrapper.find('.breadcrumb-scope')
-    expect(scope.exists()).toBe(true)
-    expect(scope.find('.breadcrumb-workspace').text()).toBe('personal')
-    expect(scope.find('.breadcrumb-project').text()).toBe('Upwordo')
-    // The one divider is inside the scope; none dangles before the title.
-    expect(wrapper.findAll('.breadcrumb-separator').length).toBe(1)
-    expect(wrapper.findAll('.breadcrumb-separator--title').length).toBe(0)
-    wrapper.unmount()
-  })
-
-  // 'General' is the project every workspace has implicitly, so naming it in the
-  // breadcrumb says nothing. The scope keeps the workspace and loses the divider
-  // that would otherwise dangle after it.
-  it('drops the project crumb for the implicit General project', async () => {
+  it('drops the project control for the implicit General project', async () => {
     const { wrapper } = await mountPanel(store => {
       store.projects = [{ ...store.projects[0], name: 'General' }]
     })
     expect(wrapper.find('.breadcrumb-project').exists()).toBe(false)
-    expect(wrapper.find('.breadcrumb-scope .breadcrumb-workspace').text()).toBe('personal')
-    expect(wrapper.findAll('.breadcrumb-separator').length).toBe(0)
+    expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  // The close control is one of the header's icon buttons, not a `&times;`
-  // character: same 18px icon in the same box as the actions across the header,
-  // which is what keeps it on their line and at their size.
   it('closes the chat from a labelled icon button', async () => {
     const { wrapper } = await mountPanel()
     const close = wrapper.find('.close-btn')

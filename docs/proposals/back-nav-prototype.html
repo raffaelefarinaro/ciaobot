@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Back navigation prototype</title>
+<style>
+:root {
+  --bg: #1a1a2e; --bg2: #1f2240; --bg3: #2a2e54; --bg-elev: #23264a;
+  --fg: #e8e8f0; --fg2: #b4b4c4; --fg3: #8f90a8;
+  --border: #2e3258; --border-strong: #3a3f70;
+  --accent: #ff4d6d; --on-accent: #1a1a2e;
+  --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif;
+  --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f4f4fa; --bg2: #ffffff; --bg3: #e6e8f4; --bg-elev: #fcfcfd;
+    --fg: #1a1a2e; --fg2: #5f607d; --fg3: #66687f;
+    --border: #d2d4e3; --border-strong: #b6b8cf;
+    --accent: #d81b60; --on-accent: #fff; color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #f4f4fa; --bg2: #ffffff; --bg3: #e6e8f4; --bg-elev: #fcfcfd;
+  --fg: #1a1a2e; --fg2: #5f607d; --fg3: #66687f;
+  --border: #d2d4e3; --border-strong: #b6b8cf;
+  --accent: #d81b60; --on-accent: #fff; color-scheme: light;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--fg); font: 14px/1.6 var(--font); overflow: hidden; }
+button { font: inherit; color: inherit; }
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.proto-bar {
+  position: fixed; left: 12px; bottom: 12px; width: 236px; z-index: 100;
+  display: flex; flex-wrap: wrap; gap: 2px; padding: 6px;
+  background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.4); font-size: 12px;
+}
+.proto-bar span { color: var(--fg3); font: 600 11px var(--mono); letter-spacing: .5px; text-transform: uppercase; padding: 4px 8px 0; flex-basis: 100%; }
+.proto-bar button { border: 0; background: none; padding: 6px 10px; border-radius: 8px; cursor: pointer; color: var(--fg2); flex-basis: 100%; text-align: left; }
+.proto-bar button[aria-pressed="true"] { background: var(--bg3); color: var(--fg); }
+.proto-bar .note { color: var(--fg3); line-height: 1.45; padding: 4px 8px 6px; }
+
+.app { display: flex; height: 100%; }
+.sidebar { width: 260px; flex: none; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 10px 12px; }
+.side-top { display: flex; align-items: center; gap: 2px; height: 36px; margin-bottom: 10px; }
+.side-top .grow { flex: 1; }
+.wordmark { display: flex; align-items: center; gap: 10px; font: 700 18px var(--mono); padding-left: 2px; }
+.wordmark b { width: 26px; height: 26px; border-radius: 50%; background: var(--accent); display: grid; place-items: center; color: var(--on-accent); font-size: 12px; }
+.side-top .nav-pair { display: flex; gap: 0; }
+.side-top .nav-pair .icon-btn { width: 26px; }
+.side-top .divider { width: 1px; height: 16px; background: var(--border); margin: 0 4px; }
+body.collapsed .sidebar { display: none; }
+.icon-btn { width: 30px; height: 30px; display: grid; place-items: center; border: 0; background: none; border-radius: 8px; color: var(--fg2); cursor: pointer; }
+.icon-btn:hover:not(:disabled) { background: var(--bg3); color: var(--fg); }
+.icon-btn:disabled { color: var(--fg3); opacity: .45; cursor: default; }
+.scope { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 10px; font-weight: 600; margin-bottom: 8px; }
+.scope i { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.nav a { display: flex; align-items: center; height: 36px; padding: 0 10px; border-radius: 10px; text-decoration: none; cursor: pointer; }
+.nav a.cur { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.sec { font: 600 11px var(--mono); letter-spacing: .5px; color: var(--fg3); text-transform: uppercase; margin: 18px 6px 6px; }
+.tree a { height: 34px; display: flex; align-items: center; padding: 0 10px; color: var(--fg2); border-radius: 8px; text-decoration: none; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tree a.p { color: var(--fg); font-weight: 600; }
+.tree a.cur { color: var(--fg); background: var(--bg3); }
+
+.pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.phead { height: 56px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 32px 0 20px; border-bottom: 1px solid var(--border); }
+.phead h1 { font-size: 17px; font-weight: 600; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.phead .grow { flex: 1; }
+.back-crumb { display: inline-flex; align-items: center; gap: 4px; height: 30px; padding: 0 8px 0 4px; border: 0; background: none; border-radius: 8px; color: var(--fg3); cursor: pointer; white-space: nowrap; max-width: 220px; }
+.back-crumb span { overflow: hidden; text-overflow: ellipsis; }
+.back-crumb:hover { background: var(--bg3); color: var(--fg); }
+.back-crumb + h1::before { content: "/"; color: var(--border-strong); margin-right: 8px; font-weight: 400; }
+
+.body { flex: 1; overflow: auto; display: flex; justify-content: center; gap: 40px; padding: 28px 32px; }
+.main { flex: 1; max-width: 640px; min-width: 0; }
+.rail { width: 280px; flex: none; }
+.msg { margin-bottom: 18px; }
+.msg.user { background: color-mix(in srgb, var(--accent) 12%, var(--bg3)); padding: 10px 14px; border-radius: 10px; margin-left: 80px; }
+.muted { color: var(--fg3); }
+.auto-tag { font: 600 11px var(--mono); color: var(--accent); letter-spacing: .4px; text-transform: uppercase; }
+
+.rail h2 { font-size: 16px; margin: 0 0 14px; }
+.rail-section { padding: 0 0 16px; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+.rail-label { color: var(--fg3); font-size: 13px; margin: 0 0 6px; }
+.kv { display: flex; justify-content: space-between; padding: 6px 0; border-top: 1px solid var(--border); font-size: 13px; }
+.kv span { color: var(--fg3); }
+.origin { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg2); margin-bottom: 18px; font-size: 13px; line-height: 1.45; }
+.origin svg { flex: none; margin-top: 2px; color: var(--fg3); }
+.origin a { font-weight: 600; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--border-strong); cursor: pointer; }
+.origin a:hover { text-decoration-color: currentColor; }
+.proj-link { font-weight: 600; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+
+.page-section { margin-bottom: 28px; }
+.page-section h3 { font-size: 16px; margin: 0 0 8px; }
+.row { display: flex; justify-content: space-between; padding: 9px 0; border-top: 1px solid var(--border); }
+.row a { text-decoration: none; cursor: pointer; }
+.row a:hover { text-decoration: underline; }
+
+.toast { position: fixed; right: 16px; bottom: 16px; background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: 10px; padding: 8px 12px; font-size: 12px; color: var(--fg2); max-width: 300px; }
+.kbd { font: 11px var(--mono); border: 1px solid var(--border-strong); border-radius: 4px; padding: 0 4px; color: var(--fg3); }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="side-top" id="sideTop"></div>
+    <div class="scope"><i></i> Work</div>
+    <nav class="nav">
+      <a data-go="home">Home</a>
+      <a data-go="automations">Automations</a>
+      <a data-go="memory">Memory</a>
+    </nav>
+    <div class="sec">Projects</div>
+    <div class="tree">
+      <a class="p" data-go="project">General</a>
+      <a data-go="chat">Morning action briefing - Sep 25</a>
+      <a data-go="chat2">Q3 OKR draft</a>
+    </div>
+  </aside>
+  <main class="pane">
+    <header class="phead" id="phead"></header>
+    <div class="body" id="body"></div>
+  </main>
+</div>
+
+<div class="proto-bar">
+  <span>Back control</span>
+  <button data-mode="side" aria-pressed="true">A · Arrows atop the sidebar</button>
+  <button data-mode="crumb" aria-pressed="false">B · "‹ Previous" in the header</button>
+  <div class="note">Collapse the sidebar to see where A's arrows go then. Click around: sidebar, the automation link, the project name. Back shows only when there is in-app history. <span class="kbd">⌘[</span> / <span class="kbd">⌘]</span> also work.</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const PAGES = {
+  home: { title: 'Home' },
+  automations: { title: 'Automations' },
+  automation: { title: 'Morning action briefing' },
+  memory: { title: 'Memory' },
+  project: { title: 'General' },
+  chat: { title: 'Morning action briefing - Sep 25' },
+  chat2: { title: 'Q3 OKR draft' },
+}
+let mode = 'side'
+let collapsed = false
+let stack = ['automation', 'chat'] // pretend we came here from the automation page
+let idx = 1
+
+const icon = (d) => `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`
+const chevL = '<polyline points="15 18 9 12 15 6"/>'
+const chevR = '<polyline points="9 18 15 12 9 6"/>'
+const clock = '<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/>'
+
+function go(p) { stack = stack.slice(0, idx + 1); stack.push(p); idx++; render() }
+function back() { if (idx > 0) { idx--; render() } }
+function fwd() { if (idx < stack.length - 1) { idx++; render() } }
+
+function render() {
+  const cur = stack[idx]
+  const prev = idx > 0 ? PAGES[stack[idx - 1]].title : null
+  const next = idx < stack.length - 1 ? PAGES[stack[idx + 1]].title : null
+
+  const panel = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>`
+  const pair = `<div class="nav-pair">
+         <button class="icon-btn bk" ${prev ? '' : 'disabled'} aria-label="${prev ? 'Back to ' + prev : 'Back'}" title="${prev ? 'Back to ' + prev + '  ⌘[' : ''}">${icon(chevL)}</button>
+         <button class="icon-btn fw" ${next ? '' : 'disabled'} aria-label="${next ? 'Forward to ' + next : 'Forward'}" title="${next ? 'Forward to ' + next + '  ⌘]' : ''}">${icon(chevR)}</button></div>`
+  document.getElementById('sideTop').innerHTML =
+    `<div class="wordmark"><b>c</b>ciaobot</div><div class="grow"></div>` +
+    (mode === 'side' ? pair + '<div class="divider"></div>' : '') +
+    `<button class="icon-btn" id="collapse" aria-label="Collapse sidebar" title="Collapse sidebar">${panel}</button>`
+
+  const crumb = mode === 'crumb' && prev
+    ? `<button class="back-crumb" id="bk2" aria-label="Back to ${prev}" title="⌘[">${icon(chevL)}<span>${prev}</span></button>` : ''
+  const isChat = cur === 'chat' || cur === 'chat2'
+  document.getElementById('phead').innerHTML =
+    (collapsed ? `<button class="icon-btn" id="expand" aria-label="Show sidebar" title="Show sidebar">${panel}</button>` + (mode === 'side' ? pair : '') : '') +
+    (isChat ? `<button class="icon-btn" aria-label="Close chat">${icon('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>')}</button>` : '') +
+    crumb + `<h1>${PAGES[cur].title}</h1><div class="grow"></div>`
+
+  document.getElementById('body').innerHTML = bodyFor(cur)
+  document.querySelectorAll('[data-go]').forEach(a => {
+    a.classList.toggle('cur', a.dataset.go === cur)
+    a.onclick = () => { if (a.dataset.go !== cur) go(a.dataset.go) }
+  })
+  document.querySelectorAll('.bk').forEach(b => b.onclick = back)
+  document.querySelectorAll('.fw').forEach(b => b.onclick = fwd)
+  document.getElementById('collapse')?.addEventListener('click', () => { collapsed = true; document.body.classList.add('collapsed'); render() })
+  document.getElementById('expand')?.addEventListener('click', () => { collapsed = false; document.body.classList.remove('collapsed'); render() })
+  document.getElementById('bk2')?.addEventListener('click', back)
+  document.getElementById('toast').textContent = 'History: ' + stack.map((p, i) => i === idx ? `[${PAGES[p].title}]` : PAGES[p].title).join(' → ')
+}
+
+function bodyFor(p) {
+  if (p === 'chat') return `
+    <div class="main">
+      <div class="msg user"><div class="auto-tag">Automation</div>Run the morning action briefing for today.</div>
+      <div class="msg">Here is today's briefing. Three items need you before 12:00…</div>
+      <div class="msg user">Don't add it as stuff I need to do, it just tagged me. Add this to the schedule.</div>
+      <div class="msg">Schedule updated. Now updating the daily log to close out the remaining items.</div>
+    </div>
+    <aside class="rail">
+      <div class="origin">${icon(clock)}<div>This chat comes from the automation <a data-go="automation">Morning action briefing</a>.</div></div>
+      <h2>Work details</h2>
+      <div class="rail-section">
+        <p class="rail-label">Project · injected with each message</p>
+        <div><a class="proj-link" data-go="project">General</a> — Pointer to general.md, the canonical doc for the work General project.</div>
+      </div>
+      <div class="rail-section">
+        <p class="rail-label">Run state</p>
+        <div class="kv"><span>Current state</span><strong>Idle</strong></div>
+        <div class="kv"><span>Background agents</span><strong>0</strong></div>
+        <div class="kv"><span>Pending questions</span><strong>0</strong></div>
+      </div>
+      <div class="rail-section" style="border:0">
+        <p class="rail-label">Files</p>
+        <div class="muted" style="font-size:13px">2026-09-25.md</div>
+      </div>
+    </aside>`
+  if (p === 'project') return `
+    <div class="main">
+      <div class="page-section"><h3>Chats</h3>
+        <div class="row"><a data-go="chat">Morning action briefing - Sep 25</a><span class="muted">10:13</span></div>
+        <div class="row"><a data-go="chat2">Q3 OKR draft</a><span class="muted">Yesterday</span></div></div>
+      <div class="page-section"><h3>Files</h3>
+        <div class="row"><span>general.md</span></div><div class="row"><span>README.md</span></div><div class="row"><span>gs1-telecom-2d-datamatrix.md</span></div></div>
+    </div>
+    <aside class="rail"><h2>Project</h2><div class="kv"><span>Chats</span><strong>2</strong></div><div class="kv"><span>Files</span><strong>3</strong></div></aside>`
+  if (p === 'automation') return `
+    <div class="main">
+      <div class="page-section"><h3>Recent runs</h3>
+        <div class="row"><a data-go="chat">Morning action briefing - Sep 25</a><span class="muted">08:00</span></div>
+        <div class="row"><span class="muted">Morning action briefing - Sep 24</span><span class="muted">08:00</span></div></div>
+    </div>
+    <aside class="rail"><h2>Automation</h2>
+      <div class="kv"><span>Repeats</span><strong>Weekdays 08:00</strong></div>
+      <div class="kv"><span>State</span><strong>Scheduled</strong></div>
+      <div class="kv"><span>Next run</span><strong>in 69h</strong></div></aside>`
+  return `<div class="main"><p class="muted">${PAGES[p].title} page.</p></div>`
+}
+
+document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => {
+  mode = b.dataset.mode
+  document.querySelectorAll('[data-mode]').forEach(x => x.setAttribute('aria-pressed', x === b))
+  render()
+})
+document.addEventListener('keydown', e => {
+  if (!(e.metaKey || e.ctrlKey)) return
+  if (e.key === '[') { e.preventDefault(); back() }
+  if (e.key === ']') { e.preventDefault(); fwd() }
+})
+render()
+</script>
+</body>
+</html>

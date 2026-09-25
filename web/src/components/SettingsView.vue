@@ -4,8 +4,10 @@
       v-if="packageUpdating"
       :version="packageStatus?.latest_version"
     />
-    <PaneHeader page-tag="settings" @open-sidebar="emit('open-sidebar')" />
-    <div class="pane-body">
+    <PaneHeader page-tag="Settings" @open-sidebar="emit('open-sidebar')" />
+    <div ref="bodyEl" class="pane-body" @scroll.passive="onBodyScroll">
+      <div class="page-grid settings-grid">
+      <div ref="mainEl" class="page-main settings-main">
 
       <!-- HOME TAB -->
       <template v-if="currentTab === 'home'">
@@ -14,7 +16,7 @@
              once, at the top, and point at the one screen that is local. -->
         <div v-if="nodeStatusUnknown" class="card scope-card">
           <div class="settings-card-header">
-            <p class="section-title">connection role unavailable</p>
+            <p class="section-title">Connection role unavailable</p>
             <p class="hint">
               Ciaobot could not verify whether this browser is connected to a host. Settings actions
               stay on this device until the connection is known.
@@ -24,7 +26,7 @@
         </div>
         <div v-else-if="isNodeClient" class="card scope-card">
           <div class="settings-card-header">
-            <p class="section-title">you are viewing {{ hostScopeLabel }}</p>
+            <p class="section-title">You are viewing {{ hostScopeLabel }}</p>
             <p class="hint">
               This is the host's Settings, exactly as it looks on that machine. Changes here apply
               there, including the password and restarts.
@@ -34,18 +36,71 @@
           </div>
         </div>
 
+        <!-- Appearance -->
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">Appearance</p>
+            <p class="hint">Control the visual theme and type scale used across Ciaobot.</p>
+          </div>
+          <div class="setting-row setting-row--inline setting-row--flush">
+            <div class="routine-info">
+              <span class="routine-name">Theme</span>
+              <span class="routine-detail">Choose light, dark, or match the device appearance.</span>
+            </div>
+            <div class="settings-control">
+              <div class="instance-toggle">
+                <button
+                  class="toggle-btn"
+                  :class="{ active: activeTheme === 'dark' }"
+                  @click="setTheme('dark')"
+                >
+                  Dark
+                </button>
+                <button
+                  class="toggle-btn"
+                  :class="{ active: activeTheme === 'light' }"
+                  @click="setTheme('light')"
+                >
+                  Light
+                </button>
+                <button
+                  class="toggle-btn"
+                  :class="{ active: activeTheme === 'system' }"
+                  @click="setTheme('system')"
+                >
+                  System
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="setting-row setting-row--inline">
+            <div class="routine-info">
+              <span class="routine-name">Font size</span>
+              <span class="routine-detail">Adjust messages, code blocks, sidebars, and menus together.</span>
+            </div>
+            <div class="settings-control">
+              <div class="font-scale-row">
+                <button class="btn-small" @click="adjustFontScale(-FONT_SCALE_STEP)" :disabled="fontScale <= MIN_FONT_SCALE">Decrease</button>
+                <span class="font-scale-display">{{ fontScalePercent }}%</span>
+                <button class="btn-small" @click="adjustFontScale(FONT_SCALE_STEP)" :disabled="fontScale >= MAX_FONT_SCALE">Increase</button>
+                <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === DEFAULT_FONT_SCALE">Reset</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Actions -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <p class="section-title">app actions</p>
+              <p class="section-title">This host</p>
               <p class="hint">
                 Snapshot, sync, or restart
                 {{ isNodeClient ? `the host (${hostScopeLabel})` : nodeStatusUnknown ? 'the connected host (status unavailable)' : 'this local Ciaobot instance' }}.
               </p>
             </div>
             <div class="settings-card-header-actions">
-              <button class="btn-primary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="nodeStatusUnknown || !!actionPending">
+              <button class="btn-secondary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="nodeStatusUnknown || !!actionPending">
                 {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
               </button>
               <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="nodeStatusUnknown || !!actionPending" :title="localStatus?.restart_only ? 'Wait for active chats, then restart the installed server' : 'Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code'">
@@ -70,53 +125,137 @@
           </div>
         </div>
 
-        <!-- Keyboard shortcuts -->
-        <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">keyboard shortcuts</p>
-            <p class="hint">Global shortcuts. Text fields keep their normal meaning: number keys stay typeable, Cmd+A/Alt+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
+        <!-- Package update — the desktop app drives this from the tray. -->
+        <div v-if="!inDesktopApp" class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">Updates</p>
+              <p class="hint">
+                <template v-if="nodeStatusUnknown">
+                  Update ownership is unknown until the connection role can be verified.
+                </template>
+                <template v-else-if="isNodeClient && packageStatus?.mode !== 'bundled_app'">
+                  The version installed on {{ hostScopeLabel }}. Updating restarts the host.
+                  <template v-if="canUseDeviceControls">To upgrade this computer, open <a :href="deviceHref('/device')">this device</a>.</template>
+                </template>
+                <template v-else-if="packageStatus?.mode === 'bundled_app'">
+                  This bundled app updates through the Ciaobot menu-bar icon. Choose
+                  <strong>Update</strong> there, or run the one-line installer again.
+                </template>
+                <template v-else>
+                  Check the installed package version and upgrade this local app.
+                </template>
+              </p>
+            </div>
+            <div v-if="packageStatus && packageStatus.mode !== 'bundled_app'" class="settings-card-header-actions">
+              <button
+                v-if="packageStatus.update_available"
+                class="btn-primary btn-small"
+                @click="openUpdatePanel"
+                :disabled="nodeStatusUnknown || packageUpdating || showUpdatePanel"
+              >
+                {{ `Update to ${packageStatus.latest_version}` }}
+              </button>
+              <!-- Nothing to do: a status, not a disabled button. -->
+              <span v-else class="settings-status">Up to date<template v-if="packageStatus.current_version"> · {{ packageStatus.current_version }}</template></span>
+            </div>
           </div>
-          <ul class="shortcut-list">
-            <li>
-              <kbd v-if="inDesktopApp">&#8984;T</kbd>
-              <kbd v-else>{{ webChord('N') }}</kbd>
-              <span>Open a new chat in the default General project</span>
-            </li>
-            <li>
-              <kbd v-if="inDesktopApp">&#8984;D</kbd>
-              <kbd v-else>{{ webChord('D') }}</kbd>
-              <span>Toggle voice dictation (start / stop)</span>
-            </li>
-            <li>
-              <kbd v-if="inDesktopApp">&#8984;&#9003;</kbd>
-              <kbd v-else>{{ webChord('\u232B', 'Backspace') }}</kbd>
-              <span>Archive the open chat (asks to confirm)</span>
-            </li>
-            <li>
-              <kbd v-if="inDesktopApp">&#8984;S</kbd>
-              <kbd v-else>{{ webChord('S') }}</kbd>
-              <span>Show or hide the sidebar</span>
-            </li>
-            <li>
-              <kbd v-if="inDesktopApp">&#8984;&#8679;M</kbd>
-              <kbd v-else>{{ webChord('M') }}</kbd>
-              <span>Open the model picker</span>
-            </li>
-            <li><kbd>1–9</kbd><span>Switch to the first through ninth workspace in the sidebar</span></li>
-            <li>
-              <kbd v-if="inDesktopApp">&#8984;&#8679;=</kbd>
-              <kbd v-else>{{ webChord('=') }}</kbd>
-              <span>Increase the font size</span>
-            </li>
-            <li>
-              <kbd v-if="inDesktopApp">&#8984;&#8679;-</kbd>
-              <kbd v-else>{{ webChord('-') }}</kbd>
-              <span>Decrease the font size</span>
-            </li>
-            <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
-            <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats; stacked workspaces use up/down between lanes</span></li>
-            <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
-          </ul>
+          <div v-if="packageLoading && !packageStatus" class="loading">
+            Checking package status...
+          </div>
+          <div v-else-if="packageStatus">
+            <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
+              Update check failed: {{ packageStatus.error }}
+            </div>
+
+            <div v-if="showUpdatePanel && packageStatus.mode !== 'bundled_app'" class="settings-form-panel">
+              <p class="section-title">What&rsquo;s new in {{ packageStatus.latest_version }}</p>
+              <div v-if="changelogLoading" class="loading">Loading changelog&hellip;</div>
+              <template v-else>
+                <ul v-if="changelog.commits && changelog.commits.length" class="changelog-list">
+                  <li v-for="c in changelog.commits" :key="c.sha || c.subject">
+                    <code v-if="c.sha" class="changelog-sha">{{ c.sha }}</code>
+                    <span class="changelog-subject">{{ c.subject }}</span>
+                  </li>
+                </ul>
+                <p v-else class="hint">
+                  {{ changelog.error
+                      ? `Could not load changelog: ${changelog.error}`
+                      : 'No changelog details available.' }}
+                </p>
+                <p v-if="changelog.compare_url" class="hint hint--spaced">
+                  <a :href="changelog.compare_url" target="_blank" rel="noopener">View full diff on GitHub</a>
+                </p>
+                <p v-if="packageStatus.source" class="hint hint--spaced">
+                  <a :href="packageStatus.source" target="_blank" rel="noopener">Release notes on GitHub</a>
+                </p>
+              </template>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="doPackageUpdate" :disabled="nodeStatusUnknown || packageUpdating">
+                  {{ packageUpdating ? 'Updating&hellip;' : 'Update &amp; Restart' }}
+                </button>
+                <button class="btn-small" @click="showUpdatePanel = false" :disabled="packageUpdating">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+          <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
+        </div>
+
+        <!-- Main workspace -->
+        <div v-if="routines && routines.workspace_context" class="card">
+          <div class="settings-card-header">
+            <p class="section-title">Main workspace</p>
+            <p class="hint">
+              The server filesystem root for routines, skills, scripts, and runtime state.
+              Set <code>CIAO_WORKSPACE</code> in your <code>.env</code> file, then restart Ciaobot.
+              Logical chat workspaces (sidebar switcher) are managed separately under Settings &rarr; Workspaces.
+            </p>
+          </div>
+          <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
+        </div>
+
+        <!-- Workspace health -->
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">Workspace health</p>
+              <p class="hint">Checks Claude Code discovery files, vault writability, and generated asset links.</p>
+            </div>
+            <span class="badge" :class="healthBadgeClass(workspaceHealth?.status || '')">
+              {{ workspaceHealth?.status || (agentAssetsLoaded ? 'unknown' : 'loading') }}
+            </span>
+          </div>
+          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Scanning&hellip;</span></div>
+          <p v-else-if="agentAssetsError" class="hint hint--warn">{{ agentAssetsError }}</p>
+          <div v-else-if="workspaceHealth && prioritizedHealthChecks.length" class="health-list">
+            <div
+              v-for="check in prioritizedHealthChecks"
+              :key="check.id"
+              class="health-row"
+              :class="`health-row--${check.status}`"
+            >
+              <span class="health-dot" aria-hidden="true"></span>
+              <div class="health-main">
+                <div class="health-title-row">
+                  <span class="health-title">{{ check.title }}</span>
+                  <span v-if="check.path" class="health-path">{{ check.path }}</span>
+                </div>
+                <p class="hint hint--compact">{{ check.detail }}</p>
+                <p v-if="check.action" class="hint hint--compact hint--warn">{{ check.action }}</p>
+              </div>
+            </div>
+            <div v-if="workspaceHealth.status !== 'ok'" class="action-row">
+              <button
+                id="workspace-health-fix"
+                class="btn-primary"
+                :disabled="healthFixPending"
+                @click="fixWorkspaceHealth"
+              >{{ healthFixPending ? 'Fixing…' : 'Fix issues' }}</button>
+              <span v-if="healthFixError" class="hint hint--warn">{{ healthFixError }}</span>
+            </div>
+          </div>
         </div>
 
         <!-- PWA password -->
@@ -190,202 +329,78 @@
           </template>
         </div>
 
-        <!-- Workspace health -->
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">workspace health</p>
-              <p class="hint">Checks Claude Code discovery files, vault writability, and generated asset links.</p>
-            </div>
-            <span class="badge" :class="healthBadgeClass(workspaceHealth?.status || '')">
-              {{ workspaceHealth?.status || (agentAssetsLoaded ? 'unknown' : 'loading') }}
-            </span>
-          </div>
-          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Scanning&hellip;</span></div>
-          <p v-else-if="agentAssetsError" class="hint hint--warn">{{ agentAssetsError }}</p>
-          <div v-else-if="workspaceHealth && prioritizedHealthChecks.length" class="health-list">
-            <div
-              v-for="check in prioritizedHealthChecks"
-              :key="check.id"
-              class="health-row"
-              :class="`health-row--${check.status}`"
-            >
-              <span class="health-dot" aria-hidden="true"></span>
-              <div class="health-main">
-                <div class="health-title-row">
-                  <span class="health-title">{{ check.title }}</span>
-                  <span v-if="check.path" class="health-path">{{ check.path }}</span>
-                </div>
-                <p class="hint hint--compact">{{ check.detail }}</p>
-                <p v-if="check.action" class="hint hint--compact hint--warn">{{ check.action }}</p>
-              </div>
-            </div>
-            <div v-if="workspaceHealth.status !== 'ok'" class="action-row">
-              <button
-                id="workspace-health-fix"
-                class="btn-primary"
-                :disabled="healthFixPending"
-                @click="fixWorkspaceHealth"
-              >{{ healthFixPending ? 'Fixing…' : 'Fix issues' }}</button>
-              <span v-if="healthFixError" class="hint hint--warn">{{ healthFixError }}</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Main workspace -->
-        <div v-if="routines && routines.workspace_context" class="card">
-          <div class="settings-card-header">
-            <p class="section-title">main workspace</p>
-            <p class="hint">
-              The server filesystem root for routines, skills, scripts, and runtime state.
-              Set <code>CIAO_WORKSPACE</code> in your <code>.env</code> file, then restart Ciaobot.
-              Logical chat workspaces (sidebar switcher) are managed separately under Settings &rarr; Workspaces.
-            </p>
-          </div>
-          <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
-        </div>
-
-        <!-- Package update — the desktop app drives this from the tray. -->
-        <div v-if="!inDesktopApp" class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">package update</p>
-              <p class="hint">
-                <template v-if="nodeStatusUnknown">
-                  Update ownership is unknown until the connection role can be verified.
-                </template>
-                <template v-else-if="isNodeClient && packageStatus?.mode !== 'bundled_app'">
-                  The version installed on {{ hostScopeLabel }}. Updating restarts the host.
-                  <template v-if="canUseDeviceControls">To upgrade this computer, open <a :href="deviceHref('/device')">this device</a>.</template>
-                </template>
-                <template v-else-if="packageStatus?.mode === 'bundled_app'">
-                  This bundled app updates through the Ciaobot menu-bar icon. Choose
-                  <strong>Update</strong> there, or run the one-line installer again.
-                </template>
-                <template v-else>
-                  Check the installed package version and upgrade this local app.
-                </template>
-              </p>
-            </div>
-            <div v-if="packageStatus && packageStatus.mode !== 'bundled_app'" class="settings-card-header-actions">
-              <button
-                :class="packageStatus.update_available ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
-                @click="openUpdatePanel"
-                :disabled="nodeStatusUnknown || !packageStatus.update_available || packageUpdating || showUpdatePanel"
-              >
-                {{ packageStatus.update_available
-                    ? `Update to ${packageStatus.latest_version}`
-                    : 'Up to date' }}
-              </button>
-            </div>
-          </div>
-          <div v-if="packageLoading && !packageStatus" class="loading">
-            Checking package status...
-          </div>
-          <div v-else-if="packageStatus">
-            <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
-              Update check failed: {{ packageStatus.error }}
-            </div>
-
-            <div v-if="showUpdatePanel && packageStatus.mode !== 'bundled_app'" class="settings-form-panel">
-              <p class="section-title">What&rsquo;s new in {{ packageStatus.latest_version }}</p>
-              <div v-if="changelogLoading" class="loading">Loading changelog&hellip;</div>
-              <template v-else>
-                <ul v-if="changelog.commits && changelog.commits.length" class="changelog-list">
-                  <li v-for="c in changelog.commits" :key="c.sha || c.subject">
-                    <code v-if="c.sha" class="changelog-sha">{{ c.sha }}</code>
-                    <span class="changelog-subject">{{ c.subject }}</span>
-                  </li>
-                </ul>
-                <p v-else class="hint">
-                  {{ changelog.error
-                      ? `Could not load changelog: ${changelog.error}`
-                      : 'No changelog details available.' }}
-                </p>
-                <p v-if="changelog.compare_url" class="hint hint--spaced">
-                  <a :href="changelog.compare_url" target="_blank" rel="noopener">View full diff on GitHub</a>
-                </p>
-                <p v-if="packageStatus.source" class="hint hint--spaced">
-                  <a :href="packageStatus.source" target="_blank" rel="noopener">Release notes on GitHub</a>
-                </p>
-              </template>
-              <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doPackageUpdate" :disabled="nodeStatusUnknown || packageUpdating">
-                  {{ packageUpdating ? 'Updating&hellip;' : 'Update &amp; Restart' }}
-                </button>
-                <button class="btn-small" @click="showUpdatePanel = false" :disabled="packageUpdating">
-                  Cancel
-                </button>
-              </div>
-            </div>
-          </div>
-          <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
-        </div>
-
         <!-- Notifications — the desktop app owns this in the tray, so the
              card drops out there rather than showing web-push controls the
              tray already supersedes. Same card as the Notifications tab. -->
         <SettingsNotifications hide-in-desktop-app />
 
-        <!-- Appearance -->
+        <!-- Keyboard shortcuts -->
         <div class="card">
           <div class="settings-card-header">
-            <p class="section-title">appearance</p>
-            <p class="hint">Control the visual theme and type scale used across Ciaobot.</p>
+            <p class="section-title">Keyboard shortcuts</p>
+            <p class="hint">Global shortcuts. Text fields keep their normal meaning: number keys stay typeable, Cmd+A/Alt+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
           </div>
-          <div class="setting-row setting-row--inline setting-row--flush">
-            <div class="routine-info">
-              <span class="routine-name">Theme</span>
-              <span class="routine-detail">Choose light, dark, or match the device appearance.</span>
-            </div>
-            <div class="settings-control">
-              <div class="instance-toggle">
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'dark' }"
-                  @click="setTheme('dark')"
-                >
-                  Dark
-                </button>
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'light' }"
-                  @click="setTheme('light')"
-                >
-                  Light
-                </button>
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'system' }"
-                  @click="setTheme('system')"
-                >
-                  System
-                </button>
-              </div>
-            </div>
-          </div>
-          <div class="setting-row setting-row--inline">
-            <div class="routine-info">
-              <span class="routine-name">Font size</span>
-              <span class="routine-detail">Adjust messages, code blocks, sidebars, and menus together.</span>
-            </div>
-            <div class="settings-control">
-              <div class="font-scale-row">
-                <button class="btn-small" @click="adjustFontScale(-FONT_SCALE_STEP)" :disabled="fontScale <= MIN_FONT_SCALE">Decrease</button>
-                <span class="font-scale-display">{{ fontScalePercent }}%</span>
-                <button class="btn-small" @click="adjustFontScale(FONT_SCALE_STEP)" :disabled="fontScale >= MAX_FONT_SCALE">Increase</button>
-                <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === DEFAULT_FONT_SCALE">Reset</button>
-              </div>
-            </div>
-          </div>
+          <ul id="settings-shortcut-list" class="shortcut-list">
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;T</kbd>
+              <kbd v-else>{{ webChord('N') }}</kbd>
+              <span>Open a new chat in the default General project</span>
+            </li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;D</kbd>
+              <kbd v-else>{{ webChord('D') }}</kbd>
+              <span>Toggle voice dictation (start / stop)</span>
+            </li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;&#8679;M</kbd>
+              <kbd v-else>{{ webChord('M') }}</kbd>
+              <span>Open the model picker</span>
+            </li>
+            <li><kbd>1–9</kbd><span>Switch to the first through ninth workspace in the sidebar</span></li>
+            <template v-if="showAllShortcuts">
+              <li v-if="inDesktopApp">
+                <kbd>&#8984;[</kbd>
+                <span>Go back (&#8984;] goes forward)</span>
+              </li>
+              <li>
+                <kbd v-if="inDesktopApp">&#8984;&#9003;</kbd>
+                <kbd v-else>{{ webChord('\u232B', 'Backspace') }}</kbd>
+                <span>Archive the open chat (asks to confirm)</span>
+              </li>
+              <li>
+                <kbd v-if="inDesktopApp">&#8984;S</kbd>
+                <kbd v-else>{{ webChord('S') }}</kbd>
+                <span>Show or hide the sidebar</span>
+              </li>
+              <li>
+                <kbd v-if="inDesktopApp">&#8984;&#8679;=</kbd>
+                <kbd v-else>{{ webChord('=') }}</kbd>
+                <span>Increase the font size</span>
+              </li>
+              <li>
+                <kbd v-if="inDesktopApp">&#8984;&#8679;-</kbd>
+                <kbd v-else>{{ webChord('-') }}</kbd>
+                <span>Decrease the font size</span>
+              </li>
+              <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
+              <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats; stacked workspaces use up/down between lanes</span></li>
+              <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
+            </template>
+          </ul>
+          <button
+            type="button"
+            class="settings-disclosure"
+            aria-controls="settings-shortcut-list"
+            :aria-expanded="showAllShortcuts"
+            @click="showAllShortcuts = !showAllShortcuts"
+          >{{ showAllShortcuts ? 'Show fewer' : `Show all ${SHORTCUT_COUNT}` }}</button>
         </div>
 
-        
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <p class="section-title">debug</p>
+              <p class="section-title">Debug</p>
               <p class="hint">Runtime issue log: server errors and failed background jobs. Send it to a chat so the agent can self-fix.</p>
             </div>
             <div class="settings-card-header-actions">
@@ -409,7 +424,7 @@
              dismissed, the card quiets back to prose. -->
         <div class="card open-source-card" :class="{ 'open-source-card--with-face': showStarNudge }">
           <div class="settings-card-header">
-            <p class="section-title">open source</p>
+            <p class="section-title">Open source</p>
             <p class="hint">
               Ciaobot is an open-source project. Support and contributions are welcome:
               report issues, suggest features, or open a pull request on
@@ -433,6 +448,7 @@
             draggable="false"
           />
         </div>
+
       </template>
 
       <!-- NOTIFICATIONS TAB -->
@@ -462,7 +478,7 @@
           <div id="chat-providers" class="card">
             <div class="settings-card-header">
               <div>
-                <p class="section-title">chat providers</p>
+                <p class="section-title">Chat providers</p>
                 <p class="hint">
                   Each provider CLI manages its own login and credentials. Ciaobot verifies every connection.
                   The defaults below apply to new chats; any chat can override them from the picker.
@@ -470,17 +486,17 @@
               </div>
             </div>
 
-            <div v-if="providerKeys.connections" class="provider-connections">
-              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row">
-                <div class="setting-row-main setting-row-main--inline">
-                  <div class="routine-info">
-                    <span class="routine-name">{{ conn.label || connKey }}</span>
-                    <p class="hint hint--compact provider-connection-detail">
+            <div v-if="providerKeys.connections" class="provider-connections set-list">
+              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row set-row">
+                <div class="set-row-head provider-row-head">
+                  <div class="routine-info set-row-main">
+                    <span class="routine-name set-row-title">{{ conn.label || connKey }}</span>
+                    <p class="set-row-sub provider-connection-detail">
                       <span v-if="conn.version">{{ conn.version }}</span>
                       <span v-if="conn.account">{{ conn.account }}</span>
                       <span v-if="!conn.version && conn.detail">{{ conn.detail }}</span>
                     </p>
-                    <p v-if="conn.auth === 'not_installed'" class="hint hint--compact">
+                    <p v-if="conn.auth === 'not_installed'" class="set-row-sub">
                       {{ conn.detail }}
                       Install it with <code>{{ conn.command }}</code>
                       <template v-if="conn.path_command">
@@ -496,32 +512,76 @@
                     </p>
                     <p
                       v-if="conn.auth !== 'not_installed' && conn.path_command"
-                      class="hint hint--compact"
+                      class="set-row-sub"
                     >
                       Your terminal cannot find this CLI yet — put it on your PATH with
                       <code>{{ conn.path_command }}</code>
                     </p>
                   </div>
-                  <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
-                    {{ conn.ok ? `Connected · ${conn.auth}` : 'Not connected' }}
-                  </span>
+                  <div class="set-row-actions provider-connection-actions">
+                    <span class="settings-conn-state" :class="conn.ok ? 'settings-conn-state--ok' : 'settings-conn-state--error'">
+                      {{ conn.ok ? 'Connected' : 'Not connected' }}
+                    </span>
+                    <!-- Connect is the row's one primary only while it is needed;
+                         once connected, the rare Reconnect / Log out live in the menu. -->
+                    <button
+                      v-if="!conn.ok"
+                      type="button"
+                      class="btn-primary btn-small"
+                      :disabled="providerConnectionPending === connKey"
+                      @click="providerConnectionAction(String(connKey), 'connect')"
+                    >Connect</button>
+                    <button
+                      type="button"
+                      class="set-link"
+                      :disabled="providerConnectionPending === connKey"
+                      @click="providerConnectionAction(String(connKey), 'verify')"
+                    >Verify</button>
+                    <DropdownMenuRoot
+                      v-if="conn.ok"
+                      :open="settingsMenu === `provider:${connKey}`"
+                      :modal="false"
+                      @update:open="setSettingsMenu(`provider:${connKey}`, $event)"
+                    >
+                      <DropdownMenuTrigger as-child>
+                        <button
+                          type="button"
+                          class="set-menu-btn"
+                          :aria-label="`More actions for ${conn.label || connKey}`"
+                          :disabled="providerConnectionPending === connKey"
+                        >&middot;&middot;&middot;</button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent as-child align="end" :side-offset="4" :collision-padding="8">
+                        <div class="settings-menu" @keydown.esc="closeSettingsMenuOnEscape">
+                          <DropdownMenuItem as-child @select="providerConnectionAction(String(connKey), 'connect')">
+                            <button type="button" class="settings-menu-item">Reconnect</button>
+                          </DropdownMenuItem>
+                          <DropdownMenuItem as-child @select="providerConnectionAction(String(connKey), 'logout')">
+                            <button type="button" class="settings-menu-item settings-menu-item--danger">Log out</button>
+                          </DropdownMenuItem>
+                        </div>
+                      </DropdownMenuContent>
+                    </DropdownMenuRoot>
+                  </div>
                 </div>
                 <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
-                  <label class="settings-field">
-                    <span class="ws-label">Default model</span>
-                    <ModelSelector
-                      v-if="getProviderSection(String(connKey))?.configurable"
-                      :model-value="providerDefaultModelSelectorValue(String(connKey) as AliasProviderKey)"
-                      :sections="providerDefaultModelSectionsFor(String(connKey) as AliasProviderKey)"
-                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
-                      @update:model-value="saveProviderDefaultModel(String(connKey) as AliasProviderKey, $event)"
-                    />
-                    <span v-else class="hint hint--compact">Automatic — {{ (conn.label || connKey) }} picks its own default.</span>
-                  </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Permission mode</span>
+                  <div class="set-subrow">
+                    <span class="ws-label set-subrow-label">Default model</span>
+                    <div class="set-subrow-control">
+                      <ModelSelector
+                        v-if="getProviderSection(String(connKey))?.configurable"
+                        :model-value="providerDefaultModelSelectorValue(String(connKey) as AliasProviderKey)"
+                        :sections="providerDefaultModelSectionsFor(String(connKey) as AliasProviderKey)"
+                        :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                        @update:model-value="saveProviderDefaultModel(String(connKey) as AliasProviderKey, $event)"
+                      />
+                      <span v-else class="hint hint--compact">Automatic — {{ (conn.label || connKey) }} picks its own default.</span>
+                    </div>
+                  </div>
+                  <label class="set-subrow">
+                    <span class="ws-label set-subrow-label">Permission mode</span>
                     <select
-                      class="routine-select"
+                      class="routine-select set-subrow-control"
                       :value="providerDefaultModeValue(String(connKey) as AliasProviderKey)"
                       :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
                       @change="saveProviderDefaultMode(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
@@ -531,30 +591,45 @@
                       </option>
                     </select>
                   </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Default thinking</span>
-                    <select
-                      class="routine-select"
-                      :value="providerDefaultThinkingValue(String(connKey) as AliasProviderKey)"
-                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
-                      @change="saveProviderDefaultThinking(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
-                    >
-                      <option
-                        v-for="option in providerThinkingOptions(String(connKey) as AliasProviderKey)"
-                        :key="option.value"
-                        :value="option.value"
+                  <div class="set-subrow">
+                    <span :id="`thinking-label-${connKey}`" class="ws-label set-subrow-label">Default thinking</span>
+                    <div class="set-subrow-control">
+                      <!-- A short closed set reads best as a segmented control; a
+                           long provider list falls back to a select. -->
+                      <div
+                        v-if="providerThinkingOptions(String(connKey) as AliasProviderKey).length <= 5"
+                        class="set-seg"
+                        role="radiogroup"
+                        :aria-labelledby="`thinking-label-${connKey}`"
                       >
-                        {{ option.label }}
-                      </option>
-                    </select>
-                  </label>
-                </div>
-                <div class="action-row provider-connection-actions">
-                  <button class="btn-primary btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'connect')">
-                    {{ conn.ok ? 'Reconnect' : 'Connect' }}
-                  </button>
-                  <button class="btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'verify')">Verify</button>
-                  <button v-if="conn.ok" class="btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'logout')">Log out</button>
+                        <button
+                          v-for="option in providerThinkingOptions(String(connKey) as AliasProviderKey)"
+                          :key="option.value"
+                          type="button"
+                          role="radio"
+                          :aria-checked="providerDefaultThinkingValue(String(connKey) as AliasProviderKey) === option.value"
+                          :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                          @click="saveProviderDefaultThinking(String(connKey) as AliasProviderKey, option.value)"
+                        >{{ thinkingOptionLabel(option) }}</button>
+                      </div>
+                      <select
+                        v-else
+                        class="routine-select"
+                        :aria-labelledby="`thinking-label-${connKey}`"
+                        :value="providerDefaultThinkingValue(String(connKey) as AliasProviderKey)"
+                        :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                        @change="saveProviderDefaultThinking(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
+                      >
+                        <option
+                          v-for="option in providerThinkingOptions(String(connKey) as AliasProviderKey)"
+                          :key="option.value"
+                          :value="option.value"
+                        >
+                          {{ option.label }}
+                        </option>
+                      </select>
+                    </div>
+                  </div>
                 </div>
                 <!-- What the CLI brings on its own. Long chip lists, so they sit
                      behind a disclosure, collapsed by default. -->
@@ -613,7 +688,7 @@
           <!-- Background models (internal routines) -->
           <div class="card">
             <div class="settings-card-header">
-              <p class="section-title">background models</p>
+              <p class="section-title">Background models</p>
               <p class="hint">
                 These background tasks use their own model setting, separate from the chat defaults above.
                 "Automatic" keeps the built-in default.
@@ -671,37 +746,34 @@
 
             <div class="routine-row">
               <div class="routine-info">
-                <span class="routine-name">Critique models</span>
-                <span class="routine-detail">Select one or more models for adversarial review.</span>
+                <span class="routine-name">Critique panel</span>
+                <span class="routine-detail">Models asked for an adversarial review.</span>
               </div>
               <div class="critique-model-picker">
-                <div class="critique-picker-header">
-                  <div class="critique-picker-summary">
-                    <div v-if="selectedCritiqueModels.length" class="critique-chip-list">
-                      <button
-                        v-for="model in selectedCritiqueModels"
-                        :key="model"
-                        type="button"
-                        class="critique-chip"
-                        :disabled="routinesSaving"
-                        :title="`Remove ${model}`"
-                        :aria-label="`Remove ${model}`"
-                        @click="removeCritiqueModel(model)"
-                      >
-                        <span>{{ model }}</span>
-                        <span aria-hidden="true">&times;</span>
-                      </button>
-                    </div>
-                    <span v-else class="critique-picker-default">{{ critiqueDefaultLabel }}</span>
+                <!-- One control: the multi-select picker. Picked models show as
+                     removable chips; "Use automatic" clears the list. -->
+                <div v-if="selectedCritiqueModels.length" class="critique-picker-header">
+                  <div class="critique-chip-list">
+                    <button
+                      v-for="model in selectedCritiqueModels"
+                      :key="model"
+                      type="button"
+                      class="critique-chip"
+                      :disabled="routinesSaving"
+                      :title="`Remove ${model}`"
+                      :aria-label="`Remove ${model}`"
+                      @click="removeCritiqueModel(model)"
+                    >
+                      <span>{{ model }}</span>
+                      <span aria-hidden="true">&times;</span>
+                    </button>
                   </div>
                   <button
                     type="button"
-                    class="btn-small"
-                    :disabled="routinesSaving || selectedCritiqueModels.length === 0"
+                    class="set-link set-link--quiet"
+                    :disabled="routinesSaving"
                     @click="setCritiqueModels([])"
-                  >
-                    Reset
-                  </button>
+                  >Use automatic</button>
                 </div>
                 <ModelSelector
                   multiple
@@ -719,7 +791,7 @@
           <!-- Voice: hear (dictation) and speak (read aloud) -->
           <div class="card">
             <div class="settings-card-header">
-              <p class="section-title">voice</p>
+              <p class="section-title">Voice</p>
               <p class="hint">Choose the engines used to hear you (dictation) and to speak messages aloud.</p>
             </div>
             <!-- No engine picker: voice is on-device only now. Both engines are
@@ -836,17 +908,17 @@
           <div class="card">
             <div class="settings-card-header settings-card-header--split">
               <div>
-                <p class="section-title">workspaces</p>
+                <p class="section-title">Workspaces</p>
                 <p class="hint">
-                  Logical chat spaces that route projects, chats, vault names, model defaults, and integration profiles.
+                  Each workspace keeps its own projects, chats, memory, model defaults and Google account.
                 </p>
               </div>
-              <button class="btn-small" @click="showNewWorkspace = !showNewWorkspace">
-                {{ showNewWorkspace ? 'Cancel' : '+ Add workspace' }}
+              <button class="btn-small" :aria-expanded="showNewWorkspace" @click="showNewWorkspace = !showNewWorkspace">
+                {{ showNewWorkspace ? 'Cancel' : 'New workspace' }}
               </button>
             </div>
 
-            <div v-if="showNewWorkspace" class="workspace-card workspace-card--new">
+            <div v-if="showNewWorkspace" id="new-workspace" class="workspace-card workspace-card--new settings-form-panel">
               <div class="workspace-card-header">
                 <div>
                   <p class="workspace-title">New workspace</p>
@@ -914,45 +986,69 @@
                 </label>
               </div>
               <div class="action-row settings-actions">
+                <button class="set-link set-link--quiet" type="button" :disabled="workspacesSaving === 'new'" @click="showNewWorkspace = false">Cancel</button>
                 <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
                   {{ workspacesSaving === 'new' ? 'Creating...' : 'Create workspace' }}
                 </button>
               </div>
             </div>
 
-            <div class="workspace-list">
+            <div class="workspace-list set-list">
               <div
                 v-for="form in workspaceForms"
                 :key="form.name"
-                class="workspace-card"
+                class="workspace-card set-row"
+                :class="{ 'workspace-card--open': openWorkspace === form.name }"
               >
-                <div class="workspace-card-header">
-                  <div>
-                    <p class="workspace-title">{{ form.name }}</p>
+                <div class="workspace-card-header set-row-head">
+                  <span class="set-dot" aria-hidden="true" :style="{ '--swatch': workspaceSwatch(form.color) }"></span>
+                  <div class="set-row-main">
+                    <p class="workspace-title set-row-title">{{ form.name }}</p>
+                    <p class="set-row-sub">{{ workspaceSummary(form) }}</p>
                   </div>
-                  <div class="workspace-actions">
+                  <div class="workspace-actions set-row-actions">
                     <button
-                      class="btn-small"
-                      @click="saveWorkspace(form.name)"
-                      :disabled="workspacesSaving === form.name || archivingWorkspace === form.name"
-                    >
-                      {{ workspacesSaving === form.name ? 'Saving...' : 'Save' }}
-                    </button>
-                    <button
+                      v-if="openWorkspace !== form.name"
+                      type="button"
+                      class="set-link"
+                      :aria-label="`Edit workspace ${form.name}`"
+                      :aria-expanded="false"
+                      @click="openWorkspace = form.name"
+                    >Edit</button>
+                    <DropdownMenuRoot
                       v-if="workspaceArchivable(form.name)"
-                      class="btn-small btn-caution"
-                      :aria-label="`Archive workspace ${form.name}`"
-                      @click="archiveWorkspace(form.name)"
-                      :disabled="workspacesSaving === form.name || archivingWorkspace === form.name"
-                    >{{ archivingWorkspace === form.name ? 'Archiving...' : 'Archive' }}</button>
+                      :open="settingsMenu === `ws:${form.name}`"
+                      :modal="false"
+                      @update:open="setSettingsMenu(`ws:${form.name}`, $event)"
+                    >
+                      <DropdownMenuTrigger as-child>
+                        <button
+                          type="button"
+                          class="set-menu-btn"
+                          :aria-label="`Actions for workspace ${form.name}`"
+                          :disabled="archivingWorkspace === form.name"
+                        >&middot;&middot;&middot;</button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent as-child align="end" :side-offset="4" :collision-padding="8">
+                        <div class="settings-menu" @keydown.esc="closeSettingsMenuOnEscape">
+                          <DropdownMenuItem as-child @select="archiveWorkspace(form.name)">
+                            <button
+                              type="button"
+                              class="settings-menu-item settings-menu-item--caution"
+                              :aria-label="`Archive workspace ${form.name}`"
+                            >{{ archivingWorkspace === form.name ? 'Archiving...' : 'Archive' }}</button>
+                          </DropdownMenuItem>
+                        </div>
+                      </DropdownMenuContent>
+                    </DropdownMenuRoot>
                   </div>
                 </div>
 
-                <div class="settings-field-grid">
-                  <div class="settings-field settings-field--wide">
-                    <span class="ws-label" :id="`workspace-color-${form.name}`">Accent color</span>
+                <div v-if="openWorkspace === form.name" class="set-row-body">
+                  <div class="set-subrow">
+                    <span class="set-subrow-label" :id="`workspace-color-${form.name}`">Accent</span>
                     <div
-                      class="workspace-color-swatches"
+                      class="workspace-color-swatches set-subrow-control"
                       role="radiogroup"
                       :aria-labelledby="`workspace-color-${form.name}`"
                     >
@@ -972,26 +1068,17 @@
                       />
                     </div>
                   </div>
-                  <label class="settings-field"><span class="ws-label">{{ workspaceProviderFieldLabel }}</span>
-                    <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
+                  <label class="settings-field set-subrow">
+                    <span class="ws-label set-subrow-label">{{ workspaceProviderFieldLabel }}</span>
+                    <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
                       <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
                         {{ provider.label }}
                       </option>
                     </select>
                   </label>
-                  <label class="settings-field">
-                    <div class="settings-label-row">
-                      <span class="ws-label">Google profile</span>
-                      <details class="field-info">
-                        <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
-                        <div class="field-info-panel">
-                          <p>
-                            Selects which Google account this workspace uses. Accounts are added and connected in the Google Workspace card below.
-                          </p>
-                        </div>
-                      </details>
-                    </div>
-                    <select class="routine-input workspace-select" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
+                  <label class="settings-field set-subrow">
+                    <span class="ws-label set-subrow-label" title="Which Google account this workspace uses. Accounts are added under Google Workspace below.">Google profile</span>
+                    <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
                       <option value="">{{ gwsUnlinkedOptionLabel }}</option>
                       <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
                         {{ profile.label }} ({{ profile.email || profile.name }})
@@ -1001,6 +1088,21 @@
                       </option>
                     </select>
                   </label>
+                  <div class="workspace-edit-actions">
+                    <button
+                      v-if="workspaceDirty(form)"
+                      type="button"
+                      class="btn-primary btn-small workspace-save"
+                      :disabled="workspacesSaving === form.name || archivingWorkspace === form.name"
+                      @click="saveWorkspace(form.name)"
+                    >{{ workspacesSaving === form.name ? 'Saving...' : 'Save changes' }}</button>
+                    <button
+                      type="button"
+                      class="set-link set-link--quiet"
+                      :disabled="workspacesSaving === form.name"
+                      @click="discardWorkspace(form.name)"
+                    >{{ workspaceDirty(form) ? 'Discard' : 'Done' }}</button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1050,7 +1152,7 @@
             <div class="settings-card-header settings-card-header--split">
               <div>
                 <div class="settings-label-row">
-                  <p class="section-title">google workspace</p>
+                  <p class="section-title">Google Workspace</p>
                   <details class="field-info">
                     <summary aria-label="About Google Workspace integration" title="About Google Workspace integration">i</summary>
                     <div class="field-info-panel">
@@ -1441,23 +1543,18 @@
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <p class="section-title">skills</p>
+              <p class="section-title">Skills</p>
               <p class="hint">
-                Skills are local folders: place <code>skills/&lt;name&gt;/SKILL.md</code> (or upload a validated zip) then <code>ciao sync-skills</code>. Workspace git sync propagates to other operators. No GitHub fetch.
+                Shared with Claude Code and opencode. Each skill is a folder with a <code>SKILL.md</code> in <code>skills/</code>; workspace git sync carries it to other machines.
               </p>
             </div>
             <div class="settings-card-header-actions">
-              <button class="btn-small" @click="createSkillViaChat">Add via chat</button>
-              <button class="btn-primary btn-small" @click="toggleAddSkill">
-                {{ showAddSkill ? 'Cancel' : '+ Add skill' }}
+              <button class="set-link set-link--quiet" type="button" @click="createSkillViaChat">Ask Ciao to write one</button>
+              <button class="btn-small" type="button" :aria-expanded="showAddSkill" @click="toggleAddSkill">
+                {{ showAddSkill ? 'Cancel' : 'New skill' }}
               </button>
             </div>
           </div>
-
-          <p class="hint hint--info skill-scope-note">
-             Ciaobot runs chats through Claude Code or opencode. Ciaobot-managed skills are synchronized into both runtimes where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed stock and custom skills — see
-            <RouterLink to="/settings/models#chat-providers">Models &amp; providers</RouterLink> for what each CLI brings on its own.
-          </p>
 
           <!-- Add Skill Form: folder note + zip upload -->
           <div v-if="showAddSkill" class="settings-form-panel">
@@ -1505,8 +1602,12 @@
           <template v-else-if="skillsInventory">
             <!-- Custom Skills Section -->
             <div class="skill-section">
-              <p class="subsection-title subsection-title--spaced">custom skills</p>
-              <p v-if="!customSkills.length" class="hint hint--section-empty">No custom skills yet. Add a folder <code>skills/&lt;name&gt;/SKILL.md</code> or upload a zip.</p>
+              <p class="subsection-title subsection-title--spaced">Custom skills</p>
+              <p v-if="!customSkills.length" class="set-empty">
+                <strong>No custom skills yet.</strong>
+                A skill teaches Ciao a repeatable task, such as a review checklist or a report format.
+                <button class="set-link" type="button" @click="createSkillViaChat">Ask Ciao to write one</button>
+              </p>
               <div v-else class="skill-list skill-list--section">
                 <div
                   v-for="skill in customSkills"
@@ -1519,6 +1620,7 @@
                     <div class="skill-title-row">
                       <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
                       <span class="skill-name">{{ skill.name }}</span>
+                      <span class="skill-badges"><span class="set-tag set-tag--custom">Custom</span></span>
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
@@ -1535,8 +1637,11 @@
 
             <!-- Stock Skills Section -->
             <div class="skill-section skill-section--spaced">
-              <p class="subsection-title subsection-title--spaced">stock skills</p>
-              <p v-if="!stockSkills.length" class="hint hint--section-empty">No stock skills installed.</p>
+              <p class="subsection-title subsection-title--spaced">Built-in skills</p>
+              <p v-if="!stockSkills.length" class="set-empty">
+                <strong>No built-in skills installed.</strong>
+                They come with the app and are restored by <code>ciao sync-skills</code>.
+              </p>
               <div v-else class="skill-list skill-list--section">
                 <div
                   v-for="skill in stockSkills"
@@ -1549,6 +1654,7 @@
                     <div class="skill-title-row">
                       <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
                       <span class="skill-name">{{ skill.name }}</span>
+                      <span class="skill-badges"><span class="set-tag">Built in</span></span>
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
@@ -1571,14 +1677,17 @@
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <p class="section-title">subagents</p>
+              <p class="section-title">Subagents</p>
               <p class="hint">
-                 Shared subagents available to Claude Code and opencode. Custom definitions are saved in <code>subagents/</code>, mirrored into the vault, and synchronized into each runtime's native format.
+                Shared with Claude Code and opencode. Saved in <code>subagents/</code> and kept in the vault.
               </p>
             </div>
-            <button class="btn-small" @click="toggleAddSubagent">
-              {{ showAddSubagent ? 'Cancel' : '+ New subagent' }}
-            </button>
+            <div class="settings-card-header-actions">
+              <button class="set-link set-link--quiet" type="button" @click="createAssetViaChat('subagent')">Ask Ciao to write one</button>
+              <button class="btn-small" type="button" :aria-expanded="showAddSubagent" @click="toggleAddSubagent">
+                {{ showAddSubagent ? 'Cancel' : 'New subagent' }}
+              </button>
+            </div>
           </div>
 
           <div v-if="showAddSubagent" class="settings-form-panel">
@@ -1607,7 +1716,11 @@
             <p class="hint hint--warn">{{ agentAssetsError }}</p>
           </template>
           <template v-else>
-            <p v-if="!subagentAssets.length" class="hint hint--section-empty">No subagents found.</p>
+            <p v-if="!subagentAssets.length" class="set-empty">
+              <strong>No subagents yet.</strong>
+              A subagent is a specialist Ciao hands part of a task to, with its own instructions.
+              <button class="set-link" type="button" @click="toggleAddSubagent">Create one</button>
+            </p>
             <div v-else class="skill-list">
               <div
                 v-for="agent in subagentAssets"
@@ -1623,6 +1736,13 @@
                     <span class="skill-badges">
                       <span :class="assetOriginClass(subagentOrigin(agent))">{{ assetOriginLabel(subagentOrigin(agent)) }}</span>
                       <span v-if="agent.scope && agent.scope !== 'custom' && agent.scope !== 'built-in'" class="badge badge--muted command-source">{{ agent.scope }}</span>
+                      <button
+                        v-if="agent.editable"
+                        type="button"
+                        class="set-link"
+                        :aria-label="`Edit subagent ${agent.name}`"
+                        @click.stop="openSubagentEditor(agent)"
+                      >Edit</button>
                     </span>
                   </div>
                   <p v-if="agent.description" class="skill-description">{{ agent.description }}</p>
@@ -1671,14 +1791,15 @@
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <p class="section-title">commands</p>
+              <p class="section-title">Commands</p>
               <p class="hint">
-                 Shared commands available to Claude Code and opencode. Custom commands are saved in <code>commands/</code>, mirrored into the vault, and exposed through each runtime's native format.
+                Slash commands shared with Claude Code and opencode. Saved in <code>commands/</code> and kept in the vault.
               </p>
             </div>
             <div class="settings-card-header-actions">
-              <button class="btn-small" @click="toggleAddCommand">
-                {{ showAddCommand ? 'Cancel' : '+ New command' }}
+              <button class="set-link set-link--quiet" type="button" @click="createAssetViaChat('command')">Ask Ciao to write one</button>
+              <button class="btn-small" type="button" :aria-expanded="showAddCommand" @click="toggleAddCommand">
+                {{ showAddCommand ? 'Cancel' : 'New command' }}
               </button>
             </div>
           </div>
@@ -1713,7 +1834,11 @@
             <p class="hint hint--warn">{{ agentAssetsError }}</p>
           </template>
           <template v-else>
-            <p v-if="!commandAssets.length" class="hint hint--section-empty">No slash commands found.</p>
+            <p v-if="!commandAssets.length" class="set-empty">
+              <strong>No slash commands yet.</strong>
+              A command is a saved prompt you run by typing <code>/name</code> in a chat.
+              <button class="set-link" type="button" @click="toggleAddCommand">Create one</button>
+            </p>
             <div v-else class="skill-list">
               <div
                 v-for="command in commandAssets"
@@ -1730,6 +1855,13 @@
                     <span class="skill-badges">
                       <span :class="assetOriginClass(commandOrigin(command))">{{ assetOriginLabel(commandOrigin(command)) }}</span>
                       <span v-if="command.scope && command.scope !== 'custom' && command.scope !== 'built-in'" class="badge badge--muted command-source">{{ command.scope }}</span>
+                      <button
+                        v-if="command.editable"
+                        type="button"
+                        class="set-link"
+                        :aria-label="`Edit command /${command.name}`"
+                        @click.stop="openCommandEditor(command)"
+                      >Edit</button>
                     </span>
                   </div>
                   <p v-if="command.description" class="skill-description">{{ command.description }}</p>
@@ -1792,15 +1924,64 @@
       <template v-if="currentTab === 'mcp'">
         <SettingsMcpServers :mcp="mcp" @create-via-chat="createMcpViaChat" />
       </template>
+      </div>
 
-
-
-
+      <!-- On this page: built from the rendered sections of the current tab,
+           so it follows whatever the tab actually shows (conditional sections
+           included) instead of a second hand-kept list. -->
+      <aside v-if="tocItems.length > 1 || assetRail" class="page-rail settings-rail" aria-label="About this page">
+        <section v-if="tocItems.length > 1" class="rail-section">
+          <h2 id="settings-toc-title" class="rail-title">On this page</h2>
+          <nav class="settings-toc" aria-label="Sections on this page">
+            <button
+              v-for="item in tocItems"
+              :key="item.id"
+              type="button"
+              class="settings-toc-item"
+              :class="{ active: item.id === activeTocId }"
+              :aria-current="item.id === activeTocId ? 'location' : undefined"
+              @click="scrollToSection(item.id)"
+            >{{ item.label }}</button>
+          </nav>
+        </section>
+        <!-- Models: a glance at whether each CLI is working. -->
+        <section
+          v-if="currentTab === 'models' && providerKeys?.connections"
+          class="rail-section settings-rail-status"
+          aria-labelledby="settings-rail-status-title"
+        >
+          <h2 id="settings-rail-status-title" class="rail-title">Status</h2>
+          <div class="rail-kvs">
+            <div v-for="(conn, connKey) in providerKeys.connections" :key="`rail-${connKey}`" class="rail-kv">
+              <span>{{ conn.label || connKey }}</span>
+              <strong :class="{ 'rail-attention': !conn.ok }">{{ conn.ok ? 'Connected' : 'Not connected' }}</strong>
+            </div>
+          </div>
+        </section>
+        <!-- Skills, subagents, commands: how many exist and where they live. -->
+        <section v-if="assetRail" class="rail-section settings-rail-assets" aria-labelledby="settings-rail-assets-title">
+          <h2 id="settings-rail-assets-title" class="rail-title">{{ assetRail.title }}</h2>
+          <div class="rail-kvs">
+            <div class="rail-kv"><span>Custom</span><strong>{{ assetRail.custom }}</strong></div>
+            <div class="rail-kv"><span>Built in</span><strong>{{ assetRail.builtin }}</strong></div>
+            <div v-if="assetRail.other" class="rail-kv"><span>Other</span><strong>{{ assetRail.other }}</strong></div>
+          </div>
+          <p class="rail-note">
+            Saved in <code>{{ assetRail.folder }}</code>.
+            <template v-if="currentTab === 'skills'">
+              Skills you install directly in a CLI stay available too; see
+              <RouterLink to="/settings/models#chat-providers">Models &amp; providers</RouterLink>.
+            </template>
+          </p>
+        </section>
+      </aside>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import { formatConnectorLabel } from '../lib/mcpLabels'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
@@ -1851,6 +2032,12 @@ import { archiveConfirmMessage, restoreConfirmMessage, restoredMessage } from '.
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import { useHousekeepingStore } from '../stores/housekeeping'
+import {
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRoot,
+  DropdownMenuTrigger,
+} from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -1903,6 +2090,115 @@ const mcp = useMcpServers({
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
   return tab
+})
+
+// ── Keyboard shortcuts: the common four, the rest behind a disclosure ────
+const SHORTCUT_COUNT = 11
+const showAllShortcuts = ref(false)
+
+// ── On this page ─────────────────────────────────────────────────────────
+// Read from the rendered tab, not a hand-kept list: a section is any
+// top-level .card with a .section-title, so conditional sections (debug,
+// client scope, loading states) appear and disappear with the page itself.
+type TocItem = { id: string; label: string }
+const bodyEl = ref<HTMLElement | null>(null)
+const mainEl = ref<HTMLElement | null>(null)
+const tocItems = ref<TocItem[]>([])
+const activeTocId = ref('')
+let tocObserver: MutationObserver | null = null
+let tocFrame = 0
+
+function slugify(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'section'
+}
+
+function tocSections(): HTMLElement[] {
+  const main = mainEl.value
+  if (!main) return []
+  return Array.from(main.querySelectorAll<HTMLElement>('.card')).filter(card => (
+    card.parentElement?.closest('.card') == null
+    && !card.classList.contains('scope-card')
+    && card.querySelector('.section-title')
+  ))
+}
+
+function rebuildToc(): void {
+  const used = new Set<string>()
+  const items: TocItem[] = []
+  for (const card of tocSections()) {
+    const label = card.querySelector('.section-title')?.textContent?.trim() || ''
+    if (!label) continue
+    let id = card.id
+    if (!id || used.has(id)) {
+      const base = `settings-${slugify(label)}`
+      id = base
+      for (let n = 2; used.has(id); n += 1) id = `${base}-${n}`
+      card.id = id
+    }
+    used.add(id)
+    items.push({ id, label })
+  }
+  const same = items.length === tocItems.value.length
+    && items.every((item, i) => item.id === tocItems.value[i].id && item.label === tocItems.value[i].label)
+  if (!same) tocItems.value = items
+  updateActiveToc()
+}
+
+function scheduleTocRebuild(): void {
+  if (tocFrame) return
+  tocFrame = requestAnimationFrame(() => {
+    tocFrame = 0
+    rebuildToc()
+  })
+}
+
+// The active entry is the last section whose top has scrolled past a line a
+// little below the pane's top edge.
+function updateActiveToc(): void {
+  const body = bodyEl.value
+  if (!body || !tocItems.value.length) return
+  const line = body.getBoundingClientRect().top + 96
+  let active = tocItems.value[0].id
+  for (const item of tocItems.value) {
+    const el = document.getElementById(item.id)
+    if (el && el.getBoundingClientRect().top <= line) active = item.id
+  }
+  activeTocId.value = active
+}
+
+function onBodyScroll(): void {
+  updateActiveToc()
+}
+
+function scrollToSection(id: string): void {
+  const el = document.getElementById(id)
+  if (!el) return
+  const reduce = typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  el.scrollIntoView?.({ block: 'start', behavior: reduce ? 'auto' : 'smooth' })
+  // Move focus with the view so keyboard users land in the section too.
+  if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1')
+  el.focus({ preventScroll: true })
+  activeTocId.value = id
+}
+
+watch(currentTab, () => {
+  showAllShortcuts.value = false
+  void nextTick(rebuildToc)
+})
+
+onMounted(() => {
+  void nextTick(rebuildToc)
+  if (mainEl.value && typeof MutationObserver !== 'undefined') {
+    tocObserver = new MutationObserver(scheduleTocRebuild)
+    tocObserver.observe(mainEl.value, { childList: true, subtree: true, characterData: true })
+  }
+})
+
+onUnmounted(() => {
+  tocObserver?.disconnect()
+  tocObserver = null
+  if (tocFrame) cancelAnimationFrame(tocFrame)
 })
 
 // ── GitHub star nudge, mirrored onto the open-source card ─────────────────
@@ -2308,6 +2604,12 @@ function providerThinkingOptions(provider: AliasProviderKey): { value: string; l
     },
     ...levels.map((level) => ({ value: level, label: level })),
   ]
+}
+
+/** Segment label: the automatic entry is just "Auto"; levels are capitalised. */
+function thinkingOptionLabel(option: { value: string; label: string }): string {
+  if (option.value === DEFAULT_THINKING_SELECTION) return 'Auto'
+  return option.label.charAt(0).toUpperCase() + option.label.slice(1)
 }
 
 async function saveProviderDefaultThinking(provider: AliasProviderKey, value: string) {
@@ -2976,16 +3278,47 @@ async function fixWorkspaceHealth() {
   }
 }
 
+// `skills` is optional on the wire in practice: a partial or malformed
+// response ({} from a stub or an older engine) must render the empty state,
+// not throw in render and blank the whole Settings pane.
 const stockSkills = computed(() => {
-  return skillsInventory.value?.skills.filter(s => s.label === 'stock') || []
+  return skillsInventory.value?.skills?.filter(s => s.label === 'stock') || []
 })
 
 const customSkills = computed(() => {
-  return skillsInventory.value?.skills.filter(s => s.label === 'custom') || []
+  return skillsInventory.value?.skills?.filter(s => s.label === 'custom') || []
 })
 
 const subagentAssets = computed(() => agentAssets.value?.subagents || [])
 const commandAssets = computed(() => agentAssets.value?.commands || [])
+
+type AssetRail = { title: string; custom: number; builtin: number; other: number; folder: string }
+
+function originCounts(items: { editable?: boolean; scope?: string }[]): Pick<AssetRail, 'custom' | 'builtin' | 'other'> {
+  const counts = { custom: 0, builtin: 0, other: 0 }
+  for (const item of items) {
+    const origin = commandOrigin(item)
+    if (origin === 'custom') counts.custom += 1
+    else if (origin === 'builtin') counts.builtin += 1
+    else counts.other += 1
+  }
+  return counts
+}
+
+// Rail content for the asset list tabs; null elsewhere or while loading.
+const assetRail = computed<AssetRail | null>(() => {
+  if (currentTab.value === 'skills' && skillsLoaded.value && !skillsError.value) {
+    return { title: 'Skills', custom: customSkills.value.length, builtin: stockSkills.value.length, other: 0, folder: 'skills/' }
+  }
+  if (!agentAssetsLoaded.value || agentAssetsError.value) return null
+  if (currentTab.value === 'subagents') {
+    return { title: 'Subagents', ...originCounts(subagentAssets.value), folder: 'subagents/' }
+  }
+  if (currentTab.value === 'commands') {
+    return { title: 'Commands', ...originCounts(commandAssets.value), folder: 'commands/' }
+  }
+  return null
+})
 const workspaceHealth = computed<WorkspaceHealthResponse | null>(() => agentAssets.value?.health || null)
 const prioritizedHealthChecks = computed(() => {
   const checks = workspaceHealth.value?.checks || []
@@ -3120,6 +3453,12 @@ async function addCommand() {
   }
 }
 
+// Row-level Edit: open the row and its editor in one step.
+function openSubagentEditor(agent: SubagentAsset) {
+  expandedSubagents.value[`${agent.source}:${agent.name}:${agent.path}`] = true
+  startEditSubagent(agent)
+}
+
 function startEditSubagent(agent: SubagentAsset) {
   if (!agent.editable) return
   editingSubagent.value = agent.name
@@ -3179,6 +3518,11 @@ async function deleteSubagent(agent: SubagentAsset) {
   } finally {
     savingSubagent.value = null
   }
+}
+
+function openCommandEditor(command: CommandAsset) {
+  expandedCommands.value[commandKey(command)] = true
+  startEditCommand(command)
 }
 
 function startEditCommand(command: CommandAsset) {
@@ -3304,7 +3648,26 @@ async function uploadSkillZip() {
   }
 }
 
-async function createSkillViaChat() {
+const ASSET_CHAT_PROMPTS = {
+  skill: {
+    title: 'New Custom Skill',
+    prompt: 'I want to create a new custom skill. Please guide me through writing a new skill (creating the SKILL.md under the skills/ directory).',
+  },
+  subagent: {
+    title: 'New Subagent',
+    prompt: 'I want to create a new shared subagent. Please guide me through writing its definition under the subagents/ directory.',
+  },
+  command: {
+    title: 'New Slash Command',
+    prompt: 'I want to create a new shared slash command. Please guide me through writing it under the commands/ directory.',
+  },
+} as const
+
+function createSkillViaChat() {
+  return createAssetViaChat('skill')
+}
+
+async function createAssetViaChat(kind: keyof typeof ASSET_CHAT_PROMPTS) {
   const activeProj = projectStore.activeProject
   let projectId = activeProj?.project_id
   if (!projectId) {
@@ -3319,10 +3682,9 @@ async function createSkillViaChat() {
   }
 
   try {
-    const chat = await projectStore.createChat(projectId, 'New Custom Skill')
+    const chat = await projectStore.createChat(projectId, ASSET_CHAT_PROMPTS[kind].title)
     if (chat) {
-      const prompt = 'I want to create a new custom skill. Please guide me through writing a new skill (creating the SKILL.md under the skills/ directory).'
-      projectStore.sendMessage(chat.chat_id, prompt)
+      projectStore.sendMessage(chat.chat_id, ASSET_CHAT_PROMPTS[kind].prompt)
     }
   } catch (e) {
     notifyFailed('Could not start chat', errorMessage(e))
@@ -3424,6 +3786,20 @@ const archivedLoading = ref(false)
 const archivedLoadError = ref('')
 const restoringArchiveId = ref<string | null>(null)
 const showNewWorkspace = ref(false)
+// The sidebar's "New workspace" links to /settings/workspaces#new-workspace:
+// open the form and bring it into view instead of landing on the list.
+watch(
+  () => route.hash,
+  hash => {
+    if (hash !== '#new-workspace') return
+    showNewWorkspace.value = true
+    void nextTick(() => {
+      document.querySelector('.workspace-card--new')?.scrollIntoView?.({ block: 'start' })
+      document.querySelector<HTMLInputElement>('.workspace-card--new input')?.focus()
+    })
+  },
+  { immediate: true },
+)
 const workspaceModels = ref<ModelsResponse | null>(null)
 
 type WorkspaceForm = {
@@ -3499,6 +3875,55 @@ function workspaceModelSectionsForForm(form: WorkspaceForm): ModelSection[] {
 
 const workspaceForms = ref<WorkspaceForm[]>([])
 const newWorkspaceForm = ref<WorkspaceForm>(blankWorkspaceForm())
+// One row "..." menu open at a time, keyed by row. Esc closes it here and
+// marks the press handled: ChatLayout's window Esc handler leaves Settings
+// unless the event was already handled, and Reka's own window listener is
+// registered later, too late to mark it.
+const settingsMenu = ref<string | null>(null)
+
+function setSettingsMenu(key: string, open: boolean): void {
+  if (open) settingsMenu.value = key
+  else if (settingsMenu.value === key) settingsMenu.value = null
+}
+
+function closeSettingsMenuOnEscape(event: KeyboardEvent): void {
+  event.preventDefault()
+  settingsMenu.value = null
+}
+
+// Rows are collapsed to a summary; Edit opens one in place. The baseline is
+// the saved form, so Save appears only once something actually changed.
+const openWorkspace = ref<string | null>(null)
+const workspaceBaseline = ref<Record<string, string>>({})
+
+function workspaceDirty(form: WorkspaceForm): boolean {
+  const saved = workspaceBaseline.value[form.name]
+  return saved !== undefined && saved !== JSON.stringify(form)
+}
+
+function discardWorkspace(name: string): void {
+  const saved = workspaceBaseline.value[name]
+  const index = workspaceForms.value.findIndex((f) => f.name === name)
+  if (saved !== undefined && index >= 0) {
+    workspaceForms.value[index] = JSON.parse(saved) as WorkspaceForm
+  }
+  openWorkspace.value = null
+}
+
+function workspaceSwatch(color: WorkspaceColorId): string {
+  return WORKSPACE_COLOR_PRESETS.find((preset) => preset.id === color)?.swatch || 'var(--accent)'
+}
+
+function workspaceSummary(form: WorkspaceForm): string {
+  const provider = workspaceProviderOptions.value.find((option) => option.value === form.default_provider)?.label
+    || form.default_provider
+  const profile = form.gws_profile
+    ? gwsProfileOptions.value.find((option) => option.name === form.gws_profile)?.label || form.gws_profile
+    : ''
+  const parts = [provider, profile ? `Google: ${profile}` : 'No Google account']
+  if (form.name === primaryWorkspace.value) parts.push('Main workspace')
+  return parts.join(' · ')
+}
 
 const workspaceProviderOptions = computed(() =>
   projectStore.workspaceProviderOptions.length
@@ -3512,12 +3937,6 @@ function disallowedToolsPayload(raw: string): string[] | null {
   return cleaned.split(',').map((s) => s.trim()).filter(Boolean)
 }
 
-function formatConnectorLabel(name: string): string {
-  let clean = name.replace(/^mcp__claude_ai_/, '').replace(/^mcp__/, '')
-  if (clean === 'Google_Cloud_BigQuery') return 'BigQuery'
-  if (clean === 'incident_io') return 'incident.io'
-  return clean
-}
 
 
 
@@ -3552,6 +3971,12 @@ async function fetchWorkspacesList() {
     const res = await projectStore.fetchWorkspaces()
     primaryWorkspace.value = res?.primary ?? null
     workspaceForms.value = projectStore.workspaces.map(workspaceToForm)
+    workspaceBaseline.value = Object.fromEntries(
+      workspaceForms.value.map((form) => [form.name, JSON.stringify(form)]),
+    )
+    if (openWorkspace.value && !workspaceForms.value.some((f) => f.name === openWorkspace.value)) {
+      openWorkspace.value = null
+    }
     newWorkspaceForm.value.default_provider = normalizeWorkspaceProvider(newWorkspaceForm.value.default_provider)
   } catch (e) {
     workspacesError.value = `Failed to load workspaces: ${errorMessage(e)}`
@@ -3591,6 +4016,7 @@ async function saveWorkspace(name: string) {
       color: form.color,
     })
     notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
+    openWorkspace.value = null
     await fetchWorkspacesList()
   } catch (e) {
     const detail = apiErrorMessage(e, 'The workspace could not be saved.')
@@ -4200,47 +4626,162 @@ async function doPackageUpdate() {
 
 .shortcut-list {
   list-style: none;
-  margin: 12px 0 0;
+  margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
 }
 
 .shortcut-list li {
   display: flex;
   align-items: center;
   gap: 12px;
-  font-size: 13px;
-  color: var(--fg2);
+  min-height: 40px;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-sm);
+  color: var(--fg);
 }
 
 .shortcut-list kbd {
-  font-family: var(--font);
-  font-size: 12px;
-  min-width: 44px;
-  text-align: center;
-  padding: 4px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg2);
-  color: var(--fg);
-  flex: 0 0 auto;
+  flex: 0 0 150px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg2);
+}
+
+@media (max-width: 700px) {
+  .shortcut-list kbd { flex-basis: 72px; }
 }
 .pane-body {
   flex: 1;
   overflow-y: auto;
-  padding: var(--space-5);
+  padding: var(--space-6) 0 48px;
+}
+
+/* Sections stack in the page grid's main column with generous separation;
+   the rail holds the tab's table of contents. */
+.settings-main {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: 36px;
+}
+
+.settings-toc {
+  display: grid;
+  border-left: 1px solid var(--border);
+}
+
+.settings-toc-item {
+  min-height: 32px;
+  margin-left: -1px;
+  padding: 4px 0 4px 12px;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: none;
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-toc-item:hover {
+  color: var(--fg);
+}
+
+.settings-toc-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.settings-toc-item.active {
+  border-left-color: var(--accent);
+  color: var(--fg);
+}
+
+@media (pointer: coarse) {
+  .settings-toc-item { min-height: var(--touch); }
+}
+
+/* One button size across every settings section: the standard secondary
+   control. Header actions used to mix 44px primaries with compact chips,
+   which is what made each card read as its own little app. */
+.settings-main :deep(:is(.btn-primary, .btn-secondary, .btn-caution, .btn-small)) {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+@media (pointer: coarse) {
+  .settings-main :deep(:is(.btn-primary, .btn-secondary, .btn-caution, .btn-small)) {
+    min-height: var(--touch);
+  }
+}
+
+/* Connection state as text with a leading dot, not a mono pill. */
+.settings-conn-state {
+  display: inline-flex;
   align-items: center;
+  gap: 6px;
+  flex: none;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.settings-conn-state::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.settings-conn-state--ok::before { background: var(--success); }
+.settings-conn-state--error { color: var(--error); }
+
+.settings-main :deep(:is(.btn-primary, .btn-secondary, .btn-caution, .btn-small)) {
+  white-space: nowrap;
+}
+
+.settings-status {
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+/* Narrow panes collapse the grid; a table of contents under the page it
+   indexes would only be something to scroll past. */
+@container chat-pane (max-width: 940px) {
+  .settings-rail { display: none; }
+}
+
+.settings-disclosure {
+  align-self: flex-start;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.settings-disclosure:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+@media (pointer: coarse) {
+  .settings-disclosure { min-height: var(--touch); }
 }
 /* The inline device panel renders its own .card tiles; give the wrapper the
    same width as every other card here so they line up with the rest. */
 .device-tile {
-  width: min(100%, 1040px);
-  margin: 0 auto;
+  width: 100%;
+  margin: 0;
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
@@ -4405,9 +4946,21 @@ a.btn-secondary {
   text-decoration: none;
 }
 /* Client mode: names the machine whose settings the rest of the page edits. */
-.scope-card {
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
-  background: color-mix(in srgb, var(--accent) 6%, var(--bg2));
+.scope-card.card {
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warning) 7%, transparent);
+}
+.scope-card .settings-card-header {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+.scope-card .section-title {
+  font-size: var(--text-base);
+}
+.scope-card .hint {
+  color: var(--fg2);
 }
 
 .action-result--error {
@@ -4639,30 +5192,38 @@ a.btn-secondary {
 
 .instance-toggle {
   display: flex;
-  gap: 0;
+  gap: 2px;
+  padding: 2px;
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid var(--border);
   margin-top: 0;
   width: 100%;
 }
+/* A quiet segmented control: the current choice is a raised tile, not an
+   accent fill - the accent stays reserved for each section's one action. */
 .toggle-btn {
   flex: 1;
-  padding: 10px 16px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--fg2);
   font-size: var(--text-sm);
   font-weight: 600;
-  border: none;
-  cursor: pointer;
-  background: var(--bg);
-  color: var(--fg);
   transition: background 0.15s, color 0.15s;
 }
-.toggle-btn:not(:last-child) {
-  border-right: 1px solid var(--border);
+.toggle-btn:hover:not(:disabled) {
+  color: var(--fg);
 }
 .toggle-btn.active {
-  background: var(--accent);
-  color: var(--on-accent);
+  background: var(--bg3);
+  color: var(--fg);
+}
+@media (pointer: coarse) {
+  .toggle-btn { min-height: var(--touch); }
 }
 .toggle-btn:disabled {
   opacity: 0.6;
@@ -5362,24 +5923,25 @@ a.btn-secondary {
 .workspace-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  margin-top: var(--space-2);
 }
+/* One workspace = one collapsed hairline row (.set-row); Edit opens its
+   fields in place underneath. */
 .workspace-card {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  border-radius: 0;
+  background: transparent;
 }
+/* The unsaved new workspace keeps a light frame: it is a draft form, and it
+   has to read as not-yet-real next to the saved rows. */
 .workspace-card--new {
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
-  background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
 }
 .workspace-card-header {
   display: flex;
-  align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
 }
@@ -5387,7 +5949,17 @@ a.btn-secondary {
   margin: 0;
   color: var(--fg);
   font-size: var(--text-base);
-  font-weight: 700;
+  font-weight: 600;
+}
+.workspace-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.workspace-edit-actions .btn-small {
+  flex: 0 0 auto;
 }
 .workspace-actions {
   display: flex;
@@ -5412,19 +5984,19 @@ a.btn-secondary {
 .archived-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
   margin: 0;
   padding: 0;
   list-style: none;
+  border-top: 1px solid var(--border);
 }
 .archived-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius);
+  min-height: 52px;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
 }
 .archived-item-text {
   display: flex;
@@ -5447,12 +6019,6 @@ a.btn-secondary {
   cursor: not-allowed;
   transform: none;
 }
-/* Same size as the Save button beside it; the compact caution variant is
-   sized for denser rows. */
-.workspace-actions .btn-caution.btn-small {
-  padding: 8px 16px;
-  font-weight: 600;
-}
 .provider-defaults {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -5472,18 +6038,10 @@ a.btn-secondary {
   font-weight: 600;
   color: var(--fg);
 }
+/* The provider's defaults are indented hairline rows (.set-subrow) under its
+   head, not a boxed grid of selects. */
 .provider-inline-defaults {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-3);
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  background: color-mix(in srgb, var(--bg) 76%, transparent);
-  margin-bottom: var(--space-3);
-}
-@media (max-width: 720px) {
-  .provider-inline-defaults { grid-template-columns: 1fr; }
+  display: block;
 }
 @media (max-width: 720px) {
   .provider-defaults {
@@ -5493,28 +6051,37 @@ a.btn-secondary {
 .workspace-color-swatches {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: 6px;
   align-items: center;
 }
+/* 26px swatch; the selected one carries a ring in the text colour so the
+   choice reads without relying on the swatch hue. */
 .workspace-color-swatch {
-  width: var(--touch);
-  height: var(--touch);
+  width: 26px;
+  height: 26px;
   padding: 0;
-  border: 2px solid var(--border);
+  border: 0;
   border-radius: 50%;
-  background:
-    radial-gradient(circle at center, var(--swatch) 0 58%, transparent 60%),
-    var(--bg);
+  background: var(--swatch);
   cursor: pointer;
-  transition: border-color 120ms var(--ease), transform 120ms var(--ease);
+  transition: box-shadow 120ms var(--ease), transform 120ms var(--ease);
 }
 .workspace-color-swatch:hover:not(:disabled) {
-  border-color: var(--border-strong);
-  transform: translateY(-1px);
+  transform: scale(1.08);
 }
 .workspace-color-swatch.active {
-  border-color: var(--swatch);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--swatch) 35%, transparent);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--fg);
+}
+@media (pointer: coarse) {
+  .workspace-color-swatch {
+    width: var(--touch);
+    height: var(--touch);
+    background: radial-gradient(circle at center, var(--swatch) 0 13px, transparent 14px);
+  }
+  .workspace-color-swatch.active {
+    box-shadow: none;
+    background: radial-gradient(circle at center, var(--swatch) 0 13px, var(--bg) 14px 15px, var(--fg) 16px 17px, transparent 18px);
+  }
 }
 .workspace-color-swatch:focus-visible {
   outline: 2px solid var(--accent);
@@ -5635,16 +6202,6 @@ a.btn-secondary {
     align-items: stretch;
     flex-direction: column;
   }
-  .workspace-card-header {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .workspace-actions {
-    width: 100%;
-  }
-  .workspace-actions .btn-small {
-    flex: 1 1 auto;
-  }
   .archived-item {
     flex-direction: column;
     align-items: stretch;
@@ -5748,9 +6305,11 @@ a.btn-secondary {
   margin-top: 0;
   width: 100%;
 }
+.font-scale-row {
+  justify-content: flex-end;
+}
 .font-scale-row .btn-small {
-  flex: 1 1 0;
-  min-width: 0;
+  flex: 0 0 auto;
 }
 .font-scale-display {
   font-size: var(--text-base);

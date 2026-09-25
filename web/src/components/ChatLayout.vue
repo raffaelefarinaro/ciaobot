@@ -47,7 +47,7 @@
           />
           <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-            <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="home-boot-body">
               <!-- Skeleton of the home screen this will become (lane header
                    with the face+status row inside it, housekeeping tile, chat
@@ -80,7 +80,11 @@
                homepage behind it after closing a chat would just duplicate the
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-            <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false">
+              <template v-if="!isMobile" #actions>
+                <HostStatusPill />
+              </template>
+            </PaneHeader>
             <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
               <!-- The glanceable status (face + summary) lives inside the active
                    workspace's lane header now (HomeRecentChats.vue), right under
@@ -107,19 +111,27 @@
                   </button>
                 </div>
               </div>
-              <HousekeepingStrip />
-              <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
-              <div v-if="showGlobalNewChatActions" class="empty-actions">
-                <button
-                  v-for="action in generalWorkspaceActions"
-                  :key="action.workspace"
-                  class="btn-primary"
-                  :data-workspace-color="action.color"
-                  :disabled="action.isCreating"
-                  @click="createWorkspaceChat(action)"
-                >
-                  {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
-                </button>
+              <div class="home-workbench">
+                <div class="home-main">
+                  <HomeIntake />
+                  <HousekeepingStrip />
+                  <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
+                  <div v-if="showGlobalNewChatActions" class="empty-actions">
+                    <button
+                      v-for="action in generalWorkspaceActions"
+                      :key="action.workspace"
+                      class="btn-primary"
+                      :data-workspace-color="action.color"
+                      :disabled="action.isCreating"
+                      @click="chooseNewChat(action.workspace)"
+                    >
+                      {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
+                    </button>
+                  </div>
+                </div>
+                <div class="home-rail">
+                  <HomeReviewSummary />
+                </div>
               </div>
             </div>
           </div>
@@ -130,14 +142,9 @@
           :class="{ 'is-dragging': isDraggingSplit }"
           @mousedown="startSplitDrag"
         />
-        <div
-          class="chat-split-side"
-          :style="{
-            width: isMobile ? '100%' : ((1 - chatSplitRatio) * 100) + '%',
-            flex: isMobile ? undefined : '0 0 auto',
-            transition: isDraggingSplit ? 'none' : undefined
-          }"
-        >
+        <!-- Takes whatever the chat pane and gutter leave, so the tile's inset
+             margin never pushes the pair past 100%. -->
+        <div class="chat-split-side">
           <PinnedFilePanel ref="pinnedFilePanelRef" :key="pinnedFilePath" :file-path="pinnedFilePath" @close="unpinCurrent" />
         </div>
       </template>
@@ -169,7 +176,7 @@
         />
         <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-          <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
           <div class="home-boot-body">
             <!-- Same skeleton as the split-view copy above; only one is ever
                  mounted, so the two must stay identical. -->
@@ -200,7 +207,11 @@
              homepage behind it after closing a chat would just duplicate the
              same list. Hide the empty-state whenever the mobile sidebar is open. -->
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-          <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false">
+            <template v-if="!isMobile" #actions>
+              <HostStatusPill />
+            </template>
+          </PaneHeader>
           <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
             <!-- The glanceable status (face + summary) lives inside the active
                  workspace's lane header now (HomeRecentChats.vue), right under
@@ -227,21 +238,29 @@
                 </button>
               </div>
             </div>
-            <HousekeepingStrip />
-            <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
-            <div v-if="showGlobalNewChatActions" class="empty-actions">
-              <button
-                v-for="action in generalWorkspaceActions"
-                :key="action.workspace"
-                class="btn-primary"
-                :data-workspace-color="action.color"
-                :disabled="action.isCreating"
-                @click="createWorkspaceChat(action)"
-              >
-                {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
-              </button>
+            <div class="home-workbench">
+              <div class="home-main">
+                <HomeIntake />
+                <HousekeepingStrip />
+                <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
+                <div v-if="showGlobalNewChatActions" class="empty-actions">
+                  <button
+                    v-for="action in generalWorkspaceActions"
+                    :key="action.workspace"
+                    class="btn-primary"
+                    :data-workspace-color="action.color"
+                    :disabled="action.isCreating"
+                    @click="chooseNewChat(action.workspace)"
+                  >
+                    {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
+                  </button>
+                </div>
               </div>
-                      </div>
+              <div class="home-rail">
+                <HomeReviewSummary />
+              </div>
+            </div>
+          </div>
         </div>
       </template>
     </div>
@@ -253,7 +272,7 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
-import { pendingNewChat } from '../lib/newChat'
+import { openNewChatPicker, pendingNewChat } from '../lib/newChat'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskStore } from '../stores/tasks'
 import { useMemoryMapStore } from '../stores/memoryMap'
@@ -276,7 +295,10 @@ const SettingsView = defineAsyncComponent(() => import('./SettingsView.vue'))
 import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
+import HostStatusPill from './HostStatusPill.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
+import HomeIntake from './HomeIntake.vue'
+import HomeReviewSummary from './HomeReviewSummary.vue'
 import HousekeepingStrip from './HousekeepingStrip.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
@@ -321,6 +343,9 @@ const SIDEBAR_SNAP_THRESHOLD = 15 // px
 const DEFAULT_SPLIT_RATIO = 0.5
 const MIN_CHAT_PANE_WIDTH = 240
 const MIN_SIDE_PANE_WIDTH = 240
+// Gutter + the tile's right inset (both --space-2): width the docked file tile
+// occupies beyond its own box.
+const SIDE_TILE_CHROME = 16
 const SPLIT_SNAP_THRESHOLD = 15 // px
 const LATEST_STATUS_SYNC_MS = 15000
 
@@ -421,7 +446,7 @@ function handleSplitDrag(e: MouseEvent) {
   let newLeftWidth = clientX - dragContainerLeft
   
   const minLeft = MIN_CHAT_PANE_WIDTH
-  const maxLeft = dragContainerWidth - MIN_SIDE_PANE_WIDTH
+  const maxLeft = dragContainerWidth - MIN_SIDE_PANE_WIDTH - SIDE_TILE_CHROME
   
   if (maxLeft < minLeft) {
     chatSplitRatio.value = 0.5
@@ -620,19 +645,16 @@ if (typeof document !== 'undefined') {
   )
 }
 
-async function createWorkspaceChat(action: { workspace: string; projectId: string; isCreating: boolean }) {
-  if (!action.projectId || action.isCreating) return
-  await store.switchWorkspace(action.workspace)
-  await store.createChat(action.projectId)
+async function chooseNewChat(workspace = store.activeWorkspace, projectId?: string) {
+  const selectedProject = await openNewChatPicker({ workspace, projectId })
+  if (!selectedProject) return
+  await store.newChatInProject(selectedProject)
 }
 
-// Cmd+T (Desktop) / Option+N (Web/PWA): show the new-chat picker, which drills
-// workspace → project and resolves to the chosen project's id.
+// Cmd+T (Desktop) / Option+N (Web/PWA) and every visible New action use the
+// same project picker.
 async function handleNewChatShortcut() {
-  const { openNewChatPicker } = await import('../lib/newChat')
-  const projectId = await openNewChatPicker()
-  if (!projectId) return
-  await store.newChatInProject(projectId)
+  await chooseNewChat()
 }
 const activePinKey = computed(() => {
   return store.activeChatId || currentProjectId.value
@@ -1034,6 +1056,17 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
+  // Back / forward: Cmd+[ / Cmd+] in the desktop app, which has no browser
+  // chrome to provide them. A browser already binds its own chord, so the PWA
+  // leaves the key alone. Text fields keep it (Cmd+[ outdents in some editors).
+  if (isDesktop && mod && !alt && !e.shiftKey && (e.key === '[' || e.key === ']')) {
+    if (isTypingTarget(e.target)) return
+    e.preventDefault()
+    if (e.key === '[') router.back()
+    else router.forward()
+    return
+  }
+
   // Sidebar: Cmd+S (Desktop) or Option+S (Web/PWA), where Cmd+S is the
   // browser's Save Page. Skipped while typing for the same reason as archive:
   // in a text field Option+S is how you type ß, and stealing it would break
@@ -1255,7 +1288,6 @@ onBeforeUnmount(() => {
   gap: var(--space-2);
   padding: var(--space-3);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--border-strong);
   border-radius: var(--radius);
 }
 
@@ -1358,7 +1390,15 @@ onBeforeUnmount(() => {
   align-items: stretch;
   justify-content: flex-start;
   padding-top: var(--space-2);
+  /* The workbench carries the page gutter itself (--page-gutter), so the
+     shell only keeps the device safe-area insets. */
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
   text-align: left;
+}
+
+.empty-state > .home-intake {
+  order: -1;
 }
 
 .empty-home-header {
@@ -1482,6 +1522,62 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
+/* Workbench composition (prototype A): the request column keeps the readable
+   measure, and the memory pulse sits in a quiet side rail on wide panes
+   instead of stacking another full-width band under the prompt. */
+.home-workbench {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto;
+  padding: 48px var(--page-gutter) 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--page-rail);
+  align-items: start;
+  gap: 48px;
+}
+
+.home-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.home-workbench .home-main > .home-intake,
+.home-workbench .home-main > .empty-actions {
+  width: 100%;
+  max-width: none;
+}
+
+.home-rail {
+  position: sticky;
+  top: var(--space-2);
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+
+/* Keyed to the pane, not the viewport: with the resizable sidebar open, a
+   1280px window leaves the pane well under 980px, and a viewport query kept
+   the rail beside a request column too narrow for its own chips. */
+@container chat-pane (max-width: 940px) {
+  .home-workbench {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 25px;
+    padding: var(--space-5) var(--page-gutter) var(--space-4);
+  }
+
+  .home-rail {
+    position: static;
+  }
+}
+
+@container chat-pane (max-width: 700px) {
+  .home-workbench {
+    padding-top: var(--space-3);
+  }
+}
+
 .sidebar-backdrop {
   position: fixed;
   inset: 0;
@@ -1509,15 +1605,30 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow: hidden;
 }
+/* The pinned file is a window docked inside the pane, not a second flat
+   column: inset from the pane edges, in the sidebar's tone (--bg2), so the
+   sidebar and the file read as one layer and the chat is the canvas between. */
 .chat-split-side {
-  width: 50%;
   flex: 1 1 0;
   min-width: 240px;
-  border-left: 1px solid var(--border);
+  margin: var(--space-2) var(--space-2) var(--space-2) 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--bg);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 32px -14px rgb(0 0 0 / 45%);
+  animation: chat-tile-in 180ms var(--ease);
+}
+:global(:root.theme-light) .chat-split-side {
+  box-shadow: 0 10px 28px -14px rgb(26 26 46 / 28%);
+}
+@keyframes chat-tile-in {
+  from { opacity: 0; transform: translateX(12px) scale(0.985); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-split-side { animation: none; }
 }
 
 .sidebar-resizer,
@@ -1546,6 +1657,22 @@ onBeforeUnmount(() => {
 .chat-split-resizer:hover::after,
 .chat-split-resizer.is-dragging::after {
   background-color: var(--accent);
+}
+/* Between the chat and the tile the resizer is the visible gap itself, with a
+   grip that shows on hover instead of a full-height accent line. */
+.chat-split-resizer {
+  flex: none;
+  width: var(--space-2);
+  margin: 0;
+}
+.chat-split-resizer::after {
+  top: 50%;
+  bottom: auto;
+  left: 50%;
+  width: 3px;
+  height: 36px;
+  border-radius: 2px;
+  transform: translate(-50%, -50%);
 }
 
 :global(body.is-dragging-layout) {

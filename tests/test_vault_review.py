@@ -23,6 +23,11 @@ from ciao.vault_review import (
 )
 
 
+# Age is a review signal, so a test about some other signal pins the clock near
+# its fixture's `updated:` date instead of letting the date age into a failure.
+_PINNED = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
+
+
 def _note(root: Path, name: str, body: str) -> None:
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -287,14 +292,14 @@ def test_lookup_notes_need_more_than_unlinked_to_be_offered_for_retirement(tmp_p
         "---\ntype: person\ntags: [person]\nupdated: 2026-01-01\n---\n# Quiet\n\nA colleague.",
         encoding="utf-8",
     )
-    assert generate_candidates(tmp_path, workspace="personal", write_queue=False) == []
+    assert generate_candidates(tmp_path, workspace="personal", write_queue=False, now=_PINNED) == []
 
     # A second, independent signal still surfaces the same note.
     (tmp_path / "People" / "Quiet.md").write_text(
         "---\ntype: person\ntags: [person]\nupdated: 2026-01-01\n---\n# Quiet\n\nSuperseded by someone else.",
         encoding="utf-8",
     )
-    candidates = generate_candidates(tmp_path, workspace="personal", write_queue=False)
+    candidates = generate_candidates(tmp_path, workspace="personal", write_queue=False, now=_PINNED)
     assert [c.path for c in candidates] == ["memory-vault/People/Quiet.md"]
     assert set(candidates[0].signals) == {"unlinked", "superseded_language"}
 
@@ -435,7 +440,7 @@ def test_an_active_status_outranks_supersession_wording(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     # Still unlinked, as the only note in its vault — but not superseded.
-    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False)[0]
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False, now=_PINNED)[0]
     assert candidate.signals == ("unlinked",)
 
 
@@ -781,7 +786,7 @@ def test_lookup_type_filter_survives_a_capitalised_type(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    assert generate_candidates(tmp_path, workspace="personal", write_queue=False) == []
+    assert generate_candidates(tmp_path, workspace="personal", write_queue=False, now=_PINNED) == []
 
 
 def test_record_type_filter_follows_type_aliases(tmp_path: Path) -> None:
@@ -856,7 +861,7 @@ def test_an_orphaned_analysis_note_is_still_queued(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    candidates = generate_candidates(tmp_path, workspace="personal", write_queue=False)
+    candidates = generate_candidates(tmp_path, workspace="personal", write_queue=False, now=_PINNED)
     assert [c.path for c in candidates] == ["memory-vault/Resources/Q3 analysis.md"]
     assert list(candidates[0].signals) == ["unlinked"]
 
@@ -1241,3 +1246,181 @@ def test_a_completed_project_with_a_rewritten_status_is_not_vanished(tmp_path: P
     generate_candidates(tmp_path, workspace="personal", write_queue=True)
 
     assert not [r for r in review.read_ledger(tmp_path) if r["disposition"] == "vanished"]
+
+
+# --- unverified signal ------------------------------------------------------
+
+_SEPT = datetime(2026, 9, 25, 12, 0, tzinfo=UTC)
+
+
+def _linked_person(root: Path, updated: str = "2026-06-01") -> None:
+    (root / "People").mkdir(parents=True, exist_ok=True)
+    (root / "People" / "Mo.md").write_text(
+        f"---\ntype: person\ntags: [person]\nupdated: {updated}\n---\n# Mo\n\nA colleague.\n",
+        encoding="utf-8",
+    )
+    (root / "Hub.md").write_text(
+        "---\ntype: note\ntags: [hub]\nupdated: 2026-09-20\n---\n# Hub\n\nSee [Mo](People/Mo.md).\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_linked_person_note_unchecked_past_its_horizon_is_queued(tmp_path: Path) -> None:
+    """The main complaint: the map said "unchecked", the queue had nothing."""
+    _linked_person(tmp_path)
+
+    by_path = {
+        c.path: c for c in generate_candidates(tmp_path, workspace="personal", write_queue=False, now=_SEPT)
+    }
+    person = by_path["memory-vault/People/Mo.md"]
+    assert person.signals == ("unverified",)
+    assert person.evidence["unverified"] == {
+        "age_days": 116,
+        "threshold_days": 90,
+        "last_verified": "2026-06-01",
+        "source": "frontmatter",
+    }
+    assert person.evidence["age_days"] == 116
+    assert person.evidence["superseded"] is None
+
+
+def test_unverified_falls_back_to_mtime(tmp_path: Path) -> None:
+    import os
+
+    path = tmp_path / "Ideas" / "Old.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("---\ntype: note\ntags: [idea]\n---\n# Old\n\nBody.\n", encoding="utf-8")
+    old = datetime(2026, 1, 1, tzinfo=UTC).timestamp()
+    os.utime(path, (old, old))
+
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False, now=_SEPT)[0]
+    assert "unverified" in candidate.signals
+    assert candidate.evidence["unverified"]["source"] == "mtime"
+    assert candidate.evidence["unverified"]["threshold_days"] == 180
+    assert candidate.evidence["age_days"] == candidate.evidence["unverified"]["age_days"]
+
+
+def test_unverified_never_fires_on_exempt_types(tmp_path: Path) -> None:
+    (tmp_path / "Logs").mkdir(parents=True)
+    (tmp_path / "Logs" / "ops.md").write_text(
+        "---\ntype: log\ntags: [ops]\nupdated: 2020-01-01\n---\n# Ops\n\nSee [Hub](../Hub.md).\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Hub.md").write_text(
+        "---\ntype: note\ntags: [hub]\nupdated: 2026-09-20\n---\n# Hub\n\n[Ops](Logs/ops.md)\n",
+        encoding="utf-8",
+    )
+    candidates = generate_candidates(tmp_path, workspace="personal", write_queue=False, now=_SEPT)
+    assert all("unverified" not in c.signals for c in candidates)
+
+
+def test_a_disposable_orphan_outranks_a_linked_note_that_only_needs_checking(tmp_path: Path) -> None:
+    _linked_person(tmp_path)
+    (tmp_path / "Ideas").mkdir()
+    (tmp_path / "Ideas" / "Stray.md").write_text("# Stray\n\nNo frontmatter.\n", encoding="utf-8")
+
+    paths = [
+        c.path for c in generate_candidates(tmp_path, workspace="personal", write_queue=False, now=_SEPT)
+    ]
+    assert paths.index("memory-vault/Ideas/Stray.md") < paths.index("memory-vault/People/Mo.md")
+
+
+def test_keep_on_an_unverified_note_clears_the_signal_not_just_the_row(tmp_path: Path) -> None:
+    """`Still true` stamps `updated:`, so the age signal is gone for real."""
+    _linked_person(tmp_path)
+    candidate = next(
+        c for c in generate_candidates(tmp_path, workspace="personal", write_queue=False, now=_SEPT)
+        if c.path == "memory-vault/People/Mo.md"
+    )
+    result = record_decision(tmp_path, candidate, disposition="keep", now=_SEPT)
+    assert result["stamped"] is True
+
+    # Edit the note so the hash-scoped `keep` no longer suppresses it: only a
+    # live signal could put it back in the queue now.
+    note = tmp_path / "People" / "Mo.md"
+    note.write_text(note.read_text(encoding="utf-8") + "\nMoved teams.\n", encoding="utf-8")
+    later = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+    paths = [c.path for c in generate_candidates(tmp_path, workspace="personal", write_queue=False, now=later)]
+    assert "memory-vault/People/Mo.md" not in paths
+
+
+def test_listing_ceiling_is_above_fifty_and_projection_holds_the_whole_queue(tmp_path: Path) -> None:
+    for index in range(60):
+        _note(tmp_path, f"Ideas/n{index:02}.md", "An unlinked note.")
+
+    assert len(generate_candidates(tmp_path, workspace="personal", max_candidates=200, write_queue=False)) == 60
+
+    # An agent's short `list` must not shrink the readable projection.
+    assert len(generate_candidates(tmp_path, workspace="personal", max_candidates=5)) == 5
+    rows = [line for line in review.queue_path(tmp_path).read_text(encoding="utf-8").splitlines() if line.startswith("- `")]
+    assert len(rows) == 60
+
+
+# --- superseded evidence ----------------------------------------------------
+
+
+def test_superseded_evidence_points_at_the_frontmatter_line() -> None:
+    text = (
+        "---\n"
+        "type: project\n"
+        "description: Superseded by the new plan.\n"
+        "tags: [old]\n"
+        "---\n"
+        "# Old\n\nNothing here.\n"
+    )
+    match = review._superseded_match(text)
+    assert match == {
+        "line": 3,
+        "text": "description: Superseded by the new plan.",
+        "match": "Superseded",
+        "where": "frontmatter",
+        "before": {"line": 2, "text": "type: project"},
+        "after": {"line": 4, "text": "tags: [old]"},
+    }
+
+
+def test_superseded_evidence_points_at_the_lead_line() -> None:
+    text = (
+        "---\ntype: note\n---\n"
+        "# Plan\n"
+        "\n"
+        "First line of the lead.\n"
+        "This plan moved to the Q4 doc.\n"
+        "\n"
+        "## Details\n\nReplaced by nothing.\n"
+    )
+    match = review._superseded_match(text)
+    assert match is not None
+    assert (match["line"], match["where"], match["match"]) == (7, "lead", "moved to")
+    assert match["text"] == "This plan moved to the Q4 doc."
+    assert match["before"] == {"line": 6, "text": "First line of the lead."}
+    assert match["after"] == {"line": 9, "text": "## Details"}
+    assert review._says_it_was_superseded(text) is True
+
+
+def test_superseded_evidence_survives_bom_and_crlf() -> None:
+    text = "﻿---\r\ntype: note\r\n---\r\n# T\r\n\r\nDeprecated: use the other one.\r\n"
+    match = review._superseded_match(text)
+    assert match is not None
+    assert match["line"] == 6
+    assert match["text"] == "Deprecated: use the other one."
+    assert match["before"] == {"line": 4, "text": "# T"}
+    assert match["after"] is None
+
+
+def test_superseded_evidence_respects_the_existing_rules() -> None:
+    # Below the first section heading, or under an active status: no claim.
+    assert review._superseded_match("# T\n\nLive.\n\n## Log\n\nMoved to X.\n") is None
+    assert review._superseded_match("---\nstatus: active\n---\n# T\n\nMoved to X.\n") is None
+
+
+def test_candidate_carries_superseded_evidence(tmp_path: Path) -> None:
+    (tmp_path / "Old.md").write_text(
+        "---\ntype: note\ntags: [x]\nupdated: 2026-09-20\n---\n# Old\n\nReplaced by [New](New.md).\n",
+        encoding="utf-8",
+    )
+    candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False, now=_SEPT)[0]
+    assert "superseded_language" in candidate.signals
+    assert candidate.evidence["superseded"]["line"] == 8
+    assert candidate.evidence["superseded"]["match"] == "Replaced by"
+    assert candidate.evidence["unverified"] is None

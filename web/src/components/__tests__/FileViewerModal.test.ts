@@ -315,6 +315,19 @@ describe('FileViewerModal', () => {
     expect(close).not.toHaveBeenCalled()
   })
 
+  it('keeps two text actions visible and puts the file utilities in one menu', async () => {
+    openViewer()
+    await settle()
+
+    const header = document.querySelector<HTMLElement>('.fv-header')!
+    const labels = Array.from(header.querySelectorAll('button')).map(b => b.getAttribute('aria-label') || b.textContent?.trim())
+    expect(labels).toContain('Discuss')
+    expect(labels).toContain('More file actions')
+    // The utilities are no longer a row of header icons.
+    expect(header.querySelector('[aria-label="Download"]')).toBeNull()
+    expect(header.querySelector('[aria-label="Copy path"]')).toBeNull()
+  })
+
   it('renders the comment compose popover in place when asked to', async () => {
     const { default: CommentComposePopover } = await import('../CommentComposePopover.vue')
     const host = document.createElement('div')

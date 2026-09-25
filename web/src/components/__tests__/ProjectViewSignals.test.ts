@@ -241,8 +241,7 @@ describe('ProjectView chat rows', () => {
 
     const wrapper = await mountView()
 
-    await wrapper.get('[data-tab="schedules"]').trigger('click')
-    const text = wrapper.get('.automation-card').text()
+    const text = wrapper.get('.project-automations').text()
     expect(text).toContain('PR watcher')
     expect(text).toContain('every 10 min')
     expect(text).toContain('Send the daily brief')
@@ -250,134 +249,119 @@ describe('ProjectView chat rows', () => {
     // Bound to a chat outside this project.
     expect(text).not.toContain('Other watcher')
     expect(text).not.toContain('Send another brief')
-    expect(wrapper.get('[data-tab="schedules"]').text()).toContain('3')
+    expect(wrapper.get('#project-automations-title').text()).toContain('3')
   })
 })
 
-// The tab bar shipped with role="tab" on buttons that had no enclosing
-// tablist, no aria-controls, no tabpanel to point at, and no keyboard
-// handling at all. These lock the full pattern in.
-describe('ProjectView tabs', () => {
+// The Overview / Automations tabs became plain sections on one page (the
+// aligned-pages redesign): every capability stays reachable without a tab
+// switch, so the tablist contract no longer applies here. TabBar keeps its own
+// suite for the views that still use it.
+describe('ProjectView layout', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.restoreAllMocks()
   })
 
-  it('owns the tabs with a tablist', async () => {
+  it('shows context, chats and automations together, with no tabs', async () => {
     seed()
     const wrapper = await mountView()
-
-    const tablist = wrapper.get('[role="tablist"]')
-    expect(tablist.attributes('aria-label')).toBe('Project sections')
-    const tabs = tablist.findAll('[role="tab"]')
-    expect(tabs).toHaveLength(2)
-    expect(tabs.map(t => t.attributes('data-tab'))).toEqual(['overview', 'schedules'])
+    expect(wrapper.find('[role="tablist"]').exists()).toBe(false)
+    expect(wrapper.find('.project-context').exists()).toBe(true)
+    expect(wrapper.find('#project-chats-title').text()).toBe('Chats')
+    expect(wrapper.find('.project-automations').exists()).toBe(true)
   })
 
-  it('tracks the active tab with aria-selected', async () => {
+  it('names the project without repeating its workspace', async () => {
     seed()
     const wrapper = await mountView()
-
-    expect(wrapper.get('[data-tab="overview"]').attributes('aria-selected')).toBe('true')
-    expect(wrapper.get('[data-tab="schedules"]').attributes('aria-selected')).toBe('false')
-
-    await wrapper.get('[data-tab="schedules"]').trigger('click')
-
-    expect(wrapper.get('[data-tab="overview"]').attributes('aria-selected')).toBe('false')
-    expect(wrapper.get('[data-tab="schedules"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.get('.project-title').text()).toBe('Upwordo')
+    expect(wrapper.find('.workspace-badge').exists()).toBe(false)
+    expect(wrapper.text()).not.toMatch(/\bpersonal\b/i)
   })
 
-  // aria-controls must name a real tabpanel, and that panel must point back.
-  it.each(['overview', 'schedules'])('pairs the %s tab with its panel', async (key) => {
+  it('moves the activity counts to the rail, read from the store', async () => {
+    const store = seed()
+    store.projectStreaming = { 'chat-read': true }
+    vi.spyOn(store, 'projectNeedsInput').mockReturnValue(2)
+    vi.spyOn(store, 'projectUnread').mockReturnValue(1)
+    const wrapper = await mountView()
+    expect(wrapper.find('.project-stats').exists()).toBe(false)
+    const rows = Object.fromEntries(
+      wrapper.findAll('.project-rail .rail-kv').map(row => [
+        row.get('span').text(),
+        row.get('strong').text(),
+      ]),
+    )
+    expect(rows['Need you']).toBe('2')
+    expect(rows['Unread']).toBe('1')
+    expect(rows['Active chats']).toBe(String(store.chats.filter(c => !c.archived && c.local !== false).length))
+    expect(rows['Working']).toBe('1')
+  })
+
+  it('gives each chat row a status line from the same signals as Home', async () => {
+    const store = seed()
+    store.projectStreaming = { 'chat-read': true }
+    const wrapper = await mountView()
+    const subs = wrapper.findAll('.chat-row-sub').map(node => node.text())
+    expect(subs).toContain('agent is working')
+    expect(subs.every(text => ['waiting for you', 'agent is working', 'new reply', 'no new activity'].includes(text))).toBe(true)
+  })
+
+  it('starts a new chat from the header through the shared picker', async () => {
     seed()
     const wrapper = await mountView()
-    await wrapper.get(`[data-tab="${key}"]`).trigger('click')
+    expect(wrapper.get('.project-new-chat').attributes('aria-haspopup')).toBe('dialog')
+  })
+})
 
-    const tab = wrapper.get(`[data-tab="${key}"]`)
-    const tabId = tab.attributes('id')
-    const controls = tab.attributes('aria-controls')
-    expect(tabId).toBeTruthy()
-    expect(controls).toBeTruthy()
-
-    const panel = wrapper.get(`#${controls}`)
-    expect(panel.attributes('role')).toBe('tabpanel')
-    expect(panel.attributes('aria-labelledby')).toBe(tabId)
-    // Panels are in the tab sequence so their content is keyboard reachable.
-    expect(panel.attributes('tabindex')).toBe('0')
+describe('ProjectView progressive actions', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.restoreAllMocks()
   })
 
-  it('renders only the selected panel', async () => {
-    seed()
-    const wrapper = await mountView()
-    expect(wrapper.findAll('[role="tabpanel"]')).toHaveLength(1)
-
-    await wrapper.get('[data-tab="schedules"]').trigger('click')
-    expect(wrapper.findAll('[role="tabpanel"]')).toHaveLength(1)
-    expect(wrapper.get('[role="tabpanel"]').attributes('aria-labelledby'))
-      .toBe(wrapper.get('[data-tab="schedules"]').attributes('id'))
-  })
-
-  // Roving tabindex: the whole bar is one Tab stop, not three.
-  it('keeps a single tab stop', async () => {
-    seed()
-    const wrapper = await mountView()
-
-    const tabindexes = () => wrapper.findAll('[role="tab"]').map(t => t.attributes('tabindex'))
-    expect(tabindexes()).toEqual(['0', '-1'])
-
-    await wrapper.get('[data-tab="schedules"]').trigger('click')
-    expect(tabindexes()).toEqual(['-1', '0'])
-  })
-
-  it('moves right and left with the arrow keys, wrapping at the ends', async () => {
-    seed()
-    const wrapper = await mountView()
-
-    await wrapper.get('[data-tab="overview"]').trigger('keydown', { key: 'ArrowRight' })
-    expect(wrapper.get('[data-tab="schedules"]').attributes('aria-selected')).toBe('true')
-
-    // Wraps forward past the last tab...
-    await wrapper.get('[data-tab="schedules"]').trigger('keydown', { key: 'ArrowRight' })
-    expect(wrapper.get('[data-tab="overview"]').attributes('aria-selected')).toBe('true')
-
-    // ...and backward past the first.
-    await wrapper.get('[data-tab="overview"]').trigger('keydown', { key: 'ArrowLeft' })
-    expect(wrapper.get('[data-tab="schedules"]').attributes('aria-selected')).toBe('true')
-  })
-
-  it('jumps to the first and last tab with Home and End', async () => {
-    seed()
-    const wrapper = await mountView()
-
-    await wrapper.get('[data-tab="overview"]').trigger('keydown', { key: 'End' })
-    expect(wrapper.get('[data-tab="schedules"]').attributes('aria-selected')).toBe('true')
-
-    await wrapper.get('[data-tab="schedules"]').trigger('keydown', { key: 'Home' })
-    expect(wrapper.get('[data-tab="overview"]').attributes('aria-selected')).toBe('true')
-  })
-
-  it('leaves other keys to the browser', async () => {
-    seed()
-    const wrapper = await mountView()
-
-    await wrapper.get('[data-tab="overview"]').trigger('keydown', { key: 'ArrowDown' })
-    await wrapper.get('[data-tab="overview"]').trigger('keydown', { key: 'a' })
-    expect(wrapper.get('[data-tab="overview"]').attributes('aria-selected')).toBe('true')
-  })
-
-  it('moves DOM focus along with the arrow keys', async () => {
+  it('uses a complete keyboard menu contract and restores its trigger', async () => {
     seed()
     const wrapper = await mountView({ attach: true })
     try {
-      const overview = wrapper.get('[data-tab="overview"]').element as HTMLElement
-      overview.focus()
-      expect(document.activeElement).toBe(overview)
+      const trigger = wrapper.get<HTMLButtonElement>('[aria-label="Project actions"]')
+      trigger.element.focus()
+      await trigger.trigger('click')
+      await nextTick()
 
-      await wrapper.get('[data-tab="overview"]').trigger('keydown', { key: 'ArrowRight' })
-      expect(document.activeElement).toBe(wrapper.get('[data-tab="schedules"]').element)
+      const item = wrapper.get<HTMLButtonElement>('[role="menuitem"]')
+      expect(document.activeElement).toBe(item.element)
+      await item.trigger('keydown', { key: 'Escape' })
+      await nextTick()
+      expect(wrapper.find('[role="menu"]').exists()).toBe(false)
+      expect(document.activeElement).toBe(trigger.element)
     } finally {
       wrapper.unmount()
     }
+  })
+
+  it('resets context editing when two projects have the same context', async () => {
+    const store = seed()
+    store.projects[0].context = 'Shared context'
+    store.projects.push({
+      project_id: 'project-2',
+      name: 'Second project',
+      workspace: 'personal',
+      context: 'Shared context',
+      is_auto: false,
+    } as typeof store.projects[number])
+    const wrapper = await mountView()
+
+    await wrapper.get('.project-context').get('button').trigger('click')
+    await wrapper.get('textarea').setValue('Draft for the first project')
+    await wrapper.setProps({ projectId: 'project-2' })
+    await nextTick()
+
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.get('.context-display').text()).toContain('Shared context')
+    await wrapper.get('.project-context').get('button').trigger('click')
+    expect(wrapper.get<HTMLTextAreaElement>('textarea').element.value).toBe('Shared context')
   })
 })
 
@@ -391,35 +375,41 @@ describe('ProjectView automations load state', () => {
   it('says it is loading rather than claiming there are none', async () => {
     seed()
     const taskStore = useTaskStore()
+    taskStore.scheduleLoading = true
+    taskStore.schedulesLoaded = false
     vi.spyOn(taskStore, 'fetchSchedules').mockReturnValue(new Promise(() => {}))
 
     const wrapper = await mountView()
-    await wrapper.get('[data-tab="schedules"]').trigger('click')
 
-    expect(wrapper.get('.automation-card').text()).toContain('loading automations')
-    expect(wrapper.get('.automation-card').text()).not.toContain('no automations deliver')
+    expect(wrapper.get('.project-automations').text()).toContain('Loading automations')
+    expect(wrapper.get('.project-automations').text()).not.toContain('No automations deliver')
     // A count it cannot vouch for is omitted, not printed as 0.
-    expect(wrapper.get('[data-tab="schedules"]').text()).not.toContain('0')
+    expect(wrapper.get('#project-automations-title').text()).not.toContain('0')
   })
 
   it('reports a failed load rather than claiming there are none', async () => {
     seed()
     const taskStore = useTaskStore()
+    taskStore.scheduleLoading = false
+    taskStore.schedulesLoaded = false
+    taskStore.scheduleLoadError = 'offline'
     vi.spyOn(taskStore, 'fetchSchedules').mockRejectedValue(new Error('offline'))
 
     const wrapper = await mountView()
-    await wrapper.get('[data-tab="schedules"]').trigger('click')
 
-    expect(wrapper.get('.automation-card').text()).toContain('could not load automations')
-    expect(wrapper.get('[data-tab="schedules"]').text()).not.toContain('0')
+    expect(wrapper.get('.project-automations').text()).toContain('Could not load automations')
+    expect(wrapper.get('#project-automations-title').text()).not.toContain('0')
   })
 
   it('reports a real zero once the load resolves', async () => {
     seed()
+    const taskStore = useTaskStore()
+    taskStore.scheduleLoading = false
+    taskStore.schedulesLoaded = true
+    taskStore.scheduleLoadError = ''
     const wrapper = await mountView()
-    await wrapper.get('[data-tab="schedules"]').trigger('click')
 
-    expect(wrapper.get('.automation-card').text()).toContain('no automations deliver prompts to this project')
-    expect(wrapper.get('[data-tab="schedules"]').text()).toContain('0')
+    // A resolved zero is stated in words; the heading carries no "0" count.
+    expect(wrapper.get('.project-automations').text()).toContain('No automations deliver prompts to this project')
   })
 })

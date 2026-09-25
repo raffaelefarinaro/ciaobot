@@ -6,7 +6,7 @@
       class="toast"
       :class="{ 'toast-error': t.variant === 'error', 'toast-swiping': swipeId === t.id }"
       :style="swipeId === t.id ? swipeStyle : undefined"
-      role="status"
+      :role="t.variant === 'error' ? 'alert' : 'status'"
       @click="onClick(t)"
       @pointerdown="onPointerDown(t, $event)"
       @pointermove="onPointerMove($event)"
@@ -192,6 +192,7 @@ async function onFix(toast: InAppToast) {
 }
 
 .toast-fix {
+  min-height: var(--touch);
   margin-top: 8px;
   padding: 4px 12px;
   background: transparent;
@@ -248,15 +249,15 @@ async function onFix(toast: InAppToast) {
 
 .toast-close {
   position: absolute;
-  top: 4px;
-  right: 4px;
+  top: 0;
+  right: 0;
   background: transparent;
   border: none;
   color: var(--fg2);
   font-size: 18px;
   line-height: 1;
-  width: 24px;
-  height: 24px;
+  width: var(--touch);
+  height: var(--touch);
   cursor: pointer;
   border-radius: var(--radius-sm);
 }

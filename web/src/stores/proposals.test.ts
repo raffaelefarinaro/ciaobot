@@ -522,3 +522,83 @@ describe('batch conflicts stay guarded', () => {
     })
   })
 })
+
+describe('row preview prefetch', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(api.get).mockReset()
+  })
+
+  it('runs at most three at a time, once per id, and keeps failures per row', async () => {
+    const store = useProposalsStore()
+    let inFlight = 0
+    let peak = 0
+    const release: Array<() => void> = []
+    vi.mocked(api.get).mockImplementation((url: string) => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      const id = /proposals\/([^/]+)\/preview/.exec(url)![1]
+      return new Promise((resolve, reject) => {
+        release.push(() => {
+          inFlight -= 1
+          if (id === 'bad') reject(new Error('unreadable'))
+          else resolve({ ok: true, preview: { id, revision: `rev-${id}` } } as never)
+        })
+      })
+    })
+
+    const done = store.prefetchPreviews(['a', 'b', 'bad', 'c', 'd'])
+    await Promise.resolve()
+    expect(inFlight).toBe(3)
+    while (release.length) {
+      release.shift()!()
+      await new Promise(resolve => setTimeout(resolve, 0))
+    }
+    await done
+    expect(peak).toBe(3)
+    expect(Object.keys(store.previews).sort()).toEqual(['a', 'b', 'c', 'd'])
+    expect(store.previewErrors.bad).toBe('unreadable')
+
+    // Asked again: nothing is refetched, not even the failure (it has a retry).
+    vi.mocked(api.get).mockClear()
+    await store.prefetchPreviews(['a', 'bad', 'c'])
+    expect(api.get).not.toHaveBeenCalled()
+  })
+})
+
+describe('sibling previews after an accept', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(api.get).mockReset()
+    vi.mocked(api.post).mockReset()
+  })
+
+  function preview(id: string, destination: string, revision: string): ProposalPreview {
+    return { id, destination, revision } as ProposalPreview
+  }
+
+  it('re-previews other rows that write the same file, keeps the rest', async () => {
+    // Accepting `a` changes Learnings.md, so `b`'s prefetched diff and pinned
+    // revision describe a file that no longer exists; keeping them would show
+    // the wrong lines and get `b`'s next accept refused as a conflict.
+    const store = useProposalsStore()
+    store.previews = {
+      a: preview('a', 'Workspace/Learnings.md', 'rev-1'),
+      b: preview('b', 'Workspace/Learnings.md', 'rev-1'),
+      c: preview('c', 'People/Ada.md', 'rev-9'),
+    }
+    vi.mocked(api.post).mockResolvedValue({} as never)
+    vi.mocked(api.get).mockImplementation((url: string) => {
+      if (url === '/api/proposals') return Promise.resolve({ rows: [row({ id: 'b' }), row({ id: 'c' })] } as never)
+      const id = /proposals\/([^/]+)\/preview/.exec(url)![1]
+      return Promise.resolve({ ok: true, preview: preview(id, 'Workspace/Learnings.md', 'rev-2') } as never)
+    })
+
+    await store.act('a', 'accept', '', { expectedRevision: 'rev-1' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(store.previews.b?.revision).toBe('rev-2')
+    expect(store.previews.c?.revision).toBe('rev-9')
+    expect(vi.mocked(api.get).mock.calls.map(c => c[0])).not.toContain('/api/proposals/c/preview')
+  })
+})

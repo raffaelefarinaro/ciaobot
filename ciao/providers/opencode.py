@@ -116,6 +116,11 @@ _MODEL_CACHE_TTL = 300.0
 # on every single request.
 _EMPTY_MODEL_CACHE_TTL = 20.0
 _MODEL_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+# How long the catalog keeps polling a fresh server whose model list is still
+# empty. Loading took about 0.5s against three connected providers; an account
+# with genuinely no models pays this once per `_EMPTY_MODEL_CACHE_TTL`.
+_CATALOG_WARMUP_TIMEOUT = 5.0
+_CATALOG_WARMUP_POLL = 0.25
 
 # Session reads (`read_thread` / `read_collab_tree`) also cost a throwaway
 # `opencode serve`. A chat with a live provider attached reuses that server
@@ -141,6 +146,11 @@ _COLLAB_CACHE: dict[tuple[str, str], tuple[float, float, list[dict[str, Any]]]] 
 _SERVER_START_TIMEOUT = 30.0
 _SERVER_START_ATTEMPTS = 3
 _SERVER_START_RETRY_DELAYS = (0.25, 0.75)
+# `/api/info` can become healthy a moment before OpenCode finishes serving its
+# generated OpenAPI document. Retry that narrow readiness race, not an
+# incompatible (valid JSON) contract.
+_OPENAPI_READY_ATTEMPTS = 5
+_OPENAPI_READY_DELAY_S = 0.2
 _REQUEST_TIMEOUT = 30.0
 # Mid-turn SSE recovery: re-subscribe attempts after a dropped /event stream,
 # then a bounded message-poll window that replays settled parts idempotently.
@@ -1543,12 +1553,22 @@ class OpencodeProvider(BaseSDKProvider):
     async def _verify_contract(self) -> None:
         """Fail closed when the installed V2 build lacks required operations."""
         assert self._client is not None
-        try:
-            response = await self._client.get("/openapi.json", timeout=10.0)
-            response.raise_for_status()
-            spec = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise RuntimeError(f"could not read the OpenCode API document: {exc}") from exc
+        last_error: Exception | None = None
+        spec: Any = None
+        for attempt in range(_OPENAPI_READY_ATTEMPTS):
+            try:
+                response = await self._client.get("/openapi.json", timeout=10.0)
+                response.raise_for_status()
+                spec = response.json()
+                break
+            except (httpx.HTTPError, ValueError) as exc:
+                last_error = exc
+                if attempt + 1 < _OPENAPI_READY_ATTEMPTS:
+                    await asyncio.sleep(_OPENAPI_READY_DELAY_S)
+        else:
+            raise RuntimeError(
+                f"could not read the OpenCode API document: {last_error}"
+            ) from last_error
         missing = missing_required_paths(spec)
         if missing:
             raise RuntimeError(
@@ -2632,9 +2652,18 @@ class OpencodeProvider(BaseSDKProvider):
         provider_id, model_id = split_model(model)
         if provider_id or not model_id:
             return provider_id, model_id
-        response = await client.get("/api/model")
-        response.raise_for_status()
-        models = _data(response.json())
+        # A chat's server can be seconds old here, and a fresh server lists no
+        # models until its providers load (see `model_catalog`), which would
+        # reject a valid bare id as not found.
+        loop = asyncio.get_running_loop()
+        warm_deadline = loop.time() + _CATALOG_WARMUP_TIMEOUT
+        while True:
+            response = await client.get("/api/model")
+            response.raise_for_status()
+            models = _data(response.json())
+            if models or loop.time() >= warm_deadline:
+                break
+            await asyncio.sleep(_CATALOG_WARMUP_POLL)
         if not isinstance(models, list):
             return "", ""
         matches = [
@@ -2945,23 +2974,36 @@ class OpencodeProvider(BaseSDKProvider):
             models_payload: object = {"data": []}
             async with _EphemeralServer(workspace_root) as client:
                 if client is not None:
-                    for attempt in range(3):
+                    # A fresh server answers /api/info before it has loaded
+                    # its providers, and its first /api/model is an empty
+                    # list for the half-second or so that takes. Keep asking
+                    # while the list is empty, or that empty list is cached
+                    # and the picker shows no opencode models (2.0.16).
+                    loop = asyncio.get_running_loop()
+                    warm_deadline = loop.time() + _CATALOG_WARMUP_TIMEOUT
+                    attempt = 0
+                    while True:
                         try:
                             models = await client.get("/api/model")
                             if (
                                 getattr(models, "status_code", 200) in {502, 503, 504}
                                 and attempt < 2
                             ):
-                                await asyncio.sleep(0.25 * (attempt + 1))
+                                attempt += 1
+                                await asyncio.sleep(0.25 * attempt)
                                 continue
                             models.raise_for_status()
                             models_payload = models.json()
-                            break
                         except (httpx.HTTPError, ValueError, AttributeError):
                             if attempt < 2:
-                                await asyncio.sleep(0.25 * (attempt + 1))
+                                attempt += 1
+                                await asyncio.sleep(0.25 * attempt)
                                 continue
                             models_payload = {"data": []}
+                            break
+                        if _data(models_payload) or loop.time() >= warm_deadline:
+                            break
+                        await asyncio.sleep(_CATALOG_WARMUP_POLL)
             # V2's /api/model snapshot is already filtered to enabled models;
             # do not combine it with a separately timed provider snapshot.
             catalog = _catalog_from_api({"data": None}, models_payload)
@@ -3295,12 +3337,14 @@ _CREDENTIAL_COUNT_RE = re.compile(r"(\d+)\s+credentials?\b", re.IGNORECASE)
 
 
 def _credential_count(binary: str, *, timeout: float) -> int | None:
-    """How many provider credentials opencode has stored, or None if unknown.
+    """How many providers opencode holds credentials for, or None if unknown.
 
-    Reads the count opencode itself prints (`0 credentials`). The output is a
-    decorated TUI box — ANSI codes and box-drawing characters — so counting
-    non-empty lines counts the decoration, which is how this once reported
-    "10 provider(s) authenticated" against an empty store.
+    2.0.16 prints a plain table (and "No authenticated integrations" when
+    empty), so ask for `--format json` and count providers with at least one
+    connection. Earlier 2.x builds printed a decorated TUI box ending in
+    `N credentials`; that count is the fallback. Counting non-empty lines
+    counts the decoration, which is how this once reported "10 provider(s)
+    authenticated" against an empty store.
 
     `~/.local/share/opencode/auth.json` is deliberately not read: parsing a
     provider's cached credential file to determine identity is out of bounds.
@@ -3309,12 +3353,73 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
 
     try:
         listed = subprocess.run(
+            [binary, "auth", "list", "--format", "json"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        providers = json.loads(listed.stdout)
+    except (TypeError, ValueError):
+        providers = None
+    if isinstance(providers, list):
+        return sum(
+            1 for item in providers
+            if isinstance(item, dict) and item.get("connections")
+        )
+    try:
+        listed = subprocess.run(
             [binary, "auth", "list"], capture_output=True, text=True, timeout=timeout
         )
     except (OSError, subprocess.SubprocessError):
         return None
     match = _CREDENTIAL_COUNT_RE.search(_ANSI_RE.sub("", listed.stdout))
     return int(match.group(1)) if match else None
+
+
+def _server_list(binary: str, path: str, *, timeout: float) -> list[dict[str, Any]]:
+    """`data` rows of a V2 list route, fetched through `opencode api`.
+
+    Run from the home directory so the result is the global configuration,
+    not whatever project the engine happens to be started in.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [binary, "api", "GET", path],
+            capture_output=True, text=True, timeout=timeout, cwd=str(Path.home()),
+        )
+        payload = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return []
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _row_names(rows: list[dict[str, Any]]) -> list[str]:
+    names: list[str] = []
+    for row in rows:
+        name = str(row.get("id") or row.get("name") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _opencode_inventory(binary: str, *, timeout: float) -> tuple[list[str], list[str]]:
+    """Skills and plugins, and MCP servers, the opencode CLI loads globally.
+
+    Built-in plugins are opencode internals, and a plugin that failed to load
+    (a duplicate ID, say) brings nothing, so both are left out.
+    """
+    skills = _row_names(_server_list(binary, "/api/skill", timeout=timeout))
+    plugins = _row_names([
+        row for row in _server_list(binary, "/api/plugin", timeout=timeout)
+        if (row.get("source") or {}).get("type") != "builtin"
+        and (row.get("state") or {}).get("status", "active") == "active"
+    ])
+    mcps = _row_names(_server_list(binary, "/api/mcp", timeout=timeout))
+    return skills + [name for name in plugins if name not in skills], mcps
 
 
 def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
@@ -3364,6 +3469,7 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
     else:
         detail = "no credentials — free models only"
         auth = "free"
+    skills, mcps = _opencode_inventory(binary, timeout=timeout)
     return _provider(
         name="opencode",
         ok=True,
@@ -3371,6 +3477,8 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
         command="opencode auth login",
         detail=detail,
         version=version or "unknown",
+        skills=skills,
+        mcps=mcps,
     )
 
 
