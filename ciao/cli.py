@@ -5322,6 +5322,10 @@ def main(argv: list[str] | None = None) -> int:
         return package_smoke.main(argv_list[1:])
     if argv_list[:1] == ["prepare-release"]:
         return release.main(argv_list[1:])
+    if argv_list[:1] == ["update"]:
+        from ciao.engine_update import main as update_main
+
+        return update_main(argv_list[1:])
     if argv_list[:1] == ["critique"]:
         from ciao.critique import main as critique_main
 
