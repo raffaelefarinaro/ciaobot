@@ -3956,84 +3956,15 @@ function handlePanelClick(e: MouseEvent): void {
   handleFileLinkClick(e)
 }
 
+// The live row stays one short line: the step (in the label) and how long
+// the turn has been running. Counts and tokens belong to the finished turn's
+// summary and footer, where they no longer change every second.
 const liveTraceMetaParts = computed(() => {
-  let toolCount = 0
-  let textCount = 0
-  let thinkingCount = 0
-  let fileCount = 0
-  for (const e of store.currentTimeline) {
-    if (e.kind === 'tool') {
-      toolCount += e.content.split('\n').filter(Boolean).length
-    } else if (e.kind === 'thinking') {
-      thinkingCount += 1
-    } else if (e.kind === 'filecard') {
-      fileCount += 1
-    } else if (e.kind === 'text') {
-      textCount += 1
-    }
-  }
-  if (store.currentStreamingThinking) thinkingCount += 1
-  if (store.currentStreamingText) textCount += 1
   const parts: { key: string; text: string; shortText?: string; isImportant?: boolean }[] = []
-  if (thinkingCount) {
-    parts.push({
-      key: 'thoughts',
-      text: `${thinkingCount} thought${thinkingCount === 1 ? '' : 's'}`,
-      shortText: `${thinkingCount} th`
-    })
-  }
-  if (textCount) {
-    parts.push({
-      key: 'notes',
-      text: `${textCount} note${textCount === 1 ? '' : 's'}`,
-      shortText: `${textCount} n`
-    })
-  }
-  if (toolCount) {
-    parts.push({
-      key: 'tools',
-      text: `${toolCount} tool call${toolCount === 1 ? '' : 's'}`,
-      shortText: `${toolCount} tool${toolCount === 1 ? '' : 's'}`,
-      isImportant: true
-    })
-  }
-  if (fileCount) {
-    parts.push({
-      key: 'files',
-      text: `${fileCount} file${fileCount === 1 ? '' : 's'}`,
-      shortText: `${fileCount} f`
-    })
-  }
-  // Live elapsed time: reads nowTs (ticks every second) against the turn's
-  // start so the label counts up while the model works.
   const startedAt = store.currentStreamStartedAt
   if (startedAt) {
     const elapsed = nowTs.value - startedAt
-    if (elapsed >= 0) {
-      parts.push({
-        key: 'duration',
-        text: formatDuration(elapsed),
-        isImportant: true
-      })
-    }
-  }
-  // Live token count: cumulative tokens reported so far this turn.
-  const usage = store.currentLiveUsage
-  if (usage) {
-    if (usage.input > 0) {
-      parts.push({
-        key: 'tokens-in',
-        text: `${formatTokens(usage.input)} in`,
-        shortText: `${formatTokens(usage.input)} in`
-      })
-    }
-    if (usage.output > 0) {
-      parts.push({
-        key: 'tokens-out',
-        text: `${formatTokens(usage.output)} out`,
-        shortText: `${formatTokens(usage.output)} out`
-      })
-    }
+    if (elapsed >= 0) parts.push({ key: 'duration', text: formatDuration(elapsed), isImportant: true })
   }
   return parts
 })
@@ -4057,19 +3988,6 @@ const liveTraceLabel = computed(() => {
   if (store.currentTimeline.length || store.currentStreamingText) return 'Working...'
   return 'Thinking...'
 })
-
-// Compact token label: 1234 -> "1.2k", 1_200_000 -> "1.2M". Keeps the live
-// trace meta short while the count grows.
-function formatTokens(n: number): string {
-  if (!isFinite(n) || n <= 0) return '0'
-  if (n < 1000) return String(Math.round(n))
-  if (n < 1_000_000) {
-    const k = n / 1000
-    return `${k < 10 ? k.toFixed(1) : Math.round(k)}k`
-  }
-  const m = n / 1_000_000
-  return `${m < 10 ? m.toFixed(1) : Math.round(m)}M`
-}
 
 // Image extensions get routed through openImage so the binary streams
 // directly instead of round-tripping through the text endpoint. Everything

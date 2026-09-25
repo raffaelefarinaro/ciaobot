@@ -583,6 +583,8 @@ export function describeToolStep(line: string): string {
     return skill ? `Using the ${skill} skill` : 'Using a skill'
   }
   if (lower === 'todowrite' || lower === 'taskcreate' || lower === 'taskupdate') return 'Updating the plan'
+  // Claude Code's deferred-tool loader: plumbing, not a step worth naming.
+  if (lower === 'toolsearch') return 'Loading tools'
   const mcp = /^mcp__(.+?)__(.+)$/.exec(name)
   if (mcp) return `${mcp[1]} · ${mcp[2].replace(/_/g, ' ')}`
   return summary ? `${name} ${summary}` : name

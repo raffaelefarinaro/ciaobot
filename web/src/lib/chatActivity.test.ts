@@ -419,6 +419,7 @@ describe('describeToolStep', () => {
     expect(describeToolStep('🔧 skill {"name":"docs"}')).toBe('Using the docs skill')
     expect(describeToolStep('🔌 mcp__github__get_pull_request #418')).toBe('github · get pull request')
     expect(describeToolStep('📝 TodoWrite [...]')).toBe('Updating the plan')
+    expect(describeToolStep('🔧 ToolSearch select:mcp__claude_ai_Airtable__list_records_for_table')).toBe('Loading tools')
   })
 })
 
