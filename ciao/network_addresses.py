@@ -70,3 +70,29 @@ def is_loopback_url(url: str) -> bool:
     """
 
     return "//localhost:" in url or "//127." in url
+
+
+def normalize_trusted_url(raw: str) -> str:
+    """Validate a trusted HTTPS origin for other devices; "" clears it.
+
+    Only an origin is accepted (scheme + host[:port]) so a copied URL can
+    never smuggle a path, query token or credentials into a QR code.
+    Raises ValueError with a user-facing message.
+    """
+    from urllib.parse import urlsplit
+
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    parts = urlsplit(text)
+    if parts.scheme.lower() != "https":
+        raise ValueError("trusted_url must start with https://")
+    if not parts.hostname:
+        raise ValueError("trusted_url needs a host name")
+    if parts.username or parts.password:
+        raise ValueError("trusted_url must not contain a user name or password")
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        raise ValueError("trusted_url must be just the address, without a path or query")
+    host = parts.hostname.lower()
+    port = f":{parts.port}" if parts.port else ""
+    return f"https://{host}{port}/"

@@ -329,6 +329,11 @@
           </template>
         </div>
 
+        <!-- Other devices — where to open Ciaobot from a phone or another
+             computer. The desktop app is the one device, so the card drops
+             out there. -->
+        <SettingsDevices v-if="!inDesktopApp" />
+
         <!-- Notifications — the desktop app owns this in the tray, so the
              card drops out there rather than showing web-push controls the
              tray already supersedes. Same card as the Notifications tab. -->
@@ -1939,6 +1944,7 @@ import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsAutomation from './settings/SettingsAutomation.vue'
+import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'

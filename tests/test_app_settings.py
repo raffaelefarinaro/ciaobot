@@ -75,6 +75,25 @@ def test_trajectories_enabled_rejects_non_boolean(tmp_path):
         store.update({"trajectories_enabled": "false"})
 
 
+def test_trusted_url_is_normalized_and_validated(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+
+    store.update({"trusted_url": "https://Mini.ts.net"})
+    # Stored in the canonical origin form, not exactly as typed.
+    assert store.settings.trusted_url == "https://mini.ts.net/"
+    assert AppSettingsStore(path).settings.trusted_url == "https://mini.ts.net/"
+
+    # Plain HTTP is refused: it is an insecure context, so it cannot be the
+    # address other devices install the full app from.
+    with pytest.raises(ValueError, match="https"):
+        store.update({"trusted_url": "http://x"})
+
+    store.update({"trusted_url": ""})
+    assert store.settings.trusted_url == ""
+    assert AppSettingsStore(path).settings.trusted_url == ""
+
+
 def test_legacy_insights_opt_out_migrates_once(tmp_path):
     path = tmp_path / "app_settings.json"
     store = AppSettingsStore(path)

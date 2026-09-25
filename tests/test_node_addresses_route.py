@@ -10,11 +10,17 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.network_addresses import is_loopback_url, parse_inet_addresses, server_addresses
+from ciao.network_addresses import (
+    is_loopback_url,
+    normalize_trusted_url,
+    parse_inet_addresses,
+    server_addresses,
+)
 from ciao.web.routes_node import node_addresses_endpoint
 
 
@@ -88,3 +94,28 @@ en1: flags=8863
 def test_address_discovery_without_a_bonjour_name() -> None:
     urls = server_addresses(8443, ifconfig_text="", local_hostname="")
     assert urls == ["http://localhost:8443/"]
+
+
+def test_normalize_trusted_url_accepts_https_origins() -> None:
+    # Canonical stored form: lowercase host, one trailing slash, port kept.
+    assert normalize_trusted_url("https://Mini.Tailnet.ts.net") == "https://mini.tailnet.ts.net/"
+    assert normalize_trusted_url("https://host:8443/") == "https://host:8443/"
+    # Empty (or whitespace) clears the setting.
+    assert normalize_trusted_url(" ") == ""
+
+
+def test_normalize_trusted_url_rejects_unsafe_values() -> None:
+    # Anything a copied URL could smuggle past a QR code is refused rather
+    # than stored: a scheme that is not HTTPS, no host, credentials, or a
+    # path/query/fragment that could carry a token.
+    for bad in (
+        "http://host",
+        "https://",
+        "https://u:p@host",
+        "https://host/path",
+        "https://host/?token=x",
+        "https://host/#x",
+        "ftp://host",
+    ):
+        with pytest.raises(ValueError):
+            normalize_trusted_url(bad)
