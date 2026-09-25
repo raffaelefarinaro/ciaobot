@@ -118,6 +118,8 @@ class AppSettings:
     push_all_devices: bool = False
     # Model used by post-archive session-insights extraction.
     insights_model: str = ""
+    # HTTPS origin other devices should use (e.g. Tailscale Serve); "" = none.
+    trusted_url: str = ""
 
     # Comma-separated list of models for the adversarial_review MCP tool.
     critique_models: str = ""
@@ -236,6 +238,10 @@ class AppSettingsStore:
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             value = value.strip()
+            if key == "trusted_url":
+                from ciao.network_addresses import normalize_trusted_url
+
+                value = normalize_trusted_url(value)
             setattr(self.settings, key, value)
         _drop_retired_models(self.settings)
         self._save()

@@ -155,6 +155,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/local/handback` | Commit pending work, pull from origin, push the current branch |
 | POST | `/api/local/resync` | Merge `origin/<branch>` back into the checkout |
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
+| GET | `/api/addresses` | Where other devices can open this engine: the configured trusted HTTPS URL first (`kind: trusted`, `secure: true`), then LAN/Bonjour HTTP URLs (`kind: lan`), then localhost (`kind: loopback`). Session-protected; URLs never carry a password or token |
 | GET | `/api/node/addresses` | URLs this engine is reachable at (localhost, Bonjour `.local`, each LAN/VPN IPv4), each flagged `loopback` so the PWA can mark the ones a phone cannot use. Session-protected, unlike the loopback-public tray endpoints, because it enumerates LAN interfaces |
 | GET | `/api/node/status` | Read multi-device node failover status and role |
 | GET | `/api/node/connected-clients` | Live remote WebSocket clients connected to this host (excludes loopback) |
@@ -620,6 +621,8 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # on-device option) reads as Automatic rather than reaching a provider as a
 # literal model id. Per-provider defaults use the nested maps:
 # provider_default_models, provider_default_thinking, provider_insights_models.
+# trusted_url is the HTTPS origin other devices should use (e.g. a Tailscale
+# Serve address); only a bare https origin is accepted and "" clears it.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
   -d '{"insights_enabled":false,"trajectories_enabled":false,"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
