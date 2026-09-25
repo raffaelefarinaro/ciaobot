@@ -37,6 +37,15 @@ jobs:
         run: |
           npm ci
           npm run build
+      - name: Build engine wheel
+        run: uv build --wheel --out-dir dist
+      - name: Verify engine wheel in a clean environment
+        run: |
+          set -euo pipefail
+          uv venv --python 3.13 "$RUNNER_TEMP/engine-check"
+          uv pip install --python "$RUNNER_TEMP/engine-check/bin/python" dist/ciaobot-*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/engine-check/bin/python" -m ciao.release_manifest check-static
       - name: Resolve pinned Python runtimes
         id: python-runtime
         shell: bash
@@ -98,6 +107,18 @@ jobs:
             --arg signature "$signature_value" \
             '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {"darwin-aarch64": {signature: $signature, url: $url}}}' \
             > latest.json
+      - name: Write and sign engine manifest
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          py="$RUNNER_TEMP/engine-check/bin/python"
+          "$py" -m ciao.release_manifest build --version "$version" --out ciaobot-engine-manifest.json dist/ciaobot-*.whl
+          (cd desktop && npx tauri signer sign ../ciaobot-engine-manifest.json)
+          "$py" -m ciao.release_manifest verify ciaobot-engine-manifest.json ciaobot-engine-manifest.json.sig
       - name: Attach release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -109,6 +130,9 @@ jobs:
             Ciaobot_*_aarch64.app.tar.gz \
             Ciaobot_*_aarch64.app.tar.gz.sig \
             latest.json \
+            dist/ciaobot-*.whl \
+            ciaobot-engine-manifest.json \
+            ciaobot-engine-manifest.json.sig \
             --clobber
 
   release-smoke:
