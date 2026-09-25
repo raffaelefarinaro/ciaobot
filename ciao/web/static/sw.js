@@ -337,7 +337,14 @@ self.addEventListener('fetch', (event) => {
 
   event.respondWith(
     fetch(event.request)
-      .then((response) => {
+      .then(async (response) => {
+        // A reverse proxy answers 502/503/504 while the engine behind it is down.
+        // That is a live response, not a network error, so it would otherwise be
+        // shown as a raw error page; serve the cached shell like an offline launch.
+        if (event.request.mode === 'navigate' && [502, 503, 504].includes(response.status)) {
+          const shell = (await caches.match('/index.html')) || (await caches.match('/'))
+          if (shell) return shell
+        }
         if (response.ok) {
           const clone = response.clone()
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone))
