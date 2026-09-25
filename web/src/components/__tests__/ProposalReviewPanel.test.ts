@@ -71,6 +71,12 @@ function rehomeRow(overrides: Partial<ProposalRow> = {}): ProposalRow {
   })
 }
 
+/** Row checkboxes appear only after "Select" (or once something is selected). */
+async function enterSelectMode(wrapper: { find: (s: string) => { exists: () => boolean; text: () => string; trigger: (e: string) => Promise<void> } }) {
+  const toggle = wrapper.find('.pr-select-toggle')
+  if (toggle.exists() && toggle.text() === 'Select') await toggle.trigger('click')
+}
+
 describe('ProposalReviewPanel', () => {
   let pinia: ReturnType<typeof createPinia>
 
@@ -169,6 +175,7 @@ describe('ProposalReviewPanel', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
+    await enterSelectMode(wrapper)
     const labels = wrapper.findAll('.pr-row-check').map(c => c.attributes('aria-label'))
     expect(labels).toEqual([
       'Select memory: Remember the thing',
@@ -184,6 +191,7 @@ describe('ProposalReviewPanel', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
+    await enterSelectMode(wrapper)
     const hit = wrapper.find('.pr-row-check-hit')
     expect(hit.exists()).toBe(true)
     expect(hit.find('input[type="checkbox"]').exists()).toBe(true)
@@ -221,10 +229,10 @@ describe('ProposalReviewPanel', () => {
     const rowEl = wrapper.find('.pr-row')
     // The candidates are the primary buttons: one per workspace the tags name.
     // Never a pre-filled single accept, because no one candidate is backed.
-    const candidates = rowEl.findAll('.pr-actions .btn-primary').map(o => o.text())
+    const candidates = rowEl.findAll('.pr-actions .pr-row-action').map(o => o.text())
     expect(candidates).toEqual(['work', 'client'])
     // And the non-committal options stay available.
-    const chips = rowEl.findAll('.pr-actions .btn-chip').map(o => o.text())
+    const chips = rowEl.findAll('.pr-actions .btn-chip:not(.pr-row-action)').map(o => o.text())
     expect(chips).toEqual(['Dismiss', 'Talk about it'])
     wrapper.unmount()
   })
@@ -252,7 +260,7 @@ describe('ProposalReviewPanel', () => {
     expect(rowEl.text()).toContain('visible in every workspace')
 
     // Clicking the primary opens the card, not the API call.
-    await rowEl.find('.btn-primary').trigger('click')
+    await rowEl.find('.pr-row-action').trigger('click')
     await flushPromises()
     expect(apiPost).not.toHaveBeenCalled()
     expect(wrapper.find('.pr-card').text()).toContain('visible in every workspace')
@@ -274,6 +282,7 @@ describe('ProposalReviewPanel', () => {
     await flushPromises()
 
     // Select all, then accept.
+    await enterSelectMode(wrapper)
     await wrapper.find('.pr-group-select input').setValue(true)
     await nextTick()
     await wrapper.find('.pr-batch .btn-primary').trigger('click')
@@ -296,6 +305,7 @@ describe('ProposalReviewPanel', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
+    await enterSelectMode(wrapper)
     await wrapper.find('.pr-group-select input').setValue(true)
     await nextTick()
     await wrapper.find('.pr-batch .btn-chip').trigger('click')
@@ -313,11 +323,16 @@ describe('ProposalReviewPanel', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    // Default is 30 days; set a deterministic value.
-    const input = wrapper.find('.pr-older-input')
-    await input.setValue(7)
+    // The clean-up lives in the section menu and asks for the day count.
+    const prompt = await import('../../lib/prompt')
+    await wrapper.find('.pr-more').trigger('keydown', { key: 'Enter' })
     await nextTick()
-    await wrapper.find('.pr-foot .btn-chip').trigger('click')
+    const item = wrapper.find('.pr-dismiss-older')
+    expect(item.exists()).toBe(true)
+    await item.trigger('click')
+    await flushPromises()
+    expect(prompt.pendingPrompt.value?.value).toBe('30')
+    prompt.pendingPrompt.value!.resolve('7')
     await flushPromises()
 
     const expected = new Date()
@@ -346,8 +361,8 @@ describe('ProposalReviewPanel', () => {
     expect(link.attributes('title')).toBe('personal/Workspace/Skill-Proposals/proposal-2026-08-20.md')
     // Build it or drop it. `implement` is the primary because accepting a
     // proposed skill means implementing it — which is a chat, not a write.
-    expect(skillRow.find('.btn-primary').text()).toBe('Implement')
-    expect(skillRow.findAll('.btn-chip').map(b => b.text()))
+    expect(skillRow.find('.pr-row-action').text()).toBe('Implement')
+    expect(skillRow.findAll('.btn-chip:not(.pr-row-action)').map(b => b.text()))
       .toEqual(['Dismiss', 'Talk about it'])
     wrapper.unmount()
   })
@@ -390,7 +405,7 @@ describe('ProposalReviewPanel', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    const button = wrapper.findAll('.btn-primary').find(b => b.text() === 'Implement')!
+    const button = wrapper.findAll('.pr-row-action').find(b => b.text() === 'Implement')!
     await button.trigger('click')
     await flushPromises()
 
@@ -463,7 +478,7 @@ describe('ProposalReviewPanel', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    const workButton = wrapper.findAll('.btn-primary').find(b => b.text() === 'work')!
+    const workButton = wrapper.findAll('.pr-row-action').find(b => b.text() === 'work')!
     await workButton.trigger('click')
     await flushPromises()
 
@@ -484,7 +499,7 @@ describe('ProposalReviewPanel', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(wrapper.find('.btn-primary').text()).toBe('Move to work')
+    expect(wrapper.find('.pr-row-action').text()).toBe('Move to work')
     wrapper.unmount()
   })
 
@@ -498,6 +513,7 @@ describe('ProposalReviewPanel', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
+    await enterSelectMode(wrapper)
     await wrapper.find('.pr-group-select input').setValue(true)
     await nextTick()
     // The accept button counts only non-skill rows.
@@ -790,7 +806,7 @@ describe('workspace scoping', () => {
     const rowEl = wrapper.find('.pr-row')
     expect(rowEl.text()).toContain('Move to')
     // Its own workspace is not a destination, and nothing is pre-selected.
-    expect(rowEl.findAll('.pr-actions .btn-primary').map(b => b.text())).toEqual(['work'])
+    expect(rowEl.findAll('.pr-actions .pr-row-action').map(b => b.text())).toEqual(['work'])
     wrapper.unmount()
   })
 
@@ -805,6 +821,7 @@ describe('workspace scoping', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
+    await enterSelectMode(wrapper)
     await wrapper.find('.pr-row-check').setValue(true)
 
     const batch = wrapper.find('.pr-batch')
@@ -825,6 +842,7 @@ describe('workspace scoping', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
+    await enterSelectMode(wrapper)
     await wrapper.find('.pr-group-select input').setValue(true)
     const store = useProposalsStore()
     const act = vi.spyOn(store, 'act')
@@ -851,6 +869,7 @@ describe('workspace scoping', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
+    await enterSelectMode(wrapper)
     await wrapper.find('.pr-group-select input').setValue(true)
     await nextTick()
     expect(wrapper.find('.pr-batch').text()).toContain('2 selected')
@@ -886,6 +905,7 @@ describe('workspace scoping', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
+    await enterSelectMode(wrapper)
     await wrapper.find('.pr-group-select input').setValue(true)
     await nextTick()
     expect(wrapper.find('.pr-batch').text()).toContain('2 selected')
@@ -896,6 +916,7 @@ describe('workspace scoping', () => {
     expect(wrapper.find('.pr-batch').exists()).toBe(false)
 
     // Selecting the row that IS on screen dismisses only that one.
+    await enterSelectMode(wrapper)
     await wrapper.find('.pr-row-check').setValue(true)
     await nextTick()
     await wrapper.find('.pr-batch').findAll('button')
@@ -921,10 +942,12 @@ describe('workspace scoping', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
+    await enterSelectMode(wrapper)
     await wrapper.find('.pr-group-select input').setValue(true)
     await nextTick()
     projects.activeWorkspace = 'personal'
     await nextTick()
+    await enterSelectMode(wrapper)
     await wrapper.find('.pr-row-check').setValue(true)
     await nextTick()
 
@@ -1038,7 +1061,7 @@ describe('Queue / History tabs', () => {
     const before = historyCalls()
 
     apiPost.mockResolvedValue({} as never)
-    await wrapper.find('.pr-row .btn-primary').trigger('click')
+    await wrapper.find('.pr-row .pr-row-action').trigger('click')
     await flushPromises()
     await wrapper.find('.pr-actions--card .btn-primary').trigger('click')
     await flushPromises()
@@ -1084,7 +1107,7 @@ describe('decision card', () => {
   async function openCard() {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
-    await wrapper.find('.pr-row .btn-primary').trigger('click')
+    await wrapper.find('.pr-row .pr-row-action').trigger('click')
     await flushPromises()
     return wrapper
   }
@@ -1296,6 +1319,7 @@ describe('decision card', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
+    await enterSelectMode(wrapper)
     await wrapper.find('.pr-group-select input').setValue(true)
     await nextTick()
     await wrapper.find('.pr-batch .btn-primary').trigger('click')
@@ -1362,7 +1386,7 @@ describe('reconcile before writing', () => {
   async function openCard() {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
-    await wrapper.find('.pr-row .btn-primary').trigger('click')
+    await wrapper.find('.pr-row .pr-row-action').trigger('click')
     await flushPromises()
     return wrapper
   }
@@ -1389,7 +1413,7 @@ describe('reconcile before writing', () => {
     })
 
     apiPost.mockClear()
-    await wrapper.find('.pr-row .btn-primary').trigger('click')
+    await wrapper.find('.pr-row .pr-row-action').trigger('click')
     await flushPromises()
     await clickCard(wrapper, 'Check first')
     await flushPromises()

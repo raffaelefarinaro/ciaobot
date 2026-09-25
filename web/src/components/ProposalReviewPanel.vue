@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { DropdownMenuContent, DropdownMenuItem, DropdownMenuRoot, DropdownMenuTrigger } from 'reka-ui'
+import { askPrompt } from '../lib/prompt'
 import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -970,6 +972,42 @@ async function batchDiscuss() {
   }
 }
 
+/** Checkboxes stay out of the way until asked for: most visits decide one
+ *  row at a time, and a checkbox on every row read as the primary control. */
+const selecting = ref(false)
+const menuOpen = ref(false)
+
+// Esc closes the menu and stops there. The layout's window Esc handler goes
+// home from Memory unless the press was already handled, and Reka's own Esc
+// listener sits on window too, registered later, so it cannot mark the press
+// in time. Handling it on the menu element runs first, while it bubbles.
+function closeMenuOnEscape(event: KeyboardEvent) {
+  event.preventDefault()
+  menuOpen.value = false
+}
+const showChecks = computed(() => selecting.value || selected.value.size > 0)
+
+function stopSelecting() {
+  selecting.value = false
+  selected.value = new Set()
+}
+
+// The bulk clean-up lives in the section's menu, asked as a question rather
+// than an always-visible form row under the queue.
+async function askDismissOlder() {
+  const answer = await askPrompt('Suggestions waiting longer than this are dismissed.', {
+    title: 'Dismiss old suggestions',
+    value: String(olderThanDays.value),
+    placeholder: 'Days',
+    confirmLabel: 'Dismiss',
+  })
+  if (answer === null) return
+  const days = Math.round(Number(answer))
+  if (!Number.isFinite(days) || days < 1 || days > 365) return
+  olderThanDays.value = days
+  dismissOlder()
+}
+
 function dismissOlder() {
   const date = new Date()
   date.setDate(date.getDate() - olderThanDays.value)
@@ -1132,12 +1170,42 @@ watch(
 
     <template v-if="queueSettled">
     <section class="pr-group">
+      <!-- Count on the left, section actions on the right: Select turns the
+           row checkboxes on, the menu holds the rare bulk clean-up. -->
       <header v-if="filtered.length" class="pr-group-head">
-        <label class="pr-group-select">
+        <label v-if="showChecks" class="pr-group-select">
           <input type="checkbox" :checked="allSelected" @change="toggleAll" />
-          <span class="pr-group-name">Select all</span>
+          <span class="pr-group-name">Select all {{ filtered.length }}</span>
         </label>
-        <span class="pr-group-count">{{ filtered.length }}</span>
+        <span v-else class="pr-group-name">{{ filtered.length === 1 ? '1 suggestion' : `${filtered.length} suggestions` }}</span>
+        <span class="pr-group-tools">
+          <button
+            v-if="showChecks"
+            type="button"
+            class="pr-text-btn pr-select-toggle"
+            @click="stopSelecting"
+          >Done</button>
+          <button
+            v-else
+            type="button"
+            class="pr-text-btn pr-select-toggle"
+            @click="selecting = true"
+          >Select</button>
+          <DropdownMenuRoot v-model:open="menuOpen" :modal="false">
+            <DropdownMenuTrigger as-child>
+              <button type="button" class="btn-icon pr-more" aria-label="More suggestion actions" title="More">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" /></svg>
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent as-child align="end" :side-offset="6" :collision-padding="8">
+              <div class="pr-menu" @keydown.esc="closeMenuOnEscape">
+                <DropdownMenuItem as-child :disabled="store.busy" @select="askDismissOlder">
+                  <button type="button" class="pr-dismiss-older">Dismiss suggestions older than…</button>
+                </DropdownMenuItem>
+              </div>
+            </DropdownMenuContent>
+          </DropdownMenuRoot>
+        </span>
       </header>
 
       <template v-for="group in groups" :key="group.key">
@@ -1147,7 +1215,7 @@ watch(
           <span class="pr-group-label-name">{{ group.label }}</span>
           <span class="pr-group-label-count">{{ group.rows.length }}</span>
         </header>
-        <ul class="pr-rows">
+        <ul class="pr-rows" :class="{ 'pr-rows--plain': !showChecks }">
         <li
           v-for="row in group.rows"
           :key="row.id"
@@ -1156,7 +1224,7 @@ watch(
         >
           <!-- Wrapped so the tap target reaches 44px; the input itself keeps its
                native size, and the aria-label names the fact this row controls. -->
-          <label class="pr-row-check-hit">
+          <label v-if="showChecks" class="pr-row-check-hit">
             <input
               class="pr-row-check"
               type="checkbox"
@@ -1353,7 +1421,7 @@ watch(
                actions. -->
           <div v-else-if="hasActiveLink(row)" class="pr-actions pr-actions--linked">
             <span class="pr-linked-label">Working in <strong>{{ linkedChatTitle(row) }}</strong></span>
-            <button type="button" class="btn-small btn-primary" @click="openLinkedChat(row)">Open chat</button>
+            <button type="button" class="btn-small btn-chip pr-row-action" @click="openLinkedChat(row)">Open chat</button>
             <button type="button" class="btn-small btn-chip" @click="clearLink(row.id)">Show actions</button>
           </div>
 
@@ -1367,11 +1435,11 @@ watch(
               v-for="c in moveTargets(row)"
               :key="c"
               type="button"
-              class="btn-small btn-primary"
+              class="btn-small btn-chip pr-row-action"
               :disabled="store.isBusy(row.id)"
               @click="doAccept(row, c)"
             >{{ store.isBusy(row.id) ? 'working…' : c }}</button>
-            <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
+            <button type="button" class="btn-small btn-chip pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
             <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
             <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Talk about it</button>
           </div>
@@ -1383,11 +1451,11 @@ watch(
           <div v-else-if="isSkill(row)" class="pr-actions">
             <button
               type="button"
-              class="btn-small btn-primary"
+              class="btn-small btn-chip pr-row-action"
               :disabled="chatBusy"
               @click="implementSkill(row)"
             >Implement</button>
-            <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
+            <button type="button" class="btn-small btn-chip pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
             <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
             <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Talk about it</button>
           </div>
@@ -1400,11 +1468,11 @@ watch(
             <button
               v-if="canAccept(row)"
               type="button"
-              class="btn-small btn-primary"
+              class="btn-small btn-chip pr-row-action"
               :disabled="store.isBusy(row.id)"
               @click="reviewAccept(row)"
             >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `Move to ${rehomeTarget(row)}` : 'Review') }}</button>
-            <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
+            <button type="button" class="btn-small btn-chip pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
             <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
             <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Talk about it</button>
           </div>
@@ -1413,14 +1481,6 @@ watch(
       </template>
     </section>
 
-    <footer v-if="filtered.length" class="pr-foot">
-      <label class="pr-older">
-        <span>Dismiss suggestions older than</span>
-        <input v-model.number="olderThanDays" type="number" min="1" max="365" class="pr-older-input" />
-        <span>days</span>
-      </label>
-      <button type="button" class="btn-small btn-chip" :disabled="store.busy" @click="dismissOlder">Dismiss old</button>
-    </footer>
     </template>
     </div>
   </div>
@@ -1591,6 +1651,19 @@ watch(
   border-color: transparent;
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+
+/* A dismissal is routine and reversible, so it reads as a quiet text action
+   beside the row's one neutral button, not a second bordered one. */
+.pr-actions .pr-quiet {
+  border-color: transparent;
+  background: none;
+  color: var(--fg2);
+  font-weight: 500;
+}
+.pr-actions .pr-quiet:hover:not(:disabled) {
+  border-color: transparent;
+  color: var(--fg);
 }
 
 @media (pointer: coarse) {
@@ -2022,12 +2095,6 @@ watch(
   font-weight: 500;
 }
 
-.pr-group-count {
-  margin-left: auto;
-  color: var(--fg3);
-  font-variant-numeric: tabular-nums;
-}
-
 .pr-rows {
   list-style: none;
   margin: 0;
@@ -2199,39 +2266,62 @@ watch(
   color: var(--fg2);
 }
 
-.pr-foot {
-  display: flex;
+/* Section tools on the count row: text actions and the overflow menu. */
+.pr-group-tools {
+  margin-left: auto;
+  display: inline-flex;
   align-items: center;
-  flex-wrap: wrap;
   gap: var(--space-2);
-  color: var(--fg3);
-  font-size: var(--text-sm);
 }
-
-.pr-foot .btn-small {
-  min-height: 32px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+.pr-text-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--fg2);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.pr-text-btn:hover { color: var(--fg); }
+.pr-menu {
+  z-index: 50;
+  min-width: 240px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
   background: var(--bg-elev);
-  color: var(--fg);
-  font-size: var(--text-sm);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
 }
-
-@media (pointer: coarse) {
-  .pr-foot .btn-small { min-height: var(--touch); }
-}
-
-.pr-older {
+.pr-menu button {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  margin-right: auto;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.pr-menu button:hover,
+.pr-menu button[data-highlighted] { background: var(--bg3); outline: none; }
+.pr-menu button[data-disabled] { opacity: 0.45; cursor: default; }
+@media (pointer: coarse) {
+  .pr-text-btn { min-height: var(--touch); }
+  .pr-menu button { min-height: var(--touch); }
 }
 
-.pr-older-input {
-  width: 4.5rem;
-}
+/* Without checkboxes the row is one column; the body and actions that were
+   placed in column 2 move to column 1. */
+.pr-rows--plain > .pr-row { grid-template-columns: minmax(0, 1fr); }
+.pr-rows--plain > .pr-row > * { grid-column: 1 / -1; }
 
 /* On a phone the actions take the row's full width under the checkbox. */
 @media (max-width: 640px) {

@@ -406,7 +406,7 @@ describe('VaultReviewPanel', () => {
     const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    await buttonByText(wrapper, 'refresh').trigger('click')
+    await buttonByText(wrapper, 'Refresh').trigger('click')
     await flushPromises()
 
     expect(wrapper.findAll('.vr-row')).toHaveLength(1)

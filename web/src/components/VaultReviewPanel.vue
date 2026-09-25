@@ -321,10 +321,10 @@ function clearedDate(note: VaultClearedNote): string {
       </p>
       <button
         type="button"
-        class="btn-small btn-chip"
+        class="vr-refresh"
         :disabled="store.loading"
         @click="refresh"
-      >{{ store.loading ? 'loading…' : 'refresh' }}</button>
+      >{{ store.loading ? 'Loading…' : 'Refresh' }}</button>
     </header>
 
     <div v-if="showStaleError" class="vr-load-state vr-load-state--stale" role="status">
@@ -539,7 +539,9 @@ function clearedDate(note: VaultClearedNote): string {
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--space-4);
+  /* Block padding only: the rows start on the page column's edge, like the
+     Suggested tab beside it, instead of sitting in a second inset. */
+  padding: var(--space-4) 0;
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
@@ -553,10 +555,32 @@ function clearedDate(note: VaultClearedNote): string {
   flex-wrap: wrap;
 }
 
+/* The section heading: sentence-case 16px, the count in the same weight. */
 .vr-summary {
   margin: 0;
-  font-size: 0.95rem;
+  color: var(--fg);
+  font-size: calc(16px * var(--font-scale, 1));
+  font-weight: 650;
+  letter-spacing: -0.02em;
 }
+.vr-summary strong { font-weight: inherit; }
+
+/* A section action is a text link at the heading's right edge. */
+.vr-refresh {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.vr-refresh:hover { text-decoration: underline; text-underline-offset: 3px; }
+.vr-refresh:disabled { color: var(--fg3); cursor: default; text-decoration: none; }
+@media (pointer: coarse) { .vr-refresh { min-height: var(--touch); } }
 
 .vr-hint {
   margin: 0;
@@ -569,7 +593,7 @@ function clearedDate(note: VaultClearedNote): string {
    because it is the first thing read. */
 .vr-lede {
   margin: 0;
-  color: var(--fg);
+  color: var(--fg3);
   font-size: var(--text-sm);
   line-height: 1.5;
   max-width: 62ch;
@@ -673,18 +697,17 @@ function clearedDate(note: VaultClearedNote): string {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  border-top: 1px solid var(--border);
 }
 
+/* Hairline rows, the page's list shape, rather than a filled card each. */
 .vr-row {
   display: grid;
   grid-template-columns: 1fr auto;
   align-items: start;
   gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg2);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border);
 }
 
 .vr-row--busy {
