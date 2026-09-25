@@ -300,10 +300,16 @@ def _harness(tmp_path: Path) -> dict[str, Any]:
     }
 
 
-def _run_installer(harness: dict[str, Any], *args: str) -> subprocess.CompletedProcess[str]:
+def _run_installer(
+    harness: dict[str, Any],
+    *args: str,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["sh", str(harness["script"]), *args],
-        env={**os.environ, **harness["env"]},
+        env={**os.environ, **harness["env"], **(env or {})},
+        cwd=str(cwd) if cwd is not None else None,
         capture_output=True,
         text=True,
         check=False,
@@ -335,7 +341,9 @@ def test_engine_installer_end_to_end_with_fakes(tmp_path: Path) -> None:
 
     ciao = home / ".local" / "bin" / "ciao"
     calls = _log(harness, "ciao-calls.log")
-    assert f"setup --workspace {home / 'Ciaobot'} --python {ciao} --yes" in calls
+    # The trailing newline is the assertion: `--yes` would end the line, and
+    # passing it unconditionally is what turns off setup's guards.
+    assert f"setup --workspace {home / 'Ciaobot'} --python {ciao}\n" in calls
     assert "service start" not in calls
 
     receipt = json.loads(
@@ -378,6 +386,87 @@ def test_engine_installer_refuses_foreign_ciao(tmp_path: Path) -> None:
     assert "was not installed by Ciaobot" in result.stderr
     assert "tool install" not in _log(harness, "uv-calls.log")
     assert foreign.read_text(encoding="utf-8") == "#!/bin/sh\necho other\n"
+
+
+def _write_desktop_shim(home: Path, target: Path) -> Path:
+    """The shim scripts/install.sh writes, pointing at `target`.
+
+    The desktop installer writes it *before* onboarding creates the server
+    plist, so the shim is the only evidence a Ciaobot.app owns the engine
+    during that window.
+    """
+    shim = home / ".local" / "bin" / "ciao"
+    shim.write_text(
+        "#!/bin/sh\n"
+        "# Ciaobot shim (managed by the Ciaobot installer)\n"
+        f'exec "{target}" "$@"\n',
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    return shim
+
+
+@needs_local_tools
+def test_engine_installer_refuses_live_desktop_shim(tmp_path: Path) -> None:
+    # The plist is absent (onboarding has not run yet) but the app is live, so
+    # refusing here is the difference between a refused install and an engine
+    # taken over from a running Ciaobot.app.
+    harness = _harness(tmp_path)
+    app_engine = (
+        tmp_path / "Ciaobot.app" / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
+    )
+    app_engine.parent.mkdir(parents=True)
+    _write_exec(app_engine, "#!/bin/sh\nexit 0\n")
+    _write_desktop_shim(harness["home"], app_engine)
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 1
+    assert "#576" in result.stderr
+    assert "tool install" not in _log(harness, "uv-calls.log")
+
+
+@needs_local_tools
+def test_engine_installer_replaces_stale_desktop_shim(tmp_path: Path) -> None:
+    # The app is gone: nothing owns the engine any more, so the stale shim is
+    # ours to replace and the install goes on.
+    harness = _harness(tmp_path)
+    _write_desktop_shim(
+        harness["home"],
+        tmp_path / "Applications" / "Ciaobot.app/Contents/Resources/ciao-runtime/bin/ciao",
+    )
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert "tool install" in _log(harness, "uv-calls.log")
+
+
+@needs_local_tools
+def test_engine_installer_rejects_cdpath_surprise(tmp_path: Path) -> None:
+    # `cd` consults CDPATH for a bare relative name and prints the path it
+    # found, so an inherited CDPATH decides where the workspace really is (or
+    # makes the install fail after the wheel is already installed). The decoy
+    # `wsrel` under the CDPATH entry is the case that must not win.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    (tmp_path / "wsrel").mkdir()
+
+    result = _run_installer(
+        harness,
+        "--version",
+        VERSION,
+        "--workspace",
+        "wsrel",
+        "--no-start",
+        cwd=home,
+        env={"CDPATH": str(tmp_path)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    ciao = home / ".local" / "bin" / "ciao"
+    calls = _log(harness, "ciao-calls.log")
+    assert f"setup --workspace {home / 'wsrel'} --python {ciao}\n" in calls
 
 
 def test_engine_installer_refuses_app_managed_engine(tmp_path: Path) -> None:

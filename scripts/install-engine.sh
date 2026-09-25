@@ -88,7 +88,10 @@ base="$release_base/v$version"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ciaobot-engine.XXXXXX")
 chmod 700 "$tmp"
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+trap 'rm -rf "$tmp"' EXIT
+# A signal handler that only cleaned up would fall through into the next step
+# with the temp dir already deleted; exit runs the EXIT trap, so cleanup stays.
+trap 'exit 130' HUP INT TERM
 
 download() {
     curl -fsSL --retry 3 --connect-timeout 15 "$1" -o "$2"
@@ -106,7 +109,8 @@ find_uv() {
         # profile is left alone: PATH changes are the user's call.
         download "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-installer.sh" \
             "$tmp/uv-installer.sh" || fail "could not download the uv installer"
-        UV_NO_MODIFY_PATH=1 sh "$tmp/uv-installer.sh" >/dev/null || fail "could not install uv"
+        UV_NO_MODIFY_PATH=1 UV_INSTALL_DIR="$HOME/.local/bin" sh "$tmp/uv-installer.sh" >/dev/null \
+            || fail "could not install uv"
         uv="$HOME/.local/bin/uv"
     fi
     [ -x "$uv" ] || fail "uv is not available at $uv"
@@ -124,6 +128,17 @@ refuse_desktop_engine() {
                 fail "Ciaobot.app manages the engine on this Mac. Migrating it to the terminal engine is not supported yet (#576); keep using Ciaobot.app or uninstall it first with: ciao desktop uninstall"
                 ;;
         esac
+    fi
+    # The desktop installer writes that shim before onboarding creates the
+    # plist, so in that window the plist check above sees nothing while a live
+    # Ciaobot.app still owns the engine. A shim whose target is gone (the app
+    # was deleted) is stale and this script may replace it.
+    shim="$HOME/.local/bin/ciao"
+    if [ -f "$shim" ] && grep -qF "$SHIM_MARKER" "$shim" 2>/dev/null; then
+        shim_target=$(awk -F'"' '/^exec "/ {print $2; exit}' "$shim" 2>/dev/null || true)
+        if [ -n "$shim_target" ] && [ -x "$shim_target" ]; then
+            fail "Ciaobot.app manages the engine on this Mac. Migrating it to the terminal engine is not supported yet (#576); keep using Ciaobot.app or uninstall it first with: ciao desktop uninstall"
+        fi
     fi
 }
 
@@ -179,8 +194,8 @@ print(name, digest, size)
 PY
 }
 
-find_uv
 refuse_desktop_engine
+find_uv
 
 download "$base/ciaobot-engine-manifest.json" "$tmp/ciaobot-engine-manifest.json" \
     || fail "could not download the release manifest"
@@ -245,22 +260,34 @@ tool_python="$tool_dir/ciaobot/bin/python"
     --previous-executable "$previous_executable" \
     >/dev/null || fail "could not write the install receipt"
 
+# --yes turns off every guard in `ciao setup` (a LaunchAgent macOS TCC will
+# block, a health check that never comes up, a service silently re-pointed at a
+# different workspace), so it is passed only for the workspace this script
+# detected the engine already running in - the same rule install.sh applies.
+setup_yes=
 if [ -z "$workspace" ]; then
     workspace=
     if [ -f "$plist" ] && [ -x "$PLISTBUDDY" ]; then
         existing=$("$PLISTBUDDY" -c 'Print :WorkingDirectory' "$plist" 2>/dev/null || true)
         if [ -n "$existing" ] && [ -d "$existing" ] && [ -f "$existing/.env" ]; then
             workspace=$existing
+            setup_yes=1
         fi
     fi
     [ -n "$workspace" ] || workspace="$HOME/Ciaobot"
 fi
 mkdir -p "$workspace"
-workspace=$(cd "$workspace" && pwd -P)
+# CDPATH would send `cd` looking for a matching directory elsewhere and print
+# the path it found, so it is cleared for this one command.
+workspace=$(CDPATH= cd -- "$workspace" && pwd -P)
 
-# Idempotent, and it preserves an existing .env and its password.
-"$ciao" setup --workspace "$workspace" --python "$ciao" --yes >/dev/null \
-    || fail "ciao setup failed"
+# Idempotent, and it preserves an existing .env and its password. stderr is left
+# visible so setup's own guard message reaches the user.
+if [ -n "$setup_yes" ]; then
+    "$ciao" setup --workspace "$workspace" --python "$ciao" --yes >/dev/null || fail "ciao setup failed"
+else
+    "$ciao" setup --workspace "$workspace" --python "$ciao" >/dev/null || fail "ciao setup failed"
+fi
 
 if [ "$no_start" -eq 0 ]; then
     "$ciao" service start --workspace "$workspace" --json >/dev/null \
@@ -288,8 +315,15 @@ echo "  workspace: $workspace"
 url=
 if [ "$no_start" -eq 0 ]; then
     # Printed to the terminal and nowhere else: the URL is a one-time
-    # credential that signs the person at this keyboard in.
-    url=$("$ciao" setup-url --workspace "$workspace" | tail -1)
+    # credential that signs the person at this keyboard in. A failure must not
+    # reach the user as "Open Ciaobot: " with nothing after it.
+    url_output=$("$ciao" setup-url --workspace "$workspace") \
+        || fail "could not create the sign-in link; run: $ciao setup-url --workspace $workspace"
+    url=$(printf '%s\n' "$url_output" | tail -1)
+    case "$url" in
+        http://*) ;;
+        *) fail "could not create the sign-in link; run: $ciao setup-url --workspace $workspace" ;;
+    esac
     echo "Open Ciaobot: $url"
     echo "This link signs you in once. Do not share it."
 fi
