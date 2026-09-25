@@ -42,6 +42,34 @@ def test_runtime_resolution_uses_checked_in_pins() -> None:
         assert "x86_64-apple-darwin" not in workflow
 
 
+def test_publish_workflow_ships_signed_engine_manifest() -> None:
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
+    ).read_text(encoding="utf-8")
+
+    # The engine wheel is a release asset in its own right (#562), and the
+    # manifest beside it is signed with the same key the installer verifier
+    # trusts, so the future installer (#568) and updater (#569) can check it is
+    # authentic rather than merely intact. The desktop assets stay in the list.
+    for fragment in (
+        "uv build --wheel --out-dir dist",
+        "-m ciao.release_manifest check-static",
+        "-m ciao.release_manifest build",
+        "npx tauri signer sign ../ciaobot-engine-manifest.json",
+        "-m ciao.release_manifest verify",
+        "dist/ciaobot-*.whl",
+        "ciaobot-engine-manifest.json.sig",
+        "latest.json",
+        "Ciaobot_*_aarch64.app.tar.gz",
+    ):
+        assert fragment in workflow, (
+            f"publish.yml no longer publishes the engine manifest: {fragment!r}"
+        )
+
+    # The wheel has to carry the PWA, so it is built after the frontend build.
+    assert workflow.index("Build PWA assets") < workflow.index("Build engine wheel")
+
+
 def test_cold_start_uses_the_embedded_engine_for_launchagent_setup() -> None:
     workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
