@@ -208,6 +208,19 @@ self.addEventListener('push', (event) => {
     ]))
     return
   }
+  if (data.kind === 'test') {
+    event.waitUntil(self.registration.showNotification(title, {
+      body: data.body || '',
+      icon: ICON,
+      badge: BADGE,
+      tag: 'ciaobot-test',
+      renotify: true,
+      // Marks this as a delivery test: the click/close handlers bail out
+      // instead of touching unread state or navigating away from a chat.
+      data: { kind: 'test' },
+    }))
+    return
+  }
   const options = {
     body: data.body || '',
     icon: ICON,
@@ -232,6 +245,7 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close()
+  if (event.notification.data?.kind === 'test') return
   const chatId = event.notification.data?.chat_id || ''
   if (event.action === 'dismiss') {
     event.waitUntil(clearNotificationUnread(chatId))
@@ -264,6 +278,7 @@ self.addEventListener('notificationclick', (event) => {
 })
 
 self.addEventListener('notificationclose', (event) => {
+  if (event.notification.data?.kind === 'test') return
   const chatId = event.notification.data?.chat_id || ''
   event.waitUntil(clearNotificationUnread(chatId))
 })

@@ -67,7 +67,7 @@ _NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
     "provider_insights_models": _clean_provider_map,
     "provider_default_modes": _clean_default_modes,
 }
-_BOOLEAN_FIELDS = {"insights_enabled", "trajectories_enabled"}
+_BOOLEAN_FIELDS = {"insights_enabled", "trajectories_enabled", "push_all_devices"}
 
 # Apple's on-device model used to be an insights option. It is gone, so a
 # stored sentinel reads as Automatic instead of reaching a provider as a
@@ -112,6 +112,10 @@ class AppSettings:
 
     insights_enabled: bool = True
     trajectories_enabled: bool = True
+    # Web Push every subscription (this machine included) and skip the
+    # tray notification log. Off while Ciaobot.app's menu bar still shows
+    # this machine's banners; the PWA-only engine turns it on (#562).
+    push_all_devices: bool = False
     # Model used by post-archive session-insights extraction.
     insights_model: str = ""
 
