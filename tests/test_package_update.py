@@ -205,7 +205,9 @@ def test_update_package_installer_mode_points_at_installer(monkeypatch) -> None:
 
     assert result["ok"] is False
     assert result["mode"] == "installer"
-    assert "install.sh" in result["command"]
+    # The engine-only installer, not the desktop one: an installer-managed
+    # engine has no Ciaobot.app to reinstall (#568).
+    assert "install-engine.sh" in result["command"]
     assert "installer" in result["error"]
 
 

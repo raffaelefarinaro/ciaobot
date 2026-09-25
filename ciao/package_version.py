@@ -461,7 +461,7 @@ def update_package(
             "ok": False,
             "mode": mode,
             "error": "This engine was installed by the Ciaobot installer. Re-run the installer to update; in-app updates are not available yet.",
-            "command": "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh",
+            "command": "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install-engine.sh | sh",
         }
     return {
         "ok": False,

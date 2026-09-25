@@ -83,6 +83,16 @@ The source template is `scripts/install.sh`. The release workflow substitutes
 the verifier checksum and attaches `install.sh`, the verifier, the signed app
 archive, its signature, and `latest.json`.
 
+`scripts/install-engine.sh` is the engine-only path, for users who want the web
+app without `Ciaobot.app`. It verifies the signed engine manifest with the
+release minisign key embedded in the script, and the wheel's digest and size,
+before anything is installed; installs the verified wheel with `uv tool install`;
+writes the install receipt with absolute paths; then runs `ciao setup` and
+`ciao service start` and prints the one-time login URL to the terminal. It
+refuses to take over an engine that Ciaobot.app manages (migrating those
+installs is #576) and refuses to overwrite a `ciao` it did not install. The
+workflow attaches it as the `install-engine.sh` release asset.
+
 ## Branching and releases
 
 - **`develop`** is the integration branch. Feature and fix PRs target `develop`.
