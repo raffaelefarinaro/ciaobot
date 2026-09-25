@@ -167,7 +167,9 @@
          opened with its first message below the fold. Collapsed it is one line
          of counted chips; expanded it is the same detail rows with the same
          actions. -->
-    <div v-if="contextRelations.length" class="ctx-bar" :class="{ 'ctx-bar--open': contextExpanded }">
+    <!-- Only when the Work details rail is hidden: with the rail shown, the
+         chat's automations live there instead of above the transcript. -->
+    <div v-if="contextRelations.length && !railShown" class="ctx-bar" :class="{ 'ctx-bar--open': contextExpanded }">
       <button
         type="button"
         class="ctx-summary"
@@ -1288,8 +1290,8 @@
                     v-if="showThinkingLevels"
                     class="thinking-levels"
                   >
-                    <span class="thinking-levels__label">Thinking</span>
-                    <div class="thinking-levels__chips">
+                    <span id="thinking-levels-label" class="thinking-levels__label">Thinking</span>
+                    <div class="thinking-levels__chips" role="group" aria-labelledby="thinking-levels-label">
                       <button
                         v-for="level in ['', ...filteredThinkingLevels]"
                         :key="level"
@@ -1299,7 +1301,7 @@
                         :aria-pressed="(chat.thinking_level || '') === level"
                         @click="selectThinking(level)"
                       >
-                        {{ level || 'auto' }}
+                        {{ level ? level.charAt(0).toUpperCase() + level.slice(1) : 'Auto' }}
                       </button>
                     </div>
                   </div>
@@ -1372,10 +1374,29 @@
             <span>{{ row.label }}</span>
             <strong :class="{ 'rail-attention': row.tone === 'attention' || row.tone === 'working' }">{{ row.value }}</strong>
           </div>
-          <div v-if="contextRelations.length" class="rail-kv">
-            <span>Automations</span>
-            <strong>{{ contextRelations.length }}</strong>
+        </div>
+      </section>
+      <!-- What this chat is attached to: each automation that runs here, with
+           its cadence and the same actions the context bar offers. -->
+      <section
+        v-for="s in chatSchedules"
+        :key="`rail-sched-${s.schedule_id}`"
+        class="rail-section chat-rail-schedule"
+        :aria-label="`Automation: ${s.title || 'Automation'}`"
+      >
+        <p class="rail-label">Automation</p>
+        <router-link :to="`/schedules/${s.schedule_id}`" class="chat-rail-schedule-title">{{ s.title || 'Automation' }}</router-link>
+        <div class="rail-kvs">
+          <div class="rail-kv"><span>Repeats</span><strong>{{ capitalizeFirst(scheduleCadence(s)) }}</strong></div>
+          <div class="rail-kv">
+            <span>State</span>
+            <strong :class="{ 'rail-attention': s.last_status === 'busy' }">{{ s.enabled ? (s.last_status === 'busy' ? 'Waiting, chat busy' : 'Scheduled') : 'Paused' }}</strong>
           </div>
+          <div v-if="s.enabled && scheduleCountdown(s)" class="rail-kv"><span>Next run</span><strong>{{ scheduleCountdown(s) }}</strong></div>
+        </div>
+        <div class="chat-rail-schedule-actions">
+          <button type="button" class="chat-rail-link" :disabled="scheduleRunningId === s.schedule_id" @click="runScheduleNow(s)">{{ scheduleRunningId === s.schedule_id ? 'Running…' : 'Run now' }}</button>
+          <button type="button" class="chat-rail-link" @click="toggleScheduleEnabled(s)">{{ s.enabled ? 'Pause' : 'Resume' }}</button>
         </div>
       </section>
       <section v-if="toolUsage.skills.length || toolUsage.mcp.length" class="rail-section" aria-labelledby="chat-rail-tools">
@@ -1861,6 +1882,10 @@ const chatSchedules = computed(() => {
 // One counted chip per relation, so the v-for banner blocks can never again
 // push the transcript below the fold. Detail rows live behind the disclosure.
 const contextExpanded = ref(false)
+
+function capitalizeFirst(text: string): string {
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : text
+}
 
 interface ContextRelation {
   key: string
@@ -4836,6 +4861,33 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   overflow-wrap: anywhere;
 }
 
+.chat-rail-schedule-title {
+  display: inline-block;
+  margin: 0 0 6px;
+  color: var(--fg);
+  font-weight: 600;
+  text-decoration: none;
+}
+.chat-rail-schedule-title:hover { color: var(--accent); }
+.chat-rail-schedule-actions {
+  display: flex;
+  gap: var(--space-4);
+  margin-top: 8px;
+}
+.chat-rail-link {
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.chat-rail-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.chat-rail-link:disabled { color: var(--fg3); cursor: default; text-decoration: none; }
+@media (pointer: coarse) { .chat-rail-link { min-height: var(--touch); } }
+
 .chat-rail-project {
   display: inline;
   padding: 0;
@@ -7370,47 +7422,54 @@ details[open] > .activity-summary::before {
 
 .thinking-levels {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 2px 4px;
 }
 
 .thinking-levels__label {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
+  font-size: var(--text-sm);
   color: var(--fg2);
 }
 
+/* Segmented control, the same shape as Settings → Models' thinking picker. */
 .thinking-levels__chips {
-  display: flex;
+  display: inline-flex;
   flex-wrap: wrap;
-  gap: 6px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
 }
 
 .thinking-chip {
   display: inline-flex;
   align-items: center;
-  padding: 3px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-elev);
-  color: var(--fg);
+  min-height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--fg2);
   font: inherit;
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: var(--text-sm);
   cursor: pointer;
-  transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
+  transition: background 120ms var(--ease), color 120ms var(--ease);
 }
 
 .thinking-chip:hover {
-  background: var(--bg3);
+  color: var(--fg);
 }
 
 .thinking-chip--active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
+  background: var(--bg3);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+@media (pointer: coarse) {
+  .thinking-chip { min-height: var(--touch); }
 }
 
 .archive-btn {
@@ -7563,8 +7622,7 @@ details[open] > .activity-summary::before {
   .chat-input { font-size: 16px; padding: 12px 12px; line-height: 1.25; }
   .chat-input::placeholder { font-size: 16px; }
   /* Keep every composer action at the shared touch-target minimum.
-     Preserve the 61px footer lock (44 + 8 + 8 + 1) used on desktop so the
-     sidebar "+ New Project" row still lines up on coarse pointers. */
+     Preserve the 61px footer lock (44 + 8 + 8 + 1) used on desktop. */
   .input-bar { min-height: 61px; padding-top: 8px; padding-bottom: 8px; }
   .chat-input { height: var(--touch); min-height: var(--touch); }
   .input-actions .send-btn {

@@ -159,7 +159,7 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     if (!el) return
     el.style.height = 'auto'
     // Floor at the shared touch target so an empty composer stays aligned
-    // with the sidebar "+ New Project" row (both 44px inside 61px footers).
+    // at the shared 44px touch target inside the 61px footer.
     const next = Math.min(Math.max(el.scrollHeight, 44), 200)
     el.style.height = next + 'px'
     const bar = el.closest('.input-bar')

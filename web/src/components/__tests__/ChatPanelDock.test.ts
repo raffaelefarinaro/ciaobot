@@ -201,6 +201,32 @@ describe('ChatPanel context bar', () => {
     expect(wrapper.find('.loop-banner-row').exists()).toBe(true)
     wrapper.unmount()
   })
+
+  // With Work details shown as a rail, the automation lives there instead of
+  // taking a strip above the transcript.
+  it('moves into the Work details rail on a wide pane', async () => {
+    const observers: Array<() => void> = []
+    vi.stubGlobal('ResizeObserver', class {
+      private cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe() {
+        observers.push(() => this.cb([{ contentRect: { width: 1200 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver))
+      }
+      disconnect() {}
+      unobserve() {}
+    })
+    const { wrapper } = await mountPanel(undefined, [makeIntervalSchedule('schedule-1')])
+    observers.forEach(fire => fire())
+    await nextTick()
+
+    expect(wrapper.find('.ctx-bar').exists()).toBe(false)
+    const section = wrapper.get('#chat-work-rail .chat-rail-schedule')
+    expect(section.attributes('aria-label')).toBe('Automation: schedule-1')
+    expect(section.text()).toContain('Scheduled')
+    expect(section.findAll('button').map(b => b.text())).toEqual(['Run now', 'Pause'])
+    vi.unstubAllGlobals()
+    wrapper.unmount()
+  })
 })
 
 describe('ChatPanel action dock', () => {
