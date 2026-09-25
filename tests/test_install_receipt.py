@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,46 @@ def test_write_then_read_round_trips(tmp_path: Path) -> None:
 
     assert written == tmp_path / "r.json"
     assert read_receipt(tmp_path / "r.json") == receipt
+
+
+# The update coordinator (#569) is a second writer of this file, so the
+# round-trip has to carry the uv that built the env: the updater stages the
+# next env with it rather than whatever `uv` happens to be on PATH later.
+def test_receipt_round_trips_uv_field(tmp_path: Path) -> None:
+    receipt = _receipt(uv="/u/.local/bin/uv")
+
+    write_receipt(receipt, tmp_path / "r.json")
+
+    read_back = read_receipt(tmp_path / "r.json")
+    assert read_back is not None
+    assert read_back.uv == "/u/.local/bin/uv"
+    assert read_back == receipt
+    # An installer that predates #569 simply has no uv, and that is not corrupt.
+    assert read_receipt(_write_json(tmp_path / "old.json", _payload())) == _receipt()
+
+
+# `True == 1` in Python, so a plain `!= SCHEMA_VERSION` would accept a receipt
+# whose schema is a JSON boolean and hand it to a reader expecting version 1.
+def test_read_rejects_bool_schema(tmp_path: Path) -> None:
+    assert read_receipt(_write_json(tmp_path / "r.json", _payload(schema=True))) is None
+    assert read_receipt(_write_json(tmp_path / "f.json", _payload(schema=False))) is None
+
+
+# A fixed `.tmp` name is a shared mutable slot: two writers pick the same
+# path, and one's cleanup unlinks the file the other is about to rename.
+def test_concurrent_writers_leave_no_temp_files(tmp_path: Path) -> None:
+    target = tmp_path / "state" / "install-receipt.json"
+    versions = [f"0.9.{n}" for n in range(20)]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for path in pool.map(lambda v: write_receipt(_receipt(version=v), target), versions):
+            assert path == target
+
+    read_back = read_receipt(target)
+    assert read_back is not None
+    assert read_back.version in versions
+    assert list(target.parent.iterdir()) == [target]
+    assert list(target.parent.glob("*.tmp")) == []
 
 
 def test_write_is_private_and_atomic(tmp_path: Path) -> None:

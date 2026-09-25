@@ -430,6 +430,18 @@ def update_package(
     import sys
 
     mode = detect_install_mode()
+    if mode == "installer":
+        # Before the Linux branch on purpose. Ownership, not platform, decides
+        # the answer: a Linux `systemd-user` engine installed by the shell
+        # installer is a managed install, and answering with the generic
+        # administrator workflow (no `ciao update stage`) was the #567 review
+        # finding — the platform check ran first and swallowed this branch.
+        return {
+            "ok": False,
+            "mode": mode,
+            "error": "This engine was installed by the Ciaobot installer. Stage an update with `ciao update stage`; applying it from the app arrives in a later release.",
+            "command": "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh",
+        }
     if sys.platform.startswith("linux"):
         # The documented Linux install is `pip install -e`, which
         # detect_install_mode() classifies as `editable`. A generic
@@ -454,13 +466,6 @@ def update_package(
             "already_current": True,
             "mode": mode,
             "error": "The bundled app and engine update together through Ciaobot.app.",
-            "command": "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh",
-        }
-    if mode == "installer":
-        return {
-            "ok": False,
-            "mode": mode,
-            "error": "This engine was installed by the Ciaobot installer. Re-run the installer to update; in-app updates are not available yet.",
             "command": "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh",
         }
     return {

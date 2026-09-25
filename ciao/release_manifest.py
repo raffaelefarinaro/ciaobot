@@ -22,6 +22,7 @@ SCHEMA_VERSION = 1
 # TAURI_SIGNING_PRIVATE_KEY release secret.
 RELEASE_PUBLIC_KEY = "RWSDUnIeQDnpmnNJiTjLmN6XOVFqgn1A0EXvTVG7AJIZXJxhyFN9osxm"
 _VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ASSET_REF_RE = re.compile(r'(?:src|href)="(/assets/[^"]+)"')
 _CHUNK = 1 << 20
 
@@ -148,6 +149,40 @@ def verify_signature(
     return trusted_comment
 
 
+def _check_artifact(entry: Any) -> None:
+    """Reject an artifact a consumer could not safely act on.
+
+    The signature already proves the manifest came from the release key, so this
+    is not about authenticity: it is that a consumer which trusts the manifest
+    also trusts these fields. A ``filename`` with a path separator would send
+    the download outside the staging directory; a ``sha256`` that is uppercase
+    or truncated will not compare equal to a computed digest; and a ``size``
+    that is a string, a float or a boolean means the consumer's size check is
+    the one that has been coerced rather than enforced.
+    """
+    if not isinstance(entry, dict):
+        raise ValueError("manifest artifact is malformed")
+    filename = entry.get("filename")
+    if (
+        not isinstance(filename, str)
+        or not filename
+        or "/" in filename
+        or "\\" in filename
+        or filename in (".", "..")
+    ):
+        raise ValueError("manifest artifact is malformed")
+    kind = entry.get("kind")
+    if not isinstance(kind, str) or not kind:
+        raise ValueError("manifest artifact is malformed")
+    sha256 = entry.get("sha256")
+    if not isinstance(sha256, str) or not _SHA256_RE.fullmatch(sha256):
+        raise ValueError("manifest artifact is malformed")
+    # `type(...) is int`, not isinstance: bool is a subclass of int, so
+    # `True` would pass as a size of 1 and a float would pass as a size.
+    if type(entry.get("size")) is not int or entry["size"] < 0:
+        raise ValueError("manifest artifact is malformed")
+
+
 def verify_manifest(
     manifest_bytes: bytes, signature_text: str, public_key: str = RELEASE_PUBLIC_KEY
 ) -> dict[str, Any]:
@@ -165,9 +200,19 @@ def verify_manifest(
     version = manifest.get("version")
     if not isinstance(version, str) or not _VERSION_RE.fullmatch(version):
         raise ValueError(f"manifest version is not a release version: {version!r}")
+    # The tag is what a downloader resolves a URL from, and the version is
+    # what the consumer compares against. If they can disagree, a signed
+    # manifest for one release can be served under another's directory.
+    if manifest.get("tag") != f"v{version}":
+        raise ValueError(
+            f"manifest tag does not match its version: "
+            f"{manifest.get('tag')!r} != 'v{version}'"
+        )
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         raise ValueError("manifest lists no artifacts")
+    for entry in artifacts:
+        _check_artifact(entry)
     return manifest
 
 
