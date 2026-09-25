@@ -632,7 +632,7 @@
                   :title="expandedProjects.has(project.project_id) ? 'Collapse' : 'Expand'"
                   :aria-label="`${expandedProjects.has(project.project_id) ? 'Collapse' : 'Expand'} ${project.name}`"
                   :aria-expanded="expandedProjects.has(project.project_id)"
-                >{{ expandedProjects.has(project.project_id) ? '▾' : '▸' }}</button>
+                ><svg class="project-chevron" :class="{ open: expandedProjects.has(project.project_id) }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg></button>
                 <button
                   type="button"
                   class="project-name"
@@ -644,23 +644,20 @@
                   {{ project.name }}
                   <span v-if="project.is_auto" class="system-chip" title="Auto-managed project">auto</span>
                   <span
-                    v-if="store.projectNeedsInput(project.project_id) > 0"
-                    class="rollup-needs-dot"
-                    title="A chat in this project needs your answer"
-                    aria-label="A chat in this project needs your answer"
-                  />
-                  <span
-                    v-else-if="store.projectIsStreaming(project.project_id)"
+                    v-if="store.projectIsStreaming(project.project_id) && !projectAttention(project.project_id)"
                     class="rollup-ring"
                     title="A chat in this project is working"
                     aria-label="A chat in this project is working"
                   ><span class="rollup-ring-core" aria-hidden="true" /></span>
+                  <!-- A subtle count of chats that want the user (needs an answer
+                       or unread), accent only when one is blocked on an answer. -->
                   <span
-                    v-if="store.projectUnread(project.project_id) > 0"
-                    class="badge"
-                    :title="`${store.projectUnread(project.project_id)} unread chats`"
-                    :aria-label="`${store.projectUnread(project.project_id)} unread chats`"
-                  >{{ store.projectUnread(project.project_id) }}</span>
+                    v-if="projectAttention(project.project_id)"
+                    class="project-count"
+                    :class="{ 'project-count--needs': store.projectNeedsInput(project.project_id) > 0 }"
+                    :title="projectAttentionLabel(project.project_id)"
+                    :aria-label="projectAttentionLabel(project.project_id)"
+                  >{{ projectAttention(project.project_id) }}</span>
                 </button>
                 <input
                   v-else
@@ -1110,6 +1107,19 @@ const settingsNote = computed(() => {
   if (store.packageStatus?.update_available) return 'update'
   return ''
 })
+
+function projectAttention(projectId: string): number {
+  return store.projectNeedsInput(projectId) + store.projectUnread(projectId)
+}
+
+function projectAttentionLabel(projectId: string): string {
+  const needs = store.projectNeedsInput(projectId)
+  const unread = store.projectUnread(projectId)
+  const parts: string[] = []
+  if (needs) parts.push(`${needs} waiting for your answer`)
+  if (unread) parts.push(`${unread} unread`)
+  return parts.join(', ')
+}
 
 function workspaceInitial(workspace: string): string {
   return (workspaceLabel(workspace).trim()[0] || '·').toUpperCase()
@@ -2341,7 +2351,7 @@ async function confirmDeleteChat(chatId: string) {
 .project-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 6px;
   flex-shrink: 0;
 }
 
@@ -2356,7 +2366,9 @@ async function confirmDeleteChat(chatId: string) {
   padding: 6px 10px;
   border-radius: 7px;
   font-size: var(--text-base);
-  color: var(--fg2);
+  /* The project is the group heading: full-strength text. Its chats sit
+     beneath in the muted register, so the two levels never look alike. */
+  color: var(--fg);
   font-weight: 600;
   min-height: var(--touch);
 }
@@ -2393,35 +2405,39 @@ async function confirmDeleteChat(chatId: string) {
   background: var(--bg3);
 }
 
-.project-header.is-system {
-  opacity: 0.85;
-}
 .project-header.is-system .project-name {
-  font-weight: 500;
   text-transform: none;
   letter-spacing: 0;
-  color: var(--fg2);
 }
 .project-header.is-system:hover .project-name { color: var(--fg); }
 
+/* Auto-managed marker: a muted word, not a boxed uppercase chip. */
 .system-chip {
-  display: inline-flex;
-  align-items: center;
-  height: 14px;
-  padding: 0 5px;
   margin-left: 6px;
-  border-radius: var(--radius-xs);
-  background: var(--bg3);
-  color: var(--fg2);
-  font-size: calc(9px * var(--font-scale));
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  vertical-align: baseline;
+}
+
+.project-count {
+  margin-left: 8px;
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.project-count--needs {
+  color: var(--accent);
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  vertical-align: middle;
 }
 
 .project-icon {
-  font-size: calc(10px * var(--font-scale));
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  color: var(--fg3);
   width: var(--touch);
   height: var(--touch);
   margin: -6px 0 -6px -10px;
@@ -2434,6 +2450,16 @@ async function confirmDeleteChat(chatId: string) {
   user-select: none;
 }
 .project-icon:hover { color: var(--fg); }
+.project-chevron { transition: transform 120ms var(--ease); }
+.project-chevron.open { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .project-chevron { transition: none; } }
+
+/* A project's chats hang off a thin guide under its chevron, with their
+   titles aligned to the project name, so membership reads at a glance. */
+.chat-list {
+  margin: 2px 0 2px 21px;
+  border-left: 1px solid var(--border);
+}
 
 .project-name {
   flex: 1;
@@ -2532,7 +2558,8 @@ async function confirmDeleteChat(chatId: string) {
   align-items: center;
   gap: 6px;
   min-height: var(--touch);
-  padding: 0 4px 0 30px;
+  padding: 0 4px 0 22px;
+  margin-left: 4px;
   border-radius: 7px;
   cursor: pointer;
   font-size: var(--text-base);
@@ -2546,7 +2573,7 @@ async function confirmDeleteChat(chatId: string) {
    Indent is on padding rather than margin so the hover/active background
    still spans the full sidebar width. */
 .chat-item.subagent-item {
-  padding-left: 44px;
+  padding-left: 38px;
   text-decoration: none;
   color: var(--fg2);
 }
@@ -2676,9 +2703,11 @@ async function confirmDeleteChat(chatId: string) {
   white-space: nowrap;
 }
 
+/* Unread is full-strength text plus the row's dot, not bold: bold chat
+   titles read as a second level of headings next to the projects. */
 .chat-title--unread {
   color: var(--fg);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .workspace-name {

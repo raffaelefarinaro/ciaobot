@@ -1298,7 +1298,7 @@
               <span class="transcribe-spinner"></span>
             </span>
             <span class="composer-spacer"></span>
-            <kbd v-if="inputText.trim()" class="composer-kbd" aria-hidden="true">{{ sendChordLabel }}</kbd>
+            <span v-if="inputText.trim()" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
             <!-- While streaming: empty composer → stop; any draft → queue. -->
             <button
               class="send-btn"
@@ -6652,11 +6652,32 @@ details[open] > .activity-summary::before {
 .composer-spacer { flex: 1; }
 
 .composer-kbd {
+  margin-right: 6px;
   flex: none;
-  margin-right: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
+}
+/* A real keycap: readable glyphs at body size, bordered, so the chord is
+   legible next to the send button rather than a faint mono smudge. */
+.composer-kbd kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--bg-elev);
+  color: var(--fg2);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1;
 }
 
 .composer-model {

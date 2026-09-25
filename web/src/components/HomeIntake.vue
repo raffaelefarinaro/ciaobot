@@ -65,7 +65,7 @@
         </div>
 
         <span class="home-intake-spacer" />
-        <kbd v-if="prompt.trim()" class="home-intake-kbd" aria-hidden="true">{{ sendChord }}</kbd>
+        <span v-if="prompt.trim()" class="home-intake-kbd" aria-hidden="true"><kbd>{{ sendChord }}</kbd> send</span>
         <!-- Keeps "New" as its accessible name: the control still opens the
              shared project picker first, with or without a prompt. -->
         <button
@@ -405,10 +405,32 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
 }
 
 .home-intake-kbd {
+  margin-right: 4px;
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
+}
+/* A real keycap: readable glyphs at body size, bordered, so the chord is
+   legible next to the send button rather than a faint mono smudge. */
+.home-intake-kbd kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--bg-elev);
+  color: var(--fg2);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1;
 }
 
 .home-intake-new {
