@@ -159,7 +159,7 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
 
 /* The expanded sidebar carries the product mark, so on a pane wide enough for
    a real title the header drops its centred wordmark. A view with no title of
-   its own (Today, Settings, Automations, Memory) shows its page tag as that
+   its own (Home, Settings, Automations, Memory) shows its page tag as that
    title, on the left, where every other page's title sits - not as a pill in
    the middle of the header. */
 @container chat-pane (min-width: 600px) {

@@ -47,7 +47,7 @@
           />
           <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-            <PaneHeader page-tag="Today" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="home-boot-body">
               <!-- Skeleton of the home screen this will become (lane header
                    with the face+status row inside it, housekeeping tile, chat
@@ -80,7 +80,7 @@
                homepage behind it after closing a chat would just duplicate the
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-            <PaneHeader page-tag="Today" @open-sidebar="sidebarCollapsed = false">
+            <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false">
               <template v-if="!isMobile" #actions>
                 <HostStatusPill />
               </template>
@@ -181,7 +181,7 @@
         />
         <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-          <PaneHeader page-tag="Today" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
           <div class="home-boot-body">
             <!-- Same skeleton as the split-view copy above; only one is ever
                  mounted, so the two must stay identical. -->
@@ -212,7 +212,7 @@
              homepage behind it after closing a chat would just duplicate the
              same list. Hide the empty-state whenever the mobile sidebar is open. -->
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-          <PaneHeader page-tag="Today" @open-sidebar="sidebarCollapsed = false">
+          <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false">
             <template v-if="!isMobile" #actions>
               <HostStatusPill />
             </template>

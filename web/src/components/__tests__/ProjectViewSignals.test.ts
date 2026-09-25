@@ -299,7 +299,7 @@ describe('ProjectView layout', () => {
     expect(rows['Working']).toBe('1')
   })
 
-  it('gives each chat row a status line from the same signals as Today', async () => {
+  it('gives each chat row a status line from the same signals as Home', async () => {
     const store = seed()
     store.projectStreaming = { 'chat-read': true }
     const wrapper = await mountView()

@@ -76,7 +76,7 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
-  it('shows the workspace attention count on the Today item', async () => {
+  it('shows the workspace attention count on the Home item', async () => {
     const store = useProjectStore()
     store.chats[0].last_activity_at = '2026-08-12T10:00:00Z'
     store.chats[0].last_read_at = '2026-08-12T09:00:00Z'
@@ -96,7 +96,7 @@ describe('ProjectSidebar chat actions', () => {
     const chatsLink = wrapper.get('a[href="/"]')
     // A subtle number from a data attribute, not a dot or a pill.
     expect(chatsLink.attributes('data-count')).toBe('1')
-    expect(chatsLink.attributes('aria-label')).toBe('Today — 1 chat needs attention')
+    expect(chatsLink.attributes('aria-label')).toBe('Home — 1 chat needs attention')
 
     wrapper.unmount()
   })

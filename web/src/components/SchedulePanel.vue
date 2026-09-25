@@ -1842,7 +1842,7 @@ function closeSchedule() {
 /* ── Overview ─────────────────────────────────────────────────────
    Sections with a plain heading over hairline rows: title and a plain
    cadence/delivery sub-line on the left, the next run on the right - the same
-   row language as Today's "Continue where you left off". */
+   row language as Home's "Continue where you left off". */
 .overview-body .page-main {
   display: flex;
   flex-direction: column;

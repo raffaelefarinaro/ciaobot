@@ -119,9 +119,9 @@
               'nav-item--active': mode === 'chat' || mode === 'project',
               'nav-item--working': isAnyChatWorking
             }"
-            title="Today"
+            title="Home"
             :data-count="todayCount || undefined"
-            :aria-label="todayCount > 0 ? `Today — ${todayCount} chat${todayCount === 1 ? '' : 's'} need${todayCount === 1 ? 's' : ''} attention` : (isAnyChatWorking ? 'Today (assistant is working)' : 'Today')"
+            :aria-label="todayCount > 0 ? `Home — ${todayCount} chat${todayCount === 1 ? '' : 's'} need${todayCount === 1 ? 's' : ''} attention` : (isAnyChatWorking ? 'Home (assistant is working)' : 'Home')"
           >
             <span class="nav-item-icon" aria-hidden="true">
               <!-- Stacked message lines: sharper, more "log-window" than a speech bubble -->
@@ -134,7 +134,7 @@
               </svg>
 
             </span>
-            <span class="nav-item-label" aria-hidden="true">Today</span>
+            <span class="nav-item-label" aria-hidden="true">Home</span>
           </router-link>
           <router-link
             to="/schedules"
@@ -2195,7 +2195,7 @@ async function confirmDeleteChat(chatId: string) {
 
 /* Subtle section counts: plain numerals on the right of the row, drawn from
    a data attribute so they stay out of the link's text (its aria-label
-   carries the full sentence). Needs-you on Today uses the accent colour;
+   carries the full sentence). Needs-you on Home uses the accent colour;
    everything else stays muted. */
 .nav-item[data-count]::after,
 .nav-item[data-note]::after {

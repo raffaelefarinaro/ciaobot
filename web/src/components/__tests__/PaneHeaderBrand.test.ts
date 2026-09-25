@@ -182,7 +182,7 @@ describe('page tag per view', () => {
     vi.restoreAllMocks()
   })
 
-  it('tags the home screen "Today" and gives it no separate title', async () => {
+  it('tags the home screen "Home" and gives it no separate title', async () => {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [{ path: '/', component: EmptyStub }],
@@ -218,7 +218,7 @@ describe('page tag per view', () => {
     await flushPromises()
     await nextTick()
 
-    expect(seen).toEqual([{ pageTag: 'Today', brand: true }])
+    expect(seen).toEqual([{ pageTag: 'Home', brand: true }])
     wrapper.unmount()
   })
 })

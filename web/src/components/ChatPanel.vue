@@ -1192,7 +1192,7 @@
       <template v-else>
         <!-- The command surface: staged attachments, the prompt, then one bar
              with the model, attach, dictation and the forward action. Same
-             shape as Today's composer so the two read as one control. -->
+             shape as Home's composer so the two read as one control. -->
         <div class="composer-surface">
           <!-- Staged attachments. Images, chat comments and file comments share one
                lifecycle (staged here, sent with the next message, cleared on send),
@@ -1256,7 +1256,7 @@
           ></textarea>
           <div class="input-actions composer-bar">
             <!-- The model picker's trigger lives in the composer, where the next
-                 message is written, as on Today. The selector itself (thinking
+                 message is written, as on Home. The selector itself (thinking
                  levels, Option+M) is unchanged; it opens upward from here. -->
             <div class="model-picker-wrap composer-model" ref="modelPickerRef">
               <button
@@ -3179,7 +3179,7 @@ const inputPlaceholder = computed(() => {
   if (store.isStreaming) return 'Reply — it is queued until Ciao finishes'
   return 'Reply to Ciao'
 })
-// Same send chord as Today's composer; bare Enter stays a newline.
+// Same send chord as Home's composer; bare Enter stays a newline.
 const sendChordLabel = isApplePlatform() ? '⌘↩' : 'Ctrl+↩'
 
 
@@ -5258,12 +5258,12 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   /* The column already carries the page gutter; the transcript only keeps
-     breathing room above and below. The scroll box reaches 14px past the
+     breathing room above and below. The scroll box reaches 22px past the
      column on each side and pads it back, so the text stays aligned while
      focus rings and a selected message's lifted card are not clipped by the
      horizontal overflow guard below. */
-  margin-inline: -14px;
-  padding: 28px 18px 24px;
+  margin-inline: -22px;
+  padding: 28px 26px 24px;
   min-height: 0;
   position: relative;
 }
@@ -5599,15 +5599,21 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
 /* Replies are plain prose, so a selected one gets a surface to lift. The
    negative margin keeps the text from moving. */
 .message-wrap--selected.assistant .message-row {
-  margin: -10px -12px;
-  padding: 10px 12px;
-  border-radius: 12px;
+  margin: -16px -18px;
+  padding: 16px 18px;
+  border-radius: 14px;
   background: var(--bg2);
   box-shadow: 0 0 0 1px var(--border-strong), 0 16px 40px rgb(0 0 0 / 28%);
 }
+/* Buttons start at the card's edge, a clear step below it; the turn
+   details line up with the reply text inside the card. */
 .message-wrap--selected.assistant .message-actions {
   position: relative;
-  margin-top: 14px;
+  margin: 26px 0 0 -18px;
+  row-gap: 10px;
+}
+.message-wrap--selected.assistant .message-actions .message-meta {
+  padding-left: 18px;
 }
 /* On a selected message the actions are the point: real buttons on a
    surface, full-strength text, not the quiet text links of the row. */
@@ -6687,7 +6693,7 @@ details[open] > .activity-summary::before {
   line-height: 1.45;
 }
 
-/* The command surface (same shape as Today's HomeIntake): attachments,
+/* The command surface (same shape as Home's HomeIntake): attachments,
    the prompt, then one bar of controls under a hairline. */
 .composer-surface {
   flex: 1;
@@ -7692,11 +7698,11 @@ details[open] > .activity-summary::before {
   display: flex;
   min-height: 0;
   overflow: hidden;
-  /* Its clip box reaches 14px past the text column (padded back), so the
+  /* Its clip box reaches 22px past the text column (padded back), so the
      transcript's widened scroll box - and a selected message's lifted card -
      fit inside it instead of being cut at the column edge. */
-  margin-inline: -14px;
-  padding-inline: 14px;
+  margin-inline: -22px;
+  padding-inline: 22px;
 }
 .chat-with-sidebar > .messages {
   flex: 1;

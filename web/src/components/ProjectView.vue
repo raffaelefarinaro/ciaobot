@@ -129,7 +129,7 @@
                   <ChatSignals :chat-id="chat.chat_id" density="row" :hue="workspaceHue" />
                   <span v-if="chat.local === false" class="remote-chip">remote</span>
                 </span>
-                <!-- Same status grammar as Today's rows, read from the same
+                <!-- Same status grammar as Home's rows, read from the same
                      signals, so a chat never reads differently in two places. -->
                 <span class="chat-row-sub" :class="{ 'chat-row-sub--needs': store.chatNeedsInput(chat.chat_id) }">{{ chatStatusPhrase(chat) }}</span>
               </span>
@@ -451,7 +451,7 @@ function chatActivity(chat: ChatInfo): string {
   return chatActivityTimestamp(chat)
 }
 
-// Today's tier order: a question or permission beats work in flight, which
+// Home's tier order: a question or permission beats work in flight, which
 // beats an unread reply.
 function chatStatusPhrase(chat: ChatInfo): string {
   if (store.chatNeedsInput(chat.chat_id)) return 'waiting for you'
@@ -973,7 +973,7 @@ watch(() => props.projectId, async () => {
 }
 
 /* Sections, not cards: a 16px heading with its one action on the right, then
-   hairline rows. Same vocabulary as Today and the other aligned pages. */
+   hairline rows. Same vocabulary as Home and the other aligned pages. */
 .project-section + .project-section {
   margin-top: 36px;
 }
@@ -1093,7 +1093,7 @@ watch(() => props.projectId, async () => {
   border-top: 1px solid var(--border);
 }
 
-/* Today's row: title over a status sub-line, time on the right. */
+/* Home's row: title over a status sub-line, time on the right. */
 .chat-row {
   display: flex;
   align-items: center;
