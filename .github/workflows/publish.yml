@@ -27,7 +27,6 @@ jobs:
           test -n "$newest"
           sudo xcode-select -s "$newest"
           xcodebuild -version
-          swiftc --version
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
       - name: Install desktop dependencies

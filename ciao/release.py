@@ -511,10 +511,10 @@ def _run_checks(root: Path, *, skip_frontend: bool) -> list[str]:
                     "cd desktop && npm run build",
                 ),
                 # `npm run build` above is only the desktop *frontend* (vite).
-                # Nothing else here compiles Rust, the Swift sidecar, or
-                # assembles the .app, so without this a desktop change reaches
-                # CI unverified — and a build-desktop failure there fails the
-                # release after the tag already exists.
+                # Nothing else here compiles Rust or assembles the .app, so
+                # without this a desktop change reaches CI unverified — and a
+                # build-desktop failure there fails the release after the tag
+                # already exists.
                 (
                     ["./scripts/check-desktop.sh"],
                     root,

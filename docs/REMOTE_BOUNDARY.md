@@ -53,7 +53,7 @@ events copied absolute paths into page JavaScript.
 - `mypy ciao` and `mypy --no-incremental ciao` pass (142 source files).
 - `rustup run 1.90.0 rustfmt --edition 2024 --check src/lib.rs src/capture.rs` and
   `cargo test --lib` pass (57 Rust tests). `./scripts/check-desktop.sh --fast`
-  passes its sidecar, format, clippy, and test gates.
+  passes its format, clippy, and test gates.
 
 ## Remaining work (not claimed resolved)
 

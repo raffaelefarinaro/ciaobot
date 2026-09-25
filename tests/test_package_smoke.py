@@ -113,14 +113,14 @@ def test_release_wheel_bundles_every_ciao_module(tmp_path: Path) -> None:
         if path.name != "__init__.py"
         and not any(part.startswith("_") for part in path.relative_to(ciao_root).parts)
     }
-    assert "ciao/native_sidecar.py" in expected_modules
+    assert "ciao/insights.py" in expected_modules
 
     with zipfile.ZipFile(wheels[-1]) as wheel:
         bundled = set(wheel.namelist())
 
     missing = sorted(expected_modules - bundled)
     assert not missing, f"wheel is missing modules: {missing}"
-    assert "ciao/native_sidecar.py" in bundled
+    assert "ciao/insights.py" in bundled
 
 
 @pytest.mark.skipif(importlib.util.find_spec("build") is None, reason="build is required")

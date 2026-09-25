@@ -14,7 +14,7 @@ Two things make this heavy but faithful: the embedded runtime is rebuilt (it pip
 ## Before you start
 
 - The checkout must be on `develop`, clean, and up to date.
-- Toolchain must be present: Node 22 (`.nvmrc`), cargo (Rust 1.90.0 via rustup), `swiftc`, `uv`, and a repo `.venv`. If any is missing, install it before building.
+- Toolchain must be present: Node 22 (`.nvmrc`), cargo (Rust 1.90.0 via rustup), `uv`, and a repo `.venv`. If any is missing, install it before building.
 - The installed app currently lives at `~/Applications/Ciaobot.app` (`CIAO_APP_DIR`); the workspace and password live in the existing `com.ciao.server.plist` and are preserved.
 - Ask the user before installing if the build or install steps would overwrite something unexpected (e.g. a release install they still need), and always confirm the swap because it replaces the running app.
 
@@ -32,7 +32,7 @@ git status --short   # must be clean, or stop and ask
 Verify the toolchain:
 
 ```bash
-command -v cargo swiftc uv node
+command -v cargo uv node
 nvm use               # reads .nvmrc -> Node 22
 ls .venv/bin/python
 ```
@@ -82,7 +82,6 @@ npm run tauri build -- --bundles app --config '{"bundle":{"createUpdaterArtifact
 ```
 
 - `--bundles app` skips the DMG; disabling updater artifacts drops the signing requirement (a dev machine has no `TAURI_SIGNING_PRIVATE_KEY`).
-- The `pretauri` hook compiles the Swift native sidecar automatically.
 - Native-arch only (like `ciao/desktop_build.py`'s dev builds), matching the aarch64-only release target.
 - Verify the result: `desktop/src-tauri/target/release/bundle/macos/Ciaobot.app` must exist with a runnable `Contents/MacOS/ciaobot-desktop` and `Contents/Resources/ciao-runtime/bin/ciao`.
 
