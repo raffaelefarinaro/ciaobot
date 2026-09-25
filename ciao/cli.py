@@ -3687,6 +3687,19 @@ def _register_launchd_service(workspace: Path) -> Path:
         raise RuntimeError(
             f"{root} is not a Ciaobot workspace (no .env). Run `ciao setup --workspace {root}` first."
         )
+    if _looks_like_source_checkout(root):
+        raise RuntimeError(
+            f"{root} looks like the Ciaobot source checkout, not a workspace. "
+            "Pass your workspace folder to --workspace."
+        )
+    from ciao.setup_status import tcc_protected_location
+
+    protected = tcc_protected_location(root)
+    if protected:
+        raise RuntimeError(
+            f"{root} is inside ~/{protected}, which launchd cannot read. "
+            "Move the workspace out of Desktop/Documents/Downloads first."
+        )
 
     from dotenv import dotenv_values
 

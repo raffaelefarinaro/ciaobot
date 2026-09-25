@@ -374,6 +374,72 @@ def test_service_start_rejects_directory_without_env(
     assert calls == []
 
 
+def test_service_start_rejects_source_checkout(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from ciao import cli
+
+    workspace = tmp_path / "ws"
+    (workspace / "ciao").mkdir(parents=True)
+    (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    (workspace / "pyproject.toml").write_text("", encoding="utf-8")
+    (workspace / "ciao" / "__init__.py").write_text("", encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        macos_service,
+        "_launchctl",
+        lambda args, runner=None: calls.append(list(args))
+        or subprocess.CompletedProcess(["launchctl", *args], 0, "", ""),
+    )
+
+    rc = cli.main(
+        ["service", "start", "--workspace", str(workspace), "--json"]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    plist_path = (
+        Path(os.environ["CIAO_LAUNCH_AGENTS_DIR"]) / "com.ciao.server.plist"
+    )
+    assert rc == 1
+    assert "source checkout" in payload["message"]
+    assert not plist_path.exists()
+    assert calls == []
+
+
+def test_service_start_rejects_tcc_protected_workspace(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from ciao import cli
+
+    home = tmp_path
+    workspace = home / "Documents" / "ws"
+    workspace.mkdir(parents=True)
+    (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        macos_service,
+        "_launchctl",
+        lambda args, runner=None: calls.append(list(args))
+        or subprocess.CompletedProcess(["launchctl", *args], 0, "", ""),
+    )
+
+    rc = cli.main(
+        ["service", "start", "--workspace", str(workspace), "--json"]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    plist_path = (
+        Path(os.environ["CIAO_LAUNCH_AGENTS_DIR"]) / "com.ciao.server.plist"
+    )
+    assert rc == 1
+    assert "Documents" in payload["message"]
+    assert not plist_path.exists()
+    assert calls == []
+
+
 def test_service_start_register_honors_runtime_root_and_engine_path(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
