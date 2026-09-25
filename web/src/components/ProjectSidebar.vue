@@ -5,6 +5,32 @@
         <template v-if="!collapsed">
           <span class="sidebar-brand-mark" aria-hidden="true"><CiaoMark /></span>
           <BrandMark class="sidebar-brand" />
+          <!-- Back / forward through in-app navigation, just before the
+               collapse control; a hairline keeps the three from reading as
+               one group. Collapsed, the pair drops below the header. -->
+          <div class="sidebar-history" role="group" aria-label="History">
+        <button
+          type="button"
+          class="history-btn touch-hit"
+          :disabled="!historyNav.canBack.value"
+          :title="historyNav.canBack.value ? `${historyNav.backLabel.value}${historyChordHint('[')}` : undefined"
+          :aria-label="historyNav.backLabel.value"
+          @click="historyNav.back"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6" /></svg>
+        </button>
+        <button
+          type="button"
+          class="history-btn touch-hit"
+          :disabled="!historyNav.canForward.value"
+          :title="historyNav.canForward.value ? `${historyNav.forwardLabel.value}${historyChordHint(']')}` : undefined"
+          :aria-label="historyNav.forwardLabel.value"
+          @click="historyNav.forward"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
+        </button>
+      </div>
+          <span class="history-divider" aria-hidden="true"></span>
         </template>
       <button
         class="toggle-btn touch-hit"
@@ -214,6 +240,30 @@
         </nav>
 
       </template>
+    </div>
+    <div v-if="collapsed" class="sidebar-history-rail">
+      <div class="sidebar-history sidebar-history--rail" role="group" aria-label="History">
+        <button
+          type="button"
+          class="history-btn touch-hit"
+          :disabled="!historyNav.canBack.value"
+          :title="historyNav.canBack.value ? `${historyNav.backLabel.value}${historyChordHint('[')}` : undefined"
+          :aria-label="historyNav.backLabel.value"
+          @click="historyNav.back"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6" /></svg>
+        </button>
+        <button
+          type="button"
+          class="history-btn touch-hit"
+          :disabled="!historyNav.canForward.value"
+          :title="historyNav.canForward.value ? `${historyNav.forwardLabel.value}${historyChordHint(']')}` : undefined"
+          :aria-label="historyNav.forwardLabel.value"
+          @click="historyNav.forward"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
+        </button>
+      </div>
     </div>
 
     <!-- No section title here: the nav pill above already names this view.
@@ -667,7 +717,7 @@
                   <div
                     class="chat-item"
                     :class="{
-                      active: chat.chat_id === store.activeChatId && !activeSubagentId,
+                      active: chat.chat_id === store.activeChatId,
                       remote: chat.local === false,
                       dragging: dragChatId === chat.chat_id,
                     }"
@@ -683,15 +733,6 @@
                     :aria-disabled="chat.local === false"
                     :title="chat.local === false ? 'This chat lives on another instance' : 'Drag to move to another project'"
                   >
-                    <button
-                      v-if="subagentsFor(chat.chat_id).length"
-                      type="button"
-                      class="subagent-toggle"
-                      :aria-expanded="subagentsExpanded(chat.chat_id)"
-                      :aria-label="(subagentsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subagents for ' + chat.title"
-                      :title="(subagentsExpanded(chat.chat_id) ? 'Collapse' : 'Expand') + ' subagents'"
-                      @click.stop="toggleSubagents(chat.chat_id)"
-                    >{{ subagentsExpanded(chat.chat_id) ? '▾' : '▸' }}</button>
                     <span
                       v-if="chat.title_status === 'pending'"
                       class="title-shimmer"
@@ -788,35 +829,6 @@
                   </DropdownMenuPortal>
                 </DropdownMenuRoot>
 
-                <!-- Subagents this chat has working right now. They are not
-                     chats: the row opens a read-only view of the agent's own
-                     transcript, and it disappears when the agent finishes
-                     (the completed transcript stays in the chat's Activity
-                     trace). -->
-                <template v-if="subagentsExpanded(chat.chat_id)">
-                  <RouterLink
-                    v-for="sub in subagentsFor(chat.chat_id)"
-                    :key="sub.agent_id"
-                    class="chat-item subagent-item"
-                    :class="{ active: isActiveSubagent(chat.chat_id, sub.agent_id) }"
-                    :to="subagentPath(chat.chat_id, sub.agent_id)"
-                    :title="subagentLabel(sub) + ' — running in ' + chat.title"
-                    @click="emit('chat-selected')"
-                  >
-                    <span class="subagent-mark" aria-hidden="true">&#8627;</span>
-                    <span class="chat-title">{{ subagentLabel(sub) }}</span>
-                    <span
-                      v-if="sub.subagent_type"
-                      class="subagent-chip"
-                    >{{ sub.subagent_type }}</span>
-                    <span
-                      class="subagent-spinner"
-                      role="img"
-                      aria-label="Working"
-                      title="Working"
-                    />
-                  </RouterLink>
-                </template>
               </template>
             </div>
           </div>
@@ -888,6 +900,7 @@ import {
 } from 'reka-ui'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
+import { useHistoryNav } from '../composables/useHistoryNav'
 import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
 import { useHousekeepingStore } from '../stores/housekeeping'
@@ -948,6 +961,13 @@ onBeforeUnmount(() => {
 
 const route = useRoute()
 const router = useRouter()
+const historyNav = useHistoryNav()
+// The desktop app binds ⌘[ / ⌘] (ChatLayout); in a browser the browser's own
+// back/forward chord does the same thing.
+function historyChordHint(key: '[' | ']'): string {
+  if (isDesktopApp() || isApplePlatform()) return ` (⌘${key})`
+  return key === '[' ? ' (Alt+←)' : ' (Alt+→)'
+}
 
 /** Kind labels are lower-case nouns ("memory", "skill"); the sidebar lists
  * them as sentence-case names like every other filter row. */
@@ -1203,8 +1223,7 @@ function missedCountFor(workspace: string): number {
   ).length
 }
 
-import type { ChatInfo, ProjectInfo, RunningSubagent, Schedule } from '../lib/types'
-import { bareAgentId, shortAgentId, subagentPath } from '../lib/subagentIds'
+import type { ChatInfo, ProjectInfo, Schedule } from '../lib/types'
 function openProject(projectId: string) {
   router.push(`/project/${projectId}`)
   emit('chat-selected') // collapse sidebar on mobile
@@ -1215,7 +1234,6 @@ const expandedProjects = reactive(new Set<string>())
 // working, so hiding it behind a closed disclosure would defeat the point.
 // Deliberately component-local, matching the project disclosure state above
 // and the chat context disclosure in ChatPanel.
-const collapsedSubagentParents = reactive(new Set<string>())
 const projectMenu = ref<string | null>(null)
 const chatMenu = ref<string | null>(null)
 type MenuReference = HTMLElement | { getBoundingClientRect: () => DOMRect }
@@ -1378,13 +1396,6 @@ watch(() => store.workspaceProjects, (projects) => {
   }
 }, { immediate: true })
 
-// Opening a subagent view must never leave its row hidden behind a collapsed
-// disclosure — the route is reachable from the chat's Activity trace too.
-watch(() => route.params.agentId, (agentId) => {
-  const chatId = route.params.chatId as string
-  if (agentId && chatId) collapsedSubagentParents.delete(chatId)
-}, { immediate: true })
-
 watch(() => store.activeChatId, (chatId) => {
   if (!chatId) return
   const project = store.projectFor(chatId)
@@ -1491,35 +1502,6 @@ function toggleProject(id: string) {
   } else {
     expandedProjects.add(id)
   }
-}
-
-function subagentsFor(chatId: string): RunningSubagent[] {
-  return store.runningSubagentsFor(chatId)
-}
-
-function subagentsExpanded(chatId: string): boolean {
-  return !collapsedSubagentParents.has(chatId)
-}
-
-function toggleSubagents(chatId: string) {
-  if (subagentsExpanded(chatId)) {
-    collapsedSubagentParents.add(chatId)
-  } else {
-    collapsedSubagentParents.delete(chatId)
-  }
-}
-
-const activeSubagentId = computed(() => (route.params.agentId as string) || '')
-
-function isActiveSubagent(chatId: string, agentId: string): boolean {
-  return (
-    route.params.chatId === chatId
-    && activeSubagentId.value === bareAgentId(agentId)
-  )
-}
-
-function subagentLabel(sub: RunningSubagent): string {
-  return (sub.description || '').trim() || shortAgentId(sub.agent_id)
 }
 
 // `window.prompt` cannot be used here: wry's WKUIDelegate never shows it, so in
@@ -1800,6 +1782,47 @@ async function confirmDeleteChat(chatId: string) {
   color: var(--fg3);
   font: 700 10px/1 var(--font-mono);
 }
+
+.sidebar-history {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+.sidebar-history-rail {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0;
+}
+.sidebar-history--rail {
+  flex-direction: column;
+  margin-left: 0;
+  gap: 2px;
+}
+.history-btn {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg2);
+  cursor: pointer;
+  transition: color 120ms var(--ease);
+}
+.history-btn:hover:not(:disabled) { color: var(--fg); }
+.history-btn:disabled { color: var(--fg3); opacity: 0.45; cursor: default; }
+.history-btn:disabled::before { background: transparent; }
+.history-divider {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
+  background: var(--border);
+}
+/* The history pair already pushes the row's trailing group right. */
+.sidebar-header--expanded .sidebar-history + .history-divider + .toggle-btn { margin-left: 0; }
 
 .toggle-btn {
   background: none;
@@ -2464,85 +2487,6 @@ async function confirmDeleteChat(chatId: string) {
   color: var(--fg2);
   overflow: hidden;
   white-space: nowrap;
-}
-
-/* A subagent row is not a chat: it opens a read-only transcript, so it drops
-   the actions menu and shifts right to read as owned by the chat above it.
-   Indent is on padding rather than margin so the hover/active background
-   still spans the full sidebar width. */
-.chat-item.subagent-item {
-  padding-left: 38px;
-  text-decoration: none;
-  color: var(--fg2);
-}
-
-.subagent-mark {
-  flex: none;
-  color: var(--fg3, var(--fg2));
-  font-size: var(--text-sm, 0.85em);
-  line-height: 1;
-}
-
-/* The agent's type ("Explore", "general-purpose"), when the CLI recorded one.
-   Muted: the description is the row's subject, this only qualifies it. */
-.subagent-chip {
-  flex: none;
-  padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  color: var(--fg3, var(--fg2));
-  font-size: var(--text-xs, 0.75em);
-  line-height: 16px;
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Live signal. Same pulse as the in-chat SubagentPanel spinner so the two
-   surfaces read as one state. */
-.subagent-spinner {
-  flex: none;
-  margin-left: auto;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent2, var(--accent));
-  animation: subagent-row-pulse 1.1s ease-in-out infinite;
-}
-
-@keyframes subagent-row-pulse {
-  0%, 100% { transform: scale(0.55); opacity: 0.35; }
-  50% { transform: scale(1); opacity: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .subagent-spinner { animation-duration: 2.2s; }
-}
-
-/* A chat's subagent disclosure sits inside the chat row. It uses the same
-   44px hit area as the project disclosure while keeping the glyph compact, so
-   collapsing a busy chat does not make the child rows unreachable on a
-   touch device. */
-.subagent-toggle {
-  flex: 0 0 var(--touch);
-  width: var(--touch);
-  height: var(--touch);
-  margin: 0 0 0 -14px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--fg3, var(--fg2));
-  cursor: pointer;
-  font: inherit;
-  line-height: 1;
-  text-align: center;
-}
-.subagent-toggle:hover { color: var(--fg); }
-.subagent-toggle:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-  border-radius: var(--radius-sm);
 }
 
 /* Interval-automation marker on a chat row. Accent while the cadence is live,

@@ -23,12 +23,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from ciao.config import CiaoConfig
+from ciao.context.entity_tagger import context_entities
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
     ChatContext,
     ImageAttachment,
     ModelCapabilityQuestionEvent,
+    ContextEntitiesEvent,
     ModelChangedEvent,
     PermissionRequestEvent,
     ResultEvent,
@@ -440,6 +442,13 @@ class ChatStreaming:
                                 payload["sent_at"] = sent_at_rec
                             if duration_ms is not None:
                                 payload["duration_ms"] = duration_ms
+                        if (
+                            payload
+                            and isinstance(event, ContextEntitiesEvent)
+                            and run_turn_index is not None
+                        ):
+                            # Ties the matches to their user bubble.
+                            payload["turn_index"] = run_turn_index
                         if payload:
                             stream.publish(payload)
                             if isinstance(event, ResultEvent):
@@ -1062,6 +1071,13 @@ class ChatStreaming:
             images=images,
             resume_session=chat.session_id or None,
             unattended=unattended,
+        )
+        # Which notes this message was matched to, for the Work details rail.
+        # Always sent (an empty list included) so the rail drops the previous
+        # message's matches instead of showing them against this one.
+        yield ContextEntitiesEvent(
+            type="context_entities",
+            entities=context_entities(request.prompt),
         )
 
         response_text = ""

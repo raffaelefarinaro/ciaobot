@@ -5520,6 +5520,15 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
 
+      case 'context_entities': {
+        // The user bubble is already there (user_echo precedes the turn).
+        const target = event.turn_index != null
+          ? msgs.find(m => m.role === 'user' && m.turn_index === event.turn_index)
+          : [...msgs].reverse().find(m => m.role === 'user')
+        if (target) target.context_entities = Array.isArray(event.entities) ? event.entities : []
+        break
+      }
+
       case 'model_changed': {
         const chat = chats.value.find(c => c.chat_id === chatId)
         if (chat && event.model) {

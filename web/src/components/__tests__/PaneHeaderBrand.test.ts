@@ -105,7 +105,7 @@ describe('PaneHeader brand and page tag', () => {
     expect(wrapper.get('.pane-title').text().length).toBeGreaterThan(200)
     const columns = Array.from(wrapper.get('.pane-header').element.children)
       .map(el => el.className)
-      .filter(name => !name.includes('header-hamburger'))
+      .filter(name => !name.includes('header-lead'))
     expect(columns).toEqual(['header-title', 'header-center header-center--with-title', 'header-trail'])
     expect(wrapper.findAll('.brand')).toHaveLength(1)
     expect(wrapper.get('.header-center').find('.brand').exists()).toBe(true)

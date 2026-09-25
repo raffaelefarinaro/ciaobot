@@ -280,3 +280,41 @@ def test_a_different_journal_for_the_same_chat_is_still_recovered(
         if m["role"] == "user"
     ]
     assert prompts == ["first", "second"]
+
+
+def test_current_messages_carries_the_turns_matched_notes(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    ctx = _ctx("chat-11")
+
+    class _Req:
+        model = "m"
+        display_prompt = (
+            "[CIAO_CONTEXT_BEGIN]\n"
+            "today=2026-09-25\n"
+            "mentioned_entities:\n"
+            "- [InfoSign](./work/Companies/InfoSign.md) (company)\n"
+            "[CIAO_CONTEXT_END]\n\n"
+            "Reply to InfoSign"
+        )
+        prompt = display_prompt
+        mode = ""
+        images: list = []
+        resume_session = ""
+
+    store.record_turn(
+        _Req(),  # type: ignore[arg-type]
+        ctx=ctx,
+        response_text="done",
+        effective_model="m",
+        session_id="sid",
+        usage={},
+        quota={},
+        input_kind="text",
+        provider="claude",
+    )
+
+    user = store.current_messages(ctx, "claude")[0]
+    assert user["content"] == "Reply to InfoSign"
+    assert user["context_entities"] == [
+        {"name": "InfoSign", "path": "work/Companies/InfoSign.md", "category": "company"},
+    ]

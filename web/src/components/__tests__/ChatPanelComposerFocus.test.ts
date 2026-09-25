@@ -206,8 +206,8 @@ describe('composer focus on opening a chat', () => {
     await wrapper.get('.chat-empty-knowledge').trigger('click')
     await nextTick()
     const inspector = wrapper.get('.chat-work-inspector')
-    expect(inspector.get('#work-panel-context').text()).toContain('Injected with each message')
-    expect(inspector.get('#work-panel-context').text()).toContain('Memory notes are retrieved only when relevant')
+    expect(inspector.get('#work-panel-context').text()).toContain('Agent context')
+    expect(inspector.get('#work-panel-context').text()).toContain('Project brief')
     wrapper.unmount()
   })
   test('keeps a persisted unsent draft instead of offering starter prompts', async () => {
@@ -237,7 +237,7 @@ describe('composer focus on opening a chat', () => {
     contextTab.focus()
     await tabs[0].trigger('keydown', { key: 'ArrowRight' })
     await nextTick()
-    expect(inspector.get('#work-panel-activity').text()).toContain('Current state')
+    expect(inspector.get('#work-panel-activity').text()).toContain('Subagents running')
     expect(document.activeElement).toBe(inspector.findAll('[role="tab"]')[1].element)
 
     await inspector.findAll('[role="tab"]')[1].trigger('keydown', { key: 'End' })

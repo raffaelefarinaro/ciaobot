@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ciao.context.entity_tagger import find_entities, format_entities, get_index
+from ciao.context.entity_tagger import (
+    VaultEntity,
+    context_entities,
+    find_entities,
+    format_entities,
+    get_index,
+)
 
 
 def _write_index(tmp_path: Path, body: str) -> Path:
@@ -193,3 +199,31 @@ def test_format_entities_quotes_a_path_with_spaces(tmp_path: Path) -> None:
     )
     rendered = format_entities(find_entities("call Mo Salah", tmp_path))
     assert "[Mo Salah](<./People/Mo Salah.md>)" in rendered
+
+
+def test_context_entities_reads_back_what_format_entities_wrote() -> None:
+    entities = [
+        VaultEntity(name="Michael Stanton", category="People", path="work/People/Michael Stanton", aliases=()),
+        VaultEntity(name="InfoSign", category="Companies", path="work/Companies/InfoSign", aliases=()),
+    ]
+    prompt = (
+        "[CIAO_CONTEXT_BEGIN]\n"
+        '[Chat ID: "c1"]\n'
+        "today=2026-09-25\n"
+        f"{format_entities(entities)}\n"
+        "[CIAO_CONTEXT_END]\n\n"
+        "Reply to Michael at InfoSign"
+    )
+    assert context_entities(prompt) == [
+        {"name": "Michael Stanton", "path": "work/People/Michael Stanton.md", "category": "people"},
+        {"name": "InfoSign", "path": "work/Companies/InfoSign.md", "category": "companie"},
+    ]
+
+
+def test_context_entities_is_empty_without_a_capsule_or_matches() -> None:
+    assert context_entities("plain message") == []
+    assert context_entities(
+        "[CIAO_CONTEXT_BEGIN]\ntoday=2026-09-25\n[CIAO_CONTEXT_END]\n\nhi"
+    ) == []
+    # The hint grammar only counts inside the leading capsule.
+    assert context_entities("mentioned_entities:\n- [A](./a.md) (person)") == []

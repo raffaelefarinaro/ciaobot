@@ -191,7 +191,7 @@ describe('ChatPanel aligned layout', () => {
     wrapper.unmount()
   })
 
-  it('shows Work details as a rail on a wide pane and toggles it from the header', async () => {
+  it('shows Work details as a rail on a wide pane, hidden from its heading and reopened from the info tab', async () => {
     // ChatPanel observes more than one element; report a wide pane to all.
     const observers: Array<() => void> = []
     vi.stubGlobal('ResizeObserver', class {
@@ -208,20 +208,29 @@ describe('ChatPanel aligned layout', () => {
     await nextTick()
 
     const rail = wrapper.get('#chat-work-rail')
-    expect(rail.text()).toContain('injected with each message')
-    // The project is named in the rail, so the header no longer repeats it.
-    expect(rail.find('.chat-rail-project').exists()).toBe(true)
+    // The project is named in the rail's Agent context, so the header no
+    // longer repeats it.
+    expect(rail.findComponent({ name: 'AgentContextSection' }).exists()).toBe(true)
     expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)
-    expect(rail.text()).toContain('Launch planning for the public beta.')
-    expect(rail.text()).toContain('Current state')
+    expect(rail.text()).not.toContain('Current state')
 
-    const toggle = wrapper.get('.work-inspector-trigger')
-    expect(toggle.attributes('aria-expanded')).toBe('true')
-    expect(toggle.attributes('aria-controls')).toBe('chat-work-rail')
-    await toggle.trigger('click')
+    // The header carries Archive only, as a labelled primary button; the
+    // toggle lives with Work details.
+    const actions = wrapper.get('.pane-header .header-actions')
+    expect(actions.findAll('button').map(b => b.text())).toEqual(['Archive'])
+    expect(actions.get('button').classes()).toContain('btn-primary')
+    expect(wrapper.find('.work-inspector-trigger').exists()).toBe(false)
+    const hide = rail.get('.chat-rail-hide')
+    expect(hide.attributes('aria-controls')).toBe('chat-work-rail')
+    await hide.trigger('click')
     expect(wrapper.find('#chat-work-rail').exists()).toBe(false)
     // With the rail hidden the header names the project again.
     expect(wrapper.find('.breadcrumb-scope').exists()).toBe(true)
+
+    const reopen = wrapper.get('.work-inspector-trigger')
+    expect(reopen.attributes('aria-controls')).toBe('chat-work-rail')
+    await reopen.trigger('click')
+    expect(wrapper.find('#chat-work-rail').exists()).toBe(true)
     // The drawer is the narrow-pane form; it does not open on a wide pane.
     expect(wrapper.find('.chat-work-inspector').exists()).toBe(false)
     wrapper.unmount()

@@ -6,17 +6,31 @@
       'pane-header--tag-title': !hasTitle && !!pageTag,
     }"
   >
-    <button class="header-hamburger touch-hit" aria-label="Open sidebar" @click="$emit('open-sidebar')">
-      <!-- 18px at stroke 2, the size and weight every other icon in this header
-           and in the sidebar uses (see the .btn-icon block below). At 22px and
-           stroke 2.2 it read as a heavier glyph than the actions it shares the
-           row with. -->
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-        <line x1="4" y1="7" x2="20" y2="7"/>
-        <line x1="4" y1="12" x2="20" y2="12"/>
-        <line x1="4" y1="17" x2="20" y2="17"/>
-      </svg>
-    </button>
+    <!-- Phones only (the sidebar is a drawer there, so its back / forward
+         pair is out of sight): the menu button, then Back when there is
+         in-app history to go back to. -->
+    <div class="header-lead">
+      <button class="header-hamburger touch-hit" aria-label="Open sidebar" @click="$emit('open-sidebar')">
+        <!-- 18px at stroke 2, the size and weight every other icon in this header
+             and in the sidebar uses (see the .btn-icon block below). At 22px and
+             stroke 2.2 it read as a heavier glyph than the actions it shares the
+             row with. -->
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <line x1="4" y1="7" x2="20" y2="7"/>
+          <line x1="4" y1="12" x2="20" y2="12"/>
+          <line x1="4" y1="17" x2="20" y2="17"/>
+        </svg>
+      </button>
+      <button
+        v-if="historyNav.canBack.value"
+        class="header-back touch-hit"
+        :aria-label="historyNav.backLabel.value"
+        :title="historyNav.backLabel.value"
+        @click="historyNav.back"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+    </div>
     <div v-if="hasTitle" class="header-title">
       <slot name="title" />
     </div>
@@ -42,6 +56,7 @@
 <script setup lang="ts">
 import { computed, useSlots } from 'vue'
 import BrandMark from './BrandMark.vue'
+import { useHistoryNav } from '../composables/useHistoryNav'
 
 const props = withDefaults(defineProps<{
   activeBgAgents?: number
@@ -53,6 +68,7 @@ const props = withDefaults(defineProps<{
 defineEmits<{ 'open-sidebar': [] }>()
 
 const slots = useSlots()
+const historyNav = useHistoryNav()
 // An empty `.header-title` would still claim the left grid track and, on mobile,
 // a second row. Views with no title of their own (home, settings, the automations
 // list) drop the element and let the page tag name them instead.
@@ -234,6 +250,8 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   gap: var(--space-1);
   flex-shrink: 0;
 }
+.header-lead { display: none; }
+.header-back,
 .header-hamburger {
   display: none;
   align-items: center;
@@ -247,6 +265,7 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   border-radius: var(--radius-sm);
   flex-shrink: 0;
 }
+.header-back:active,
 .header-hamburger:active { transform: scale(0.96); }
 /* Unify header icon sizes with the sidebar (30px containers, 18px content).
    ::before keeps hover/active fills at the 30px visual footprint. */
@@ -329,12 +348,16 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
     padding-right: calc(var(--space-3) + var(--safe-right));
     row-gap: var(--space-1);
   }
-  .header-hamburger {
+  .header-lead {
     display: flex;
+    align-items: center;
+    gap: var(--space-2);
     grid-column: 1;
     grid-row: 1;
     justify-self: start;
   }
+  .header-back,
+  .header-hamburger { display: flex; }
   .header-center {
     grid-column: 2;
     grid-row: 1;

@@ -318,3 +318,39 @@ def format_entities(entities: list[VaultEntity]) -> str:
             f"- [{entity.name}]({target}) ({entity.category.rstrip('s').lower()})"
         )
     return "mentioned_entities:\n" + "\n".join(lines)
+
+
+# The capsule's hint block, as format_entities writes it:
+#   mentioned_entities:
+#   - [Name](./path.md) (category)
+# The destination may be angle-bracketed when the path has spaces.
+_CAPSULE_RE = re.compile(r"(?s)\[CIAO_CONTEXT_BEGIN\]\n(.*?)\n\[CIAO_CONTEXT_END\]")
+_HINT_LINE_RE = re.compile(r"^- \[(?P<name>[^\]]*)\]\((?:<(?P<angled>[^>]*)>|(?P<bare>[^)\s]*))\) \((?P<category>[^)]*)\)$")
+
+
+def context_entities(prompt: str) -> list[dict[str, str]]:
+    """The entity hints a stored prompt's leading capsule carried.
+
+    The inverse of :func:`format_entities`, read back out of the envelope that
+    stays in the stored turn, so the chat can show which notes each message
+    was matched to without a second record of them. Paths come back
+    vault-root-relative without the ``./`` prefix. Empty when the prompt has
+    no capsule or the capsule matched nothing.
+    """
+    capsule = _CAPSULE_RE.match(prompt or "")
+    if not capsule:
+        return []
+    lines = capsule.group(1).splitlines()
+    try:
+        start = lines.index("mentioned_entities:") + 1
+    except ValueError:
+        return []
+    found: list[dict[str, str]] = []
+    for line in lines[start:]:
+        match = _HINT_LINE_RE.match(line.strip())
+        if not match:
+            break
+        dest = match.group("angled") if match.group("angled") is not None else match.group("bare")
+        path = dest.replace("%3C", "<").replace("%3E", ">").removeprefix("./")
+        found.append({"name": match.group("name"), "path": path, "category": match.group("category")})
+    return found

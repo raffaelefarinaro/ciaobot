@@ -358,6 +358,10 @@
             </li>
             <li><kbd>1–9</kbd><span>Switch to the first through ninth workspace in the sidebar</span></li>
             <template v-if="showAllShortcuts">
+              <li v-if="inDesktopApp">
+                <kbd>&#8984;[</kbd>
+                <span>Go back (&#8984;] goes forward)</span>
+              </li>
               <li>
                 <kbd v-if="inDesktopApp">&#8984;&#9003;</kbd>
                 <kbd v-else>{{ webChord('\u232B', 'Backspace') }}</kbd>

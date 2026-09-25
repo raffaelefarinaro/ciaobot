@@ -54,6 +54,7 @@
 </template>
 
 <script setup lang="ts">
+import { fetchWorkspaceGuide, tokensFor } from '../lib/workspaceGuide'
 import { computed, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -84,7 +85,6 @@ function serializeLen(entries: string[]): number {
   if (!entries.length) return 0
   return entries.join('\n§\n').length + 1 // +1 trailing \n mirrors python serialize_entries
 }
-function tokensFor(chars: number): number { return Math.ceil(chars / 4) || 0 }
 function expirationInfo(entry: string): { expired: boolean; malformed: boolean } {
   const hasPrefix = /\[expires\s*:/i.test(entry)
   const m = entry.match(/\[expires:\s*([^\]]*)\]/i)
@@ -141,66 +141,13 @@ async function fetchGuide(): Promise<void> {
   const seq = ++guideFetchSeq
   guideLoading.value = true
   guideError.value = ''
-  // AGENTS.md is the workspace guide; CLAUDE.md is only what an install that
-  // has not run the guide migration still has (ciao/workspace_guide.py), so it
-  // is tried second and will stop appearing once installs have upgraded.
-  //
-  // After the workspace re-root migration each guide lives under
-  // `<workspace>/AGENTS.md`, so a bare basename would let /api/workspace-file's
-  // fuzzy lookup silently resolve to the lexicographically-first workspace's
-  // guide. Try the workspace-qualified path first (retained for Open/Discuss/
-  // pin), then fall back to the bare basename for installs that have not
-  // re-rooted (guide still at the install root).
-  const ws = store.activeWorkspace
-  const qualified = [`${ws}/AGENTS.md`, `${ws}/CLAUDE.md`]
-  const bare = ['AGENTS.md', 'CLAUDE.md']
-  let lastError = ''
-  let qualifiedErrored = false
-  for (const candidate of [...qualified, ...bare]) {
-    // A bare basename can fuzzy-resolve to a DIFFERENT workspace's guide
-    // (routes_helpers._resolve_workspace_path anchors relative paths to the
-    // primary root), so it is only a legitimate fallback when every
-    // workspace-qualified probe genuinely 404'd. If one of them errored we
-    // do not know whether this workspace has a guide, and showing another
-    // one's — with Open/Discuss/pin acting on it — is worse than showing
-    // nothing.
-    if (bare.includes(candidate) && qualifiedErrored) break
-    try {
-      // `exact=1`: no fuzzy fallback. Without it, asking for
-      // `<ws>/AGENTS.md` on a workspace that has no guide yet
-      // filename-matches another workspace's and returns it with a 200,
-      // so the card would render someone else's guide as this one's.
-      const resp = await fetch(`/api/workspace-file?exact=1&path=${encodeURIComponent(candidate)}`, { credentials: 'same-origin' })
-      if (seq !== guideFetchSeq) return
-      if (resp.status === 404) continue
-      // Keep trying the remaining candidates rather than giving up on the
-      // first non-404: a transient 503 (the engine restarting) on the first
-      // name used to blank the card even though a later name would have
-      // served it. The error is only shown if every candidate fails.
-      if (!resp.ok) {
-        lastError = `Failed to load ${candidate} (HTTP ${resp.status})`
-        if (qualified.includes(candidate)) qualifiedErrored = true
-        continue
-      }
-      const text = await resp.text()
-      if (seq !== guideFetchSeq) return
-      guideContent.value = text
-      guideResolvedPath.value = candidate
-      guideError.value = ''
-      guideLoading.value = false
-      return
-    } catch (e) {
-      if (qualified.includes(candidate)) qualifiedErrored = true
-      if (seq === guideFetchSeq) { guideError.value = e instanceof Error ? e.message : String(e) }
-    }
-  }
+  const guide = await fetchWorkspaceGuide(store.activeWorkspace)
   if (seq !== guideFetchSeq) return
-  guideContent.value = ''
-  // Every candidate 404'd (no guide yet) or errored. Surface the last real
-  // error if there was one; a plain "not found" stays silent, because a
-  // workspace with no guide yet is an ordinary state, not a failure.
-  if (!guideError.value) guideError.value = lastError
-  guideResolvedPath.value = ''
+  guideContent.value = guide.content
+  guideResolvedPath.value = guide.path
+  // A plain "not found" stays silent: a workspace with no guide yet is an
+  // ordinary state, not a failure.
+  guideError.value = guide.error
   guideLoading.value = false
 }
 watch(() => store.activeWorkspace, () => { void fetchGuide() }, { immediate: true })

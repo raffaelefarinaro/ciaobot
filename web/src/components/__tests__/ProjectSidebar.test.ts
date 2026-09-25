@@ -226,59 +226,9 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
-  it('collapses and expands a chat\'s running-subagent group', async () => {
-    const store = useProjectStore()
-    store.runningSubagents = {
-      [chatId]: [
-        { agent_id: 'a1b2c3d4', description: 'Sweep the callers', subagent_type: 'Explore', status: 'running' },
-      ],
-    }
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [
-        { path: '/', component: { template: '<div />' } },
-        { path: '/chat/:chatId/subagent/:agentId', component: { template: '<div />' } },
-      ],
-    })
-    await router.push('/')
-    await router.isReady()
-
-    const wrapper = mount(ProjectSidebar, {
-      attachTo: document.body,
-      props: { collapsed: false, mode: 'chat' },
-      global: {
-        plugins: [router],
-      },
-    })
-
-    // The chat row plus its one subagent row (which reuses .chat-item).
-    expect(wrapper.findAll('.chat-item')).toHaveLength(2)
-    const row = wrapper.get('.subagent-item')
-    expect(row.text()).toContain('Sweep the callers')
-    expect(row.attributes('href')).toBe(`/chat/${chatId}/subagent/a1b2c3d4`)
-
-    const toggle = wrapper.get('[aria-label="Collapse subagents for Copy me"]')
-    expect(toggle.attributes('aria-expanded')).toBe('true')
-
-    await toggle.trigger('click')
-
-    expect(wrapper.findAll('.chat-item')).toHaveLength(1)
-    expect(toggle.attributes('aria-expanded')).toBe('false')
-
-    // Opening the subagent's own view must reopen the group it lives in.
-    await router.push(`/chat/${chatId}/subagent/a1b2c3d4`)
-    await nextTick()
-
-    expect(wrapper.findAll('.chat-item')).toHaveLength(2)
-    expect(toggle.attributes('aria-expanded')).toBe('true')
-    expect(wrapper.get('.subagent-item').classes()).toContain('active')
-
-    wrapper.unmount()
-  })
-
-  // A finished subagent is not archived and leaves no row behind: the poll
-  // stops listing it, and the transcript stays in the chat's Activity trace.
-  it('drops a subagent row once the agent stops running', async () => {
+  // Running subagents are listed in the chat's Work details rail, not as
+  // rows under the chat in this tree.
+  it('does not list running subagents as rows in the tree', async () => {
     const store = useProjectStore()
     store.runningSubagents = {
       [chatId]: [{ agent_id: 'a1b2c3d4', description: 'Sweep the callers', status: 'running' }],
@@ -290,7 +240,7 @@ describe('ProjectSidebar chat actions', () => {
         { path: '/chat/:chatId/subagent/:agentId', component: { template: '<div />' } },
       ],
     })
-    await router.push('/')
+    await router.push(`/chat/${chatId}/subagent/a1b2c3d4`)
     await router.isReady()
 
     const wrapper = mount(ProjectSidebar, {
@@ -298,13 +248,9 @@ describe('ProjectSidebar chat actions', () => {
       props: { collapsed: false, mode: 'chat' },
       global: { plugins: [router] },
     })
-    expect(wrapper.findAll('.subagent-item')).toHaveLength(1)
-
-    store.runningSubagents = {}
-    await nextTick()
-
-    expect(wrapper.findAll('.subagent-item')).toHaveLength(0)
     expect(wrapper.findAll('.chat-item')).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('Sweep the callers')
+    expect(wrapper.find('.subagent-toggle').exists()).toBe(false)
 
     wrapper.unmount()
   })

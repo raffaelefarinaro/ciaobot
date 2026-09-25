@@ -226,6 +226,18 @@ class SystemStatusEvent(StreamEvent):
 
 
 @dataclass(slots=True)
+class ContextEntitiesEvent(StreamEvent):
+    """The vault notes this turn's prompt was matched to (entity hints).
+
+    Emitted once, right after the turn's context capsule is built, so the chat
+    can list them for the message that is running; history reads the same list
+    back out of the stored capsule.
+    """
+
+    entities: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ModelChangedEvent(StreamEvent):
     """Emitted when the chat's model is switched during a capability fallback.
 

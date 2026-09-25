@@ -1504,8 +1504,7 @@ defineExpose({ isBusyAuthoring })
 .pfp-body {
   flex: 1;
   overflow: auto;
-  /* A document, not a code pane: generous margins and, for prose, a
-     readable measure (see .pfp-md). */
+  /* A document, not a code pane: generous, equal margins on both sides. */
   padding: 28px 32px 48px;
   min-width: 0;
   display: flex;
@@ -1654,7 +1653,6 @@ defineExpose({ isBusyAuthoring })
 
 .pfp-meta {
   width: 100%;
-  max-width: 680px;
   margin: 0 0 20px;
   padding: 0 0 16px;
   border-bottom: 1px solid var(--border);
@@ -1713,9 +1711,12 @@ defineExpose({ isBusyAuthoring })
 .pfp-md {
   font-size: var(--text-base);
   line-height: 1.65;
-  /* Readable measure for prose; code and tables keep their own scroll. */
+  /* Fills the tile: the tile's own width is the measure (it is a docked
+     side panel the user sizes by dragging), and the body's padding keeps
+     equal margins left and right. A fixed cap left a dead strip on the right
+     whenever the tile was wider than the cap. Code and tables keep their own
+     scroll. */
   width: 100%;
-  max-width: 680px;
 }
 /* Same violet as chat comments: one colour means "you left a note here". */
 .pfp-md :deep(.comment-highlight) {

@@ -30,11 +30,10 @@
               <line x1="6" y1="6" x2="18" y2="18"/>
             </svg>
           </button>
-          <div class="header-breadcrumb" ref="breadcrumbRef">
+          <div class="header-breadcrumb">
             <!-- The project is the context envelope for this chat. The workspace
                  is already the sidebar's scope, so repeating it here would add
-                 a second, competing location cue. The control opens the durable
-                 project context and its file list without leaving the chat. -->
+                 a second, competing location cue. It links to the project page. -->
             <input
               v-if="editingTitle"
               class="title-input"
@@ -46,112 +45,29 @@
               autofocus
             />
             <span v-else class="pane-title chat-title" @dblclick.stop="startEditTitle" @click.stop>{{ chat.title }}</span>
-            <div v-if="projectCrumb && !railShown" class="breadcrumb-scope">
-              <button
-                type="button"
+            <div v-if="projectCrumb && !railShown && project" class="breadcrumb-scope">
+              <router-link
+                :to="`/project/${project.project_id}`"
                 class="breadcrumb-project"
-                :class="{ active: showContext }"
-                :aria-expanded="showContext"
-                aria-controls="project-context-popup"
-                aria-label="Open project context"
-                @click.stop="toggleContext"
-              >
-                <span>{{ projectCrumb }}</span>
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" aria-hidden="true">
-                  <polyline points="6 9 12 15 18 9" />
-                </svg>
-              </button>
-            </div>
-            <!-- Project context popup -->
-            <div
-              v-if="showContext"
-              id="project-context-popup"
-              class="context-popup"
-              role="dialog"
-              aria-label="Project context"
-              @click.stop
-              @keydown.esc.stop.prevent="closeContext"
-            >
-              <div class="context-popup-body">
-                <div class="context-popup-section context-popup-baseline">
-                  <span class="label-eyebrow">Baseline sent with this chat</span>
-                  <p>Project context and the workspace guide are included with every message. Memory notes are retrieved only when relevant.</p>
-                </div>
-                <div v-if="project?.vault_doc_path" class="context-popup-section">
-                  <span class="label-eyebrow">Project</span>
-                  <p v-if="project.context" class="context-description">{{ project.context }}</p>
-                  <button
-                    class="btn-small"
-                    @click="fileViewer.open(project.vault_doc_path)"
-                  >Open canonical doc</button>
-                </div>
-                <div v-else class="context-popup-section">
-                  <span class="label-eyebrow">Project context</span>
-                  <textarea
-                    v-model="contextDraft"
-                    class="context-textarea"
-                    :placeholder="project ? 'No project context configured.' : ''"
-                    :disabled="!project"
-                    rows="3"
-                  ></textarea>
-                  <div class="context-edit-actions">
-                    <span v-if="contextStatus" class="context-status" :class="contextStatus">{{ contextStatusLabel }}</span>
-                    <button
-                      class="btn-small"
-                      :disabled="!contextDirty || contextSaving"
-                      @click="saveContext"
-                    >{{ contextSaving ? 'Saving...' : 'Save' }}</button>
-                  </div>
-                </div>
-                <div v-if="showProjectFiles" class="context-popup-section">
-                  <span class="label-eyebrow">Files ({{ projectFiles.length }})</span>
-                  <div v-if="projectFilesLoading" class="context-files-status">Loading…</div>
-                  <div v-else-if="projectFilesError" class="context-files-status error">{{ projectFilesError }}</div>
-                  <div v-else-if="!projectFiles.length" class="context-files-status">// no files</div>
-                  <div v-else class="context-files-list">
-                    <div
-                      v-for="f in projectFiles"
-                      :key="f.path"
-                      class="context-file-row"
-                      @click="openProjectFile(f)"
-                      :title="f.path"
-                    >
-                      <AppIcon class="context-file-icon" :name="f.kind === 'image' ? 'image' : f.kind === 'markdown' ? 'doc' : 'file'" />
-                      <span class="context-file-name">{{ f.path }}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
+                :title="`Open ${projectCrumb}`"
+              ><span>{{ projectCrumb }}</span></router-link>
             </div>
           </div>
         </div>
       </template>
       <template #actions>
+        <!-- Archive is the header's one action, so it gets words, not just a
+             glyph. Work details moved out: it opens from the info tab at the
+             top right of the chat body and hides from its own heading. -->
         <button
-          ref="inspectorTrigger"
           type="button"
-          class="btn-icon work-inspector-trigger"
-          :class="{ active: isWidePane ? railShown : inspectorOpen }"
-          :aria-expanded="isWidePane ? railShown : inspectorOpen"
-          :aria-controls="isWidePane ? 'chat-work-rail' : 'chat-work-inspector'"
-          aria-label="Work details"
-          title="Work details"
-          @click="toggleWorkDetails"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="miter" aria-hidden="true">
-            <rect x="4" y="3" width="16" height="18" rx="2" />
-            <line x1="9" y1="8" x2="15" y2="8" />
-            <line x1="9" y1="12" x2="15" y2="12" />
-            <line x1="9" y1="16" x2="13" y2="16" />
-          </svg>
-        </button>
-        <button
-          class="archive-btn touch-hit"
-          @click="doArchive"
+          class="btn-primary chat-archive-btn"
           :title="ARCHIVE_ACTION_LABEL"
           :aria-label="ARCHIVE_ACTION_LABEL"
+          @click="doArchive"
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+          <span>Archive</span>
         </button>
       </template>
     </PaneHeader>
@@ -161,6 +77,21 @@
          share the header title's left edge; the rail on the right is Work
          details, shown in place on panes wide enough for it. -->
     <div class="chat-body">
+    <!-- Work details, when it is not showing: the rail is hidden on a wide
+         pane, or the pane is too narrow for one and it opens as a drawer. -->
+    <button
+      v-if="!railShown"
+      ref="inspectorTrigger"
+      type="button"
+      class="btn-icon work-inspector-trigger"
+      :aria-expanded="isWidePane ? false : inspectorOpen"
+      :aria-controls="isWidePane ? 'chat-work-rail' : 'chat-work-inspector'"
+      aria-label="Show work details"
+      title="Show work details"
+      @click="toggleWorkDetails"
+    >
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+    </button>
     <div class="chat-column">
     <!-- Context bar: what this chat is attached to — its automations. These
          were sibling banner blocks, each a v-for, so a chat with all of them
@@ -766,20 +697,12 @@
         role="tabpanel"
         aria-labelledby="work-tab-context"
       >
-        <span class="chat-work-label">Injected with each message</span>
-        <h3>{{ project?.name || 'General' }}</h3>
-        <p class="chat-work-copy">{{ project?.context || 'No project context has been added yet.' }}</p>
-        <p class="chat-work-note">The workspace guide is loaded alongside this project context. Memory notes are retrieved only when relevant to the request.</p>
-        <div class="chat-work-facts">
-          <div>
-            <span>Automations</span>
-            <strong>{{ contextRelations.length }}</strong>
-          </div>
-          <div>
-            <span>Background agents</span>
-            <strong>{{ store.activeBackgroundAgents }}</strong>
-          </div>
-        </div>
+        <AgentContextSection
+          :project="project"
+          :entities="lastUserEntities"
+          :context-pct="contextPct"
+          @open-file="openInspectorFile"
+        />
       </section>
 
       <section
@@ -789,14 +712,20 @@
         role="tabpanel"
         aria-labelledby="work-tab-activity"
       >
-        <span class="chat-work-label">Run state</span>
-        <div class="chat-work-status-list">
-          <div v-for="row in inspectorStatusRows" :key="row.label" class="chat-work-status-row">
-            <span>{{ row.label }}</span>
-            <strong :class="row.tone">{{ row.value }}</strong>
-          </div>
+        <span class="chat-work-label">Subagents running</span>
+        <div v-if="runningSubagents.length" class="rail-list">
+          <router-link
+            v-for="sub in runningSubagents"
+            :key="sub.agent_id"
+            :to="subagentPath(chat.chat_id, sub.agent_id)"
+            class="rail-item"
+          >
+            <span class="chat-rail-subagent">{{ subagentLabel(sub) }}</span>
+            <small v-if="sub.subagent_type">{{ sub.subagent_type }}</small>
+          </router-link>
         </div>
-        <p class="chat-work-note">Tool steps stay collapsed in the transcript. This panel is the quick status surface; open Activity on a turn for its full sequence.</p>
+        <p v-else class="chat-work-note">None right now.</p>
+        <p class="chat-work-note">Tool steps stay collapsed in the transcript; open Activity on a turn for its full sequence.</p>
       </section>
 
       <section
@@ -1348,55 +1277,50 @@
       class="chat-rail"
       aria-labelledby="chat-work-rail-title"
     >
-      <h2 id="chat-work-rail-title" class="rail-title">Work details</h2>
-      <!-- The project lives here on wide panes; the header only names it when
-           this rail is hidden. -->
-      <section class="rail-section" aria-labelledby="chat-rail-context">
-        <p id="chat-rail-context" class="rail-label">Project · injected with each message</p>
-        <p class="chat-rail-context" tabindex="-1" ref="railContextEl">
-          <button
-            type="button"
-            class="chat-rail-project"
-            :aria-expanded="showContext"
-            aria-controls="project-context-popup"
-            @click.stop="toggleContext"
-          >{{ project?.name || 'General' }}</button><template v-if="project?.context"> — {{ project.context }}</template><template v-else> — No project context has been added yet.</template>
-        </p>
-        <p class="rail-note">The workspace guide rides along too. Memory notes are retrieved only when relevant.</p>
-        <div v-if="contextUsedLabel" class="rail-kvs chat-rail-context-used">
-          <div class="rail-kv"><span>Context used</span><strong>{{ contextUsedLabel }}</strong></div>
-        </div>
-      </section>
-      <section class="rail-section" aria-labelledby="chat-rail-run">
-        <p id="chat-rail-run" class="rail-label">Run state</p>
-        <div class="rail-kvs">
-          <div v-for="row in inspectorStatusRows" :key="row.label" class="rail-kv">
-            <span>{{ row.label }}</span>
-            <strong :class="{ 'rail-attention': row.tone === 'attention' || row.tone === 'working' }">{{ row.value }}</strong>
-          </div>
-        </div>
-      </section>
-      <!-- What this chat is attached to: each automation that runs here, with
-           its cadence and the same actions the context bar offers. -->
-      <section
-        v-for="s in chatSchedules"
-        :key="`rail-sched-${s.schedule_id}`"
-        class="rail-section chat-rail-schedule"
-        :aria-label="`Automation: ${s.title || 'Automation'}`"
-      >
-        <p class="rail-label">Automation</p>
-        <router-link :to="`/schedules/${s.schedule_id}`" class="chat-rail-schedule-title">{{ s.title || 'Automation' }}</router-link>
-        <div class="rail-kvs">
-          <div class="rail-kv"><span>Repeats</span><strong>{{ capitalizeFirst(scheduleCadence(s)) }}</strong></div>
-          <div class="rail-kv">
-            <span>State</span>
-            <strong :class="{ 'rail-attention': s.last_status === 'busy' }">{{ s.enabled ? (s.last_status === 'busy' ? 'Waiting, chat busy' : 'Scheduled') : 'Paused' }}</strong>
-          </div>
-          <div v-if="s.enabled && scheduleCountdown(s)" class="rail-kv"><span>Next run</span><strong>{{ scheduleCountdown(s) }}</strong></div>
-        </div>
-        <div class="chat-rail-schedule-actions">
-          <button type="button" class="chat-rail-link" :disabled="scheduleRunningId === s.schedule_id" @click="runScheduleNow(s)">{{ scheduleRunningId === s.schedule_id ? 'Running…' : 'Run now' }}</button>
-          <button type="button" class="chat-rail-link" @click="toggleScheduleEnabled(s)">{{ s.enabled ? 'Pause' : 'Resume' }}</button>
+      <!-- Where this chat came from, above everything else: one line naming the
+           automation that runs here. Its cadence and controls live on the
+           automation's own page. -->
+      <p v-for="s in chatSchedules" :key="`rail-sched-${s.schedule_id}`" class="chat-rail-origin">
+        <AppIcon class="chat-rail-origin-icon" name="clock" :size="16" />
+        <span>This chat comes from the automation <router-link :to="`/schedules/${s.schedule_id}`">{{ s.title || 'Automation' }}</router-link>.</span>
+      </p>
+      <div class="chat-rail-head">
+        <h2 id="chat-work-rail-title" class="rail-title">Work details</h2>
+        <button
+          ref="railHideButton"
+          type="button"
+          class="btn-icon chat-rail-hide active"
+          aria-expanded="true"
+          aria-controls="chat-work-rail"
+          aria-label="Hide work details"
+          title="Hide work details"
+          @click="hideRail"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+        </button>
+      </div>
+      <!-- What the agent is given. The project also lives here on wide panes;
+           the header only names it when this rail is hidden. -->
+      <div ref="railContextEl" class="chat-rail-agent-context" tabindex="-1">
+        <AgentContextSection
+          :project="project"
+          :entities="lastUserEntities"
+          :context-pct="contextPct"
+          @open-file="openInspectorFile"
+        />
+      </div>
+      <section v-if="runningSubagents.length" class="rail-section" aria-labelledby="chat-rail-subagents">
+        <p id="chat-rail-subagents" class="rail-label">Subagents running</p>
+        <div class="rail-list">
+          <router-link
+            v-for="sub in runningSubagents"
+            :key="sub.agent_id"
+            :to="subagentPath(chat.chat_id, sub.agent_id)"
+            class="rail-item"
+          >
+            <span class="chat-rail-subagent">{{ subagentLabel(sub) }}</span>
+            <small v-if="sub.subagent_type">{{ sub.subagent_type }}</small>
+          </router-link>
         </div>
       </section>
       <section v-if="toolUsage.skills.length || toolUsage.mcp.length" class="rail-section" aria-labelledby="chat-rail-tools">
@@ -1470,12 +1394,13 @@ import VoiceRecorder from './VoiceRecorder.vue'
 // them, parsed server-side from the session JSONL), so each panel anchors
 // under the turn that spawned its agents.
 import SubagentPanel from './SubagentPanel.vue'
+import AgentContextSection from './AgentContextSection.vue'
 import ChatTurnActivity from './ChatTurnActivity.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { recordSentPrompt } from '../lib/chatDrafts'
 import { useModalFocus } from '../composables/useModalFocus'
-import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, Schedule, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, RunningSubagent, Schedule, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -1883,10 +1808,6 @@ const chatSchedules = computed(() => {
 // push the transcript below the fold. Detail rows live behind the disclosure.
 const contextExpanded = ref(false)
 
-function capitalizeFirst(text: string): string {
-  return text ? text.charAt(0).toUpperCase() + text.slice(1) : text
-}
-
 interface ContextRelation {
   key: string
   label: string
@@ -2157,32 +2078,36 @@ const mentionedFiles = computed<string[]>(() => {
 })
 
 // How full the model's context window was at the end of the latest turn,
-// from the usage the provider reported. Empty when it reported none.
-const contextUsedLabel = computed(() => {
+// from the usage the provider reported (the last model call of that turn).
+// Providers report it as text ("13.2%"), so parseFloat, not Number. Null
+// when it reported none.
+const contextPct = computed<number | null>(() => {
   const items = renderItems.value
   for (let i = items.length - 1; i >= 0; i--) {
     const item = items[i]
     if (item.kind !== 'assistant' || !item.meta?.usage) continue
     const usage = item.meta.usage as Record<string, unknown>
-    const pct = Number(usage.context_pct ?? usage.contextPct)
-    if (Number.isFinite(pct) && pct > 0) return `${Math.round(pct)}%`
-    return ''
+    const pct = Number.parseFloat(String(usage.context_pct ?? usage.contextPct ?? ''))
+    return Number.isFinite(pct) && pct > 0 ? pct : null
   }
-  return ''
+  return null
 })
 
-const inspectorStatusRows = computed(() => {
-  const chatId = chat.value?.chat_id
-  const questions = chatId ? (store.activeQuestions[chatId]?.length ?? 0) : 0
-  const permissions = chatId ? (store.pendingPermissions[chatId]?.length ?? 0) : 0
-  const working = chatId ? store.isChatStreaming(chatId) : false
-  return [
-    { label: 'Current state', value: working ? 'Working' : 'Idle', tone: working ? 'working' : '' },
-    { label: 'Background agents', value: String(store.activeBackgroundAgents), tone: '' },
-    { label: 'Pending questions', value: String(questions), tone: questions ? 'attention' : '' },
-    { label: 'Waiting permissions', value: String(permissions), tone: permissions ? 'attention' : '' },
-  ]
+// The newest user message's entity matches: undefined before the first
+// message, [] when it matched nothing.
+const lastUserEntities = computed(() => {
+  const msgs = store.activeMessages
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'user') return msgs[i].context_entities ?? []
+  }
+  return undefined
 })
+
+const runningSubagents = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
+function subagentLabel(sub: RunningSubagent): string {
+  return (sub.description || '').trim() || shortAgentId(sub.agent_id)
+}
+
 const inspectorActive = computed(() => inspectorOpen.value)
 function openInspector() {
   inspectorTrigger.value?.focus()
@@ -2210,12 +2135,21 @@ onMounted(() => {
 })
 onBeforeUnmount(() => { panelObserver?.disconnect() })
 
+const railHideButton = ref<HTMLButtonElement | null>(null)
+// Focus follows the toggle: it lives in the rail while the rail shows and in
+// the chat body while it does not, so each click would otherwise drop focus
+// on a button that just unmounted.
 function toggleWorkDetails() {
   if (isWidePane.value) {
-    railOpen.value = !railOpen.value
+    railOpen.value = true
+    void nextTick(() => railHideButton.value?.focus())
     return
   }
   openInspector()
+}
+function hideRail() {
+  railOpen.value = false
+  void nextTick(() => inspectorTrigger.value?.focus())
 }
 
 function openProjectKnowledge() {
@@ -2318,74 +2252,6 @@ let messagesResizeObserver: ResizeObserver | null = null
 const showScrollBtn = computed(() => Boolean(messagesEl.value && store.activeMessages.length > 0 && !isNearBottom.value))
 const showModelPicker = ref(false)
 const modelPickerRef = ref<HTMLElement>()
-const showContext = ref(false)
-const contextDraft = ref('')
-const contextSaving = ref(false)
-const contextStatus = ref<'' | 'saved' | 'error'>('')
-const breadcrumbRef = ref<HTMLElement>()
-
-watch(
-  () => [project.value?.project_id, project.value?.context, showContext.value] as const,
-  ([_id, ctx, open]) => {
-    if (open) contextDraft.value = ctx || ''
-  },
-  { immediate: true }
-)
-
-const contextDirty = computed(() => (project.value?.context || '') !== contextDraft.value)
-const contextStatusLabel = computed(() => {
-  if (contextStatus.value === 'saved') return 'Saved'
-  if (contextStatus.value === 'error') return 'Error'
-  return ''
-})
-
-async function saveContext() {
-  if (!project.value || !contextDirty.value) return
-  contextSaving.value = true
-  contextStatus.value = ''
-  try {
-    await store.updateProject(project.value.project_id, { context: contextDraft.value })
-    contextStatus.value = 'saved'
-    setTimeout(() => { if (contextStatus.value === 'saved') contextStatus.value = '' }, 2000)
-  } catch {
-    contextStatus.value = 'error'
-  } finally {
-    contextSaving.value = false
-  }
-}
-
-function toggleContext() {
-  showContext.value = !showContext.value
-}
-
-function closeContext() {
-  showContext.value = false
-  const projectButton = breadcrumbRef.value
-    ?.querySelector<HTMLButtonElement>('.breadcrumb-project')
-  if (projectButton) projectButton.focus()
-  else void nextTick(() => {
-    breadcrumbRef.value
-      ?.querySelector<HTMLButtonElement>('.breadcrumb-project')
-      ?.focus()
-  })
-}
-
-// Close popup when clicking outside. Keep the listener for the whole open
-// state: a once-listener is consumed by the first click *inside* the popup,
-// which left a second outside click unable to close it.
-function onDocumentClick(e: MouseEvent) {
-  if (!showContext.value) return
-  const target = e.target as Node | null
-  if (target && breadcrumbRef.value && !breadcrumbRef.value.contains(target)) {
-    closeContext()
-  }
-}
-watch(showContext, (open) => {
-  if (open) window.addEventListener('click', onDocumentClick)
-  else window.removeEventListener('click', onDocumentClick)
-})
-onBeforeUnmount(() => window.removeEventListener('click', onDocumentClick))
-
 interface ContextProjectFile {
   path: string
   vault_path: string
@@ -2394,9 +2260,6 @@ interface ContextProjectFile {
   mtime: string
 }
 const projectFiles = ref<ContextProjectFile[]>([])
-const projectFilesLoading = ref(false)
-const projectFilesError = ref('')
-const showProjectFiles = computed(() => Boolean(project.value?.vault_folder))
 const mentionAgents = ref<MentionAgent[]>([])
 const mentionChats = computed<MentionChat[]>(() => {
   const activeProjects = new Map(store.projects.map(item => [item.project_id, item]))
@@ -2441,44 +2304,22 @@ function refreshComposerPickers(): void {
 async function loadProjectFiles() {
   if (!project.value || !project.value.vault_folder) {
     projectFiles.value = []
-    projectFilesError.value = ''
     return
   }
-  projectFilesLoading.value = true
-  projectFilesError.value = ''
   try {
     const resp = await fetch(`/api/projects/${project.value.project_id}/files`, {
       credentials: 'same-origin',
     })
-    if (resp.ok) {
-      projectFiles.value = await resp.json()
-    } else {
-      projectFiles.value = []
-      projectFilesError.value = `Couldn't load files (HTTP ${resp.status}).`
-    }
-  } catch (e) {
+    projectFiles.value = resp.ok ? await resp.json() : []
+  } catch {
     projectFiles.value = []
-    projectFilesError.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    projectFilesLoading.value = false
   }
 }
 
-function openProjectFile(f: ContextProjectFile): void {
-  const isDoc = f.kind === 'markdown' || f.kind === 'text' || /\.(pdf|pptx)$/i.test(f.vault_path)
-  if (f.kind === 'image') {
-    fileViewer.openImage(f.vault_path)
-  } else if (isDoc) {
-    fileViewer.open(f.vault_path)
-  } else {
-    const url = `/api/workspace-binary?path=${encodeURIComponent(f.vault_path)}`
-    window.open(url, '_blank')
-  }
-}
-
+// Feeds the @-mention picker's file list.
 watch(
-  () => [showContext.value, project.value?.project_id, project.value?.vault_folder] as const,
-  ([open]) => { if (open || project.value?.vault_folder) loadProjectFiles() },
+  () => [project.value?.project_id, project.value?.vault_folder] as const,
+  () => { if (project.value?.vault_folder) loadProjectFiles() },
   { immediate: true }
 )
 
@@ -4837,6 +4678,47 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   padding-inline: calc(var(--page-gutter) + var(--safe-left)) calc(var(--page-gutter) + var(--safe-right));
 }
 
+/* Top right of the chat body, where the rail's heading would be. */
+.chat-body { position: relative; }
+.work-inspector-trigger {
+  position: absolute;
+  top: 12px;
+  right: calc(var(--page-gutter) + var(--safe-right));
+  z-index: 2;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  color: var(--fg2);
+  min-width: 34px;
+  min-height: 34px;
+  padding: 7px;
+}
+@media (pointer: coarse) {
+  .work-inspector-trigger { min-width: var(--touch); min-height: var(--touch); }
+}
+.work-inspector-trigger:hover { color: var(--fg); border-color: var(--border-strong); }
+
+.chat-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: 0 0 10px;
+}
+.chat-rail-head .rail-title { margin-bottom: 0; }
+/* Same 34px box as the tab that reopens it, pulled into the heading's line
+   height so the row does not grow. */
+.chat-rail-hide {
+  min-width: 34px;
+  min-height: 34px;
+  margin: -7px -8px -7px 0;
+  padding: 7px;
+  color: var(--accent);
+}
+@media (pointer: coarse) {
+  .chat-rail-hide { min-width: var(--touch); min-height: var(--touch); margin-block: -12px; }
+}
+
 .chat-column {
   flex: 1;
   min-width: 0;
@@ -4854,55 +4736,28 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   font-size: var(--text-sm);
 }
 
-.chat-rail-context {
-  margin: 0;
-  color: var(--fg2);
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-
-.chat-rail-schedule-title {
-  display: inline-block;
-  margin: 0 0 6px;
-  color: var(--fg);
-  font-weight: 600;
-  text-decoration: none;
-}
-.chat-rail-schedule-title:hover { color: var(--accent); }
-.chat-rail-schedule-actions {
+.chat-rail-origin {
   display: flex;
-  gap: var(--space-4);
-  margin-top: 8px;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 0 0 18px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  color: var(--fg2);
+  line-height: 1.45;
 }
-.chat-rail-link {
-  min-height: 32px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--accent);
-  font: inherit;
-  font-size: var(--text-sm);
-  cursor: pointer;
-}
-.chat-rail-link:hover { text-decoration: underline; text-underline-offset: 3px; }
-.chat-rail-link:disabled { color: var(--fg3); cursor: default; text-decoration: none; }
-@media (pointer: coarse) { .chat-rail-link { min-height: var(--touch); } }
-
-.chat-rail-project {
-  display: inline;
-  padding: 0;
-  border: 0;
-  background: none;
+.chat-rail-origin-icon { flex: none; margin-top: 2px; color: var(--fg3); }
+.chat-rail-origin a {
   color: var(--fg);
-  font: inherit;
   font-weight: 650;
-  cursor: pointer;
   text-decoration: underline;
   text-decoration-color: var(--border-strong);
   text-underline-offset: 3px;
 }
-.chat-rail-project:hover { text-decoration-color: currentColor; }
-.chat-rail-context-used { margin-top: var(--space-2); }
+.chat-rail-origin a:hover { text-decoration-color: currentColor; }
+
 .chat-rail-tool {
   min-width: 0;
   overflow: hidden;
@@ -4916,16 +4771,21 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   font-size: var(--text-xs);
 }
 .chat-rail-sublabel { margin-top: var(--space-3); }
-
-.chat-rail-context strong {
-  color: var(--fg);
-}
-
-.chat-rail-context:focus-visible {
+/* The shared rail rhythm is `.rail-section + .rail-section`; this wrapper
+   (the focus target for "See what Ciao knows") sits between two of them. */
+.chat-rail-agent-context + .rail-section { margin-top: var(--space-5); }
+.chat-rail-agent-context:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
   border-radius: var(--radius-xs);
 }
+.chat-rail-subagent {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 
 .drop-overlay {
   position: absolute;
@@ -5031,7 +4891,7 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   text-overflow: ellipsis;
 }
 
-/* The project is an explicit context control, not passive breadcrumb text. */
+/* The project links to its page. */
 .breadcrumb-project {
   display: inline-flex;
   align-items: center;
@@ -5044,6 +4904,7 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   background: transparent;
   color: var(--fg3);
   font: inherit;
+  text-decoration: none;
   cursor: pointer;
 }
 
@@ -5054,13 +4915,7 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   white-space: nowrap;
 }
 
-.breadcrumb-project svg {
-  flex: none;
-  color: var(--fg3);
-}
-
-.breadcrumb-project:hover,
-.breadcrumb-project.active {
+.breadcrumb-project:hover {
   border-color: var(--border);
   background: var(--bg3);
   color: var(--accent);
@@ -5070,133 +4925,6 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-/* Compact project context popup, positioned below the breadcrumb.
-   Replaces the old inline panel that pushed messages down. */
-.context-popup {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 100;
-  min-width: 280px;
-  max-width: 360px;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  padding: 12px;
-}
-
-.context-popup-body {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  max-height: 360px;
-  overflow-y: auto;
-}
-
-.context-popup-baseline {
-  padding-bottom: var(--space-2);
-  border-bottom: 1px solid var(--border);
-}
-
-.context-popup-baseline p {
-  margin: 0;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-}
-
-.context-popup-section {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.context-popup .context-description {
-  font-size: var(--text-sm);
-  color: var(--fg2);
-  line-height: 1.45;
-  margin: 0;
-  white-space: pre-wrap;
-}
-
-.context-popup .context-textarea {
-  width: 100%;
-  resize: vertical;
-  font-size: var(--text-sm);
-  padding: 6px 8px;
-  min-height: 60px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--fg);
-  font-family: var(--font);
-}
-
-.context-popup .context-edit-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.context-popup .context-status {
-  font-size: var(--text-xs);
-  color: var(--fg2);
-}
-.context-popup .context-status.saved { color: var(--success); }
-.context-popup .context-status.error { color: var(--error); }
-
-.context-popup .context-files-status {
-  font-size: 12px;
-  color: var(--fg2);
-  padding: 4px 0;
-}
-.context-popup .context-files-status.error { color: var(--error); }
-
-.context-popup .context-files-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  overflow-y: auto;
-  font-size: 12px;
-  padding-right: 4px;
-}
-.context-popup .context-file-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 6px;
-  border-radius: 4px;
-  cursor: pointer;
-  color: var(--fg);
-}
-.context-popup .context-file-row:hover {
-  background: var(--bg);
-}
-.context-popup .context-file-icon {
-  flex-shrink: 0;
-  font-size: 12px;
-  width: 14px;
-  text-align: center;
-}
-.context-popup .context-file-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-@media (max-width: 768px) {
-  .context-popup {
-    left: 0;
-    right: auto;
-    min-width: 260px;
-    max-width: calc(100vw - 24px);
-  }
-}
-
 .chat-title {
   cursor: pointer;
 }
@@ -7472,23 +7200,13 @@ details[open] > .activity-summary::before {
   .thinking-chip { min-height: var(--touch); }
 }
 
-.archive-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  box-sizing: content-box;
-  width: 30px;
-  height: 30px;
-  min-width: 30px;
-  min-height: 30px;
-  border-radius: 6px;
-  color: var(--fg2);
-  background: transparent;
-  border: none;
-  cursor: pointer;
+.chat-archive-btn {
+  gap: var(--space-2);
+  height: 34px;
+  padding: 0 14px;
+  white-space: nowrap;
 }
-.archive-btn:hover { color: var(--fg); }
-.archive-btn:active { transform: scale(0.96); }
+@media (pointer: coarse) { .chat-archive-btn { min-height: var(--touch); } }
 
 .model-picker-dropdown {
   position: absolute;

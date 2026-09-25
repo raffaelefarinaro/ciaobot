@@ -19,6 +19,7 @@ from claude_agent_sdk import (
     get_session_messages as _sdk_get_session_messages,
 )
 
+from ciao.context.entity_tagger import context_entities
 from ciao.jsonio import read_json_dict
 from ciao.models import AgentRequest, ChatContext
 
@@ -491,15 +492,20 @@ class TranscriptStore:
             if not isinstance(turn, dict):
                 continue
             timestamp = str(turn.get("timestamp") or "")
-            prompt = _INJECTED_CONTEXT_RE.sub("", str(turn.get("prompt") or "")).strip()
+            raw_prompt = str(turn.get("prompt") or "")
+            prompt = _INJECTED_CONTEXT_RE.sub("", raw_prompt).strip()
             response = str(turn.get("response") or "").strip()
             if prompt:
-                rows.append({
+                user_row: dict[str, Any] = {
                     "role": "user",
                     "content": prompt,
                     "turn_index": index,
                     "sent_at": timestamp,
-                })
+                }
+                entities = context_entities(raw_prompt)
+                if entities:
+                    user_row["context_entities"] = entities
+                rows.append(user_row)
             if response:
                 row: dict[str, Any] = {
                     "role": "assistant",

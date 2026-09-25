@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h, nextTick } from 'vue'
-import { flushPromises, shallowMount } from '@vue/test-utils'
+import { flushPromises, RouterLinkStub, shallowMount } from '@vue/test-utils'
 import { api } from '../../lib/api'
 import type { ChatInfo, ProjectInfo, Schedule } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
@@ -145,7 +145,7 @@ async function mountPanel(
         SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
-        RouterLink: ChildStub,
+        RouterLink: RouterLinkStub,
       },
     },
   })
@@ -202,9 +202,9 @@ describe('ChatPanel context bar', () => {
     wrapper.unmount()
   })
 
-  // With Work details shown as a rail, the automation lives there instead of
-  // taking a strip above the transcript.
-  it('moves into the Work details rail on a wide pane', async () => {
+  // With Work details shown as a rail, the automation is one line at the top of
+  // it naming where the chat came from; cadence and controls stay on its page.
+  it('names the automation at the top of the Work details rail on a wide pane', async () => {
     const observers: Array<() => void> = []
     vi.stubGlobal('ResizeObserver', class {
       private cb: ResizeObserverCallback
@@ -220,10 +220,12 @@ describe('ChatPanel context bar', () => {
     await nextTick()
 
     expect(wrapper.find('.ctx-bar').exists()).toBe(false)
-    const section = wrapper.get('#chat-work-rail .chat-rail-schedule')
-    expect(section.attributes('aria-label')).toBe('Automation: schedule-1')
-    expect(section.text()).toContain('Scheduled')
-    expect(section.findAll('button').map(b => b.text())).toEqual(['Run now', 'Pause'])
+    const rail = wrapper.get('#chat-work-rail')
+    expect(rail.element.firstElementChild?.classList.contains('chat-rail-origin')).toBe(true)
+    const origin = rail.get('.chat-rail-origin')
+    expect(origin.text()).toBe('This chat comes from the automation schedule-1.')
+    expect(origin.getComponent(RouterLinkStub).props('to')).toBe('/schedules/schedule-1')
+    expect(origin.findAll('button')).toHaveLength(0)
     vi.unstubAllGlobals()
     wrapper.unmount()
   })
@@ -335,36 +337,12 @@ describe('ChatPanel project context breadcrumb', () => {
   })
   afterEach(() => vi.restoreAllMocks())
 
-  it('shows the project as an explicit context control and hides the workspace', async () => {
-    const { wrapper } = await mountPanel()
+  it('links the project to its page and hides the workspace', async () => {
+    const { wrapper, store } = await mountPanel()
     expect(wrapper.find('.breadcrumb-workspace').exists()).toBe(false)
-    const project = wrapper.get('.breadcrumb-project')
-    expect(project.element.tagName).toBe('BUTTON')
+    const project = wrapper.getComponent<typeof RouterLinkStub>('.breadcrumb-project')
     expect(project.text()).toContain('Upwordo')
-    expect(project.attributes('aria-expanded')).toBe('false')
-    expect(project.attributes('aria-controls')).toBe('project-context-popup')
-
-    await project.trigger('click')
-    expect(project.attributes('aria-expanded')).toBe('true')
-    const popup = wrapper.get('#project-context-popup')
-    expect(popup.text()).toContain('Baseline sent with this chat')
-    expect(popup.text()).toContain('Memory notes are retrieved only when relevant.')
-
-    await popup.trigger('keydown.esc')
-    await nextTick()
-    expect(wrapper.find('#project-context-popup').exists()).toBe(false)
-    expect(document.activeElement).toBe(project.element)
-    wrapper.unmount()
-  })
-
-  it('keeps outside-click closing active after a click inside the context popup', async () => {
-    const { wrapper } = await mountPanel()
-    const project = wrapper.get('.breadcrumb-project')
-    await project.trigger('click')
-    await wrapper.get('#project-context-popup').trigger('click')
-    document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await nextTick()
-
+    expect(project.props('to')).toBe(`/project/${store.projects[0].project_id}`)
     expect(wrapper.find('#project-context-popup').exists()).toBe(false)
     wrapper.unmount()
   })

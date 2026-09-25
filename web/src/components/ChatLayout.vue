@@ -1056,6 +1056,17 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
+  // Back / forward: Cmd+[ / Cmd+] in the desktop app, which has no browser
+  // chrome to provide them. A browser already binds its own chord, so the PWA
+  // leaves the key alone. Text fields keep it (Cmd+[ outdents in some editors).
+  if (isDesktop && mod && !alt && !e.shiftKey && (e.key === '[' || e.key === ']')) {
+    if (isTypingTarget(e.target)) return
+    e.preventDefault()
+    if (e.key === '[') router.back()
+    else router.forward()
+    return
+  }
+
   // Sidebar: Cmd+S (Desktop) or Option+S (Web/PWA), where Cmd+S is the
   // browser's Save Page. Skipped while typing for the same reason as archive:
   // in a text field Option+S is how you type ß, and stealing it would break
