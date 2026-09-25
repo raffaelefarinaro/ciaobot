@@ -13,7 +13,10 @@
           @escape-key-down="onEscapeKeyDown"
         >
           <DialogTitle as="p" class="newchat-title">New chat</DialogTitle>
-          <DialogDescription as="p" class="newchat-hint">{{ hint }}</DialogDescription>
+          <DialogDescription as="p" class="newchat-hint">
+            Pick a project in {{ workspaceName }}.
+            <kbd>1</kbd>–<kbd>9</kbd> switch workspace.
+          </DialogDescription>
           <div
             class="newchat-options"
             role="listbox"
@@ -34,6 +37,7 @@
             >
               <span class="newchat-name">{{ item.label }}</span>
               <span v-if="item.badge" class="newchat-badge">{{ item.badge }}</span>
+              <span v-if="selected === item.id" class="newchat-enter" aria-hidden="true">↵</span>
             </button>
           </div>
         </DialogContent>
@@ -92,9 +96,7 @@ const projectItems = computed<PickerItem[]>(() => {
 const selected = ref<string>('')
 const itemButtons = ref<HTMLButtonElement[]>([])
 
-const hint = computed(() =>
-  `Projects in ${workspaceLabel(previewWorkspace.value)} — press 1-9 to switch workspace.`,
-)
+const workspaceName = computed(() => workspaceLabel(previewWorkspace.value))
 
 function currentIndex(): number {
   return Math.max(0, projectItems.value.findIndex(o => o.id === selected.value))
@@ -250,13 +252,21 @@ onBeforeUnmount(() => {
 }
 .newchat-hint {
   margin: 0 0 var(--space-1);
-  color: var(--fg2);
+  color: var(--fg3);
   font-size: var(--text-sm);
+}
+.newchat-hint kbd {
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg2);
 }
 .newchat-options {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 2px;
 }
 .newchat-option {
   display: flex;
@@ -264,35 +274,43 @@ onBeforeUnmount(() => {
   gap: var(--space-2);
   min-height: var(--touch);
   padding: 0 var(--space-3);
-  border: 1px solid transparent;
-  border-radius: var(--radius);
+  border: 0;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--fg);
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background 120ms var(--ease), border-color 120ms var(--ease);
+  transition: background 120ms var(--ease), box-shadow 120ms var(--ease);
 }
 .newchat-option:hover {
   background: var(--bg3);
 }
-.newchat-option--active {
-  background: var(--bg3);
-  border-color: var(--accent);
+/* Same current-item treatment as the sidebar: accent-tinted fill and a slim
+   accent edge, not a bordered box. */
+.newchat-option--active,
+.newchat-option--active:hover {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .newchat-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .newchat-badge {
   margin-left: auto;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 600;
+  font-size: var(--text-sm);
   color: var(--fg3);
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
   flex: 0 0 auto;
 }
+.newchat-enter {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg3);
+  flex: 0 0 auto;
+}
+.newchat-badge + .newchat-enter { margin-left: var(--space-2); }
 </style>

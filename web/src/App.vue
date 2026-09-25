@@ -9,44 +9,40 @@
       <!-- The host can drop while no chat is open, and the per-chat card that
            announces it lives inside ChatPanel. This banner is the only piece of
            chrome present on every screen, so it carries the state too. -->
-      <span v-if="projectStore.hostAuthRequired">
-        Host password required —
-        <a v-if="canUseDeviceControls" class="client-mode-banner-link" :href="contentHref('/login')">Log in again</a>.
+      <span v-if="projectStore.hostAuthRequired" class="client-mode-banner-text">
+        The host needs its password again.
+        <a v-if="canUseDeviceControls" class="client-mode-banner-link" :href="contentHref('/login')">Log in again</a>
       </span>
-      <span v-else-if="clientStateUnknown">
-        Connection role unavailable — open
-        <a v-if="canUseDeviceControls" class="client-mode-banner-link" :href="deviceHref('/device')">This device</a>
-        to recover.
+      <span v-else-if="clientStateUnknown" class="client-mode-banner-text">
+        Ciaobot can’t tell whether this browser is on the host.
       </span>
-      <span v-else-if="projectStore.hostPolicyBlocked">
-        Connection blocked by a local policy —
-        <a v-if="canUseDeviceControls" class="client-mode-banner-link" :href="deviceHref('/device')">Open this device</a>.
+      <span v-else-if="projectStore.hostPolicyBlocked" class="client-mode-banner-text">
+        A local policy is blocking the connection to the host.
       </span>
-      <span v-else-if="hostUnreachable">
+      <span v-else-if="hostUnreachable" class="client-mode-banner-text">
         <span class="client-mode-banner-spinner" aria-hidden="true"></span>
-        Can’t reach <code>{{ clientHostLabel }}</code> — reconnecting…
+        Can’t reach <code>{{ clientHostLabel }}</code>. Reconnecting…
       </span>
-      <span v-else>
-        Client mode — everything below is
-        <code>{{ clientHostLabel }}</code>
-        <template v-if="!clientHasSession"> · host password needed</template>
+      <span v-else class="client-mode-banner-text">
+        Client mode. Everything below is on
+        <code>{{ clientHostLabel }}</code><template v-if="!clientHasSession"> · host password needed</template>
       </span>
       <div class="client-mode-banner-actions">
-        <button
-          v-if="canUseDeviceControls"
-          type="button"
-          class="client-mode-banner-link"
-          :disabled="switchingToHost"
-          @click="switchBackToHost"
-        >
-          {{ switchingToHost ? 'Switching…' : 'Switch to host' }}
-        </button>
         <!-- The one screen that is about this computer, not the host. -->
         <a
           v-if="canUseDeviceControls"
           class="client-mode-banner-link"
           :href="deviceHref('/device')"
-        >This device</a>
+        >{{ clientStateUnknown || projectStore.hostPolicyBlocked ? 'Open This device' : 'This device' }}</a>
+        <button
+          v-if="canUseDeviceControls"
+          type="button"
+          class="client-mode-banner-btn"
+          :disabled="switchingToHost"
+          @click="switchBackToHost"
+        >
+          {{ switchingToHost ? 'Switching…' : 'Switch to host' }}
+        </button>
       </div>
     </div>
     <Transition name="fade">
@@ -253,27 +249,39 @@ watch(showStartup, (show) => {
 
 <style>
 .client-mode-banner {
+  --banner-tone: var(--warning);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 14px;
-  background: color-mix(in srgb, var(--warn, #ff9800) 18%, var(--bg2));
-  border-bottom: 1px solid var(--border);
+  gap: 6px 12px;
+  padding: 6px 16px;
+  background: color-mix(in srgb, var(--banner-tone) 8%, var(--bg));
+  border-bottom: 1px solid color-mix(in srgb, var(--banner-tone) 35%, var(--border));
   color: var(--fg);
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 12px;
-  line-height: 1.4;
+  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, sans-serif);
+  font-size: var(--text-sm);
+  line-height: 1.45;
 }
-.client-mode-banner.is-offline {
-  background: color-mix(in srgb, var(--error) 22%, var(--bg2));
+.client-mode-banner.is-offline { --banner-tone: var(--error); }
+.client-mode-banner-text { flex: 1 1 16rem; min-width: 0; }
+/* The state dot rides the sentence so it stays beside the first word when the
+   banner wraps on a phone. */
+.client-mode-banner-text::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  vertical-align: 1px;
+  border-radius: var(--radius-pill);
+  background: var(--banner-tone);
 }
 .client-mode-banner-spinner {
   display: inline-block;
   width: 10px;
   height: 10px;
   margin-right: var(--space-2);
-  vertical-align: baseline;
+  vertical-align: -1px;
   border: 2px solid color-mix(in srgb, var(--fg) 30%, transparent);
   border-top-color: var(--fg);
   border-radius: var(--radius-pill);
@@ -286,32 +294,44 @@ watch(showStartup, (show) => {
   .client-mode-banner-spinner { animation: none; }
 }
 .client-mode-banner code {
-  color: var(--accent, #ff4d6d);
-  font-size: inherit;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.92em;
+  color: var(--fg);
 }
 .client-mode-banner-actions {
   display: flex;
   align-items: center;
   gap: 12px;
+  margin-left: auto;
   flex-shrink: 0;
 }
 .client-mode-banner-link {
-  color: var(--accent, #ff4d6d);
+  color: var(--accent);
+  font-weight: 600;
   text-decoration: none;
+  white-space: nowrap;
+}
+.client-mode-banner-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.client-mode-banner-btn {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-elev, var(--bg2));
+  color: var(--fg);
+  font: inherit;
   font-weight: 600;
   white-space: nowrap;
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
   cursor: pointer;
 }
-.client-mode-banner-link:hover:not(:disabled) {
-  text-decoration: underline;
-}
-.client-mode-banner-link:disabled {
-  opacity: 0.6;
-  cursor: wait;
+.client-mode-banner-btn:hover:not(:disabled) { border-color: var(--border-strong, var(--border)); }
+.client-mode-banner-btn:disabled { opacity: 0.6; cursor: wait; }
+@media (pointer: coarse) {
+  .client-mode-banner-btn, .client-mode-banner-link {
+    min-height: var(--touch, 44px);
+    display: inline-flex;
+    align-items: center;
+  }
 }
 
 :root {
