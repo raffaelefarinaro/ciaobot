@@ -666,11 +666,6 @@ export interface RoutineSettings {
   insights_model_by_workspace?: Record<string, string>
 
   critique_models_effective: string
-  // The "apple" insights option is hardware-gated: needs macOS 26+, the
-  // desktop app, and Apple Intelligence on. Nothing installable, so Settings
-  // shows the reason when the machine lacks it.
-  apple_model_available?: boolean
-  apple_model_unavailable_reason?: string
   model_options: {
     anthropic: string[]
   }

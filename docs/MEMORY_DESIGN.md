@@ -111,14 +111,8 @@ outperforms any pipeline that summarizes those sources away.
   against memory, whereas the one-shot can only ever emit text that
   deterministic, guarded code then routes (event-shape filter, caps, dedupe,
   undo log). (2) **Cost and reach**: extraction runs on every archived chat
-  and works on a cheap model or Apple's free on-device model — a tool-using
-  session needs a capable cloud model and many calls per archive.
-  The backfill pass carries one extra cost guard: a cheap on-device
-  pre-filter (`insights._apple_prefilter_skips`) asks the Apple Foundation
-  Model whether an archive holds any durable signal and skips extraction
-  for no-signal archives, failing open — an unavailable model, an explicit
-  `remember`/`save this` user turn, or a classifier error all force normal
-  extraction so a fact is never silently lost.
+  and works on a cheap model — a tool-using session needs a capable cloud
+  model and many calls per archive.
   (3) **Testability**: parse/route/dedupe are pure functions with tests.
   The judgment the agentic version would add already exists in the design,
   split into two cheaper places: the write-time reconcile (one sandboxed

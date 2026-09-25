@@ -707,10 +707,7 @@
                   </span>
                 </div>
               </div>
-              <div
-                class="routine-model-controls"
-                :class="{ 'routine-model-controls--single': routineProviderValue('insights_model') === 'apple' }"
-              >
+              <div class="routine-model-controls">
                 <select
                   class="routine-select routine-select--provider"
                   :value="routineProviderValue('insights_model')"
@@ -718,24 +715,18 @@
                   @change="saveRoutineProvider('insights_model', ($event.target as HTMLSelectElement).value)"
                 >
                   <option value="automatic">Automatic</option>
-                  <option v-if="appleModelAvailable" value="apple">Local (free)</option>
                   <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
                     {{ provider.label }}
                   </option>
                 </select>
                 <ModelSelector
-                  v-if="routineProviderValue('insights_model') !== 'apple' && routineProviderValue('insights_model') !== 'automatic'"
+                  v-if="routineProviderValue('insights_model') !== 'automatic'"
                   :model-value="routineModelValue('insights_model')"
                   :sections="routineModelSectionsFor('insights_model')"
                   :disabled="routinesSaving"
                   @update:model-value="saveRoutineModel('insights_model', $event)"
                 />
-                <span class="routine-model-hint">
-                  <template v-if="routineProviderValue('insights_model') === 'apple'">
-                    Runs on-device for free using Apple Intelligence. Nothing to install.
-                  </template>
-                  <template v-else>{{ routineModelSummary('insights_model') }}</template>
-                </span>
+                <span class="routine-model-hint">{{ routineModelSummary('insights_model') }}</span>
               </div>
             </div>
 
@@ -2276,8 +2267,8 @@ const routinesResult = ref('')
 // Every provider with models is a runtime provider now.
 type AliasProviderKey = RuntimeProvider
 type RoutineModelKey = 'insights_model'
-// The routine pickers offer Automatic, Apple, and each available provider.
-type RoutineProviderValue = 'automatic' | 'apple' | AliasProviderKey
+// The routine pickers offer Automatic and each available provider.
+type RoutineProviderValue = 'automatic' | AliasProviderKey
 
 type AliasProviderSection = {
   key: AliasProviderKey
@@ -2321,10 +2312,6 @@ async function saveRoutines(patch: Record<string, unknown>) {
     routinesSaving.value = false
   }
 }
-
-// Apple's on-device model is hardware-gated: it shows only when this machine
-// can run it. No app-side opt-in flag any more.
-const appleModelAvailable = computed(() => routines.value?.apple_model_available === true)
 
 function parseModelList(raw: string): string[] {
   const seen = new Set<string>()
@@ -2576,8 +2563,6 @@ function routineEffectiveModel(key: RoutineModelKey): string {
 function inferRoutineModel(model: string): { provider: RoutineProviderValue; model: string } {
   const raw = model.trim()
   if (!raw) return { provider: 'automatic', model: '' }
-  // 'apfel' is the legacy id from when this shelled out to the apfel CLI.
-  if (raw === 'apple' || raw === 'apfel') return { provider: 'apple', model: '' }
   for (const provider of ['opencode'] as const) {
     const prefix = `${provider}:`
     if (raw.startsWith(prefix)) {
@@ -2605,7 +2590,7 @@ function routineModelValue(key: RoutineModelKey): string {
 // The concrete-model sections for a routine once its provider is chosen.
 function routineModelSectionsFor(key: RoutineModelKey): ModelSection[] {
   const provider = routineProviderValue(key)
-  if (provider === 'automatic' || provider === 'apple') return []
+  if (provider === 'automatic') return []
   return [aliasSectionEntry(provider)]
 }
 
@@ -2613,10 +2598,6 @@ async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) 
   const provider = providerValue as RoutineProviderValue
   if (provider === 'automatic') {
     await saveRoutines({ [key]: '' })
-    return
-  }
-  if (provider === 'apple') {
-    await saveRoutines({ [key]: 'apple' })
     return
   }
   // Pick the provider's effective default model as the starting point.
@@ -2657,7 +2638,6 @@ function routineModelSummary(key: RoutineModelKey): string {
     }
     return `Automatic: ${routineEffectiveModel(key) || 'default'}`
   }
-  if (provider === 'apple') return 'Local (free)'
   const model = routineModelValue(key)
   if (provider === 'opencode') return `opencode: ${model || 'default'}`
   return `${aliasProviderLabel(provider)}: ${model || 'default'}`
@@ -5212,9 +5192,6 @@ a.btn-secondary {
   grid-template-columns: minmax(0, 1fr) 136px;
   gap: 8px;
   align-items: start;
-}
-.routine-model-controls--single {
-  grid-template-columns: 1fr;
 }
 .routine-model-controls .routine-select {
   max-width: none;

@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # The desktop gate: everything CI's build-desktop job would catch, run locally.
 #
-# `pytest tests/` and the two `npm run build`s never touch Rust, the Swift
-# sidecar, or Tauri bundling, so a change under desktop/ could pass every local
+# `pytest tests/` and the two `npm run build`s never touch Rust or Tauri
+# bundling, so a change under desktop/ could pass every local
 # check and still fail on GitHub — where the failure costs a release. This runs
 # the same commands CI does, in the same order, against the same pinned
 # toolchain (desktop/rust-toolchain.toml).
 #
 # Usage:
-#   ./scripts/check-desktop.sh            # fmt, clippy, cargo test, sidecar, bundle
+#   ./scripts/check-desktop.sh            # fmt, clippy, cargo test, bundle
 #   ./scripts/check-desktop.sh --fast     # skip the bundle build (~1 min instead of ~3)
 #
-# The bundle step is what catches externalBin/sidecar mistakes: a wrong
-# target-triple suffix only shows up when Tauri actually assembles the .app.
-# Skip it only when you have not touched desktop/native/ or tauri.conf.json.
+# The bundle step is what catches bundling mistakes, which only show up when
+# Tauri actually assembles the .app. Skip it only when you have not touched
+# tauri.conf.json.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,7 +35,6 @@ export PATH
 
 missing=""
 command -v cargo >/dev/null 2>&1 || missing="cargo (install: brew install rustup && rustup default 1.90.0)"
-command -v swiftc >/dev/null 2>&1 || missing="${missing:+$missing; }swiftc (install: xcode-select --install)"
 if [[ -n "$missing" ]]; then
   echo "Cannot run the desktop gate — missing: $missing" >&2
   exit 1
@@ -76,9 +75,6 @@ runtime_note() {
 
 step() { printf '\n=== %s ===\n' "$1"; }
 
-step "sidecar build (swiftc, aarch64)"
-"$DESKTOP/native/build.sh"
-
 step "cargo fmt --check"
 (cd "$DESKTOP/src-tauri" && cargo fmt --check)
 
@@ -96,8 +92,7 @@ if [[ "$FAST" -eq 1 ]]; then
 fi
 
 step "tauri build (app bundle, aarch64)"
-# aarch64 is what release CI builds, and it resolves a different sidecar
-# filename than a native build, so this is the shape worth checking. Updater
+# aarch64 is what release CI builds, so this is the shape worth checking. Updater
 # artifacts are disabled: signing them needs TAURI_SIGNING_PRIVATE_KEY, which
 # only CI holds.
 (cd "$DESKTOP" && npm run tauri build -- \
@@ -106,14 +101,12 @@ step "tauri build (app bundle, aarch64)"
   --config '{"bundle":{"createUpdaterArtifacts":false}}')
 
 APP="$DESKTOP/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Ciaobot.app"
-SIDECAR="$APP/Contents/MacOS/ciaobot-native"
+SHELL_BIN="$APP/Contents/MacOS/ciaobot-desktop"
 
 step "bundle contents"
-[[ -x "$SIDECAR" ]] || { echo "FAIL: $SIDECAR missing — externalBin did not bundle the sidecar" >&2; exit 1; }
+[[ -x "$SHELL_BIN" ]] || { echo "FAIL: $SHELL_BIN missing from the bundle" >&2; exit 1; }
 codesign -v "$APP" || { echo "FAIL: bundle signature invalid" >&2; exit 1; }
-"$SIDECAR" probe >/dev/null \
-  || { echo "FAIL: bundled sidecar does not run" >&2; exit 1; }
 
 echo
-echo "Desktop gate passed: sidecar bundled, aarch64, signed, and runnable."
+echo "Desktop gate passed: aarch64 bundle assembled and signed."
 runtime_note

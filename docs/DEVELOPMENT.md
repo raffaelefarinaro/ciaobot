@@ -90,8 +90,8 @@ archive, its signature, and `latest.json`.
 - **CI** (`.github/workflows/ci.yml`) runs on pushes to `develop` and on pull requests into `develop` or `main`.
   Every PR runs the `linux-server` job: `mypy ciao`, `pytest -n auto tests/`,
   `npm test`, `npm run build` and a package smoke test, in about 5 minutes. The
-  full macOS `test` job (coverage, browser tests, desktop Rust, the Swift
-  sidecar and a cold-started app bundle, about 18 minutes) runs on pushes to
+  full macOS `test` job (coverage, browser tests, desktop Rust,
+  and a cold-started app bundle, about 18 minutes) runs on pushes to
   `develop`, on PRs into `main`, and on PRs that touch `desktop/`, the embedded
   runtime build scripts, `pyproject.toml`, or the CI workflow itself. When it is skipped on a PR
   it still reports as passing, so a required `test` check does not block.
@@ -162,28 +162,19 @@ npm test             # 61 test files under web/src
 
 ## macOS desktop development
 
-The Tauri 2 shell requires macOS 13+ on Apple Silicon (arm64), Node 22.x, Rust
-1.90.0 with the `aarch64-apple-darwin` target, and `swiftc` from the Xcode
-Command Line Tools (it builds the `ciaobot-native` sidecar).
+The Tauri 2 shell requires macOS 13+ on Apple Silicon (arm64), Node 22.x, and
+Rust 1.90.0 with the `aarch64-apple-darwin` target.
 
-`desktop/native/main.swift` uses Apple's FoundationModels, whose
-`GenerationOptions` initialiser was renamed: `sampling:` on the macOS 26 SDK,
-`samplingMode:` on macOS 27. **The file deliberately uses the older
-`sampling:`** — it is the only spelling that compiles on both, since the GitHub
-macOS runner currently tops out at Xcode 26.6 (Swift 6.3.3, macOS 26 SDK) where
-`samplingMode:` does not exist. On a macOS 27 SDK it still builds, with a
-deprecation warning. Switch to `samplingMode:` only once the runner image ships
-Xcode 27, or CI cannot build the sidecar at all.
-
-CI and the publish workflow both select the newest Xcode installed on the runner
-before building the sidecar and print `xcodebuild -version`, so a toolchain skew
-is visible in the log instead of looking like a code regression.
+CI and the publish workflow both select the newest Xcode installed on the
+runner and print `xcodebuild -version` so the aarch64 build targets a current
+SDK, with any toolchain skew visible in the log instead of looking like a code
+regression.
 
 `./scripts/check-desktop.sh` runs the whole gate — the same commands CI's
-`build-desktop` job does — and asserts the sidecar ends up bundled, signed, and
-runnable inside the built aarch64 app. Run it after any change under
-`desktop/`; `--fast` skips the bundle build when you have not touched
-`desktop/native/` or `tauri.conf.json`. `prepare-release` runs it too.
+`build-desktop` job does — and asserts the built aarch64 app bundle is signed
+and its shell binary is present. Run it after any change under `desktop/`;
+`--fast` skips the bundle build when you have not touched `tauri.conf.json`.
+`prepare-release` runs it too.
 
 The individual steps, if you need them separately:
 
@@ -191,7 +182,6 @@ The individual steps, if you need them separately:
 cd desktop
 npm ci
 npm run build            # desktop frontend (vite) only
-npm run build:native     # Swift sidecar -> src-tauri/binaries/ (also runs via pretauri)
 cd src-tauri
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings

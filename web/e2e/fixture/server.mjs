@@ -105,8 +105,6 @@ const GET_ROUTES = {
     insights_model_effective: 'synthetic-model',
     insights_model_by_workspace: {},
     critique_models_effective: '',
-    apple_model_available: false,
-    apple_model_unavailable_reason: 'Not available on the fixture host',
     model_options: { anthropic: ['synthetic-model'] },
     backends: { anthropic: true, opencode: false },
     workspace_context: { workspace_root: '/fixture/workspace', vault_root: '/fixture/workspace/memory-vault' },

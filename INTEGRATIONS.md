@@ -163,23 +163,6 @@ opencli list   # see available adapters
 
 Note: many adapters require the Browser Bridge Chrome extension and a logged-in Chrome session.
 
-### Apple Intelligence (on-device session insights)
-
-Nothing to install. Selecting **Apple** as the Session insights model in
-Settings → Models uses Apple's on-device Foundation Model through the
-`ciaobot-native` sidecar bundled in `Ciaobot.app` — no API key, no network, and
-no per-task cost.
-
-This replaced the `apfel` Homebrew CLI, which did the same job through the same
-Apple models but had to be installed and kept up to date separately. Ciaobot
-calls `FoundationModels` directly rather than Apple's `fm` CLI, because `fm`
-only ships with macOS 27 while the framework behind it has been present since
-macOS 26.
-
-Requires macOS 26+, the desktop app, and Apple Intelligence switched on in
-System Settings → Apple Intelligence & Siri. When any of those is missing,
-Settings says which one and titles fall back to the configured cloud model.
-
 ### PWA workspace keyboard navigation
 
 The PWA has no integration or environment setting for workspace shortcuts. In the
@@ -292,8 +275,7 @@ providers launches, verifies, and logs out Claude Code and opencode through
 their own CLIs; Ciaobot stores none of their credentials, and there are no
 API-key fields to fill in. Claude Code may instead use an
 `ANTHROPIC_API_KEY` inherited from the process environment; Ciaobot reports only
-whether one is present. Apple Intelligence is on-device and needs no
-provider key.
+whether one is present.
 
 **Reaching any other model.** Ciaobot talks to exactly two providers: Claude
 Code (Anthropic) and opencode (everything else). opencode is
@@ -369,7 +351,6 @@ EnvironmentFile syntax. Keep provider credentials in the service account's home.
 Linux production Settings uses `/api/admin/restart` for a draining restart,
 without a git checkout, package reinstall, or desktop build.
 See [Linux hosting](docs/LINUX.md) for provisioning, HTTPS, updates, and recovery.
-Apple Intelligence is unavailable on Linux hosts.
 
 - `CLAUDE_EXECUTION_MODE` / `CLAUDE_PERMISSION_MODE`: **removed 2026-08-21 and no longer read.** The permission mode is now set per provider in Settings → Models & providers (Manual asks before every action, Auto lets safe reads and edits run silently and asks before destructive operations, Bypass allows everything); a provider with no pin uses Auto. An install that still sets one gets a `legacy-env-ignored` operator tile, because a setting that is silently ignored reads as a setting that is in effect.
 - `PWA_AUTH_REQUIRED`: password protection for the PWA dashboard. **Enabled by default** — an unset value protects the dashboard whenever `PWA_AUTH_TOKEN` is present (without a token there is no password a human could type, so protection stays off until one is set in Settings). Set it to `false` to run unprotected on a machine nobody else can reach; that is the only way to turn protection off, since Settings can only change the password. `ciao setup` writes the value explicitly (`--no-auth` writes `false`).
@@ -396,7 +377,6 @@ Apple Intelligence is unavailable on Linux hosts.
 - `CIAO_PUSH_DELAY_SECONDS`: delay before sending push notifications after a completed turn (default `30`). Rapid replies to the same chat cancel the previous timer and start a new one (coalesce into a single push). Permission requests and model questions push immediately (no delay). Unanswered permission requests re-fire every 30 seconds, up to 3 times, until the user approves/denies or the turn ends. Marking a chat read sends a separate clear control to all registered Web Push subscriptions and the macOS notification log.
 - `CIAO_PYTHON`: path to a specific Python binary for `scripts/dev.sh` (e.g. when Homebrew breaks `ensurepip`).
 - `CIAO_PATH`: baked into the launchd plist's `EnvironmentVariables` at setup time so developer-mode subprocesses (npm, node, git) are found despite launchd's minimal default PATH. Not an operator env var; it's a `com.ciao.server.plist.tmpl` placeholder rendered from the user's shell PATH.
-- `CIAO_NATIVE_SIDECAR`: absolute path to the `ciaobot-native` binary used for on-device Foundation Model calls. Normally unset — the engine finds it inside the installed `Ciaobot.app`. Point it at `desktop/src-tauri/binaries/ciaobot-native-aarch64-apple-darwin` to test a locally built sidecar (`npm run build:native` in `desktop/`) without installing the app.
 - Installer and release-build variables: `CIAO_APP_DIR` overrides the per-user app directory, `CIAO_ARCHIVE_NAME` and `CIAO_VERIFIER_NAME` override release asset names, and `CIAO_RELEASE_BASE_URL` selects a private release mirror for an explicit `--version` (the embedded archive signature is still mandatory). `CIAO_BUNDLED_APP` marks the embedded runtime for internal mode detection. `CIAO_PYTHON_ARM64_URL`, `CIAO_PYTHON_ARM64_SHA256`, `CIAO_PYTHON_X86_64_URL`, and `CIAO_PYTHON_X86_64_SHA256` are required only by the release workflow when assembling the embedded runtimes. `CIAO_EXECUTABLE` is a LaunchAgent template token, not an operator environment variable.
 - `CIAO_ALLOW_LAUNCH_AGENT_REPOINT`: set to `1`/`true`/`yes` (case-insensitive) to allow `setup_workspace`/`_write_launchd_plist` and `ciao setup` to repoint the live `~/Library/LaunchAgents/com.ciao.server.plist` to a different workspace without `confirm_repoint=True`/`--yes`. For automation that intentionally moves the install; leave unset for the safe default (refuse). `CIAO_LAUNCH_AGENTS_DIR` (test-only) already isolates the suite by redirecting the plist location.
 - `CIAO_EVAL_MAX_CALLS`: hard call ceiling for one `ciao eval run` (the bounded model-backed behavioral probe). Default `40`. The runner stops claiming new probes at the ceiling and records the remainder as `budget_exhausted` rather than continuing to spend. The deterministic `ciao eval contracts` half never calls a model and ignores it.

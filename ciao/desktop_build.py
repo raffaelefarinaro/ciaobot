@@ -65,10 +65,6 @@ WATCHED_SOURCES = (
     "desktop/src-tauri/Cargo.toml",
     "desktop/src-tauri/Cargo.lock",
     "desktop/src-tauri/tauri.conf.json",
-    # The native Foundation Models sidecar. `npm run tauri build` rebuilds it via the
-    # pretauri hook, but the freshness check has to see the Swift source or a
-    # sidecar-only change would be skipped as "sources unchanged".
-    "desktop/native",
     "ciao/stock/deploy/face_template.png",
     "ciao/stock/deploy/Ciaobot.icns",
 )
