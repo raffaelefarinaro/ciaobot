@@ -55,11 +55,16 @@ export function createEngineMonitor(opts: EngineMonitorOptions) {
   let failures = 0
   let timer: ReturnType<typeof setTimeout> | null = null
   let stopped = true
+  // A probe outlives the timeout that started it: a dead engine hangs until the
+  // 4s abort, so by then `timer` is already null and `clearTimeout` in
+  // `retry()` has nothing to cancel. One shared promise is what makes a click
+  // during an in-flight probe join that probe instead of adding a second loop.
+  let inflight: Promise<void> | null = null
 
   function set(next: EngineState) {
     if (next !== state) { state = next; opts.onChange(next) }
   }
-  async function tick(): Promise<void> {
+  async function runProbe(): Promise<void> {
     const result = await probe()
     if (result === 'failure') {
       failures += 1
@@ -69,10 +74,17 @@ export function createEngineMonitor(opts: EngineMonitorOptions) {
       set(result)
     }
   }
+  function tick(): Promise<void> {
+    if (!inflight) inflight = runProbe().finally(() => { inflight = null })
+    return inflight
+  }
   function schedule() {
     if (stopped) return
+    // Both the scheduled tick and a concurrent `retry()` schedule when their
+    // probe settles; whichever is last owns the one live timer.
+    if (timer) clearTimeout(timer)
     const delay = state === 'ready' && failures === 0 ? HEALTHY_INTERVAL_MS : RECOVERY_INTERVAL_MS
-    timer = setTimeout(async () => { await tick(); schedule() }, delay)
+    timer = setTimeout(async () => { timer = null; await tick(); schedule() }, delay)
   }
   return {
     start() { if (!stopped) return; stopped = false; schedule() },

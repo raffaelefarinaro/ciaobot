@@ -8,6 +8,7 @@
   <div
     class="engine-offline"
     role="alertdialog"
+    aria-modal="true"
     aria-live="assertive"
     aria-labelledby="engine-offline-title"
   >
@@ -17,12 +18,12 @@
       <template v-if="state === 'unreachable' && loopback">
         <div v-for="cmd in commands" :key="cmd" class="engine-offline-cmd">
           <code>{{ cmd }}</code>
-          <button class="btn-secondary btn-small" type="button" @click="copy(cmd)">{{ copied === cmd ? 'Copied' : 'Copy' }}</button>
+          <button class="btn-small" type="button" @click="copy(cmd)">{{ copied === cmd ? 'Copied' : 'Copy' }}</button>
         </div>
         <p class="hint">Logs: <code>.runtime/ciao.stderr.log</code> in your Ciaobot workspace.</p>
       </template>
       <div class="engine-offline-actions">
-        <button class="btn-primary" type="button" :disabled="retrying" @click="emit('retry')">{{ retrying ? 'Checking…' : 'Retry' }}</button>
+        <button ref="retryButton" class="btn-primary" type="button" :disabled="retrying" @click="emit('retry')">{{ retrying ? 'Checking…' : 'Retry' }}</button>
         <span class="hint">Reconnecting automatically…</span>
       </div>
     </div>
@@ -30,7 +31,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 const props = defineProps<{
   state: 'updating' | 'unreachable'
@@ -43,27 +44,38 @@ const emit = defineEmits<{ (e: 'retry'): void }>()
 
 const commands = ['ciao service start', 'ciao service status']
 const copied = ref('')
+const retryButton = ref<HTMLButtonElement | null>(null)
+
+// Nothing behind the curtain unmounts, so focus would stay wherever it was and
+// the first Tab would reach a control the user cannot see. Retry is the one
+// thing to do here, so it takes focus when the curtain appears.
+onMounted(() => retryButton.value?.focus())
 
 async function copy(cmd: string) {
+  if (!navigator.clipboard) return
   try {
-    await navigator.clipboard?.writeText(cmd)
-  } catch {
-    // Clipboard access can be denied (no permission, no secure context). The
+    await navigator.clipboard.writeText(cmd)
+    // Only claim a copy that actually happened: outside a secure context
+    // `navigator.clipboard` is missing and `writeText` can be denied. The
     // command stays selectable text, so the hint still does its job.
+    copied.value = cmd
+  } catch {
+    // Clipboard access can be denied (no permission, no secure context).
   }
-  copied.value = cmd
 }
 
 // Two different failures with two different ways out. On the loopback origin
 // the fix is a command on this computer, so it is shown verbatim and
 // copyable; anywhere else the only honest thing to name is the host.
 const title = computed(() => {
-  if (props.state === 'updating') return 'Ciaobot is updating'
+  if (props.state === 'updating') return 'Ciaobot is restarting'
   if (props.loopback) return "Ciaobot isn't running"
   return `Ciaobot on ${props.host} isn't reachable`
 })
 const text = computed(() => {
-  if (props.state === 'updating') return 'The engine is restarting onto a new version. This page reconnects by itself.'
+  // `serverRestarting` also covers plain Settings and drain restarts, so this
+  // must not promise a new version.
+  if (props.state === 'updating') return 'This page reconnects by itself.'
   if (props.loopback) return 'The engine on this computer stopped responding. Start it from a terminal:'
   return 'Check that the computer running Ciaobot is on and connected. Your open chat and drafts are kept.'
 })

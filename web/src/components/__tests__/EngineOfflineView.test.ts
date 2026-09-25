@@ -45,9 +45,9 @@ describe('engine offline screen', () => {
     expect(text).not.toContain('ciao service start')
   })
 
-  it('says updating, with no commands, during an announced restart', () => {
+  it('says restarting, with no commands, during an announced restart', () => {
     const text = mountView({ state: 'updating' }).text()
-    expect(text).toContain('Ciaobot is updating')
+    expect(text).toContain('Ciaobot is restarting')
     expect(text).not.toContain('ciao service start')
   })
 
@@ -74,5 +74,19 @@ describe('engine offline screen', () => {
 
     expect(writeText).toHaveBeenCalledWith('ciao service start')
     expect(firstCopy.text()).toBe('Copied')
+  })
+
+  it('takes focus so the curtain is usable from the keyboard', () => {
+    // Mounted on the document: focus() is a no-op on a detached tree, which is
+    // exactly the case a mount() without attachTo would leave us in.
+    const wrapper = mount(EngineOfflineView, {
+      props: { ...baseProps },
+      attachTo: document.body,
+    })
+    // The app behind the curtain stays mounted, so without this the first Tab
+    // would land on a control the user cannot see.
+    const retry = wrapper.find('.engine-offline-actions .btn-primary').element
+    expect(document.activeElement).toBe(retry)
+    wrapper.unmount()
   })
 })

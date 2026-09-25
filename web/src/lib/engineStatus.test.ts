@@ -153,4 +153,26 @@ describe('createEngineMonitor', () => {
     expect(onChange).toHaveBeenLastCalledWith('ready')
     monitor.stop()
   })
+
+  it('retry during an in-flight probe does not start a second loop', async () => {
+    vi.useFakeTimers()
+    const onChange = vi.fn()
+    // A remote host that is off hangs until the abort, so the scheduled probe
+    // is still in flight when the user hits Retry.
+    const probe = vi.fn<() => Promise<ProbeResult>>(() => new Promise((resolve) => {
+      setTimeout(() => resolve('failure'), 3000)
+    }))
+    const monitor = createEngineMonitor({ probe, onChange })
+    monitor.start()
+    await vi.advanceTimersByTimeAsync(HEALTHY_INTERVAL_MS)
+    // The scheduled tick has fired and its probe is still pending.
+    void monitor.retry()
+    await vi.advanceTimersByTimeAsync(3000)
+    probe.mockClear()
+    // Each remaining round is one probe plus one recovery interval. Two live
+    // loops would double that.
+    await vi.advanceTimersByTimeAsync((3000 + RECOVERY_INTERVAL_MS) * 4)
+    expect(probe.mock.calls.length).toBeLessThanOrEqual(4)
+    monitor.stop()
+  })
 })
