@@ -4956,6 +4956,8 @@ def _routines_payload(config, app_settings) -> dict:
     return {
         # Overrides as stored ("" = automatic default).
         "insights_model": s.insights_model,
+        # The HTTPS origin other devices should use, as stored ("" = none).
+        "trusted_url": s.trusted_url,
         "insights_enabled": config.insights_enabled,
         "trajectories_enabled": config.trajectories_enabled,
         "push_all_devices": s.push_all_devices,
@@ -8085,3 +8087,40 @@ async def dismiss_housekeeping_action(request: Request) -> JSONResponse:
             "actions": [action.as_dict() for action in actions],
         }
     )
+
+
+async def addresses_endpoint(request: Request) -> JSONResponse:
+    """Where other devices can open this engine, trusted HTTPS first.
+
+    Session-protected: it enumerates LAN interfaces. URLs never carry a
+    password or setup token; every device signs in on its own.
+    """
+    from ciao.network_addresses import (
+        is_loopback_url,
+        normalize_trusted_url,
+        server_addresses,
+    )
+
+    config = request.app.state.config
+    port = int(getattr(config, "pwa_port", 8443) or 8443)
+    app_settings = getattr(request.app.state, "app_settings", None)
+    stored = getattr(getattr(app_settings, "settings", None), "trusted_url", "") or ""
+    # Re-validate what was stored: app_settings.json can be hand-edited, and a
+    # token smuggled into the stored value must never reach the QR code. A
+    # value the setter would have refused is treated as no trusted URL at all.
+    try:
+        trusted = normalize_trusted_url(stored)
+    except ValueError:
+        trusted = ""
+    entries: list[dict[str, object]] = []
+    if trusted:
+        entries.append({"url": trusted, "kind": "trusted", "secure": True, "loopback": False})
+    urls = await asyncio.to_thread(server_addresses, port)
+    for url in urls:
+        if is_loopback_url(url):
+            continue
+        entries.append({"url": url, "kind": "lan", "secure": False, "loopback": False})
+    for url in urls:
+        if is_loopback_url(url):
+            entries.append({"url": url, "kind": "loopback", "secure": False, "loopback": True})
+    return JSONResponse({"port": port, "trusted_url": trusted or None, "addresses": entries})

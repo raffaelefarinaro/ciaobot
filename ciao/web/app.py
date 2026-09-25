@@ -47,6 +47,7 @@ from ciao.web.routes_auth import (
     auth_settings_update,
 )
 from ciao.web.routes_api import (
+    addresses_endpoint,
     admin_add_skill,
     admin_deploy,
     admin_restart,
@@ -372,6 +373,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/open-chat/{chat_id}", open_chat_endpoint, methods=["GET"]),
         Route("/api/setup-status", setup_status_endpoint, methods=["GET"]),
         Route("/api/node/addresses", node_addresses_endpoint, methods=["GET"]),
+        Route("/api/addresses", addresses_endpoint, methods=["GET"]),
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
         Route("/api/package/changelog", package_changelog_endpoint, methods=["GET"]),
         Route("/api/package/update", package_update_endpoint, methods=["POST"]),
