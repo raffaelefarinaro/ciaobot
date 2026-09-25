@@ -6,10 +6,9 @@
     <PaneHeader :brand="false" @open-sidebar="$emit('close')">
       <template #title>
         <div class="header-left">
-          <span v-if="fileTypeLabel" class="pfp-type" aria-hidden="true">{{ fileTypeLabel }}</span>
           <div class="header-breadcrumb">
             <span class="chat-title" :title="filePath">{{ basename }}</span>
-            <span v-if="docDir" class="pfp-dir" :title="docDir">{{ docDir }}</span>
+            <span v-if="docDir" class="pfp-dir" :title="docDir">{{ shortDirname(cleanPath) }}</span>
           </div>
         </div>
       </template>
@@ -23,43 +22,36 @@
           aria-label="Edit"
           :disabled="loading || !!error"
         >Edit</button>
-        <button
-          class="btn-icon"
-          :class="{ ok: refreshed }"
-          @click="refresh"
-          title="Refresh"
-          aria-label="Refresh"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-        </button>
-        <button
-          class="btn-icon"
-          @click="downloadFile"
-          title="Download"
-          aria-label="Download"
-          :disabled="loading || !!error"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        </button>
-        <button
-          class="btn-icon"
-          :class="{ ok: openExternalState === 'ok' }"
-          @click="openExternally"
-          title="Open in default app"
-          aria-label="Open in default app"
-          :disabled="loading || !!error || openExternalState === 'loading'"
-        >
-           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-         </button>
-        <button
-          v-if="memoryPath"
-          class="btn-icon"
-          @click="void openInMemoryMap()"
-          title="Open in memory map"
-          aria-label="Open in memory map"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="m7.7 7.1 2.9 8.1M16.3 7.1l-2.9 8.1M8 6h8"/></svg>
-        </button>
+        <!-- File utilities share one menu, like the file viewer modal, instead
+             of a row of look-alike icons. -->
+        <DropdownMenuRoot :modal="false">
+          <DropdownMenuTrigger as-child>
+            <button type="button" class="btn-icon" aria-label="More file actions" title="More">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" /></svg>
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuPortal>
+            <DropdownMenuContent as-child align="end" :side-offset="6" :collision-padding="8">
+              <div class="pfp-actions-menu">
+                <DropdownMenuItem as-child @select="refresh">
+                  <button type="button">Refresh</button>
+                </DropdownMenuItem>
+                <DropdownMenuItem as-child @select.prevent="copyPath">
+                  <button type="button">{{ copyState === 'ok' ? 'Copied' : 'Copy path' }}</button>
+                </DropdownMenuItem>
+                <DropdownMenuItem as-child :disabled="loading || !!error" @select="downloadFile">
+                  <button type="button">Download</button>
+                </DropdownMenuItem>
+                <DropdownMenuItem as-child :disabled="loading || !!error || openExternalState === 'loading'" @select="openExternally">
+                  <button type="button">{{ openExternalState === 'ok' ? 'Opened' : 'Open in default app' }}</button>
+                </DropdownMenuItem>
+                <DropdownMenuItem v-if="memoryPath" as-child @select="void openInMemoryMap()">
+                  <button type="button">Open in memory map</button>
+                </DropdownMenuItem>
+              </div>
+            </DropdownMenuContent>
+          </DropdownMenuPortal>
+        </DropdownMenuRoot>
         <!-- Close sits last, where a window's close lives; the tile is a window. -->
         <button class="btn-icon close-btn desktop-only" @click="$emit('close')" title="Unpin file" aria-label="Unpin file">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
@@ -172,7 +164,7 @@
                 <span v-if="fmUpdated" class="pfp-meta-date">Updated {{ fmUpdated }}</span>
                 <span v-else-if="fmCreated" class="pfp-meta-date">Created {{ fmCreated }}</span>
               </div>
-              <p v-if="fmName && fmName !== basename.replace(/\.md$/, '')" class="pfp-meta-name" :title="fmName">{{ fmName }}</p>
+              <p v-if="showFmName" class="pfp-meta-name" :title="fmName">{{ fmName }}</p>
               <p v-if="fmProse" class="pfp-meta-summary">{{ fmProse }}</p>
               <p v-if="fmTags.length" class="pfp-meta-tags">
                 <span v-for="t in fmTags" :key="t" class="pfp-meta-tag">#{{ t }}</span>
@@ -320,7 +312,14 @@
 </template>
 
 <script setup lang="ts">
-import { FocusScope } from 'reka-ui'
+import {
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuPortal,
+  DropdownMenuRoot,
+  DropdownMenuTrigger,
+  FocusScope,
+} from 'reka-ui'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
@@ -328,6 +327,7 @@ import { renderFileMarkdown } from '../lib/safeMarkdown'
 import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isCsvPath } from '../lib/csv'
+import { shortDirname } from '../lib/chatActivity'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
@@ -381,6 +381,16 @@ const sourceLoading = ref(false)
 const sourceError = ref('')
 const sourceLoaded = ref(false)
 const refreshed = ref(false)
+const copyState = ref<'idle' | 'ok'>('idle')
+async function copyPath(): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(cleanPath.value)
+    copyState.value = 'ok'
+    setTimeout(() => { copyState.value = 'idle' }, 1500)
+  } catch {
+    /* clipboard unavailable: leave the label as is */
+  }
+}
 const openExternalState = ref<'' | 'loading' | 'ok'>('')
 const isEditingText = ref(false)
 const editBuffer = ref('')
@@ -452,12 +462,6 @@ function humanizeMeta(value: string): string {
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(cleanPath.value))
 const isCsv = computed(() => isCsvPath(cleanPath.value))
 
-// Short extension badge for the tile's title bar ("MD", "CSV", "HTML").
-const fileTypeLabel = computed(() => {
-  const m = /\.([a-z0-9]{1,5})$/i.exec(basename.value)
-  return m ? m[1].toUpperCase() : ''
-})
-
 const docDir = computed(() => {
   const idx = cleanPath.value.lastIndexOf('/')
   return idx === -1 ? '' : cleanPath.value.slice(0, idx + 1)
@@ -503,6 +507,14 @@ const renderedMarkdown = computed(() => {
 // `title` is the canonical human label in the vault schema; `name` is the
 // retired synonym still present on older pages. Prefer title, fall back.
 const fmName = computed(() => fmString('title') || fmString('name'))
+// The title usually repeats the file name or the body's first heading; show it
+// only when it says something neither of those does.
+const showFmName = computed(() => {
+  const name = fmName.value.trim()
+  if (!name || name === basename.value.replace(/\.md$/, '')) return false
+  const heading = /^#\s+(.+?)\s*#*\s*$/m.exec(splitContent.value.body || '')
+  return !heading || heading[1].trim() !== name
+})
 const fmType = computed(() => fmString('type'))
 const fmStatus = computed(() => fmString('status'))
 const fmTags = computed(() => fmList('tags'))
@@ -532,7 +544,9 @@ const _linkPathSet = computed(() => new Set(markdownPaths.value || []))
 function resolveListItem(raw: string): { label: string; path: string | null } {
   const inner = raw.replace(/^\[\[(.+)\]\]$/, '$1').trim()
   const [ref, alias] = inner.split('|')
-  const label = (alias ?? ref).trim()
+  // A related note reads by its name, not its vault path; the full path stays
+  // in the link's title.
+  const label = (alias ?? (ref.split('/').pop() || ref).replace(/\.md$/i, '')).trim()
   const path = ref.trim()
     ? resolveVaultLinkTarget(ref.trim(), cleanPath.value, _linkIndex.value, _linkPathSet.value)
     : null
@@ -546,7 +560,7 @@ const fmListExtras = computed(() => {
     if (!items.length) continue
     const resolved = _LINK_LIST_KEYS.has(key)
       ? items.map(resolveListItem)
-      : items.map((raw) => ({ label: raw, path: null }))
+      : [{ label: items.join(', '), path: null }]
     out.push({ key, items: resolved })
   }
   return out
@@ -1401,18 +1415,6 @@ defineExpose({ isBusyAuthoring })
   padding: 0 4px 0 12px;
   background: transparent;
 }
-.pfp-type {
-  flex: none;
-  padding: 2px 5px;
-  border-radius: var(--radius-xs);
-  background: var(--bg3);
-  color: var(--fg2);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  line-height: 1.4;
-}
 
 /* Unified Header styles matching ChatPanel */
 .header-left {
@@ -1618,6 +1620,38 @@ defineExpose({ isBusyAuthoring })
 /* ── Metadata card (parsed frontmatter) ─────────────────────────── */
 /* Document properties: sits above the prose in the same measure, reads as
    metadata (muted, sentence case, normal font), and ends on a hairline. */
+.pfp-actions-menu {
+  z-index: 100;
+  min-width: 190px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 35%);
+}
+.pfp-actions-menu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.pfp-actions-menu button:hover,
+.pfp-actions-menu button[data-highlighted] { background: var(--bg3); }
+.pfp-actions-menu button[data-disabled] { color: var(--fg3); cursor: default; }
+.pfp-actions-menu button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (pointer: coarse) {
+  .pfp-actions-menu button { min-height: var(--touch); }
+}
+
 .pfp-meta {
   width: 100%;
   max-width: 680px;
@@ -1644,9 +1678,8 @@ defineExpose({ isBusyAuthoring })
 .pfp-meta-name { margin: 6px 0 0; color: var(--fg2); }
 .pfp-meta-summary {
   margin: 8px 0 0;
-  color: var(--fg);
-  font-size: var(--text-base);
-  line-height: 1.6;
+  color: var(--fg2);
+  line-height: 1.55;
 }
 .pfp-meta-tags {
   display: flex;

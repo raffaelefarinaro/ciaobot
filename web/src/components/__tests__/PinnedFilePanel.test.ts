@@ -26,11 +26,11 @@ describe('PinnedFilePanel', () => {
     vi.unstubAllGlobals()
   })
 
-  async function mountPanel(options: { attach?: boolean; filePath?: string } = {}): Promise<VueWrapper> {
+  async function mountPanel(options: { attach?: boolean; filePath?: string; content?: string } = {}): Promise<VueWrapper> {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url.startsWith('/api/workspace-file')) {
-        return new Response(FILE_CONTENT, {
+        return new Response(options.content ?? FILE_CONTENT, {
           status: 200,
           headers: { 'content-type': 'text/plain' },
         })
@@ -300,10 +300,45 @@ describe('PinnedFilePanel', () => {
     wrapper.unmount()
   })
 
-  it('offers memory-map navigation for markdown files', async () => {
-    const wrapper = await mountPanel()
+  it('shows document properties without repeating the heading or vault paths', async () => {
+    const content = [
+      '---',
+      'type: project',
+      'title: "LV order capture"',
+      'description: "Read the order number off a printout."',
+      'aliases:',
+      '  - LV OCR',
+      '  - order number OCR',
+      'related:',
+      '  - "work/memory-vault/projects/active/q4/lvmh-p6-ocr-trials.md"',
+      '---',
+      '',
+      '# LV order capture',
+      '',
+      'body',
+    ].join('\n')
+    const wrapper = await mountPanel({ content })
 
-    expect(wrapper.get('button[aria-label="Open in memory map"]')).toBeTruthy()
+    const meta = wrapper.get('.pfp-meta')
+    // The title repeats the first heading, so the properties leave it out.
+    expect(meta.find('.pfp-meta-name').exists()).toBe(false)
+    expect(meta.get('.pfp-meta-summary').text()).toBe('Read the order number off a printout.')
+    expect(meta.text()).toContain('LV OCR, order number OCR')
+    expect(meta.text()).toContain('lvmh-p6-ocr-trials')
+    expect(meta.text()).not.toContain('work/memory-vault')
+    wrapper.unmount()
+  })
+
+  it('keeps file utilities in one menu, with memory-map navigation for markdown', async () => {
+    const wrapper = await mountPanel({ attach: true })
+
+    // The header is Edit, the menu and close - not a row of utility icons.
+    expect(wrapper.find('button[aria-label="Download"]').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="Refresh"]').exists()).toBe(false)
+    await wrapper.get('button[aria-label="More file actions"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    const items = Array.from(document.querySelectorAll('.pfp-actions-menu button')).map(b => b.textContent?.trim())
+    expect(items).toEqual(['Refresh', 'Copy path', 'Download', 'Open in default app', 'Open in memory map'])
     wrapper.unmount()
   })
 

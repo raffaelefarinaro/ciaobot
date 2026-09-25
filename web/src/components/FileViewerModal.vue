@@ -170,7 +170,7 @@
                 <span v-if="fmUpdated" class="fv-meta-date">Updated {{ fmUpdated }}</span>
                 <span v-else-if="fmCreated" class="fv-meta-date">Created {{ fmCreated }}</span>
               </div>
-              <p v-if="fmName && fmName !== basename.replace(/\.md$/, '')" class="fv-meta-name" :title="fmName">{{ fmName }}</p>
+              <p v-if="showFmName" class="fv-meta-name" :title="fmName">{{ fmName }}</p>
               <p v-if="fmProse" class="fv-meta-summary">{{ fmProse }}</p>
               <p v-if="fmTags.length" class="fv-meta-tags">
                 <span v-for="t in fmTags" :key="t" class="fv-meta-tag">#{{ t }}</span>
@@ -462,6 +462,14 @@ const bodyOnly = computed(() => splitContent.value.body)
 // `title` is the canonical human label in the vault schema; `name` is the
 // retired synonym still present on older pages. Prefer title, fall back.
 const fmName = computed(() => fmString('title') || fmString('name'))
+// The title usually repeats the file name or the body's first heading; show it
+// only when it says something neither of those does.
+const showFmName = computed(() => {
+  const name = fmName.value.trim()
+  if (!name || name === basename.value.replace(/\.md$/, '')) return false
+  const heading = /^#\s+(.+?)\s*#*\s*$/m.exec(bodyOnly.value || '')
+  return !heading || heading[1].trim() !== name
+})
 const fmType = computed(() => fmString('type'))
 const fmStatus = computed(() => fmString('status'))
 const fmTags = computed(() => fmList('tags'))
@@ -492,7 +500,9 @@ const _linkPathSet = computed(() => new Set<string>(store.markdownPaths || []))
 function resolveListItem(raw: string): { label: string; path: string | null } {
   const inner = raw.replace(/^\[\[(.+)\]\]$/, '$1').trim()
   const [ref, alias] = inner.split('|')
-  const label = (alias ?? ref).trim()
+  // A related note reads by its name, not its vault path; the full path stays
+  // in the link's title.
+  const label = (alias ?? (ref.split('/').pop() || ref).replace(/\.md$/i, '')).trim()
   const path = ref.trim()
     ? resolveVaultLinkTarget(ref.trim(), store.path, _linkIndex.value, _linkPathSet.value)
     : null
@@ -506,7 +516,7 @@ const fmListExtras = computed(() => {
     if (!items.length) continue
     const resolved = _LINK_LIST_KEYS.has(key)
       ? items.map(resolveListItem)
-      : items.map((raw) => ({ label: raw, path: null }))
+      : [{ label: items.join(', '), path: null }]
     out.push({ key, items: resolved })
   }
   return out
@@ -1705,9 +1715,8 @@ watch(
 .fv-meta-name { margin: 6px 0 0; color: var(--fg2); }
 .fv-meta-summary {
   margin: 8px 0 0;
-  color: var(--fg);
-  font-size: var(--text-base);
-  line-height: 1.6;
+  color: var(--fg2);
+  line-height: 1.55;
 }
 .fv-meta-tags {
   display: flex;
