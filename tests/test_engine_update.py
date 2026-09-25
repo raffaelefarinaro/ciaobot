@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from ciao.engine_update import (
+    Operation,
     UpdateError,
     UpdateInProgress,
     acquire_lock,
@@ -27,6 +28,7 @@ from ciao.engine_update import (
     read_operation,
     release_lock,
     stage_update,
+    write_operation,
 )
 from ciao.install_receipt import InstallReceipt, write_receipt
 from ciao.release_manifest import artifact_entry, build_manifest
@@ -405,3 +407,59 @@ def test_cli_status_without_record(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["status"]) == 0
 
     assert "no update staged" in capsys.readouterr().out
+
+
+# A `run(..., check=True)` failure carries uv's reason in the captured stderr,
+# not in `str(exc)`, which is only "returned non-zero exit status 1". The record
+# must keep the real explanation, or `ciao update status` and the UI show an
+# operator an unexplained failure. (Round 1 review finding.)
+def test_stage_update_keeps_uv_stderr_in_failed_record(
+    tmp_path: Path, release: FakeRelease, fake_run
+) -> None:
+    good_run, _ = fake_run
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "pip" in argv:
+            raise subprocess.CalledProcessError(
+                1, argv, output="", stderr="no matching distribution"
+            )
+        return good_run(argv, **kwargs)
+
+    with pytest.raises(UpdateError, match="no matching distribution"):
+        stage_update(
+            "1.2.3",
+            current_version="1.2.2",
+            state_dir=tmp_path / "state",
+            release_base=RELEASE_BASE,
+            fetch=release.serve,
+            run=run,
+            uv="/fake/uv",
+        )
+
+    op = read_operation(tmp_path / "state")
+    assert op is not None
+    assert op.phase == "failed"
+    assert "no matching distribution" in op.error
+
+
+# The record's phase is what an operator reads. Printing every record as
+# "staged" told a reader the update was ready right after a failure.
+def test_cli_status_reports_failed_phase(capsys: pytest.CaptureFixture[str]) -> None:
+    write_operation(
+        Operation(
+            id="20260925T100000-1.2.3",
+            phase="failed",
+            from_version="1.2.2",
+            to_version="1.2.3",
+            started_at="2026-09-25T10:00:00+00:00",
+            updated_at="2026-09-25T10:00:05+00:00",
+            error="boom",
+            stage_dir="/home/u/.local/state/ciaobot/updates/1.2.3",
+        )
+    )
+
+    assert main(["status"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.startswith("failed")
+    assert "boom" in out

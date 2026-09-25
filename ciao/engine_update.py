@@ -427,13 +427,22 @@ def _stage_locked(
     except Exception as exc:
         # One write, with the reason attached: a `failed` record whose error is
         # still empty would be the one case the UI cannot explain.
+        #
+        # `run(..., check=True)` reports only "returned non-zero exit status 1"
+        # here; uv's own stderr is the likeliest real explanation, so it is
+        # carried into the record instead of being captured and dropped.
+        message = str(exc)
+        if isinstance(exc, subprocess.CalledProcessError):
+            detail = (exc.stderr or exc.stdout or "").strip()
+            if detail:
+                message = f"{message}: {detail[-2000:]}"
         op.phase = "failed"
-        op.error = str(exc)
+        op.error = message
         op.updated_at = _now()
         write_operation(op, state_dir)
         if isinstance(exc, UpdateError):
             raise
-        raise UpdateError(str(exc)) from exc
+        raise UpdateError(message) from exc
 
     advance("staged")
     return op
@@ -483,7 +492,13 @@ def main(argv: list[str] | None = None) -> int:
 def _format(op: Operation, as_json: bool) -> str:
     if as_json:
         return json.dumps(asdict(op), indent=2, sort_keys=True)
-    return f"staged {op.to_version} in {op.stage_dir}"
+    # The record's own phase, not a fixed word: a `failed` or still-running
+    # operation printed as "staged" tells an operator the update is ready when
+    # it is not.
+    line = f"{op.phase} {op.to_version} in {op.stage_dir}"
+    if op.error:
+        line = f"{line}: {op.error}"
+    return line
 
 
 if __name__ == "__main__":
