@@ -58,6 +58,13 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
   /** Newest mutation response whose returned queue has been adopted. */
   let latestMutationSnapshot = 0
   let mutationSeq = 0
+  // Request-start order does not say which snapshot is freshest: a POST that
+  // started later can land first, and the earlier one's reply — which may
+  // hold both mutations — is then discarded by the ticket check. When that
+  // happens, re-fetch once the burst of concurrent mutations has settled, so
+  // the queue ends on the server's state rather than on the order of replies.
+  let mutationsInFlight = 0
+  let discardedSnapshotFor: string | null = null
 
   function isBusy(id: string): boolean {
     return busyIds.value.has(id)
@@ -149,6 +156,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     body: Record<string, unknown>,
   ): Promise<{ ok: boolean; result: VaultReviewDecisionResult | null }> {
     const mutationTicket = ++mutationSeq
+    mutationsInFlight += 1
     setBusy(id, true)
     error.value = ''
     notice.value = ''
@@ -187,6 +195,8 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
           cleared.value = data.cleared ?? []
           loadedWorkspace.value = workspace
           loadError.value = ''
+        } else if (loadedWorkspace.value === workspace || loadedWorkspace.value === null) {
+          discardedSnapshotFor = workspace
         }
       } else {
         await fetch(workspace, { force: true })
@@ -197,6 +207,12 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
       return { ok: false, result: null }
     } finally {
       setBusy(id, false)
+      mutationsInFlight -= 1
+      if (mutationsInFlight === 0 && discardedSnapshotFor) {
+        const stale = discardedSnapshotFor
+        discardedSnapshotFor = null
+        if (loadedWorkspace.value === stale) void fetch(stale, { force: true })
+      }
     }
   }
 

@@ -551,7 +551,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   }
 
   return {
-    nodes, edges, loading, loadError, search, activeCats, selectedId, focusSignal,
+    nodes, edges, loading, loadError, search, activeCats, selectedId, focusSignal, loadedWorkspace,
     pendingFocus,
     hideOrphans, orphanFilter, view, mapView, reviewTab, retirementTab, section, setSection,
     nodesById, adjacency, categoryList, visibleNodes, visibleIds, visibleEdgeCount, orphanCount,

@@ -918,7 +918,7 @@ function memoryNavCount(section: MemorySection): number | null {
     case 'suggested': return proposals.scopedRows(workspace).length || null
     case 'revisit': return retirementLoaded ? vaultReview.candidates.length || null : null
     case 'retired': return retirementLoaded ? vaultReview.trashed.length || null : null
-    case 'map': return mm.nodes.length || null
+    case 'map': return mm.loadedWorkspace === workspace ? mm.nodes.length || null : null
     case 'history': return historyLoaded ? proposals.historyTotal || null : null
   }
 }

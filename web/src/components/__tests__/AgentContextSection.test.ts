@@ -67,4 +67,28 @@ describe('AgentContextSection', () => {
     const wrapper = await mountSection({ entities: [] })
     expect(wrapper.text()).toContain('None.')
   })
+
+  it('says the guide could not be read, with a retry, instead of dropping the row', async () => {
+    setActivePinia(createPinia())
+    let failing = true
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (failing) throw new Error('network down')
+      return url.includes(encodeURIComponent('work/AGENTS.md'))
+        ? new Response('guide', { status: 200 })
+        : new Response('', { status: 404 })
+    }))
+    const wrapper = mount(AgentContextSection, {
+      props: { project: PROJECT, entities: undefined, contextPct: null },
+      global: { stubs: { RouterLink: RouterLinkStub } },
+    })
+    await flushPromises()
+    const error = wrapper.get('.agent-context-error')
+    expect(error.text()).toContain('network down')
+
+    failing = false
+    await error.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.agent-context-error').exists()).toBe(false)
+    expect(wrapper.text()).toContain('AGENTS.md')
+  })
 })

@@ -158,6 +158,22 @@ describe('ProjectSidebar review section', () => {
     expect(items[3].find('.memory-nav-count').exists()).toBe(false)
   })
 
+  it('shows no map count until the selected workspace\'s graph has loaded', async () => {
+    // Switching to an uncached workspace leaves the previous graph's nodes in
+    // place while the new one loads; its count must not appear under the new
+    // workspace.
+    const mm = useMemoryMapStore()
+    mm.nodes = [{ id: 'n', title: 'n', type: 'note', tags: [], aliases: [], description: '', workspace: 'work', degree: 0, mtime: 0, updated: '', stale: false, ageDays: null, x: 0, y: 0, vx: 0, vy: 0 }] as never
+    mm.loadedWorkspace = 'work'
+    const wrapper = await mountSidebar()
+    const map = wrapper.findAll('.memory-nav-item')[2]
+    expect(map.find('.memory-nav-count').exists()).toBe(false)
+
+    mm.loadedWorkspace = 'personal'
+    await nextTick()
+    expect(map.get('.memory-nav-count').text()).toBe('1')
+  })
+
   it('marks the section on screen as the current page', async () => {
     useMemoryMapStore().setSection('revisit')
     const wrapper = await mountSidebar()

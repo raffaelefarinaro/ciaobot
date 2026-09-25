@@ -407,7 +407,39 @@ describe('vaultReview store', () => {
     })
     await first
 
-    expect(store.candidates.map(row => row.candidate_id)).toEqual(['newest'])
+    // The earlier-started reply is discarded on arrival (it may predate the
+    // later one's mutation, or hold both — the client cannot tell), and once
+    // the burst settles the queue is re-read from the server.
+    expect(get).toHaveBeenCalledTimes(1)
+  })
+
+  it('ends on the server\'s queue when an out-of-order reply was the fresher one', async () => {
+    const other = 'zzz999zzz999zzz999zzz999'
+    let settleFirst!: (value: unknown) => void
+    let settleSecond!: (value: unknown) => void
+    post.mockImplementationOnce(() => new Promise(resolve => { settleFirst = resolve }))
+    post.mockImplementationOnce(() => new Promise(resolve => { settleSecond = resolve }))
+    // What the server holds after both mutations: neither row is pending.
+    get.mockResolvedValueOnce({ candidates: [], trashed: [], cleared: [] })
+    const store = useVaultReviewStore()
+    store.loadedWorkspace = 'personal'
+    store.candidates = [candidate(), candidate({ candidate_id: other })]
+
+    const first = store.decide('personal', ID, 'keep')
+    const second = store.decide('personal', other, 'keep')
+    // The later POST lands first, before the earlier one mutated the ledger:
+    // its snapshot still lists row one as pending.
+    settleSecond({ ok: true, result: null, candidates: [candidate()], trashed: [], cleared: [] })
+    await second
+    expect(store.candidates.map(row => row.candidate_id)).toEqual([ID])
+    // The earlier POST's snapshot holds both mutations, but arrives second.
+    settleFirst({ ok: true, result: null, candidates: [], trashed: [], cleared: [] })
+    await first
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(get).toHaveBeenCalledTimes(1)
+    expect(store.candidates).toEqual([])
   })
 
   it('reads its own POST answer when two decisions are in flight', async () => {

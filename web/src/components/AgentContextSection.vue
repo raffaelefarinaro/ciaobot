@@ -31,6 +31,13 @@
         </span>
         <small>Workspace guide · read every turn</small>
       </button>
+      <div v-else-if="guide.error" class="rail-item agent-context-row agent-context-error" role="status">
+        <span class="agent-context-row-top">
+          <span class="agent-context-name">Workspace guide</span>
+          <button type="button" class="agent-context-link" @click="loadGuide">Retry</button>
+        </span>
+        <small>Could not be read just now: {{ guide.error }}</small>
+      </div>
       <div v-if="project" class="rail-item agent-context-row agent-context-brief">
         <span class="agent-context-row-top">
           <router-link :to="`/project/${project.project_id}`" class="agent-context-name agent-context-project">{{ project.name }}</router-link>
@@ -88,12 +95,16 @@ const fileViewer = useFileViewerStore()
 
 const guide = ref<WorkspaceGuide>({ path: '', content: '', error: '' })
 let guideSeq = 0
-watch(() => props.project?.workspace, async (workspace) => {
+// A failed read (network, non-404) keeps its error so the row says the guide
+// is unreadable rather than disappearing as if the workspace had none.
+async function loadGuide() {
+  const workspace = props.project?.workspace
   const seq = ++guideSeq
   if (!workspace) { guide.value = { path: '', content: '', error: '' }; return }
   const result = await fetchWorkspaceGuide(workspace)
   if (seq === guideSeq) guide.value = result
-}, { immediate: true })
+}
+watch(() => props.project?.workspace, loadGuide, { immediate: true })
 const guideName = computed(() => guide.value.path.split('/').pop() || 'AGENTS.md')
 const guideTokens = computed(() => tokensFor(guide.value.content.length))
 
