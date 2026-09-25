@@ -63,9 +63,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/native/sessions` | List locally-running Claude Code CLI sessions for a workspace (handover warning) |
 | GET | `/api/chats/{chat_id}/subagents` | Load subagent transcripts. `?agent_id=` narrows to one agent (bare or `agent-`-prefixed) and skips reading the siblings — what the read-only subagent view polls |
 | GET | `/api/subagents/running` | Live subagents per working chat (metadata only), for the sidebar's subagent rows |
-| POST | `/api/chats/{chat_id}/voice` | Upload voice for transcription |
-| POST | `/api/voice` | Transcribe voice before a chat exists (home composer); same upload and limits as the per-chat route |
-| POST | `/api/chats/{chat_id}/speak` | Synthesize speech for a message; returns audio bytes |
 | POST | `/api/chats/{chat_id}/images` | Upload chat images |
 | POST | `/api/chats/{chat_id}/attachments` | Upload chat files; supported documents become Markdown in the active project folder; the browser receives bounded `file_refs`, not server paths |
 | GET | `/api/images/{ref}` | Read uploaded image blob |

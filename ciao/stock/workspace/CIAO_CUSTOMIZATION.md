@@ -74,7 +74,6 @@ Provider keys live in `.env` or the provider's own OAuth store. Do not put keys 
 Common keys:
 
 - Claude Code authentication is owned by the Claude CLI; use Settings → Models & providers to connect or verify it.
-- Voice transcription and read-aloud use the host Mac's on-device Apple frameworks; no voice API key is required.
 - Provider authentication is owned by the provider CLIs; use `ciao auth <provider>` or Settings → Models & providers. Claude Code also accepts `ANTHROPIC_API_KEY` from the process environment; Ciaobot has no API-key fields and never returns the value.
 
 Agents may check whether a key is set, but must not print the value.

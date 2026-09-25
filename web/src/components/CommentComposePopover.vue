@@ -42,17 +42,6 @@
           <input type="file" accept="image/*" multiple hidden @change="onUpload" />
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </label>
-        <div class="compose-voice">
-          <VoiceRecorder
-            v-if="!transcribing"
-            ref="voiceRecorderRef"
-            @recorded="handleVoice"
-            @error="handleVoiceError"
-          />
-          <span v-else class="voice-transcribing" title="Transcribing...">
-            <span class="transcribe-spinner"></span>
-          </span>
-        </div>
         <span class="compose-spacer" aria-hidden="true" />
         <button class="compose-btn" @click="emit('cancel')" type="button">Cancel</button>
         <button
@@ -84,9 +73,6 @@ import { computed, nextTick, ref, watch } from 'vue'
 
 import { useViewportHeight } from '../composables/useViewportHeight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
-import { useProjectStore } from '../stores/projects'
-import { errorMessage } from '../lib/errorMessage'
-import VoiceRecorder from './VoiceRecorder.vue'
 
 type ComposeAnchor = { top: number; left: number }
 
@@ -116,12 +102,9 @@ const emit = defineEmits<{
 
 const images = computed(() => props.images ?? [])
 const inputEl = ref<HTMLTextAreaElement>()
-const voiceRecorderRef = ref<InstanceType<typeof VoiceRecorder> | null>(null)
-const transcribing = ref(false)
 // Measured height, once rendered. Null until then, so the first paint uses the
 // COMPOSE_H estimate rather than jumping.
 const measuredH = ref<number | null>(null)
-const store = useProjectStore()
 
 // Reactive on purpose. Opening this popover focuses the textarea, so on a phone
 // the keyboard comes up a moment later and shrinks the viewport under a box that
@@ -175,13 +158,6 @@ function onKeydown(e: KeyboardEvent): void {
     emit('save')
     return
   }
-  // Same dictation shortcut that opens this popover from a selection, so it
-  // keeps working once the textarea has focus.
-  if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'd' || e.key === 'D')) {
-    e.preventDefault()
-    e.stopPropagation()
-    toggleDictation()
-  }
 }
 
 function focus(): void {
@@ -220,36 +196,7 @@ function insertTextAtCursor(text: string): void {
   })
 }
 
-async function handleVoice(blob: Blob): Promise<void> {
-  const chatId = store.activeChatId
-  if (!chatId) {
-    store.pushErrorToast('Voice dictation unavailable', 'No active chat')
-    return
-  }
-  transcribing.value = true
-  try {
-    const text = await store.transcribeVoice(chatId, blob)
-    if (text.trim()) {
-      insertTextAtCursor(text.trimEnd())
-    }
-  } catch (e) {
-    console.error('Voice error:', e)
-    store.pushErrorToast('Voice transcription failed', `${errorMessage(e)}`)
-  } finally {
-    transcribing.value = false
-  }
-}
-
-function handleVoiceError(message: string): void {
-  store.pushErrorToast('Voice dictation unavailable', message)
-}
-
-// Allow the parent (and a future global shortcut) to toggle recording.
-function toggleDictation(): void {
-  voiceRecorderRef.value?.toggleRecording()
-}
-
-defineExpose({ focus, toggleDictation })
+defineExpose({ focus })
 </script>
 
 <style scoped>
@@ -366,18 +313,6 @@ defineExpose({ focus, toggleDictation })
   opacity: 0.5;
   cursor: not-allowed;
 }
-.compose-voice {
-  display: flex;
-  align-items: center;
-}
-.compose-voice :deep(.voice-btn) {
-  min-width: 30px;
-  min-height: 30px;
-  width: 30px;
-  height: 30px;
-  border-color: transparent;
-  border-radius: 6px;
-}
 .compose-spacer { flex: 1; }
 .compose-hint {
   margin-right: auto;
@@ -389,30 +324,7 @@ defineExpose({ focus, toggleDictation })
 .compose-attach { margin-right: 0; }
 @media (pointer: coarse) {
   .compose-btn { min-height: var(--touch); }
-  .compose-attach,
-  .compose-voice :deep(.voice-btn) { width: var(--touch); height: var(--touch); min-width: var(--touch); min-height: var(--touch); }
-}
-.compose-voice :deep(.voice-btn svg) {
-  width: 16px;
-  height: 16px;
-}
-.voice-transcribing {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-}
-.transcribe-spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent, #60a5fa);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-@keyframes spin {
-  to { transform: rotate(360deg); }
+  .compose-attach { width: var(--touch); height: var(--touch); min-width: var(--touch); min-height: var(--touch); }
 }
 
 @media (max-width: 640px) {
@@ -425,9 +337,7 @@ defineExpose({ focus, toggleDictation })
 }
 @media (pointer: coarse) {
   .compose-attach,
-  .compose-btn,
-  .compose-voice :deep(.voice-btn),
-  .voice-transcribing {
+  .compose-btn {
     min-width: var(--touch);
     min-height: var(--touch);
     width: var(--touch);

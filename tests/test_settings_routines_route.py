@@ -71,15 +71,6 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
             {"workspace": "", "path": str(config.vault_root)},
         ],
     }
-    # Voice is on-device only: availability and a reason, no engine to pick.
-    assert data["transcription"]["locale"] == "en-US"
-    assert isinstance(data["transcription"]["available"], bool)
-    assert isinstance(data["transcription"]["unavailable_reason"], str)
-    assert isinstance(data["speech"]["available"], bool)
-    # Empty local voice = "best installed voice for the locale"; the picker is
-    # populated from the machine rather than a hardcoded default.
-    assert data["speech"]["local_voice"] == ""
-    assert isinstance(data["speech"]["local_voices"], list)
 
 
 def test_get_insights_effective_is_default_not_apfel_when_no_override(
@@ -267,23 +258,6 @@ def test_an_override_clears_the_per_workspace_maps(monkeypatch, tmp_path):
     assert data["insights_model_effective"] == "gemma4:12b-it-qat"
     # Empty signals "not workspace-dependent" to the UI.
     assert data["insights_model_by_workspace"] == {}
-
-
-def test_patch_persists_the_voice(tmp_path):
-    """What is left to configure once the engine choice is gone: which
-    installed voice reads aloud. The locale is fixed, so a PATCH naming it
-    is ignored like any unknown key."""
-    client, config = _make_client(tmp_path)
-    resp = client.patch(
-        "/api/settings/routines",
-        json={"transcription_locale": "it-IT", "tts_local_voice": "com.apple.voice.x"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["transcription"]["locale"] == "en-US"
-    assert not hasattr(config, "transcription_locale")
-    assert config.tts_local_voice == "com.apple.voice.x"
-    assert not hasattr(config, "transcription_engine")
-    assert not hasattr(config, "tts_engine")
 
 
 def test_routines_reports_apple_model_availability_without_a_beta_flag(tmp_path):

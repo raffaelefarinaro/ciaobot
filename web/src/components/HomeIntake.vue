@@ -90,11 +90,6 @@
         <button type="button" class="home-intake-icon-btn" title="Attach files" aria-label="Attach files" @click="fileInput?.click()">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 12 5-5a3 3 0 0 1 4 4l-7 7a5 5 0 0 1-7-7l7-7" /></svg>
         </button>
-        <span class="home-intake-voice">
-          <VoiceRecorder v-if="!transcribing" ref="voiceRecorderRef" @recorded="onVoice" @error="onVoiceError" />
-          <span v-else class="home-intake-spinner home-intake-spinner--muted" role="status" aria-label="Transcribing" />
-        </span>
-
         <span class="home-intake-spacer" />
         <span v-if="prompt.trim()" class="home-intake-kbd" aria-hidden="true"><kbd>{{ sendChord }}</kbd> send</span>
         <!-- Keeps "New" as its accessible name: the control still opens the
@@ -128,7 +123,6 @@ import { openNewChatPicker } from '../lib/newChat'
 import { isApplePlatform } from '../lib/desktop'
 import { providerForModelSection, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import ModelSelector from './ModelSelector.vue'
-import VoiceRecorder from './VoiceRecorder.vue'
 import { importDesktopDrop, uploadChatAttachments } from '../lib/chatAttachments'
 
 // Sentinel row for "no override": ModelSelector lists models, so the
@@ -238,13 +232,11 @@ watch(() => store.projects, () => {
   if (!chosen || chosen.workspace !== store.activeWorkspace) preferredProjectId.value = ''
 }, { deep: true })
 
-// ── Attachments and dictation ────────────────────────────────────────
+// ── Attachments ──────────────────────────────────────────────────────
 type StagedItem = { id: number; name: string; image: boolean; file?: File; grantId?: string }
 const staged = ref<StagedItem[]>([])
 const fileInput = ref<HTMLInputElement | null>(null)
 const dragOver = ref(false)
-const transcribing = ref(false)
-const voiceRecorderRef = ref<InstanceType<typeof VoiceRecorder> | null>(null)
 let stagedSeq = 0
 
 function stageFiles(files: File[]): void {
@@ -317,22 +309,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
   window.removeEventListener('ciao:native-file-drop', onNativeDrop)
 })
-
-async function onVoice(blob: Blob): Promise<void> {
-  transcribing.value = true
-  try {
-    const text = (await store.transcribeVoice(null, blob)).trim()
-    if (text) prompt.value = prompt.value.trim() ? `${prompt.value.trimEnd()} ${text}` : text
-  } catch (error) {
-    store.pushErrorToast('Voice transcription failed', error instanceof Error ? error.message : String(error))
-  } finally {
-    transcribing.value = false
-  }
-}
-
-function onVoiceError(message: string): void {
-  store.pushErrorToast('Voice dictation unavailable', message)
-}
 
 /** Upload staged items into the new chat; returns prompt tokens for files. */
 async function attachStaged(chatId: string, projectId: string, items: StagedItem[]): Promise<string[]> {
@@ -642,35 +618,6 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
 }
 .home-intake-icon-btn:hover { background: var(--bg3); color: var(--fg); }
 .home-intake-icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-.home-intake-voice {
-  display: inline-flex;
-  align-items: center;
-  flex: none;
-}
-
-/* The shared recorder, drawn like the paperclip beside it. */
-.home-intake-voice :deep(.voice-btn:not(.recording)) {
-  width: 32px;
-  height: 32px;
-  min-width: 0;
-  min-height: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: none;
-  color: var(--fg2);
-}
-.home-intake-voice :deep(.voice-btn:not(.recording):hover) { background: var(--bg3); color: var(--fg); }
-.home-intake-voice :deep(.voice-btn svg) { width: 16px; height: 16px; }
-@media (pointer: coarse), (max-width: 700px) {
-  .home-intake-voice :deep(.voice-btn:not(.recording)) { width: var(--touch); height: var(--touch); }
-}
-
-.home-intake-spinner--muted {
-  border-color: color-mix(in srgb, var(--fg2) 30%, transparent);
-  border-top-color: var(--fg2);
-}
 
 .home-intake-spacer {
   flex: 1;

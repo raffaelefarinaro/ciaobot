@@ -33,17 +33,17 @@ async function shortcutLabels(platform: string): Promise<string[]> {
 
 it('shows the Option glyph for browser shortcuts on Apple platforms', async () => {
   const labels = await shortcutLabels('MacIntel')
-  expect(labels).toEqual(expect.arrayContaining(['⌥N', '⌥D', '⌥⌫', '⌥S', '⌥M', '⌥=', '⌥-']))
+  expect(labels).toEqual(expect.arrayContaining(['⌥N', '⌥⌫', '⌥S', '⌥M', '⌥=', '⌥-']))
   expect(labels.some(l => l.startsWith('Alt+'))).toBe(false)
 })
 
 it.each(['Win32', 'Linux x86_64'])('shows Alt labels for browser shortcuts on %s', async (platform) => {
   const labels = await shortcutLabels(platform)
-  expect(labels).toEqual(expect.arrayContaining(['Alt+N', 'Alt+D', 'Alt+Backspace', 'Alt+S', 'Alt+M', 'Alt+=', 'Alt+-']))
+  expect(labels).toEqual(expect.arrayContaining(['Alt+N', 'Alt+Backspace', 'Alt+S', 'Alt+M', 'Alt+=', 'Alt+-']))
   expect(labels.some(l => l.includes('⌥'))).toBe(false)
 })
 
-it('shows the four common shortcuts and discloses the rest', async () => {
+it('shows the common shortcuts and discloses the rest', async () => {
   Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true })
   setActivePinia(createPinia())
   const stub = defineComponent({ render: () => h('div') })
@@ -55,13 +55,13 @@ it('shows the four common shortcuts and discloses the rest', async () => {
   try {
     await flushPromises()
     const toggle = wrapper.get('.settings-disclosure')
-    expect(wrapper.findAll('.shortcut-list li')).toHaveLength(4)
+    expect(wrapper.findAll('.shortcut-list li')).toHaveLength(3)
     expect(toggle.attributes('aria-expanded')).toBe('false')
     expect(toggle.attributes('aria-controls')).toBe('settings-shortcut-list')
-    expect(toggle.text()).toBe('Show all 11')
+    expect(toggle.text()).toBe('Show all 10')
 
     await toggle.trigger('click')
-    expect(wrapper.findAll('.shortcut-list li')).toHaveLength(11)
+    expect(wrapper.findAll('.shortcut-list li')).toHaveLength(10)
     expect(toggle.attributes('aria-expanded')).toBe('true')
     expect(toggle.text()).toBe('Show fewer')
   } finally {

@@ -32,11 +32,6 @@ function openViewer(options: { dirty?: boolean } = {}) {
   }
   wrapper = mount(FileViewerModal, {
     attachTo: document.body,
-    global: {
-      stubs: {
-        VoiceRecorder: true,
-      },
-    },
   })
   store.isOpen = true
   store.loadToken++
@@ -335,7 +330,6 @@ describe('FileViewerModal', () => {
     const inline = mount(CommentComposePopover, {
       attachTo: host,
       props: { anchor: { top: 10, left: 10 } as never, modelValue: 'note', inline: true },
-      global: { stubs: { VoiceRecorder: true } },
     })
     await settle()
     // Rendered in place, not teleported to <body>: reka disables pointer

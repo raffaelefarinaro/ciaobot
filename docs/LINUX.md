@@ -2,9 +2,9 @@
 
 Ciaobot's Python backend and PWA can run on Ubuntu 24.04 with Python 3.12 and
 Node 22. Use a browser or installed PWA from macOS, Windows, Linux, or a phone.
-The agents execute on the server and use its files and credentials. Apple-native
-voice and Apple Intelligence require a Mac host; select Claude/OpenCode models
-for Linux routines. Native Windows and Linux desktop bundles are separate work.
+The agents execute on the server and use its files and credentials. Apple
+Intelligence requires a Mac host; select Claude/OpenCode models for Linux
+routines. Native Windows and Linux desktop bundles are separate work.
 
 ## Install
 

@@ -50,7 +50,6 @@ from ciao.config import (
     CLAUDE_MODELS,
     GWS_DEFAULT_PROFILE,
     MAX_IMAGE_SIZE_BYTES,
-    MAX_VOICE_SIZE_BYTES,
     RESTART_EXIT_CODE,
     WorkspaceConfig,
 )
@@ -3137,91 +3136,6 @@ def _merge_subagent_dispatch_meta(
             entry["turn_index"] = info.turn_index
 
 
-# ── Voice ────────────────────────────────────────────────────────────────
-
-async def chat_voice(request: Request) -> JSONResponse:
-    """Upload and transcribe a voice file."""
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    chat = pcm.get_chat(chat_id)
-    if chat is None:
-        return JSONResponse({"error": "chat not found"}, status_code=404)
-    return await _transcribe_voice_form(request)
-
-
-async def voice_transcribe(request: Request) -> JSONResponse:
-    """Transcribe a voice file before any chat exists (the home composer).
-
-    Transcription never depended on the chat: the per-chat route only checks
-    that the chat exists. This is the same upload, size limit and cleanup.
-    """
-    return await _transcribe_voice_form(request)
-
-
-async def _transcribe_voice_form(request: Request) -> JSONResponse:
-    pcm = request.app.state.project_chat_manager
-    form = await request.form()
-    upload = form.get("audio")
-    if upload is None:
-        return JSONResponse({"error": "no audio file"}, status_code=400)
-
-    filename = getattr(upload, "filename", "audio.webm") or "audio.webm"
-
-    try:
-        data = await _read_upload_limited(
-            upload, MAX_VOICE_SIZE_BYTES
-        )
-        path = pcm.save_voice_upload(data, filename)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-
-    try:
-        text, cost = await pcm.transcribe_voice(path)
-    except ValueError as exc:
-        path.unlink(missing_ok=True)
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    except Exception as exc:
-        path.unlink(missing_ok=True)
-        return JSONResponse({"error": f"Transcription failed: {exc}"}, status_code=500)
-
-    path.unlink(missing_ok=True)
-
-    return JSONResponse({
-        "text": text,
-        "cost": round(cost, 6),
-    })
-
-
-async def chat_speak(request: Request) -> Response:
-    """Synthesize speech for a message; returns the audio bytes directly."""
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    chat = pcm.get_chat(chat_id)
-    if chat is None:
-        return JSONResponse({"error": "chat not found"}, status_code=404)
-
-    try:
-        body = await request.json()
-    except ValueError:
-        return JSONResponse({"error": "invalid JSON"}, status_code=400)
-    text = (body.get("text") or "").strip() if isinstance(body, dict) else ""
-    if not text:
-        return JSONResponse({"error": "no text to speak"}, status_code=400)
-
-    try:
-        audio, mime, cost = await pcm.synthesize_speech(text)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    except Exception as exc:
-        return JSONResponse({"error": f"Speech synthesis failed: {exc}"}, status_code=500)
-
-    return Response(
-        audio,
-        media_type=mime,
-        headers={"X-TTS-Cost": f"{cost:.6f}", "Cache-Control": "no-store"},
-    )
-
-
 # ── Images ───────────────────────────────────────────────────────────────
 
 async def chat_images(request: Request) -> JSONResponse:
@@ -5018,13 +4932,6 @@ async def list_models(request: Request) -> JSONResponse:
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
     from ciao import native_sidecar
-    from ciao.voice import (
-        apple_dictation_available,
-        apple_speech_available,
-        dictation_unavailable_reason,
-        system_locale,
-        system_voices,
-    )
 
     s = app_settings.settings
     from ciao.critique import critique_models_effective
@@ -5080,21 +4987,6 @@ def _routines_payload(config, app_settings) -> dict:
         # missing prerequisite instead of hiding the option.
         "apple_model_available": native_sidecar.apple_model_available(),
         "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
-        "transcription": {
-            "locale": system_locale(),
-            # On-device dictation needs macOS 26+, the installed app, and a
-            # dictation language. Settings hides the local option entirely when
-            # it cannot run, and shows the reason when the user asks.
-            "available": apple_dictation_available(),
-            "unavailable_reason": dictation_unavailable_reason(),
-        },
-        "speech": {
-            "local_voice": config.tts_local_voice,
-            "available": apple_speech_available(),
-            # Voices differ per machine, so the picker is populated from the
-            # system rather than a hardcoded list, best quality first.
-            "local_voices": system_voices(),
-        },
         # Grouped options for the routine model selectors.
         "model_options": {
             "anthropic": list(CLAUDE_MODELS),

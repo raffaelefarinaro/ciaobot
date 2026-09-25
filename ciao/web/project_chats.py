@@ -75,7 +75,6 @@ from ciao.config import (
     CLAUDE_MODELS,
     GWS_DEFAULT_PROFILE,
     MAX_IMAGE_SIZE_BYTES,
-    MAX_VOICE_SIZE_BYTES,
     BridgeConfig,
 )
 from ciao.context.capsule import (
@@ -135,7 +134,6 @@ from ciao.workspace_guide import guide_path as workspace_guide_path
 logger = logging.getLogger(__name__)
 
 _ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-_ALLOWED_VOICE_EXTENSIONS = {".webm", ".ogg", ".oga", ".mp3", ".m4a", ".wav"}
 
 # How long the PWA gets to answer a model-capability question (image input
 # against a non-vision model) before the turn closes with the system bubble
@@ -7207,75 +7205,6 @@ class ProjectChatManager:
                 if p.workspace == workspace:
                     return p
         return None
-
-    # ── Voice ────────────────────────────────────────────────────────────
-
-    async def transcribe_voice(self, audio_path: Path) -> tuple[str, float]:
-        """Transcribe an audio file. Returns (text, cost_usd).
-
-        On-device only, and free -- the cost is always 0.0, kept in the return
-        shape because callers record it. Raises ValueError naming the reason
-        when dictation is unavailable (pre-macOS 26, no desktop app, or no
-        dictation language installed).
-        """
-        from ciao.voice import (
-            AppleDictationTranscriber,
-            apple_dictation_available,
-            dictation_unavailable_reason,
-        )
-
-        if not await asyncio.to_thread(apple_dictation_available):
-            raise ValueError(
-                f"Dictation is unavailable: {dictation_unavailable_reason()}."
-            )
-        try:
-            transcriber = AppleDictationTranscriber()
-            text = await transcriber.transcribe(audio_path)
-            # Repair dictation surface errors with the on-device model. Fail-open:
-            # any failure returns the raw transcript unchanged.
-            text = await transcriber.correct(text)
-        except Exception as exc:
-            raise ValueError(f"Dictation failed: {exc}") from exc
-        return text, 0.0
-
-    async def synthesize_speech(self, text: str) -> tuple[bytes, str, float]:
-        """Read a message aloud. Returns (audio_bytes, mime_type, cost_usd).
-
-        The macOS system synthesizer through the bundled sidecar. Free, so the
-        cost is always 0.0. Markdown is reduced to speakable text first.
-        """
-        from ciao.voice import SystemSpeaker, apple_speech_available, speech_text
-
-        spoken = speech_text(text)
-        if not spoken:
-            raise ValueError("Nothing to read aloud in this message")
-
-        if not await asyncio.to_thread(apple_speech_available):
-            if sys.platform != "darwin":
-                raise ValueError("Read-aloud is macOS-only.")
-            raise ValueError(
-                "Read-aloud is unavailable. Install the desktop app with "
-                "the Ciaobot one-line installer."
-            )
-        try:
-            speaker = SystemSpeaker(self._config.tts_local_voice)
-            audio = await speaker.speak(spoken)
-        except Exception as exc:
-            raise ValueError(f"Read-aloud failed: {exc}") from exc
-        return audio, speaker.mime_type, 0.0
-
-    def save_voice_upload(self, data: bytes, filename: str) -> Path:
-        """Save an uploaded voice file and return its path."""
-        ext = Path(filename).suffix.lower() or ".webm"
-        if ext not in _ALLOWED_VOICE_EXTENSIONS:
-            raise ValueError(f"Unsupported voice format: {ext}")
-        target = self._config.media_root / f"web_voice_{chat_service._uuid8()}{ext}"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-        if len(data) > MAX_VOICE_SIZE_BYTES:
-            target.unlink(missing_ok=True)
-            raise ValueError("Voice file too large")
-        return target
 
     # ── Project files ────────────────────────────────────────────────────
 

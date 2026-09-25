@@ -4,8 +4,8 @@
  * The main webview loads the live localhost PWA as *remote* content. The app
  * injects `__CIAOBOT_DESKTOP__` with a document-start initialization script as
  * a one-way marker. A very small Tauri command surface is also exposed so the
- * PWA can ask macOS for native permissions (microphone, notifications,
- * camera in the future); the Tauri capability is limited to bundled local
+ * PWA can ask macOS for native permissions (notifications, camera in the
+ * future); the Tauri capability is limited to bundled local
  * pages and does not grant commands to remote PWA content.
  */
 declare global {
@@ -34,7 +34,7 @@ export function isApplePlatform(): boolean {
   return /macintosh|mac os x|iphone|ipad|ipod/i.test(nav.userAgent || '')
 }
 
-export type DesktopPermissionKind = 'microphone' | 'notifications' | 'camera'
+export type DesktopPermissionKind = 'notifications' | 'camera'
 export type DesktopPermissionState =
   | 'not_determined'
   | 'restricted'

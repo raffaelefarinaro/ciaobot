@@ -11,7 +11,6 @@ import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useFontScale } from '../../composables/useFontScale'
 import { pendingNewChat } from '../../lib/newChat'
 
-const toggleDictation = vi.fn()
 const toggleModelPicker = vi.fn()
 const handleSendShortcut = vi.fn(() => true)
 const archiveActiveChat = vi.fn()
@@ -20,7 +19,7 @@ const ChatPanelStub = defineComponent({
   name: 'ChatPanel',
   emits: ['close'],
   setup(_, { emit, expose }) {
-    expose({ toggleDictation, toggleModelPicker, handleSendShortcut, archiveActiveChat })
+    expose({ toggleModelPicker, handleSendShortcut, archiveActiveChat })
     return () => h('button', {
       'data-testid': 'close-chat',
       onClick: () => emit('close'),
@@ -62,7 +61,6 @@ describe('ChatLayout', () => {
 
   afterEach(() => {
     window.__CIAOBOT_DESKTOP__ = undefined
-    toggleDictation.mockReset()
     toggleModelPicker.mockReset()
     handleSendShortcut.mockReset()
     handleSendShortcut.mockReturnValue(true)
@@ -543,124 +541,6 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
-  it('routes Cmd+D to the active chat composer in the desktop app', async () => {
-    window.__CIAOBOT_DESKTOP__ = true
-    Object.defineProperty(window, 'innerWidth', {
-      configurable: true,
-      value: 1180,
-    })
-
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
-    })
-    await router.push('/')
-    await router.isReady()
-
-    const store = useProjectStore()
-    store.projects = [{
-      project_id: 'project-1',
-      name: 'General',
-      workspace: 'personal',
-    }] as unknown as typeof store.projects
-    store.chats = [{
-      chat_id: 'chat-1',
-      project_id: 'project-1',
-      title: 'Test chat',
-    }] as unknown as typeof store.chats
-    store.activeChatId = 'chat-1'
-    store.bootstrapped = true
-    vi.spyOn(store, 'fetchAll').mockResolvedValue()
-
-    const taskStore = useTaskStore()
-    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-
-    const { default: ChatLayout } = await import('../ChatLayout.vue')
-    const wrapper = mount(ChatLayout, {
-      global: {
-        plugins: [router],
-        stubs: {
-          ChatPanel: ChatPanelStub,
-          ProjectSidebar: EmptyStub,
-          ProjectView: EmptyStub,
-          SchedulePanel: EmptyStub,
-          SettingsView: EmptyStub,
-          FileViewerModal: EmptyStub,
-          PinnedFilePanel: EmptyStub,
-          PaneHeader: EmptyStub,
-          HomeRecentChats: EmptyStub,
-        },
-      },
-    })
-    await flushPromises()
-
-    const event = new KeyboardEvent('keydown', { key: 'd', metaKey: true, cancelable: true })
-    window.dispatchEvent(event)
-
-    expect(toggleDictation).toHaveBeenCalledOnce()
-    expect(event.defaultPrevented).toBe(true)
-    wrapper.unmount()
-  })
-
-  it('routes Alt+D to the active chat composer in the web PWA', async () => {
-    window.__CIAOBOT_DESKTOP__ = undefined
-    Object.defineProperty(window, 'innerWidth', {
-      configurable: true,
-      value: 1180,
-    })
-
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
-    })
-    await router.push('/')
-    await router.isReady()
-
-    const store = useProjectStore()
-    store.projects = [{
-      project_id: 'project-1',
-      name: 'General',
-      workspace: 'personal',
-    }] as unknown as typeof store.projects
-    store.chats = [{
-      chat_id: 'chat-1',
-      project_id: 'project-1',
-      title: 'Test chat',
-    }] as unknown as typeof store.chats
-    store.activeChatId = 'chat-1'
-    store.bootstrapped = true
-    vi.spyOn(store, 'fetchAll').mockResolvedValue()
-
-    const taskStore = useTaskStore()
-    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-
-    const { default: ChatLayout } = await import('../ChatLayout.vue')
-    const wrapper = mount(ChatLayout, {
-      global: {
-        plugins: [router],
-        stubs: {
-          ChatPanel: ChatPanelStub,
-          ProjectSidebar: EmptyStub,
-          ProjectView: EmptyStub,
-          SchedulePanel: EmptyStub,
-          SettingsView: EmptyStub,
-          FileViewerModal: EmptyStub,
-          PinnedFilePanel: EmptyStub,
-          PaneHeader: EmptyStub,
-          HomeRecentChats: EmptyStub,
-        },
-      },
-    })
-    await flushPromises()
-
-    const event = new KeyboardEvent('keydown', { key: 'd', altKey: true, cancelable: true })
-    window.dispatchEvent(event)
-
-    expect(toggleDictation).toHaveBeenCalledOnce()
-    expect(event.defaultPrevented).toBe(true)
-    wrapper.unmount()
-  })
-
   it('Cmd+T opens the new-chat picker instead of creating a chat directly', async () => {
     window.__CIAOBOT_DESKTOP__ = true
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
@@ -777,7 +657,7 @@ describe('ChatLayout', () => {
 
   // The model picker follows the same split: Cmd+Shift+M in the desktop app,
   // Option+M in the PWA, because macOS reserves plain Cmd+M for Minimize
-  // Window. Needs an active chat, like dictation.
+  // Window. Needs an active chat.
   it.each([
     ['the desktop app', true, { key: 'm', metaKey: true, shiftKey: true }],
     ['the web PWA', undefined, { key: 'm', altKey: true }],
@@ -1803,7 +1683,6 @@ describe('ChatLayout PWA Option/Alt chords', () => {
   })
 
   afterEach(() => {
-    toggleDictation.mockReset()
     toggleModelPicker.mockReset()
     archiveActiveChat.mockReset()
     pendingNewChat.value?.resolve(null)
@@ -1849,17 +1728,9 @@ describe('ChatLayout PWA Option/Alt chords', () => {
   }
 
   const platforms = [
-    ['Mac Option', { n: 'Dead', d: '∂', m: 'µ', s: 'ß', eq: '≠', minus: '–' }],
-    ['Windows Alt', { n: 'n', d: 'd', m: 'm', s: 's', eq: '=', minus: '-' }],
+    ['Mac Option', { n: 'Dead', m: 'µ', s: 'ß', eq: '≠', minus: '–' }],
+    ['Windows Alt', { n: 'n', m: 'm', s: 's', eq: '=', minus: '-' }],
   ] as const
-
-  it.each(platforms)('%s+D toggles dictation', async (_label, keys) => {
-    const wrapper = await mountWebLayout()
-    const event = press({ key: keys.d, code: 'KeyD' })
-    expect(toggleDictation).toHaveBeenCalledOnce()
-    expect(event.defaultPrevented).toBe(true)
-    wrapper.unmount()
-  })
 
   it.each(platforms)('%s+M opens the model picker', async (_label, keys) => {
     const wrapper = await mountWebLayout()
@@ -1930,12 +1801,11 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     wrapper.unmount()
   })
 
-  // Option+letter is how a Mac types accents and symbols (⌥N then N is ñ, ⌥D
-  // is ∂), so inside a text field a Mac Option press must reach the field
+  // Option+letter is how a Mac types accents and symbols (⌥N then N is ñ), so
+  // inside a text field a Mac Option press must reach the field
   // untouched. The same events outside a text field are shortcuts.
   it.each([
     ['⌥N', { key: 'Dead', code: 'KeyN' }],
-    ['⌥D', { key: '∂', code: 'KeyD' }],
     ['⌥M', { key: 'µ', code: 'KeyM' }],
   ] as const)('Mac %s in a focused textarea types the character instead of firing', async (_label, init) => {
     const wrapper = await mountWebLayout()
@@ -1947,7 +1817,6 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     await flushPromises()
 
     expect(event.defaultPrevented).toBe(false)
-    expect(toggleDictation).not.toHaveBeenCalled()
     expect(toggleModelPicker).not.toHaveBeenCalled()
     expect(pendingNewChat.value).toBeNull()
 
@@ -1955,7 +1824,7 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     wrapper.unmount()
   })
 
-  it('Mac ⌥N and ⌥D fire their shortcuts when focus is on the body', async () => {
+  it('Mac ⌥N fires its shortcut when focus is on the body', async () => {
     const wrapper = await mountWebLayout()
     const newChat = press({ key: 'Dead', code: 'KeyN' }, document.body)
     await flushPromises()
@@ -1964,9 +1833,6 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     pendingNewChat.value?.resolve(null)
     await flushPromises()
 
-    const dictation = press({ key: '∂', code: 'KeyD' }, document.body)
-    expect(dictation.defaultPrevented).toBe(true)
-    expect(toggleDictation).toHaveBeenCalledOnce()
     wrapper.unmount()
   })
 
@@ -1990,12 +1856,12 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     wrapper.unmount()
   })
 
-  // The physical key decides when `code` is present: Option on the D key is
-  // dictation whatever character the layout reports.
+  // The physical key decides when `code` is present: Option on the M key is
+  // the model picker whatever character the layout reports.
   it('ignores the Option-produced character when code names another key', async () => {
     const wrapper = await mountWebLayout()
-    const event = press({ key: 'd', code: 'KeyE' })
-    expect(toggleDictation).not.toHaveBeenCalled()
+    const event = press({ key: 'm', code: 'KeyE' })
+    expect(toggleModelPicker).not.toHaveBeenCalled()
     expect(event.defaultPrevented).toBe(false)
     wrapper.unmount()
   })

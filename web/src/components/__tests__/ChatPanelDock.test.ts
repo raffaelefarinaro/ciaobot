@@ -141,7 +141,6 @@ async function mountPanel(
       stubs: {
         PaneHeader: PaneHeaderStub,
         ModelSelector: ChildStub,
-        VoiceRecorder: ChildStub,
         SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,

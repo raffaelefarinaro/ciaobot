@@ -347,11 +347,6 @@
               <span>Open a new chat in the default General project</span>
             </li>
             <li>
-              <kbd v-if="inDesktopApp">&#8984;D</kbd>
-              <kbd v-else>{{ webChord('D') }}</kbd>
-              <span>Toggle voice dictation (start / stop)</span>
-            </li>
-            <li>
               <kbd v-if="inDesktopApp">&#8984;&#8679;M</kbd>
               <kbd v-else>{{ webChord('M') }}</kbd>
               <span>Open the model picker</span>
@@ -457,7 +452,7 @@
       </template>
 
 
-      <!-- MODELS TAB: chat providers, then background models, then voice.
+      <!-- MODELS TAB: chat providers, then background models.
            The old providers tab folded in here; /settings/providers
            redirects to /settings/models#chat-providers (router.ts). -->
       <template v-if="currentTab === 'models'">
@@ -679,7 +674,7 @@
           </div>
         </template>
 
-        <!-- Background models and voice -->
+        <!-- Background models -->
         <div v-if="!routinesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
         <template v-else-if="routinesError">
           <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
@@ -784,95 +779,6 @@
                   :disabled="routinesSaving"
                   @update:model-value="setCritiqueModels"
                 />
-              </div>
-            </div>
-          </div>
-
-          <!-- Voice: hear (dictation) and speak (read aloud) -->
-          <div class="card">
-            <div class="settings-card-header">
-              <p class="section-title">Voice</p>
-              <p class="hint">Choose the engines used to hear you (dictation) and to speak messages aloud.</p>
-            </div>
-            <!-- No engine picker: voice is on-device only now. Both engines are
-                 free and need no key, so the only thing worth saying is whether
-                 this machine can run them and, if not, why. -->
-            <div class="routine-row routine-row--flush">
-              <div class="routine-info">
-                <span class="routine-name">
-                  <svg class="routine-voice-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
-                  Hear
-                </span>
-              </div>
-              <div class="routine-model-controls routine-model-controls--single">
-                <span class="routine-model-hint">
-                  <template v-if="routines.transcription.available">
-                    Dictation runs on-device using macOS speech recognition
-                    (<code>{{ routines.transcription.locale }}</code>). Free, nothing to download.
-                  </template>
-                  <template v-else>
-                    <span class="hint--warn">
-                      Dictation is unavailable: {{ routines.transcription.unavailable_reason }}
-                    </span>
-                  </template>
-                </span>
-              </div>
-            </div>
-            <div class="routine-row routine-row--flush">
-              <div class="routine-info">
-                <span class="routine-name">
-                  <svg class="routine-voice-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
-                  Speak
-                </span>
-              </div>
-              <div class="routine-model-controls routine-model-controls--single">
-                <span class="routine-model-hint">
-                  <template v-if="routines.speech.available">
-                    Read-aloud uses the macOS system voice. Free, nothing to download.
-                  </template>
-                  <template v-else>
-                    <span class="hint--warn">
-                      Read-aloud is unavailable. It requires a macOS host with
-                      the Ciaobot desktop app installed.
-                    </span>
-                  </template>
-                </span>
-              </div>
-            </div>
-            <!-- The installed voice list differs per machine, so it is served by
-                 the engine rather than hardcoded, best quality first. Empty
-                 means "let macOS pick the best one for the language". -->
-            <div
-              v-if="routines.speech.available"
-              class="routine-row routine-row--flush"
-            >
-              <div class="routine-info">
-                <span class="routine-name routine-name--sub">Voice</span>
-              </div>
-              <div class="routine-model-controls routine-model-controls--single">
-                <select
-                  class="routine-select"
-                  :value="routines.speech.local_voice"
-                  :disabled="routinesSaving"
-                  @change="saveRoutines({ tts_local_voice: ($event.target as HTMLSelectElement).value })"
-                >
-                  <option value="">Best available for the language</option>
-                  <option v-for="voice in routines.speech.local_voices || []" :key="voice.id" :value="voice.id">
-                    {{ voice.name }} ({{ voice.locale }}{{ voice.quality === 'default' ? '' : ', ' + voice.quality }})
-                  </option>
-                </select>
-                <span class="routine-model-hint">
-                  The stock voices are the basic tier. Look for ones marked
-                  <strong>Premium</strong> (then Enhanced) &mdash; they are a free download under
-                  System Settings &rsaquo; Accessibility &rsaquo; Read &amp; Speak &rsaquo;
-                  System voice &rsaquo; Manage Voices, and Ciaobot picks the best installed one
-                  automatically.
-                  <a
-                    href="https://support.apple.com/guide/mac-help/mchlp2290/mac"
-                    target="_blank"
-                    rel="noopener"
-                  >How to add a voice</a>.
-                </span>
               </div>
             </div>
           </div>
@@ -2093,7 +1999,7 @@ const currentTab = computed(() => {
 })
 
 // ── Keyboard shortcuts: the common four, the rest behind a disclosure ────
-const SHORTCUT_COUNT = 11
+const SHORTCUT_COUNT = 10
 const showAllShortcuts = ref(false)
 
 // ── On this page ─────────────────────────────────────────────────────────
@@ -5257,10 +5163,6 @@ a.btn-secondary {
   border-top: 0;
   padding-top: 0;
 }
-.routine-voice-icon {
-  flex: none;
-  color: var(--fg2);
-}
 .routine-detail {
   font-size: var(--text-xs);
   color: var(--fg2);
@@ -5370,12 +5272,6 @@ a.btn-secondary {
   width: min(100%, 430px);
   min-width: 320px;
   flex: 0 0 auto;
-}
-.voice-warning {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
 }
 .critique-model-picker {
   width: 100%;
@@ -6198,10 +6094,6 @@ a.btn-secondary {
   margin-bottom: var(--space-2);
 }
 @container (max-width: 720px) {
-  .voice-warning {
-    align-items: stretch;
-    flex-direction: column;
-  }
   .archived-item {
     flex-direction: column;
     align-items: stretch;

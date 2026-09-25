@@ -7,7 +7,6 @@ import { useTypeToComment } from '../useTypeToComment'
 
 type Harness = {
   opened: string[]
-  dictated: number
   images: File[][]
   active: ReturnType<typeof ref<boolean>>
 }
@@ -17,13 +16,12 @@ let wrapper: ReturnType<typeof mount> | null = null
 
 function mountHarness(): void {
   const active = ref(true)
-  harness = { opened: [], dictated: 0, images: [], active }
+  harness = { opened: [], images: [], active }
   const Host = defineComponent({
     setup() {
       useTypeToComment({
         isActive: () => !!active.value,
         open: (text: string) => { harness.opened.push(text) },
-        dictate: () => { harness.dictated += 1 },
         addImages: (files: File[]) => { harness.images.push(files) },
       })
       return () => null
@@ -94,9 +92,7 @@ describe('useTypeToComment', () => {
     await nextTick()
     press('h')
     paste('hello')
-    press('d', { metaKey: true })
     expect(harness.opened).toEqual([])
-    expect(harness.dictated).toBe(0)
   })
 
   it('opens with the pasted text', () => {
@@ -115,12 +111,6 @@ describe('useTypeToComment', () => {
   it('ignores an empty paste', () => {
     expect(paste('   ')).toBe(false)
     expect(harness.opened).toEqual([])
-  })
-
-  it('opens and starts dictating on Cmd+D', () => {
-    expect(press('d', { metaKey: true })).toBe(true)
-    expect(harness.opened).toEqual([''])
-    expect(harness.dictated).toBe(1)
   })
 
   it('leaves other shortcuts to the browser', () => {
