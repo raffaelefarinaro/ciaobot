@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -23,6 +24,20 @@ from ciao.release_manifest import (
 )
 
 TRUSTED = "timestamp:1\tfile:ciaobot-engine-manifest.json"
+
+
+def _entry(**overrides: Any) -> dict[str, Any]:
+    """A complete, valid artifact entry, the shape `artifact_entry` produces."""
+    entry: dict[str, Any] = {
+        "filename": "ciaobot-1.2.3-py3-none-any.whl",
+        "kind": "wheel",
+        "platform": "any",
+        "arch": "any",
+        "sha256": "ab" * 32,
+        "size": 1024,
+    }
+    entry.update(overrides)
+    return entry
 
 
 def _keypair() -> tuple[Ed25519PrivateKey, str, bytes]:
@@ -179,7 +194,7 @@ def test_verify_manifest_round_trip_and_schema_checks() -> None:
     priv, public_key, key_id = _keypair()
     document = build_manifest(
         "1.2.3",
-        [{"filename": "ciaobot-1.2.3-py3-none-any.whl", "kind": "wheel"}],
+        [_entry()],
         created="2026-09-25T10:00:00+00:00",
     )
     raw = json.dumps(document).encode()
@@ -190,6 +205,67 @@ def test_verify_manifest_round_trip_and_schema_checks() -> None:
     wrong_schema = json.dumps({"schema": 2, "version": "1.2.3", "artifacts": [{}]}).encode()
     with pytest.raises(ValueError):
         verify_manifest(wrong_schema, _sign(wrong_schema, priv, key_id), public_key)
+
+
+# A downloader resolves a URL from `tag` while a consumer compares against
+# `version`. A signed manifest whose two disagree can therefore be served
+# under one release's directory and read as another's.
+def test_verify_manifest_rejects_tag_mismatch() -> None:
+    priv, public_key, key_id = _keypair()
+    document = build_manifest(
+        "1.2.3", [_entry()], created="2026-09-25T10:00:00+00:00"
+    )
+    document["tag"] = "v1.2.4"
+    raw = json.dumps(document).encode()
+
+    with pytest.raises(ValueError, match="tag does not match"):
+        verify_manifest(raw, _sign(raw, priv, key_id), public_key)
+
+
+# Every field a consumer trusts when it downloads and checks a digest. A
+# filename with a separator escapes the staging directory, a non-canonical
+# sha256 never compares equal to a computed one, and a non-int size means the
+# size check was coerced rather than enforced.
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("filename", "../escape.whl"),
+        ("filename", "sub/dir.whl"),
+        ("filename", "sub\\dir.whl"),
+        ("filename", ".."),
+        ("filename", ""),
+        ("kind", ""),
+        ("kind", None),
+        ("sha256", "A" * 64),
+        ("sha256", "ab"),
+        ("sha256", "z" * 64),
+        ("size", "1024"),
+        ("size", True),
+        ("size", 1.5),
+        ("size", -1),
+    ],
+)
+def test_verify_manifest_rejects_malformed_artifacts(field: str, value: object) -> None:
+    priv, public_key, key_id = _keypair()
+    entry = _entry()
+    if value is None:
+        entry.pop(field)
+    else:
+        entry[field] = value
+    document = build_manifest("1.2.3", [entry], created="2026-09-25T10:00:00+00:00")
+    raw = json.dumps(document).encode()
+
+    with pytest.raises(ValueError, match="manifest artifact is malformed"):
+        verify_manifest(raw, _sign(raw, priv, key_id), public_key)
+
+
+def test_verify_manifest_rejects_a_non_object_artifact() -> None:
+    priv, public_key, key_id = _keypair()
+    document = build_manifest("1.2.3", ["ciaobot.whl"], created="2026-09-25T10:00:00+00:00")
+    raw = json.dumps(document).encode()
+
+    with pytest.raises(ValueError, match="manifest artifact is malformed"):
+        verify_manifest(raw, _sign(raw, priv, key_id), public_key)
 
 
 def test_missing_static_assets(tmp_path: Path) -> None:
@@ -240,7 +316,7 @@ def test_main_verify_cli(tmp_path: Path) -> None:
     priv, public_key, key_id = _keypair()
     manifest = tmp_path / "ciaobot-engine-manifest.json"
     raw = build_manifest(
-        "1.2.3", [{"filename": "ciaobot-1.2.3-py3-none-any.whl"}], created="2026-09-25T10:00:00+00:00"
+        "1.2.3", [_entry()], created="2026-09-25T10:00:00+00:00"
     )
     manifest.write_bytes(json.dumps(raw).encode())
     signature = tmp_path / "ciaobot-engine-manifest.json.sig"

@@ -211,6 +211,27 @@ def test_update_package_installer_mode_points_at_installer(monkeypatch) -> None:
     assert "installer" in result["error"]
 
 
+# Receipt ownership decides the answer, not the platform. A Linux
+# `systemd-user` engine placed by the shell installer is a managed install, so
+# it must be told about `ciao update stage` rather than the generic Linux
+# administrator workflow, which the platform branch would otherwise return
+# first. This is the #567 review finding on the branch order.
+#
+# The command follows the platform too: install.sh exits on Linux with "this
+# installer supports macOS only", so a Linux installer engine must not be sent
+# to it. (Round 1 review finding.)
+def test_update_package_installer_checked_before_linux(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "installer")
+
+    result = update_package()
+
+    assert result["ok"] is False
+    assert result["mode"] == "installer"
+    assert "ciao update stage" in result["error"]
+    assert result["command"] == "ciao update stage"
+
+
 def test_linux_source_export_never_recommends_the_mac_installer(monkeypatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     for mode in ("editable", "unknown"):

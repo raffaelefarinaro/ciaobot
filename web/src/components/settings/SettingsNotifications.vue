@@ -28,6 +28,28 @@
           </button>
         </span>
       </div>
+      <div v-if="pushEnabledFlag && !inDesktopApp" class="notif-row">
+        <span class="notif-key">Test</span>
+        <span class="notif-value">
+          <span class="notif-detail">Sends a notification to this device only.</span>
+        </span>
+        <span class="notif-end">
+          <button class="btn-secondary btn-small" @click="sendTest" :disabled="testPending">
+            {{ testPending ? 'Sending...' : 'Send test notification' }}
+          </button>
+        </span>
+      </div>
+      <div v-if="!inDesktopApp" class="notif-row">
+        <span class="notif-key">Delivery</span>
+        <span class="notif-value">
+          <span class="notif-detail">{{ pushAllDevices ? 'Every device, including this computer' : 'Other devices only; Ciaobot.app\'s menu bar covers the computer it runs on' }}</span>
+        </span>
+        <span class="notif-end">
+          <button class="btn-secondary btn-small" @click="toggleDelivery" :disabled="deliveryPending">
+            {{ pushAllDevices ? 'Use the menu bar on this Mac' : 'Push to every device' }}
+          </button>
+        </span>
+      </div>
     </div>
     <!-- Mac without web push: the menu bar already covers it; web push is an
          optional upgrade, not a required action. -->
@@ -37,6 +59,7 @@
       (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;),
       then enable it here.
     </p>
+    <p v-if="testResult" class="hint notif-note" role="status">{{ testResult }}</p>
     <p v-if="pushError" class="action-result" role="alert">{{ pushError }}</p>
   </div>
 </template>
@@ -46,7 +69,9 @@ import { computed, onMounted, ref } from 'vue'
 import { api } from '../../lib/api'
 import { errorMessage } from '../../lib/errorMessage'
 import { isDesktopApp } from '../../lib/desktop'
-import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../../lib/push'
+import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported, sendTestNotification } from '../../lib/push'
+import { isIos, isMacDesktop, isStandalone } from '../../lib/pwaPlatform'
+import type { RoutineSettings } from '../../lib/types'
 
 /** The Home tab renders this card too, so both surfaces stay one copy.
  *
@@ -65,6 +90,10 @@ const pushPending = ref(false)
 const pushError = ref('')
 const permissionDenied = ref(false)
 const needsIosInstall = ref(false)
+const pushAllDevices = ref(false)
+const deliveryPending = ref(false)
+const testPending = ref(false)
+const testResult = ref('')
 
 const showToggle = computed(
   () => !inDesktopApp && !needsIosInstall.value && !permissionDenied.value && pushSupportedFlag.value,
@@ -102,7 +131,7 @@ const status = computed<{ label: string; tone: Tone; detail: string }>(() => {
     }
   }
   if (pushEnabledFlag.value) return { label: 'On for this device', tone: 'ok', detail: '' }
-  if (isMacDesktop()) {
+  if (isMacDesktop() && !pushAllDevices.value) {
     return {
       label: 'Covered by the menu bar',
       tone: 'ok',
@@ -111,19 +140,6 @@ const status = computed<{ label: string; tone: Tone; detail: string }>(() => {
   }
   return { label: 'Off on this device', tone: 'off', detail: '' }
 })
-
-function isIos(): boolean {
-  return /iphone|ipad|ipod/i.test(navigator.userAgent)
-}
-function isMacDesktop(): boolean {
-  return /macintosh|mac os x/i.test(navigator.userAgent) && !isIos()
-}
-function isStandalone(): boolean {
-  return (
-    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
-    (navigator as Navigator & { standalone?: boolean }).standalone === true
-  )
-}
 
 onMounted(async () => {
   pushSupportedFlag.value = pushSupported()
@@ -152,6 +168,11 @@ onMounted(async () => {
       } catch { /* best-effort */ }
     }
   }
+  // Delivery is an install-wide setting, not this browser's: read it once and
+  // never let an unavailable settings endpoint break the card.
+  try {
+    pushAllDevices.value = Boolean((await api.get<RoutineSettings>('/api/settings/routines')).push_all_devices)
+  } catch { /* settings unavailable: keep default */ }
 })
 
 async function togglePush() {
@@ -169,6 +190,42 @@ async function togglePush() {
     pushError.value = errorMessage(e)
   } finally {
     pushPending.value = false
+  }
+}
+
+async function toggleDelivery() {
+  deliveryPending.value = true
+  pushError.value = ''
+  try {
+    const res = await api.patch<RoutineSettings>('/api/settings/routines', { push_all_devices: !pushAllDevices.value })
+    pushAllDevices.value = Boolean(res.push_all_devices)
+  } catch (e) {
+    pushError.value = errorMessage(e)
+  } finally {
+    deliveryPending.value = false
+  }
+}
+
+async function sendTest() {
+  testPending.value = true
+  testResult.value = ''
+  pushError.value = ''
+  try {
+    const sent = await sendTestNotification()
+    if (!sent) {
+      testResult.value = 'Enable notifications on this device first.'
+      return
+    }
+    // With Delivery off, the Mac's own browser still gets the test (it is
+    // registered), but its real chat banners come from the menu bar instead.
+    // Saying so avoids reading a green result as proof the Mac is covered.
+    testResult.value = !pushAllDevices.value && isMacDesktop()
+      ? "Sent. This Mac's chat notifications come from the menu bar unless Delivery is set to every device."
+      : 'Sent. If nothing appears within a few seconds, check this browser\'s notification permission in your system settings.'
+  } catch (e) {
+    pushError.value = errorMessage(e)
+  } finally {
+    testPending.value = false
   }
 }
 </script>

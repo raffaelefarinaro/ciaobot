@@ -156,6 +156,43 @@ def test_patch_rejects_non_boolean_trajectories_enabled(tmp_path):
     assert resp.status_code == 400
 
 
+def test_patch_sets_trusted_url(tmp_path):
+    client, _config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"trusted_url": "https://mini.ts.net"},
+    )
+
+    assert resp.status_code == 200
+    # The response carries the normalized origin, not what was typed.
+    assert resp.json()["trusted_url"] == "https://mini.ts.net/"
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.settings.trusted_url == "https://mini.ts.net/"
+
+    # Only an HTTPS origin is a secure context, so a bad one is a 400 and
+    # nothing is persisted.
+    bad = client.patch(
+        "/api/settings/routines",
+        json={"trusted_url": "http://x"},
+    )
+    assert bad.status_code == 400
+
+
+def test_patch_toggles_push_all_devices(tmp_path):
+    client, _config = _make_client(tmp_path)
+    assert client.get("/api/settings/routines").json()["push_all_devices"] is False
+
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"push_all_devices": True},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["push_all_devices"] is True
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.settings.push_all_devices is True
+
+
 def test_patch_applies_provider_default_models(tmp_path):
     """The per-provider default-model map sets the new-chat default."""
     client, config = _make_client(tmp_path)

@@ -647,6 +647,9 @@ export interface RoutineSettings {
   insights_model: string
   insights_enabled?: boolean
   trajectories_enabled?: boolean
+  // The HTTPS origin other devices should use; empty/undefined = none.
+  trusted_url?: string
+  push_all_devices?: boolean
 
   critique_models: string
   // Per-provider default model for new chats; a missing entry = the provider's
