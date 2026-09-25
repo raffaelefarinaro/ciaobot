@@ -55,6 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from sandbox import (  # noqa: E402 - after the sys.path insert above
     SandboxError,
+    assert_contained,
     assert_sandbox_path,
     clone_workspace,
     commit_snapshot,
@@ -62,6 +63,7 @@ from sandbox import (  # noqa: E402 - after the sys.path insert above
     pick_port,
     prepare_clone,
     strip_archives,
+    sum_claude_usage,
 )
 
 # The develop checkout the harness itself runs from, so the agent-clone server
@@ -251,11 +253,93 @@ def project_docs(agent_clone: Path, inst: Instance, rows: list[Row]) -> dict[str
     return docs
 
 
+# ── path containment ─────────────────────────────────────────────────────
+
+
+def clone_config(clone: Path) -> Any:
+    """A ``CiaoConfig`` bound to ``clone`` by an explicit env dict.
+
+    Never built from ``os.environ``: :meth:`CiaoConfig.from_env` falls back to
+    the LaunchAgent's (live) workspace when ``CIAO_WORKSPACE`` is missing, and
+    the containment check below is only meaningful if the config it inspects
+    is the one the arm will actually use.
+    """
+    from ciao.config import CiaoConfig
+
+    return CiaoConfig.from_env(
+        {
+            "CIAO_WORKSPACE": str(clone),
+            "CIAO_RUNTIME_ROOT": str(clone / ".runtime"),
+            "PWA_AUTH_TOKEN": "sandbox",
+        }
+    )
+
+
+def clone_doc(clone: Path, doc: str) -> Path:
+    """A project doc as a path inside ``clone``, without joining an absolute one.
+
+    ``vault_doc_path`` may be absolute -- a vault outside the workspace is a
+    supported configuration -- and ``Path / absolute_path`` returns the
+    absolute path, so ``clone / doc`` would silently hand an external doc to
+    the agent. The check is what decides, so the join only happens for a
+    relative doc, and an absolute one is passed through to be refused.
+    """
+    path = Path(doc).expanduser()
+    if not path.is_absolute():
+        return clone / path
+    return path
+
+
+def assert_clone_containment(
+    config: Any, clone: Path, rows: list[Row], *, docs: list[str] | None = None
+) -> None:
+    """Refuse unless every path both arms will write lives inside ``clone``.
+
+    Covers the settings ``prepare_clone`` cannot rebase: ``vault_root`` and
+    every selected ``workspace_vault_root``/``agent_root`` are registry values
+    that may be absolute, and a project's ``vault_doc_path`` may point at a
+    vault outside the workspace entirely. A clone of such an install resolves
+    the originals, and both arms -- the one-shot chain and a full agent with
+    Bash -- would write them.
+
+    Fails closed rather than rebasing: a refused run is recoverable, a memory
+    pass that wrote the live vault is not. Called before the first model call
+    in the one-shot arm and before ``Popen`` in the agent arm, so the refusal
+    lands before anything has been started or written.
+
+    ``docs`` defaults to the docs on ``rows``, which is what both arms want once
+    the project map is known. The pre-boot call passes an empty list instead,
+    because there is no project map yet -- and it has to be an empty *list*
+    rather than a default, or the fallback would check rows whose docs are not
+    filled in yet.
+    """
+    workspaces = sorted({row.workspace for row in rows if row.workspace})
+    paths: list[Path] = [config.workspace_root, config.vault_root]
+    for workspace in workspaces:
+        try:
+            paths.append(config.workspace_vault_root(workspace))
+            paths.append(config.agent_root(workspace))
+        except ValueError as exc:
+            # An unusable workspace name is still a refusal, not a crash: the
+            # arm would resolve this workspace's roots before it wrote
+            # anything, and the operator needs the name and the reason rather
+            # than a traceback from inside `CiaoConfig`.
+            raise SandboxError(
+                f"workspace {workspace!r} does not resolve to a usable root: {exc}"
+            ) from exc
+    paths.extend(clone / row.archive_rel for row in rows)
+    selected_docs = [row.doc for row in rows] if docs is None else docs
+    for doc in selected_docs:
+        if doc:
+            paths.append(clone_doc(clone, doc))
+    assert_contained(paths, clone)
+
+
 # ── the agent-clone server ───────────────────────────────────────────────
 
 
 def start_server(
-    agent_clone: Path, run_dir: Path, port: int
+    agent_clone: Path, run_dir: Path, port: int, rows: list[Row]
 ) -> tuple[subprocess.Popen, Instance, str]:
     """Start a second Ciaobot server on the agent clone; return it and a client.
 
@@ -269,6 +353,12 @@ def start_server(
     started, so a default run cannot land on a port somebody else is already
     listening on.
 
+    The agent arm's containment check runs here, before ``Popen``: this is the
+    last point at which the run can be refused without a server -- and, once
+    the agent clone has a server on it, a full agent with Bash -- already
+    running against it. The doc half of the check has to wait, because the
+    project map only exists after boot; the caller does that part.
+
     Everything after ``Popen`` sits in a ``try``. A server that exits during
     boot, and a login that turns out to have been answered by somebody else's
     Ciaobot instance, are both failures -- and neither may leave a process
@@ -277,6 +367,9 @@ def start_server(
     returned.
     """
     port = pick_port(port)
+    # The config the server will build for itself, with no project docs yet:
+    # the roots, the archives, and nothing that only boot can know.
+    assert_clone_containment(clone_config(agent_clone), agent_clone, rows, docs=[])
     env = {
         key: value
         for key, value in os.environ.items()
@@ -399,6 +492,50 @@ def assert_no_remote(clone: Path) -> None:
         raise SandboxError(f"{clone} regained a git remote after boot: {remotes}")
 
 
+# How long `/api/active-chats` must have been continuously empty before the
+# harness treats boot as finished. Not a single empty sample: a server that has
+# just bound its port has not yet run its first tick, and a tick that fires a
+# schedule, a startup-triage check or the startup backfill would write into the
+# agent clone with nobody attributing it. Ten seconds of nothing is a cheap way
+# to tell "booted" from "about to".
+_BOOT_IDLE_SECONDS = 10.0
+_BOOT_IDLE_TIMEOUT = 300.0
+
+
+def wait_for_boot_idle(
+    inst: Instance,
+    *,
+    seconds: float = _BOOT_IDLE_SECONDS,
+    timeout: float = _BOOT_IDLE_TIMEOUT,
+    poll: float = 1.0,
+) -> None:
+    """Block until ``/api/active-chats`` has been empty for ``seconds`` in a row.
+
+    A chat that keeps appearing is a schedule or triage getting through the
+    clone prep; the run waits rather than aborting, because it is a timing
+    question and a pilot should not die on one slow boot. A chat that is
+    *still* running when the timeout expires is the opposite -- something is
+    active that the measurement cannot attribute -- and that is a refusal.
+
+    ``poll``, ``seconds`` and ``timeout`` take arguments so a test can drive a
+    minute of wall clock in a millisecond; the driver uses the defaults.
+    """
+    deadline = time.monotonic() + timeout
+    empty_since: float | None = None
+    while time.monotonic() < deadline:
+        if inst.active_chat_ids():
+            empty_since = None
+        elif empty_since is None:
+            empty_since = time.monotonic()
+        elif time.monotonic() - empty_since >= seconds:
+            return
+        time.sleep(poll)
+    raise SandboxError(
+        f"the agent-clone server still had an active chat after "
+        f"{timeout:.0f}s; its writes cannot be attributed to a chat"
+    )
+
+
 # ── arms ─────────────────────────────────────────────────────────────────
 
 
@@ -415,28 +552,52 @@ class ArmResult:
     diff: dict = field(default_factory=dict)
     previous_sha: str = ""
     sha: str = ""
+    usage: dict[str, int] = field(default_factory=dict)
+
+
+def chat_usage(
+    inst: Instance, agent_clone: Path, chat_id: str, provider: str
+) -> dict[str, int]:
+    """Token usage for one agent chat, or ``{}`` when it cannot be read.
+
+    ``GET /api/chats`` carries no cost field, so the only honest source is
+    Claude Code's own session transcript: the chat's ``session_id`` names a
+    ``<session_id>.jsonl`` under the agent clone's project directory, and every
+    assistant record in it reports ``message.usage``. That is the agent's real
+    spend, read rather than estimated, which is what makes the report's cost
+    column worth having.
+
+    Claude only, deliberately. OpenCode keeps its own session store with a
+    different shape, and guessing at it would put a number in the report that
+    is not a measurement. An arm that cannot be read reports ``{}`` and the
+    report prints ``-`` for it, which is the honest answer.
+    """
+    if provider != "claude":
+        return {}
+    session_id = str((inst.chat(chat_id) or {}).get("session_id") or "")
+    if not session_id:
+        return {}
+    from ciao.transcripts import _claude_projects_dir
+
+    return sum_claude_usage(_claude_projects_dir(agent_clone) / f"{session_id}.jsonl")
 
 
 async def run_oneshot_arm(clone: Path, rows: list[Row], baseline: str) -> list[ArmResult]:
     """Today's production chain, in process, against the ``oneshot`` clone.
 
-    ``config.workspace_root`` is asserted against the clone before the first
-    model call. Everything else here follows ``ArchivePipeline._job_inputs``:
-    the same model resolution, the same workspace guide, the same proposal
-    vault root. If the assertion ever fails the arm aborts rather than
-    writing to the live workspace -- that is the whole safety argument.
+    ``config.workspace_root`` is asserted against the clone, and then every
+    other path the arm was handed is asserted to be *inside* it, both before
+    the first model call. Everything else here follows
+    ``ArchivePipeline._job_inputs``: the same model resolution, the same
+    workspace guide, the same proposal vault root. If either assertion ever
+    fails the arm aborts rather than writing to the live workspace -- that is
+    the whole safety argument.
     """
     from ciao import critique, job_runs, proposal_outcomes
-    from ciao.config import CiaoConfig
     from ciao.insights import extract_and_append
     from ciao.workspace_guide import guide_path
 
-    env = {
-        "CIAO_WORKSPACE": str(clone),
-        "CIAO_RUNTIME_ROOT": str(clone / ".runtime"),
-        "PWA_AUTH_TOKEN": "sandbox",
-    }
-    config = CiaoConfig.from_env(env)
+    config = clone_config(clone)
     # `apply_app_settings_overlay` prefers `os.environ["CIAO_RUNTIME_ROOT"]` over
     # the config it is handed, so pin it to the clone for the call: a stray
     # value in the operator's shell would otherwise load the *live* Settings
@@ -458,6 +619,11 @@ async def run_oneshot_arm(clone: Path, rows: list[Row], baseline: str) -> list[A
             f"refusing to run the one-shot arm: config resolves to "
             f"{config.workspace_root}, not the clone {clone}"
         )
+    # The stronger half of the same argument: not only is the workspace root
+    # the clone, every path the arm was handed must be inside it too. An
+    # absolute `vault_root`, a workspace `vault_root` or a project doc that
+    # escapes the clone is refused here, before the first model call.
+    assert_clone_containment(config, clone, rows)
     print(f"oneshot: config pinned to {config.workspace_root}")
 
     results: list[ArmResult] = []
@@ -534,11 +700,42 @@ async def _wait_for_turn(inst: Instance, chat_id: str, timeout_s: float) -> tupl
     return False, cards, round(time.monotonic() - started, 1)
 
 
+def create_harness_projects(
+    inst: Instance, rows: list[Row]
+) -> dict[str, tuple[str, str]]:
+    """One "Insights sandbox" project per selected workspace.
+
+    Returns ``{workspace: (project_id, name)}``. The projects have to exist
+    before the first chat, and creating them writes rows into
+    ``.runtime/web_projects.json`` in the clone -- so this is deliberately *not*
+    called from inside the arm's chat loop, where the write would be charged to
+    chat 1. ``run_arms`` creates them, commits, and only then starts the arm.
+    """
+    projects: dict[str, tuple[str, str]] = {}
+    for workspace in sorted({row.workspace for row in rows}):
+        created = inst.post(
+            "/api/projects",
+            {"name": "Insights sandbox", "workspace": workspace},
+        )
+        # The 201 body is the project dict; there is no GET for one project,
+        # only PATCH/DELETE, so the name comes from where it was created.
+        projects[workspace] = (
+            str(created["project_id"]),
+            str(created.get("name") or "none"),
+        )
+    print(
+        "agent: project per workspace "
+        + str({ws: pid for ws, (pid, _) in projects.items()})
+    )
+    return projects
+
+
 async def run_agent_arm(
     inst: Instance,
     agent_clone: Path,
     rows: list[Row],
-    baseline: str,
+    projects: dict[str, tuple[str, str]],
+    setup_sha: str,
     *,
     turn_timeout: float,
 ) -> list[ArmResult]:
@@ -547,22 +744,20 @@ async def run_agent_arm(
     Attended, not scheduled: an unattended chat is told to defer facts it is
     not sure about (``memory_policy.py`` ~L118-134), which would bias the
     comparison against the arm that is being measured.
+
+    ``setup_sha`` is the *setup* snapshot, not the pre-boot one. Booting the
+    server writes to the clone before any chat exists -- a regenerated
+    ``INDEX.md``, the harness's own project rows in ``web_projects.json`` --
+    and against the pre-boot baseline all of that lands in chat 1's diff,
+    which would make the first chat look busier than it was. ``run_arms``
+    commits boot and then ``harness: project setup``, so chat 1 is measured
+    from a clone that already contains its own scaffolding.
     """
-    project_ids: dict[str, str] = {}
-    project_names: dict[str, str] = {}
-    for workspace in sorted({row.workspace for row in rows}):
-        created = inst.post(
-            "/api/projects",
-            {"name": "Insights sandbox", "workspace": workspace},
-        )
-        project_ids[workspace] = str(created["project_id"])
-        # The 201 body is the project dict; there is no GET for one project,
-        # only PATCH/DELETE, so the name comes from where it was created.
-        project_names[workspace] = str(created.get("name") or "none")
-    print(f"agent: project per workspace {project_ids}")
+    project_ids = {workspace: pid for workspace, (pid, _) in projects.items()}
+    project_names = {workspace: name for workspace, (_, name) in projects.items()}
 
     results: list[ArmResult] = []
-    previous = baseline
+    previous = setup_sha
     for row in rows:
         result = ArmResult(chat_id=row.chat_id, previous_sha=previous)
         started = time.monotonic()
@@ -577,7 +772,12 @@ async def run_agent_arm(
                 },
             )
             chat_id = str(chat["chat_id"])
-            doc = str(agent_clone / row.doc) if row.doc else "none"
+            # `clone_doc` rather than `agent_clone / row.doc`: an absolute
+            # `vault_doc_path` survives the join, so `Path / "/elsewhere/x.md"`
+            # would hand the agent a doc outside the clone. Containment has
+            # already refused such a run, so what reaches here is inside the
+            # clone -- and this keeps the prompt honest about that.
+            doc = str(clone_doc(agent_clone, row.doc)) if row.doc else "none"
             inst.post(
                 f"/api/chats/{chat_id}/prompt",
                 {
@@ -607,6 +807,9 @@ async def run_agent_arm(
             # inventing a number the report would then total.
             cost = (inst.chat(chat_id) or {}).get("cost_usd")
             result.cost_usd = float(cost) if isinstance(cost, (int, float)) else None
+            result.usage = chat_usage(
+                inst, agent_clone, chat_id, row.effective_provider
+            )
         except Exception as exc:  # noqa: BLE001 - one chat must not end the arm
             result.status = "error"
             result.error = f"{type(exc).__name__}: {exc}"[:300]
@@ -631,6 +834,44 @@ async def run_agent_arm(
 
 def _median(values: list[float]) -> str:
     return f"{statistics.median(values):.1f}" if values else "-"
+
+
+# Every token counter, so an arm that reports usage does so consistently and a
+# reader can compare cache reads against fresh input rather than one opaque
+# "tokens" number. A provider the harness cannot read shows `-` on the total
+# and on each field, rather than a zero that would read as "this chat was free".
+_TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+def usage_total(usage: dict[str, int]) -> int:
+    """Every counted token in one usage row, or 0 when there is no row."""
+    return sum(int(value) for value in (usage or {}).values())
+
+
+def usage_cell(usage: dict[str, int] | None, counter: str) -> str:
+    """One token counter for the report, or ``-`` when it was not read."""
+    if not usage:
+        return "-"
+    return f"{int(usage.get(counter, 0)):,}"
+
+
+def _sum_usage(results: list[ArmResult]) -> dict[str, int]:
+    """Every chat's usage added up, or ``{}`` when no chat reported any.
+
+    An arm where *some* chats reported usage totals only those, because a
+    total that silently skipped unread ones would understate the run; the
+    per-chat column is where that gap is visible.
+    """
+    total: dict[str, int] = {}
+    for result in results:
+        for counter, value in (result.usage or {}).items():
+            total[counter] = total.get(counter, 0) + int(value)
+    return total
 
 
 def render_report(
@@ -658,8 +899,8 @@ def render_report(
         "",
         "| arm | chats | ok | errors | timeouts | permission cards | "
         "median s | added | modified | deleted | vault | guide | proposals | "
-        "other | queued | cost |",
-        "|---" * 17 + "|",
+        "other | queued | cost | tokens | in | out | cache read | cache write |",
+        "|---" * 21 + "|",
     ]
     for arm, results in arms.items():
         ok = [r for r in results if r.status == "ok"]
@@ -669,6 +910,9 @@ def render_report(
             for group, count in (result.diff.get("by_class") or {}).items():
                 by_class[group] = by_class.get(group, 0) + int(count)
         cost = sum(r.cost_usd for r in results if r.cost_usd is not None)
+        # An arm whose provider cannot be read has no usage at all, so all five
+        # token cells are `-`: a zero would read as "this chat was free".
+        usage = _sum_usage(results)
         cells = [
             arm,
             str(len(results)),
@@ -686,19 +930,34 @@ def render_report(
             str(by_class.get("other", 0)),
             str(sum(int(r.diff.get("queued") or 0) for r in results)),
             f"${cost:.4f}" if any(r.cost_usd is not None for r in results) else "-",
+            f"{usage_total(usage):,}" if usage else "-",
+            *(usage_cell(usage, counter) for counter in _TOKEN_FIELDS),
         ]
         lines.append("| " + " | ".join(cells) + " |")
     lines += [
         "",
-        "`logs` changes are excluded: transcripts are written by the server by "
-        "design, and the archives are inputs rather than output.",
+        "`logs` changes are excluded from every count above: transcripts are "
+        "written by the server by design, and the archives are inputs rather "
+        "than output.",
+        "",
+        "Token columns are read from each chat's own Claude session transcript "
+        "(`message.usage`, deduped by `message.id`), not estimated. A chat "
+        "whose provider is not claude, or whose session transcript is "
+        "unreadable, shows `-`.",
         "",
         "## Per chat",
         "",
     ]
     header = ["chat", "provider", "model"]
     for arm in arms:
-        header += [f"{arm} status", f"{arm} s", f"{arm} a/m/d", f"{arm} queued", f"{arm} diff"]
+        header += [
+            f"{arm} status",
+            f"{arm} s",
+            f"{arm} a/m/d",
+            f"{arm} queued",
+            f"{arm} tokens",
+            f"{arm} diff",
+        ]
     lines.append("| " + " | ".join(header) + " |")
     lines.append("|---" * len(header) + "|")
     for row in rows:
@@ -706,7 +965,7 @@ def render_report(
         for arm, results in arms.items():
             match = next((r for r in results if r.chat_id == row.chat_id), None)
             if match is None:
-                cells += ["-", "-", "-", "-", "-"]
+                cells += ["-", "-", "-", "-", "-", "-"]
                 continue
             counts = (
                 f"{len(match.diff.get('added', []))}/"
@@ -718,6 +977,7 @@ def render_report(
                 f"{match.seconds:.1f}",
                 counts,
                 str(match.diff.get("queued", 0)),
+                f"{usage_total(match.usage):,}" if match.usage else "-",
                 f"diffs/{arm}/{match.chat_id}.diff",
             ]
         lines.append("| " + " | ".join(cells) + " |")
@@ -799,15 +1059,35 @@ async def run_arms(
     cannot leave a process listening on the operator's loopback with a
     full-access agent on the other end. ``start_server`` additionally stops it
     itself if it never got far enough to hand it back.
+
+    Once the server answers, boot is *waited out* and then *committed*. A boot
+    that finds work to do writes to the clone -- a regenerated ``INDEX.md``, a
+    schedule that fired before its disable took effect -- and with the
+    pre-boot baseline as chat 1's ``previous``, that setup lands in the first
+    chat's numbers. Waiting for a quiet window and then committing
+    ``harness: server boot`` puts that work in its own commit; a second
+    ``harness: project setup`` commit does the same for the harness's own
+    projects, which exist before chat 1 for the same reason. Chat 1 is
+    therefore only ever measured against a clone that was already running.
     """
     results: dict[str, list[ArmResult]] = {}
     proc: subprocess.Popen | None = None
     try:
-        proc, inst, base_url = start_server(clones["agent"], run_dir, port)
+        proc, inst, base_url = start_server(clones["agent"], run_dir, port, rows)
         print(f"agent server up on {base_url}")
+        wait_for_boot_idle(inst)
+        agent_baseline = commit_snapshot(clones["agent"], "harness: server boot")
         docs = project_docs(clones["agent"], inst, rows)
         for row in rows:
             row.doc = docs.get(row.chat_id, "")
+        # The doc half of the containment check, which start_server could not
+        # do: a project's `vault_doc_path` is only knowable once the project map
+        # has been read from the booted server, and it may name a vault outside
+        # the workspace. Refused here it stops the run before either arm's
+        # first model call.
+        assert_clone_containment(
+            clone_config(clones["agent"]), clones["agent"], rows
+        )
         (run_dir / "selection.json").write_text(
             json.dumps(
                 [
@@ -827,6 +1107,16 @@ async def run_arms(
             + "\n",
             encoding="utf-8",
         )
+        if "agent" in arms:
+            # The harness's own projects, created and committed as setup, so
+            # the rows they add to `.runtime/web_projects.json` are not part
+            # of chat 1's diff.
+            projects = create_harness_projects(inst, rows)
+            agent_baseline = commit_snapshot(
+                clones["agent"], "harness: project setup"
+            )
+        else:
+            projects = {}
         if "oneshot" in arms:
             results["oneshot"] = await run_oneshot_arm(
                 clones["oneshot"], rows, baselines["oneshot"]
@@ -836,7 +1126,8 @@ async def run_arms(
                 inst,
                 clones["agent"],
                 rows,
-                baselines["agent"],
+                projects,
+                agent_baseline,
                 turn_timeout=turn_timeout,
             )
     finally:
@@ -921,17 +1212,25 @@ def main() -> int:
 
     for row in rows:
         row.doc = ""
-    results = asyncio.run(
-        run_arms(
-            clones,
-            baselines,
-            run_dir,
-            rows,
-            arms,
-            port=args.port,
-            turn_timeout=args.turn_timeout,
+    try:
+        results = asyncio.run(
+            run_arms(
+                clones,
+                baselines,
+                run_dir,
+                rows,
+                arms,
+                port=args.port,
+                turn_timeout=args.turn_timeout,
+            )
         )
-    )
+    except SandboxError as exc:
+        # A refusal -- a path outside a clone, a busy boot, a stranger's port
+        # -- is an answer, not a crash. The server is stopped by `run_arms`'s
+        # own `finally` on the way out, so printing the reason and exiting is
+        # safe; a traceback here would bury the one line that says what to fix.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     for arm, arm_results in results.items():
         write_diffs(run_dir, clones[arm], arm, arm_results)

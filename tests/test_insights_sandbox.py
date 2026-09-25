@@ -1,38 +1,67 @@
-"""Tests for the insights sandbox helpers (``scripts/insights-sandbox/sandbox.py``).
+"""Tests for the insights sandbox helpers (``scripts/insights-sandbox/``).
 
 The harness lets a full agent really write, so the only thing standing between
-a pilot run and the live workspace is this module. The tests are therefore
-mostly about refusals: a path check that passes is a claim about the operator's
-real files, and a ``prepare_clone`` step that silently no-ops is a step the
-harness's own README promises.
+a pilot run and the live workspace is these two modules. The tests are
+therefore mostly about refusals: a path check that passes is a claim about the
+operator's real files, and a ``prepare_clone`` step that silently no-ops is a
+step the harness's own README promises.
 
-The module is loaded by path rather than imported: ``scripts/insights-sandbox``
-is a directory of a hyphen, not a package.
+The modules are loaded by path rather than imported: ``scripts/insights-sandbox``
+is a directory with a hyphen, not a package.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import socket
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _MODULE_PATH = _REPO_ROOT / "scripts" / "insights-sandbox" / "sandbox.py"
+_DRIVER_PATH = _REPO_ROOT / "scripts" / "insights-sandbox" / "run.py"
 
 
-def _load_sandbox():
-    spec = importlib.util.spec_from_file_location("insights_sandbox_helpers", _MODULE_PATH)
+def _load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    # Registered before exec: `@dataclass` resolves its string annotations
+    # through `sys.modules[cls.__module__]`, which is None until the loader has
+    # put the module there.
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
 
+def _load_sandbox():
+    return _load("insights_sandbox_helpers", _MODULE_PATH)
+
+
+def _load_run():
+    """The driver, loaded the same way.
+
+    Importing it is cheap and side-effect free: it inserts its own directory on
+    ``sys.path`` and defines functions, and it starts nothing until ``main``.
+    The containment helpers live here rather than in ``sandbox.py`` because
+    they need ``CiaoConfig``, and the driver's own module-level imports are
+    what ``--help`` already exercises.
+    """
+    return _load("insights_sandbox_driver", _DRIVER_PATH)
+
+
 sandbox = _load_sandbox()
+# The driver does `from sandbox import SandboxError`, so it is registered under
+# that name here rather than loaded as a second copy: with one module object the
+# driver's exceptions and these tests' `pytest.raises` are the same class, which
+# is what a real run gets.
+sys.modules.setdefault("sandbox", sandbox)
+run = _load_run()
 
 
 def _git(clone: Path, *args: str) -> str:
@@ -96,6 +125,62 @@ def test_assert_sandbox_path_refuses_live_and_outside(tmp_path: Path) -> None:
     ) == (root / "run" / "base").resolve()
 
 
+def test_assert_contained_refuses_anything_outside_the_clone(tmp_path: Path) -> None:
+    """Every path an arm is handed has to land inside its clone.
+
+    The complement of ``assert_sandbox_path``: that one proves the clone is in
+    the sandbox tree, this one proves the paths the arms were given are in the
+    clone. Absolute vault roots, an external vault and a project doc outside
+    the workspace are all supported ``CiaoConfig`` settings, and every one of
+    them is an instruction to write the original files.
+    """
+    clone = (tmp_path / "clone").resolve()
+    outside = (tmp_path / "outside-vault").resolve()
+    clone.mkdir()
+    outside.mkdir()
+    os.symlink(outside, clone / "escape", target_is_directory=True)
+
+    # Inside: the clone itself (a workspace that is its own vault is a
+    # supported layout) and anything under it.
+    sandbox.assert_contained(
+        [clone, clone / "memory-vault", clone / "memory-vault" / "work" / "p.md"],
+        clone,
+    )
+
+    # Outside: a sibling directory, a symlink out of the clone, and a `..` that
+    # walks out of it. Resolution happens first, so none of the three is
+    # smuggled past by looking contained.
+    for escaping in (outside, clone / "escape", clone / ".."):
+        with pytest.raises(sandbox.SandboxError) as excinfo:
+            sandbox.assert_contained([clone, escaping], clone)
+        assert "outside the clone" in str(excinfo.value)
+
+    # The first offending path is the one named, not merely the first in some
+    # other order: the point of raising on the first is that the message is
+    # about the path that actually stopped the run.
+    with pytest.raises(sandbox.SandboxError) as excinfo:
+        sandbox.assert_contained([clone, outside, Path("/etc")], clone)
+    assert str(outside) in str(excinfo.value)
+    assert "/etc" not in str(excinfo.value)
+
+
+def test_clone_config_is_bound_to_the_clone_not_the_ambient_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The config the containment check inspects is the one the arm will use.
+
+    ``CiaoConfig.from_env`` falls back to the LaunchAgent's (live) workspace
+    when ``CIAO_WORKSPACE`` is missing, so a config built from the ambient
+    environment would make every containment check a check on the wrong paths.
+    """
+    monkeypatch.setenv("CIAO_WORKSPACE", "/somewhere/live")
+    clone = (tmp_path / "clone").resolve()
+    (clone / ".runtime").mkdir(parents=True)
+    config = run.clone_config(clone)
+    assert config.workspace_root == clone
+    assert config.state_path.parent == clone / ".runtime"
+
+
 # ── port selection ───────────────────────────────────────────────────────
 
 
@@ -137,6 +222,198 @@ def test_pick_port_refuses_busy_port() -> None:
     # A negative port is not a port.
     with pytest.raises(sandbox.SandboxError):
         sandbox.pick_port(-1)
+
+
+# ── the arms' path containment ───────────────────────────────────────────
+
+
+@pytest.fixture
+def escaping_clone(tmp_path: Path) -> tuple[Path, Path, list[object]]:
+    """A clone whose vault and workspace registry point outside it.
+
+    Resolved, because ``CiaoConfig`` refuses an absolute ``vault_root`` whose
+    own path contains a symlink, and pytest's ``tmp_path`` may sit behind one
+    on macOS. The external vault is created first so it exists: a configured
+    vault that is not there yet is still an external path.
+    """
+    clone = (tmp_path / "clone").resolve()
+    outside = (tmp_path / "outside-vault").resolve()
+    (clone / ".runtime").mkdir(parents=True)
+    outside.mkdir()
+    _write_json(
+        clone / ".runtime" / "workspaces.json",
+        [{"name": "work", "vault_root": "memory-vault/work"}],
+    )
+    rows = [
+        run.Row(
+            chat_id="chat-1",
+            workspace="work",
+            provider="claude",
+            effective_provider="claude",
+            model="opus",
+            archive_rel=Path("Logs/Chats/chat-1/claude/a.md"),
+        )
+    ]
+    return clone, outside, rows
+
+
+def _config(clone: Path, **env: str):
+    from ciao.config import CiaoConfig
+
+    return CiaoConfig.from_env(
+        {
+            "CIAO_WORKSPACE": str(clone),
+            "CIAO_RUNTIME_ROOT": str(clone / ".runtime"),
+            "PWA_AUTH_TOKEN": "sandbox",
+            **env,
+        }
+    )
+
+
+def test_absolute_vault_root_is_refused_not_written(
+    escaping_clone: tuple[Path, Path, list[object]],
+) -> None:
+    """An absolute ``CIAO_VAULT_ROOT`` stops the run, and nothing is written.
+
+    Absolute vault roots are a supported configuration -- ``CiaoConfig``
+    preserves them on purpose -- so an operator can have one. Cloned as-is the
+    one-shot arm and the agent both resolve the *original* vault, and the
+    harness cannot rebase the value: it is this env, not a file the prep can
+    rewrite. Failing closed is the only safe answer, and the test asserts the
+    external vault is untouched afterwards.
+    """
+    clone, outside, rows = escaping_clone
+    outside.mkdir(exist_ok=True)
+    (outside / "sentinel.md").write_text("# do not touch\n", encoding="utf-8")
+    before = sorted(p.name for p in outside.iterdir())
+
+    # The normal install passes, so the refusal below is about the path and not
+    # about the check being stricter than every configuration.
+    run.assert_clone_containment(_config(clone), clone, rows)
+
+    with pytest.raises(sandbox.SandboxError) as excinfo:
+        run.assert_clone_containment(
+            _config(clone, CIAO_VAULT_ROOT=str(outside)), clone, rows
+        )
+    assert str(outside) in str(excinfo.value)
+
+    # The refusal happened before any arm ran, so the external vault is exactly
+    # as it was.
+    assert sorted(p.name for p in outside.iterdir()) == before
+    assert (outside / "sentinel.md").read_text(encoding="utf-8") == "# do not touch\n"
+
+
+def test_absolute_workspace_vault_root_is_refused(
+    escaping_clone: tuple[Path, Path, list[object]],
+) -> None:
+    """A per-workspace ``vault_root`` outside the clone is refused too.
+
+    This is the one ``prepare_clone`` most looks like it covers: the value
+    lives in ``.runtime/workspaces.json`` inside the clone, and the prep already
+    rewrites that file to clear the integration switches. It preserves
+    ``vault_root``, because for a real install that value is the operator's
+    data location and rewriting it would be far worse than refusing to run.
+    """
+    clone, outside, rows = escaping_clone
+    _write_json(
+        clone / ".runtime" / "workspaces.json",
+        [{"name": "work", "vault_root": str(outside)}],
+    )
+    config = _config(clone)
+    # The registry value is preserved, not rebased: that is the whole point.
+    assert config.workspace_vault_root("work") == outside
+    with pytest.raises(sandbox.SandboxError) as excinfo:
+        run.assert_clone_containment(config, clone, rows)
+    assert str(outside) in str(excinfo.value)
+    assert list(outside.iterdir()) == []
+
+
+def test_absolute_project_doc_is_refused_and_never_joined(
+    escaping_clone: tuple[Path, Path, list[object]],
+) -> None:
+    """An absolute ``vault_doc_path`` is refused, and not joined onto the clone.
+
+    ``agent_clone / row.doc`` looks like a rebase and is not: ``Path`` ignores
+    the left operand when the right one is absolute, so an external doc would
+    reach the agent's prompt unchanged. The check is what refuses it, which is
+    only true if the join is not silently doing the work.
+    """
+    clone, outside, rows = escaping_clone
+    external_doc = outside / "Projects" / "Ada.md"
+    rows[0].doc = str(external_doc)  # type: ignore[attr-defined]
+
+    with pytest.raises(sandbox.SandboxError) as excinfo:
+        run.assert_clone_containment(_config(clone), clone, rows)
+    assert str(external_doc.resolve()) in str(excinfo.value)
+
+    # The doc is passed through, not joined: `clone / external_doc` would return
+    # the external path, and a relative doc is what actually gets rebased.
+    assert run.clone_doc(clone, str(external_doc)) == external_doc
+    assert run.clone_doc(clone, "memory-vault/work/Ada.md") == (
+        clone / "memory-vault/work/Ada.md"
+    )
+
+    # A relative doc that stays inside the clone is fine, and is rebased.
+    rows[0].doc = "memory-vault/work/Ada.md"  # type: ignore[attr-defined]
+    run.assert_clone_containment(_config(clone), clone, rows)
+
+    # `docs=[]` means "no docs yet", which is the pre-boot call: there is no
+    # project map before the server has answered. It has to stay distinct from
+    # the default -- a `docs or ...` fallback would read the empty list as
+    # unset and check the rows' docs, which are not filled in yet.
+    rows[0].doc = str(external_doc)  # type: ignore[attr-defined]
+    run.assert_clone_containment(_config(clone), clone, rows, docs=[])
+    with pytest.raises(sandbox.SandboxError):
+        run.assert_clone_containment(_config(clone), clone, rows, docs=None)
+
+
+def test_every_selected_workspace_root_is_checked(
+    escaping_clone: tuple[Path, Path, list[object]],
+) -> None:
+    """A workspace nothing in the selection needs is still resolved and refused.
+
+    Both arms iterate workspaces, not chats, so a workspace whose agent root
+    escapes would be resolved during a run even if no selected chat belongs to
+    it. Checking only the selected workspaces' *chats* would miss that.
+    """
+    clone, outside, rows = escaping_clone
+    rows.append(  # type: ignore[union-attr]
+        run.Row(
+            chat_id="chat-2",
+            workspace="other",
+            provider="claude",
+            effective_provider="claude",
+            model="opus",
+            archive_rel=Path("Logs/Chats/chat-2/claude/b.md"),
+        )
+    )
+    _write_json(
+        clone / ".runtime" / "workspaces.json",
+        [
+            {"name": "work", "vault_root": "memory-vault/work"},
+            {"name": "other", "vault_root": str(outside)},
+        ],
+    )
+    with pytest.raises(sandbox.SandboxError) as excinfo:
+        run.assert_clone_containment(_config(clone), clone, rows)
+    assert str(outside) in str(excinfo.value)
+
+
+def test_an_archive_outside_the_clone_is_refused(
+    escaping_clone: tuple[Path, Path, list[object]],
+) -> None:
+    """A selected archive that is not in the clone is refused.
+
+    The selection is built from the live workspace, so a row pointing outside
+    the clone is either a stale cache entry or a tampered one. Either way, both
+    arms would read -- and the one-shot arm would then append to -- a file that
+    is not the sandbox's.
+    """
+    clone, outside, rows = escaping_clone
+    rows[0].archive_rel = outside / "elsewhere.md"  # type: ignore[attr-defined]
+    with pytest.raises(sandbox.SandboxError) as excinfo:
+        run.assert_clone_containment(_config(clone), clone, rows)
+    assert str((outside / "elsewhere.md").resolve()) in str(excinfo.value)
 
 
 # ── clone preparation ────────────────────────────────────────────────────
@@ -313,16 +590,16 @@ def test_commit_snapshot_and_diff_summary_classify(tmp_path: Path) -> None:
     assert summary["added"] == [
         "memory-vault/work/People/grace.md",
     ]
+    # The transcript is not in `modified`: every a/m/d number the report prints
+    # is the length of one of these lists, so leaving `Logs/` in them counted a
+    # server-written file as the arm's work while the report claimed logs were
+    # excluded. Dropped at the source, not only from `by_class`.
     assert summary["modified"] == [
-        # git sorts its output, and `Logs/` sorts before `memory-vault/`.
-        "Logs/Chats/chat-1/claude/a.md",
         "memory-vault/work/People/ada.md",
         "memory-vault/work/Workspace/Memory-Proposals.md",
         "work/AGENTS.md",
     ]
     assert summary["deleted"] == []
-    # Transcripts are inputs, not output: the server writes them by design, so
-    # the raw lists still name them but they are not counted as a change.
     assert "logs" not in summary["by_class"]
     assert summary["by_class"] == {"vault": 2, "proposals": 1, "guide": 1}
     assert summary["queued"] == 2
@@ -345,3 +622,228 @@ def test_classify_paths() -> None:
     assert sandbox.classify("memory-vault/Logs/x.md") == "logs"
     assert sandbox.classify("pyproject.toml") == "other"
     assert sandbox.classify("web/src/main.tsx") == "other"
+
+
+# ── setup is not chat 1 ──────────────────────────────────────────────────
+
+
+def test_boot_and_project_setup_are_absent_from_chat_one(tmp_path: Path) -> None:
+    """Chat 1's diff is the chat's, not the server's boot and the harness's projects.
+
+    The attribution is per chat, and it is only worth anything if nothing else
+    is in the window. Booting the server writes to the clone before any chat
+    exists (a regenerated ``INDEX.md``), and the harness's own per-workspace
+    projects are created before the first chat, so with the pre-boot baseline
+    as chat 1's ``previous_sha`` both landed in chat 1's counts: the one number
+    in the report a reader cannot explain.
+
+    The two setup commits are what fix it, so this reproduces the exact commit
+    sequence the driver runs and asserts the setup paths are gone from chat 1 --
+    and that they *were* there before, or the assertion proves nothing.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _git(tmp_path, "init", str(clone), "-q")
+    _git(clone, "config", "user.email", "t@example.invalid")
+    _git(clone, "config", "user.name", "T")
+    baseline = sandbox.commit_snapshot(clone, "harness: baseline")
+
+    # Boot: the server regenerates the vault index.
+    index = clone / "memory-vault" / "INDEX.md"
+    index.parent.mkdir(parents=True)
+    index.write_text("# Index\n", encoding="utf-8")
+    boot_sha = sandbox.commit_snapshot(clone, "harness: server boot")
+    # Setup: the harness creates its "Insights sandbox" project per workspace.
+    _write_json(
+        clone / ".runtime" / "web_projects.json",
+        {"projects": {"p1": {"name": "Insights sandbox", "workspace": "work"}}},
+    )
+    setup_sha = sandbox.commit_snapshot(clone, "harness: project setup")
+
+    # Chat 1: the agent writes one vault note.
+    note = clone / "memory-vault" / "work" / "People" / "ada.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# Ada\n\nlikes tea.\n", encoding="utf-8")
+    chat_sha = sandbox.commit_snapshot(clone, "agent chat-1")
+
+    chat_one = sandbox.diff_summary(clone, setup_sha, chat_sha)
+    changed = [
+        *chat_one["added"],
+        *chat_one["modified"],
+        *chat_one["deleted"],
+    ]
+    assert changed == ["memory-vault/work/People/ada.md"]
+    assert chat_one["by_class"] == {"vault": 1}
+
+    # The two setup commits are separate steps, not one: the boot snapshot
+    # predates the projects, so the project rows sit in the diff between them
+    # and neither commit is charged to a chat.
+    boot_to_setup = sandbox.diff_summary(clone, boot_sha, setup_sha)
+    assert boot_to_setup["added"] == [".runtime/web_projects.json"]
+    assert sandbox.diff_summary(clone, baseline, boot_sha)["added"] == [
+        "memory-vault/INDEX.md"
+    ]
+
+    # The pre-fix wiring really would have shown the setup as chat 1's work.
+    stale = sandbox.diff_summary(clone, baseline, chat_sha)
+    stale_changed = [*stale["added"], *stale["modified"], *stale["deleted"]]
+    assert "memory-vault/INDEX.md" in stale_changed
+    assert ".runtime/web_projects.json" in stale_changed
+
+
+def test_wait_for_boot_idle_waits_for_a_continuous_empty_window() -> None:
+    """Boot is not finished when the port answers; it is finished when nothing runs.
+
+    A single empty sample is not enough: a server that has just bound its port
+    has not run its first tick yet, and a tick that fires a schedule or the
+    startup backfill would write into the agent clone with nothing attributing
+    it. So the wait is for a window, and a chat appearing inside the window
+    restarts it.
+    """
+
+    class FakeInstance:
+        """Only ``active_chats`` matters here, and it is scripted per poll."""
+
+        def __init__(self, script: list[set[str]]) -> None:
+            self.script = list(script)
+            self.polls = 0
+
+        def active_chat_ids(self) -> set[str]:
+            self.polls += 1
+            if self.script:
+                return self.script.pop(0)
+            return set()
+
+    # Busy, then empty: the wait must not return on the first empty poll.
+    busy_then_idle = FakeInstance([{"chat-1"}, set()])
+    run.wait_for_boot_idle(busy_then_idle, seconds=0.0, poll=0.0)  # type: ignore[arg-type]
+    assert busy_then_idle.polls >= 3, "an idle window must be more than one sample"
+
+    # A chat that reappears restarts the window rather than being ignored.
+    flapping = FakeInstance([{"chat-1"}, set(), {"chat-2"}, set()])
+    run.wait_for_boot_idle(flapping, seconds=0.0, poll=0.0)  # type: ignore[arg-type]
+    assert flapping.polls >= 5
+
+    # Never idle: a refusal, because writes nobody can attribute are worse than
+    # a run that stops.
+    never = FakeInstance([{"chat-1"}] * 1000)
+    with pytest.raises(sandbox.SandboxError) as excinfo:
+        run.wait_for_boot_idle(never, seconds=0.0, timeout=0.05, poll=0.01)  # type: ignore[arg-type]
+    assert "active chat" in str(excinfo.value)
+
+
+# ── token accounting ─────────────────────────────────────────────────────
+
+
+def test_sum_claude_usage_dedupes_message_ids(tmp_path: Path) -> None:
+    """A transcript's usage is counted once per message, not once per record.
+
+    A real ``<session_id>.jsonl`` writes the same assistant record several
+    times -- persisted, copied into a sidechain, re-read -- and every copy
+    carries the same ``usage`` block. Summing records would report a chat as
+    costing three or four times what it did, and a token column that lies is
+    worse than one that says it does not know.
+    """
+    usage = {
+        "input_tokens": 4,
+        "output_tokens": 120,
+        "cache_read_input_tokens": 30_000,
+        "cache_creation_input_tokens": 9_500,
+    }
+    other = {
+        "input_tokens": 1,
+        "output_tokens": 40,
+        "cache_read_input_tokens": 1_000,
+        "cache_creation_input_tokens": 250,
+    }
+    lines = [
+        json.dumps({"type": "queue-operation", "operation": "add"}),
+        json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}),
+        json.dumps({"type": "assistant", "message": {"id": "msg_1", "usage": usage}}),
+        # The same message, persisted twice and copied into a sidechain.
+        json.dumps(
+            {"type": "assistant", "isSidechain": True, "message": {"id": "msg_1", "usage": usage}}
+        ),
+        json.dumps({"type": "assistant", "message": {"id": "msg_2", "usage": other}}),
+        json.dumps({"type": "assistant", "message": {"id": "msg_2", "usage": other}}),
+        # A summary record, a truncated line, and an assistant with no usage.
+        json.dumps({"type": "summary", "summary": "a session summary"}),
+        '{"type": "assistant", "mess',
+        json.dumps({"type": "assistant", "message": {"id": "msg_3"}}),
+        "",
+    ]
+    jsonl = tmp_path / "session.jsonl"
+    jsonl.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    assert sandbox.sum_claude_usage(jsonl) == {
+        "input_tokens": 5,
+        "output_tokens": 160,
+        "cache_read_input_tokens": 31_000,
+        "cache_creation_input_tokens": 9_750,
+    }
+
+    # A record with no message id is still counted, rather than dropped.
+    no_id = tmp_path / "no-id.jsonl"
+    no_id.write_text(
+        json.dumps({"type": "assistant", "message": {"role": "assistant", "usage": usage}})
+        + "\n",
+        encoding="utf-8",
+    )
+    assert sandbox.sum_claude_usage(no_id) == usage
+
+    # A missing transcript is zero, not an exception: the caller records what
+    # it could not read and the report prints `-` for that chat.
+    assert sandbox.sum_claude_usage(tmp_path / "absent.jsonl") == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+    }
+
+
+def test_report_shows_agent_tokens_and_dashes_where_there_are_none() -> None:
+    """The report's token columns are the real totals, or an honest `-`.
+
+    A per-chat and an arm total, both empty-dash for a provider whose usage
+    cannot be read (opencode), because a partial row that summed silently
+    would understate the run it is reporting on.
+    """
+    usage = {
+        "input_tokens": 4,
+        "output_tokens": 120,
+        "cache_read_input_tokens": 30_000,
+        "cache_creation_input_tokens": 9_500,
+    }
+    rows = [
+        run.Row(
+            chat_id="chat-1",
+            workspace="work",
+            provider="claude",
+            effective_provider="claude",
+            model="opus",
+            archive_rel=Path("Logs/Chats/chat-1/claude/a.md"),
+        ),
+        run.Row(
+            chat_id="chat-2",
+            workspace="work",
+            provider="opencode",
+            effective_provider="opencode",
+            model="gpt",
+            archive_rel=Path("Logs/Chats/chat-2/opencode/b.md"),
+        ),
+    ]
+    arms = {
+        "agent": [
+            run.ArmResult(chat_id="chat-1", seconds=12.0, usage=usage),
+            run.ArmResult(chat_id="chat-2", seconds=9.0),
+        ]
+    }
+    report = run.render_report("pilot-1", Path("/live"), rows, arms, "now")
+
+    header = next(line for line in report.splitlines() if line.startswith("| arm |"))
+    assert "tokens" in header and "cache read" in header
+    # The arm total is the sum of the one chat that reported.
+    assert "39,624" in report
+    # Chat 2 has no usage to show.
+    chat2_row = next(line for line in report.splitlines() if line.startswith("| chat-2 |"))
+    assert chat2_row.count("| - ") >= 1

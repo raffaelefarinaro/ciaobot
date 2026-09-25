@@ -28,6 +28,7 @@ import re
 import shutil
 import socket
 import subprocess
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -91,6 +92,39 @@ def assert_sandbox_path(path: Path, *, sandbox_root: Path, live: Path) -> Path:
             f"{resolved} contains the live workspace ({live_resolved})"
         )
     return resolved
+
+
+def assert_contained(paths: Iterable[Path], clone: Path) -> None:
+    """Refuse the first path in ``paths`` that is not inside ``clone``.
+
+    :func:`assert_sandbox_path` proves a *clone* lives in the sandbox tree.
+    This proves the other direction, and it is the check the clone cannot make
+    for itself: an install may configure a vault, a workspace root or a project
+    doc *outside* its workspace, and those settings are preserved on purpose
+    -- ``CiaoConfig.workspace_vault_root`` returns an absolute ``vault_root``
+    unchanged. ``prepare_clone`` cannot rebase them, because they live in
+    ``.runtime/workspaces.json`` and in a project's ``vault_doc_path``, and
+    both are legitimate absolute paths.
+
+    Cloned as-is, every writer that resolves those settings -- the one-shot
+    arm, the server, the agent with Bash -- writes the original files, and
+    nothing the harness can undo afterwards. So it fails closed instead: build
+    the config the arm is about to use, ask for every path it will resolve,
+    and refuse the run when one of them lands outside the clone.
+
+    The clone counts as inside itself, because ``vault_root: "."`` (a
+    workspace that is its own vault) is a supported layout and resolves to the
+    clone root. Every comparison is on resolved paths, so a symlink or a
+    ``..`` in the value cannot smuggle a different target past the check.
+    """
+    root = Path(clone).expanduser().resolve()
+    for path in paths:
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.is_relative_to(root):
+            raise SandboxError(
+                f"{resolved} is outside the clone {root}; refusing to run, "
+                "because the arm would write the original files"
+            )
 
 
 def clone_workspace(live: Path, dest: Path) -> None:
@@ -472,6 +506,12 @@ def diff_summary(clone: Path, a: str, b: str) -> dict:
         fields = line.split("\t")
         status = fields[0][:1]
         target = fields[-1]
+        if classify(target) == "logs":
+            # Dropped here, not only from `by_class`: every a/m/d number the
+            # report prints is the length of one of these three lists, so a log
+            # path left in them would be counted in the totals and in the
+            # per-chat cell while the report claims logs are excluded.
+            continue
         if status == "A":
             added.append(target)
         elif status == "D":
@@ -481,8 +521,6 @@ def diff_summary(clone: Path, a: str, b: str) -> dict:
     by_class: dict[str, int] = {}
     for path in (*added, *modified, *deleted):
         group = classify(path)
-        if group == "logs":
-            continue
         by_class[group] = by_class.get(group, 0) + 1
     queued = sum(
         1
@@ -496,3 +534,68 @@ def diff_summary(clone: Path, a: str, b: str) -> dict:
         "by_class": by_class,
         "queued": queued,
     }
+
+
+# ── token accounting ─────────────────────────────────────────────────────
+
+# The four counters a Claude transcript carries. Cache reads and cache writes
+# are separate keys because they are billed differently from fresh input, and
+# for a long agent chat they dwarf `input_tokens` -- a report that only counted
+# fresh input would say a 200k-token pass was cheap.
+_USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+def sum_claude_usage(jsonl: Path) -> dict[str, int]:
+    """Token usage for one Claude session transcript, counted once per message.
+
+    A ``<session_id>.jsonl`` writes the same assistant record more than once:
+    a real transcript observed during development carries each ``message.id``
+    three or four times, as the stream is persisted, copied into a sidechain
+    and re-read, and every copy carries the same ``usage`` block. Summing
+    records would multiply the chat's real cost by the number of copies, so
+    ``message.id`` is the dedupe key and a message is counted the first time
+    its id is seen.
+
+    A record with no usable id is still counted, under a key nothing else can
+    produce, so an odd transcript loses no tokens instead of losing the first
+    record and counting the rest twice. A missing or unreadable file is zero
+    rather than an exception: the caller records a count it could not get, and
+    the report shows ``-`` for it.
+
+    Local parsing, no network and no model, so it stays testable offline.
+    """
+    totals: dict[str, int] = dict.fromkeys(_USAGE_FIELDS, 0)
+    seen: set[str] = set()
+    try:
+        with Path(jsonl).open(encoding="utf-8", errors="replace") as handle:
+            for index, raw in enumerate(handle):
+                if not raw.strip():
+                    continue
+                try:
+                    record = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict) or record.get("type") != "assistant":
+                    continue
+                message = record.get("message")
+                if not isinstance(message, dict):
+                    continue
+                usage = message.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                key = str(message.get("id") or "") or f"#{index}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                for counter in _USAGE_FIELDS:
+                    value = usage.get(counter)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        totals[counter] += value
+    except OSError:
+        return totals
+    return totals

@@ -55,6 +55,19 @@ The harness then refuses to run on the live path: every clone goes through
 resolved `config.workspace_root` *is* the clone before the first model call.
 `--live` is only ever read.
 
+It also refuses to run on an install whose **paths point outside the clone**.
+An absolute `CIAO_VAULT_ROOT`, an absolute per-workspace `vault_root`, and a
+project `vault_doc_path` outside the workspace are all supported
+configurations, and `CiaoConfig` deliberately preserves them — so a clone of
+such an install would have both arms writing the original vault. Before
+anything runs, each arm builds the config it is about to use and passes
+`config.vault_root`, every selected `workspace_vault_root` and `agent_root`,
+every selected archive and every resolved project doc through
+`sandbox.assert_contained`. A path outside the clone stops the run with a
+`SandboxError` naming it. That is a refusal, not a rebasing: the pilot is
+refused on an install the clone cannot honestly measure, and the operator
+points `--live` at a workspace with relative roots instead.
+
 ## Running it
 
 Full cost warning first: **an agent arm chat on opus runs roughly $0.50–$1
@@ -98,6 +111,17 @@ report.md       totals per arm, then a per-chat table
 diffs/<arm>/    one .diff and one .stat per chat per arm
 agent-server.log
 ```
+
+Per-chat attribution is only worth anything if nothing else falls in the
+window, so the agent clone gets two commits of its own before chat 1:
+`harness: server boot`, after boot has been quiet for ten seconds, and
+`harness: project setup`, after the harness's own per-workspace projects are
+created. Both would otherwise be charged to chat 1.
+
+Token columns in the report are read from each chat's own Claude session
+transcript (`message.usage`, deduped by `message.id`, because a transcript
+carries the same assistant record several times), not estimated. A chat on a
+provider whose usage the harness cannot read shows `-`.
 
 The report contains counts and diffs, and **no verdict**. Which arm's writes
 are better is a judgement about real memory, and a summary that made it would
