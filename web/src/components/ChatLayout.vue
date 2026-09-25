@@ -142,14 +142,9 @@
           :class="{ 'is-dragging': isDraggingSplit }"
           @mousedown="startSplitDrag"
         />
-        <div
-          class="chat-split-side"
-          :style="{
-            width: isMobile ? '100%' : ((1 - chatSplitRatio) * 100) + '%',
-            flex: isMobile ? undefined : '0 0 auto',
-            transition: isDraggingSplit ? 'none' : undefined
-          }"
-        >
+        <!-- Takes whatever the chat pane and gutter leave, so the tile's inset
+             margin never pushes the pair past 100%. -->
+        <div class="chat-split-side">
           <PinnedFilePanel ref="pinnedFilePanelRef" :key="pinnedFilePath" :file-path="pinnedFilePath" @close="unpinCurrent" />
         </div>
       </template>
@@ -348,6 +343,9 @@ const SIDEBAR_SNAP_THRESHOLD = 15 // px
 const DEFAULT_SPLIT_RATIO = 0.5
 const MIN_CHAT_PANE_WIDTH = 240
 const MIN_SIDE_PANE_WIDTH = 240
+// Gutter + the tile's right inset (both --space-2): width the docked file tile
+// occupies beyond its own box.
+const SIDE_TILE_CHROME = 16
 const SPLIT_SNAP_THRESHOLD = 15 // px
 const LATEST_STATUS_SYNC_MS = 15000
 
@@ -448,7 +446,7 @@ function handleSplitDrag(e: MouseEvent) {
   let newLeftWidth = clientX - dragContainerLeft
   
   const minLeft = MIN_CHAT_PANE_WIDTH
-  const maxLeft = dragContainerWidth - MIN_SIDE_PANE_WIDTH
+  const maxLeft = dragContainerWidth - MIN_SIDE_PANE_WIDTH - SIDE_TILE_CHROME
   
   if (maxLeft < minLeft) {
     chatSplitRatio.value = 0.5
@@ -1596,15 +1594,30 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow: hidden;
 }
+/* The pinned file is a window docked inside the pane, not a second flat
+   column: inset from the pane edges, in the sidebar's tone (--bg2), so the
+   sidebar and the file read as one layer and the chat is the canvas between. */
 .chat-split-side {
-  width: 50%;
   flex: 1 1 0;
   min-width: 240px;
-  border-left: 1px solid var(--border);
+  margin: var(--space-2) var(--space-2) var(--space-2) 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--bg);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 32px -14px rgb(0 0 0 / 45%);
+  animation: chat-tile-in 180ms var(--ease);
+}
+:global(:root.theme-light) .chat-split-side {
+  box-shadow: 0 10px 28px -14px rgb(26 26 46 / 28%);
+}
+@keyframes chat-tile-in {
+  from { opacity: 0; transform: translateX(12px) scale(0.985); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-split-side { animation: none; }
 }
 
 .sidebar-resizer,
@@ -1633,6 +1646,22 @@ onBeforeUnmount(() => {
 .chat-split-resizer:hover::after,
 .chat-split-resizer.is-dragging::after {
   background-color: var(--accent);
+}
+/* Between the chat and the tile the resizer is the visible gap itself, with a
+   grip that shows on hover instead of a full-height accent line. */
+.chat-split-resizer {
+  flex: none;
+  width: var(--space-2);
+  margin: 0;
+}
+.chat-split-resizer::after {
+  top: 50%;
+  bottom: auto;
+  left: 50%;
+  width: 3px;
+  height: 36px;
+  border-radius: 2px;
+  transform: translate(-50%, -50%);
 }
 
 :global(body.is-dragging-layout) {

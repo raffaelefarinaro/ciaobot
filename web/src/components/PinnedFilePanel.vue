@@ -6,9 +6,7 @@
     <PaneHeader :brand="false" @open-sidebar="$emit('close')">
       <template #title>
         <div class="header-left">
-          <button class="btn-icon close-btn desktop-only" @click="$emit('close')" title="Unpin file" aria-label="Unpin file">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
-          </button>
+          <span v-if="fileTypeLabel" class="pfp-type" aria-hidden="true">{{ fileTypeLabel }}</span>
           <div class="header-breadcrumb">
             <span class="chat-title" :title="filePath">{{ basename }}</span>
             <span v-if="docDir" class="pfp-dir" :title="docDir">{{ docDir }}</span>
@@ -61,6 +59,10 @@
           aria-label="Open in memory map"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="m7.7 7.1 2.9 8.1M16.3 7.1l-2.9 8.1M8 6h8"/></svg>
+        </button>
+        <!-- Close sits last, where a window's close lives; the tile is a window. -->
+        <button class="btn-icon close-btn desktop-only" @click="$emit('close')" title="Unpin file" aria-label="Unpin file">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
         </button>
       </template>
     </PaneHeader>
@@ -449,6 +451,12 @@ function humanizeMeta(value: string): string {
 }
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(cleanPath.value))
 const isCsv = computed(() => isCsvPath(cleanPath.value))
+
+// Short extension badge for the tile's title bar ("MD", "CSV", "HTML").
+const fileTypeLabel = computed(() => {
+  const m = /\.([a-z0-9]{1,5})$/i.exec(basename.value)
+  return m ? m[1].toUpperCase() : ''
+})
 
 const docDir = computed(() => {
   const idx = cleanPath.value.lastIndexOf('/')
@@ -1379,8 +1387,31 @@ defineExpose({ isBusyAuthoring })
   flex-direction: column;
   height: 100%;
   overflow: hidden;
-  background: var(--bg);
+  /* The tile's own tone (ChatLayout .chat-split-side): the sidebar's surface. */
+  background: var(--bg2);
   position: relative;
+}
+
+/* A window title bar, not a page header: shorter than the chat's, on the tile
+   surface, with its own tight inset instead of the page grid's gutter. 52px =
+   the chat header's 61px less the tile's 8px inset and 1px border, so the two
+   header rules meet on one line across the gap. */
+.pinned-file-panel > :deep(.pane-header) {
+  height: 52px;
+  padding: 0 4px 0 12px;
+  background: transparent;
+}
+.pfp-type {
+  flex: none;
+  padding: 2px 5px;
+  border-radius: var(--radius-xs);
+  background: var(--bg3);
+  color: var(--fg2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  line-height: 1.4;
 }
 
 /* Unified Header styles matching ChatPanel */
@@ -1399,7 +1430,8 @@ defineExpose({ isBusyAuthoring })
 
 /* The file's folder, muted after its name: where it lives, not a second title. */
 .pfp-dir {
-  flex: 0 1 auto;
+  /* Gives way long before the filename does. */
+  flex: 0 1000 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--fg3);
@@ -1447,7 +1479,10 @@ defineExpose({ isBusyAuthoring })
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  flex: 0 1 auto;
+  /* The filename keeps its width and the folder takes the squeeze; only a name
+     longer than the whole row ellipses. */
+  flex: 0 0 auto;
+  max-width: 100%;
 }
 
 .desktop-only { display: inline-flex; }
