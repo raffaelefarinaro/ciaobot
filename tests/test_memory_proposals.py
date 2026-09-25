@@ -523,6 +523,40 @@ def test_route_insights_is_pure_and_matches_archive_routing(
     assert sorted(vault.rglob("*")) == before
 
 
+def test_archive_of_only_already_applied_facts_still_records_and_settles(
+    tmp_path: Path,
+) -> None:
+    """The re-run case: every fact is known, and the archive is the only news.
+
+    The suppression rows and the zeroed stats sat behind the same ``if kept``
+    guard, so an archive whose facts were *all* already applied — exactly the
+    archive a second pass over the same chats sees — recorded nothing, filed
+    nothing, and left ``stats`` untouched, so the caller reported neither the
+    verdict nor the absence of proposals.
+    """
+    vault = tmp_path / "vault"
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["Chose the old rule over the other because it still holds."],
+    )
+    archive = _archive(
+        tmp_path,
+        "## Decisions\n"
+        "- Chose the old rule over the other because it still holds. [memory]\n",
+    )
+
+    stats: dict[str, int] = {}
+    out = mp.proposals_from_archive(archive, vault, guide_path=guide, stats=stats)
+
+    assert out is None
+    assert stats == {"proposed": 0, "promoted": 0}
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    rows = mp.read_decisions(queue)
+    assert [(r["action"], r["outcome"]) for r in rows] == [("accepted", "suppressed")]
+    # Recorded, not queued: the fact was already applied.
+    assert mp.list_proposals(queue) == []
+
+
 def test_promote_holds_back_no_op_rule_clause(tmp_path: Path) -> None:
     """'Durable rule: None.' style fillers never land in a bounded region."""
     guide = write_guide(tmp_path / "CLAUDE.md")

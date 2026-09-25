@@ -131,6 +131,32 @@ def _chat_workspaces(runtime_root: Path) -> dict[str, str]:
     return out
 
 
+def _provider_interleaved(
+    bucket: list[Candidate], rng: random.Random
+) -> list[Candidate]:
+    """Order one bucket so neighbouring candidates come from different providers.
+
+    A tercile is not a provider population: the same chat can be a five-minute
+    Claude question or a day-long opencode session, so slicing by length leaves
+    provider skew inside each slice. Walking the providers round-robin (each
+    provider's own order drawn from the seeded shuffle) means no prefix of the
+    bucket is one provider's territory.
+    """
+    by_provider: dict[str, list[Candidate]] = {}
+    for cand in bucket:
+        by_provider.setdefault(cand.provider, []).append(cand)
+    for chat_list in by_provider.values():
+        rng.shuffle(chat_list)
+    remaining = [by_provider[name] for name in sorted(by_provider)]
+    ordered: list[Candidate] = []
+    while remaining:
+        for chat_list in remaining:
+            if chat_list:
+                ordered.append(chat_list.pop())
+        remaining = [chat_list for chat_list in remaining if chat_list]
+    return ordered
+
+
 def _varied_sample(
     pool: list[Candidate], last: int, seed: int
 ) -> list[Candidate]:
@@ -138,17 +164,26 @@ def _varied_sample(
 
     The newest N archives are the ones the user has actually been living
     with, and a straight "newest 50" is a length-ordered sample in
-    practice — recent sessions are short. So the pool is split into three
-    length terciles, each bucket is shuffled deterministically from ``seed``,
-    and the three are then drawn round-robin. The result still favours recent
-    chats but reaches the long ones, and with ``seed`` fixed the same command
-    twice picks the same chats.
+    practice — recent sessions are short. So the pool is sorted by transcript
+    length, split into three length terciles, each tercile is ordered so
+    neighbouring picks come from different providers, and the three are then
+    drawn round-robin. The result still favours recent chats but reaches the
+    long ones, and with ``seed`` fixed the same command twice picks the same
+    chats.
     """
-    size = max(1, len(pool) // 3)
-    buckets = [pool[:size], pool[size : size * 2], pool[size * 2 :]]
+    # Ascending by length, and stable, so equal-length chats stay in
+    # newest-first order: recency is the tie-breaker that was there before.
+    by_length = sorted(pool, key=lambda c: c.chars)
+    size = max(1, len(by_length) // 3)
     rng = random.Random(seed)
-    for bucket in buckets:
-        rng.shuffle(bucket)
+    buckets = [
+        _provider_interleaved(chunk, rng)
+        for chunk in (
+            by_length[:size],
+            by_length[size : size * 2],
+            by_length[size * 2 :],
+        )
+    ]
     picked: list[Candidate] = []
     index = 0
     while len(picked) < last and any(buckets):
@@ -262,23 +297,32 @@ async def _timed(call: Callable[[], Awaitable[Any]]) -> tuple[Any, str, float]:
         )
 
 
-async def compare_one(config: Any, cand: Candidate, *, cache_dir: Path) -> dict:
-    """Run both modes over one archived chat and return its result record.
+@dataclass
+class _Prep:
+    """What both modes need from the vault, the model config and the archive.
 
-    Resumable by construction: a chat whose record is already in
-    ``cache_dir`` is returned as-is without a model call, so a run
-    interrupted at chat 40 of 50 resumes at 41 rather than paying twice.
+    Resolved once per chat, before either mode runs, and outside them: a chat
+    whose model cannot be resolved has neither mode to run, so failing here is
+    a per-chat error rather than a per-mode one.
     """
-    cache_path = cache_dir / _cache_name(cand)
-    try:
-        cached = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        cached = None
-    if isinstance(cached, dict):
-        return cached
 
+    vault_root: Path
+    guide: Path | None
+    model: str
+    eff_provider: str
+    body: str
+    context_block: str
+
+
+def _prepare(config: Any, cand: Candidate) -> _Prep:
+    """Read the archive and resolve the model both modes will use.
+
+    Every step here can fail on a single chat — the archive may have been
+    reclaimed since selection, the workspace may no longer resolve, the model
+    lookup may raise. The caller turns any of those into a recorded error for
+    this chat alone.
+    """
     from ciao.insights import (
-        _call_text_model,
         _known_context_block,
         _resolve_insights_call,
         resolve_insights_model,
@@ -302,70 +346,148 @@ async def compare_one(config: Any, cand: Candidate, *, cache_dir: Path) -> dict:
     model, eff_provider, _note = _resolve_insights_call(
         config, model, provider=cand.provider
     )
-
     body = strip_insights(cand.archive_path.read_text(encoding="utf-8"))
-    context_block = _known_context_block(guide, vault_root, transcript=body)
-
-    # Exactly today's extraction path: same body, same context block, same
-    # model resolution. The only thing that differs from the agent run is
-    # the tool surface.
-    text, oneshot_error, oneshot_seconds = await _timed(
-        lambda: _call_text_model(
-            body, model, provider=eff_provider,
-            cwd=config.workspace_root, context_block=context_block,
-        )
+    return _Prep(
+        vault_root=vault_root,
+        guide=guide,
+        model=model,
+        eff_provider=eff_provider,
+        body=body,
+        context_block=_known_context_block(guide, vault_root, transcript=body),
     )
-    oneshot = ModeResult(
-        mode="oneshot", status="ok", seconds=oneshot_seconds, output="",
-        kept=[], suppressed=0, dropped=0, error=oneshot_error,
+
+
+def _error_mode(mode: str, error: str) -> ModeResult:
+    return ModeResult(
+        mode=mode, status="error", seconds=0.0, output="",
+        kept=[], suppressed=0, dropped=0, error=error[:300],
     )
-    if text is None:
-        oneshot.status = "error"
-    else:
-        oneshot.output = text
-        _apply_routed(oneshot, _routed(text, vault_root, guide))
 
-    if eff_provider not in _AGENT_PROVIDERS:
-        agent = ModeResult(
-            mode="agent", status=f"skipped: {eff_provider}", seconds=0.0,
-            output="", kept=[], suppressed=0, dropped=0,
-        )
-    else:
-        from ciao.insights_agent import run_agent_extraction
 
-        run, agent_error, agent_seconds = await _timed(
-            lambda: run_agent_extraction(
-                cand.archive_path,
-                vault_root=vault_root,
-                guide_path=guide,
-                model=model,
-                provider=eff_provider,
+async def _oneshot_result(config: Any, prep: _Prep) -> ModeResult:
+    """Exactly today's extraction path: same body, context block and model.
+
+    The only thing that differs from the agent run is the tool surface, so
+    anything that goes wrong here is a fact about one-shot mode, not about
+    this chat.
+    """
+    from ciao.insights import _call_text_model
+
+    try:
+        text, error, seconds = await _timed(
+            lambda: _call_text_model(
+                prep.body, prep.model, provider=prep.eff_provider,
+                cwd=config.workspace_root, context_block=prep.context_block,
             )
         )
-        agent = ModeResult(
-            mode="agent", status="ok", seconds=agent_seconds, output="",
-            kept=[], suppressed=0, dropped=0, error=agent_error,
+        result = ModeResult(
+            mode="oneshot", status="ok", seconds=seconds, output="",
+            kept=[], suppressed=0, dropped=0, error=error,
+        )
+        if text is None:
+            result.status = "error"
+            return result
+        result.output = text
+        _apply_routed(result, _routed(text, prep.vault_root, prep.guide))
+        return result
+    except Exception as exc:  # noqa: BLE001 — a failed mode is a recorded result
+        return _error_mode("oneshot", f"{type(exc).__name__}: {exc}")
+
+
+async def _agent_result(cand: Candidate, prep: _Prep) -> ModeResult:
+    """The read-only agent run, or a recorded reason there was not one."""
+    if prep.eff_provider not in _AGENT_PROVIDERS:
+        return ModeResult(
+            mode="agent", status=f"skipped: {prep.eff_provider}", seconds=0.0,
+            output="", kept=[], suppressed=0, dropped=0,
+        )
+    try:
+        from ciao.insights_agent import run_agent_extraction
+
+        run, error, seconds = await _timed(
+            lambda: run_agent_extraction(
+                cand.archive_path,
+                vault_root=prep.vault_root,
+                guide_path=prep.guide,
+                model=prep.model,
+                provider=prep.eff_provider,
+            )
+        )
+        result = ModeResult(
+            mode="agent", status="ok", seconds=seconds, output="",
+            kept=[], suppressed=0, dropped=0, error=error,
         )
         if run is None:
-            agent.status = "error"
-        else:
-            agent.output = run.text
-            agent.turns = run.turns
-            agent.tool_calls = run.tool_calls
-            agent.cost_usd = run.cost_usd
-            agent.denied = run.denied
-            _apply_routed(agent, _routed(run.text, vault_root, guide))
+            result.status = "error"
+            return result
+        result.output = run.text
+        result.turns = run.turns
+        result.tool_calls = run.tool_calls
+        result.cost_usd = run.cost_usd
+        result.denied = run.denied
+        _apply_routed(result, _routed(run.text, prep.vault_root, prep.guide))
+        return result
+    except Exception as exc:  # noqa: BLE001 — a failed mode is a recorded result
+        return _error_mode("agent", f"{type(exc).__name__}: {exc}")
 
-    record = {
+
+def _unprepared_record(cand: Candidate, exc: Exception) -> dict:
+    """The record for a chat that could not be prepared for either mode.
+
+    Both modes are reported as errors rather than one being invented: the
+    report counts ok/error per mode, and a chat missing from it would read as
+    a mode that was never tried. Cached with the rest, so a resume does not
+    re-attempt a candidate that failed before it ever called a model.
+    """
+    error = f"{type(exc).__name__}: {exc}"[:300]
+    return {
         "chat_id": cand.chat_id,
         "provider": cand.provider,
         "workspace": cand.workspace,
         "chars": cand.chars,
-        "model": model,
-        "effective_provider": eff_provider,
-        "oneshot": _mode_to_dict(oneshot),
-        "agent": _mode_to_dict(agent),
+        "model": "",
+        "effective_provider": "",
+        "oneshot": _mode_to_dict(_error_mode("oneshot", error)),
+        "agent": _mode_to_dict(_error_mode("agent", error)),
     }
+
+
+async def compare_one(config: Any, cand: Candidate, *, cache_dir: Path) -> dict:
+    """Run both modes over one archived chat and return its result record.
+
+    Resumable by construction: a chat whose record is already in
+    ``cache_dir`` is returned as-is without a model call, so a run
+    interrupted at chat 40 of 50 resumes at 41 rather than paying twice.
+
+    This chat's problems end here. Preparation, one-shot mode and agent mode
+    each record their own failure, because ``asyncio.gather`` over 50 of
+    these turns one unhandled raise into a run with no report at all.
+    """
+    cache_path = cache_dir / _cache_name(cand)
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        cached = None
+    if isinstance(cached, dict):
+        return cached
+
+    try:
+        prep = _prepare(config, cand)
+    except Exception as exc:  # noqa: BLE001 — one bad candidate is a result, not a raise
+        record = _unprepared_record(cand, exc)
+    else:
+        oneshot = await _oneshot_result(config, prep)
+        agent = await _agent_result(cand, prep)
+        record = {
+            "chat_id": cand.chat_id,
+            "provider": cand.provider,
+            "workspace": cand.workspace,
+            "chars": cand.chars,
+            "model": prep.model,
+            "effective_provider": prep.eff_provider,
+            "oneshot": _mode_to_dict(oneshot),
+            "agent": _mode_to_dict(agent),
+        }
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(
@@ -419,6 +541,11 @@ async def run_compare(
     rate-limit story. The progress line reports the running agent cost so a
     long run's price is visible while it is happening, not only in the
     report at the end.
+
+    A candidate that still raises — ``compare_one`` records the failures it
+    knows about, and this is the backstop for one it does not — becomes an
+    error record in place. ``asyncio.gather`` otherwise cancels its siblings
+    on the first raise, which would cost the whole report for one chat.
     """
     total = len(candidates)
     sem = asyncio.Semaphore(max(1, int(concurrency)))
@@ -426,7 +553,14 @@ async def run_compare(
 
     async def one(cand: Candidate) -> dict:
         async with sem:
-            record = await compare_one(config, cand, cache_dir=cache_dir)
+            try:
+                record = await compare_one(config, cand, cache_dir=cache_dir)
+            except Exception as exc:  # noqa: BLE001 — a bad candidate is a result
+                logger.info(
+                    "insights-compare: %s could not be compared: %s",
+                    cand.chat_id, exc,
+                )
+                record = _unprepared_record(cand, exc)
         state["done"] += 1
         agent = record.get("agent")
         agent = agent if isinstance(agent, dict) else {}

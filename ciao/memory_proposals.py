@@ -3041,8 +3041,11 @@ def proposals_from_archive(
                 result.dropped,
                 archive_path.name,
             )
-        proposals = result.kept
-        if proposals:
+        # A fact the session already applied is recorded wherever the routing
+        # left it. Guarding this on `kept` would lose the history row for an
+        # archive whose every fact was already applied — which is exactly the
+        # archive a re-run passes over.
+        if result.kept or result.suppressed:
             for _p in result.suppressed:
                 logger.info(
                     "memory proposals: suppressed already-applied %r from %s",
@@ -3076,11 +3079,12 @@ def proposals_from_archive(
                     len(result.suppressed),
                     archive_path.name,
                 )
-            if not proposals:
-                if stats is not None:
-                    stats["proposed"] = 0
-                    stats["promoted"] = stats.get("promoted", 0)
-                return None
+        proposals = result.kept
+        if not proposals:
+            if stats is not None:
+                stats["proposed"] = 0
+                stats["promoted"] = stats.get("promoted", 0)
+            return None
 
         if auto_promote_memory and proposals and curation_in_progress(workspace_vault_root):
             # A curation run is mid-consolidation: it read the region minutes

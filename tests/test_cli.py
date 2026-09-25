@@ -235,6 +235,72 @@ def test_insights_compare_parses_args(monkeypatch: pytest.MonkeyPatch) -> None:
     assert called[1].run_id == datetime.date.today().isoformat()
 
 
+def test_insights_compare_writes_the_report_into_the_named_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--workspace personal` must land the report in that workspace's vault.
+
+    Both modes were routed against that workspace's notes, so a report under
+    the install-wide vault is a file in a vault the run never read — and the
+    acceptance criterion for this command is that it changes nothing outside
+    the workspace it compared.
+    """
+    from ciao import critique
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao import insights_compare
+
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path / "ws",
+        state_path=tmp_path / "ws" / ".runtime" / "state.json",
+        media_root=tmp_path / "ws" / ".runtime" / "media",
+        vault_root=tmp_path / "vault",
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root="personal")
+        },
+    )
+    (config.workspace_root / ".runtime").mkdir(parents=True)
+
+    monkeypatch.setattr(
+        CiaoConfig, "from_env", staticmethod(lambda env=None: config)
+    )
+    monkeypatch.setattr(
+        critique, "apply_app_settings_overlay", lambda cfg: None
+    )
+    monkeypatch.setattr(
+        insights_compare, "select_archives", lambda *a, **k: [
+            insights_compare.Candidate(
+                archive_path=tmp_path / "chat.md", chat_id="chat-1",
+                provider="claude", workspace="personal", chars=2000,
+            )
+        ]
+    )
+
+    async def fake_run_compare(config, candidates, **kwargs):
+        return [
+            {
+                "chat_id": cand.chat_id, "provider": cand.provider,
+                "workspace": cand.workspace, "chars": cand.chars,
+                "oneshot": {"status": "ok", "seconds": 1.0, "kept": []},
+                "agent": {"status": "ok", "seconds": 2.0, "kept": []},
+            }
+            for cand in candidates
+        ]
+
+    monkeypatch.setattr(insights_compare, "run_compare", fake_run_compare)
+
+    assert cli.main(["insights-compare", "--workspace", "personal"]) == 0
+
+    today = datetime.date.today().isoformat()
+    written = config.workspace_vault_root("personal") / "Workspace" / (
+        f"Insights-Compare-{today}.md"
+    )
+    assert config.workspace_vault_root("personal") != config.vault_root
+    assert written.exists()
+    assert "### chat-1" in written.read_text(encoding="utf-8")
+    assert not (config.vault_root / "Workspace").exists()
+
+
 def _write_healthy_audit_workspace(root: Path) -> None:
     from ciao.memory_tool import ensure_regions
 

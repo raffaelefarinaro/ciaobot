@@ -3204,7 +3204,15 @@ def _insights_compare_command(args: argparse.Namespace) -> int:
             concurrency=args.concurrency,
         )
     )
-    out = args.out or default_report_path(config.vault_root, today)
+    # The report belongs in the vault whose notes were compared. Routing
+    # followed `--workspace`, so writing it under the install-wide vault put
+    # it outside the workspace the run actually read.
+    out_vault = (
+        config.workspace_vault_root(args.workspace)
+        if args.workspace
+        else config.vault_root
+    )
+    out = args.out or default_report_path(out_vault, today)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
         render_report(results, workspace=args.workspace, started=today),

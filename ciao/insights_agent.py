@@ -115,3 +115,10 @@ async def run_agent_extraction(
         )
     finally:
         transcript_path.unlink(missing_ok=True)
+        # The directory was made for this run, and a dry run leaves the vault
+        # as it found it. Another run's copy is still in there, or a previous
+        # cleanup already took it: either way there is nothing to do about it.
+        try:
+            tmp_dir.rmdir()
+        except OSError:
+            pass

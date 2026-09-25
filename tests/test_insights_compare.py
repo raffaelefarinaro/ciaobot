@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -117,6 +118,74 @@ def test_select_archives_filters_workspace_and_varied_sample(tmp_path: Path) -> 
     assert len(ic.select_archives(config, workspace="work", last=1, sample="recent")) == 1
 
 
+# Newest first, and deliberately disagreeing with itself: the two newest chats
+# are among the longest and the next two among the shortest, so length terciles
+# and recency terciles are different sets. Every tercile holds two chats per
+# provider, so a sampler that leaves a tercile's providers grouped shows up as
+# two adjacent picks from the same provider.
+_SKEWED_POOL = (
+    ("chat-01", "claude", 9000),
+    ("chat-02", "opencode", 9500),
+    ("chat-03", "claude", 2000),
+    ("chat-04", "opencode", 2100),
+    ("chat-05", "claude", 10500),
+    ("chat-06", "opencode", 10000),
+    ("chat-07", "claude", 2200),
+    ("chat-08", "opencode", 2300),
+    ("chat-09", "claude", 10700),
+    ("chat-10", "opencode", 10600),
+    ("chat-11", "claude", 2400),
+    ("chat-12", "opencode", 2450),
+)
+
+
+def _skewed_archives(logs_root: Path) -> None:
+    base = 1_700_000_000
+    for index, (chat_id, provider, chars) in enumerate(_SKEWED_POOL):
+        path = _write_archive(
+            logs_root, chat_id, provider,
+            name=f"00000000-0000-0000-0000-0000000000{index:02d}",
+            body="# chat\n\n" + "x" * chars,
+        )
+        mtime = base + (len(_SKEWED_POOL) - index) * 3600
+        os.utime(path, (mtime, mtime))
+
+
+def test_varied_sample_sorts_by_length_and_interleaves_providers(
+    tmp_path: Path,
+) -> None:
+    """The three buckets are length terciles, not thirds of the newest-first list.
+
+    Recent chats skew short, so slicing newest-first handed back three recency
+    slices while the report claimed a length spread — and a bucket that
+    happened to hold one provider's chats was sampled as that provider's
+    territory. Both are asserted here, and over several seeds, because a
+    seeded shuffle is deterministic per seed rather than wrong every time.
+    """
+    config = _config(tmp_path)
+    _skewed_archives(config.logs_root)
+
+    lengths = sorted(c.chars for c in ic.select_archives(
+        config, last=50, sample="recent"
+    ))
+    assert len(lengths) == len(_SKEWED_POOL)
+
+    for seed in (0, 1, 2):
+        picked = ic.select_archives(config, last=12, sample="varied", seed=seed)
+        assert len(picked) == 12
+        # Round-robin draws one from each tercile in turn, so position i and
+        # every position i + 3 came out of tercile i.
+        terciles = [picked[i::3] for i in range(3)]
+        assert [sorted(c.chars for c in t) for t in terciles] == [
+            lengths[:4], lengths[4:8], lengths[8:12],
+        ]
+        for tercile in terciles:
+            providers = [c.provider for c in tercile]
+            assert all(
+                one != other for one, other in zip(providers, providers[1:])
+            ), providers
+
+
 def test_compare_one_dry_run_writes_only_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -223,6 +292,48 @@ def test_compare_one_passes_provider_to_agent(
     assert record["oneshot"]["status"] == "ok"
 
 
+def test_compare_one_records_an_archive_it_cannot_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A candidate that fails before either mode runs is a result, not a raise.
+
+    `run_compare` gathers one `compare_one` per chat and `gather` cancels its
+    siblings on the first raise, so a single reclaimed archive — the archives
+    are reclaimed under the server, and a fifty-chat run takes minutes — used
+    to cost the whole report rather than one row in it.
+    """
+    config = _config(tmp_path)
+    archive = _write_archive(config.logs_root, "chat-1", "claude")
+    cache_dir = tmp_path / "cache"
+    cand = ic.Candidate(
+        archive_path=archive, chat_id="chat-1", provider="claude",
+        workspace="", chars=1200,
+    )
+
+    calls: list[str] = []
+
+    async def fake_text(body, model, **kwargs):
+        calls.append("oneshot")
+        return _INSIGHTS
+
+    monkeypatch.setattr(insights, "_call_text_model", fake_text)
+    # Selected, then reclaimed before the comparison came to read it.
+    archive.unlink()
+
+    record = asyncio.run(ic.compare_one(config, cand, cache_dir=cache_dir))
+
+    assert calls == [], "a chat that cannot be read must not reach a model"
+    assert record["oneshot"]["status"] == "error"
+    assert "FileNotFoundError" in record["oneshot"]["error"]
+    assert record["agent"]["status"] == "error"
+    assert record["agent"]["error"] == record["oneshot"]["error"]
+    assert record["agent"]["kept"] == []
+    # Cached like any other record, so a resume neither retries nor loses it.
+    cached = cache_dir / "chat-1__00000000-0000-0000-0000-000000000001.json"
+    assert json.loads(cached.read_text(encoding="utf-8")) == record
+    assert ic.render_report([record], workspace="", started="2026-09-25")
+
+
 def test_render_report_has_totals_and_per_chat_sections() -> None:
     results = [
         {
@@ -307,6 +418,83 @@ def test_run_compare_reports_each_chat(
     assert len(lines) == 2
     assert lines[0].startswith("[1/2] a oneshot=ok 1.0s agent=ok 2.0s cost_so_far=$0.5000")
     assert lines[1].startswith("[2/2] b oneshot=ok 1.0s agent=ok 2.0s cost_so_far=$1.0000")
+
+
+def test_run_compare_isolates_a_failing_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One candidate that raises must not take the other chats' report with it.
+
+    `compare_one` records the failures it knows about; this is the backstop for
+    one it does not. `asyncio.gather` cancels its siblings on the first raise,
+    so without it a single bad chat ends the run with nothing written.
+    """
+    lines: list[str] = []
+
+    async def compare_one(config, cand, *, cache_dir):
+        if cand.chat_id == "bad":
+            raise RuntimeError("the archive vanished mid-run")
+        return {
+            "chat_id": cand.chat_id, "provider": "claude", "chars": 10,
+            "oneshot": {"status": "ok", "seconds": 1.0},
+            "agent": {"status": "ok", "seconds": 2.0, "cost_usd": 0.5},
+        }
+
+    monkeypatch.setattr(ic, "compare_one", compare_one)
+    cands = [
+        ic.Candidate(archive_path=Path("good.md"), chat_id="good",
+                     provider="claude", workspace="", chars=10),
+        ic.Candidate(archive_path=Path("bad.md"), chat_id="bad",
+                     provider="claude", workspace="", chars=10),
+    ]
+    out = asyncio.run(ic.run_compare(
+        None, cands, cache_dir=tmp_path, progress=lines.append,
+    ))
+
+    assert [r["chat_id"] for r in out] == ["good", "bad"]
+    assert out[0]["oneshot"]["status"] == "ok"
+    # Reported in the run's own order, with the failure as the row it is.
+    assert out[1]["oneshot"]["status"] == "error"
+    assert "RuntimeError" in out[1]["oneshot"]["error"]
+    assert out[1]["agent"]["status"] == "error"
+    # The good chat still reported, and the failed one still counted as done.
+    assert len(lines) == 2
+    assert lines[1].startswith("[2/2] bad oneshot=error")
+
+
+def test_agent_extraction_leaves_no_tmp_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The transcript copy is the only thing an agent run may put in the vault.
+
+    It exists while the agent reads it and is gone afterwards, along with the
+    directory holding it: a dry run that leaves `.ciao-tmp/` behind in a real
+    vault is a change to the vault it promised not to make.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    archive = _write_archive(tmp_path / "logs", "chat-1", "claude")
+    during: list[list[Path]] = []
+
+    async def fake_run_readonly_agent(prompt, **kwargs):
+        # `rglob("*")` skips dot-prefixed names, so the temp directory is
+        # asked for by name.
+        during.append(sorted((vault / ".ciao-tmp").rglob("*")))
+        return AgentRunResult(text=_INSIGHTS, turns=1, tool_calls=1)
+
+    monkeypatch.setattr(insights_agent, "run_readonly_agent", fake_run_readonly_agent)
+
+    result = asyncio.run(insights_agent.run_agent_extraction(
+        archive, vault_root=vault, guide_path=None, model="sonnet",
+    ))
+
+    assert result.text == _INSIGHTS
+    # The agent had one transcript to read, and it was inside the vault.
+    assert len(during[0]) == 1
+    assert during[0][0].suffix == ".md"
+    # And afterwards the vault is exactly as it was found.
+    assert not (vault / ".ciao-tmp").exists()
+    assert sorted(vault.rglob("*")) == []
 
 
 def test_default_report_path_is_in_the_workspace(tmp_path: Path) -> None:
