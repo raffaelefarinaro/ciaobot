@@ -15,17 +15,6 @@ from ciao.config import CiaoConfig
 from ciao.web.routes_api import settings_routines
 
 
-@pytest.fixture(autouse=True)
-def reset_native_sidecar():
-    """Keep the cached probe (and latched model availability) from leaking
-    between route tests."""
-    from ciao import native_sidecar
-
-    native_sidecar.reset_probe_cache()
-    yield
-    native_sidecar.reset_probe_cache()
-
-
 def _make_client(tmp_path, env_extra: dict[str, str] | None = None):
     env = {
         "PWA_AUTH_TOKEN": "t",
@@ -73,26 +62,36 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     }
 
 
-def test_get_insights_effective_is_default_not_apfel_when_no_override(
-    monkeypatch, tmp_path,
+@pytest.mark.parametrize("sentinel", ["apple", "apfel", "Apple"])
+def test_patching_the_retired_on_device_model_reads_as_automatic(
+    monkeypatch, tmp_path, sentinel,
 ):
-    # Apple Intelligence is an explicit option, never the Automatic default.
     monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
-    data = client.get("/api/settings/routines").json()
+    resp = client.patch("/api/settings/routines", json={"insights_model": sentinel})
+    assert resp.status_code == 200
+    data = resp.json()
     assert data["insights_model"] == ""
-    assert data["insights_model_effective"] != "apfel"
     assert data["insights_model_effective"] == config.claude_default_model
 
 
-def test_get_insights_effective_is_apfel_when_explicitly_chosen(
-    monkeypatch, tmp_path,
-):
-    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
+def test_a_stored_on_device_model_is_dropped_on_load(tmp_path):
+    """An install that picked Apple Intelligence before it was removed must not
+    send the sentinel upstream as a literal model id."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "app_settings.json").write_text(
+        json.dumps({
+            "insights_model": "apple",
+            "provider_insights_models": {"claude": "apfel", "opencode": "x/y"},
+        }),
+        encoding="utf-8",
+    )
     client, config = _make_client(tmp_path)
-    resp = client.patch("/api/settings/routines", json={"insights_model": "apfel"})
-    assert resp.status_code == 200
-    assert resp.json()["insights_model_effective"] == "apfel"
+    data = client.get("/api/settings/routines").json()
+    assert data["insights_model"] == ""
+    assert config.insights_model_override == ""
+    assert data["provider_insights_models"] == {"opencode": "x/y"}
 
 
 def test_patch_applies_to_live_config_and_persists(tmp_path):
@@ -260,13 +259,8 @@ def test_an_override_clears_the_per_workspace_maps(monkeypatch, tmp_path):
     assert data["insights_model_by_workspace"] == {}
 
 
-def test_routines_reports_apple_model_availability_without_a_beta_flag(tmp_path):
-    """GET reports whether the machine can run the on-device model; there is
-    no app-side beta opt-in flag any more."""
+def test_routines_no_longer_reports_the_on_device_model(tmp_path):
     client, _config = _make_client(tmp_path)
     data = client.get("/api/settings/routines").json()
-    assert "apple_intelligence_beta" not in data
-    assert "apple_intelligence_enabled" not in data
-    # Availability is a machine report, present regardless of the answer.
-    assert "apple_model_available" in data
-    assert "apple_model_unavailable_reason" in data
+    assert "apple_model_available" not in data
+    assert "apple_model_unavailable_reason" not in data

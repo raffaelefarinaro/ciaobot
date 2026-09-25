@@ -4931,8 +4931,6 @@ async def list_models(request: Request) -> JSONResponse:
 
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
-    from ciao import native_sidecar
-
     s = app_settings.settings
     from ciao.critique import critique_models_effective
 
@@ -4981,12 +4979,6 @@ def _routines_payload(config, app_settings) -> dict:
         "insights_model_by_workspace": insights_by_workspace,
 
         "critique_models_effective": critique_effective,
-        # The "apple" title/insights options are hardware-gated: they need
-        # macOS 26+, the desktop app, and Apple Intelligence switched on in
-        # System Settings. No app-side opt-in: the routine rows show the
-        # missing prerequisite instead of hiding the option.
-        "apple_model_available": native_sidecar.apple_model_available(),
-        "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
         # Grouped options for the routine model selectors.
         "model_options": {
             "anthropic": list(CLAUDE_MODELS),
@@ -5035,10 +5027,7 @@ async def settings_routines(request: Request) -> JSONResponse:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         app_settings.apply_to_config(config)
-    # _routines_payload probes the native sidecar, which spawns a subprocess on
-    # first call. Off the event loop: the availability checks it replaced were
-    # in-process find_spec/which calls, so this used to be free.
-    return JSONResponse(await asyncio.to_thread(_routines_payload, config, app_settings))
+    return JSONResponse(_routines_payload(config, app_settings))
 
 
 # ── Status ───────────────────────────────────────────────────────────────

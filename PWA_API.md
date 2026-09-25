@@ -615,8 +615,9 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 
 # Update any subset. Persisted in .runtime/app_settings.json, applied to the
 # live config immediately (no restart). Empty string clears an override back
-# to the env default. "apple" routes a routine to the on-device Foundation
-# Model (insights_model). Per-provider defaults use the nested maps:
+# to the env default. A stored "apple"/"apfel" insights_model (from the retired
+# on-device option) reads as Automatic rather than reaching a provider as a
+# literal model id. Per-provider defaults use the nested maps:
 # provider_default_models, provider_default_thinking, provider_insights_models.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \

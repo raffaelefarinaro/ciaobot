@@ -27,9 +27,6 @@
       "../runtime": "ciao-runtime"
     },
     "createUpdaterArtifacts": true,
-    "externalBin": [
-      "binaries/ciaobot-native"
-    ],
     "icon": [
       "../../ciao/stock/deploy/face_template.png",
       "../../ciao/stock/deploy/Ciaobot.icns"

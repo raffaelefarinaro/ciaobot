@@ -43,16 +43,9 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from ciao import proposal_kinds
 from ciao.workspace_guide import GUIDE_NAME, guide_path
 
 logger = logging.getLogger(__name__)
-
-# A review queue is "deep" once it holds at least this many pending items. The
-# tile is a backlog signal, not a per-item reminder, so a single straggler does
-# not hold a permanent tile.
-REVIEW_QUEUE_DEPTH = 5
-
 
 @dataclass(frozen=True)
 class OperatorAction:
@@ -706,97 +699,6 @@ def _detect_missed_schedules(context: DetectionContext) -> list[OperatorAction]:
     ]
 
 
-# -- review queue depth ------------------------------------------------------
-
-
-def _review_queue_depths(context: DetectionContext) -> dict[str, int]:
-    """Pending memory-proposal bullets plus skill-proposal files, per workspace.
-
-    Both queues are counted through the one shared bullet pattern and a
-    directory listing — never through the ``/api/proposals`` route, which walks
-    every person note to build its rehome signal. Cheap by construction: a few
-    known queue files and one small folder per workspace.
-    """
-    config = context.config
-    lister = getattr(config, "workspace_names", None)
-    resolver = getattr(config, "workspace_vault_root", None)
-    if not callable(lister) or not callable(resolver):
-        return {}
-    depths: dict[str, int] = {}
-    for name in lister():
-        try:
-            root = Path(resolver(name))
-        except Exception:  # noqa: BLE001 — a missing workspace must not fail
-            continue
-        depth = 0
-        queue = root / "Workspace" / "Memory-Proposals.md"
-        try:
-            if queue.is_file():
-                for line in queue.read_text(encoding="utf-8").splitlines():
-                    if proposal_kinds.BULLET_RE.match(line):
-                        depth += 1
-        except (OSError, UnicodeDecodeError):
-            pass
-        skill_dir = root / "Workspace" / "Skill-Proposals"
-        try:
-            if skill_dir.is_dir():
-                # Counted by iterating: Path.glob returns a generator, so len()
-                # raises TypeError, which detect_actions swallows as a broken
-                # detector. That made the whole review-queue tile disappear
-                # exactly when a Skill-Proposals folder existed, which is the
-                # only case it matters in.
-                depth += sum(1 for _ in skill_dir.glob("*.md"))
-        except OSError:
-            pass
-        depths[name] = depth
-    return depths
-
-
-def _detect_review_queue(context: DetectionContext) -> list[OperatorAction]:
-    """A deep review queue is a pile of operator decisions, surfaced per workspace.
-
-    Under the depth threshold it is a normal state of a working install, not an
-    action — which is what keeps the tile at zero for a healthy vault. One tile
-    per workspace rather than one summed tile: the ``/proposals`` page scopes
-    its rows to the active workspace, so a cross-workspace total claimed work
-    the opened page could not show, and let one busy workspace's pile summon a
-    tile into every other workspace's strip.
-    """
-    depths = _review_queue_depths(context)
-    actions: list[OperatorAction] = []
-    for name in sorted(depths):
-        depth = depths[name]
-        if depth < REVIEW_QUEUE_DEPTH:
-            continue
-        actions.append(
-            OperatorAction(
-                id=f"review-queue-depth:{name}",
-                kind="review-queue-depth",
-                severity=5,
-                title=f"{depth} proposals are waiting for a review",
-                detail=(
-                    "Memory-proposal bullets and skill-proposal files have piled up "
-                    "past the threshold. Review them to keep the queues current."
-                ),
-                glyph="◌",
-                workspace=name,
-                # The queue is the point of this tile, and it already has per-row
-                # accept/dismiss, a destination picker, a leak confirm and batch
-                # operations. Offering only chat asked the operator to work through
-                # 109 items in prose.
-                view_label="Open queue",
-                view_route="/proposals",
-                chat_label="Review in chat",
-                chat_prompt=(
-                    f"There are {depth} pending memory and skill proposals in the "
-                    f"{name} workspace. Review its Workspace/Memory-Proposals.md "
-                    "and Workspace/Skill-Proposals/, then promote or dismiss each one."
-                ),
-            )
-        )
-    return actions
-
-
 # -- post-migration drift (§11.2) --------------------------------------------
 #
 # Four read-only detectors over the per-root layout, each mirroring a drift
@@ -1141,7 +1043,6 @@ _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
     _detect_vault_vocabulary,
     _detect_unmigrated_links,
     _detect_missed_schedules,
-    _detect_review_queue,
     _detect_workspace_root_missing,
     _detect_workspace_assets_stale,
     _detect_skill_triage_pending,

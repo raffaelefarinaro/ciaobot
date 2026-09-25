@@ -44,11 +44,10 @@ Verification:
   `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
   Lint is still worth running — it just will not fail the build for you.
 - Run `./scripts/check-desktop.sh` after changes under `desktop/` — nothing else
-  compiles the Rust shell, the Swift native sidecar, or assembles `Ciaobot.app`,
-  so those break in CI rather than locally. Use `--fast` to skip the bundle step
-  when you have not touched `desktop/native/` or `tauri.conf.json`. It needs
-  Rust (`brew install rustup && rustup default 1.90.0`) and `swiftc`
-  (`xcode-select --install`).
+  compiles the Rust shell or assembles `Ciaobot.app`, so those break in CI
+  rather than locally. Use `--fast` to skip the bundle step when you have not
+  touched `tauri.conf.json`. It needs Rust
+  (`brew install rustup && rustup default 1.90.0`).
 - For UI changes, verify keyboard focus, browser zoom, and mobile touch targets.
 - Workspace shortcuts map unmodified `1`–`9` to the visible sidebar order and
   must remain inert while a text field is focused.

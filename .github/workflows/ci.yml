@@ -14,7 +14,7 @@ permissions:
 # Two tiers. `linux-server` is the gate every PR waits on: the same blocking
 # steps a contributor runs locally (mypy, pytest, frontend tests, build), with
 # pytest parallelized. `test` is the full macOS job — coverage, browser tests,
-# the Rust shell, the Swift sidecar and a cold-started app bundle — and takes
+# the Rust shell and a cold-started app bundle — and takes
 # ~18 minutes, so it runs on pushes to develop, on PRs to main (release cuts),
 # and on any PR that touches the desktop shell, which nothing else compiles.
 # A macOS-only regression in a develop PR therefore surfaces on the post-merge
@@ -192,8 +192,7 @@ jobs:
         targets: aarch64-apple-darwin
         components: rustfmt,clippy
 
-    # The Swift sidecar needs a working Xcode toolchain; pick the newest
-    # available so the aarch64 build targets a current SDK.
+    # Pick the newest Xcode so the aarch64 build targets a current SDK.
     - name: Select newest Xcode
       run: |
         newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
@@ -204,7 +203,6 @@ jobs:
         echo "Selecting $newest"
         sudo xcode-select -s "$newest"
         xcodebuild -version
-        swiftc --version
 
     - name: Set up uv
       uses: astral-sh/setup-uv@v6
@@ -233,16 +231,6 @@ jobs:
     - name: Build desktop UI
       working-directory: desktop
       run: npm run build
-
-    - name: Build native sidecar
-      working-directory: desktop
-      # Must run before any cargo invocation: tauri.conf.json declares the
-      # sidecar as an externalBin, so the build script fails with "resource
-      # path ... doesn't exist" if the binary is absent. `npm run tauri build`
-      # below builds it via the pretauri hook, but clippy/fmt/test call cargo
-      # directly and would never trigger it. The binaries are gitignored
-      # because they are build output.
-      run: npm run build:native
 
     - name: Check desktop Rust formatting
       working-directory: desktop/src-tauri

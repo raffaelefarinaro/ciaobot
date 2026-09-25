@@ -69,6 +69,22 @@ _NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
 }
 _BOOLEAN_FIELDS = {"insights_enabled", "trajectories_enabled"}
 
+# Apple's on-device model used to be an insights option. It is gone, so a
+# stored sentinel reads as Automatic instead of reaching a provider as a
+# literal model id ("there's an issue with the selected model (apple)").
+_RETIRED_MODEL_IDS = frozenset({"apple", "apfel"})
+
+
+def _drop_retired_models(settings: "AppSettings") -> None:
+    if settings.insights_model.lower() in _RETIRED_MODEL_IDS:
+        settings.insights_model = ""
+    if settings.provider_insights_models:
+        settings.provider_insights_models = {
+            provider: model
+            for provider, model in settings.provider_insights_models.items()
+            if model.strip().lower() not in _RETIRED_MODEL_IDS
+        } or None
+
 
 def _default_model_settings(config: object, descriptor: object) -> Any:
     """This provider's default-model settings dataclass on ``config``, if present.
@@ -164,6 +180,7 @@ class AppSettingsStore:
             cleaned = cleaner(raw.get(key))
             if cleaned:
                 setattr(settings, key, cleaned)
+        _drop_retired_models(settings)
         return settings
 
     def _save(self) -> None:
@@ -216,6 +233,7 @@ class AppSettingsStore:
                 raise ValueError(f"{key} must be a string")
             value = value.strip()
             setattr(self.settings, key, value)
+        _drop_retired_models(self.settings)
         self._save()
         return self.settings
 
