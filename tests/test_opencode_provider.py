@@ -2250,6 +2250,74 @@ def test_credential_count_parses_a_populated_store(monkeypatch):
     assert mod._credential_count("/bin/opencode", timeout=1.0) == 2
 
 
+def test_credential_count_reads_the_v2_json_listing(monkeypatch):
+    """2.0.16 dropped the `N credentials` footer for a plain table; the JSON
+    listing is what gets counted. Shape captured from `auth list --format json`
+    with identifiers removed."""
+    import json as _json
+    from types import SimpleNamespace
+
+    import ciao.providers.opencode as mod
+
+    listing = [
+        {"id": "openai", "name": "OpenAI", "connections": [
+            {"type": "credential", "label": "OAuth", "method": "oauth"},
+            {"type": "env", "name": "OPENAI_API_KEY"},
+        ]},
+        {"id": "openrouter", "name": "OpenRouter", "connections": [
+            {"type": "credential", "label": "API key", "method": "key"},
+        ]},
+    ]
+    calls = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd)
+        return SimpleNamespace(stdout=_json.dumps(listing), returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    assert mod._credential_count("/bin/opencode", timeout=1.0) == 2
+    assert calls == [["/bin/opencode", "auth", "list", "--format", "json"]]
+
+    monkeypatch.setattr(
+        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="[]", returncode=0)
+    )
+    assert mod._credential_count("/bin/opencode", timeout=1.0) == 0
+
+
+def test_status_reports_skills_plugins_and_mcps_from_the_server(monkeypatch):
+    """Settings lists what the opencode CLI brings; the V2 server's list routes
+    are the source, minus built-in and failed plugins."""
+    import json as _json
+    from types import SimpleNamespace
+
+    import ciao.providers.opencode as mod
+
+    routes = {
+        "/api/skill": [{"id": "opencode", "path": "/builtin/opencode.md"}, {"id": "pdf"}],
+        "/api/plugin": [
+            {"id": "opencode.config.worktree", "source": {"type": "builtin"}, "state": {"status": "active"}},
+            {"id": "review", "source": {"type": "local"}, "state": {"status": "active"}},
+            {"id": "dupe", "source": {"type": "local"}, "state": {"status": "failed"}},
+        ],
+        "/api/mcp": [{"name": "github"}],
+    }
+
+    def fake_run(cmd, *a, **k):
+        if cmd[1:3] == ["api", "GET"]:
+            return SimpleNamespace(stdout=_json.dumps({"data": routes[cmd[3]]}), returncode=0)
+        if cmd[1] == "--version":
+            return SimpleNamespace(stdout="opencode v2.0.16\n", returncode=0)
+        return SimpleNamespace(stdout="[]", returncode=0)
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    status = mod.opencode_login_status()
+
+    assert status["skills"] == ["opencode", "pdf", "review"]
+    assert status["mcps"] == ["github"]
+
+
 def test_credential_count_is_unknown_when_the_cli_fails(monkeypatch):
     import ciao.providers.opencode as mod
 
@@ -2404,6 +2472,55 @@ async def test_model_catalog_is_cached_between_calls(tmp_path, monkeypatch):
     forced = await mod.OpencodeProvider.model_catalog(tmp_path, force=True)
     assert forced == first
     assert calls["n"] == 2, "force must bypass the cache"
+    mod._MODEL_CACHE.clear()
+
+
+@pytest.mark.asyncio
+async def test_model_catalog_waits_for_a_fresh_server_to_load_its_models(tmp_path, monkeypatch):
+    """opencode 2.0.16 answers /api/info before its providers load, so the
+    first /api/model is an empty list. Caching that emptied the model picker."""
+    import ciao.providers.opencode as mod
+
+    mod._MODEL_CACHE.clear()
+    monkeypatch.setattr(mod, "_CATALOG_WARMUP_POLL", 0.0)
+    calls = {"n": 0}
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class FakeClient:
+        async def get(self, _path):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return Response({"data": []})
+            return Response({"data": [{
+                "providerID": "openrouter", "modelID": "m", "name": "M",
+                "enabled": True, "variants": [],
+            }]})
+
+    class FakeServer:
+        def __init__(self, _root):
+            pass
+
+        async def __aenter__(self):
+            return FakeClient()
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    monkeypatch.setattr(mod, "_EphemeralServer", FakeServer)
+
+    catalog = await mod.OpencodeProvider.model_catalog(tmp_path)
+
+    assert [item["model"] for item in catalog] == ["openrouter/m"]
+    assert calls["n"] == 3
     mod._MODEL_CACHE.clear()
 
 
@@ -2682,7 +2799,44 @@ async def test_resolve_model_resolves_unqualified_ids(
 
 
 @pytest.mark.asyncio
-async def test_resolve_model_rejects_an_unknown_bare_id(tmp_path):
+async def test_resolve_model_waits_for_a_fresh_server_to_load_its_models(
+    tmp_path, monkeypatch
+):
+    """A new chat server lists no models until its providers load; a valid
+    bare id must not be rejected in that window."""
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "_CATALOG_WARMUP_POLL", 0.0)
+    calls = {"n": 0}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            if calls["n"] < 3:
+                return {"data": []}
+            return {"data": [
+                {"providerID": "openrouter", "modelID": "glm", "enabled": True}
+            ]}
+
+    class _Client:
+        @staticmethod
+        async def get(_path: str):
+            calls["n"] += 1
+            return _Response()
+
+    assert await _provider(tmp_path)._resolve_model(_Client(), "glm") == (
+        "openrouter", "glm",
+    )
+    assert calls["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_resolve_model_rejects_an_unknown_bare_id(tmp_path, monkeypatch):
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "_CATALOG_WARMUP_TIMEOUT", 0.0)
     class _Response:
         def raise_for_status(self):
             return None
