@@ -27,9 +27,16 @@ chatMarkdownRenderer.table = function table(token: Tokens.Table): string {
 // markdown is injected with v-html, so the affordance has to come from the
 // renderer and be driven by delegation (see lib/codeCopy.ts).
 chatMarkdownRenderer.code = function code(token: Tokens.Code): string {
+  // A header strip names the language (the fence's first word, when given)
+  // and holds the copy button, so the block reads as one card.
+  const lang = (token.lang || '').trim().split(/\s+/)[0] || ''
+  const label = lang.replace(/[^\w+#.-]/g, '').slice(0, 24)
   return [
     `<div class="${CODE_BLOCK_CLASS}">`,
+    '<div class="code-block-head">',
+    `<span class="code-block-lang">${label}</span>`,
     codeCopyButtonHtml(),
+    '</div>',
     Renderer.prototype.code.call(this, token),
     '</div>',
   ].join('')
@@ -79,9 +86,30 @@ function chatFileHref(href: string): string {
 
 // Emit the same `a.file-link` shape the path linkifier and the note viewer
 // already produce, so the delegated click handler opens it in the panel.
+// A bare URL is its own label, and a long one (a prefilled issue link, a
+// search URL) used to fill the bubble with percent-encoding. Show the host
+// and the start of the path; the full URL stays in href and the tooltip.
+const LONG_BARE_LINK = 64
+
+function shortLinkLabel(href: string): string {
+  try {
+    const url = new URL(href)
+    const path = decodeURIComponent(url.pathname).replace(/\/$/, '')
+    const tail = path.length > 28 ? `${path.slice(0, 28)}…` : path
+    return `${url.host}${tail}${url.search || url.hash ? (tail.endsWith('…') ? '' : '…') : ''}`
+  } catch {
+    return `${href.slice(0, LONG_BARE_LINK - 1)}…`
+  }
+}
+
 chatMarkdownRenderer.link = function link(this: Renderer, token: Tokens.Link): string {
   const target = chatFileHref(token.href)
-  if (!target) return Renderer.prototype.link.call(this, token)
+  if (!target) {
+    if (token.text === token.href && token.href.length > LONG_BARE_LINK && /^https?:\/\//i.test(token.href)) {
+      return `<a href="${escapeAttr(token.href)}" title="${escapeAttr(token.href)}">${escapeAttr(shortLinkLabel(token.href))}</a>`
+    }
+    return Renderer.prototype.link.call(this, token)
+  }
   const label = this.parser.parseInline(token.tokens)
   return `<a class="file-link" href="#" data-file-path="${escapeAttr(target)}">${label}</a>`
 }

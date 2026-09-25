@@ -5988,90 +5988,113 @@ details[open] > .activity-summary::before {
   min-width: 0;
   overflow-wrap: break-word;
 }
+/* Code: a raised card, not text on the page background. Inline code is a
+   quiet chip; fenced blocks (lib/safeMarkdown.ts emits the wrapper, a header
+   strip with the language and the copy button, then the pre) scroll inside
+   the card instead of wrapping, so logs and JSON keep their shape. */
 .message-content :deep(pre) {
-  background: var(--bg);
-  padding: 8px 12px;
-  border-radius: var(--radius-sm, 6px);
+  margin: 8px 0;
+  padding: 12px 14px;
   overflow-x: auto;
-  margin: 6px 0;
-  white-space: pre-wrap;
   max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg2) 70%, var(--bg3));
+  color: var(--fg);
   font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  white-space: pre;
+  tab-size: 2;
 }
 
 .message-content :deep(code) {
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  color: var(--fg);
   font-family: var(--font-mono);
-  font-size: 0.9em;
-  padding: 1px 4px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  font-size: 0.88em;
 }
 
 .message-content :deep(pre code) {
   padding: 0;
+  border: 0;
   background: transparent;
-  font-size: var(--text-sm);
+  font-size: inherit;
 }
 
-/* Fenced code blocks (lib/codeCopy.ts emits the wrapper + button). The rule is
-   anchored on .chat-panel rather than .message-content so it also covers the
-   code blocks inside activity traces and the streaming bubble. */
-/* The button sits in its own row above the block rather than floating over it:
-   on a phone-width block an overlay would cover the start of the code. */
+/* Anchored on .chat-panel so it also covers traces and the streaming text. */
 .chat-panel :deep(.code-block) {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
   min-width: 0;
-  margin: 6px 0;
+  margin: 10px 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg2) 70%, var(--bg3));
+}
+
+.chat-panel :deep(.code-block-head) {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 34px;
+  padding: 0 6px 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg3) 55%, transparent);
+}
+
+.chat-panel :deep(.code-block-lang) {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.02em;
 }
 
 .chat-panel :deep(.code-block pre) {
   width: 100%;
   box-sizing: border-box;
   margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .chat-panel :deep(.code-copy-btn) {
   position: relative;
-  margin-bottom: var(--space-1);
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg2);
-  color: var(--fg2);
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--fg);
   font-family: var(--font);
   font-size: var(--text-xs);
+  font-weight: 600;
   line-height: 1.2;
   cursor: pointer;
   user-select: none;
-  /* Dimmed but always present: this PWA runs on phones, where :hover never
-     fires and a hover-only control would be unreachable. */
-  opacity: 0.6;
-  transition: opacity 120ms var(--ease), background 120ms var(--ease), color 120ms var(--ease);
+  transition: background 120ms var(--ease), color 120ms var(--ease), border-color 120ms var(--ease);
 }
 
-/* Touch: grow the chip and expand its hit area to a full touch target without
-   moving anything around it. The expander is dropped for fine pointers, where
-   it would only steal clicks from the text next to the chip. */
+/* Touch: a full touch target without moving the header. */
 @media (hover: none) {
-  .chat-panel :deep(.code-copy-btn) {
-    padding: var(--space-2) var(--space-3);
-  }
-
   .chat-panel :deep(.code-copy-btn::after) {
     content: '';
     position: absolute;
-    inset: calc(-1 * var(--space-2));
-    min-width: var(--touch);
+    inset: -9px -6px;
   }
 }
 
 .chat-panel :deep(.code-copy-btn:hover),
 .chat-panel :deep(.code-copy-btn:focus-visible) {
-  opacity: 1;
-  background: var(--bg3);
-  color: var(--fg);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-elev));
 }
 
 .chat-panel :deep(.code-copy-btn:active) {
@@ -6079,13 +6102,11 @@ details[open] > .activity-summary::before {
 }
 
 .chat-panel :deep(.code-copy-btn[data-copy-state="copied"]) {
-  opacity: 1;
   color: var(--success);
   border-color: color-mix(in srgb, var(--success) 45%, var(--border));
 }
 
 .chat-panel :deep(.code-copy-btn[data-copy-state="failed"]) {
-  opacity: 1;
   color: var(--error);
   border-color: color-mix(in srgb, var(--error) 45%, var(--border));
 }
@@ -6173,15 +6194,18 @@ details[open] > .activity-summary::before {
 .message-content :deep(user-comment > br:last-child) {
   display: none;
 }
+/* A quote: a calm accent rule and a faint surface, upright text at full
+   legibility. Italic grey on the page colour was close to invisible. */
 .message-content :deep(blockquote) {
-  margin: 8px 0;
-  padding: 8px 12px;
-  border-left: 3px solid var(--accent);
-  background: var(--bg);
-  border-radius: 6px;
-  color: var(--fg2);
-  font-style: italic;
+  margin: 10px 0;
+  padding: 8px 14px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  border-radius: 0 8px 8px 0;
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg2));
+  color: var(--fg);
 }
+.message-content :deep(blockquote > :first-child) { margin-top: 0; }
+.message-content :deep(blockquote > :last-child) { margin-bottom: 0; }
 
 /* File-path links produced by linkifyHtml/linkifyText. Subtle dotted
    underline so they're discoverable but don't look like external URLs. */
