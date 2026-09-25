@@ -186,6 +186,76 @@ def test_varied_sample_sorts_by_length_and_interleaves_providers(
             ), providers
 
 
+# Deliberately unequal: one provider leads in the short tercile, the other in
+# the long one, and a tie in the middle. Four candidates per tercile is what
+# `size = len(pool) // 3` produces here.
+_UNEVEN_POOL = (
+    ("chat-01", "claude", 900),
+    ("chat-02", "claude", 1100),
+    ("chat-03", "claude", 1300),
+    ("chat-04", "opencode", 1500),
+    ("chat-05", "claude", 1700),
+    ("chat-06", "opencode", 1900),
+    ("chat-07", "claude", 2100),
+    ("chat-08", "opencode", 2300),
+    ("chat-09", "claude", 2500),
+    ("chat-10", "claude", 2700),
+    ("chat-11", "opencode", 2900),
+    ("chat-12", "opencode", 3100),
+)
+
+
+def _uneven_archives(logs_root: Path) -> None:
+    base = 1_700_000_000
+    for index, (chat_id, provider, chars) in enumerate(_UNEVEN_POOL):
+        path = _write_archive(
+            logs_root, chat_id, provider,
+            name=f"00000000-0000-0000-0000-0000000000{index:02d}",
+            body="# chat\n\n" + "x" * chars,
+        )
+        mtime = base + (len(_UNEVEN_POOL) - index) * 3600
+        os.utime(path, (mtime, mtime))
+
+
+def test_varied_sample_keeps_interleave_order_with_unequal_providers(
+    tmp_path: Path,
+) -> None:
+    """A bucket is read in the order `_provider_interleaved` built it.
+
+    The balanced pool above hides the bug: with two chats per provider per
+    tercile, the interleaved order reads the same forwards and backwards. With
+    three Claude chats and one opencode one the interleaved order is
+    claude, opencode, claude, claude — consuming the bucket from the back
+    hands back claude, claude, opencode, claude instead, which groups a
+    provider exactly where the sampler claims not to.
+    """
+    config = _config(tmp_path)
+    _uneven_archives(config.logs_root)
+
+    lengths = sorted(
+        c.chars
+        for c in ic.select_archives(config, last=50, sample="recent")
+    )
+    assert len(lengths) == len(_UNEVEN_POOL)
+
+    for seed in (0, 1, 2, 3, 4):
+        picked = ic.select_archives(config, last=12, sample="varied", seed=seed)
+        assert len(picked) == 12
+        # Round-robin one per tercile in turn, so position i and every
+        # position i + 3 came out of tercile i — lengths still the terciles.
+        terciles = [picked[i::3] for i in range(3)]
+        assert [sorted(c.chars for c in t) for t in terciles] == [
+            lengths[:4], lengths[4:8], lengths[8:12],
+        ]
+        for tercile in terciles:
+            providers = [c.provider for c in tercile]
+            # `_provider_interleaved` opens with one candidate per provider
+            # before it comes back for seconds, so the first two picks of a
+            # bucket cannot be the same provider. Reading the bucket from the
+            # back breaks exactly that.
+            assert providers[0] != providers[1], (providers, seed)
+
+
 def test_compare_one_dry_run_writes_only_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -462,14 +532,24 @@ def test_run_compare_isolates_a_failing_candidate(
     assert lines[1].startswith("[2/2] bad oneshot=error")
 
 
+def _compare_dirs(vault: Path) -> list[Path]:
+    """The per-call directories an agent extraction puts in the vault.
+
+    Spelled out rather than read off the module, so the tests below assert
+    what reaches the vault and not what the module happens to call it.
+    """
+    return sorted(vault.glob(".ciao-compare-*"))
+
+
 def test_agent_extraction_leaves_no_tmp_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The transcript copy is the only thing an agent run may put in the vault.
 
     It exists while the agent reads it and is gone afterwards, along with the
-    directory holding it: a dry run that leaves `.ciao-tmp/` behind in a real
-    vault is a change to the vault it promised not to make.
+    private directory holding it: a dry run that leaves a `.ciao-compare-*`
+    directory behind in a real vault is a change to the vault it promised not
+    to make.
     """
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -477,9 +557,7 @@ def test_agent_extraction_leaves_no_tmp_dir(
     during: list[list[Path]] = []
 
     async def fake_run_readonly_agent(prompt, **kwargs):
-        # `rglob("*")` skips dot-prefixed names, so the temp directory is
-        # asked for by name.
-        during.append(sorted((vault / ".ciao-tmp").rglob("*")))
+        during.append(sorted(_compare_dirs(vault)[0].rglob("*")))
         return AgentRunResult(text=_INSIGHTS, turns=1, tool_calls=1)
 
     monkeypatch.setattr(insights_agent, "run_readonly_agent", fake_run_readonly_agent)
@@ -493,8 +571,56 @@ def test_agent_extraction_leaves_no_tmp_dir(
     assert len(during[0]) == 1
     assert during[0][0].suffix == ".md"
     # And afterwards the vault is exactly as it was found.
-    assert not (vault / ".ciao-tmp").exists()
+    assert _compare_dirs(vault) == []
     assert sorted(vault.rglob("*")) == []
+
+
+def _transcript_path_from_prompt(prompt: str) -> Path:
+    for line in prompt.splitlines():
+        if "is at: " in line:
+            return Path(line.split("is at: ", 1)[1].strip())
+    raise AssertionError(f"prompt names no transcript: {prompt!r}")
+
+
+def test_agent_extraction_preserves_existing_ciao_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A temp directory the comparison did not create is not its to delete.
+
+    The shared `.ciao-tmp` was created on demand and then `rmdir`'d
+    unconditionally, so a run against a vault that already had one removed
+    state it did not own. The copy now lives in a per-call `.ciao-compare-*`
+    directory, and only that directory is removed.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    pre_existing = vault / ".ciao-tmp"
+    pre_existing.mkdir()
+    archive = _write_archive(tmp_path / "logs", "chat-1", "claude")
+    seen: list[Path] = []
+
+    async def fake_run_readonly_agent(prompt, **kwargs):
+        transcript = _transcript_path_from_prompt(prompt)
+        seen.append(transcript)
+        # Inside the vault, so the read-only gate's single root covers it.
+        assert transcript.is_file()
+        return AgentRunResult(text=_INSIGHTS, turns=1, tool_calls=1)
+
+    monkeypatch.setattr(insights_agent, "run_readonly_agent", fake_run_readonly_agent)
+
+    result = asyncio.run(insights_agent.run_agent_extraction(
+        archive, vault_root=vault, guide_path=None, model="sonnet",
+    ))
+
+    assert result.text == _INSIGHTS
+    # The copy and the private directory holding it are gone.
+    assert seen and not seen[0].exists()
+    assert not seen[0].parent.exists()
+    # The pre-existing directory is untouched: still there, still empty, and
+    # the vault holds nothing else.
+    assert pre_existing.is_dir()
+    assert list(pre_existing.iterdir()) == []
+    assert sorted(vault.rglob("*")) == [pre_existing]
 
 
 def test_default_report_path_is_in_the_workspace(tmp_path: Path) -> None:

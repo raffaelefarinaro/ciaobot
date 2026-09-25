@@ -21,6 +21,7 @@ import logging
 import random
 import statistics
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -176,8 +177,13 @@ def _varied_sample(
     by_length = sorted(pool, key=lambda c: c.chars)
     size = max(1, len(by_length) // 3)
     rng = random.Random(seed)
+    # Deques, consumed from the front: `_provider_interleaved` already decided
+    # the order, and taking from the back would replay it upside down — in a
+    # bucket holding three Claude chats and one opencode one the interleaved
+    # order is claude, opencode, claude, claude, and reading it backwards
+    # hands back claude, claude, opencode, claude.
     buckets = [
-        _provider_interleaved(chunk, rng)
+        deque(_provider_interleaved(chunk, rng))
         for chunk in (
             by_length[:size],
             by_length[size : size * 2],
@@ -189,7 +195,7 @@ def _varied_sample(
     while len(picked) < last and any(buckets):
         bucket = buckets[index % len(buckets)]
         if bucket:
-            picked.append(bucket.pop())
+            picked.append(bucket.popleft())
         index += 1
     return picked
 

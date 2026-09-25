@@ -15,16 +15,20 @@ applied.
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 from pathlib import Path
 
 from ciao.insights import _TEXT_MODE_SYSTEM_PROMPT
 from ciao.providers.oneshot import AgentRunResult, run_readonly_agent
 
-# Where the transcript copy lives. Inside the vault on purpose: the read-only
-# gate allows one root, and a second allowed root is a second thing to keep
-# correct.
-_TMP_DIRNAME = ".ciao-tmp"
+# Prefix for the per-call directory holding the transcript copy. Inside the
+# vault on purpose: the read-only gate allows one root, and a second allowed
+# root is a second thing to keep correct. Unique per call so concurrent
+# extractions sharing a vault cannot read or delete each other's copy, and
+# removed as a whole directory so the vault is left exactly as it was found —
+# including when a `.ciao-tmp` from elsewhere in the app is already there.
+_TMP_PREFIX = ".ciao-compare-"
 
 
 _AGENT_ADDENDUM = """
@@ -71,10 +75,10 @@ async def run_agent_extraction(
 ) -> AgentRunResult:
     """Extract insights from an archived chat with a read-only agent.
 
-    The archive's rendered body is copied into the vault under
-    ``.ciao-tmp/`` and named in the prompt rather than pasted, so the agent
-    can read it with the same tool it uses for everything else. The copy is
-    removed afterwards whatever happens.
+    The archive's rendered body is copied into a private directory inside the
+    vault and named in the prompt rather than pasted, so the agent can read it
+    with the same tool it uses for everything else. The copy and its directory
+    are removed afterwards whatever happens.
     """
     # Imported here, not at module scope: `insights_compare` imports back into
     # this module's caller, and `insights._call_text_model` is a monkeypatch
@@ -83,8 +87,10 @@ async def run_agent_extraction(
     from ciao.insights_compare import strip_insights
 
     body = strip_insights(archive_path.read_text(encoding="utf-8"))
-    tmp_dir = vault_root / _TMP_DIRNAME
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    # `mkdtemp` so a second extraction running against the same vault gets its
+    # own directory: the shared-directory version had one call's cleanup remove
+    # another call's transcript mid-read.
+    tmp_dir = Path(tempfile.mkdtemp(prefix=_TMP_PREFIX, dir=vault_root))
     handle = tempfile.NamedTemporaryFile(
         mode="w", suffix=".md", delete=False, dir=tmp_dir,
         prefix="insights-transcript-", encoding="utf-8",
@@ -114,11 +120,7 @@ async def run_agent_extraction(
             provider=provider,
         )
     finally:
-        transcript_path.unlink(missing_ok=True)
-        # The directory was made for this run, and a dry run leaves the vault
-        # as it found it. Another run's copy is still in there, or a previous
-        # cleanup already took it: either way there is nothing to do about it.
-        try:
-            tmp_dir.rmdir()
-        except OSError:
-            pass
+        # The whole private directory, transcript included. A dry run leaves
+        # the vault as it found it, and because the directory is this call's
+        # alone there is nothing of anyone else's in it to preserve.
+        shutil.rmtree(tmp_dir, ignore_errors=True)

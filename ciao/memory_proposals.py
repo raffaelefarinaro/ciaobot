@@ -3080,7 +3080,14 @@ def proposals_from_archive(
                     archive_path.name,
                 )
         proposals = result.kept
-        if not proposals:
+        # Before the routing was extracted this return sat inside the
+        # `if proposals:` guard, so it only ever ran for an archive whose
+        # bullets all parsed and all came back already applied. An archive
+        # that parsed nothing, or whose bullets routed nowhere, never reached
+        # it: it fell through to `append_proposals([])`, which reports zero
+        # proposals and leaves `promoted` alone. Keep that distinction — a
+        # caller reading `stats` cannot tell the two apart otherwise.
+        if not proposals and result.suppressed:
             if stats is not None:
                 stats["proposed"] = 0
                 stats["promoted"] = stats.get("promoted", 0)
