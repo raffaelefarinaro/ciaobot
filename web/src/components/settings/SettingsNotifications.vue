@@ -1,66 +1,43 @@
 <template>
   <div v-if="!hidden" class="card">
-    <div class="settings-card-header settings-card-header--split">
-      <div>
-        <p class="section-title">Notifications</p>
-        <p class="hint">
-          Get a notification when a chat replies and the app is not focused.
-        </p>
-      </div>
-      <div v-if="!inDesktopApp && !needsIosInstall && !permissionDenied && pushSupportedFlag" class="settings-card-header-actions">
-        <button
-          :class="(!pushEnabledFlag && !isMacDesktop()) ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
-          @click="togglePush"
-          :disabled="pushPending"
-        >
-          {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
-        </button>
+    <div class="settings-card-header">
+      <p class="section-title">Notifications</p>
+      <p class="hint">
+        Ciaobot notifies you when a chat replies and the app is in the background.
+      </p>
+    </div>
+    <!-- Status as one key/value row: a dot plus words (never colour alone),
+         the fix on the line below, and the device action at the row's end. -->
+    <div class="notif-rows">
+      <div class="notif-row">
+        <span class="notif-key">Status</span>
+        <span class="notif-value">
+          <span class="notif-state">
+            <span class="notif-dot" :class="`notif-dot--${status.tone}`" aria-hidden="true" />
+            {{ status.label }}
+          </span>
+          <span v-if="status.detail" class="notif-detail" v-html="status.detail" />
+        </span>
+        <span v-if="showToggle" class="notif-end">
+          <button
+            :class="(!pushEnabledFlag && !isMacDesktop()) ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
+            @click="togglePush"
+            :disabled="pushPending"
+          >
+            {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
+          </button>
+        </span>
       </div>
     </div>
-    <!-- In the desktop app the menu-bar companion owns notifications, so
-         the PWA web-push controls are not the surface here. Explain what
-         controls them instead of rendering nothing. -->
-    <template v-if="inDesktopApp">
-      <p class="hint">
-        In the Ciaobot desktop app, notifications are handled by the menu-bar
-        companion: a chat reply while the app isn't focused posts a banner, and
-        opening it takes you to the chat. Use <strong>Menu Bar &rarr; Advanced
-        &rarr; Native Notifications</strong> to turn them on or off.
-      </p>
-      <p class="hint">
-        If notifications are blocked at the OS level, re-enable them in
-        System Settings &rarr; Notifications &rarr; Ciaobot.
-      </p>
-    </template>
-    <template v-else>
-      <div v-if="needsIosInstall" class="hint hint--warn">
-        On iOS, push notifications only work after you "Add to Home Screen" and open the app from there.
-      </div>
-      <div v-else-if="permissionDenied" class="hint hint--warn">
-        Notifications are blocked at the OS level. Re-enable them in System Settings &rarr; Notifications &rarr; Ciaobot (or your browser).
-      </div>
-      <div v-else-if="!pushSupportedFlag" class="loading">
-        Push notifications are not supported here. On macOS, install Ciaobot as an app
-        (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;) and enable them from there.
-      </div>
-      <template v-else>
-        <!-- On macOS the menu-bar agent already posts chat-reply notifications
-             out of the box (menubar_prefs defaults on, launchd RunAtLoad), so
-             don't present web-push as a required action here — lead with the
-             reassurance and offer the app-install path as an optional upgrade. -->
-        <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
-          You're covered — the menu bar already shows a notification when a chat
-          replies and the app isn't focused. Nothing to enable.
-        </p>
-        <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
-          Optional upgrade: for notifications branded as <strong>Ciaobot</strong> that
-          open the exact chat (and keep working even if you quit the menu bar), install
-          Ciaobot as an app (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr;
-          &ldquo;Add to Dock&rdquo;), then enable it here.
-        </p>
-      </template>
-      <div v-if="pushError" class="action-result">{{ pushError }}</div>
-    </template>
+    <!-- Mac without web push: the menu bar already covers it; web push is an
+         optional upgrade, not a required action. -->
+    <p v-if="!inDesktopApp && showToggle && isMacDesktop() && !pushEnabledFlag" class="hint notif-note">
+      Optional: for notifications branded as <strong>Ciaobot</strong> that open the exact
+      chat (and keep working if you quit the menu bar), install Ciaobot as an app
+      (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;),
+      then enable it here.
+    </p>
+    <p v-if="pushError" class="action-result" role="alert">{{ pushError }}</p>
   </div>
 </template>
 
@@ -88,6 +65,52 @@ const pushPending = ref(false)
 const pushError = ref('')
 const permissionDenied = ref(false)
 const needsIosInstall = ref(false)
+
+const showToggle = computed(
+  () => !inDesktopApp && !needsIosInstall.value && !permissionDenied.value && pushSupportedFlag.value,
+)
+
+type Tone = 'ok' | 'warn' | 'off'
+// Static strings only (no user data), so v-html is safe for the arrows/strong.
+const status = computed<{ label: string; tone: Tone; detail: string }>(() => {
+  if (inDesktopApp) {
+    return {
+      label: 'Handled by the menu bar',
+      tone: 'ok',
+      detail: 'Turn them on or off in <strong>Menu Bar &rarr; Advanced &rarr; Native Notifications</strong>. If they are blocked, allow them in System Settings &rarr; Notifications &rarr; Ciaobot.',
+    }
+  }
+  if (needsIosInstall.value) {
+    return {
+      label: 'Needs the Home Screen app',
+      tone: 'warn',
+      detail: 'On iOS, notifications only work after you &ldquo;Add to Home Screen&rdquo; and open Ciaobot from there.',
+    }
+  }
+  if (permissionDenied.value) {
+    return {
+      label: 'Blocked by the system',
+      tone: 'warn',
+      detail: 'Turn them on in System Settings &rarr; Notifications &rarr; Ciaobot (or in your browser&rsquo;s site settings).',
+    }
+  }
+  if (!pushSupportedFlag.value) {
+    return {
+      label: 'Not available in this browser',
+      tone: 'off',
+      detail: 'On macOS, install Ciaobot as an app (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;) and enable them there.',
+    }
+  }
+  if (pushEnabledFlag.value) return { label: 'On for this device', tone: 'ok', detail: '' }
+  if (isMacDesktop()) {
+    return {
+      label: 'Covered by the menu bar',
+      tone: 'ok',
+      detail: 'The menu bar already shows a notification when a chat replies and the app is not focused.',
+    }
+  }
+  return { label: 'Off on this device', tone: 'off', detail: '' }
+})
 
 function isIos(): boolean {
   return /iphone|ipad|ipod/i.test(navigator.userAgent)
@@ -203,16 +226,36 @@ async function togglePush() {
   margin: var(--space-1) 0 0;
   max-width: 76ch;
 }
-.settings-card-header-actions {
+.notif-rows { border-top: 1px solid var(--border); }
+.notif-row {
   display: flex;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  flex: 0 0 auto;
+  align-items: flex-start;
+  gap: var(--space-4);
+  min-height: var(--touch);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-sm);
 }
-.loading {
-  color: var(--fg2);
-  font-size: var(--text-base);
+.notif-key { width: 116px; flex: none; color: var(--fg3); line-height: 1.5; }
+.notif-value { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.notif-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg);
+  font-weight: 600;
+  line-height: 1.5;
+}
+.notif-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--fg3); }
+.notif-dot--ok { background: var(--success); }
+.notif-dot--warn { background: var(--warning); }
+.notif-detail { color: var(--fg3); line-height: 1.5; max-width: 72ch; }
+.notif-end { flex: none; margin-left: auto; }
+.notif-note { margin: 0; color: var(--fg3); font-size: var(--text-sm); max-width: 72ch; }
+@media (max-width: 600px) {
+  .notif-row { flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
+  .notif-key { width: auto; }
+  .notif-value { flex-basis: 100%; order: 3; }
 }
 .action-result {
   font-size: var(--text-sm);

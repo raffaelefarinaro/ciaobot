@@ -1,63 +1,64 @@
 <template>
   <div class="card">
-    <div class="settings-card-header settings-card-header--split">
-      <div>
-        <div class="settings-label-row">
-          <p class="section-title">Background automations</p>
-          <button class="btn-small" :disabled="!automationLoaded" @click="fetchAutomation">Refresh</button>
-        </div>
-        <p class="hint">
-          Work Ciaobot does on its own: naming chats, extracting insights when a chat is
-          archived, capturing trajectories when enabled, keeping the vault and skills in order. Each row says when it runs
-          and what happened last time. Rows that run several steps on one trigger list those
-          steps in the order they execute.
-        </p>
+    <div class="settings-card-header">
+      <div class="automation-section-head">
+        <p class="section-title">Background automations</p>
+        <button class="text-link" type="button" :disabled="!automationLoaded" @click="fetchAutomation">Refresh</button>
       </div>
+      <p class="hint">
+        Work Ciaobot does on its own: naming chats, extracting insights when a chat is
+        archived, capturing trajectories when enabled, keeping the vault and skills in order.
+      </p>
     </div>
 
     <div v-if="routines" class="insights-control">
       <div class="insights-control-copy">
-        <span class="insights-control-title">Automatic session insights</span>
+        <span class="insights-control-title">Session insights</span>
         <span class="hint">
-          Off stops model processing for new and archived chats. The run action below remains an explicit one-time choice.
+          Reads new and archived chats for durable learnings. Off stops model processing; the run action below remains an explicit one-time choice.
         </span>
       </div>
       <button
-        class="btn-small insights-toggle"
+        class="insights-toggle"
         type="button"
-        :aria-pressed="insightsEnabled"
-        :aria-label="`Toggle automatic session insights (currently ${insightsEnabled ? 'on' : 'off'})`"
+        role="switch"
+        :aria-checked="insightsEnabled"
+        aria-label="Automatic session insights"
         :disabled="routinesSaving"
         @click="toggleInsights"
       >
-        {{ insightsEnabled ? 'On' : 'Off' }}
+        <span class="switch-word">{{ insightsEnabled ? 'On' : 'Off' }}</span>
+        <span class="switch-track" aria-hidden="true"></span>
       </button>
     </div>
 
     <div v-if="routines" class="insights-control">
       <div class="insights-control-copy">
-        <span class="insights-control-title">Automatic trajectory capture</span>
+        <span class="insights-control-title">Trajectory capture</span>
         <span class="hint">
-          Off stops writing structured trajectory records for archived chats.
+          Writes a structured trajectory record for each archived chat.
         </span>
       </div>
       <button
-        class="btn-small insights-toggle"
+        class="insights-toggle"
         type="button"
-        :aria-pressed="trajectoriesEnabled"
-        :aria-label="`Toggle automatic trajectory capture (currently ${trajectoriesEnabled ? 'on' : 'off'})`"
+        role="switch"
+        :aria-checked="trajectoriesEnabled"
+        aria-label="Automatic trajectory capture"
         :disabled="routinesSaving"
         @click="toggleTrajectories"
       >
-        {{ trajectoriesEnabled ? 'On' : 'Off' }}
+        <span class="switch-word">{{ trajectoriesEnabled ? 'On' : 'Off' }}</span>
+        <span class="switch-track" aria-hidden="true"></span>
       </button>
     </div>
 
-    <div v-if="!automationLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+    <p v-if="!automationLoaded" class="loading">Loading&hellip;</p>
     <p v-else-if="automationError" class="hint hint--warn">{{ automationError }}</p>
     <template v-else-if="automationItems">
-      <p v-if="automationItems.length === 0" class="hint hint--info">
-        No automation runs recorded yet.
+      <p class="automation-runs-title">Recent runs</p>
+      <p v-if="automationItems.length === 0" class="hint automation-empty">
+        No runs recorded yet. They appear here after the first nightly pass.
       </p>
       <template v-else>
         <p
@@ -374,39 +375,120 @@ async function runJob(item: AutomationProcess, model: string) {
   font-size: var(--text-base);
 }
 
+.automation-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+}
+/* Quiet text action at the section's right edge (matches SchedulePanel). */
+.text-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  flex: none;
+}
+.text-link:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
+.text-link:disabled { color: var(--fg3); cursor: default; }
+
+/* Hairline rows: title and one muted line, a switch on the right. */
 .insights-control {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-4);
-  padding: var(--space-3) 0;
-  border-top: 1px solid var(--border);
+  min-height: 56px;
+  padding: var(--space-2) 0;
   border-bottom: 1px solid var(--border);
 }
+.card > .settings-card-header + .insights-control { border-top: 1px solid var(--border); }
 .insights-control-copy {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: 2px;
 }
 .insights-control-title {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: var(--text-sm);
+  color: var(--fg);
+  font-size: var(--text-base);
   font-weight: 600;
 }
 .insights-control .hint {
   margin: 0;
   max-width: 72ch;
+  color: var(--fg3);
+  font-size: var(--text-sm);
 }
+/* A switch reads as state, keeping pink for the accent rather than an action.
+   The visible On/Off word means it does not rely on colour. */
 .insights-toggle {
-  min-width: 64px;
-  min-height: var(--touch);
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--touch);
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
 }
-.insights-toggle[aria-pressed='true'] {
-  border-color: var(--accent);
-  color: var(--on-accent, var(--fg));
+.insights-toggle:disabled { opacity: 0.6; cursor: default; }
+.switch-word { min-width: 2.2em; text-align: right; }
+.switch-track {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full, 9999px);
+  background: var(--bg3);
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.switch-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fg3);
+  transition: transform 120ms ease, background 120ms ease;
+}
+.insights-toggle[aria-checked='true'] .switch-word { color: var(--fg); }
+.insights-toggle[aria-checked='true'] .switch-track {
+  border-color: transparent;
   background: var(--accent);
+}
+.insights-toggle[aria-checked='true'] .switch-track::after {
+  transform: translateX(16px);
+  background: var(--on-accent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .switch-track, .switch-track::after { transition: none; }
+}
+
+.automation-runs-title {
+  margin: var(--space-4) 0 0;
+  color: var(--fg);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.automation-empty {
+  margin: 0;
+  color: var(--fg3);
+  font-size: var(--text-sm);
 }
 
 .automation-headline {
@@ -443,11 +525,8 @@ async function runJob(item: AutomationProcess, model: string) {
 .automation-group-title {
   margin: 0;
   color: var(--fg3);
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 .automation-group-title--warn {
@@ -457,7 +536,7 @@ async function runJob(item: AutomationProcess, model: string) {
 .automation-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  border-top: 1px solid var(--border);
 }
 
 .automation-settled {
@@ -478,13 +557,4 @@ async function runJob(item: AutomationProcess, model: string) {
   margin-bottom: var(--space-3);
 }
 
-@media (max-width: 600px) {
-  .insights-control {
-    align-items: stretch;
-    flex-direction: column;
-  }
-  .insights-toggle {
-    width: 100%;
-  }
-}
 </style>

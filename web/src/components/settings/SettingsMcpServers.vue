@@ -4,13 +4,14 @@
       <div>
         <p class="section-title">MCP servers</p>
         <p class="hint">
-          Model Context Protocol (MCP) servers and tools available to Ciaobot agents.
+          Servers give Ciaobot agents tools, such as your calendar or a database.
+          Custom servers are saved in <code>.mcp.json</code>; their secrets go to the workspace <code>.env</code>.
         </p>
       </div>
-      <div class="settings-card-header-actions">
-        <button class="btn-small" @click="emit('create-via-chat')">Add via chat</button>
-        <button class="btn-small" @click="toggleAddServer">
-          {{ showAddServer ? 'Cancel' : '+ New MCP server' }}
+      <div class="settings-card-header-actions mcp-head-actions">
+        <button class="mcp-quiet-link" type="button" @click="emit('create-via-chat')">Ask Ciao to add one</button>
+        <button class="btn-small" type="button" :aria-expanded="showAddServer" @click="toggleAddServer">
+          {{ showAddServer ? 'Cancel' : 'New MCP server' }}
         </button>
       </div>
     </div>
@@ -19,11 +20,11 @@
     <div v-if="showAddServer" class="settings-form-panel">
       <div class="settings-field-grid">
         <label class="settings-field">
-          <span class="ws-label">Server Name</span>
+          <span class="ws-label">Server name</span>
           <input class="routine-input" v-model="newName" :disabled="addingServer" placeholder="e.g. postgres-db" />
         </label>
         <label class="settings-field">
-          <span class="ws-label">Transport Type</span>
+          <span class="ws-label">Transport</span>
           <select class="routine-select" v-model="newTransport" :disabled="addingServer">
             <option value="http">HTTP / SSE</option>
             <option value="stdio">stdio (Command)</option>
@@ -34,7 +35,7 @@
           <input class="routine-input" v-model="newUrl" :disabled="addingServer" placeholder="https://mcp.example.com/http" />
         </label>
         <label v-else class="settings-field settings-field--wide">
-          <span class="ws-label">Command Line</span>
+          <span class="ws-label">Command</span>
           <input class="routine-input" v-model="newCommand" :disabled="addingServer" placeholder="npx -y @modelcontextprotocol/server-postgres postgresql://..." />
         </label>
       </div>
@@ -46,8 +47,20 @@
       <div v-if="addServerResult" class="action-result" :class="{ '--error': addServerError }">{{ addServerResult }}</div>
     </div>
 
+    <!-- An empty state that explains what these are for, instead of nothing. -->
+    <div
+      v-if="status && !(status.project_servers && status.project_servers.length) && !showAddServer"
+      class="mcp-empty"
+    >
+      <span class="mcp-empty-text">
+        <span class="mcp-empty-title">No MCP servers yet.</span>
+        <span class="mcp-empty-sub">Add one to give Ciaobot a tool it does not have out of the box.</span>
+      </span>
+      <button class="mcp-link" type="button" @click="toggleAddServer">Add one</button>
+    </div>
+
     <!-- List of MCP Servers (exact skill-list / skill-row UI) -->
-    <div class="skill-list">
+    <div v-if="status?.project_servers?.length" class="skill-list">
       <!-- Custom & Project .mcp.json Servers -->
       <template v-if="status?.project_servers && status.project_servers.length">
         <div
@@ -279,3 +292,41 @@ const {
      block, which does not reach a child's subtree. Both sides now load the
      same sheet. -->
 <style scoped src="./settingsPanels.css"></style>
+
+<style scoped>
+.mcp-head-actions { align-items: center; }
+/* Quiet text actions: secondary routes that must not compete with the one
+   neutral "New MCP server" button. */
+.mcp-quiet-link,
+.mcp-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mcp-quiet-link { color: var(--fg2); }
+.mcp-link { color: var(--accent); }
+.mcp-quiet-link:hover,
+.mcp-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.mcp-empty {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-height: 72px;
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.mcp-empty-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.mcp-empty-title { color: var(--fg); font-weight: 500; }
+.mcp-empty-sub { color: var(--fg3); font-size: var(--text-sm); }
+@media (pointer: coarse) {
+  .mcp-quiet-link, .mcp-link { min-height: var(--touch); }
+}
+</style>

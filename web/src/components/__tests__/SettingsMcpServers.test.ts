@@ -59,6 +59,13 @@ describe('SettingsMcpServers', () => {
     expect(wrapper.find('#mcp-servers').exists()).toBe(true)
   })
 
+  it('explains an empty list and opens the add form from it', async () => {
+    const { wrapper, mcp } = mountPanel(m => { m.status.value = { enabled: true, bound: true, tool_count: 0, project_servers: [] } })
+    expect(wrapper.find('.mcp-empty').text()).toContain('No MCP servers yet.')
+    await wrapper.find('.mcp-empty button').trigger('click')
+    expect(mcp.showAddServer.value).toBe(true)
+  })
+
   it('badges a server that is missing its secrets', () => {
     const { wrapper } = mountPanel()
     expect(wrapper.text()).toContain('needs .env')

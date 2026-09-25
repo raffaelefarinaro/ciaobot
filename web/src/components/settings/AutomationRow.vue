@@ -170,20 +170,14 @@ const showModelPicker = computed(
 </script>
 
 <style scoped>
+/* A hairline row, not a card: the list reads as one section. Failing rows
+   carry a slim error edge plus the status text, never colour alone. */
 .automation-row {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-  transition: border-color 0.15s var(--ease);
-}
-
-.automation-row:hover {
-  border-color: var(--border-strong);
+  border-bottom: 1px solid var(--border);
 }
 
 .automation-row--error {
-  border-color: color-mix(in srgb, var(--error) 45%, var(--border));
+  box-shadow: inset 2px 0 0 var(--error);
 }
 
 .automation-row-head {
@@ -191,8 +185,10 @@ const showModelPicker = computed(
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-3);
+  padding: var(--space-3) 0;
 }
+
+.automation-row--error .automation-row-head { padding-left: var(--space-3); }
 
 .automation-row-toggle {
   display: flex;
@@ -392,9 +388,7 @@ const showModelPicker = computed(
 
 .automation-model-label {
   color: var(--fg3);
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: var(--text-sm);
 }
 
 /* Mirrors `.routine-select` in SettingsView, which is scoped there and so does
@@ -423,15 +417,9 @@ const showModelPicker = computed(
   display: none;
 }
 
+/* Neutral: a row action repeated down the list must not compete as pink. */
 .btn-run {
-  background: var(--accent2);
-  color: #fff;
-  border: none;
   white-space: nowrap;
-}
-
-.btn-run:hover:not(:disabled) {
-  background: var(--accent-strong);
 }
 
 @media (max-width: 768px) {
@@ -456,9 +444,7 @@ const showModelPicker = computed(
 }
 
 .automation-row-detail {
-  padding: var(--space-4);
-  background: var(--bg);
-  border-top: 1px solid var(--border);
+  padding: 0 0 var(--space-4) calc(12px + var(--space-2));
   display: flex;
   flex-direction: column;
   gap: var(--space-4);

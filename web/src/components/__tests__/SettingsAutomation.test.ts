@@ -130,7 +130,8 @@ describe('SettingsAutomation insights privacy toggle', () => {
     const toggle = view.find('.insights-toggle')
 
     expect(toggle.text()).toBe('On')
-    expect(toggle.attributes('aria-pressed')).toBe('true')
+    expect(toggle.attributes('role')).toBe('switch')
+    expect(toggle.attributes('aria-checked')).toBe('true')
     await toggle.trigger('click')
 
     expect(saveRoutines).toHaveBeenCalledWith({ insights_enabled: false })
