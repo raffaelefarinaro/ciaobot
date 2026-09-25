@@ -497,6 +497,21 @@ function rowTitle(row: ProposalRow): string {
   return row.text
 }
 
+/** Split text on `backtick` spans so they can render as inline code. */
+function inlineCodeParts(text: string): Array<{ text: string; code: boolean }> {
+  const parts: Array<{ text: string; code: boolean }> = []
+  const re = /`([^`]+)`/g
+  let last = 0
+  let match: RegExpExecArray | null
+  while ((match = re.exec(text))) {
+    if (match.index > last) parts.push({ text: text.slice(last, match.index), code: false })
+    parts.push({ text: match[1], code: true })
+    last = match.index + match[0].length
+  }
+  if (last < text.length) parts.push({ text: text.slice(last), code: false })
+  return parts
+}
+
 /** Where an accept would write, as a path. Now the tooltip and the details
  * line rather than the row's own subtitle.
  *
@@ -1152,9 +1167,16 @@ watch(
           </label>
 
           <div class="pr-row-body">
-            <div class="pr-row-top">
+            <!-- Kind and source first, as one quiet line, so the fact itself
+                 starts at the row's left edge and reads as the subject. -->
+            <p class="pr-row-meta">
               <span class="pr-kind" :class="`pr-kind--${row.kind}`">{{ kindLabel(row.kind) }}</span>
-              <span class="pr-row-title">{{ rowTitle(row) }}</span>
+              <template v-if="row.source && !isRehome(row) && !isSkill(row)"> · from {{ row.source }}</template>
+            </p>
+            <div class="pr-row-top">
+              <!-- Backtick spans render as inline code rather than raw backticks;
+                   built from segments, never v-html, since the text is model-written. -->
+              <span class="pr-row-title"><template v-for="(part, pi) in inlineCodeParts(rowTitle(row))" :key="pi"><code v-if="part.code" class="pr-inline-code">{{ part.text }}</code><template v-else>{{ part.text }}</template></template></span>
             </div>
             <!-- What accepting this row would do, in words rather than a path:
                  `ciao:memory` and `Workspace/Learnings.md` are the same shape of
@@ -1172,7 +1194,7 @@ watch(
                 :title="row.path"
                 @click="view(row)"
               >{{ pathLeaf(row.path) }}</button>
-              <template v-else><template v-if="row.source && !isRehome(row)">From {{ row.source }} · </template>{{ rowConsequence(row) }}</template>
+              <template v-else>{{ rowConsequence(row) }}</template>
               <span v-if="row.leak_warning" class="pr-badge --warn">visible in every workspace</span>
             </p>
             <details class="pr-row-detail">
@@ -2089,16 +2111,35 @@ watch(
   min-width: 0;
 }
 
-.pr-row-title {
-  color: var(--fg);
-  font-size: var(--text-base);
-  font-weight: 600;
-  line-height: 1.45;
+.pr-row-meta {
+  margin: 0 0 3px;
+  color: var(--fg3);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
 
+/* The fact is prose to read, not a heading: regular weight at a readable
+   measure. Bold paragraphs were what made long suggestions hard to scan. */
+.pr-row-title {
+  max-width: 72ch;
+  color: var(--fg);
+  font-size: calc(15px * var(--font-scale));
+  font-weight: 450;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.pr-inline-code {
+  padding: 0 4px;
+  border-radius: var(--radius-xs);
+  background: var(--bg3);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+}
+
 .pr-row-sub {
-  margin: 2px 0 0;
+  margin: 4px 0 0;
   color: var(--fg3);
   font-size: var(--text-sm);
   overflow-wrap: anywhere;
@@ -2106,10 +2147,8 @@ watch(
 
 /* The kind is a quiet word before the fact, not a boxed mono tag. */
 .pr-kind {
-  flex: none;
-  color: var(--fg3);
-  font-size: var(--text-sm);
-  font-weight: 500;
+  color: var(--fg2);
+  font-weight: 600;
   text-transform: capitalize;
 }
 
@@ -2150,8 +2189,8 @@ watch(
 }
 
 .pr-row-source {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
   opacity: 0.75;
 }
 

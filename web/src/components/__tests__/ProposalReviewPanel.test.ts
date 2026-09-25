@@ -97,6 +97,19 @@ describe('ProposalReviewPanel', () => {
     wrapper.unmount()
   })
 
+  it('renders backtick spans in a fact as inline code, never as raw HTML', async () => {
+    apiGet.mockResolvedValue({ rows: [row({ id: 'a', text: 'Apps get `<name>.scandbox.io` domains via `get_any_app`.' })] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const codes = wrapper.findAll('.pr-row-title .pr-inline-code').map(c => c.text())
+    expect(codes).toEqual(['<name>.scandbox.io', 'get_any_app'])
+    // The angle brackets stay text: nothing model-written becomes markup.
+    expect(wrapper.find('.pr-row-title name').exists()).toBe(false)
+    expect(wrapper.get('.pr-row-title').text()).not.toContain('`')
+    wrapper.unmount()
+  })
+
   it('opens with one sentence and folds the mechanism into a disclosure', async () => {
     // The paragraph this replaces ran nine lines of internal routing, bounded
     // regions, stub notes and file removal BEFORE the first row — about 230px
