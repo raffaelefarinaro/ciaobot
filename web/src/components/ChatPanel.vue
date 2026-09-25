@@ -46,7 +46,7 @@
               autofocus
             />
             <span v-else class="pane-title chat-title" @dblclick.stop="startEditTitle" @click.stop>{{ chat.title }}</span>
-            <div v-if="projectCrumb" class="breadcrumb-scope">
+            <div v-if="projectCrumb && !railShown" class="breadcrumb-scope">
               <button
                 type="button"
                 class="breadcrumb-project"
@@ -1328,10 +1328,23 @@
       aria-labelledby="chat-work-rail-title"
     >
       <h2 id="chat-work-rail-title" class="rail-title">Work details</h2>
+      <!-- The project lives here on wide panes; the header only names it when
+           this rail is hidden. -->
       <section class="rail-section" aria-labelledby="chat-rail-context">
-        <p id="chat-rail-context" class="rail-label">Injected with each message</p>
-        <p class="chat-rail-context" tabindex="-1" ref="railContextEl"><strong>{{ project?.name || 'General' }}</strong><template v-if="project?.context"> — {{ project.context }}</template><template v-else> — No project context has been added yet.</template></p>
+        <p id="chat-rail-context" class="rail-label">Project · injected with each message</p>
+        <p class="chat-rail-context" tabindex="-1" ref="railContextEl">
+          <button
+            type="button"
+            class="chat-rail-project"
+            :aria-expanded="showContext"
+            aria-controls="project-context-popup"
+            @click.stop="toggleContext"
+          >{{ project?.name || 'General' }}</button><template v-if="project?.context"> — {{ project.context }}</template><template v-else> — No project context has been added yet.</template>
+        </p>
         <p class="rail-note">The workspace guide rides along too. Memory notes are retrieved only when relevant.</p>
+        <div v-if="contextUsedLabel" class="rail-kvs chat-rail-context-used">
+          <div class="rail-kv"><span>Context used</span><strong>{{ contextUsedLabel }}</strong></div>
+        </div>
       </section>
       <section class="rail-section" aria-labelledby="chat-rail-run">
         <p id="chat-rail-run" class="rail-label">Run state</p>
@@ -1346,8 +1359,21 @@
           </div>
         </div>
       </section>
+      <section v-if="toolUsage.skills.length || toolUsage.mcp.length" class="rail-section" aria-labelledby="chat-rail-tools">
+        <p id="chat-rail-tools" class="rail-label">Skills and MCP used</p>
+        <div class="rail-kvs">
+          <div v-for="skill in toolUsage.skills" :key="`skill-${skill.name}`" class="rail-kv">
+            <span class="chat-rail-tool"><small>Skill</small> {{ skill.name }}</span>
+            <strong v-if="skill.count > 1">×{{ skill.count }}</strong>
+          </div>
+          <div v-for="tool in toolUsage.mcp" :key="`mcp-${tool.name}`" class="rail-kv">
+            <span class="chat-rail-tool" :title="tool.name"><small>MCP</small> {{ tool.name }}</span>
+            <strong v-if="tool.count > 1">×{{ tool.count }}</strong>
+          </div>
+        </div>
+      </section>
       <section class="rail-section" aria-labelledby="chat-rail-files">
-        <p id="chat-rail-files" class="rail-label">Files produced</p>
+        <p id="chat-rail-files" class="rail-label">Files</p>
         <div v-if="inspectorOutputs.length" class="rail-list">
           <button
             v-for="output in inspectorOutputs"
@@ -1361,7 +1387,23 @@
             <small>{{ output.action }}<template v-if="fileCardDirname(output.file_path)"> · {{ fileCardDirname(output.file_path) }}</template></small>
           </button>
         </div>
-        <p v-else class="rail-note">None yet.</p>
+        <p v-else-if="!mentionedFiles.length" class="rail-note">None yet.</p>
+        <template v-if="mentionedFiles.length">
+          <p class="rail-label chat-rail-sublabel">Mentioned in replies</p>
+          <div class="rail-list">
+            <button
+              v-for="path in mentionedFiles"
+              :key="`mentioned-${path}`"
+              type="button"
+              class="rail-item"
+              :title="path"
+              @click="openFileCard(path)"
+            >
+              <span>{{ fileCardBasename(path) }}</span>
+              <small>{{ fileCardDirname(path) || 'workspace' }}</small>
+            </button>
+          </div>
+        </template>
       </section>
     </aside>
     </div>
@@ -1408,6 +1450,7 @@ import { formatTime, formatDuration } from '../lib/time'
 import {
   activityLines,
   buildTurnParts,
+  collectToolUsage,
   collectTraceOutputs,
   fileCardBasename,
   fileCardDirname,
@@ -1416,6 +1459,7 @@ import {
   formatTokenUsage,
   isImageFilePath,
   isSubagentLine,
+  mentionedFilePaths,
   outputActionTag,
   traceSummaryMetaParts,
   type TraceOutput,
@@ -2040,6 +2084,57 @@ const inspectorOutputs = computed<TraceOutput[]>(() => {
   }
   return outputs
 })
+// Every activity line this chat has produced: its turns, the subagents they
+// ran, and the turn in flight. The rail reads skills and MCP tools from it.
+const chatActivityLines = computed<string[]>(() => {
+  const lines: string[] = []
+  const take = (messages: ChatMessage[] | undefined) => {
+    for (const m of messages ?? []) {
+      if (m.tool_name === '_activity' && m.content) lines.push(...activityLines(m.content))
+    }
+  }
+  for (const item of renderItems.value) {
+    if (item.kind !== 'trace') continue
+    take(item.steps)
+    for (const sub of item.subs ?? []) take(sub.messages)
+  }
+  for (const entry of store.currentTimeline) {
+    if (entry.kind === 'tool') lines.push(...activityLines(entry.content))
+  }
+  return lines
+})
+const toolUsage = computed(() => collectToolUsage(chatActivityLines.value))
+
+// Paths the replies name that no turn recorded as a file card - typically a
+// file a delegate or a shell command wrote. Listed as "mentioned", never as
+// produced, because the chat has no record of the write itself.
+const mentionedFiles = computed<string[]>(() => {
+  const produced = new Set(inspectorOutputs.value.map(output => output.file_path))
+  const found: string[] = []
+  for (const item of renderItems.value) {
+    if (item.kind !== 'assistant' || !item.msg.content) continue
+    for (const path of mentionedFilePaths(item.msg.content)) {
+      if (!produced.has(path) && !found.includes(path)) found.push(path)
+    }
+  }
+  return found
+})
+
+// How full the model's context window was at the end of the latest turn,
+// from the usage the provider reported. Empty when it reported none.
+const contextUsedLabel = computed(() => {
+  const items = renderItems.value
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i]
+    if (item.kind !== 'assistant' || !item.meta?.usage) continue
+    const usage = item.meta.usage as Record<string, unknown>
+    const pct = Number(usage.context_pct ?? usage.contextPct)
+    if (Number.isFinite(pct) && pct > 0) return `${Math.round(pct)}%`
+    return ''
+  }
+  return ''
+})
+
 const inspectorStatusRows = computed(() => {
   const chatId = chat.value?.chat_id
   const questions = chatId ? (store.activeQuestions[chatId]?.length ?? 0) : 0
@@ -4798,6 +4893,35 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   overflow-wrap: anywhere;
 }
 
+.chat-rail-project {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+.chat-rail-project:hover { text-decoration-color: currentColor; }
+.chat-rail-context-used { margin-top: var(--space-2); }
+.chat-rail-tool {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+.chat-rail-tool small {
+  margin-right: 4px;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+}
+.chat-rail-sublabel { margin-top: var(--space-3); }
+
 .chat-rail-context strong {
   color: var(--fg);
 }
@@ -5400,6 +5524,16 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
   margin: 4px 0 0 -8px;
 }
 
+/* Under a reply the row may carry the turn details (time · duration ·
+   model · tokens). They get their own line beneath the buttons instead of
+   being squeezed onto the same row and truncated. */
+.message-wrap.assistant .message-actions:has(.message-meta) {
+  flex-wrap: wrap;
+  height: auto;
+  min-height: 28px;
+  row-gap: 0;
+}
+
 .message-wrap.user .message-actions {
   position: absolute;
   top: calc(100% + 2px);
@@ -5474,11 +5608,10 @@ defineExpose({ toggleDictation, toggleModelPicker, archiveActiveChat, handleQues
 
 /* Model · tokens · duration for the turn, on the right of its row. */
 .message-actions .message-meta {
-  margin-left: auto;
-  padding-left: var(--space-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex-basis: 100%;
+  min-width: 0;
+  padding: 0 0 0 8px;
+  overflow-wrap: anywhere;
 }
 
 .message-action-btn--busy {

@@ -408,3 +408,104 @@ export function fileCardIcon(filePath: string): FileCardIcon {
   if (/\.(pdf|docx?|xlsx?|pptx?)$/i.test(filePath)) return 'doc'
   return 'file'
 }
+
+
+/* ------------------------------------------------------------------ *
+ * Tool usage for the chat's Work details rail: which skills and MCP
+ * tools a chat's turns called, read from the same activity lines the
+ * trace renders ("<icon> <ToolName> <summary>", subagent lines prefixed
+ * with ↳). Both providers write that shape; they differ in naming:
+ *   Claude Code  Skill <name>          mcp__<server>__<tool>
+ *   opencode     skill {"name": ...}   <server>_<tool> (no fixed separator)
+ * opencode's MCP names cannot be split into server and tool reliably, so
+ * they are reported by their full tool name.
+ * ------------------------------------------------------------------ */
+
+export interface UsageEntry {
+  name: string
+  count: number
+}
+
+export interface ToolUsage {
+  skills: UsageEntry[]
+  mcp: UsageEntry[]
+}
+
+// opencode's own tools. Anything else with an underscore is an MCP tool.
+const OPENCODE_BUILTIN_TOOLS = new Set([
+  'read', 'write', 'edit', 'multiedit', 'patch', 'bash', 'grep', 'glob', 'list',
+  'webfetch', 'websearch', 'codesearch', 'todowrite', 'todoread', 'task',
+  'skill', 'lsp', 'question', 'invalid', 'batch',
+])
+
+function parseToolLine(line: string): { name: string; summary: string } | null {
+  const tokens = line.trim().replace(/^↳\s*/, '').split(/\s+/)
+  const at = tokens.findIndex(token => /^[A-Za-z_][\w.:-]*$/.test(token))
+  if (at < 0) return null
+  return { name: tokens[at], summary: tokens.slice(at + 1).join(' ').trim() }
+}
+
+function skillNameFrom(summary: string): string {
+  if (!summary) return ''
+  if (summary.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(summary) as Record<string, unknown>
+      const name = parsed.name ?? parsed.skill
+      return typeof name === 'string' ? name.trim() : ''
+    } catch {
+      return ''
+    }
+  }
+  return summary.split(/\s+/)[0] ?? ''
+}
+
+function bump(map: Map<string, number>, key: string): void {
+  if (key) map.set(key, (map.get(key) ?? 0) + 1)
+}
+
+export function collectToolUsage(lines: Iterable<string>): ToolUsage {
+  const skills = new Map<string, number>()
+  const mcp = new Map<string, number>()
+  for (const raw of lines) {
+    const parsed = parseToolLine(raw)
+    if (!parsed) continue
+    const { name, summary } = parsed
+    if (name === 'Skill' || name === 'skill') {
+      bump(skills, skillNameFrom(summary))
+      continue
+    }
+    const claudeMcp = /^mcp__(.+?)__(.+)$/.exec(name)
+    if (claudeMcp) {
+      bump(mcp, `${claudeMcp[1]} · ${claudeMcp[2]}`)
+      continue
+    }
+    if (name.includes('_') && name === name.toLowerCase() && !OPENCODE_BUILTIN_TOOLS.has(name)) {
+      bump(mcp, name)
+    }
+  }
+  const toEntries = (map: Map<string, number>): UsageEntry[] =>
+    [...map.entries()]
+      .map(([entryName, count]) => ({ name: entryName, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+  return { skills: toEntries(skills), mcp: toEntries(mcp) }
+}
+
+/**
+ * Workspace paths a reply names in `code` or as a markdown link target.
+ * A delegate or a shell command can write a file the parent turn never
+ * records as a file card, and the reply then says where it went; this lets
+ * the rail list it as "mentioned" instead of claiming no files exist.
+ */
+export function mentionedFilePaths(text: string): string[] {
+  const found: string[] = []
+  const push = (candidate: string) => {
+    const value = candidate.trim().replace(/[.,;:]+$/, '')
+    if (!value || /^[a-z]+:\/\//i.test(value) || value.startsWith('#')) return
+    if (!value.includes('/') || !/\.\w{1,8}$/.test(value)) return
+    if (/\s/.test(value)) return
+    if (!found.includes(value)) found.push(value)
+  }
+  for (const match of text.matchAll(/`([^`\n]+)`/g)) push(match[1])
+  for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) push(match[1])
+  return found
+}

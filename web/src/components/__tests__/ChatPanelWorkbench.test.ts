@@ -195,7 +195,10 @@ describe('ChatPanel aligned layout', () => {
     await nextTick()
 
     const rail = wrapper.get('#chat-work-rail')
-    expect(rail.text()).toContain('Injected with each message')
+    expect(rail.text()).toContain('injected with each message')
+    // The project is named in the rail, so the header no longer repeats it.
+    expect(rail.find('.chat-rail-project').exists()).toBe(true)
+    expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)
     expect(rail.text()).toContain('Launch planning for the public beta.')
     expect(rail.text()).toContain('Current state')
 
@@ -204,6 +207,8 @@ describe('ChatPanel aligned layout', () => {
     expect(toggle.attributes('aria-controls')).toBe('chat-work-rail')
     await toggle.trigger('click')
     expect(wrapper.find('#chat-work-rail').exists()).toBe(false)
+    // With the rail hidden the header names the project again.
+    expect(wrapper.find('.breadcrumb-scope').exists()).toBe(true)
     // The drawer is the narrow-pane form; it does not open on a wide pane.
     expect(wrapper.find('.chat-work-inspector').exists()).toBe(false)
     wrapper.unmount()

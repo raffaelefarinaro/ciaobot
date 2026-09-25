@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  collectToolUsage,
+  mentionedFilePaths,
   buildTurnParts,
   collectTraceOutputs,
   findFinalAnswerIndex,
@@ -364,6 +366,43 @@ describe('traceSummaryMeta', () => {
       { agent_id: 'sub-1', messages: [] },
       { agent_id: 'sub-2', messages: [] }
     ])).toBe('2 thoughts · 2 notes · 2 files · 2 subagents')
+  })
+})
+
+describe('collectToolUsage', () => {
+  it('reads skills and MCP tools from both providers\' activity lines', () => {
+    const usage = collectToolUsage([
+      '🧩 Skill ciao-dev-install',
+      '🧩 Skill ciao-dev-install',
+      '🔌 mcp__claude_ai_scandbox__get_any_app demo',
+      '↳ 🔌 mcp__claude_ai_Slack__slack_search_public "launch"',
+      '🔧 skill {"name":"docs"}',
+      '🔧 scandbox_get_any_app {"name":"x"}',
+      '📖 Read src/app.ts',
+      '🔧 read src/app.ts',
+      '🔧 todowrite []',
+    ])
+    expect(usage.skills).toEqual([
+      { name: 'ciao-dev-install', count: 2 },
+      { name: 'docs', count: 1 },
+    ])
+    expect(usage.mcp.map(entry => entry.name)).toEqual([
+      'claude_ai_scandbox · get_any_app',
+      'claude_ai_Slack · slack_search_public',
+      'scandbox_get_any_app',
+    ])
+  })
+})
+
+describe('mentionedFilePaths', () => {
+  it('finds workspace paths in code spans and links, not URLs or prose', () => {
+    expect(mentionedFilePaths(
+      'Full write-up saved to `memory-vault/work/review-pr418.md`. See [notes](docs/notes.md), ' +
+      '`npm run build`, `https://example.com/a.md` and `.github/workflows/build-docs.yml:57`.',
+    )).toEqual([
+      'memory-vault/work/review-pr418.md',
+      'docs/notes.md',
+    ])
   })
 })
 
