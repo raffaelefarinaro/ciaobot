@@ -550,8 +550,18 @@ def strip_archives(clone: Path, rel_archives: list[str]) -> int:
     from ciao.insights_compare import strip_insights
 
     changed = 0
+    clone_root = Path(clone).resolve()
     for rel in rel_archives:
         path = Path(clone) / rel
+        # This is the harness's first write into a clone, and it runs before any
+        # config-level containment check, so it guards itself: an absolute or
+        # `..` relative path, or a symlinked archive, would otherwise rewrite a
+        # file outside the clone.
+        if path.is_symlink():
+            raise SandboxError(f"{path} is a symlink; refusing to rewrite it")
+        resolved = path.resolve()
+        if resolved == clone_root or not resolved.is_relative_to(clone_root):
+            raise SandboxError(f"{path} resolves outside the clone {clone_root}")
         try:
             original = path.read_text(encoding="utf-8")
         except OSError:

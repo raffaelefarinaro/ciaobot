@@ -41,6 +41,7 @@ import json
 import os
 import secrets
 import statistics
+import re
 import subprocess
 import sys
 import time
@@ -193,6 +194,10 @@ class Row:
     project_name: str = ""
 
 
+# A chat id, provider name or archive stem as one plain path segment.
+_SAFE_SEGMENT = re.compile(r"(?!\.{1,2}$)[A-Za-z0-9._:-]+")
+
+
 def select_rows(cache_dirs: list[Path], live: Path, limit: int) -> list[Row]:
     """The #586 cache rows whose archive still exists under ``live``.
 
@@ -219,8 +224,18 @@ def select_rows(cache_dirs: list[Path], live: Path, limit: int) -> list[Row]:
                 continue
             # The cache file is "<chat id>__<archive stem>.json".
             stem = path.stem.split("__", 1)[1]
+            # Each part becomes a path component, so only a plain segment is
+            # accepted: an absolute or `..` value would point the archive (and
+            # the later strip, which rewrites it) outside the workspace.
+            if not all(_SAFE_SEGMENT.fullmatch(part) for part in (chat_id, provider, stem)):
+                print(f"skipping cache row {path.name}: unsafe chat id, provider or stem")
+                continue
             archive_rel = Path("Logs") / "Chats" / chat_id / provider / f"{stem}.md"
-            if not (live / archive_rel).exists():
+            archive = live / archive_rel
+            if archive.is_symlink() or not archive.resolve().is_relative_to(live.resolve()):
+                print(f"skipping cache row {path.name}: archive is a symlink or outside {live}")
+                continue
+            if not archive.exists():
                 continue
             key = (chat_id, stem)
             if key in seen:

@@ -1396,3 +1396,67 @@ def test_report_shows_agent_tokens_and_dashes_where_there_are_none() -> None:
     # Chat 2 has no usage to show.
     chat2_row = next(line for line in report.splitlines() if line.startswith("| chat-2 |"))
     assert chat2_row.count("| - ") >= 1
+
+
+# ── archive paths from the cache ─────────────────────────────────────────
+
+
+def _cache_row(cache: Path, chat_id: str, provider: str, stem: str) -> None:
+    _write_json(
+        cache / f"{chat_id}__{stem}.json",
+        {"chat_id": chat_id, "provider": provider, "workspace": "work", "model": "opus"},
+    )
+
+
+def test_select_rows_rejects_unsafe_segments_and_escaping_archives(
+    tmp_path: Path,
+) -> None:
+    """A cache row names a path; only a plain one inside the live root is kept.
+
+    `strip_archives` rewrites every selected archive before any config-level
+    containment check, so a row whose chat id or provider is absolute, a `..`,
+    or whose archive is a symlink out of the workspace must never be selected.
+    """
+    live = tmp_path / "live"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "note.md"
+    sentinel.write_text("do not touch\n", encoding="utf-8")
+    good = live / "Logs" / "Chats" / "chat-ok" / "claude"
+    good.mkdir(parents=True)
+    (good / "s1.md").write_text("# ok\n", encoding="utf-8")
+    linked = live / "Logs" / "Chats" / "chat-link" / "claude"
+    linked.mkdir(parents=True)
+    (linked / "s2.md").symlink_to(sentinel)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    _cache_row(cache, "chat-ok", "claude", "s1")
+    _cache_row(cache, "chat-link", "claude", "s2")
+    _write_json(
+        cache / "x__s3.json",
+        {"chat_id": str(outside), "provider": "claude", "workspace": "work"},
+    )
+    _write_json(
+        cache / "y__s4.json",
+        {"chat_id": "..", "provider": "..", "workspace": "work"},
+    )
+
+    rows = run.select_rows([cache], live, 0)
+
+    assert [row.chat_id for row in rows] == ["chat-ok"]
+
+
+def test_strip_archives_refuses_paths_outside_the_clone(tmp_path: Path) -> None:
+    """The writer guards itself: absolute, `..` and symlinked archives are refused."""
+    clone = tmp_path / "clone"
+    archives = clone / "Logs" / "Chats" / "c" / "claude"
+    archives.mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    original = "# t\n\n<!-- ciao:session-insights -->\n## Session insights\n- x\n"
+    outside.write_text(original, encoding="utf-8")
+    (archives / "link.md").symlink_to(outside)
+
+    for rel in (str(outside), "../outside.md", "Logs/Chats/c/claude/link.md"):
+        with pytest.raises(sandbox.SandboxError):
+            sandbox.strip_archives(clone, [rel])
+    assert outside.read_text(encoding="utf-8") == original
