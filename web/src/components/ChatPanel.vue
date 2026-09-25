@@ -1403,7 +1403,7 @@
             @click="openFileCard(output.file_path)"
           >
             <span>{{ fileCardBasename(output.file_path) }}</span>
-            <small>{{ outputActionTag(output.action) }}<template v-if="fileCardDirname(output.file_path)"> · {{ fileCardDirname(output.file_path) }}</template></small>
+            <small>{{ outputActionTag(output.action) }}<template v-if="shortDirname(output.file_path)"> · {{ shortDirname(output.file_path) }}</template></small>
           </button>
         </div>
         <p v-else-if="!mentionedFiles.length" class="rail-note">None yet.</p>
@@ -1419,7 +1419,7 @@
               @click="openFileCard(path)"
             >
               <span>{{ fileCardBasename(path) }}</span>
-              <small>{{ fileCardDirname(path) || 'workspace' }}</small>
+              <small>{{ shortDirname(path) || 'workspace' }}</small>
             </button>
           </div>
         </template>
@@ -1481,6 +1481,8 @@ import {
   isSubagentLine,
   mentionedFilePaths,
   mergeTraceOutputs,
+  collapseOutputsByName,
+  shortDirname,
   outputActionTag,
   traceSummaryMetaParts,
   type TraceOutput,
@@ -2085,9 +2087,12 @@ const inspectorTabs = [
   { key: 'activity' as const, label: 'Activity' },
   { key: 'output' as const, label: 'Output' },
 ]
-const inspectorOutputs = computed<TraceOutput[]>(() => mergeTraceOutputs(
+// One row per file name: the same note shows up under several spellings
+// (relative, workspace-prefixed, before and after a move), and the reader
+// thinks of it as one file.
+const inspectorOutputs = computed<TraceOutput[]>(() => collapseOutputsByName(mergeTraceOutputs(
   renderItems.value.map(item => (item.kind === 'trace' || item.kind === 'assistant' ? item.outputs : undefined)),
-))
+)))
 // Every activity line this chat has produced: its turns, the subagents they
 // ran, and the turn in flight. The rail reads skills and MCP tools from it.
 const chatActivityLines = computed<string[]>(() => {
@@ -2113,12 +2118,14 @@ const toolUsage = computed(() => collectToolUsage(chatActivityLines.value))
 // file a delegate or a shell command wrote. Listed as "mentioned", never as
 // produced, because the chat has no record of the write itself.
 const mentionedFiles = computed<string[]>(() => {
-  const produced = new Set(inspectorOutputs.value.map(output => output.file_path))
+  const produced = new Set(inspectorOutputs.value.map(output => fileCardBasename(output.file_path)))
   const found: string[] = []
   for (const item of renderItems.value) {
     if (item.kind !== 'assistant' || !item.msg.content) continue
     for (const path of mentionedFilePaths(item.msg.content)) {
-      if (!produced.has(path) && !found.includes(path)) found.push(path)
+      const name = fileCardBasename(path)
+      if (produced.has(name) || found.some(p => fileCardBasename(p) === name)) continue
+      found.push(path)
     }
   }
   return found

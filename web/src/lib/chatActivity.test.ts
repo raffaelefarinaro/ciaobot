@@ -4,6 +4,8 @@ import {
   describeToolStep,
   mentionedFilePaths,
   mergeTraceOutputs,
+  collapseOutputsByName,
+  shortDirname,
   buildTurnParts,
   collectTraceOutputs,
   findFinalAnswerIndex,
@@ -434,6 +436,28 @@ describe('mergeTraceOutputs', () => {
       { file_path: 'work/memory-vault/journal/daily/2026-09-25.md', action: 'created' },
       { file_path: 'docs/other.md', action: 'edited' },
     ])
+  })
+})
+
+describe('collapseOutputsByName', () => {
+  it('shows one row per file name, opening the most specific path', () => {
+    expect(collapseOutputsByName([
+      { file_path: 'work/memory-vault/projects/active/lvmh/lvmh-ocr.md', action: 'edited' },
+      { file_path: 'q4-2026-planning/lvmh-ocr.md', action: 'created' },
+      { file_path: 'lvmh-ocr.md', action: 'edited' },
+      { file_path: 'log.md', action: 'edited' },
+    ])).toEqual([
+      { file_path: 'work/memory-vault/projects/active/lvmh/lvmh-ocr.md', action: 'created' },
+      { file_path: 'log.md', action: 'edited' },
+    ])
+  })
+})
+
+describe('shortDirname', () => {
+  it('keeps the last two folders', () => {
+    expect(shortDirname('work/memory-vault/projects/active/q4/plan.md')).toBe('…/active/q4')
+    expect(shortDirname('docs/plan.md')).toBe('docs')
+    expect(shortDirname('plan.md')).toBe('')
   })
 })
 

@@ -134,6 +134,35 @@ export function mergeTraceOutputs(lists: Iterable<TraceOutput[] | undefined>): T
   return merged
 }
 
+/** One row per file name. The same note appears under several spellings
+ *  (relative, workspace-prefixed, before and after a move); keep the most
+ *  specific path (most folders) as the one to open, and the most telling
+ *  action across all of them. */
+export function collapseOutputsByName(outputs: TraceOutput[]): TraceOutput[] {
+  const byName = new Map<string, TraceOutput>()
+  for (const output of outputs) {
+    const name = fileCardBasename(output.file_path)
+    const existing = byName.get(name)
+    if (!existing) {
+      byName.set(name, { ...output })
+      continue
+    }
+    const depth = (path: string) => normalizeOutputPath(path).split('/').length
+    const path = depth(output.file_path) > depth(existing.file_path) ? output.file_path : existing.file_path
+    const action = outputActionRank(output.action) > outputActionRank(existing.action) ? output.action : existing.action
+    byName.set(name, { file_path: path, ...(action ? { action } : {}) })
+  }
+  return [...byName.values()]
+}
+
+/** The last two folders of a path, for a compact label (full path on hover). */
+export function shortDirname(filePath: string): string {
+  const parts = normalizeOutputPath(filePath).split('/').filter(Boolean)
+  parts.pop()
+  if (!parts.length) return ''
+  return (parts.length > 2 ? '…/' : '') + parts.slice(-2).join('/')
+}
+
 export function formatTokenUsage(usage?: Record<string, unknown>): string {
   if (!usage) return ''
   const inputVal = (usage.input_tokens ?? usage.inputTokens) as unknown
