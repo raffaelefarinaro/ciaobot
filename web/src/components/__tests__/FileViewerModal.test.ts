@@ -314,4 +314,31 @@ describe('FileViewerModal', () => {
 
     expect(close).not.toHaveBeenCalled()
   })
+
+  it('renders the comment compose popover in place when asked to', async () => {
+    const { default: CommentComposePopover } = await import('../CommentComposePopover.vue')
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const inline = mount(CommentComposePopover, {
+      attachTo: host,
+      props: { anchor: { top: 10, left: 10 } as never, modelValue: 'note', inline: true },
+      global: { stubs: { VoiceRecorder: true } },
+    })
+    await settle()
+    // Rendered in place, not teleported to <body>: reka disables pointer
+    // events outside a modal dialog and closes it on an outside click, so a
+    // teleported popover inside the file viewer could not be used.
+    expect(host.querySelector('.compose')).not.toBeNull()
+    inline.unmount()
+    host.remove()
+  })
+
+  it('keeps the file viewer comment popovers inside the dialog', async () => {
+    openViewer()
+    await settle()
+    const popovers = wrapper!.findAllComponents({ name: 'CommentComposePopover' })
+    expect(popovers.length).toBeGreaterThan(0)
+    for (const popover of popovers) expect(popover.props('inline')).toBe(true)
+  })
 })
+
