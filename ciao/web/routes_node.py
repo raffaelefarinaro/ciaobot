@@ -113,6 +113,73 @@ _ALREADY_RUNNING = "an engine update is already in progress"
 _NOTHING_STAGED = "nothing staged; run: ciao update stage"
 
 
+def _update_read_fn(
+    request: Request,
+) -> Callable[[], engine_update.Operation | None]:
+    """The one read of the durable record, shared by the routes and the card.
+
+    Local, not returned straight out of a ``getattr``: the injected fake is
+    ``Any`` as far as mypy is concerned, and handing that back through a
+    declared return type is the ``no-any-return`` this repo blocks on.
+    """
+    read_fn: Callable[[], engine_update.Operation | None] = (
+        getattr(request.app.state, "engine_update_read", None) or engine_update.read_operation
+    )
+    return read_fn
+
+
+def _read_operation(
+    request: Request,
+) -> engine_update.Operation | None:
+    """The persisted record, or None when it cannot be read at all.
+
+    Fail-safe because the caller is already holding a failure to report: an
+    unreadable record is not a second thing to fail on, it just leaves the
+    record looking like there never was one — which is the case this whole
+    path exists to describe.
+    """
+    read_fn = _update_read_fn(request)
+    try:
+        return read_fn()
+    except Exception:
+        return None
+
+
+def _operation_fingerprint(operation: engine_update.Operation | None) -> str:
+    """Which record this is, for "is it still the one we were told about?".
+
+    Id and phase, not the whole record: a run advances its own record in
+    place, so the timestamps and paths differ between two reads of the same
+    run while a genuinely new run is always a new id.
+    """
+    if operation is None:
+        return ""
+    return f"{operation.id}/{operation.phase}"
+
+
+def _current_update_error(
+    request: Request, operation: engine_update.Operation | None
+) -> str:
+    """The reason a run left no record of its own, or "" when there is none.
+
+    ``engine_update_error`` is parked on ``app.state`` by
+    ``_start_update_task`` when the coordinator raised before it could write a
+    ``failed`` record; it is the only trace such a run leaves, and the card
+    polls here. It answers one run, so it is dropped as soon as the record on
+    disk is no longer the one it was parked against: a later run that wrote a
+    record of its own has already answered what the card was asking.
+    """
+    error = str(getattr(request.app.state, "engine_update_error", "") or "")
+    if not error:
+        return ""
+    parked_for = str(getattr(request.app.state, "engine_update_error_for", "") or "")
+    if _operation_fingerprint(operation) == parked_for:
+        return error
+    request.app.state.engine_update_error = ""
+    request.app.state.engine_update_error_for = ""
+    return ""
+
+
 def _engine_update_state(request: Request) -> dict[str, Any]:
     """The persisted job + install mode, as the Settings card needs it.
 
@@ -123,9 +190,7 @@ def _engine_update_state(request: Request) -> dict[str, Any]:
     mode_fn: Callable[[], str] = (
         getattr(request.app.state, "engine_update_mode", None) or detect_install_mode
     )
-    read_fn: Callable[[], engine_update.Operation | None] = (
-        getattr(request.app.state, "engine_update_read", None) or engine_update.read_operation
-    )
+    read_fn = _update_read_fn(request)
     mode = mode_fn()
     state: dict[str, Any] = {
         "install_mode": mode,
@@ -136,10 +201,17 @@ def _engine_update_state(request: Request) -> dict[str, Any]:
     try:
         operation = read_fn()
     except Exception as exc:
+        # The unreadable record is the live problem, so it is what the card is
+        # told. Any reason parked by an earlier run stays parked: what the
+        # record now is, is not knowable from here, and the next read that
+        # can judge is the one to retire it.
         state["operation"] = None
         state["error"] = str(exc)
         return state
     state["operation"] = asdict(operation) if operation is not None else None
+    error = _current_update_error(request, operation)
+    if error:
+        state["error"] = error
     return state
 
 
@@ -192,18 +264,49 @@ def _update_refusal(
     return None
 
 
+def _park_update_error(
+    request: Request,
+    before: engine_update.Operation | None,
+    exc: engine_update.UpdateError,
+) -> None:
+    """Make a failure that wrote no record visible through the status route.
+
+    Only when the record did not move. A record the coordinator wrote itself
+    names the phase that broke and is the truth about the run; attaching a
+    second, contradicting message to the same response would leave the card
+    holding two answers to one question.
+    """
+    after = _read_operation(request)
+    if after is not None and _operation_fingerprint(after) != _operation_fingerprint(before):
+        request.app.state.engine_update_error = ""
+        request.app.state.engine_update_error_for = ""
+        return
+    request.app.state.engine_update_error = str(exc)
+    request.app.state.engine_update_error_for = _operation_fingerprint(after)
+
+
 def _start_update_task(request: Request, fn: Callable[..., Any], *args: Any) -> None:
     """Run a long update half in a thread, holding a reference to the task.
 
     ``UpdateError`` — and the ``UpdateInProgress`` that subclasses it — is the
-    coordinator's own way of reporting a failure: it leaves a ``failed`` record
-    naming the phase that broke, which is where the card reads the truth. So
-    the thread only has to not take the event loop down with it.
+    coordinator's own way of reporting a failure, and the 202 that started the
+    run has already gone back by the time it raises. Most of the time it
+    leaves a ``failed`` record naming the phase that broke, which is where the
+    card reads the truth. But it also raises *before* any record exists: a
+    latest-version lookup that failed, a version that is not a release, an
+    engine already on the target, a lock that could not be taken. Nothing was
+    202'd for those but a run, and swallowing them leaves the card polling a
+    null record with no reason attached, so the reason is parked on
+    ``app.state`` for ``_engine_update_state`` to serve. The thread must also
+    not take the event loop down with it.
     """
 
     async def _run() -> None:
-        with contextlib.suppress(engine_update.UpdateError):
+        before = _read_operation(request)
+        try:
             await asyncio.to_thread(fn, *args)
+        except engine_update.UpdateError as exc:
+            _park_update_error(request, before, exc)
 
     task = asyncio.create_task(_run())
     request.app.state.engine_update_task = task
@@ -228,16 +331,28 @@ async def update_stage_endpoint(request: Request) -> JSONResponse:
     environment, so it runs in the background and the card polls
     ``/api/update/status`` for progress.
     """
-    state = _engine_update_state(request)
-    refusal = _update_refusal(request, state, record_blocks=True)
-    if refusal is not None:
-        return refusal
-
+    # The body first, and this is the load-bearing order: the guard below and
+    # the task registration that follows it are the only thing standing between
+    # two clicks of "Stage" and two engines building the same release. An
+    # ``await`` between them opens the window the body read used to sit in —
+    # a second request passes a guard whose job is not registered yet, gets its
+    # own 202, and the first one registers a second job over the same record,
+    # lock and staged env. So nothing between here and `_start_update_task`
+    # awaits, and a request whose body is still arriving cannot hold a job
+    # slot it has not finished claiming.
     version: str | None = None
     with contextlib.suppress(ValueError):
         body = await request.json()
         if isinstance(body, dict):
             version = str(body.get("version") or "").strip() or None
+
+    # From here to the task registration there is no await, so the guard sees
+    # every job that is already registered and the registration itself cannot
+    # be interleaved with another request's guard.
+    state = _engine_update_state(request)
+    refusal = _update_refusal(request, state, record_blocks=True)
+    if refusal is not None:
+        return refusal
 
     stage_fn: Callable[..., Any] = (
         getattr(request.app.state, "engine_update_stage", None) or engine_update.stage_update
@@ -253,6 +368,10 @@ async def update_apply_endpoint(request: Request) -> JSONResponse:
     swap to a detached job, so the connection this came in on would die
     mid-flight even if it were held open.
     """
+    # No body to read, so the guard and the registration below are already one
+    # synchronous block — the same invariant `update_stage_endpoint` has to
+    # arrange around its body read. Keep it that way: anything awaited between
+    # them is the double-start window again.
     state = _engine_update_state(request)
     refusal = _update_refusal(request, state, record_blocks=False)
     if refusal is not None:
