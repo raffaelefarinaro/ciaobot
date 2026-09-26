@@ -113,8 +113,6 @@ const clientHostUrl = ref('')
 const clientHasSession = ref(false)
 const switchingToHost = ref(false)
 
-const showStartup = computed(() => !startupDone.value && !skipped.value)
-
 // An engine that stops answering (crash, `ciao service stop`, reboot) used to
 // leave a loaded tab with no honest state: API calls failed one at a time and
 // the WebSocket backed off silently. The monitor reports `unreachable` only
@@ -125,13 +123,24 @@ const engineRetrying = ref(false)
 const engineHost = window.location.host
 const engineMonitor = createEngineMonitor({
   isUpdating: () => projectStore.serverRestarting,
-  onChange: (s) => { engineState.value = s },
+  onChange: (s) => {
+    const prev = engineState.value
+    engineState.value = s
+    const wasDown = prev === 'unreachable' || prev === 'updating'
+    if (wasDown && s === 'booting') { startupDone.value = false; skipped.value = false }   // show boot progress again
+    if (wasDown && (s === 'ready' || s === 'booting')) projectStore.reconnectNow()
+  },
 })
+const engineUnreachable = computed(() => engineState.value === 'unreachable' || engineState.value === 'updating')
+
+// A cold launch with the engine down never gets a startup answer, so the boot
+// view would have nothing to show: the curtain replaces it whenever the engine
+// is unreachable (it then has to boot out loud before we trust it), and the two
+// are never on screen together.
+const showStartup = computed(() => !startupDone.value && !skipped.value && !engineUnreachable.value)
 // Over the app, never replacing it: the route, its scroll position and its
 // in-memory state have to survive the outage.
-const showEngineOffline = computed(() =>
-  !showStartup.value && (engineState.value === 'unreachable' || engineState.value === 'updating'),
-)
+const showEngineOffline = computed(() => engineUnreachable.value)
 async function retryEngine() {
   engineRetrying.value = true
   try { await engineMonitor.retry() } finally { engineRetrying.value = false }
@@ -278,6 +287,7 @@ onUnmounted(() => {
 
 watch(showStartup, (show) => {
   if (!show) stopPolling()
+  else if (!pollTimer) void pollStartup().then(scheduleNextPoll)
 })
 </script>
 

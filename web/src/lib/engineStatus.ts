@@ -84,7 +84,14 @@ export function createEngineMonitor(opts: EngineMonitorOptions) {
     // probe settles; whichever is last owns the one live timer.
     if (timer) clearTimeout(timer)
     const delay = state === 'ready' && failures === 0 ? HEALTHY_INTERVAL_MS : RECOVERY_INTERVAL_MS
-    timer = setTimeout(async () => { timer = null; await tick(); schedule() }, delay)
+    // `catch` + `finally`, not a bare await: a probe that rejects (a stubbed
+    // fetch, a browser that throws on the abort) would leave the loop dead and
+    // the curtain up forever with nothing left to retry from, and the rejection
+    // would surface as an unhandled error rather than as a failed probe.
+    timer = setTimeout(async () => {
+      timer = null
+      try { await tick() } catch { /* the next round re-asks the engine */ } finally { schedule() }
+    }, delay)
   }
   return {
     start() { if (!stopped) return; stopped = false; schedule() },

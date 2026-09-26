@@ -13,9 +13,19 @@ export function pushSupported(): boolean {
   return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
 }
 
+/** How long to wait for `navigator.serviceWorker.ready`. The promise never
+ *  settles without a registration, and every caller here is UI state, so an
+ *  unbounded wait would freeze the setup and notifications cards forever. */
+export const SW_READY_TIMEOUT_MS = 3000
+
 async function getRegistration(): Promise<ServiceWorkerRegistration | null> {
   if (!('serviceWorker' in navigator)) return null
-  return (await navigator.serviceWorker.getRegistration()) || (await navigator.serviceWorker.ready)
+  const existing = await navigator.serviceWorker.getRegistration()
+  if (existing) return existing
+  return await Promise.race([
+    navigator.serviceWorker.ready,
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), SW_READY_TIMEOUT_MS)),
+  ])
 }
 
 export async function currentSubscription(): Promise<PushSubscription | null> {
@@ -45,6 +55,14 @@ export async function enablePush(): Promise<void> {
     applicationServerKey: urlBase64ToUint8Array(public_key),
   })
   await api.post('/api/push/subscribe', { subscription: sub.toJSON() })
+}
+
+/** Send the test notification to this browser's own subscription. False when not subscribed. */
+export async function sendTestNotification(): Promise<boolean> {
+  const sub = await currentSubscription()
+  if (!sub) return false
+  await api.post('/api/push/test', { endpoint: sub.endpoint })
+  return true
 }
 
 export async function disablePush(): Promise<void> {

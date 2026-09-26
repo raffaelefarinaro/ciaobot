@@ -127,6 +127,7 @@ jobs:
         run: |
           gh release upload "$TAG" \
             install.sh \
+            scripts/install-engine.sh \
             ciaobot-installer-verify_aarch64 \
             Ciaobot_*_aarch64.app.tar.gz \
             Ciaobot_*_aarch64.app.tar.gz.sig \

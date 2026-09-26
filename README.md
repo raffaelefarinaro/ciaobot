@@ -20,6 +20,14 @@ Open `http://localhost:8443` and follow the setup wizard. It will help you choos
 
 During setup, choose the folder where Ciaobot should work. It can be a new folder or an existing one with notes and memories. Ciaobot creates or adopts the vault there and can help migrate existing memories when needed. The folder remains yours: you can keep it under version control, open it in Obsidian or a text editor, and reuse it with Claude Code, opencode, or another CLI.
 
+### Engine only (no desktop app)
+
+```bash
+curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install-engine.sh | sh
+```
+
+Installs the engine with uv, starts it as a LaunchAgent, and prints a one-time link to open the web app.
+
 ### Connect your agent
 
 Ciaobot does not replace the agent CLI or ask you to create a second model account. It runs the CLI you have already authenticated:
