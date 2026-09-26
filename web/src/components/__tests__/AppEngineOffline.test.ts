@@ -149,6 +149,24 @@ describe('engine offline screen wiring', () => {
     expect(wrapper.find('.engine-offline-stub').exists()).toBe(false)
   })
 
+  it('shows the curtain when the engine dies again while booting', async () => {
+    // This is reachable in an already-loaded tab: after an outage the engine
+    // comes back `booting`, the boot view returns, and a second crash lands
+    // there. A stale boot view has no Retry and no recovery hint, so an
+    // unreachable engine always gets the curtain instead.
+    const wrapper = await mountApp({ StartupView: startupStub })
+
+    engine.onChange?.('unreachable')
+    await nextTick()
+    engine.onChange?.('booting')
+    await nextTick()
+    engine.onChange?.('unreachable')
+    await nextTick()
+
+    expect(wrapper.find('.engine-offline-stub').exists()).toBe(true)
+    expect(wrapper.find('.startup-stub').exists()).toBe(false)
+  })
+
   it('nudges sockets when the engine recovers', async () => {
     await mountApp()
     const nudge = vi.spyOn(useProjectStore(), 'reconnectNow')

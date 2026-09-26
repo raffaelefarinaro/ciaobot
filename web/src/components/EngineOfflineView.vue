@@ -73,7 +73,9 @@ function onKeydown(event: KeyboardEvent) {
     else if (!event.shiftKey && (active === last || !root.contains(active))) { event.preventDefault(); first.focus() }
     return
   }
-  if (root.contains(event.target as Node)) return   // Enter/Space on our own buttons
+  // Our own buttons keep their native Enter/Space activation (a default
+  // action, unaffected by stopping propagation), but no app listener may see the key.
+  if (root.contains(event.target as Node)) { event.stopImmediatePropagation(); return }
   event.preventDefault()
   event.stopImmediatePropagation()
 }

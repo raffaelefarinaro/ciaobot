@@ -119,6 +119,27 @@ describe('engine offline screen', () => {
     }
   })
 
+  it('suppresses global shortcuts while a curtain button has focus', () => {
+    // Retry takes focus on mount and the Tab trap keeps focus in there, so the
+    // keys the app listens for arrive from *inside* the curtain: with the key
+    // let through there, pressing 1 on Retry switches workspace behind it.
+    const wrapper = mount(EngineOfflineView, {
+      props: { ...baseProps },
+      attachTo: document.body,
+    })
+    const spy = vi.fn()
+    window.addEventListener('keydown', spy)
+    try {
+      const retry = wrapper.find('.engine-offline-actions .btn-primary').element
+      expect(document.activeElement).toBe(retry)
+      retry.dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true }))
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener('keydown', spy)
+    }
+    wrapper.unmount()
+  })
+
   it('traps Tab focus inside the curtain', () => {
     const wrapper = mount(EngineOfflineView, {
       props: { ...baseProps },

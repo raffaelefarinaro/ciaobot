@@ -106,10 +106,6 @@ const overallReady = ref(false)
 const serverVersion = ref('')
 const skipped = ref(false)
 const startupDone = ref(false)
-/** Set once /api/startup-status has answered at all. Without it a cold launch
- *  with the engine down never learns anything from the poll, and the boot view
- *  would sit there empty instead of the recovery curtain. */
-const startupReached = ref(false)
 const clientMode = ref(false)
 const clientStateUnknown = ref(false)
 const canUseDeviceControls = isLoopbackPage()
@@ -138,16 +134,13 @@ const engineMonitor = createEngineMonitor({
 const engineUnreachable = computed(() => engineState.value === 'unreachable' || engineState.value === 'updating')
 
 // A cold launch with the engine down never gets a startup answer, so the boot
-// view would have nothing to show: hand over to the curtain instead, unless the
-// engine has since come back (it then has to boot out loud before we trust it).
-const showStartup = computed(() =>
-  !startupDone.value && !skipped.value && !(engineUnreachable.value && !startupReached.value),
-)
+// view would have nothing to show: the curtain replaces it whenever the engine
+// is unreachable (it then has to boot out loud before we trust it), and the two
+// are never on screen together.
+const showStartup = computed(() => !startupDone.value && !skipped.value && !engineUnreachable.value)
 // Over the app, never replacing it: the route, its scroll position and its
 // in-memory state have to survive the outage.
-const showEngineOffline = computed(() =>
-  engineUnreachable.value && (!showStartup.value || !startupReached.value),
-)
+const showEngineOffline = computed(() => engineUnreachable.value)
 async function retryEngine() {
   engineRetrying.value = true
   try { await engineMonitor.retry() } finally { engineRetrying.value = false }
@@ -219,7 +212,6 @@ async function pollStartup() {
       return
     }
     const data = await res.json()
-    startupReached.value = true
     if (data.version && serverVersion.value !== data.version) {
       serverVersion.value = data.version
     }
