@@ -41,6 +41,7 @@ from ciao.providers.opencode import (
     compose_system,
     config_placeholder_problems,
     error_text,
+    memory_pass_guardrail_rules,
     model_accepts_images,
     missing_required_paths,
     mode_settings,
@@ -307,6 +308,52 @@ def test_readonly_agent_rules_scope(tmp_path: Path):
     )
 
 
+# ── memory-pass guardrails ──────────────────────────────────────────────
+# The end-of-conversation memory pass runs as an attended `bypass` chat, but
+# a blanket `allow` is the wrong ruleset for it: the pass edits the vault and
+# needs nothing else. opencode also ignores `disallowed_tools`, so the only
+# place a stricter ruleset can live is the session's own permission set.
+
+
+def test_memory_pass_rule_is_an_allow_list_that_denies_search_and_mcp():
+    rules = memory_pass_guardrail_rules()
+
+    # Deny-all first: opencode resolves last-match-wins, so every carve-out has
+    # to follow the wildcard. That wildcard is also what blocks MCP — its
+    # permission union has no `mcp` action to name.
+    assert rules[0] == {"action": "*", "resource": "*", "effect": "deny"}
+
+    allowed = {rule["action"] for rule in rules if rule["effect"] == "allow"}
+    # What a pass actually needs: read and edit the vault, and shell out to
+    # `ciao vault search` because a search cannot be scoped to the vault.
+    assert {
+        "read",
+        "edit",
+        "write",
+        "shell",
+        "external_directory",
+        "question",
+    } <= allowed
+    # Search is denied outright, not left at the default `ask`: 7 of 12
+    # opencode agent chats in the #594 experiment stopped on that card, and V2
+    # sends the pattern as the resource so it cannot be scoped anyway.
+    assert not allowed & {"glob", "grep"}
+    for action in ("glob", "grep"):
+        assert next(
+            rule["effect"] for rule in reversed(rules) if rule["action"] == action
+        ) == "deny"
+    # gws skills are denied by name even though `skill` is allowed, so the
+    # vault skills around them still run.
+    assert {"action": "skill", "resource": "gws-*", "effect": "deny"} in rules
+    # Every grant is a bare `*` resource, so an action nobody allowed — an
+    # MCP call among them — matches no allow and falls through to the deny.
+    assert {rule["resource"] for rule in rules if rule["effect"] == "allow"} == {"*"}
+    # The credential denies come last so nothing above can outrank them.
+    assert rules[len(rules) - len(opencode_credential_deny_rules()):] == (
+        opencode_credential_deny_rules()
+    )
+
+
 @pytest.mark.parametrize("mode", ["plan", "bypass"])
 def test_session_settings_prefers_custom_rules(tmp_path: Path, mode: BridgeMode):
     request = AgentRequest(prompt="p", model="m", mode=mode, provider="opencode")
@@ -323,6 +370,30 @@ def test_session_settings_prefers_custom_rules(tmp_path: Path, mode: BridgeMode)
     assert agent == "build"
     assert rules == custom
     assert rules is not custom
+
+
+def test_session_settings_uses_the_guardrail_for_a_memory_pass(tmp_path: Path):
+    plain = OpencodeProvider(tmp_path)
+    request = AgentRequest(
+        prompt="p", model="m", mode="bypass", provider="opencode", memory_pass=True
+    )
+
+    # A pass takes the allow-list instead of bypass's blanket `allow`, so the
+    # marker — not the mode — is what selects the guardrail.
+    assert plain._session_settings(request) == (
+        "build",
+        memory_pass_guardrail_rules(plain._runtime_root(), plain.workspace_root),
+    )
+
+    # An ordinary chat in the same mode is untouched.
+    ordinary = AgentRequest(prompt="p", model="m", mode="bypass", provider="opencode")
+    assert plain._session_settings(ordinary) == mode_settings("bypass")
+
+    # A caller-supplied ruleset still wins: it is the read-only memory agent,
+    # not a pass, and it is not running a Ciaobot mode at all.
+    custom = [{"action": "*", "resource": "*", "effect": "deny"}]
+    scoped = OpencodeProvider(tmp_path, permission_rules=custom)
+    assert scoped._session_settings(request) == ("build", custom)
 
 
 class _SessionResponse:

@@ -503,6 +503,50 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         tracker.fail("recover_memory_receipts", "receipt recovery failed")
         logger.exception("Memory receipt recovery failed")
 
+    # An engine update interrupted by a reboot, a logout or a killed updater job
+    # leaves its record in a post-move phase with the env moved aside and
+    # nothing resuming it: the `ciao` shim and the LaunchAgent can point into a
+    # half-installed env, and launchd's `KeepAlive` on `com.ciao.server` will
+    # start it anyway. `apply_update` installs a durable `com.ciao.recover`
+    # LaunchAgent for exactly that reason, which is the half that works when
+    # this step cannot run at all — the crash window where the live env is
+    # renamed aside leaves the engine's own program missing, so launchd cannot
+    # get far enough to reach this line. This is the fast path for the cases
+    # where the engine *does* come back: a clean reboot after a rollback
+    # started, or a crash in a post-move phase the new env can still boot from.
+    # It only *bootstraps* the detached `com.ciao.updater` job that does the
+    # rollback — this process cannot: it is the engine being booted out, and
+    # moving the env it is running out of from under itself is how a recovery
+    # turns into a second outage. So this never waits on the recovery, only on
+    # the job launch. macOS-only because the swap is launchd's; the state dir is
+    # absent elsewhere, and the call is then a cheap no-op.
+    if sys.platform == "darwin":
+        tracker.start("recover_engine_update")
+        try:
+            from ciao.engine_update import recover_interrupted_apply
+
+            recovered = await asyncio.to_thread(recover_interrupted_apply)
+            if recovered is None:
+                tracker.done("recover_engine_update")
+            else:
+                # Deliberately not "handed to a recovery job": returning a record
+                # is not the same thing as scheduling one. A `com.ciao.updater`
+                # that is still running means a live swap owns that record, and
+                # recovery stood down for it — announcing a handoff that did not
+                # happen sends an operator looking for a job that was never
+                # loaded. `recover_interrupted_apply` logs which of the three
+                # answers it took (job bootstrapped, job that would not load,
+                # stood down for a live swap) at the same level.
+                logger.warning(
+                    "Interrupted engine update %s found at startup in phase %s",
+                    recovered.id,
+                    recovered.phase,
+                )
+                tracker.done("recover_engine_update", recovered.phase)
+        except Exception:
+            tracker.fail("recover_engine_update", "engine update recovery failed")
+            logger.exception("Engine update recovery failed")
+
     # The PWA ships pre-built in the installed package; workspaces never
     # contain app source, so there is no frontend rebuild at startup.
 

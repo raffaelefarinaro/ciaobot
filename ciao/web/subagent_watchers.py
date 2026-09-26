@@ -535,6 +535,24 @@ class SubagentWatchers:
             if (chat_id, task.agent_id) not in self._cli_task_wakes_sent
         ]
 
+    def cli_task_candidates(self, chat: ChatInfo) -> list[SubagentInfo]:
+        """*chat*'s running CLI tasks that this process has not woken for.
+
+        The one resolution step both wake paths need: the boot-time
+        ``sweep_orphaned_cli_tasks`` and the cancelled-drain replay. Empty when
+        the session file is gone, when nothing is still running in it, or when
+        every task in it was already woken this process.
+        """
+        path = subagent_tracking.find_parent_session_file(
+            chat.session_id,
+            self._host._config.workspace_root,
+            agent_root=self._host._agent_root_for_chat(chat.chat_id),
+        )
+        if path is None:
+            return []
+        state = subagent_tracking.parse_session_subagents(path)
+        return self.unwoken_tasks(chat.chat_id, subagent_tracking.running_tasks(state))
+
     def wake_for_dead_cli_tasks(
         self, parent: ChatInfo, project_id: str, tasks: list[SubagentInfo]
     ) -> None:
@@ -586,17 +604,7 @@ class SubagentWatchers:
                     > _ORPHANED_CLI_TASK_SWEEP_MAX_AGE
                 ):
                     continue
-                path = subagent_tracking.find_parent_session_file(
-                    chat.session_id,
-                    self._host._config.workspace_root,
-                    agent_root=self._host._agent_root_for_chat(chat.chat_id),
-                )
-                if path is None:
-                    continue
-                state = subagent_tracking.parse_session_subagents(path)
-                tasks = self.unwoken_tasks(
-                    chat.chat_id, subagent_tracking.running_tasks(state)
-                )
+                tasks = self.cli_task_candidates(chat)
                 if not tasks:
                     continue
                 woken += 1

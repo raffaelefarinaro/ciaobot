@@ -192,4 +192,35 @@ describe('HomeReviewSummary', () => {
     expect(router.push).toHaveBeenCalledWith('/schedules')
     wrapper.unmount()
   })
+
+  it('shows the open memory pass link only when a pass exists', async () => {
+    const projects = useProjectStore()
+    // The Memory project is hidden from the sidebar, so this rail is the way in
+    // to a pass that is queued, running, or waiting on the owner.
+    projects.projects = [
+      ...projects.projects,
+      { project_id: 'personal-memory', name: 'Memory', workspace: 'personal', kind: 'memory' },
+    ] as unknown as typeof projects.projects
+
+    const none = mount(HomeReviewSummary)
+    expect(none.findAll('.home-review-link').map(l => l.text())).toEqual(['Open Memory'])
+    none.unmount()
+
+    projects.chats = [
+      { chat_id: 'pass-1', project_id: 'personal-memory', title: 'Memory pass · earlier', archived: true, last_activity_at: '2026-09-20T10:00:00Z' },
+      { chat_id: 'pass-2', project_id: 'personal-memory', title: 'Memory pass · current', archived: false, last_activity_at: '2026-09-21T10:00:00Z' },
+    ] as unknown as typeof projects.chats
+
+    const some = mount(HomeReviewSummary)
+    const links = some.findAll('.home-review-link')
+    // Distinct wording from the /memory view link directly above it.
+    expect(links.map(l => l.text())).toEqual(['Open Memory', 'Open memory pass'])
+
+    const switchChat = vi.spyOn(projects, 'switchChat').mockResolvedValue(undefined)
+    await links[1].trigger('click')
+    expect(switchChat).toHaveBeenCalledWith('pass-2')
+    // The archived pass is not what the link opens.
+    expect(switchChat).not.toHaveBeenCalledWith('pass-1')
+    some.unmount()
+  })
 })

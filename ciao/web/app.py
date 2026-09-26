@@ -138,6 +138,7 @@ from ciao.web.routes_api import (
     memory_receipt_undo,
     memory_receipt_detail,
     memory_receipts,
+    memory_entity_types,
     proposal_action,
     proposal_preview,
     proposals_batch,
@@ -338,6 +339,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/memory/receipts", memory_receipts, methods=["GET"]),
         Route("/api/memory/receipts/{id}", memory_receipt_detail, methods=["GET"]),
         Route("/api/memory/receipts/{id}/undo", memory_receipt_undo, methods=["POST"]),
+        Route("/api/memory/entity-types", memory_entity_types, methods=["GET", "PATCH"]),
         Route("/api/workspace-health", workspace_health_endpoint, methods=["GET"]),
         Route("/api/workspace-health/fix", workspace_health_fix_endpoint, methods=["POST"]),
         # Home-screen operator-action strip.

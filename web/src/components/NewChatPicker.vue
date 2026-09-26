@@ -60,6 +60,7 @@ import { pendingNewChat } from '../lib/newChat'
 import { useProjectStore } from '../stores/projects'
 import { workspaceLabel } from '../lib/workspaceLabel'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
+import { isMemoryProject } from '../lib/memoryPass'
 
 interface PickerItem {
   id: string
@@ -84,6 +85,13 @@ const previewWorkspace = ref<string>(store.activeWorkspace)
 const projectItems = computed<PickerItem[]>(() => {
   return store.projects
     .filter(p => p.workspace === previewWorkspace.value)
+    // The Memory project is app-owned and hidden from the sidebar, so it must
+    // not reappear here: this picker is the chooser behind Home's composer chip,
+    // both "+ new" affordances, Cmd+T and Option+N, and a chat started there
+    // would sit in a project the user cannot then find or move out of. Mirrors
+    // the `workspaceProjects` filter rather than reading it, because the picker
+    // previews a workspace the app is not in.
+    .filter(p => !isMemoryProject(p))
     .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
     .map(p => ({
       id: p.project_id,

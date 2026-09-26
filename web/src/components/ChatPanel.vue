@@ -1090,6 +1090,17 @@
               @click="retryArchiveSteps"
             >{{ archiveRetrying ? 'Retrying…' : 'Retry unfinished steps' }}</button>
           </div>
+          <!-- The memory pass this chat spawned, if one did. The pass lives in
+               a project the sidebar hides, so this is the durable way back to
+               it — and the one thing here that opens another chat rather than
+               re-running work on this one, which is why it stays out of the
+               retry row above. -->
+          <button
+            v-if="archiveMemoryPassChatId"
+            class="btn-sm archive-memory-pass-btn"
+            type="button"
+            @click="openMemoryPass"
+          >Open memory pass</button>
         </div>
       </template>
       <template v-else>
@@ -1354,6 +1365,7 @@ import {
   postprocessNeedsRetry,
   postprocessSummary,
 } from '../lib/postprocessView'
+import { memoryPassChatId } from '../lib/memoryPass'
 import { useFileViewerStore } from '../stores/fileViewer'
 // Subagent transcripts carry `turn_index` (the user turn that dispatched
 // them, parsed server-side from the session JSONL), so each panel anchors
@@ -1712,6 +1724,11 @@ const archiveTidyFailed = computed(() => postprocessFailed(archivePostprocess.va
 // completion (crash, provider failure) is retryable from here, so the user does
 // not have to hunt for the Home lane.
 const archiveNeedsRetry = computed(() => postprocessNeedsRetry(archivePostprocess.value))
+// The memory pass this chat spawned, recorded on its own postprocess record
+// because the pass outlives the archive job that queued it. Present from the
+// moment the pass is enqueued, so the link works while it is still running and
+// after the pass is archived.
+const archiveMemoryPassChatId = computed(() => memoryPassChatId(archivePostprocess.value))
 const archiveRetrying = ref(false)
 async function retryArchiveSteps(): Promise<void> {
   if (archiveRetrying.value) return
@@ -1723,6 +1740,9 @@ async function retryArchiveSteps(): Promise<void> {
   } finally {
     archiveRetrying.value = false
   }
+}
+function openMemoryPass(): void {
+  if (archiveMemoryPassChatId.value) void store.switchChat(archiveMemoryPassChatId.value)
 }
 watch(() => chat.value.provider, () => {
   void loadSlashCommands()
@@ -6467,6 +6487,15 @@ details[open] > .activity-summary::before {
 .archived-postprocess-retry:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+/* The link back to the memory pass this chat spawned. It sits on its own line
+   under the postprocess rows — the pass is a separate chat, not a stage of this
+   one's pipeline, so it reads as its own action. 44px like every control in
+   this footer. */
+.archive-memory-pass-btn {
+  min-height: 44px;
+  min-width: 44px;
 }
 
 .archived-postprocess-dot {
