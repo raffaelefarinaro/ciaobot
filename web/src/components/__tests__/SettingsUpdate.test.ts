@@ -199,6 +199,65 @@ it('offers Apply alone for a staged job, because staging one is refused', async 
   }
 })
 
+it('applies a staged release behind a refusal, because stage would be refused', async () => {
+  vi.useFakeTimers()
+  // A refusal parked against a `staged` record is served for as long as that
+  // record is unchanged, and nothing the card can do moves a `staged` record, so
+  // the reason survives every reload. `/api/update/stage` refuses a non-terminal
+  // record with a 409 by design, which makes Stage an action that could never
+  // succeed — and hiding Apply behind it leaves a downloaded, verified release
+  // stuck until somebody opens a terminal.
+  const { wrapper, post, statusReads } = await mountCard({
+    install_mode: 'installer',
+    can_update: true,
+    operation: operation('staged'),
+    error: 'another engine update is already in progress',
+  })
+  try {
+    // The reason is the newer answer, and it is shown.
+    expect(wrapper.text()).toContain('another engine update is already in progress')
+    // The action is the one the record allows, and it is live: the poll stopped
+    // on the refusal, so nothing is holding the card busy.
+    const apply = button(wrapper, 'Apply update')
+    expect(apply).toBeDefined()
+    expect(apply!.attributes('disabled')).toBeUndefined()
+    expect(buttonLabels(wrapper).filter(label => /stage/i.test(label))).toEqual([])
+
+    await apply!.trigger('click')
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith('/api/update/apply')
+    expect(post.mock.calls.filter(call => call[0] === '/api/update/stage')).toHaveLength(0)
+    // The apply is a run like any other, so it is watched to its own outcome.
+    const afterApply = statusReads()
+    await poll()
+    expect(statusReads()).toBeGreaterThan(afterApply)
+    wrapper.unmount()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('keeps the restored version visible behind a later refusal', async () => {
+  // A rollback is still a rollback after a refusal is parked against its record,
+  // and the version the engine went back to is still the one running. An error
+  // branch that took the whole panel hid that line, so the card could not say
+  // which version the user was actually on.
+  const { wrapper } = await mountCard({
+    install_mode: 'installer',
+    can_update: true,
+    operation: operation('rolled_back', { error: 'the new engine never answered' }),
+    error: 'another engine update is already in progress',
+  })
+  try {
+    expect(wrapper.text()).toContain('another engine update is already in progress')
+    expect(wrapper.text()).toContain('Back on v0.19.0')
+    // Nothing claims success over a run that did not apply.
+    expect(wrapper.text()).not.toContain('up to date')
+  } finally {
+    wrapper.unmount()
+  }
+})
+
 it('recovers from a refusal that never wrote a record', async () => {
   vi.useFakeTimers()
   // A stage POST is answered 202 before the record exists, so release
@@ -389,6 +448,56 @@ it('keeps polling a run whose record has not landed yet', async () => {
     expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
 
     // Read four: the run's outcome, which ends the poll and the panel.
+    await poll()
+    expect(statusReads()).toBe(4)
+    expect(buttonLabels(wrapper)).toContain('Apply update')
+
+    const settled = statusReads()
+    await poll()
+    expect(statusReads()).toBe(settled)
+    wrapper.unmount()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('does not end a new run on the refusal the previous one left parked', async () => {
+  vi.useFakeTimers()
+  // A served `error` is not scoped to the run this card started: a parked reason
+  // lives on the server and is served for as long as the record it was parked
+  // against is unchanged. So run 1's refusal is still on the wire through run
+  // 2's pre-record window — the lock, the release lookup and the removal of any
+  // previous staged environment all happen before the coordinator's first write.
+  // Treating that reason as run 2's own answer stops the poll while the run goes
+  // on staging invisibly, behind a panel with a re-enabled button whose second
+  // click is a 409, because by then the run really is in flight.
+  const parked = 'another engine update is already in progress'
+  const { wrapper, post, statusReads } = await mountCard([
+    { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the wheel could not be built' }), error: parked },
+    { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the wheel could not be built' }), error: parked },
+    { install_mode: 'installer', can_update: true, operation: operation('downloading') },
+    { install_mode: 'installer', can_update: true, operation: operation('staged') },
+  ])
+  try {
+    expect(statusReads()).toBe(1)
+    // The parked reason offers the action, and the action is what starts run 2.
+    expect(buttonLabels(wrapper)).toContain('Stage update')
+    await button(wrapper, 'Stage update')!.trigger('click')
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith('/api/update/stage')
+
+    // Read two: the same parked reason against the same unchanged record. It is
+    // not this run's answer, so the poll has to still be alive afterwards.
+    await poll()
+    expect(statusReads()).toBe(2)
+
+    // Read three: this run's own record, in flight, in the card.
+    await poll()
+    expect(statusReads()).toBe(3)
+    expect(wrapper.find('.update-progress-phase').text()).toBe('Downloading the release')
+
+    // Read four: the run's outcome, which ends the poll and leaves the panel on
+    // the one action a staged record allows.
     await poll()
     expect(statusReads()).toBe(4)
     expect(buttonLabels(wrapper)).toContain('Apply update')

@@ -247,6 +247,24 @@ describe('inline (a run that is not a takeover)', () => {
     wrapper.unmount()
   })
 
+  it('stops the boot timer when a record arrives after the mount', async () => {
+    vi.useFakeTimers()
+    // The boot path passes no phase, so the animation starts; a record can still
+    // land afterwards, and then the rows belong to it. A timer left running under
+    // a record-driven row set would move rows the record is the only witness to.
+    const wrapper = mount(UpdateProgressView, { props: { version: '0.20.0' } })
+    await nextTick()
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+
+    await wrapper.setProps({ phase: 'downloading' })
+    expect(vi.getTimerCount()).toBe(0)
+
+    vi.advanceTimersByTime(900 * 3)
+    await nextTick()
+    expect(liveRows(wrapper)).toEqual(['downloading the release'])
+    wrapper.unmount()
+  })
+
   it('leaves the boot screen exactly as it was', () => {
     const wrapper = mount(UpdateProgressView, { props: { version: '0.20.0' } })
     // `inline` is the caller's choice, and absent must mean the boot screen is

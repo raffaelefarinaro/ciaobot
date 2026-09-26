@@ -249,15 +249,43 @@
             <!-- A coordinator refusal that wrote no record of its own: a release
                  lookup, a lock, an engine already on the target. Nothing will
                  ever arrive on a poll for a run that left no record, so the
-                 card says why and offers the same action again. Text alone
-                 would be a dead end until the page reloaded. A refusal parked
-                 against an existing record answers here too: the served reason
-                 is always the newer one, because the parked reason is only
-                 served while the record it was parked against is unchanged. -->
+                 card says why and offers the action the record allows. Text
+                 alone would be a dead end until the page reloaded. A refusal
+                 parked against an existing record answers here too: the served
+                 reason is always the newer one, because the parked reason is
+                 only served while the record it was parked against is
+                 unchanged. -->
             <template v-if="updateStatus?.error">
               <p class="hint hint--warn hint--spaced">{{ updateStatus.error }}</p>
+              <!-- Parking a reason changes nothing about the record it was
+                   parked against, so a rollback is still a rollback and the
+                   version it went back to is still the one now running. -->
+              <p v-if="engineUpdateRolledBack && engineUpdateOperation?.from_version" class="hint hint--spaced">
+                Back on v{{ engineUpdateOperation.from_version }}.
+              </p>
               <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling || nodeStatusUnknown">
+                <!-- The action has to be the one the record allows. A `staged`
+                     record is not terminal, so `/api/update/stage` refuses it
+                     with a 409 by design (`_update_refusal`), forever: a panel
+                     that answered a refusal with Stage alone could never apply
+                     the release it had already downloaded, and the parked
+                     reason lives on the server, so a reload kept it. Apply is
+                     what a `staged` record allows; a terminal record, or no
+                     record at all, is where a new run may be started. -->
+                <button
+                  v-if="engineUpdateStage === 'staged'"
+                  class="btn-primary"
+                  @click="doEngineUpdateApply"
+                  :disabled="updateActionPending || updatePolling || nodeStatusUnknown"
+                >
+                  {{ updateActionPending ? 'Applying…' : 'Apply update' }}
+                </button>
+                <button
+                  v-else
+                  class="btn-primary"
+                  @click="doEngineUpdateStage"
+                  :disabled="updateActionPending || updatePolling || nodeStatusUnknown"
+                >
                   {{ updateActionPending ? 'Staging…' : (packageStatus?.update_available ? 'Stage update' : 'Try again') }}
                 </button>
               </div>
@@ -4666,6 +4694,12 @@ let updatePollTimer: number | null = null
 let updateRunStarted = false
 let updateRunSeenInFlight = false
 let updateRunStartedAt = 0
+// The refusal the card was already holding when it asked for this run. A parked
+// reason lives on the server and is served for as long as the record it was
+// parked against is unchanged, so the previous run's refusal is still on the
+// wire during this run's pre-record window and is not this run's answer. Empty
+// when the card held no refusal, which makes any served error this run's own.
+let updateRunErrorAtStart = ''
 // A ceiling on the pre-record window, never the end condition: a run that lands
 // no record and refuses nothing must not leave the card polling forever, but a
 // slow link, a cold DNS or a re-stage of a version whose environment is still on
@@ -4752,11 +4786,17 @@ function reconcileUpdatePoll() {
   }
   const status = updateStatus.value
   if (!status) return
-  // A served error is the run's own answer: it wrote no record, so no later
-  // poll can bring one.
-  if (status.error) {
+  // A served error is this run's own answer only if it is not the one the card
+  // was already holding when it asked: a parked reason is served for as long as
+  // the record it was parked against is unchanged, so the previous run's refusal
+  // is still on the wire during this run's pre-record window. Reading that as
+  // the end of this run stopped the poll while it staged invisibly, behind a
+  // panel showing the previous run's reason with a re-enabled button — and that
+  // button's second click is a 409, because by then the run really is in flight.
+  if (status.error && status.error !== updateRunErrorAtStart) {
     updateRunStarted = false
     updateRunSeenInFlight = false
+    updateRunErrorAtStart = ''
     stopUpdatePoll()
     return
   }
@@ -4765,6 +4805,7 @@ function reconcileUpdatePoll() {
   if (updateRunSeenInFlight) {
     updateRunStarted = false
     updateRunSeenInFlight = false
+    updateRunErrorAtStart = ''
     stopUpdatePoll()
     return
   }
@@ -4775,6 +4816,7 @@ function reconcileUpdatePoll() {
   // the page reloaded.
   if (updateRunStarted && Date.now() - updateRunStartedAt >= UPDATE_RUN_GRACE_MS) {
     updateRunStarted = false
+    updateRunErrorAtStart = ''
     stopUpdatePoll()
   }
 }
@@ -4786,13 +4828,16 @@ function reconcileUpdatePoll() {
  * starts polls too, and it is not the card asking for anything. The
  * seen-in-flight flag resets with it: a new run has to look for its own record,
  * so a flag left over from an earlier run must not end this one on its first
- * read. Neither flag is cleared by `stopUpdatePoll`, so a Settings tab that is
- * left and reopened during the pre-record window keeps watching the run.
+ * read. The refusal the card is holding is captured for the same reason: it is
+ * the previous run's until a different one arrives. Neither flag is cleared by
+ * `stopUpdatePoll`, so a Settings tab that is left and reopened during the
+ * pre-record window keeps watching the run.
  */
 function beginUpdateRun() {
   updateRunStarted = true
   updateRunStartedAt = Date.now()
   updateRunSeenInFlight = false
+  updateRunErrorAtStart = updateStatus.value?.error || ''
 }
 
 function stopUpdatePoll() {

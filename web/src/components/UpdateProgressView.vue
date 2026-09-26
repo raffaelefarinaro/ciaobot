@@ -331,7 +331,18 @@ watch(() => props.finishing, (finishing) => {
 onMounted(() => {
   // The animation belongs to the boot path only. A real job is described by its
   // record, and a timer advancing rows nobody is performing would be a lie.
-  if (props.phase === undefined) advance()
+  if (!props.phase) advance()
+})
+
+// A record can arrive after the mount: the boot screen's first status poll, or
+// any caller that starts with no record and gains one. The rows then belong to
+// that record, so the boot animation stops rather than running underneath a
+// record-driven row set, which is the lie in the other direction — rows moving
+// while the record is the only thing on screen that is not moving.
+watch(() => props.phase, (phase) => {
+  if (!phase) return
+  if (stageTimer) window.clearTimeout(stageTimer)
+  stageTimer = null
 })
 
 onUnmounted(() => {
