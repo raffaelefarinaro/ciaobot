@@ -83,6 +83,13 @@ receipt_before_tool_env=
 # ordinary installer-managed install; it is not one, and this is the flag that
 # says so.
 resume_retiring=0
+# Set when the receipt describes a host hand-over that never finished: a
+# transaction in `started`, `installed_no_start` or `interrupted`. Every one of
+# those phases can be reached with `ciao setup` already done - the engine plist
+# then points at the new tool, which the classifier reports as an ordinary
+# installer-managed engine - so the same window as `resume_retiring` opens for
+# all of them, and the receipt is what says what the run was doing.
+resume_unfinished_host=0
 # Why a settled receipt is not believed, when it names a phase this script
 # settles but the install on this Mac does not match it.
 settled_mismatch=
@@ -102,7 +109,9 @@ Installs the Ciaobot engine for the current user with uv; the PWA is its UI.
                        ~/.local/state/ciaobot/migration/before/, and any failure
                        after the install puts the old engine back. If Ciaobot.app
                        is still running 20s after it is asked to quit, nothing
-                       is changed at all.
+                       is changed at all. A hand-over keeps the workspace that
+                       engine runs in: --workspace may only name that same
+                       existing workspace, and no workspace is ever created.
   --as-host            With --migrate: treat this Mac as the host, even when its
                        node state cannot be read or trusted.
   --as-client URL      With --migrate: treat this Mac as a client of URL, which
@@ -457,6 +466,7 @@ load_migration_receipt() {
     receipt_before_install_receipt=
     receipt_before_tool_env=
     resume_retiring=0
+    resume_unfinished_host=0
     [ -f "$migration_dir/receipt.json" ] || return 0
     if ! "$uv" run --quiet --no-project --python "$PYTHON_VERSION" python -c '
 # migration-receipt-read: validates an existing receipt.json, one field per line
@@ -576,6 +586,39 @@ for name in IMAGES:
         # finishing a retirement rather than installing over the top of it.
         desktop_bootout_done=1
         resume_retiring=1
+    else
+        # A hand-over that never settled. The classifier cannot see it: by the
+        # time the receipt is in one of these phases, `ciao setup` has usually
+        # already repointed the engine plist at the tool this script installed,
+        # and an engine outside a `.app` is an ordinary install as far as the
+        # classifier is concerned. Treating that as "nothing to migrate" drops
+        # the hand-over on the floor - the app's own agent stays loaded next to
+        # the engine that was supposed to replace it, and the receipt never
+        # advances. So the receipt, which still holds the originals, the kind and
+        # the workspace the transaction was started with, is what the next run
+        # finishes from. A `desktop_client` receipt is not in this: a client
+        # never runs `ciao setup`, so the classifier still sees the desktop
+        # engine and dispatches the client path on its own.
+        case "$receipt_phase" in
+            started|installed_no_start|interrupted)
+                case "$receipt_kind" in
+                    desktop_host)
+                        resume_unfinished_host=1
+                        ;;
+                    desktop_invalid)
+                        # A `--as-host` decision the user has to make again on
+                        # this run: with the plist already repointed, the
+                        # classifier cannot recover either the kind or the
+                        # workspace, so the same override is what continues the
+                        # hand-over. Without it the explicit-choice refusal
+                        # stands.
+                        if [ "$as_host" -ne 0 ]; then
+                            resume_unfinished_host=1
+                        fi
+                        ;;
+                esac
+                ;;
+        esac
     fi
 }
 
@@ -937,6 +980,50 @@ validate_client_url() {
     as_client=$client_url
 }
 
+check_host_workspace() {
+    # A host hand-over moves an engine that is *already running*, and the
+    # workspace it runs in is the one that engine's own plist names: the `.env`
+    # with the password and the provider credentials, the runtime root with the
+    # chats, the schedules, the VAPID keys and the push subscriptions. That
+    # directory is what the new engine has to keep, and it is the only thing
+    # this path is allowed to name. So three answers are refused here, while
+    # nothing on this Mac has been touched yet:
+    #   - a `--workspace` that is a different directory, which would create a
+    #     second empty workspace, repoint the service at it, retire the app's
+    #     agent and leave the original - and everything in it - behind, while the
+    #     receipt still named the original;
+    #   - a `--workspace` that is not there, because a hand-over creates no
+    #     workspace: there would be nothing to hand over;
+    #   - a classified workspace that is not an existing one with a `.env` in
+    #     it, which is the same second workspace with an extra `mkdir` in it.
+    # And when the classifier could not recover a workspace at all - an
+    # `--as-host` override on state nobody can read - the one that will be used
+    # has to be named explicitly and has to exist, because a directory this
+    # script invented would be a guess about where a host's data lives.
+    if [ -n "$workspace" ]; then
+        if [ ! -d "$workspace" ]; then
+            fail "--migrate hands the engine that is already running over to this installer, and it never creates a workspace: $workspace does not exist. Re-run without --workspace, or with the workspace Ciaobot.app was using${migrate_workspace:+ ($migrate_workspace)}. Nothing on this Mac has been changed"
+        fi
+        # Resolved, so a path that only looks different - a trailing slash, a
+        # symlink, `..` - is not mistaken for a different directory.
+        workspace=$(CDPATH= cd -- "$workspace" && pwd -P)
+    fi
+    if [ -z "$migrate_workspace" ]; then
+        if [ -z "$workspace" ]; then
+            fail "Ciaobot could not read a workspace for this Mac, so --migrate --as-host has to be told which one to keep: re-run with --migrate --as-host --workspace <the workspace Ciaobot.app was using>. Nothing on this Mac has been changed"
+        fi
+        migrate_workspace=$workspace
+    fi
+    if [ ! -d "$migrate_workspace" ] || [ ! -f "$migrate_workspace/.env" ]; then
+        fail "the workspace the engine being migrated runs in is not a Ciaobot workspace: $migrate_workspace has no .env, so a host hand-over to it would start a second engine with a fresh password and a fresh runtime root next to the real ones. Point --workspace at the workspace Ciaobot.app was using, or re-run without --migrate on a Mac that has never run Ciaobot.app. Nothing on this Mac has been changed"
+    fi
+    migrate_workspace=$(CDPATH= cd -- "$migrate_workspace" && pwd -P)
+    if [ -n "$workspace" ] && [ "$workspace" != "$migrate_workspace" ]; then
+        fail "--migrate hands the engine Ciaobot.app is running over to this installer; it does not move that engine's workspace, and --workspace $workspace is not the workspace it runs in ($migrate_workspace), whose .env, runtime root and chats stay exactly where they are. Re-run without --workspace, or with --workspace $migrate_workspace. Nothing on this Mac has been changed"
+    fi
+    return 0
+}
+
 classify_install() {
     # Reads the state through the *verified* wheel - the only code that has been
     # checked against the signed manifest at this point - and prints one JSON
@@ -965,55 +1052,73 @@ print(state.get("host_url", ""))
             3) migrate_host_url=$field ;;
         esac
     done < "$tmp/classification.txt"
-    case "$migrate_kind" in
-        desktop_host)
-            migrate_path=host
-            ;;
-        desktop_client)
-            migrate_path=client
-            ;;
-        desktop_invalid)
-            # Nobody can say what this Mac writes, so nothing is decided for
-            # the user: the override is the decision, and it is recorded.
-            if [ "$as_host" -ne 0 ]; then
-                migrate_path=host
-            elif [ -n "$as_client" ]; then
-                migrate_path=client
-                migrate_host_url=$as_client
-            else
-                fail "Ciaobot could not tell whether this Mac is the host or a client (node state unreadable). Re-run with --migrate --as-host, or --migrate --as-client https://your-host"
-            fi
-            ;;
-        desktop_stale|engine|none)
-            # Nothing live to migrate: a deleted app, an engine this script
-            # already placed, or a Mac that never ran Ciaobot.app. --migrate is
-            # a no-op and the ordinary install runs.
-            migrate_path=skip
-            ;;
-        *)
-            fail "could not classify this install: unknown kind: $migrate_kind"
-            ;;
-    esac
-    if [ "$resume_retiring" -ne 0 ]; then
-        # The last run stopped while it was retiring the app's own agent, which
-        # means it had already installed the new engine and repointed the engine
-        # plist at it. The classifier reads that as an installer-managed engine -
-        # correctly, on its own - and the ordinary install would leave the app's
-        # agent behind forever, in a receipt that never settles. So this run
-        # finishes the transaction the receipt describes, with the kind and the
-        # workspace that transaction was started with.
+    if [ "$resume_unfinished_host" -ne 0 ]; then
+        # A hand-over the receipt says never finished, on a Mac whose plist now
+        # looks like an ordinary install. The kind and the workspace come from
+        # the transaction, not from what this Mac looks like now, and the
+        # dispatch below never gets to answer `skip` for a Mac that is mid
+        # hand-over.
         migrate_kind=$receipt_kind
         [ -z "$receipt_workspace" ] || migrate_workspace=$receipt_workspace
         migrate_path=host
-        return 0
+    else
+        case "$migrate_kind" in
+            desktop_host)
+                migrate_path=host
+                ;;
+            desktop_client)
+                migrate_path=client
+                ;;
+            desktop_invalid)
+                # Nobody can say what this Mac writes, so nothing is decided for
+                # the user: the override is the decision, and it is recorded.
+                if [ "$as_host" -ne 0 ]; then
+                    migrate_path=host
+                elif [ -n "$as_client" ]; then
+                    migrate_path=client
+                    migrate_host_url=$as_client
+                else
+                    fail "Ciaobot could not tell whether this Mac is the host or a client (node state unreadable). Re-run with --migrate --as-host, or --migrate --as-client https://your-host"
+                fi
+                ;;
+            desktop_stale|engine|none)
+                # Nothing live to migrate: a deleted app, an engine this script
+                # already placed, or a Mac that never ran Ciaobot.app. --migrate is
+                # a no-op and the ordinary install runs.
+                migrate_path=skip
+                ;;
+            *)
+                fail "could not classify this install: unknown kind: $migrate_kind"
+                ;;
+        esac
+        if [ "$resume_retiring" -ne 0 ]; then
+            # The last run stopped while it was retiring the app's own agent, which
+            # means it had already installed the new engine and repointed the engine
+            # plist at it. The classifier reads that as an installer-managed engine -
+            # correctly, on its own - and the ordinary install would leave the app's
+            # agent behind forever, in a receipt that never settles. So this run
+            # finishes the transaction the receipt describes, with the kind and the
+            # workspace that transaction was started with.
+            migrate_kind=$receipt_kind
+            [ -z "$receipt_workspace" ] || migrate_workspace=$receipt_workspace
+            migrate_path=host
+        elif [ "$desktop_live" -ne 0 ] && [ "$migrate_path" = skip ]; then
+            # A live Ciaobot.app was found before verification, and the state it
+            # lives in says there is nothing to take over. Installing anyway would
+            # be the refusal this script exists to avoid, so it stops here with
+            # nothing changed and asks again.
+            fail "Ciaobot.app is running but its engine state could not be read; re-run with --migrate --as-host, or --migrate --as-client https://your-host"
+        fi
     fi
-    if [ "$desktop_live" -ne 0 ] && [ "$migrate_path" = skip ]; then
-        # A live Ciaobot.app was found before verification, and the state it
-        # lives in says there is nothing to take over. Installing anyway would
-        # be the refusal this script exists to avoid, so it stops here with
-        # nothing changed and asks again.
-        fail "Ciaobot.app is running but its engine state could not be read; re-run with --migrate --as-host, or --migrate --as-client https://your-host"
+    # A host hand-over is only ever a hand-over of one particular workspace, so
+    # the workspace it would use is settled here - before the before-images are
+    # taken and before the app is asked to quit - rather than discovered
+    # halfway through, where a `--workspace` that names somewhere else is
+    # already an install that repointed the service.
+    if [ "$migrate_path" = host ]; then
+        check_host_workspace
     fi
+    return 0
 }
 
 refuse_desktop_engine
@@ -1166,9 +1271,11 @@ if [ "$migrate_path" != client ]; then
     if [ -z "$workspace" ]; then
         workspace=
         if [ "$migrate_path" = host ] && [ -n "$migrate_workspace" ]; then
-            # Read out of the plist by the verified wheel: this is the workspace
-            # the engine being replaced runs in, so it is the one the new engine
-            # keeps. Nothing inside it is written.
+            # Read out of the plist by the verified wheel, or out of the receipt
+            # of an unfinished hand-over: either way this is the workspace the
+            # engine being replaced runs in, so it is the one the new engine
+            # keeps, and check_host_workspace has already settled that it is
+            # this one. Nothing inside it is written.
             workspace=$migrate_workspace
             setup_yes=1
         fi
@@ -1181,7 +1288,15 @@ if [ "$migrate_path" != client ]; then
         fi
         [ -n "$workspace" ] || workspace="$HOME/Ciaobot"
     fi
-    mkdir -p "$workspace"
+    if [ "$migrate_path" = host ]; then
+        # No `mkdir` on a host hand-over: check_host_workspace has already proved
+        # the workspace is there, and a directory created here would be a second
+        # one - with a fresh .env and a fresh runtime root - rather than the
+        # workspace whose data this hand-over exists to keep.
+        [ -d "$workspace" ] || fail "the workspace to hand over to is not a directory: $workspace"
+    else
+        mkdir -p "$workspace"
+    fi
     # CDPATH would send `cd` looking for a matching directory elsewhere and print
     # the path it found, so it is cleared for this one command.
     workspace=$(CDPATH= cd -- "$workspace" && pwd -P)

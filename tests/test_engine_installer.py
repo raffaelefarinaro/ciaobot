@@ -347,6 +347,15 @@ with path.open("wb") as handle:
     )
 PLIST
         fi
+        # The interruption that lands *after* setup has repointed the engine
+        # plist and *before* the service is started: the window in which the
+        # classifier reads this Mac as an ordinary installer-managed engine, so
+        # the retry has to recognise the hand-over from its receipt instead.
+        if [ -f "$HOME/interrupt-after-setup" ]; then
+            rm -f "$HOME/interrupt-after-setup"
+            kill -TERM "$PPID"
+            exit 143
+        fi
         ;;
     service)
         if [ -f "$HOME/fail-ciao-service-start" ]; then exit 1; fi
@@ -2065,3 +2074,458 @@ def test_migrate_host_resumes_from_retiring(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert _migration_receipt(harness)["phase"] == "migrated"
     assert not (harness["home"] / "Library/LaunchAgents/Ciaobot.plist").exists()
+
+
+@needs_local_tools
+def test_migrate_host_completes_an_unfinished_no_start_handover(tmp_path: Path) -> None:
+    # A `--migrate --no-start` run installs the tool, repoints `com.ciao.server`
+    # at it and stops, with the app's own agent still in place and a receipt that
+    # says `installed_no_start`. That repointed plist is what makes the retry
+    # hard: the classifier reads it as an ordinary installer-managed engine, so
+    # the ordinary install runs, exits 0, and leaves Ciaobot.app's own agent
+    # loaded next to the engine that was supposed to replace it - in a receipt
+    # that never settles. The retry has to finish the transaction the receipt
+    # describes, from the originals it kept and in the workspace it recorded.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    workspace = _desktop_install(harness, tmp_path)
+    original_plist = (home / "Library/LaunchAgents/com.ciao.server.plist").read_bytes()
+    original_shim = (home / ".local/bin/ciao").read_text(encoding="utf-8")
+
+    first = _run_installer(harness, "--version", VERSION, "--migrate", "--no-start")
+
+    assert first.returncode == 0, first.stderr
+    assert _migration_receipt(harness)["phase"] == "installed_no_start"
+    assert (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+    # The plist really does point at the newly installed tool now, which is what
+    # the retry's classifier reads as "nothing to migrate".
+    with (home / "Library/LaunchAgents/com.ciao.server.plist").open("rb") as handle:
+        assert plistlib.load(handle)["ProgramArguments"][0] == str(
+            home / ".local/bin/ciao"
+        )
+
+    second = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert second.returncode == 0, second.stderr
+    receipt = _migration_receipt(harness)
+    assert receipt["phase"] == "migrated"
+    assert receipt["kind"] == "desktop_host"
+    assert receipt["workspace"] == str(workspace)
+    # The app's own agent is retired rather than left to come back at the next
+    # relaunch, and the engine it was replaced by is left running.
+    assert not (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+    log = _log(harness, "launchctl.log")
+    assert f"bootout gui/{os.getuid()}/Ciaobot" in log
+    assert f"disable gui/{os.getuid()}/Ciaobot" in log
+    assert f"bootout gui/{os.getuid()}/com.ciao.server" not in log
+    # The originals are still the originals: the retry re-takes no snapshot over
+    # them, or a rollback could no longer give Ciaobot.app its engine back.
+    before = migration_before(harness)
+    assert (before / "com.ciao.server.plist").read_bytes() == original_plist
+    assert (before / "ciao").read_text(encoding="utf-8") == original_shim
+    assert _install_receipt(harness)["service_backend"] == "launchd"
+    # And the engine was set up in the workspace the receipt recorded, not in a
+    # fresh one and not in $HOME/Ciaobot.
+    ciao = home / ".local/bin/ciao"
+    assert f"setup --workspace {workspace} --python {ciao} --yes --load-launchd\n" in (
+        _log(harness, "ciao-calls.log")
+    )
+    assert "Ciaobot.app is no longer needed" in second.stdout
+
+
+@needs_local_tools
+def test_migrate_host_completes_an_interruption_after_setup(tmp_path: Path) -> None:
+    # The same window by way of a signal: `ciao setup` has repointed the engine
+    # plist at the new engine and the process goes away before the service is
+    # started or the app's agent is retired. The receipt says `interrupted`, and
+    # the retry has to read the hand-over out of that receipt - the same way it
+    # does for a `retiring` one - instead of installing over the top of it and
+    # leaving a desktop engine loaded next to the new one.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    workspace = _desktop_install(harness, tmp_path)
+    original_plist = (home / "Library/LaunchAgents/com.ciao.server.plist").read_bytes()
+    _knob(harness, "interrupt-after-setup")
+
+    interrupted = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert interrupted.returncode == 130, interrupted.stdout
+    receipt = _migration_receipt(harness)
+    assert receipt["phase"] == "interrupted"
+    assert receipt["kind"] == "desktop_host"
+    assert receipt["workspace"] == str(workspace)
+    # Setup did its work before the process went away, so the retry's classifier
+    # sees an installer-managed engine.
+    with (home / "Library/LaunchAgents/com.ciao.server.plist").open("rb") as handle:
+        assert plistlib.load(handle)["ProgramArguments"][0] == str(
+            home / ".local/bin/ciao"
+        )
+
+    retry = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert retry.returncode == 0, retry.stderr
+    assert _migration_receipt(harness)["phase"] == "migrated"
+    assert not (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+    assert f"disable gui/{os.getuid()}/Ciaobot" in _log(harness, "launchctl.log")
+    # The before-image of the engine plist is still the desktop's own, so a
+    # rollback out of this transaction would hand Ciaobot.app its engine back.
+    assert (migration_before(harness) / "com.ciao.server.plist").read_bytes() == (
+        original_plist
+    )
+    ciao = home / ".local/bin/ciao"
+    assert f"setup --workspace {workspace} --python {ciao} --yes --load-launchd\n" in (
+        _log(harness, "ciao-calls.log")
+    )
+
+
+@needs_local_tools
+def test_migrate_retry_of_an_unfinished_handover_undoes_itself(tmp_path: Path) -> None:
+    # Finishing an unfinished hand-over means the retry is a host transaction,
+    # so a retry that fails has to undo itself against the originals the *first*
+    # run snapshotted - the desktop shim, the desktop engine plist - and not
+    # against the new engine already sitting in their places. Otherwise a failed
+    # retry is a desktop Mac whose engine the first run replaced and the second
+    # one removed, with nothing running to replace it.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    _desktop_install(harness, tmp_path)
+    original_plist = (home / "Library/LaunchAgents/com.ciao.server.plist").read_bytes()
+    original_shim = (home / ".local/bin/ciao").read_text(encoding="utf-8")
+
+    first = _run_installer(harness, "--version", VERSION, "--migrate", "--no-start")
+
+    assert first.returncode == 0, first.stderr
+    _knob(harness, "fail-ciao-setup")
+    retry = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert retry.returncode == 1
+    assert "Ciaobot.app's engine was restored" in retry.stderr
+    assert (home / "Library/LaunchAgents/com.ciao.server.plist").read_bytes() == (
+        original_plist
+    )
+    assert (home / ".local/bin/ciao").read_text(encoding="utf-8") == original_shim
+    assert (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+    assert _migration_receipt(harness)["phase"] == "rolled_back"
+    # This retry never got as far as booting the app's own agent out of launchd,
+    # so the rollback only has to re-enable its label - the same distinction a
+    # retirement makes.
+    assert f"enable gui/{os.getuid()}/Ciaobot" in _log(harness, "launchctl.log")
+
+
+@needs_local_tools
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        pytest.param(lambda workspace: f"{workspace}/", id="trailing-slash"),
+        pytest.param(
+            lambda workspace: str(workspace.parent / "." / workspace.name), id="dot"
+        ),
+        pytest.param(lambda workspace: str(workspace.parent / "Link"), id="symlink"),
+    ],
+)
+def test_migrate_host_accepts_its_own_workspace_spelled_differently(
+    tmp_path: Path, spelling: Any
+) -> None:
+    # The rule is about the directory, not about the spelling of it: a trailing
+    # slash, a `.` segment or a symlink all name the workspace the engine is
+    # already running in, and refusing those would train users to drop the flag
+    # instead of the path. They resolve to the same directory, so they are the
+    # same workspace.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    workspace = _desktop_install(harness, tmp_path)
+    (home / "Link").symlink_to(workspace)
+
+    result = _run_installer(
+        harness,
+        "--version",
+        VERSION,
+        "--migrate",
+        "--workspace",
+        spelling(workspace),
+        "--no-start",
+    )
+
+    assert result.returncode == 0, result.stderr
+    ciao = home / ".local/bin/ciao"
+    # No `--yes` either: this workspace was typed, not detected, and the point of
+    # the test is that a spelling of the right directory is the right directory.
+    assert f"setup --workspace {workspace} --python {ciao}\n" in _log(
+        harness, "ciao-calls.log"
+    )
+    assert _migration_receipt(harness)["workspace"] == str(workspace)
+    assert _migration_receipt(harness)["phase"] == "installed_no_start"
+
+
+@needs_local_tools
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param(["--no-start"], id="no-start"),
+        pytest.param([], id="start"),
+    ],
+)
+def test_migrate_host_refuses_a_different_workspace(
+    tmp_path: Path, extra: list[str]
+) -> None:
+    # `--migrate` is a hand-over of the engine that is already running, and that
+    # engine runs in one workspace: the one its own plist names, holding the
+    # password, the provider keys, the runtime root and every chat in it. A
+    # `--workspace` naming a different directory is not a move of that engine -
+    # accepting it creates an empty workspace, repoints the service at it,
+    # retires the app's agent and leaves the original and all of its data
+    # behind, while the receipt still names the original. So it is refused while
+    # nothing has been touched, and the refusal is the same with and without a
+    # start: the mutation it prevents is the backup and the hand-over, not the
+    # service.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    workspace = _desktop_install(harness, tmp_path)
+    untouched = _replaced_state(harness)
+    # An existing, perfectly good Ciaobot workspace - just not the one the
+    # engine being handed over is running in. This is the case that cannot be
+    # waved through as a typo: everything about it is valid, and taking it
+    # anyway is the silent move this has to refuse.
+    another = home / "Another"
+    (another / ".runtime").mkdir(parents=True)
+    (another / ".env").write_text("PWA_PORT=8443\n", encoding="utf-8")
+
+    result = _run_installer(
+        harness,
+        "--version",
+        VERSION,
+        "--migrate",
+        "--workspace",
+        str(another),
+        *extra,
+    )
+
+    assert result.returncode == 1
+    assert str(another) in result.stderr
+    assert str(workspace) in result.stderr
+    assert "Nothing on this Mac has been changed" in result.stderr
+    # Nothing was decided, backed up, installed or launched.
+    assert "tool install" not in _log(harness, "uv-calls.log")
+    assert _log(harness, "launchctl.log") == ""
+    assert not (home / ".local/state/ciaobot/migration").exists()
+    assert _replaced_state(harness) == untouched
+    # The workspace that was there, and everything in it, is where it was, and
+    # the other one was not written to either.
+    assert (workspace / ".env").read_text(encoding="utf-8") == "PWA_PORT=8443\n"
+    assert sorted(p.name for p in workspace.iterdir()) == [".env", ".runtime"]
+    assert sorted(p.name for p in another.iterdir()) == [".env", ".runtime"]
+
+
+@needs_local_tools
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param(["--no-start"], id="no-start"),
+        pytest.param([], id="start"),
+    ],
+)
+def test_migrate_host_refuses_a_workspace_that_is_not_there(
+    tmp_path: Path, extra: list[str]
+) -> None:
+    # A host hand-over never creates a workspace. `--migrate` on a Mac whose
+    # engine is running keeps that engine's workspace, and a `--workspace` that
+    # does not exist is either a typo or a request to make a new one - which
+    # would be a fresh, empty workspace next to the real one, and the app's
+    # engine retired in favour of it. Both are refused, before anything exists.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    _desktop_install(harness, tmp_path)
+    untouched = _replaced_state(harness)
+    missing = home / "NotThere"
+
+    result = _run_installer(
+        harness,
+        "--version",
+        VERSION,
+        "--migrate",
+        "--workspace",
+        str(missing),
+        *extra,
+    )
+
+    assert result.returncode == 1
+    assert "never creates a workspace" in result.stderr
+    assert "Nothing on this Mac has been changed" in result.stderr
+    assert "tool install" not in _log(harness, "uv-calls.log")
+    assert _log(harness, "launchctl.log") == ""
+    assert not missing.exists()
+    assert not (home / ".local/state/ciaobot/migration").exists()
+    assert _replaced_state(harness) == untouched
+
+
+def _desktop_install_without_a_workspace(
+    harness: dict[str, Any], tmp_path: Path
+) -> Path:
+    """A live Ciaobot.app engine whose plists name no workspace at all, which is
+    what the classifier reports as `desktop_invalid` with an empty workspace:
+    there is nothing for it to recover, and `--as-host` is the only way on.
+
+    The `~/Ciaobot` directory the fixture makes is emptied on the way out, so it
+    reads as what it would be on such a Mac: an unrelated empty directory this
+    run must leave alone rather than fill in.
+    """
+    home: Path = harness["home"]
+    _desktop_install(harness, tmp_path)
+    app_engine = (
+        tmp_path
+        / "Ciaobot.app"
+        / "Contents"
+        / "Resources"
+        / "ciao-runtime"
+        / "bin"
+        / "ciao"
+    )
+    for label in ("com.ciao.server", "Ciaobot"):
+        (home / f"Library/LaunchAgents/{label}.plist").write_bytes(
+            plistlib.dumps(
+                {
+                    "Label": label,
+                    "ProgramArguments": [str(app_engine), "run"],
+                }
+            )
+        )
+    (home / "Ciaobot" / ".env").unlink(missing_ok=True)
+    shutil.rmtree(home / "Ciaobot" / ".runtime")
+    return home
+
+
+@needs_local_tools
+def test_migrate_as_host_with_no_recoverable_workspace_asks_for_one(
+    tmp_path: Path,
+) -> None:
+    # `--as-host` on a state this script cannot read is the user's decision
+    # about a Mac the classifier cannot describe, and the one thing it still
+    # cannot tell them is which workspace their data is in. A workspace it
+    # cannot recover has to be named, and it has to be one that is already there:
+    # inventing `~/Ciaobot` here is a second workspace created during a
+    # hand-over, which is the outcome the refusals above exist to prevent.
+    harness = _harness(tmp_path)
+    home = _desktop_install_without_a_workspace(harness, tmp_path)
+    untouched = _replaced_state(harness)
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate", "--as-host")
+
+    assert result.returncode == 1
+    assert "--workspace" in result.stderr
+    assert "Nothing on this Mac has been changed" in result.stderr
+    assert "tool install" not in _log(harness, "uv-calls.log")
+    assert _log(harness, "launchctl.log") == ""
+    # A workspace was not invented, and nothing that was there was touched.
+    assert list((home / "Ciaobot").iterdir()) == []
+    assert not (home / ".local/state/ciaobot/migration").exists()
+    assert _replaced_state(harness) == untouched
+
+    # The same Mac, told which workspace to keep: an explicit one that exists is
+    # accepted, because the user naming it is the decision the classifier could
+    # not make.
+    existing = home / "KeepMe"
+    (existing / ".runtime").mkdir(parents=True)
+    (existing / ".env").write_text("PWA_PORT=8443\n", encoding="utf-8")
+
+    accepted = _run_installer(
+        harness,
+        "--version",
+        VERSION,
+        "--migrate",
+        "--as-host",
+        "--workspace",
+        str(existing),
+        "--no-start",
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    ciao = home / ".local/bin/ciao"
+    # No `--yes`: that flag is for a workspace this script detected rather than
+    # one the user typed, and this one was typed.
+    assert f"setup --workspace {existing} --python {ciao}\n" in _log(
+        harness, "ciao-calls.log"
+    )
+    assert _migration_receipt(harness)["workspace"] == str(existing)
+    assert _migration_receipt(harness)["phase"] == "installed_no_start"
+
+
+@needs_local_tools
+def test_migrate_as_host_refuses_a_workspace_without_an_env(tmp_path: Path) -> None:
+    # An existing directory is not yet a Ciaobot workspace. Handing an engine
+    # over to one with no `.env` would start it with a fresh password and a
+    # fresh runtime root next to the real ones, which is the same second
+    # workspace as creating a new one - so it is refused here too, where it is
+    # still a refusal and not an install.
+    harness = _harness(tmp_path)
+    home = _desktop_install_without_a_workspace(harness, tmp_path)
+    untouched = _replaced_state(harness)
+    empty = home / "NotAWorkspace"
+    empty.mkdir()
+
+    result = _run_installer(
+        harness,
+        "--version",
+        VERSION,
+        "--migrate",
+        "--as-host",
+        "--workspace",
+        str(empty),
+    )
+
+    assert result.returncode == 1
+    assert "no .env" in result.stderr
+    assert "Nothing on this Mac has been changed" in result.stderr
+    assert "tool install" not in _log(harness, "uv-calls.log")
+    assert _log(harness, "launchctl.log") == ""
+    assert not (home / ".local/state/ciaobot/migration").exists()
+    assert _replaced_state(harness) == untouched
+
+
+@needs_local_tools
+def test_migrate_client_ignores_a_workspace_it_never_uses(tmp_path: Path) -> None:
+    # The workspace rules above are about a host hand-over. A client installs no
+    # workspace at all - it gets no setup, no service and no agent, so it never
+    # becomes a second writer for a runtime root the host owns - and there is
+    # nothing there for a `--workspace` to override.
+    harness = _harness(tmp_path)
+    _desktop_install(
+        harness, tmp_path, {"role": "standby", "host_url": "https://mini.ts.net"}
+    )
+
+    result = _run_installer(
+        harness,
+        "--version",
+        VERSION,
+        "--migrate",
+        "--workspace",
+        str(harness["home"] / "Another"),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (harness["home"] / "Another").exists()
+    assert "setup" not in _log(harness, "ciao-calls.log")
+    assert _migration_receipt(harness)["phase"] == "migrated_client"
+
+
+@needs_local_tools
+def test_ordinary_install_still_creates_its_workspace(tmp_path: Path) -> None:
+    # None of the above is about an ordinary install. A Mac that never ran
+    # Ciaobot.app has no workspace to keep, and `--workspace` is how one is
+    # named; creating it is the whole point of the flag, and the refusal above
+    # must not have leaked into this path.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    workspace = home / "Fresh"
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--workspace", str(workspace), "--no-start"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert workspace.is_dir()
+    ciao = home / ".local/bin/ciao"
+    assert f"setup --workspace {workspace} --python {ciao}\n" in _log(
+        harness, "ciao-calls.log"
+    )
+    assert "migrated" not in _log(harness, "ciao-calls.log")
+    assert not (home / ".local/state/ciaobot/migration").exists()

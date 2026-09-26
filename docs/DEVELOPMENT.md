@@ -128,7 +128,25 @@ the originals it kept, out loud. An interrupted run records `interrupted`
 rather than pretending to have finished, a retirement that launchctl refuses
 leaves the app's agent in place instead of reporting success, and a `retiring`
 receipt that was being taken to `migrated` when the process stopped is finished
-rather than treated as an ordinary installer-managed engine. The workflow
+rather than treated as an ordinary installer-managed engine. Any receipt naming
+an unfinished host hand-over (`started`, `installed_no_start`, `interrupted`)
+is finished the same way: by the time those phases are on disk, `ciao setup` has
+usually already repointed `com.ciao.server` at the tool this script installed, and
+an engine outside a `.app` is exactly what the classifier calls an ordinary
+install — so the kind and the workspace come from the receipt, which is the only
+thing left that knows what the run was doing, and taking the host path from them
+is what stops the app's own agent from staying loaded next to the engine that
+replaced it. That path also settles the workspace before it takes any
+before-image or asks the app to quit, and only ever hands over the one the
+engine being replaced runs in: a `--workspace` naming a different directory, one
+that does not exist, or a directory with no `.env` in it is refused, no
+workspace is created during a hand-over, and an `--as-host` override on a state
+whose workspace could not be recovered has to name an existing one rather than
+get a fresh `~/Ciaobot`. Taking a different workspace would start a second engine
+with a fresh password and a fresh runtime root next to the real ones, retire the
+app's agent, and leave the original and every chat in it behind while the receipt
+still named the original. The ordinary, non-`--migrate` path is unchanged: there
+`--workspace` is how a workspace is named, and it is created. The workflow
 attaches it as the `install-engine.sh` release asset.
 
 ## Branching and releases
