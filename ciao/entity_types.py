@@ -648,10 +648,13 @@ def parse_payload(payload: object) -> list[EntityType]:
     it does not reach for a private. A submitted row is read exactly like a row
     of a vault file — a *partial* override of the stock entry with the same id,
     or a new category when stock has no such id — because that is the document
-    the user would have written by hand, and because a client that sends only
-    the rows it changed must not silently reset the fields it did not send. A
-    client that sends the whole list (what the GET hands it) gets the same
-    answer either way: every field is stated, so nothing falls back to stock.
+    the user would have written by hand, and because a client that changes one
+    field of a *stock* row must not silently reset the fields it did not send.
+    The scope matters: a custom id has no shipped default to fall back on, so
+    every field it omits takes the built-in default instead (``folder`` empty,
+    ``aliases`` none) rather than what the file already said. So the contract is
+    to send the whole list, which is what the GET hands a client and what a
+    client that answers the GET's rows back unchanged does.
 
     A stock id the list omits is not in the answer, and that is not a deletion:
     an omitted stock id keeps its default, and an omitted *custom* one is

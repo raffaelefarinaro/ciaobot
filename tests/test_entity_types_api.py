@@ -228,6 +228,14 @@ def test_patch_regenerates_vocabulary_with_a_categories_section(
         ),
         ("a label is required", {"types": [{"id": "customer", "label": ""}]}),
         (
+            "a kind is one of the two",
+            {"types": [{"id": "customer", "label": "C", "kind": "bogus"}]},
+        ),
+        (
+            "enabled is a yes or a no",
+            {"types": [{"id": "customer", "label": "C", "enabled": "yes"}]},
+        ),
+        (
             "a negative staleness is a typo",
             {"types": [{"id": "customer", "label": "C", "stale_after_days": -5}]},
         ),
@@ -280,6 +288,47 @@ def test_patch_deleting_a_custom_type_with_notes_is_refused(
     assert _patch(client, without).status_code == 200
     assert "customer" not in _by_id(_rows(client))
     assert _persisted(vault) == []
+
+
+def test_patch_deleting_a_custom_type_whose_alias_names_a_note_is_refused(
+    client: TestClient, vault: Path
+) -> None:
+    """A category's own alias is the category, and its notes still block a delete.
+
+    `canonical_type` knows the static tables only, so before the count resolved a
+    `type:` through the registry as well, a note typed with a custom category's
+    alias counted as drift under a spelling no row claims: the category read as
+    empty, and omitting it passed the delete guard.
+    """
+    rows = _rows(client)
+    rows.append(_customer_row())
+    assert _patch(client, rows).status_code == 200
+    _note(vault, "Acme", "client")
+
+    assert _by_id(_rows(client))["customer"]["note_count"] == 2, (
+        "the fixture's `type: customer` note and this one, whose `type:` is the "
+        "alias only the registry knows"
+    )
+
+    without = [row for row in _rows(client) if row["id"] != "customer"]
+    refused = _patch(client, without)
+
+    assert refused.status_code == 400
+    assert "customer" in refused.json()["error"]
+    assert _by_id(_rows(client))["customer"]["note_count"] == 2, (
+        "a refused delete must not have dropped it or re-counted it"
+    )
+    assert [row["id"] for row in _persisted(vault)] == ["customer"]
+
+    # A disabled category claims no `type:`, so its alias is drift again — the
+    # registry's alias view is enabled-only, which is what keeps the count from
+    # crediting a category the user has turned off.
+    disabled = _rows(client)
+    _by_id(disabled)["customer"]["enabled"] = False
+    assert _patch(client, disabled).status_code == 200
+    assert _by_id(_rows(client))["customer"]["note_count"] == 1, (
+        "only the note carrying the id itself; the alias resolves for nobody"
+    )
 
 
 def test_patch_cannot_delete_a_builtin(client: TestClient) -> None:

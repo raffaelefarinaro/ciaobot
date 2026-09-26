@@ -3994,49 +3994,65 @@ async def vault_delete_note(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "edited_backlinks": edited})
 
 
-def _scan_entity_types(vault: Path, workspace: str) -> tuple[list[Entry], dict[str, int]]:
+def _scan_entity_types(
+    vault: Path, workspace: str, registry: entity_types.EntityTypeRegistry
+) -> tuple[list[Entry], dict[str, int]]:
     """One scan of *vault*: its entries, and its notes per ``type:`` value.
 
-    A note counts under both the value it carries and the canonical spelling that
-    value resolves to, because the two questions the callers ask are different.
-    The canonical side is what the index and the linter mean by a count, so
+    A note counts under both the value it carries and the owner that value
+    resolves to, because the two questions the callers ask are different. The
+    owning side is what the index and the linter mean by a count, so
     ``type: doc`` counts for ``document``. The literal side is what a category's
     own notes say, and it is not redundant: a category the user has just added
-    is in no alias or canonical table yet — the indexer only reads the registry
-    once the consumer swap lands — so a canonical-only count would report every
-    new category as empty, and the delete guard below would drop a category
-    whose notes still carried its ``type:``.
+    is in none of the static tables, so a count resolved through those tables
+    alone would report every new category as empty, and the delete guard below
+    would drop a category whose notes still carried its ``type:``. The indexer
+    only reads the registry once the consumer swap lands, so until then the
+    literal side is the only one that sees a new category at all.
+
+    *registry* is the caller's already-loaded registry, not a second load, and
+    it is the only thing that knows a custom category's own aliases: a note typed
+    with one of those is the category's note, not drift under a spelling no row
+    claims. The static table is consulted first, so a stock alias keeps
+    resolving the way the index and the linter resolve it. The registry's alias
+    view is enabled-only, which is right here too: a disabled category claims no
+    ``type:``, so its aliases stay drift.
 
     A ``type:`` that is neither a category nor an alias of one is drift. It is
     counted under its own spelling, which no row claims, so it stays visible as
     an unlisted type instead of inflating a category that does not own it.
     """
     entries = scan_vault(vault, workspace=workspace)
+    aliases = registry.aliases()
     counts: dict[str, int] = defaultdict(int)
     for entry in entries:
         raw = entry.type.strip()
         if raw:
             counts[raw] += 1
-        canonical = canonical_type(raw)
-        if canonical and canonical != raw:
-            counts[canonical] += 1
+        owner = canonical_type(raw) or aliases.get(raw, "")
+        if owner and owner != raw:
+            counts[owner] += 1
     return entries, dict(counts)
 
 
-def _regenerate_vocabulary(vault: Path, workspace: str) -> dict[str, int]:
-    """Rewrite ``VOCABULARY.md`` with the Categories section; return the counts.
+def _regenerate_vocabulary(
+    vault: Path, workspace: str
+) -> tuple[dict[str, int], entity_types.EntityTypeRegistry]:
+    """Rewrite ``VOCABULARY.md`` with the Categories section; return the counts
+    and the registry they were counted against.
 
-    One worker thread for the scan and the write: a Categories section that
-    disagreed with the type census beside it would be worse than no section, so
-    both are rendered from the same entries and the same registry. The counts
-    ride back out because the caller needs them for the response and the scan
-    that produced them is already paid for.
+    One worker thread for the scan and the write, and one load of the registry
+    the save left on disk, shared by all three consumers of it — the counts, the
+    Categories section and the body the caller answers — because a Categories
+    section that disagreed with the type census beside it, or with the rows the
+    response lists, would be worse than no section. The counts ride back out
+    because the caller needs them for the response and the scan that produced
+    them is already paid for.
     """
-    entries, counts = _scan_entity_types(vault, workspace)
-    write_vocabulary_file(
-        entries, vault / "VOCABULARY.md", registry=entity_types.load_entity_types(vault)
-    )
-    return counts
+    registry = entity_types.load_entity_types(vault)
+    entries, counts = _scan_entity_types(vault, workspace, registry)
+    write_vocabulary_file(entries, vault / "VOCABULARY.md", registry=registry)
+    return counts, registry
 
 
 async def memory_entity_types(request: Request) -> JSONResponse:
@@ -4055,11 +4071,15 @@ async def memory_entity_types(request: Request) -> JSONResponse:
 
     A PATCH is the desired list of entries, not a diff: idempotent, and a
     client that sends the GET's own rows back unchanged writes nothing. Two
-    rules make that safe, both in ``ciao.entity_types``: a row is a partial
-    override of the stock entry with that id (so a client that sends only what
-    it changed resets nothing), and a stock row identical to the shipped
-    default is not persisted at all (so an upgrade's change to a default still
-    reaches the install).
+    rules in ``ciao.entity_types`` make the resubmission safe, both stated
+    precisely because they hold for a stock id and not for a custom one: a row
+    whose id is a stock id is a partial override of the shipped default (so a
+    client that changes one field of a stock row resets nothing), and a stock
+    row identical to the shipped default is not persisted at all (so an
+    upgrade's change to a default still reaches the install). A custom id has
+    no shipped default to fall back on, so a field it leaves out takes the
+    built-in default instead — the contract is to send the whole list, which is
+    exactly what the GET hands a client.
     """
     config = request.app.state.config
     workspace = request.query_params.get("workspace", "").strip()
@@ -4071,10 +4091,14 @@ async def memory_entity_types(request: Request) -> JSONResponse:
         return JSONResponse({"error": f"vault unavailable: {exc}"}, status_code=409)
 
     if request.method == "GET":
+        # One registry for the scan and the body: the counts have to resolve a
+        # custom category's own aliases, and that registry is the same one the
+        # rows are rendered from, so the two cannot describe different lists.
+        registry = entity_types.load_entity_types(vault)
         _entries, counts = await asyncio.to_thread(
-            functools.partial(_scan_entity_types, vault, workspace)
+            functools.partial(_scan_entity_types, vault, workspace, registry)
         )
-        return JSONResponse(_entity_types_body(vault, workspace, counts))
+        return JSONResponse(_entity_types_body(vault, workspace, counts, registry))
 
     try:
         body = await request.json()
@@ -4103,7 +4127,7 @@ async def memory_entity_types(request: Request) -> JSONResponse:
     ]
     if orphaned:
         _entries, counts = await asyncio.to_thread(
-            functools.partial(_scan_entity_types, vault, workspace)
+            functools.partial(_scan_entity_types, vault, workspace, registry)
         )
         blocking = [
             f"{entry.id} ({counts[entry.id]} note{'' if counts[entry.id] == 1 else 's'})"
@@ -4129,7 +4153,7 @@ async def memory_entity_types(request: Request) -> JSONResponse:
             {"error": f"could not write the categories file: {exc}"}, status_code=500
         )
     try:
-        counts = await asyncio.to_thread(
+        counts, fresh = await asyncio.to_thread(
             functools.partial(_regenerate_vocabulary, vault, workspace)
         )
     except OSError as exc:
@@ -4143,12 +4167,21 @@ async def memory_entity_types(request: Request) -> JSONResponse:
     # The write cleared the registry cache, so this body is read back off the
     # file that was just written: the list a client gets is the one the next GET
     # will serve, not the submission echoed at it.
-    return JSONResponse(_entity_types_body(vault, workspace, counts))
+    return JSONResponse(_entity_types_body(vault, workspace, counts, fresh))
 
 
-def _entity_types_body(vault: Path, workspace: str, counts: dict[str, int]) -> dict[str, Any]:
-    """The response both methods answer: the vault, and its effective list."""
-    registry = entity_types.load_entity_types(vault)
+def _entity_types_body(
+    vault: Path,
+    workspace: str,
+    counts: dict[str, int],
+    registry: entity_types.EntityTypeRegistry,
+) -> dict[str, Any]:
+    """The response both methods answer: the vault, and its effective list.
+
+    The registry is the caller's, loaded once by the method that already had to
+    read it, so the counts in the body and the rows beside them are the same
+    configuration rather than two reads that could straddle a write.
+    """
     return {
         "workspace": workspace,
         "vault": str(vault),
