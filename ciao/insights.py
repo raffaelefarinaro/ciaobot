@@ -178,7 +178,7 @@ def is_terminal_failure(exc: Exception) -> bool:
     bad-model rejections fail identically on a second call, and
     ``run_oneshot`` therefore raises them without retrying internally.
     Re-sending them from here only buys another rejected request plus the
-    30s wait, once per archive across a whole backfill run.
+    30s wait, once per call.
 
     Read through ``getattr`` so a provider that raises a plain exception
     (timeout, subprocess error) stays retriable, which is the safe default.
@@ -215,11 +215,12 @@ async def call_with_retry(
 ) -> RetryOutcome:
     """Run ``call``; on a transient failure wait 30s and run it once more.
 
-    The one place the insights retry policy lives. It previously existed three
-    times — for the JSONL input, for the rendered-archive input, and inline in
-    the backfill worker — and the copies had drifted: only the JSONL one checked
-    for a context overflow. The drift is now explicit in the keyword flags
-    rather than implicit in which copy you were reading.
+    The one place the retry policy lives for every one-shot in the app. It
+    previously existed three times — for the JSONL input, for the
+    rendered-archive input, and inline in the bulk worker — and the copies had
+    drifted: only the JSONL one checked for a context overflow. The drift is now
+    explicit in the keyword flags rather than implicit in which copy you were
+    reading.
 
     Two failures are never retried, because an identical second request fails
     the same way and costs another slow call plus the 30s wait:

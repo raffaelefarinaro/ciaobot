@@ -6,8 +6,8 @@
         <button class="text-link" type="button" :disabled="!automationLoaded" @click="fetchAutomation">Refresh</button>
       </div>
       <p class="hint">
-        Work Ciaobot does on its own: naming chats, extracting insights when a chat is
-        archived, capturing trajectories when enabled, keeping the vault and skills in order.
+        Work Ciaobot does on its own: naming chats, capturing a session trajectory when a
+        chat is archived, keeping the vault and skills in order.
       </p>
     </div>
 

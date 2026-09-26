@@ -966,13 +966,14 @@ export interface AutomationProcess {
   trigger?: string
   schedule_id?: string
   one_time?: boolean
-  // Bulk/manual variants of this job (Session insights carries the backfill),
-  // reported nested so the page keeps one row per automation.
+  // Bulk/manual variants of this job, reported nested so the page keeps one row
+  // per automation.
   sub_jobs?: AutomationProcess[]
   // Steps that run inside this job's task, on this job's trigger, in execution
   // order. A step is not an automation — it has no trigger of its own — so it is
-  // reported here rather than as a peer row. Session insights owns the four-step
-  // archive pipeline; everything else has none.
+  // reported here rather than as a peer row. No job owns one since the archive
+  // pipeline lost its stages in #627, but the shape is kept: a job that grows a
+  // multi-step task again should report it here, not as peer rows.
   steps?: AutomationProcess[]
   // Name of the whole pipeline, set only on the job that owns one
   // ("When you archive a chat"). The job keeps `label` for its own step.

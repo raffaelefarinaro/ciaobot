@@ -4316,9 +4316,9 @@ class ProjectChatManager:
         workspace — so an archive's path says which CHAT wrote it and nothing
         about where that chat ran. Anything filtering archives by workspace has
         to come back through the registry, which is here and not in
-        ``ciao.insights``; the backfill scanner compared the chat-id path
-        segment to a workspace name directly, which can never match, so a
-        workspace-scoped run silently found nothing.
+        ``ciao.insights``; the insights backfill that used to live there
+        compared the chat-id path segment to a workspace name directly, which
+        can never match, so a workspace-scoped run silently found nothing.
         """
         return {
             chat_id: getattr(self._projects.get(chat.project_id), "workspace", "") or ""

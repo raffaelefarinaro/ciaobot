@@ -58,10 +58,10 @@ export interface PipelineStep {
 /**
  * The steps of a pipeline, owning job first.
  *
- * The job that owns the pipeline is a step of it too — Session insights is the
- * first thing that runs when you archive a chat — so it belongs in this list
- * rather than being represented only by the group heading. Returns [] for a job
- * that is not a pipeline, which is how callers decide whether to render a list.
+ * The job that owns the pipeline is a step of it too, so it belongs in this
+ * list rather than being represented only by the group heading. Returns [] for a
+ * job that is not a pipeline, which is how callers decide whether to render a
+ * list.
  */
 export function pipelineSteps(item: AutomationProcess): PipelineStep[] {
   const steps = item.steps || []

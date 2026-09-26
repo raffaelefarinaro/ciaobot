@@ -93,7 +93,7 @@
         :runs="step.recent"
         :title="`${step.label} — recent runs`"
       />
-      <!-- Bulk/manual variants (Session insights carries its catch-up pass). -->
+      <!-- Bulk/manual variants of this row's job. -->
       <RunHistory
         v-for="sub in item.sub_jobs || []"
         :key="sub.job"
