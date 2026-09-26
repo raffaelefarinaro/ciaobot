@@ -36,13 +36,25 @@ export function isRestartDrainMessage(message: string | undefined | null): boole
 /**
  * Poll until the server goes down and comes back ready, then reload.
  * Same signal App.vue's boot overlay uses (`/api/startup-status`).
+ *
+ * `signal` cancels the reload for good. An update drain that gives up
+ * reopens admission on a healthy engine, and without this every tab would
+ * still hard-reload at the end of the timeout — throwing away unsent drafts
+ * and scroll position for a restart that is never coming. Aborting is checked
+ * at the top of each poll and again before each reload, because a loop that
+ * only checks between polls can still reload on the poll that observed a
+ * server which had come back.
  */
-export async function reloadWhenServerReady(timeoutMs = 120000): Promise<void> {
+export async function reloadWhenServerReady(
+  timeoutMs = 120000,
+  signal?: AbortSignal
+): Promise<void> {
   const start = Date.now()
   let sawDown = false
   // for(;;) rather than while(true): same loop, and no-constant-condition
   // exempts it. The exits are the timeout check and the ready reload below.
   for (;;) {
+    if (signal?.aborted) return
     try {
       const res = await fetch('/api/startup-status', { redirect: 'manual' })
       if (res.ok) {
@@ -50,6 +62,7 @@ export async function reloadWhenServerReady(timeoutMs = 120000): Promise<void> {
         if (!data.overall_ready) {
           sawDown = true
         } else if (sawDown) {
+          if (signal?.aborted) return
           location.reload()
           return
         }
@@ -60,6 +73,7 @@ export async function reloadWhenServerReady(timeoutMs = 120000): Promise<void> {
       sawDown = true
     }
     if (Date.now() - start > timeoutMs) {
+      if (signal?.aborted) return
       location.reload()
       return
     }

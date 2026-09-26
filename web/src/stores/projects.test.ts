@@ -15,7 +15,11 @@ const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
 const apiPatch = vi.hoisted(() => vi.fn())
 const apiDel = vi.hoisted(() => vi.fn())
-const reloadWhenServerReady = vi.hoisted(() => vi.fn(() => Promise.resolve()))
+const reloadWhenServerReady = vi.hoisted(() =>
+  // Signature mirrors the real one so a caller can be checked for the signal
+  // it hands over.
+  vi.fn((_timeoutMs?: number, _signal?: AbortSignal) => Promise.resolve())
+)
 
 vi.mock('../lib/api', () => ({
   api: {
@@ -3361,6 +3365,33 @@ describe('server restart overlay', () => {
       }),
     })
     expect(store.serverRestarting).toBe(true)
+  })
+
+  // An update drain that timed out reopens admission. Without this the
+  // overlay would stick on an engine that is perfectly healthy, blocking the
+  // user's next turn behind a restart that is never coming.
+  test('server_restart_cancelled over /ws/events clears the overlay', () => {
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'server_restarting',
+        message: 'Ciaobot is waiting for active chats to finish before restarting',
+      }),
+    })
+    expect(store.serverRestarting).toBe(true)
+    const signal = reloadWhenServerReady.mock.calls.at(-1)?.[1]
+    expect(signal?.aborted).toBe(false)
+
+    sock.onmessage?.({
+      data: JSON.stringify({ type: 'server_restart_cancelled' }),
+    })
+    expect(store.serverRestarting).toBe(false)
+    expect(store.serverRestartMessage).toBe('')
+    // The reload loop is stopped too. Left running, it would hard-reload
+    // every tab at the end of its timeout against an engine that is healthy.
+    expect(signal?.aborted).toBe(true)
   })
 
   test('per-chat server_restarting undoes the optimistic send and skips the error bubble', () => {

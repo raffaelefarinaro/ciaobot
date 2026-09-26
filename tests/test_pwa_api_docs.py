@@ -27,6 +27,8 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/push/unsubscribe": "browser push registration",
     "/api/push/test": "browser Settings test-notification button",
     "/api/admin/snapshot": "admin internal; deploy is the agent-callable wrapper",
+    "/api/admin/drain": "update coordinator drain (loopback-only CLI)",
+    "/api/admin/drain/cancel": "update coordinator drain (loopback-only CLI)",
     "/api/package/update": "browser update action; production app updates through the signed Tauri updater",
     "/api/device/update": "browser Device panel; production app updates through the signed Tauri updater",
     "/api/workspace-health/fix": "browser Settings health Fix button; creates missing scaffold files and re-links skills",
