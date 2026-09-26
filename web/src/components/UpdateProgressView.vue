@@ -2,15 +2,19 @@
   <div class="update-progress-overlay">
     <!-- The overlay's status region, and where focus lands when a caller treats
          this overlay as the modal it is (the Settings engine-update card does).
-         `tabindex="-1"` keeps it out of the tab order: nothing here is
+         All three attributes are for a real job only, and the boot path — an
+         animation with no record behind it — is left exactly as it was:
+         `tabindex="-1"` keeps the region out of the tab order (nothing here is
          actionable, so Tab belongs to the curtain that holds focus, not to a row
-         in a log. Announced politely as the record's phase moves. -->
+         in a log), and `aria-live="polite"` announces the record's phase as it
+         moves, which an animation has no meaning for. -->
     <div
       ref="statusRegion"
       class="update-progress-content"
-      role="status"
-      aria-live="polite"
-      tabindex="-1"
+      :class="{ 'update-progress-content--job': hasJob }"
+      :role="hasJob ? 'status' : undefined"
+      :aria-live="hasJob ? 'polite' : undefined"
+      :tabindex="hasJob ? -1 : undefined"
     >
       <div class="update-progress-head">
         <span class="wordmark wordmark--lg">ciaobot</span>
@@ -158,6 +162,14 @@ defineExpose({ statusRegion })
 
 /** The record's phase in plain language; empty on the boot path. */
 const phaseName = computed(() => (props.phase ? updatePhaseName(props.phase) : ''))
+
+/**
+ * True when a real job is behind this screen, as opposed to the boot animation.
+ *
+ * A phase this build has no name for still counts: the record exists, and it is
+ * the record's progress that is shown.
+ */
+const hasJob = computed(() => !!props.phase)
 
 /**
  * Why the job failed, or ''. Never blank for a failed run, and never a success
@@ -326,9 +338,13 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  /* A real job lists a row per phase, which is taller than the boot screen's
-     six. Scroll it rather than let a short window clip the reason a run failed
-     off the bottom. */
+}
+
+/* A real job lists a row per phase, which is taller than the boot screen's six.
+   Scroll it rather than let a short window clip the reason a run failed off the
+   bottom. The boot animation is six rows and has always fit, so this does not
+   touch it. */
+.update-progress-content--job {
   max-height: 100%;
   overflow-y: auto;
 }

@@ -138,6 +138,28 @@ describe('with a real phase', () => {
     wrapper.unmount()
   })
 
+  it('is a live status region a caller can put focus in, because a record is behind it', () => {
+    const wrapper = mount(UpdateProgressView, { props: { phase: 'swapping' } })
+    const content = wrapper.get('.update-progress-content')
+    expect(content.attributes('role')).toBe('status')
+    expect(content.attributes('aria-live')).toBe('polite')
+    // Not in the tab order: nothing in a log is actionable, so Tab belongs to
+    // whatever holds focus while the overlay is up.
+    expect(content.attributes('tabindex')).toBe('-1')
+    // A real job lists more rows than the boot screen and must be able to scroll.
+    expect(content.classes()).toContain('update-progress-content--job')
+    wrapper.unmount()
+  })
+
+  it('still counts as a job for a phase this build has no name for', () => {
+    const wrapper = mount(UpdateProgressView, { props: { phase: 'rewarming' } })
+    // An unknown phase shows no phase line, but the record exists and its
+    // progress is what is on screen, so the job affordances still apply.
+    expect(wrapper.find('.update-progress-phase').exists()).toBe(false)
+    expect(wrapper.get('.update-progress-content').attributes('role')).toBe('status')
+    wrapper.unmount()
+  })
+
   it('marks everything done and ready on applied', () => {
     const wrapper = mount(UpdateProgressView, { props: { version: '0.20.0', phase: 'applied' } })
     // `applied` is the one phase the run is not in any more: every row is behind it.
@@ -216,6 +238,19 @@ describe('without a phase (the boot animation)', () => {
     expect(wrapper.find('.update-progress-phase').exists()).toBe(false)
     expect(wrapper.find('.update-progress-failed').exists()).toBe(false)
     expect(wrapper.find('.update-progress-ready').text()).toContain('ciaobot is up to date')
+    wrapper.unmount()
+  })
+
+  it('is the same screen it always was, with no job to announce', () => {
+    const wrapper = mount(UpdateProgressView, { props: { version: '0.20.0' } })
+    const content = wrapper.get('.update-progress-content')
+    // The job path's status region is a live region, a focus target and a
+    // scrolling list. None of that belongs to an animation with no record
+    // behind it, so the boot screen carries none of it.
+    expect(content.attributes('role')).toBeUndefined()
+    expect(content.attributes('aria-live')).toBeUndefined()
+    expect(content.attributes('tabindex')).toBeUndefined()
+    expect(content.classes()).not.toContain('update-progress-content--job')
     wrapper.unmount()
   })
 

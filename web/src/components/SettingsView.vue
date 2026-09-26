@@ -247,8 +247,11 @@
                  lookup, a lock, an engine already on the target. Nothing will
                  ever arrive on a poll for a run that left no record, so the
                  card says why and offers the same action again. Text alone
-                 would be a dead end until the page reloaded. -->
-            <template v-if="updateStatus?.error && !engineUpdateFailed">
+                 would be a dead end until the page reloaded. A refusal parked
+                 against an existing record answers here too: the served reason
+                 is always the newer one, because the parked reason is only
+                 served while the record it was parked against is unchanged. -->
+            <template v-if="updateStatus?.error">
               <p class="hint hint--warn hint--spaced">{{ updateStatus.error }}</p>
               <div class="action-row settings-actions">
                 <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling || nodeStatusUnknown">
@@ -280,7 +283,11 @@
               </div>
             </template>
 
-            <template v-else-if="engineUpdateStage === 'done'">
+            <!-- Applied, and still the newest release: the record stays on disk
+                 after a successful apply, so an engine that has updated once
+                 would answer every later release with "up to date" and never
+                 offer a Stage again. -->
+            <template v-else-if="engineUpdateStage === 'done' && !engineUpdateStaleApplied">
               <p class="hint hint--spaced">ciaobot is up to date.</p>
             </template>
 
@@ -2045,6 +2052,7 @@ import {
   updateInFlight,
   updatePhaseLabel,
   updateStage,
+  updateStageInFlight,
 } from '../lib/engineUpdate'
 import { askConfirm } from '../lib/confirm'
 import { archiveConfirmMessage, restoreConfirmMessage, restoredMessage } from '../lib/workspaceArchive'
@@ -4632,6 +4640,14 @@ let updatePollTimer: number | null = null
 
 const engineUpdateOperation = computed(() => updateStatus.value?.operation ?? null)
 const engineUpdateStage = computed(() => updateStage(engineUpdateOperation.value))
+// `applied` is the last run's outcome, not a job: nothing ever unlinks the
+// record, so a machine that has updated once would answer every later release
+// with "up to date" and never offer a Stage again. The release page and the
+// installed version are read independently of it, so a newer release is
+// exactly the signal that the record is history rather than the answer.
+const engineUpdateStaleApplied = computed(
+  () => engineUpdateStage.value === 'done' && !!packageStatus.value?.update_available,
+)
 const engineUpdateBusy = computed(() => updateInFlight(engineUpdateOperation.value))
 const engineUpdateFailed = computed(() => updateFailed(engineUpdateOperation.value))
 const engineUpdateRolledBack = computed(() => engineUpdateStage.value === 'rolled_back')
@@ -4653,11 +4669,16 @@ const engineUpdateVisible = computed(
 const engineUpdateVersion = computed(
   () => engineUpdateOperation.value?.to_version || packageStatus.value?.latest_version,
 )
-// No job and nothing newer: the header's status, not a disabled button.
+// No job and nothing newer: the header's status, not a disabled button. A
+// `done` record is history rather than a job once a newer release exists, so it
+// counts as idle here too — and the `update_available` term is what keeps the
+// header quiet, so the header and the panel below it say the same thing. A
+// version check that never answered claims nothing either.
 const engineUpdateIdleAndCurrent = computed(
   () => engineUpdateEnabled.value
-    && engineUpdateStage.value === 'idle'
+    && (engineUpdateStage.value === 'idle' || engineUpdateStaleApplied.value)
     && !updateStatus.value?.error
+    && !!packageStatus.value
     && !packageStatus.value?.update_available,
 )
 
@@ -4674,19 +4695,20 @@ async function fetchUpdateStatus() {
 /**
  * The poll's own end condition, checked after every read.
  *
- * A record in flight keeps the poll alive and a terminal one is the watcher's
- * job, so what is left is the answer that will never change on its own: the
- * coordinator refused the request and wrote no record to wait for. A stage POST
- * returns 202 before a record exists, so release resolution or locking can fail
- * with the card polling a null operation forever — which is what left the
- * button disabled and the user stuck until a reload. An operation that simply
- * has not landed yet keeps the poll, because the record is the only place that
- * run exists.
+ * What keeps a poll alive is a run that can still move on its own: a record in
+ * flight, or a stage POST that returned 202 before any record existed, so the
+ * record is still the only place that run lives. Anything else is the answer
+ * that will never change by waiting — a record that is not in flight is
+ * already the run's outcome, and a refusal that wrote none never will land a
+ * record. Polling either forever left every button in the panel disabled and the
+ * card a dead end until a reload: a terminal record was already not-busy, so
+ * the watcher below could not cover it either.
  */
 function reconcileUpdatePoll() {
   if (engineUpdateBusy.value) return
   const status = updateStatus.value
-  if (status && !status.operation && status.error) stopUpdatePoll()
+  if (!status) return
+  if (status.error || status.operation) stopUpdatePoll()
 }
 
 function stopUpdatePoll() {
@@ -4804,6 +4826,10 @@ watch(() => engineUpdateStage.value, (stage, previous) => {
     void fetchPackageStatus()
     void fetchUpdateStatus()
   }
+  // "Staging…"/"Applying…" describes a run that is in flight. Once the record
+  // settles it is the last thing that happened rather than the state, and would
+  // otherwise sit under the panel that replaced it.
+  if (updateStageInFlight(previous) && !updateStageInFlight(stage)) packageResult.value = ''
 })
 
 onUnmounted(stopUpdatePoll)

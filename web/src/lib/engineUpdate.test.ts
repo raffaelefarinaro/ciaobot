@@ -11,6 +11,7 @@ import {
   updatePhaseLabel,
   updatePhaseName,
   updateStage,
+  updateStageInFlight,
 } from './engineUpdate'
 import type { EngineUpdateOperation } from './types'
 
@@ -110,6 +111,15 @@ describe('updateInFlight', () => {
     expect(updateInFlight(op('applied'))).toBe(false)
     expect(updateInFlight(op('rolled_back'))).toBe(false)
     expect(updateInFlight(null)).toBe(false)
+  })
+
+  it('answers the same from a card state, so a settled record is recognisable', () => {
+    // The card watches the state rather than the record, and must clear its
+    // in-flight line on exactly the transitions the record says settled.
+    for (const phase of PHASES) {
+      expect(updateStageInFlight(updateStage(op(phase)))).toBe(updateInFlight(op(phase)))
+    }
+    expect(updateStageInFlight('idle')).toBe(false)
   })
 })
 

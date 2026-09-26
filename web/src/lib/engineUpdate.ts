@@ -71,10 +71,14 @@ export function updateStage(op: EngineUpdateOperation | null): UpdateStage {
   return 'idle'
 }
 
+/** True for a card state that still describes a run in flight. */
+export function updateStageInFlight(stage: UpdateStage): boolean {
+  return stage === 'staging' || stage === 'applying'
+}
+
 /** True while the record still describes a run in flight. */
 export function updateInFlight(op: EngineUpdateOperation | null): boolean {
-  const stage = updateStage(op)
-  return stage === 'staging' || stage === 'applying'
+  return updateStageInFlight(updateStage(op))
 }
 
 /** True for a phase that ended the run without applying the update. */

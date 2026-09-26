@@ -300,3 +300,85 @@ it('keeps the non-installer guidance', async () => {
     wrapper.unmount()
   }
 })
+
+it('stages again when a later release follows an applied record', async () => {
+  // The record is never unlinked, so an `applied` record is the last run's
+  // outcome forever. The release page is read independently of it, so a newer
+  // release is the signal that the record is history — and the card has to offer
+  // Stage again rather than claim the engine is up to date.
+  const { wrapper, post } = await mountCard(
+    { install_mode: 'installer', can_update: true, operation: operation('applied') },
+    { mode: 'installer', current_version: '0.20.0', update_available: true, latest_version: '0.21.0' },
+  )
+  try {
+    expect(wrapper.text()).not.toContain('ciaobot is up to date')
+    expect(wrapper.text()).not.toContain('Up to date')
+    expect(wrapper.text()).toContain('v0.21.0 is available')
+    const stage = button(wrapper, 'Stage update')
+    expect(stage).toBeDefined()
+    expect(stage!.attributes('disabled')).toBeUndefined()
+    await stage!.trigger('click')
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith('/api/update/stage')
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('recovers from a refusal parked against an existing record', async () => {
+  vi.useFakeTimers()
+  // A terminal record is already not-busy, so nothing but the poll's own end
+  // condition can tell the card that the run it just asked for will never write
+  // a record of its own. The served reason is the newer answer, and it has to
+  // win over the previous run's own error.
+  const { wrapper, post } = await mountCard([
+    { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the wheel could not be built' }) },
+    { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the wheel could not be built' }), error: 'the latest release could not be resolved' },
+  ])
+  try {
+    await button(wrapper, 'Retry')!.trigger('click')
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith('/api/update/stage')
+
+    await poll()
+    expect(wrapper.text()).toContain('the latest release could not be resolved')
+    expect(wrapper.text()).not.toContain('the wheel could not be built')
+
+    const retry = button(wrapper, 'Stage update')
+    expect(retry).toBeDefined()
+    expect(retry!.attributes('disabled')).toBeUndefined()
+    await retry!.trigger('click')
+    await flushPromises()
+    expect(post.mock.calls.filter(call => call[0] === '/api/update/stage')).toHaveLength(2)
+    wrapper.unmount()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('drops the in-flight line once the record settles', async () => {
+  vi.useFakeTimers()
+  const { wrapper } = await mountCard([
+    { install_mode: 'installer', can_update: true, operation: null },
+    { install_mode: 'installer', can_update: true, operation: operation('downloading') },
+    { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the new engine never answered' }) },
+  ])
+  try {
+    await button(wrapper, 'Stage update')!.trigger('click')
+    await flushPromises()
+    // "Staging the update…" is true while the run is in flight.
+    expect(wrapper.text()).toContain('Staging the update')
+
+    await poll()
+    expect(wrapper.text()).toContain('Staging the update')
+
+    // The run stopped: the panel says why, and the in-flight line is gone rather
+    // than reading as the state under a settled panel.
+    await poll()
+    expect(wrapper.text()).toContain('the new engine never answered')
+    expect(wrapper.text()).not.toContain('Staging the update')
+    wrapper.unmount()
+  } finally {
+    vi.useRealTimers()
+  }
+})
