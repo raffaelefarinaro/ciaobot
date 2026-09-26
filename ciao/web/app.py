@@ -174,6 +174,9 @@ from ciao.web.routes_node import (
     package_changelog_endpoint,
     package_status_endpoint,
     package_update_endpoint,
+    update_apply_endpoint,
+    update_stage_endpoint,
+    update_status_endpoint,
 )
 from ciao.web.routes_push import (
     push_notification_feed,
@@ -385,6 +388,15 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/device/package-status", package_status_endpoint, methods=["GET"]),
         Route("/api/device/changelog", package_changelog_endpoint, methods=["GET"]),
         Route("/api/device/update", package_update_endpoint, methods=["POST"]),
+        # The Settings update card driving the installer-only engine update job.
+        # Host-scoped like /api/package/* (in client mode it reports and updates
+        # the host), and session-protected rather than loopback-only: a logged-in
+        # operator may start an update from a browser, exactly as they may
+        # POST /api/admin/restart. Both halves run in the background; the card
+        # polls the status route.
+        Route("/api/update/status", update_status_endpoint, methods=["GET"]),
+        Route("/api/update/stage", update_stage_endpoint, methods=["POST"]),
+        Route("/api/update/apply", update_apply_endpoint, methods=["POST"]),
         # Node & Handover (Multi-device Active-Standby)
         Route("/api/node/status", node_status_endpoint, methods=["GET"]),
         Route("/api/node/connect", node_connect_endpoint, methods=["POST"]),

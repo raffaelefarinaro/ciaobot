@@ -1886,16 +1886,19 @@ async def test_failed_wake_is_not_rearmed(tmp_path: Path, monkeypatch) -> None:
 def _announce_spy(pcm) -> list[tuple]:
     """Record announces, and keep detached work from reaching the real vault.
 
-    Only the archive-proposal helper is swallowed — everything else spawned
-    this way is scheduled for real, or a stub here would silently disable the
-    behaviour under test (the parked-announce deadline is spawned exactly like
-    that helper).
+    Only the archive-proposal helper and the memory-pass settle are swallowed —
+    everything else spawned this way is scheduled for real, or a stub here would
+    silently disable the behaviour under test (the parked-announce deadline is
+    spawned exactly like that helper). The memory-pass hook needs the same
+    swallow: in a sync test there is no loop for its detached task.
     """
     calls: list[tuple] = []
     pcm._announce_result_ready = lambda *a: calls.append(a)  # type: ignore[method-assign]
 
     def spawn(coro, name: str):
-        if name.startswith("archive-proposal-helper"):
+        if name.startswith("archive-proposal-helper") or name.startswith(
+            "memory-pass-"
+        ):
             coro.close()
             return None
         return asyncio.create_task(coro, name=name)

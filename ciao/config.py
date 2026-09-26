@@ -1434,6 +1434,31 @@ class CiaoConfig:
         fixed = credential_path_deny_rules(self.state_path.parent)
         return list(dict.fromkeys([*fixed, *extras, *denied]))
 
+    def memory_pass_denied_tools(self, workspace: str | None) -> list[str]:
+        """Tool denies carried only by the end-of-conversation memory pass.
+
+        Additive to :meth:`disallowed_tools_for_workspace`, not a replacement
+        for it: the pass keeps every workspace deny and adds two blocks a pass
+        must never have. First, all MCP — every ``mcp__<server>`` for every
+        server ``.mcp.json`` declares, with the same fail-closed-by-name
+        fallback to :meth:`_known_mcp_server_names` when that file cannot be
+        parsed. Second, all shipped ``gws-*`` skills, as ``Skill(<name>)``
+        denies, so the pass cannot reach Google Workspace.
+
+        The skill set is read from the packaged stock skills on disk, so a
+        newly shipped gws skill is denied without a code change.
+        """
+        from ciao.gws_skills import shipped_gws_skills
+
+        declared = self._declared_mcp_server_names(workspace)
+        if declared is None:
+            mcp = [f"mcp__{name}" for name in self._known_mcp_server_names()]
+        else:
+            mcp = [f"mcp__{name}" for name in declared]
+        stock = Path(__file__).resolve().parent / "stock" / "skills"
+        skills = [f"Skill({name})" for name in shipped_gws_skills(stock)]
+        return list(dict.fromkeys([*mcp, *skills]))
+
     def _seed_allowed_mcp_servers(self) -> None:
         """Migrate pre-existing workspaces onto the allowlist, losslessly.
 

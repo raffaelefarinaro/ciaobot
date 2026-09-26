@@ -113,6 +113,10 @@ class AgentRequest:
     # (e.g. the default harness set or ``Bash``) reach the subprocess
     # without leaking through ``extra_env``.
     disallowed_tools: list[str] = field(default_factory=list)
+    # True for the end-of-conversation memory pass. Providers that have their
+    # own ruleset (opencode) select a stricter one; Claude already receives the
+    # extra denies through ``disallowed_tools``.
+    memory_pass: bool = False
     # Provider-native thinking/reasoning level (see THINKING_LEVELS).
     # Empty = provider default, nothing is forwarded.
     thinking_level: str = ""

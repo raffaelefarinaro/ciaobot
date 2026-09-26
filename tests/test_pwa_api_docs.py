@@ -31,6 +31,8 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/admin/drain/cancel": "update coordinator drain (loopback-only CLI)",
     "/api/package/update": "browser update action; production app updates through the signed Tauri updater",
     "/api/device/update": "browser Device panel; production app updates through the signed Tauri updater",
+    "/api/update/stage": "browser Settings update card; stages a release for an installer-managed engine in the background",
+    "/api/update/apply": "browser Settings update card; applies the staged release (drain, detached swap, rollback) in the background",
     "/api/workspace-health/fix": "browser Settings health Fix button; creates missing scaffold files and re-links skills",
     "/api/workspace-open": "browser file-viewer Open-in-default-app button; only meaningful when the PWA talks to a local Ciao instance",
     "/api/workspaces": "browser workspaces list config",
