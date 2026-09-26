@@ -6891,11 +6891,10 @@ async def proposals_history(request: Request) -> JSONResponse:
     Reads the same per-workspace decision sidecar :func:`record_dismissal`
     and :func:`record_promotion` write (``Memory-Proposals.dismissed.jsonl``),
     which now carries ``via`` (who decided: the operator through the PWA, the
-    curation agent, or the archive-time auto-promoter), a ``destination``, and
+    curation agent, or a prior automated promotion), a ``destination``, and
     an ``outcome`` qualifier alongside the original ``kind``/``text``. This is
     the read side of the review page's History tab: what was accepted or
-    dismissed, by whom, and what the overnight pipeline added or skipped on
-    its own.
+    dismissed, by whom, and what the memory pass recorded on its own.
     """
     from ciao.memory_proposals import history_row_id, read_decisions
 
@@ -8029,8 +8028,8 @@ async def proposal_action(request: Request) -> JSONResponse:
             elif accept.action == "edit_region":
                 # `?reconcile=1` re-runs the write-time reconcile against the
                 # region's current entries before writing, which is how a fact
-                # the archive-time pass deferred (timed-out call, stale index)
-                # gets resolved rather than appended beside what it supersedes.
+                # a previous pass deferred (timed-out call, stale index) gets
+                # resolved rather than appended beside what it supersedes.
                 # Opt-in: it is a model call, and the plain accept is one
                 # synchronous write.
                 reconcile = (

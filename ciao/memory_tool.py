@@ -14,7 +14,7 @@ and reported by ``memory_status``/``os_audit``; direct human edits remain
 supported.
 
 ``write_region`` also supports the one-time startup migration from legacy
-``~/.ciao/*.md`` files and archive-time promotion.
+``~/.ciao/*.md`` files and a managed region write.
 """
 
 from __future__ import annotations
@@ -379,7 +379,7 @@ def replace_region_body(text: str, region: str, entries: list[str]) -> str:
 def write_region(guide: Path, region: str, entries: list[str]) -> None:
     """Rewrite only the body of *region* inside *guide*.
 
-    Used by the one-time legacy migration and archive-time auto-promotion.
+    Used by the one-time legacy migration and a managed region write.
     Refuses if markers are missing, duplicated, or inverted.
     """
     canonical = resolve_region(region)

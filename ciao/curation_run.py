@@ -15,8 +15,8 @@ This module answers those questions in code. Three things come out of it:
 * a **budget**: a run takes at most ``max_items`` keys and lives at most
   ``max_seconds``. What the budget leaves behind is recorded, so the next run
   resumes instead of starting over at the top of pass 1;
-* a **lease**: one curation run per vault at a time, and archive-time memory
-  writes stand down while it is held.
+* a **lease**: one curation run per vault at a time, so two runs cannot
+  consolidate the same regions in each other's half-light.
 
 Why a lease rather than a lock held for the run's duration: a curation run is
 an agent turn spread over many separate CLI processes, so no single process
@@ -755,22 +755,6 @@ def _live_lease(state: CurationState, now: datetime) -> dict[str, Any] | None:
 def active_lease(vault_root: Path, *, now: datetime | None = None) -> dict[str, Any] | None:
     """The live lease on this vault, or None. Read-only and lock-free."""
     return _live_lease(load_state(vault_root), now or datetime.now(UTC))
-
-
-def curation_in_progress(vault_root: Path, *, now: datetime | None = None) -> bool:
-    """Whether a curation run currently owns this vault's memory.
-
-    Archive-time auto-apply calls this and stands down while it is true: the
-    run is mid-consolidation, holding region text it read minutes ago, and an
-    append landing underneath it is either lost to the rewrite or duplicated by
-    it. The fact is not dropped — it is queued as an ordinary proposal, which
-    is the path uncertain facts already take.
-    """
-    try:
-        return active_lease(vault_root, now=now) is not None
-    except Exception:  # noqa: BLE001 — a gate that fails must not break archiving
-        logger.exception("curation lease check failed for %s", vault_root)
-        return False
 
 
 def begin_run(

@@ -539,18 +539,6 @@ def test_advancing_the_marker_keeps_the_existing_log_body(tmp_path: Path) -> Non
     assert text.count("last_full_pass") == 1
 
 
-# ── Serialization against archive-time writes ─────────────────────────────
-
-
-def test_the_gate_never_breaks_archiving_when_the_state_is_unreadable(
-    tmp_path: Path,
-) -> None:
-    vault = _vault(tmp_path)
-    cr.state_path(vault).write_text("{not json", encoding="utf-8")
-
-    assert cr.curation_in_progress(vault) is False
-
-
 # ── CLI ───────────────────────────────────────────────────────────────────
 
 

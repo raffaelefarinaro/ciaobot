@@ -859,7 +859,7 @@
             <div class="routine-row">
               <div class="routine-info">
                 <span class="routine-name">Session insights</span>
-                <span class="routine-detail">Extracts learnings when a chat is archived and appends them to that archive.</span>
+                <span class="routine-detail">Runs the end-of-conversation memory pass when a chat is archived.</span>
                 <div v-if="getJobTelemetry('insights')" class="routine-telemetry">
                   <span class="badge" :class="getJobBadgeClass('insights')">
                     {{ getJobStatus('insights') }}

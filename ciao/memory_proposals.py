@@ -207,8 +207,8 @@ def _split_sections(insights_md: str) -> dict[str, list[str]]:
 
     Strips bullet markers only. Citation tags — ``[idx=12]`` and the
     multi-index ``[idx=12,34]`` shape models improvise — and destination tags
-    both survive here; they are split later, per bullet, by
-    :func:`_peel_trailing_metadata`, where the routing decision happens.
+    both survive here; they are split later, per bullet, by the accept path,
+    where the routing decision happens.
     Stripping the citation at this stage destroyed the one piece of evidence
     that ties a fact to a real turn before anything could check it. Empty
     sections are dropped.
@@ -233,20 +233,19 @@ def _split_sections(insights_md: str) -> dict[str, list[str]]:
     return sections
 
 
-# ── Auto-apply ────────────────────────────────────────────────────────────
+# ── Promotion ─────────────────────────────────────────────────────────────
 
 
-# The extraction prompt asks for the standing preference a correction implies
-# as a trailing "Durable rule: <...>" sentence. That clause — not the
-# "User said X -> assistant did Y" event around it — is what belongs in a
-# region: the regions are a state surface, and memory_audit flags the event
-# shape as rot for the nightly curator to remove.
+# A bullet states the standing preference a correction implies as a trailing
+# "Durable rule: <...>" sentence. That clause — not the "User said X ->
+# assistant did Y" event around it — is what belongs in a region: the regions
+# are a state surface, and memory_audit flags the event shape as rot for the
+# nightly curator to remove.
 #
-# Both extraction prompts in ciao.insights embed this label verbatim (a test
-# asserts the link), and the regex is built from it so the producer prompts
-# and this consumer cannot drift apart silently. Case-sensitive and anchored
-# to a sentence start so a chat fragment quoted inside the bullet ("... as a
-# durable rule: ...") never matches.
+# The regex is built from the label, so a producer and this consumer cannot
+# drift apart silently. Case-sensitive and anchored to a sentence start so a
+# chat fragment quoted inside the bullet ("... as a durable rule: ...") never
+# matches.
 DURABLE_RULE_LABEL = "Durable rule:"
 _DURABLE_RULE_RE = re.compile(
     rf"(?:^|[.!?]\s+){re.escape(DURABLE_RULE_LABEL)}\s*(.+)$"
@@ -654,8 +653,8 @@ def accept_region_fact(
     """Write one approved region fact through the guarded path.
 
     The UI accept button used to call ``update_region(action="add")`` directly,
-    which skipped everything the archive-time path does: the event-shape guard
-    (so an event-shaped bullet landed verbatim in always-loaded context), the
+    which skipped everything this path does: the event-shape guard (so an
+    event-shaped bullet landed verbatim in always-loaded context), the
     stamp-stripped duplicate check, the learned-at stamp the aging audit reads,
     and the consolidations undo log.
 
@@ -664,8 +663,8 @@ def accept_region_fact(
     sequentially inside one request. Reconciliation is offered alongside it
     rather than inside it — :func:`reconcile_region_fact` runs one fresh call
     against the *current* region and hands the result in as ``decision``, which
-    is how a fact deferred at archive time gets resolved on a retry. A caller
-    that passes none takes the plain append path.
+    is how a fact a previous reconcile could not decide gets resolved on a
+    retry. A caller that passes none takes the plain append path.
 
     Returns ``_promote_to_region``'s ``(outcome, promotable)``. Both
     out-parameters are forwarded unchanged. ``deferral_out`` lets an
@@ -1057,9 +1056,9 @@ async def reconcile_region_fact(
 ) -> ReconcileDecision | None:
     """Reconcile one queued fact against the region's *current* entries.
 
-    This is the retry half of the deferral: a fact queued because the
-    archive-time reconcile timed out, replied unusably, or named an entry that
-    had moved is not stuck there — a later attempt reads the region as it is
+    This is the retry half of the deferral: a fact queued because a reconcile
+    timed out, replied unusably, or named an entry that had moved is not stuck
+    there — a later attempt reads the region as it is
     now and can come back with a usable ``add``/``covered``/``update``. The
     decision is planned against the snapshot read here and applied by
     :func:`_promote_to_region`, which re-reads under the guide lock and refuses
@@ -1072,7 +1071,7 @@ async def reconcile_region_fact(
     model call on them is the cost this deliberately avoids.
 
     A call that fails or replies unusably comes back as a ``defer`` row with
-    its reason and the competing entries, exactly as at archive time: a retry
+    its reason and the competing entries: a retry
     that cannot decide must not become a licence to append.
     """
     from ciao.memory_audit import strip_learned_stamp
@@ -1390,7 +1389,7 @@ def _record_decision(
     log_path = dismissed_log_path(proposals_path)
     if once and _has_decision(proposals_path, key=key, text=cleaned, outcome=outcome):
         # Idempotent paths only. A decision the operator makes is a fresh event
-        # every time, but the archive-time pipeline re-derives the same
+        # every time, but a repeated sweep re-derives the same
         # "already applied, skipped" verdict on every pass over the same
         # transcript, and appending a row per pass grew the history without
         # recording anything new.
@@ -1537,7 +1536,7 @@ def history_row_id(entry: dict[str, Any], workspace: str = "") -> str:
     """Stable id for one decision-history row, derived from its content.
 
     Unlike the live queue's :func:`ciao.proposal_tracking.stable_proposal_id`,
-    this cannot key off a path/line: auto-apply only has a vault root, the CLI
+    this cannot key off a path/line: the API only has a vault root, the CLI
     only has an optional workspace name, and legacy sidecar rows have neither.
 
     Timestamps are second-precision, so content alone is not unique: the same
@@ -1626,9 +1625,9 @@ _STUB_HEADER = (
     "tags: [ciao, memory, proposals]\n"
     "---\n"
     "# Memory Proposals\n\n"
-    "Auto-generated proposals from session-insights curation. Each batch is "
-    "timestamped. Confident facts are applied automatically at archive time; "
-    "what lands here waited because the model was unsure or a write failed.\n\n"
+    "Memory proposals awaiting a decision. Each batch is timestamped. The "
+    "memory pass records what it is confident about; what lands here is what "
+    "it was unsure about, or a write that failed.\n\n"
     "Destinations: `[memory]` / `[profile]` are the bounded `ciao:memory` / "
     "`ciao:profile` regions of the workspace `AGENTS.md` (edit the region "
     "first, then dismiss with `ciao memory-proposal-dismiss --text-file <file> "

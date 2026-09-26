@@ -2704,12 +2704,11 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     """File a fact into a workspace's memory-proposal review queue.
 
     The nightly curator discovers durable facts by reading archived chats that
-    never grew a ``## Session insights`` section, so archive-time routing never
-    saw them. Filing here puts the fact in the machine queue (``ciao
-    memory-proposals``, the PWA review panel) where it can be promoted or
-    dismissed like any queued item, instead of surviving only as prose in one
-    nightly report. Re-filing an identical fact is a no-op; the queue dedupes
-    by text.
+    the memory pass never got to, so nothing routed them. Filing here puts the
+    fact in the machine queue (``ciao memory-proposals``, the PWA review panel)
+    where it can be promoted or dismissed like any queued item, instead of
+    surviving only as prose in one nightly report. Re-filing an identical fact
+    is a no-op; the queue dedupes by text.
     """
     from ciao.memory_proposals import (
         DESTINATIONS,
@@ -3272,7 +3271,7 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     """Take the lease and print this run's plan.
 
     An empty worklist releases the lease again before returning: a quiet night
-    must not leave archive-time auto-apply standing down until the TTL expires.
+    must not hold the lease until the TTL expires.
     """
     from ciao.curation_run import CurationBusy, begin_run, end_run
 
@@ -4609,7 +4608,7 @@ def build_parser() -> argparse.ArgumentParser:
             "`Workspace/Memory-Proposals.md`. This is how the nightly curator "
             "queues a durable fact it discovered by reading a chat that never "
             "grew a session-insights section, so the fact becomes reviewable "
-            "and promotable like any archive-time proposal. Re-filing "
+            "and promotable like any other queue row. Re-filing "
             "identical text is a no-op."
         ),
     )
@@ -4762,7 +4761,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Take the curation lease and print this run's planned worklist.",
         description=(
             "Serializes the nightly run: one curation run per vault at a time, "
-            "and archive-time memory auto-apply stands down while the lease is "
+            "and the run that holds it is mid-consolidation while the lease is "
             "held. Prints the same plan as `curation-plan`. Exit 0 when the "
             "lease was taken, 75 when another run holds it (do not curate), "
             "and 0 with `\"empty\": true` when there is nothing to do — the "

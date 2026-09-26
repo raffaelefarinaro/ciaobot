@@ -1,11 +1,11 @@
-"""Archive-time canonical project doc updates from session insights.
+"""Canonical project doc and people-note folds on the memory accept path.
 
-When a chat that belongs to a vault-backed project is archived, the insights
-pipeline (``ciao/insights.py``) already extracts a ``## Session insights``
-section with full chat context in hand. This module folds the material parts
-of that section — Decisions and Open loops — into the project's canonical doc
-right away, instead of waiting for the nightly ``system-memory-curation``
-schedule (which only fires while the server happens to be running).
+A ``[project]`` bullet accepted from the proposals queue is folded into the
+project's canonical doc, and an accepted ``[people: <Name>]`` bullet is merged
+into that person's existing note, right away, instead of waiting for the
+nightly ``system-memory-curation`` schedule (which only fires while the server
+happens to be running). Both share the guards below, so an accept rewrites a
+doc under the same rules the deleted archive-time fold did.
 
 Safety posture:
 
@@ -15,7 +15,7 @@ Safety posture:
   half is rejected — a truncated or hallucinated rewrite must never replace
   a good doc.
 * Writes to the same doc are serialized with a per-path asyncio lock so two
-  chats archiving into one project cannot interleave.
+  accepts into one project cannot interleave.
 * The nightly curation schedule stays on as the cross-chat consolidator.
 """
 
@@ -42,9 +42,9 @@ _MIN_SIZE_RATIO = 0.5
 
 _DOC_UPDATE_SYSTEM_PROMPT = """\
 You maintain the canonical documentation file for a project.
-You receive the current doc and the session-insights section of a chat that
-was just archived for this project. Fold in only material changes: decisions
-made, open loops added or resolved, status changes.
+You receive the current doc and a short set of material bullets from a
+conversation that just ended in this project. Fold in only material changes:
+decisions made, open loops added or resolved, status changes.
 
 Rules:
 - Preserve the doc's existing frontmatter, structure, headings, and voice.
@@ -54,14 +54,14 @@ Rules:
 - Strip `[idx=N]` citations and bracketed destination tags (`[memory]`,
   `[project]`, `[people: <Name>]`, `[learnings]`, `[review]`) from anything
   you carry over.
-- If nothing in the insights materially changes the doc, reply with exactly
+- If nothing in those bullets materially changes the doc, reply with exactly
   NO_CHANGES and nothing else.
 - Otherwise reply with the complete updated doc content and nothing else —
   no code fences, no commentary.
 """
 
 
-# One lock per doc path; two chats archiving into the same project must not
+# One lock per doc path; two accepts into the same project must not
 # interleave their read-modify-write cycles.
 _doc_locks: dict[str, asyncio.Lock] = {}
 
@@ -120,12 +120,12 @@ async def update_project_doc(
     timeout_s: float = 300.0,
     error_out: list[str] | None = None,
 ) -> bool:
-    """Fold session insights into the canonical doc. Returns True on write.
+    """Fold the Decisions/Open loops of *insights_md* into the canonical doc.
 
-    No-ops (returning False) when the doc does not exist, the insights carry
-    no Decisions/Open loops, the model reports ``NO_CHANGES``, or the output
-    fails the safety guards. Never raises — callers treat this as
-    fire-and-forget.
+    Returns True on write. No-ops (returning False) when the doc does not
+    exist, the input carries no Decisions/Open loops, the model reports
+    ``NO_CHANGES``, or the output fails the safety guards. Never raises —
+    callers treat this as fire-and-forget.
 
     ``error_out``, when given, records a non-empty reason for an internal
     failure (the provider call raised, the doc was unreadable, the write

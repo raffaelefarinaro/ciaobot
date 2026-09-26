@@ -26,7 +26,7 @@ ciao curation-begin --json
 
 It does three jobs, and each replaces work you would otherwise do by hand:
 
-1. **It serializes the run.** One curation run per vault at a time, and archive-time auto-apply stands down while the lease is held — so a chat being archived cannot append to a region you are halfway through rewriting. **Exit 75 means another run holds the lease: stop immediately and say nothing happened.** Do not curate anyway.
+1. **It serializes the run.** One curation run per vault at a time, so a second pass cannot rewrite a region you are halfway through consolidating. **Exit 75 means another run holds the lease: stop immediately and say nothing happened.** Do not curate anyway.
 2. **It computes the worklist.** Pending proposals, region usage, aging entries, learnings, the weekly marker, log sizes and skill proposals are all mechanical checks; code has already run them. **`"empty": true` means there is genuinely nothing to do — reply with the one-line no-op and stop.** The lease is already released in that case. Do not open a single file to double-check.
 3. **It applies the run budget.** Work only the passes under `planned`, and only the `keys` listed there. Anything under `deferred` is next run's work, not yours — it is already recorded and will not be lost.
 
@@ -52,7 +52,7 @@ ciao curation-end --holder <lease.holder> --status ok|failed --planned <n> --com
 
 ## 1. Process the proposals queue
 
-Start from the recent archived chats: prefer their existing session-insights sections, and sweep any archive since the last run that has none (its extraction failed or predates insights) — those are exactly the chats whose facts never entered the queue. Archive time already auto-applies confidently-tagged facts, so what remains queued is unsure or failed. List pending items with `ciao memory-proposals` and route each by its bracketed kind:
+Start from the pending queue: list pending items with `ciao memory-proposals` and route each by its bracketed kind:
 
 - `[memory]` / `[profile]` name bounded regions and **stay queued** for the user.
 - `[project <doc-path>]` folds into that canonical doc.

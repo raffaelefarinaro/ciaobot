@@ -754,8 +754,7 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 
 # Accept a region row, reconciling it against that region's CURRENT entries
 # first, so a fact that supersedes one already there replaces it (undo-logged)
-# instead of being appended beside it. This is the way out of an archive-time
-# deferral. Opt-in because it is one model call per row — the plain accept above
+# instead of being appended beside it. This is the way out of a deferral. Opt-in because it is one model call per row — the plain accept above
 # is a single synchronous write, and the batch endpoint deliberately never
 # reconciles (one timeout per row). `reconcile` accepts 1/true/yes.
 #
@@ -793,9 +792,9 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # dismissed, by whom (`via`: pwa | agent | auto), and where it landed
 # (`destination`). Reads the same per-workspace sidecar the accept/dismiss
 # routes above write to (Memory-Proposals.dismissed.jsonl), so it also shows
-# what the archive-time auto-promoter wrote or skipped ("outcome":
-# "suppressed"/"duplicate") overnight, and what the nightly curation agent
-# resolved via the CLI ("via": "agent"). Optional query params: workspace,
+# what the memory pass recorded on its own ("outcome":
+# "suppressed"/"duplicate"), and what the nightly curation agent resolved
+# via the CLI ("via": "agent"). Optional query params: workspace,
 # limit (default 200, max 1000), action (accepted|dismissed). The reply carries
 # {rows, total, truncated, limit, at_max}: `limit` is the clamped page size
 # actually served and `at_max` says the request asked for more than the cap, so

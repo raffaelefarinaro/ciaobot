@@ -183,18 +183,6 @@ vi.mock('../../lib/api', () => {
           avg_duration_ms: 300000,
           last_error: { error: 'TimeoutError', ts: '2026-08-03T20:06:14+00:00' },
         },
-        sub_jobs: [
-          {
-            job: 'insights_sweep',
-            label: 'Insights sweep',
-            category: 'system',
-            description: 'Runs session insights over every archive that is missing them.',
-            trigger: 'On demand from this page.',
-            last_run: null,
-            recent: [],
-            stats: { total_runs: 0, success_rate: null, avg_duration_ms: 0, last_error: null },
-          },
-        ],
       },
       {
         job: 'title',

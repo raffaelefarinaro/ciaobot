@@ -262,16 +262,6 @@ def test_locate_trusts_the_stamp() -> None:
     assert text[location[0]:].startswith("<!-- ciao:session-insights -->")
 
 
-def test_has_insights_section_ignores_quoted_marker(tmp_path: Path) -> None:
-    archive = tmp_path / "archive.md"
-    archive.write_text(
-        "# chat\n\n## Turn 1\n\nquoting:\n\n## Session insights\n\n- old\n\n"
-        "## Turn 2\n\nbye\n",
-        encoding="utf-8",
-    )
-    assert not insights._has_insights_section(archive)
-
-
 def test_locate_rejects_stamp_quoted_inside_code_fence() -> None:
     """A stamped section pasted into a chat turn is fenced, hence quoted.
 

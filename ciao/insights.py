@@ -25,10 +25,10 @@ archive-time session reading with no other home.
   trajectory; the memory pass, a chat of the app's own, owns everything that
   writes to the vault.
 
-:func:`locate_insights_section` and :func:`_has_insights_section` read the
-``## Session insights`` section an older build appended. Nothing appends one
-any more, but :mod:`ciao.archive_jobs` authenticates a crashed append from
-before this change against them, so a manifest written then still resumes.
+:func:`locate_insights_section` reads the ``## Session insights`` section an
+older build appended. Nothing appends one any more, but
+:mod:`ciao.archive_jobs` authenticates a crashed append from before this
+change against it, so a manifest written then still resumes.
 """
 
 from __future__ import annotations
@@ -274,12 +274,6 @@ async def call_with_retry(
         logger.exception("%s failed twice; skipping", label)
         return RetryOutcome("", str(exc).strip() or type(exc).__name__, 2, "failed-twice")
 
-
-# Rules shared verbatim by both extraction prompts (JSONL and text mode).
-# Stated once so the two modes cannot drift apart — the same reason the
-# curation contract was collapsed into one skill file.
-
-# The Markdown output contract, kept apart from the grounding rules above.
 
 def filter_session_jsonl(
     workspace_root: Path,
@@ -628,11 +622,3 @@ def _is_appended_tail(text: str, idx: int) -> bool:
     return not _TURN_HEADING_RE.search(text, idx) and not _FENCE_LINE_RE.search(
         text, idx
     )
-
-
-def _has_insights_section(path: Path) -> bool:
-    try:
-        return locate_insights_section(path.read_text(encoding="utf-8")) is not None
-    except OSError:
-        return False
-
