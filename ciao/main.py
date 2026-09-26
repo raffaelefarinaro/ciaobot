@@ -507,14 +507,19 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # leaves its record in a post-move phase with the env moved aside and
     # nothing resuming it: the `ciao` shim and the LaunchAgent can point into a
     # half-installed env, and launchd's `KeepAlive` on `com.ciao.server` will
-    # start it anyway. Recognised once here, on the machine that owns the state
-    # dir, before the server binds. It only *bootstraps* the detached
-    # `com.ciao.updater` job that does the rollback — this process cannot: it is
-    # the engine being booted out, and moving the env it is running out of from
-    # under itself is how a recovery turns into a second outage. So this never
-    # waits on the recovery, only on the job launch. macOS-only because the swap
-    # is launchd's; the state dir is absent elsewhere, and the call is then a
-    # cheap no-op.
+    # start it anyway. `apply_update` installs a durable `com.ciao.recover`
+    # LaunchAgent for exactly that reason, which is the half that works when
+    # this step cannot run at all — the crash window where the live env is
+    # renamed aside leaves the engine's own program missing, so launchd cannot
+    # get far enough to reach this line. This is the fast path for the cases
+    # where the engine *does* come back: a clean reboot after a rollback
+    # started, or a crash in a post-move phase the new env can still boot from.
+    # It only *bootstraps* the detached `com.ciao.updater` job that does the
+    # rollback — this process cannot: it is the engine being booted out, and
+    # moving the env it is running out of from under itself is how a recovery
+    # turns into a second outage. So this never waits on the recovery, only on
+    # the job launch. macOS-only because the swap is launchd's; the state dir is
+    # absent elsewhere, and the call is then a cheap no-op.
     if sys.platform == "darwin":
         tracker.start("recover_engine_update")
         try:
