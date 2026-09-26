@@ -1138,6 +1138,30 @@ export interface PackageStatus {
   source?: string
 }
 
+/**
+ * One engine update run, as the coordinator persists it
+ * (`ciao/engine_update.py:Operation`). `phase` is one of `engine_update.PHASES`
+ * and `error` carries the reason when the run failed.
+ */
+export interface EngineUpdateOperation {
+  id: string
+  phase: string
+  from_version: string
+  to_version: string
+  started_at: string
+  updated_at: string
+  error?: string
+}
+
+/** `GET /api/update/status` — the engine update coordinator's persisted job. */
+export interface EngineUpdateStatus {
+  install_mode: string
+  can_update: boolean
+  operation: EngineUpdateOperation | null
+  /** A coordinator refusal that wrote no operation of its own. */
+  error?: string
+}
+
 /** One home-screen operator action (see `ciao/operator_actions.py`). */
 export interface OperatorAction {
   id: string
