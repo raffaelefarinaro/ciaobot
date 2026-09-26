@@ -625,6 +625,49 @@ def mode_settings(
     return _MODE_AGENTS[key], rules
 
 
+# Actions a memory pass needs: it reads and edits the vault and shells out
+# to `ciao`/`ciao vault search`. Everything else is denied by the leading
+# wildcard, which is also what blocks MCP (opencode's permission union has
+# no `mcp` action) and the search actions the pass must not use.
+_MEMORY_PASS_ALLOWED_ACTIONS: tuple[str, ...] = (
+    "read", "edit", "write", "shell", "bash",
+    "external_directory", "list", "question", "skill",
+)
+
+
+def memory_pass_guardrail_rules(
+    runtime_root: object = None, workspace_root: object = None
+) -> list[dict[str, str]]:
+    """The session ruleset the end-of-conversation memory pass runs under.
+
+    An allow-list, not the ``bypass`` mode's blanket allow: the pass reads and
+    edits the vault and shells out to ``ciao``, and nothing else. A leading
+    wildcard ``deny`` plus explicit grants is what denies MCP here — opencode's
+    permission union has no ``mcp`` action to name.
+
+    ``glob`` and ``grep`` are denied outright rather than left at ``ask``:
+    opencode always asks for them even in ``bypass`` (7 of 12 agent chats in
+    the #594 experiment stopped on that card), and V2 sends the pattern as the
+    resource, so a search cannot be scoped to the vault anyway. The pass uses
+    ``ciao vault search``.
+
+    Same order as :func:`mode_settings`: wildcard first, specific grants after,
+    and the credential denies last because opencode resolves last-match-wins.
+    """
+    rules = _rules(("*", "deny"))
+    rules.extend(
+        {"action": action, "resource": "*", "effect": "allow"}
+        for action in _MEMORY_PASS_ALLOWED_ACTIONS
+    )
+    # Search stays denied even though `read` is allowed: V2 sends the
+    # pattern as the resource, so it cannot be scoped to the vault.
+    rules.append({"action": "glob", "resource": "*", "effect": "deny"})
+    rules.append({"action": "grep", "resource": "*", "effect": "deny"})
+    rules.append({"action": "skill", "resource": "gws-*", "effect": "deny"})
+    rules.extend(opencode_credential_deny_rules(runtime_root, workspace_root))
+    return rules
+
+
 def readonly_agent_rules(roots: Sequence[Path]) -> list[dict[str, str]]:
     """Deny everything except reading inside ``roots`` (read-only memory agent).
 
@@ -1411,11 +1454,16 @@ class OpencodeProvider(BaseSDKProvider):
 
         A caller that supplied ``permission_rules`` is not running a Ciaobot
         mode — it is the read-only memory agent — so its ruleset is used
-        verbatim and the mode only picks the agent. Everyone else gets
-        :func:`mode_settings`, unchanged.
+        verbatim and the mode only picks the agent. A memory pass runs under
+        :func:`memory_pass_guardrail_rules` rather than its ``bypass`` mode's
+        blanket allow. Everyone else gets :func:`mode_settings`, unchanged.
         """
         if self._permission_rules is not None:
             return "build", [dict(rule) for rule in self._permission_rules]
+        if request.memory_pass:
+            return "build", memory_pass_guardrail_rules(
+                self._runtime_root(), self.workspace_root
+            )
         return mode_settings(
             request.mode,
             tools_enabled=self._tools_enabled,

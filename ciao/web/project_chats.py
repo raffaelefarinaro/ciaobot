@@ -118,7 +118,7 @@ from ciao.web.chat_broker import (
 from ciao.web.archive_pipeline import ArchivePipeline
 from ciao.web.chat_streaming import ChatStreaming
 from ciao.web.chat_streaming import StreamOutcome as _StreamOutcome
-from ciao.web.memory_pass import MemoryPassCoordinator
+from ciao.web.memory_pass import MemoryPassCoordinator, is_memory_pass_chat
 from ciao.web.schedule_dispatch import ScheduleDispatcher
 from ciao.web.document_conversion import convert_document, is_anydoc_document
 from ciao.web.file_snapshots import SnapshotStore
@@ -4233,6 +4233,11 @@ class ProjectChatManager:
         denies (``ciao.execution_modes.credential_path_deny_rules``), which no
         workspace override or ``none`` opt-out clears.
 
+        A memory pass carries more than an ordinary chat: on top of the
+        workspace list, it denies every declared MCP server and every shipped
+        ``gws-*`` skill (``CiaoConfig.memory_pass_denied_tools``). A pass reads
+        and edits the vault; it must not reach an external surface.
+
         Two limits stated plainly. This scopes REACHABILITY, not authority: a
         shared account behind a reachable server still holds that account's full
         authority. And this list is only applied when the chat's provider is
@@ -4248,7 +4253,12 @@ class ProjectChatManager:
             return []
         project = self._projects.get(chat.project_id)
         workspace = project.workspace if project else None
-        return self._config.disallowed_tools_for_workspace(workspace)
+        base = self._config.disallowed_tools_for_workspace(workspace)
+        if is_memory_pass_chat(chat, project):
+            base = list(dict.fromkeys(
+                [*base, *self._config.memory_pass_denied_tools(workspace)]
+            ))
+        return base
 
     def schedule_default_model(
         self, project_id: str | None, provider: str | None = None
@@ -4722,6 +4732,10 @@ class ProjectChatManager:
             images=images or [],
             extra_env=extra_env,
             disallowed_tools=self.disallowed_tools_for_chat(chat),
+            # The guardrail marker: Claude reads the extra denies off
+            # ``disallowed_tools``, opencode needs a marker to pick its own
+            # stricter ruleset.
+            memory_pass=is_memory_pass_chat(chat, project),
             thinking_level=self._thinking_level_for_chat(chat),
             context_digest=context_digest,
             context_session_id=context_session_id,

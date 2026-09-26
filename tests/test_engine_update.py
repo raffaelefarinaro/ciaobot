@@ -12,6 +12,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -22,7 +23,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import ciao.engine_update as engine_update
 from ciao.engine_update import (
+    OPERATION_NAME,
     PREVIOUS_ENV_NAME,
+    RECOVER_LABEL,
+    RECOVER_PLIST_NAME,
     SERVER_LABEL,
     UPDATER_LABEL,
     UPDATER_PLIST_NAME,
@@ -35,12 +39,14 @@ from ciao.engine_update import (
     find_uv,
     main,
     read_operation,
+    recover_apply,
+    recover_interrupted_apply,
     release_lock,
     run_apply,
     stage_update,
     write_operation,
 )
-from ciao import install_receipt
+from ciao import install_receipt, macos_service
 from ciao.install_receipt import InstallReceipt, read_receipt, write_receipt
 from ciao.release_manifest import artifact_entry, build_manifest
 
@@ -632,6 +638,16 @@ class _FakeEngine:
             for call in self.launchctl_calls
         )
 
+    def changed_jobs(self) -> list[list[str]]:
+        """The launchctl calls that load or unload a job.
+
+        `launchctl print` is a read-only question about what launchd already
+        has — the pre-flight asks it what `com.ciao.server` is really running,
+        and recovery asks it whether a swap is still in flight — so an assertion
+        about "nothing was launched" is about the calls that change something.
+        """
+        return [call for call in self.launchctl_calls if call[0] != "print"]
+
 
 def _staged(
     root: Path, *, phase: str = "staged", from_version: str = FROM_VERSION
@@ -715,6 +731,242 @@ def _run(engine: _FakeEngine, op: Operation, state: Path, receipt_path: Path, **
     )
 
 
+def _handoff(
+    engine: _FakeEngine, state: Path, **kwargs: Any
+) -> Operation | None:
+    """The in-process half of recovery: recognise the record, load the job.
+
+    `updater_loaded` is injected rather than left to the real `launchctl print`,
+    so nothing here can reach a real launchd.
+    """
+    return recover_interrupted_apply(
+        state_dir=state,
+        launchctl=kwargs.pop("launchctl", engine.launchctl),
+        uid=501,
+        updater_loaded=kwargs.pop("updater_loaded", lambda: False),
+        **kwargs,
+    )
+
+
+def _recover_apply(
+    engine: _FakeEngine, op: Operation, state: Path, receipt_path: Path, **kwargs: Any
+) -> Operation | None:
+    """The durable job's own entry, running the way launchd runs it."""
+    return recover_apply(
+        op.id,
+        state_dir=state,
+        port=PORT,
+        http_post=kwargs.pop("http_post", engine.post),
+        http_get=engine.get,
+        launchctl=kwargs.pop("launchctl", engine.launchctl),
+        start_service=kwargs.pop("start_service", engine.start_service),
+        uid=501,
+        sleep=lambda seconds: None,
+        clock=kwargs.pop("clock", _FakeClock()),
+        receipt_path=receipt_path,
+        **kwargs,
+    )
+
+
+def _recorder(calls: list[str]) -> Any:
+    """An injected `http_post` that records every URL it is handed."""
+
+    def post(url: str) -> dict[str, Any]:
+        calls.append(url)
+        return {}
+
+    return post
+
+
+def _install_recovery_agent(state: Path, op: Operation) -> Path:
+    """The durable agent's plist, as `apply_update` writes it before the stop."""
+    return engine_update._write_recover_plist(
+        op, op.env_python or str(Path(op.stage_dir) / "env" / "bin" / "python"), state
+    )
+
+
+def _login_recover_plist() -> Path:
+    """The agent's login-time copy, in the directory launchd itself scans.
+
+    `conftest.py` repoints `CIAO_LAUNCH_AGENTS_DIR` at the test's `tmp_path`, so
+    this is a temp file and never the operator's own LaunchAgents directory.
+    """
+    return macos_service.default_launch_agents_dir() / RECOVER_PLIST_NAME
+
+
+def _loaded_job(
+    engine: _FakeEngine, program: str | Path | None, *, running: bool = True
+) -> Any:
+    """A launchctl that reports a *loaded* `com.ciao.server` running `program`.
+
+    The rendering is the one `launchctl print` produces, because the pre-flight
+    asks launchd what the job really is rather than reading the plist on disk:
+    launchd loads a job once, so the file and the running job are two different
+    facts. `program=None` is a job that is not loaded at all, which is the only
+    case where the on-disk plist is allowed to answer instead.
+    """
+
+    def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
+        if args[0] == "print" and args[-1].endswith(SERVER_LABEL):
+            if program is None:
+                return subprocess.CompletedProcess(
+                    args, 113, "", f'Could not find service "{SERVER_LABEL}" in domain for uid: 501'
+                )
+            state = "running" if running else "not running"
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                f"{SERVER_LABEL} = {{\n"
+                "\tactive count = 1\n"
+                f"\tpath = {_server_plist_path()}\n"
+                "\ttype = LaunchAgent\n"
+                f"\tstate = {state}\n"
+                f"\tprogram = {program}\n"
+                "\targuments = {\n\t\t-m\n\t\tciao.main\n\t}\n"
+                f"\tlast exit code = {0 if running else 1}\n"
+                "}\n",
+                "",
+            )
+        return engine.launchctl(args)
+
+    return launchctl
+
+
+# What a real `com.ciao.updater` is running when a swap is in flight: the verb
+# `apply_update` writes, with the one-shot's own arguments beside it.
+_RUN_APPLY_ARGUMENTS = (
+    "-I",
+    "-m",
+    "ciao.engine_update",
+    "run-apply",
+    "--operation",
+    "20260925T100000-0.9.0",
+)
+
+
+def _updater_print(running: bool, arguments: tuple[str, ...] | None) -> str:
+    """What `launchctl print` says about `com.ciao.updater`, in its own rendering.
+
+    A one-shot LaunchAgent stays *loaded* in launchd after its process exits, so
+    "loaded" alone cannot tell a live swap from a dead one — the `pid` line is
+    what says a process is running it. The `arguments` block beside it says which
+    one, and is rendered whether or not the job is running, the way launchd
+    renders it: one argument per line inside a block of its own.
+    """
+    body = [
+        f"{UPDATER_LABEL} = {{",
+        "\tactive count = 0",
+        "\ttype = LaunchAgent",
+        f"\tstate = {'running' if running else 'not running'}",
+        f"\tlast exit code = {0 if running else 1}",
+        "\tprogram = /fake/env/bin/python",
+    ]
+    if arguments is not None:
+        body.append("\targuments = {")
+        body.extend(f"\t\t{argument}" for argument in arguments)
+        body.append("\t}")
+    if running:
+        body.append("\tpid = 4242")
+    body.append("}")
+    return "\n".join(body) + "\n"
+
+
+def _running_updater(
+    engine: _FakeEngine,
+    *,
+    running: bool,
+    arguments: tuple[str, ...] | None = _RUN_APPLY_ARGUMENTS,
+) -> Any:
+    """A launchctl that reports `com.ciao.updater` loaded, and maybe running.
+
+    The `arguments` block is the second half of the question recovery asks about
+    that job, and the reason it is modelled here: the recovery job
+    `recover_interrupted_apply` bootstraps runs under *this* label too, so a live
+    pid on its own cannot say whether the process behind it is a swap in flight
+    or the recovery standing on its own doorstep.
+    """
+
+    def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
+        if args[0] == "print" and args[-1].endswith(UPDATER_LABEL):
+            return subprocess.CompletedProcess(
+                args, 0, _updater_print(running, arguments), ""
+            )
+        return engine.launchctl(args)
+
+    return launchctl
+
+
+def _updater_running_its_own_plist(engine: _FakeEngine, state: Path) -> Any:
+    """A launchctl reporting the `com.ciao.updater` the handoff just wrote, running.
+
+    The verb is read back out of the plist on disk rather than spelled out here,
+    so this stands in for exactly the job launchd would start — and a fix that
+    recognised one hard-coded verb instead of reading the loaded job's own
+    arguments would still fail the test that uses it.
+    """
+    plist = plistlib.loads((state / UPDATER_PLIST_NAME).read_bytes())
+    arguments = tuple(str(argument) for argument in plist["ProgramArguments"])
+    return _running_updater(engine, running=True, arguments=arguments)
+
+
+def _server_plist_path() -> Path:
+    """The server LaunchAgent's path, from the helper that owns it.
+
+    `conftest.py` redirects `CIAO_LAUNCH_AGENTS_DIR` to the test's `tmp_path`,
+    so this is a temp plist and never the operator's live one.
+    """
+    return macos_service.default_launch_agents_dir() / f"{SERVER_LABEL}.plist"
+
+
+def _write_server_plist(program: str | Path) -> Path:
+    """Write that plist with ``program`` as its `ProgramArguments[0]`."""
+    path = _server_plist_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        plistlib.dump(
+            {
+                "Label": SERVER_LABEL,
+                "ProgramArguments": [str(program), "-m", "ciao.main"],
+                "RunAtLoad": True,
+                "KeepAlive": True,
+            },
+            handle,
+        )
+    return path
+
+
+def _entry_point(root: Path, target: Path) -> Path:
+    """A `bin` entry point as `uv tool install` leaves it: a link into the env.
+
+    `install-engine.sh` installs the wheel as a uv *tool*, so the interpreter is
+    in `~/.local/share/uv/tools/ciaobot` (`receipt.python`, so `live_env`) and
+    the entry point is a link in `~/.local/bin` (`receipt.executable`) — outside
+    that env. The script then runs `ciao setup --python "$ciao"`, so this is what
+    `com.ciao.server` runs on every healthy terminal install, and it is part of
+    the install the receipt names.
+    """
+    link = root / "bin" / "ciao"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.unlink(missing_ok=True)
+    link.symlink_to(target)
+    return link
+
+
+def _interrupted(
+    root: Path, phase: str
+) -> tuple[Operation, Path, Path, _FakeEngine]:
+    """A staged operation a killed swap left in ``phase``.
+
+    The files are as that transaction left them: the live env renamed aside to
+    `previous-env` (so it is gone, which is what `swapping` means), the receipt
+    still the pre-update one — it is only rewritten at `starting` — and the
+    staged env still in place.
+    """
+    op, state, receipt_path, engine = _staged(root, phase=phase)
+    engine_update._move_env(engine.live_env, Path(op.stage_dir) / PREVIOUS_ENV_NAME)
+    return op, state, receipt_path, engine
+
+
 @pytest.fixture
 def phases(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Every phase the transaction persisted, in order.
@@ -752,12 +1004,24 @@ def test_apply_drains_then_bootstraps_updater(tmp_path: Path) -> None:
     # single empty reading is not a drained engine.
     assert engine.polls == 5
 
-    # Bootout before bootstrap, both against the updater label, and the plist
-    # handed to launchctl is the one on disk.
-    assert [call[0] for call in engine.launchctl_calls] == ["bootout", "bootstrap"]
+    # Bootout before bootstrap for each of the two jobs it loads here, and the
+    # plist handed to launchctl is the one on disk. The updater performs the
+    # swap; the recovery agent behind it is the net for a swap that never
+    # finishes (`test_apply_installs_a_durable_recovery_agent`).
+    assert [call[0] for call in engine.launchctl_calls] == [
+        "bootout",
+        "bootstrap",
+        "bootout",
+        "bootstrap",
+    ]
     assert engine.booted_out(UPDATER_LABEL)
-    plist_path = Path(engine.launchctl_calls[-1][-1])
-    assert plist_path == state / UPDATER_PLIST_NAME
+    plist_path = Path(
+        next(
+            call[-1]
+            for call in engine.launchctl_calls
+            if call[-1] == str(state / UPDATER_PLIST_NAME)
+        )
+    )
     assert plist_path.is_file()
     assert stat.S_IMODE(plist_path.stat().st_mode) == 0o600
 
@@ -1197,9 +1461,18 @@ def test_run_apply_applied_survives_a_failed_record_write(
     assert written.version == TO_VERSION
     assert engine.starts == 1
     assert engine.up is True
-    assert not engine.launchctl_calls or not any(
-        call[0] == "bootout" and call[-1].endswith(SERVER_LABEL)
-        for call in engine.launchctl_calls[1:]
+    # One bootout of the engine, the one that starts the swap: a record write
+    # that fails afterwards is bookkeeping and must not undo an install that is
+    # already serving, and a second stop would be exactly that.
+    assert (
+        len(
+            [
+                call
+                for call in engine.launchctl_calls
+                if call[0] == "bootout" and call[-1].endswith(SERVER_LABEL)
+            ]
+        )
+        == 1
     )
 
 
@@ -1340,3 +1613,959 @@ def test_status_prints_new_phases(capsys: pytest.CaptureFixture[str]) -> None:
     assert out.strip() == (
         f"rolled_back {TO_VERSION} in /home/u/.local/state/ciaobot/updates/{TO_VERSION}: boom"
     )
+
+
+# ── startup recovery and the plist↔receipt pre-flight (#609) ───────────
+#
+# A reboot, a logout or a killed updater job can leave the record in a post-move
+# phase with the env moved aside and nothing resuming it. Recovery is two halves
+# of the same shape as the apply: the in-process entry (from `ciao/main.py`)
+# recognises the record and bootstraps the detached job, and the job does the
+# rollback. That split is the point — the engine cannot boot itself out and
+# restore the env it is running out of — so the first test asserts the entry
+# does exactly two launchctl calls and touches no file.
+#
+# launchd, the service starter, the engine's HTTP surface, the clock and sleep
+# are all doubles, and the updater-loaded check is injected, so nothing here can
+# reach a real launchd or move a real environment.
+
+
+def test_recover_interrupted_apply_bootstraps_a_detached_recovery_job(
+    tmp_path: Path,
+) -> None:
+    op, state, _, engine = _interrupted(tmp_path, "swapping")
+
+    result = _handoff(engine, state)
+
+    assert result is not None
+    # The record is left exactly as it was: the job that owns it now, not this
+    # process, and the operator sees a real outcome rather than a guess.
+    assert result.phase == "swapping"
+    assert read_operation(state) == result
+
+    plist_path = state / UPDATER_PLIST_NAME
+    assert [call[0] for call in engine.launchctl_calls] == ["bootout", "bootstrap"]
+    assert engine.booted_out(UPDATER_LABEL)
+    assert Path(engine.launchctl_calls[-1][-1]) == plist_path
+    plist = plistlib.loads(plist_path.read_bytes())
+    # The same one-shot, abandon-process-group job `apply_update` uses, in its
+    # recovery role — the one that survives the bootout of the engine.
+    assert plist["Label"] == UPDATER_LABEL
+    assert plist["RunAtLoad"] is True
+    assert plist["KeepAlive"] is False
+    assert plist["AbandonProcessGroup"] is True
+    assert plist["ProgramArguments"] == [
+        op.env_python,
+        "-I",
+        "-m",
+        "ciao.engine_update",
+        "run-recover",
+        "--operation",
+        op.id,
+    ]
+
+    # Nothing was stopped and nothing was moved in the engine's own process: it
+    # is the job that boots `com.ciao.server` out and puts the env back.
+    assert not engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 0
+    assert engine.up is True
+    assert not engine.live_env.exists()
+    assert (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
+
+
+@pytest.mark.parametrize(
+    "phase", ["staged", "applying", "stopping", "applied", "failed", "rolled_back"]
+)
+def test_recover_interrupted_apply_is_a_noop_for_terminal_or_pre_move_phases(
+    tmp_path: Path, phase: str
+) -> None:
+    _, state, _, engine = _staged(tmp_path, phase=phase)
+
+    assert _handoff(engine, state) is None
+
+    # `stopping` is in this list on purpose: the env has not moved yet, and a
+    # rollback that "restored" it would delete the only working copy of the
+    # engine. The terminal phases are outcomes, not interrupted transactions.
+    assert engine.launchctl_calls == []
+    assert not (state / UPDATER_PLIST_NAME).exists()
+    assert _env_version(engine.live_env) == FROM_VERSION
+    record = read_operation(state)
+    assert record is not None
+    assert record.phase == phase
+
+
+def test_recover_interrupted_apply_defers_to_a_loaded_updater(tmp_path: Path) -> None:
+    op, state, _, engine = _interrupted(tmp_path, "swapping")
+
+    # The injected double answers "a swap is running" — the check reads the
+    # loaded job's pid, not merely that launchd still knows the job, because a
+    # one-shot job stays loaded after it dies
+    # (`test_run_recover_recovers_after_a_killed_updater_job` is the other half).
+    result = _handoff(engine, state, updater_loaded=lambda: True)
+
+    # The engine being up says nothing about whether the apply is still running:
+    # the swap belongs to a sibling job that may well be mid-swap right now, and
+    # two rollbacks over one env is the race recovery exists to prevent.
+    assert result is not None
+    assert result.phase == "swapping"
+    assert read_operation(state) == result
+    assert engine.launchctl_calls == []
+    assert not (state / UPDATER_PLIST_NAME).exists()
+    assert engine.up is True
+    assert (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
+    assert not engine.live_env.exists()
+
+
+def test_recover_interrupted_apply_records_a_job_that_will_not_load(
+    tmp_path: Path,
+) -> None:
+    op, state, _, engine = _interrupted(tmp_path, "swapping")
+
+    def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
+        engine.launchctl_calls.append(list(args))
+        if args[0] == "bootstrap":
+            return subprocess.CompletedProcess(args, 113, "", "Load failed: 5: Input/output error")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    result = _handoff(engine, state, launchctl=launchctl)
+
+    # The phase stays an interrupted swap, so the next boot tries again, and the
+    # reason is on the record because a record that says nothing is what leaves
+    # an operator guessing why nothing happened.
+    assert result is not None
+    assert result.phase == "swapping"
+    assert "recovery job did not start" in result.error
+    assert "Input/output error" in result.error
+    assert read_operation(state) == result
+    assert not engine.booted_out(SERVER_LABEL)
+    assert not engine.live_env.exists()
+
+
+def test_recover_apply_rolls_back_an_interrupted_swap(
+    tmp_path: Path, phases: list[str]
+) -> None:
+    op, state, receipt_path, engine = _interrupted(tmp_path, "swapping")
+    previous_receipt = Path(op.previous_receipt).read_bytes()
+
+    result = _recover_apply(engine, op, state, receipt_path)
+
+    assert result.phase == "rolled_back"
+    # The record says this was a recovery, so an operator reading
+    # `ciao update status` is not told an update was applied.
+    assert "interrupted during recovery" in result.error
+    assert f"rolled back to {FROM_VERSION}" in result.error
+    assert read_operation(state) == result
+    assert phases[-2:] == ["rolling_back", "rolled_back"]
+
+    # The engine was stopped first, the way the forward path stops it: its
+    # install watcher would otherwise relaunch into a half-swapped env.
+    assert engine.booted_out(SERVER_LABEL)
+    # The env on disk is the install the operator was running before the swap.
+    assert _env_version(engine.live_env) == FROM_VERSION
+    assert not (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
+    # The receipt names that install again, and the operator gets a running
+    # engine back rather than a stopped one.
+    assert receipt_path.read_bytes() == previous_receipt
+    assert engine.starts == 1
+    assert engine.up is True
+    # Recovery restores; it never re-runs the swap (that is what `uv` is for).
+    assert [c for c in engine.run_calls if "tool" in c] == []
+
+
+def test_recover_apply_reports_a_rollback_failure(tmp_path: Path) -> None:
+    op, state, receipt_path, engine = _interrupted(tmp_path, "swapping")
+    # The restore is the one move a recovery cannot survive losing, so simulate
+    # exactly that: the move back into place fails while everything unrelated
+    # still works. Recovery runs unattended, so the outcome has to be a record
+    # the operator can act on, not an exception nobody is left to read.
+    (tmp_path / "gone").write_text("not a directory", encoding="utf-8")
+    write_receipt(
+        InstallReceipt(
+            version=FROM_VERSION,
+            executable=str(tmp_path / "bin" / "ciao"),
+            python=str(tmp_path / "gone" / "ciaobot" / "bin" / "python"),
+            service_backend="launchd",
+            service_label=SERVER_LABEL,
+            installed_at="2026-09-25T16:00:00+00:00",
+            uv="/fake/uv",
+        ),
+        receipt_path,
+    )
+
+    result = _recover_apply(engine, op, state, receipt_path)
+
+    assert result.phase == "rollback_failed"
+    assert "restore the previous env" in result.error
+    assert read_operation(state) == result
+    # Still a returned record rather than an exception, and a running engine
+    # attempted: a stopped engine is a worse outcome than a broken one.
+    assert engine.starts == 1
+
+
+def test_recover_apply_reports_missing_receipt(tmp_path: Path) -> None:
+    op, state, receipt_path, engine = _interrupted(tmp_path, "swapping")
+    # The receipt the rollback is built from is gone, so there is no live env to
+    # put back. The reason belongs on the record, and the files stay as they
+    # are: nothing is touched on the way to that answer.
+    receipt_path.unlink()
+
+    result = _recover_apply(engine, op, state, receipt_path)
+
+    assert result.phase == "rollback_failed"
+    assert "no install receipt" in result.error
+    assert read_operation(state) == result
+    # Nothing was launched, stopped or started: this branch only reports. The
+    # record it left is terminal, so the agent's next tick stands down over it
+    # and retires itself.
+    assert engine.changed_jobs() == []
+    assert engine.starts == 0
+    assert (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
+    assert not engine.live_env.exists()
+
+
+def test_run_apply_refuses_plist_that_runs_another_env(tmp_path: Path) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # A Ciaobot.app installed over a terminal install, or a hand-edited plist:
+    # the receipt names one env and the loaded job runs another, so the swap
+    # would replace an env the service is not using.
+    program = tmp_path / "elsewhere" / "ciaobot" / "bin" / "python"
+    _write_server_plist(program)
+
+    result = _run(engine, op, state, receipt_path)
+
+    assert result.phase == "failed"
+    assert "not the receipt's environment" in result.error
+    # Both sides of the disagreement are named, so the operator knows which
+    # interpreter is loaded and which env the receipt is about.
+    assert str(program) in result.error
+    assert str(engine.live_env) in result.error
+    assert read_operation(state) == result
+    # Admission is reopened: the foreground half already closed it, and nothing
+    # else would.
+    assert engine.posts == [f"{BASE}/api/admin/drain/cancel"]
+    # Nothing was stopped and nothing was moved — the refusal is the pre-flight's
+    # whole answer, so there is nothing to roll back. The only launchctl call is
+    # the pre-flight's own read-only question about the loaded job.
+    assert engine.changed_jobs() == []
+    assert not engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 0
+    assert _env_version(engine.live_env) == FROM_VERSION
+    assert [c for c in engine.run_calls if "tool" in c] == []
+
+
+def test_run_apply_allows_a_missing_server_plist(
+    tmp_path: Path, phases: list[str]
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # A service that has not been loaded yet is not a disagreement: the
+    # rollback's own start step is what registers it again.
+    assert not _server_plist_path().exists()
+
+    result = _run(engine, op, state, receipt_path)
+
+    assert result.phase == "applied"
+    assert read_operation(state) == result
+    # The check ran before the stop, so the apply got past it: the first phase
+    # `run_apply` itself writes is `stopping`, and the bootout that goes with it
+    # happened.
+    assert phases[0] == "stopping"
+    assert engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 1
+
+
+# ── the durable recovery agent and the loaded-job pre-flight (review round 1) ──
+#
+# Two things the first round of this issue got wrong, both about *where* a
+# recovery runs rather than *what* it does. The window the recovery exists for
+# begins when the live env is renamed aside, and at that point
+# `com.ciao.server`'s program is a file that does not exist: launchd cannot
+# start the engine, so the startup hook that was supposed to finish the swap
+# cannot run at all. The net under a swap therefore has to be launchd's own
+# job, installed before the engine is ever stopped and re-checked on an
+# interval — a `com.ciao.recover` LaunchAgent that runs the same `run-recover`
+# from the staged interpreter. And once it is that job, the answers it gives
+# while a swap is in flight are its own: standing down, posting nothing, and not
+# retiring itself over the one window it exists for.
+#
+# launchd, the service starter, the engine's HTTP surface, the clock and sleep
+# are doubles throughout, and `acquire_lock` in these tests is the real lock —
+# no real launchd, no real env and no socket is touched.
+
+
+def test_apply_installs_a_durable_recovery_agent(tmp_path: Path) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path)
+
+    _apply(engine, state)
+
+    # Installed behind the updater, before `run_apply` stops anything, and from
+    # the staged env: the swap replaces the live one, so a recovery that ran out
+    # of it would be fixing the fire with the fuel.
+    recover_plist = state / RECOVER_PLIST_NAME
+    assert recover_plist.is_file()
+    assert stat.S_IMODE(recover_plist.stat().st_mode) == 0o600
+    plist = plistlib.loads(recover_plist.read_bytes())
+    assert plist["Label"] == RECOVER_LABEL
+    assert plist["ProgramArguments"] == [
+        op.env_python,
+        "-I",
+        "-m",
+        "ciao.engine_update",
+        "run-recover",
+        "--operation",
+        op.id,
+    ]
+    # Loaded and then *re-checked*: unlike the one-shot updater, this job has to
+    # still be there after the reboot, the logout and the death of the job that
+    # installed it. A one-shot `RunAtLoad` would not be.
+    assert plist["RunAtLoad"] is True
+    assert plist["StartInterval"] == 30
+    # A failed tick must not become a relaunch loop, and the engine's bootout
+    # must not take the net down with it.
+    assert plist["KeepAlive"] is False
+    assert plist["AbandonProcessGroup"] is True
+    # Its own log beside the updater's: two jobs writing into one file would
+    # interleave their output into something nobody can read.
+    assert plist["StandardOutPath"] == str(Path(op.stage_dir) / "recover.log")
+    assert plist["StandardErrorPath"] == str(Path(op.stage_dir) / "recover.log")
+
+    # A job registered with `bootstrap` lives in launchd's database for this
+    # login only; the login-time scan — the one thing that re-registers agents
+    # after a reboot or a logout — reads the LaunchAgents directory and nothing
+    # else. Without this second copy the plist above describes a net that
+    # disappears with the crash it was installed for.
+    login_plist = _login_recover_plist()
+    assert login_plist.is_file()
+    assert login_plist.read_bytes() == recover_plist.read_bytes()
+    assert stat.S_IMODE(login_plist.stat().st_mode) == 0o600
+
+
+def test_apply_installs_the_recovery_agent_before_the_engine_is_stopped(
+    tmp_path: Path,
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path)
+
+    _apply(engine, state)
+    # On disk from the moment the apply hands off, so the swap below runs with the
+    # net in place and takes it away again itself.
+    assert (state / RECOVER_PLIST_NAME).is_file()
+    result = _run(engine, op, state, receipt_path)
+
+    assert result.phase == "applied"
+    calls = engine.launchctl_calls
+
+    def where(action: str, endswith: str) -> int:
+        return next(
+            i
+            for i, call in enumerate(calls)
+            if call[0] == action and call[-1].endswith(endswith)
+        )
+
+    # The whole point of the ordering: the net is in place before the engine is
+    # stopped, because the crash window it covers is one where nothing inside the
+    # engine can run to notice.
+    assert where("bootstrap", RECOVER_PLIST_NAME) < where("bootout", SERVER_LABEL)
+
+
+def test_a_successful_swap_retires_the_recovery_agent(tmp_path: Path) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path)
+
+    _apply(engine, state)
+    assert (state / RECOVER_PLIST_NAME).is_file()
+    result = _run(engine, op, state, receipt_path)
+
+    assert result.phase == "applied"
+    # The update is a fact about the machine, not a transaction to be recovered,
+    # so the job is booted out *and* both of its plists deleted: leaving either
+    # behind means the next 30 seconds — or the next login — re-reads a settled
+    # record.
+    assert engine.booted_out(RECOVER_LABEL)
+    assert not (state / RECOVER_PLIST_NAME).exists()
+    assert not _login_recover_plist().exists()
+    retired = max(
+        i
+        for i, call in enumerate(engine.launchctl_calls)
+        if call[0] == "bootout" and call[-1].endswith(RECOVER_LABEL)
+    )
+    stopped = next(
+        i
+        for i, call in enumerate(engine.launchctl_calls)
+        if call[0] == "bootout" and call[-1].endswith(SERVER_LABEL)
+    )
+    assert stopped < retired
+    # The agent's own retirement is not a rollback, and must not look like one.
+    assert engine.starts == 1
+    assert _env_version(engine.live_env) == TO_VERSION
+
+
+def test_a_rolled_back_swap_retires_the_recovery_agent(tmp_path: Path) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    _install_recovery_agent(state, op)
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "tool" in argv:
+            raise subprocess.CalledProcessError(1, argv, output="", stderr="uv: broken")
+        return engine.uv_run(argv, **kwargs)
+
+    result = _run(engine, op, state, receipt_path, run=run)
+
+    assert result.phase == "rolled_back"
+    # The env is whole again and the record says so, so the net has nothing left
+    # to guard.
+    assert engine.booted_out(RECOVER_LABEL)
+    assert not (state / RECOVER_PLIST_NAME).exists()
+    assert not _login_recover_plist().exists()
+
+
+def test_run_recover_rolls_back_a_swap_with_no_live_env(
+    tmp_path: Path, phases: list[str]
+) -> None:
+    # The crash window this whole job exists for: `live_env` is renamed to
+    # `previous-env` and `uv` has not recreated it, so the engine's own program
+    # is missing and nothing inside the engine could start. Asserted from the
+    # recovery command's own entry, as the durable agent runs it.
+    op, state, receipt_path, engine = _interrupted(tmp_path, "swapping")
+    _install_recovery_agent(state, op)
+    assert not engine.live_env.exists()
+    posts: list[str] = []
+
+    result = _recover_apply(
+        engine, op, state, receipt_path, http_post=_recorder(posts)
+    )
+
+    assert result is not None
+    assert result.phase == "rolled_back"
+    assert "interrupted during recovery" in result.error
+    assert read_operation(state) == result
+    assert phases == ["rolling_back", "rolled_back"]
+    # The install the operator was running is back, and they get a running engine.
+    assert _env_version(engine.live_env) == FROM_VERSION
+    assert not (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
+    assert engine.starts == 1
+    assert engine.up is True
+    # It never drained anything, so it cancels nothing: a cancel here would
+    # reopen an admission it never closed, while a swap may be draining.
+    assert posts == []
+    # And it retires itself, so the next login does not load a net for a
+    # transaction that is over.
+    assert engine.booted_out(RECOVER_LABEL)
+    assert not (state / RECOVER_PLIST_NAME).exists()
+    assert not _login_recover_plist().exists()
+
+
+def test_run_recover_stands_down_while_a_swap_is_in_flight(tmp_path: Path) -> None:
+    op, state, receipt_path, engine = _interrupted(tmp_path, "swapping")
+    _install_recovery_agent(state, op)
+    posts: list[str] = []
+    # A live swap holds the lock, which is the ordinary state of the world for
+    # the first tick after the agent is installed.
+    handle = acquire_lock(state)
+    try:
+        result = _recover_apply(
+            engine,
+            op,
+            state,
+            receipt_path,
+            launchctl=_running_updater(engine, running=True),
+            http_post=_recorder(posts),
+        )
+    finally:
+        release_lock(handle)
+
+    assert result is None
+    # Nothing is rolled back over a swap that is still running: that is the race
+    # the durable agent exists beside, not inside.
+    assert not engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 0
+    assert engine.up is True
+    assert not engine.live_env.exists()
+    assert (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
+    # The record belongs to the swap in flight: not read, not written.
+    assert read_operation(state) == op
+    # No cancel, even though a drain may be open: it is not this job's to close.
+    assert posts == []
+    # And the net stays loaded, because this tick is the *normal* case and the
+    # next one is 30 seconds away. Retiring here would leave no net at all for
+    # the crash the agent was installed to catch.
+    assert (state / RECOVER_PLIST_NAME).exists()
+    assert not engine.booted_out(RECOVER_LABEL)
+
+
+def test_run_recover_recovers_after_a_killed_updater_job(tmp_path: Path) -> None:
+    op, state, receipt_path, engine = _interrupted(tmp_path, "swapping")
+    _install_recovery_agent(state, op)
+    # The crash the durable agent is installed for: the updater job died, and a
+    # one-shot LaunchAgent stays *loaded* in launchd after its process exits. A
+    # check that read "loaded" as "running" would stand down here for ever, and
+    # the machine would stay exactly as broken as it is now. Its lock went with
+    # the process, so recovery owns the record.
+    result = _recover_apply(
+        engine,
+        op,
+        state,
+        receipt_path,
+        launchctl=_running_updater(engine, running=False),
+    )
+
+    assert result is not None
+    assert result.phase == "rolled_back"
+    assert _env_version(engine.live_env) == FROM_VERSION
+    assert engine.starts == 1
+
+
+def test_run_recover_stands_down_for_a_running_updater(tmp_path: Path) -> None:
+    op, state, receipt_path, engine = _interrupted(tmp_path, "swapping")
+    _install_recovery_agent(state, op)
+    # The belt to the lock: `run_apply` holds the lock for its whole swap, so an
+    # updater that is *running* while this job holds it means the two are not the
+    # process one would assume. Rolling back over a live swap is the one thing
+    # this job must never do, so it stands down and tries again in 30 seconds.
+    # The double's arguments name `run-apply`: a live swap is what the pid plus
+    # that verb together mean, and both are needed — see the next test.
+    result = _recover_apply(
+        engine,
+        op,
+        state,
+        receipt_path,
+        launchctl=_running_updater(engine, running=True),
+    )
+
+    assert result is None
+    assert read_operation(state) == op
+    assert not engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 0
+    assert not engine.live_env.exists()
+    assert (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
+    # Standing down is not standing down for good: the net is still there.
+    assert (state / RECOVER_PLIST_NAME).exists()
+    assert not engine.booted_out(RECOVER_LABEL)
+
+
+def test_run_recover_does_not_stand_down_against_itself(
+    tmp_path: Path, phases: list[str]
+) -> None:
+    op, state, receipt_path, engine = _interrupted(tmp_path, "swapping")
+    # The whole startup fast path, as launchd runs it. The engine comes back with
+    # a stranded swap, bootstraps `com.ciao.updater` in `run-recover` mode, and
+    # that job is the process that executes `recover_apply` — under the label the
+    # stand-down check reads. `launchctl print` therefore reports *its own* live
+    # pid back to it, and a check that asked only "is anything running under
+    # com.ciao.updater?" would stand this job down against itself, boot nothing
+    # out and restore nothing: the machine stays exactly as broken as it is, on
+    # every path where the engine comes back (which is the whole path this
+    # feature is for).
+    assert _handoff(engine, state) is not None
+    plist = plistlib.loads((state / UPDATER_PLIST_NAME).read_bytes())
+    assert "run-recover" in plist["ProgramArguments"]
+
+    result = _recover_apply(
+        engine,
+        op,
+        state,
+        receipt_path,
+        launchctl=_updater_running_its_own_plist(engine, state),
+    )
+
+    assert result is not None
+    assert result.phase == "rolled_back"
+    assert "interrupted during recovery" in result.error
+    assert read_operation(state) == result
+    assert phases == ["rolling_back", "rolled_back"]
+    # The env the operator was running is back, the engine was stopped before it
+    # was touched, and they get a running engine.
+    assert _env_version(engine.live_env) == FROM_VERSION
+    assert not (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
+    assert engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 1
+    assert engine.up is True
+
+
+@pytest.mark.parametrize(
+    "running,arguments,expected",
+    [
+        (True, _RUN_APPLY_ARGUMENTS, True),
+        # This process, under the same label. A recovery that stands down here
+        # strands the machine, so it has to read the verb as well as the pid.
+        (True, ("-I", "-m", "ciao.engine_update", "run-recover", "--operation", "x"), False),
+        # A one-shot job stays loaded after it dies: no pid, no swap in flight.
+        (False, _RUN_APPLY_ARGUMENTS, False),
+        # Nothing usable rendered at all. The lock this job already holds is the
+        # real guard, and answering True would strand every interrupted swap.
+        (True, None, False),
+    ],
+    ids=["live-swap", "live-recovery", "dead-job", "no-arguments"],
+)
+def test_swap_in_flight_reads_the_loaded_job_arguments(
+    running: bool, arguments: tuple[str, ...] | None, expected: bool
+) -> None:
+    printed = subprocess.CompletedProcess(
+        ["print"], 0, _updater_print(running, arguments), ""
+    )
+
+    def launchctl(_args: list[str]) -> subprocess.CompletedProcess[str]:
+        return printed
+
+    assert engine_update._swap_in_flight(launchctl, 501) is expected
+
+
+def test_swap_in_flight_is_false_for_a_job_launchd_does_not_have() -> None:
+    def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args,
+            113,
+            "",
+            f'Could not find service "{UPDATER_LABEL}" in domain for uid: 501',
+        )
+
+    # A job launchd has never heard of cannot be running a swap, and answering
+    # True here would strand every interrupted swap on a machine whose updater
+    # never loaded.
+    assert engine_update._swap_in_flight(launchctl, 501) is False
+
+
+@pytest.mark.parametrize("settled", ["applied", "rollback_failed"])
+def test_run_recover_stands_down_for_a_settled_record(
+    tmp_path: Path, settled: str
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    op.phase = settled
+    op.error = "already over"
+    write_operation(op, state)
+    _install_recovery_agent(state, op)
+    posts: list[str] = []
+
+    result = _recover_apply(
+        engine, op, state, receipt_path, http_post=_recorder(posts)
+    )
+
+    # The transaction settled itself while the agent was starting. A rollback now
+    # would undo an outcome the operator already has.
+    assert result is None
+    assert read_operation(state) == op
+    assert posts == []
+    assert not engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 0
+    assert _env_version(engine.live_env) == FROM_VERSION
+    # Nothing left to recover, so the net comes down: bootout *and* the plists, or
+    # the next login loads a job for a transaction that is over.
+    assert engine.changed_jobs() == [["bootout", f"gui/501/{RECOVER_LABEL}"]]
+    assert not (state / RECOVER_PLIST_NAME).exists()
+    assert not _login_recover_plist().exists()
+
+
+@pytest.mark.parametrize(
+    "wrong_id,stale", [(True, False), (False, True)], ids=["wrong-id", "no-record"]
+)
+def test_recover_apply_ignores_a_missing_or_wrong_operation(
+    tmp_path: Path, wrong_id: bool, stale: bool
+) -> None:
+    op, state, receipt_path, engine = _interrupted(tmp_path, "swapping")
+    _install_recovery_agent(state, op)
+    if wrong_id:
+        # A newer update has taken the record over, so the record describes a
+        # different operation than the plist names. `op` itself is left alone:
+        # it is what the recovery command is asked for.
+        write_operation(replace(op, id="20260101T000000-9.9.9"), state)
+    else:
+        (state / OPERATION_NAME).unlink()
+    posts: list[str] = []
+
+    result = _recover_apply(
+        engine, op, state, receipt_path, http_post=_recorder(posts)
+    )
+
+    # A record this job has no business rewriting, and no record at all, are the
+    # same answer: there is nothing here to undo. No phase of its own, no
+    # exception, and — because it never drained anything — no cancel POST that
+    # would reopen an admission belonging to whatever update is in flight.
+    assert result is None
+    assert posts == []
+    assert not engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 0
+    assert engine.up is True
+    assert not engine.live_env.exists()
+    assert (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
+    if wrong_id:
+        record = read_operation(state)
+        assert record is not None
+        assert record.id == "20260101T000000-9.9.9"
+    else:
+        assert read_operation(state) is None
+    # Only a plist that is stale in the sense that *nothing* replaced it may
+    # retire itself. A stale one-shot whose operation a newer update has taken
+    # over would be taking the newer net down with it — the same label, the same
+    # two plists, and the only recovery for the update actually in flight.
+    if stale:
+        # The plist named an operation that is not there, so it is stale. Both
+        # copies go: a login-time copy left behind would load a job for a
+        # transaction that is over.
+        assert engine.changed_jobs() == [["bootout", f"gui/501/{RECOVER_LABEL}"]]
+        assert not (state / RECOVER_PLIST_NAME).exists()
+        assert not _login_recover_plist().exists()
+    else:
+        # The net belongs to the update in flight now, so it stays up: the stale
+        # job keeps answering for its own retired id until the newer one settles.
+        assert engine.changed_jobs() == []
+        assert (state / RECOVER_PLIST_NAME).exists()
+        assert _login_recover_plist().exists()
+
+
+@pytest.mark.parametrize("phase", ["swapping", "starting", "verifying_start"])
+@pytest.mark.parametrize(
+    "new_receipt", [False, True], ids=["old-receipt", "new-receipt"]
+)
+def test_run_recover_replaces_a_recreated_live_env(
+    tmp_path: Path, phase: str, new_receipt: bool
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase=phase)
+    previous_receipt = Path(op.previous_receipt).read_bytes()
+    # `uv` got as far as recreating the env, which is the crash this is about:
+    # the old install is retained under `previous-env` *and* a new live env is on
+    # disk, so "is the live env gone?" cannot tell whether the move happened.
+    engine_update._move_env(engine.live_env, Path(op.stage_dir) / PREVIOUS_ENV_NAME)
+    _write_env(engine.live_env, TO_VERSION)
+    installed = read_receipt(receipt_path)
+    assert installed is not None
+    if new_receipt:
+        # `run_apply` rewrites the receipt at `starting`, so a crash after that
+        # leaves the new version named by both the receipt and the env on disk.
+        write_receipt(
+            replace(installed, version=TO_VERSION, previous_version=FROM_VERSION),
+            receipt_path,
+        )
+
+    result = _recover_apply(engine, op, state, receipt_path)
+
+    # The retained previous env is the evidence the move completed, so the
+    # half-installed env is replaced rather than left in place beside a receipt
+    # that no longer describes it.
+    assert result is not None
+    assert result.phase == "rolled_back"
+    assert _env_version(engine.live_env) == FROM_VERSION
+    assert not (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
+    assert receipt_path.read_bytes() == previous_receipt
+    assert engine.starts == 1
+    assert engine.up is True
+
+
+def test_recover_interrupted_apply_never_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, state, _, engine = _staged(tmp_path, phase="swapping")
+
+    def exploding_reader(state_dir: Path | None = None) -> Operation:
+        raise OSError("the state dir is unreadable in a way nobody predicted")
+
+    monkeypatch.setattr(engine_update, "read_operation", exploding_reader)
+
+    # This runs inside the engine's startup, before the server binds. A
+    # bookkeeping failure there must not be a reason the engine does not come
+    # up, so the answer is "nothing was recovered" rather than an exception.
+    assert _handoff(engine, state) is None
+    assert engine.launchctl_calls == []
+    assert not (state / UPDATER_PLIST_NAME).exists()
+    assert not (state / RECOVER_PLIST_NAME).exists()
+    assert _env_version(engine.live_env) == FROM_VERSION
+    assert engine.starts == 0
+    assert engine.up is True
+
+
+def test_run_apply_refuses_when_the_loaded_job_runs_another_env(tmp_path: Path) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # The plist on disk agrees with the receipt: a reinstall, or an operator who
+    # re-pointed the file. launchd loaded the job before that edit, so the
+    # service actually running is the stale one, and reading the file would let
+    # the swap replace an env nothing is using.
+    _write_server_plist(engine.live_env / "bin" / "python")
+    program = tmp_path / "elsewhere" / "ciaobot" / "bin" / "python"
+
+    result = _run(
+        engine, op, state, receipt_path, launchctl=_loaded_job(engine, program)
+    )
+
+    assert result.phase == "failed"
+    assert "not the receipt's environment" in result.error
+    assert str(program) in result.error
+    assert str(engine.live_env) in result.error
+    assert read_operation(state) == result
+    assert engine.posts == [f"{BASE}/api/admin/drain/cancel"]
+    assert engine.changed_jobs() == []
+    assert not engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 0
+    assert _env_version(engine.live_env) == FROM_VERSION
+    assert [c for c in engine.run_calls if "tool" in c] == []
+
+
+def test_run_apply_allows_a_loaded_job_that_runs_the_receipt_env(
+    tmp_path: Path,
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # The reverse disagreement: the plist on disk is the stale one, and the job
+    # launchd is running uses the env the receipt names. That is the service the
+    # swap exists for, so refusing would break an install the operator has
+    # already put right.
+    _write_server_plist(tmp_path / "elsewhere" / "ciaobot" / "bin" / "python")
+
+    result = _run(
+        engine,
+        op,
+        state,
+        receipt_path,
+        launchctl=_loaded_job(engine, engine.live_env / "bin" / "python"),
+    )
+
+    assert result.phase == "applied"
+    assert read_operation(state) == result
+    assert _env_version(engine.live_env) == TO_VERSION
+    assert engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 1
+
+
+def test_run_apply_allows_a_server_plist_that_runs_the_receipt_entry_point(
+    tmp_path: Path,
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # The install `install-engine.sh` actually produces, and the one the feature
+    # exists for. `uv tool install` puts the interpreter in the tool env
+    # (`live_env`) and the entry point in `~/.local/bin` (the receipt's
+    # `executable`), then `ciao setup --python "$ciao"` points the LaunchAgent at
+    # that entry point — outside the env, and a symlink into it. Accepting only
+    # the env directory refused every healthy terminal install: the update never
+    # ran at all, and the operator was told the service ran the wrong env.
+    entry_point = _entry_point(tmp_path, engine.live_env / "bin" / "ciao")
+    assert not entry_point.is_relative_to(engine.live_env)
+    assert read_receipt(receipt_path).executable == str(entry_point)
+    _write_server_plist(entry_point)
+
+    result = _run(engine, op, state, receipt_path)
+
+    # Through the pre-flight, all the way to the new engine: the swap is the only
+    # thing that makes the receipt's own entry point worth re-pointing.
+    assert result.phase == "applied"
+    assert read_operation(state) == result
+    assert _env_version(engine.live_env) == TO_VERSION
+    assert engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 1
+    assert [c for c in engine.run_calls if "tool" in c] != []
+
+
+def test_run_apply_allows_a_loaded_job_that_runs_the_receipt_entry_point(
+    tmp_path: Path,
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # The same install, answered by launchd instead of by the plist on disk: the
+    # job is loaded, and what it runs is the receipt's entry point. The two
+    # answers are the same fact read two ways, so the pre-flight has to agree
+    # with itself about both.
+    entry_point = _entry_point(tmp_path, engine.live_env / "bin" / "ciao")
+    _write_server_plist(tmp_path / "elsewhere" / "ciaobot" / "bin" / "python")
+
+    result = _run(
+        engine, op, state, receipt_path, launchctl=_loaded_job(engine, entry_point)
+    )
+
+    assert result.phase == "applied"
+    assert read_operation(state) == result
+    assert _env_version(engine.live_env) == TO_VERSION
+    assert engine.starts == 1
+
+
+def test_run_apply_still_refuses_an_entry_point_the_receipt_does_not_name(
+    tmp_path: Path,
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # Accepting the receipt's entry point must not accept any entry point: another
+    # install's `bin/ciao`, linking into an env this receipt knows nothing about,
+    # is exactly the disagreement the pre-flight is for.
+    _entry_point(tmp_path, engine.live_env / "bin" / "ciao")
+    other = _entry_point(
+        tmp_path / "other", tmp_path / "other" / "ciaobot" / "bin" / "ciao"
+    )
+    _write_server_plist(other)
+
+    result = _run(engine, op, state, receipt_path)
+
+    assert result.phase == "failed"
+    assert "not the receipt's environment" in result.error
+    assert str(other) in result.error
+    assert engine.changed_jobs() == []
+    assert [c for c in engine.run_calls if "tool" in c] == []
+
+
+@pytest.mark.parametrize(
+    "printed,expected",
+    [
+        (
+            "com.ciao.server = {\n\tprogram = /a/b/bin/python\n\targuments = {\n\t\t-m\n\t}\n}",
+            "/a/b/bin/python",
+        ),
+        (
+            "com.ciao.server = {\n\tprogram = ( /a/b/bin/python -m ciao.main )\n}",
+            "/a/b/bin/python",
+        ),
+        ("com.ciao.server = {\n\tprogram = {\n\t\t/a/b/bin/python\n\t}\n}", "/a/b/bin/python"),
+        ("com.ciao.server = {\n\tstate = running\n\tpid = 7\n}", None),
+        ("", None),
+    ],
+)
+def test_loaded_program_argument_reads_launchctl_output(
+    printed: str, expected: str | None
+) -> None:
+    # The formats launchd has used for a loaded job's program, and the two answers
+    # that must never refuse an update: no program, and no output at all.
+    assert engine_update._loaded_program_argument(printed) == expected
+
+
+@pytest.mark.parametrize(
+    "printed,expected",
+    [
+        # launchd's own shape for a loaded job: one argument per line in a block.
+        (
+            "com.ciao.updater = {\n\targuments = {\n\t\t-I\n\t\t-m\n"
+            "\t\tciao.engine_update\n\t\trun-recover\n\t}\n}",
+            ["-I", "-m", "ciao.engine_update", "run-recover"],
+        ),
+        # Other versions: the whole list on the key's own line, braces or parens.
+        (
+            "com.ciao.updater = {\n\targuments = { -I -m ciao.engine_update run-apply }\n}",
+            ["-I", "-m", "ciao.engine_update", "run-apply"],
+        ),
+        (
+            "com.ciao.updater = {\n\targuments = ( -I -m ciao.engine_update run-apply )\n}",
+            ["-I", "-m", "ciao.engine_update", "run-apply"],
+        ),
+        # A key launchd did not render at all answers nothing, so a recovery is
+        # never stood down on evidence that was never there.
+        ("com.ciao.updater = {\n\tpid = 4242\n}", []),
+    ],
+)
+def test_loaded_tokens_reads_a_jobs_arguments(
+    printed: str, expected: list[str]
+) -> None:
+    assert engine_update._loaded_tokens(printed, "arguments") == expected
+
+
+def test_the_receipt_entry_point_is_compared_resolved(tmp_path: Path) -> None:
+    # `bin/ciao` is a link into the tool env, and the directory holding it is
+    # routinely reached through a link of its own — `/var` → `/private/var` under
+    # a macOS test, a relocated `$HOME` on a real machine. Comparing the two
+    # paths as text would refuse the install the receipt names; comparing what
+    # they point at does not.
+    env = tmp_path / "tools" / "ciaobot"
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "ciao").write_text("#!/bin/sh\n", encoding="utf-8")
+    executable = _entry_point(tmp_path, env / "bin" / "ciao")
+    alias = tmp_path / "alias"
+    alias.unlink(missing_ok=True)
+    alias.symlink_to(tmp_path / "bin")
+    spelled_differently = alias / "ciao"
+    assert str(spelled_differently) != str(executable)
+    assert engine_update._runs_the_receipt_install(spelled_differently, env, executable)
+    # The interpreter inside the env agrees too, by the env half of the check.
+    assert engine_update._runs_the_receipt_install(
+        env / "bin" / "python", env, executable
+    )
+    # And another install's entry point is still a disagreement, link or not.
+    other = _entry_point(
+        tmp_path / "other", tmp_path / "other" / "env" / "bin" / "ciao"
+    )
+    assert engine_update._runs_the_receipt_install(other, env, executable) is False
