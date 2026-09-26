@@ -3699,6 +3699,20 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  /** Reconnect every live socket immediately (engine just recovered); resets the backoff so nothing waits out a 64 s delay. */
+  function reconnectNow(): void {
+    eventsWsFailureStreak = 0
+    eventsHostRetryAttempts = 0
+    const chatId = activeChatId.value
+    if (chatId) {
+      chatReconnectAttempts[chatId] = 0
+      void reloadAndReconnectChat(chatId)
+    }
+    const socket = eventsSocket.value
+    if (socket && socket.readyState === WebSocket.OPEN) socket.close()   // onclose reconnects after 50 ms
+    else if (!socket || socket.readyState > WebSocket.OPEN) connectEventsWs()
+  }
+
   function disconnectWs(chatId: string) {
     // Cancel any pending auto-reconnect and mark this as an intentional close
     // so onclose does not schedule a new one.
@@ -5837,7 +5851,7 @@ export const useProjectStore = defineStore('projects', () => {
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
     loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
     canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,
-    connectWs, disconnectWs, connectEventsWs,
+    connectWs, disconnectWs, connectEventsWs, reconnectNow,
     beginServerRestart, restoreState,
     pushToast, pushErrorToast, dismissToast, fixError, restoreDraft,
     packageStatus, checkPackageStatus,

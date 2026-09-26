@@ -308,6 +308,54 @@ describe('resume from background reconnects a dead awareness socket', () => {
   })
 })
 
+describe('reconnectNow', () => {
+  // The engine coming back is news: both sockets can be sitting in a 2s-64s
+  // backoff, or the per-chat one can have given up for good after five failed
+  // handshakes. Waiting that out after the curtain lifts reads as a dead app.
+  test('closes an open events socket and reconnects the active chat at once', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-recover'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    store.connectEventsWs()
+    const eventsSocket = fakeSockets[fakeSockets.length - 1]
+    expect(eventsSocket.url).toContain('/ws/events')
+    expect(eventsSocket.readyState).toBe(FakeWebSocket.OPEN)
+    const countBefore = fakeSockets.length
+
+    vi.useFakeTimers()
+    try {
+      store.reconnectNow()
+      // A live socket is closed rather than left alone; its onclose reconnects
+      // on the 50ms fast path, not on a backoff the outage earned.
+      expect(eventsSocket.readyState).toBe(FakeWebSocket.CLOSED)
+      // The chat is re-attached immediately too, so events missed during the
+      // outage are replayed instead of waiting for the next user action.
+      expect(fakeSockets.filter((s) => s.url.includes(chatId)).length).toBe(2)
+      await vi.advanceTimersByTimeAsync(60)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(fakeSockets.length).toBeGreaterThan(countBefore)
+    expect(fakeSockets.some((s) => s.url.includes('/ws/events') && s !== eventsSocket)).toBe(true)
+  })
+
+  test('opens the events socket immediately when there is none left', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const countBefore = fakeSockets.length
+
+    store.reconnectNow()
+
+    // No timer to advance: a recovery nudge that waits for one is the 64s wait
+    // this exists to avoid.
+    expect(fakeSockets.length).toBe(countBefore + 1)
+    expect(fakeSockets[fakeSockets.length - 1].url).toContain('/ws/events')
+  })
+})
+
 describe('streaming started reconnect guard', () => {
   test('does not reconnect when the active chat socket is already open', () => {
     expect(shouldReconnectActiveChatOnStreamingStarted({ readyState: 1 })).toBe(false)
