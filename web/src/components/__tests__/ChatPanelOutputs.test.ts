@@ -241,6 +241,42 @@ describe('ChatPanel Outputs section', () => {
     expect(wrapper.find('.outputs-list').exists()).toBe(false)
   })
 
+  it('links an archived source chat to its memory pass', async () => {
+    const { wrapper, store } = await mountPanel()
+    // The pass runs in a project the sidebar hides, so the archived chat is the
+    // durable way back to it.
+    const chat = store.chats[0]
+    chat.archived = true
+    chat.postprocess = {
+      state: 'done',
+      steps: { memory_pass: { status: 'ok', extra: { chat_id: 'pass-1' } } },
+    }
+    await flushPromises()
+
+    const button = wrapper.find('.archive-memory-pass-btn')
+    expect(button.exists()).toBe(true)
+    expect(button.text()).toBe('Open memory pass')
+
+    const switchChat = vi.spyOn(store, 'switchChat').mockResolvedValue(undefined)
+    await button.trigger('click')
+    expect(switchChat).toHaveBeenCalledWith('pass-1')
+  })
+
+  it('offers no memory pass link on an archived chat that spawned none', async () => {
+    const { wrapper, store } = await mountPanel()
+    const chat = store.chats[0]
+    chat.archived = true
+    chat.postprocess = { state: 'done', steps: { insights: { status: 'ok', extra: {} } } }
+    await flushPromises()
+
+    expect(wrapper.find('.archive-memory-pass-btn').exists()).toBe(false)
+
+    // A record that is not even a chat id must not become a navigation target.
+    chat.postprocess = { state: 'done', steps: { memory_pass: { status: 'queued', extra: { chat_id: 7 } } } } as never
+    await flushPromises()
+    expect(wrapper.find('.archive-memory-pass-btn').exists()).toBe(false)
+  })
+
   it('deduplicates repeated action/path pairs in the Work inspector', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [

@@ -17,6 +17,7 @@ from ciao.config import CiaoConfig
 from ciao.models import ChatContext
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
+from ciao.web import memory_pass
 from ciao.web.chat_service import _restored_postprocess
 from ciao.web.project_chats import ProjectChatManager
 
@@ -234,6 +235,10 @@ def test_a_restart_mid_pipeline_leaves_no_chat_pulsing(tmp_path: Path) -> None:
 
 
 def test_retry_insights_starts_a_resume_pipeline(tmp_path: Path, monkeypatch) -> None:
+    # One-shot retry is a no-op while memory passes own the archive path: the
+    # insights stage is filtered out, so the resume finds nothing to launch.
+    # This test is about the resume machinery, so it pins the flag Off.
+    monkeypatch.setattr(memory_pass, "MEMORY_PASS_CHATS", False)
     manager = _make_manager(tmp_path)
     chat_id = _chat(manager)
     chat = manager.get_chat(chat_id)
@@ -297,6 +302,8 @@ def test_retry_insights_reports_complete_when_only_insights_are_settled(
     tmp_path: Path, monkeypatch,
 ) -> None:
     """Insights-settled is not "complete": the fold/proposals can still resume."""
+    # As above: the resume must have the one-shot stages to resume through.
+    monkeypatch.setattr(memory_pass, "MEMORY_PASS_CHATS", False)
     manager = _make_manager(tmp_path)
     chat_id = _chat(manager)
     chat = manager.get_chat(chat_id)
