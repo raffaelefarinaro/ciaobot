@@ -27,6 +27,13 @@ events copied absolute paths into page JavaScript.
   and refuses an HTTPS-to-HTTP peer. WebSocket authentication/policy closes are
   terminal and distinct from transport outages; the client no longer reconnects
   those failures in a loop.
+- `/api/admin/drain` and `/api/admin/drain/cancel` are local on a client node.
+  An update applies to the engine the operator ran it against, so a mirrored
+  drain would close admission on the *host* and swap the host's install while
+  this node kept serving; the cancel would reopen the host's admission when a
+  local apply gives up. `/api/active-chats` stays mirrored — it is the host's
+  chat state a client wants — and the updater no longer reads it, polling the
+  local drain POST instead, which answers with the same `active_chat_ids`.
 - The macOS capability is limited to bundled local pages. The remote PWA no
   longer has a Tauri capability, and the `trigger_app_update` command and
   permission are removed; updates remain tray-controlled. The main webview

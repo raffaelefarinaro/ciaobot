@@ -87,3 +87,55 @@ def test_restart_drain_rejects_new_turns_but_keeps_existing_stream() -> None:
     assert manager.start_stream("running", "ignored") is existing
     with pytest.raises(RestartDrainingError, match="waiting for active chats"):
         manager.start_stream("idle", "new work")
+
+
+def _admission_refusal(manager: ProjectChatManager) -> BaseException | None:
+    """Whatever ``start_stream`` raises for a new turn on a bare manager.
+
+    A hand-built manager lacks the collaborators a real stream needs, so a
+    failure *past* the admission check is expected here; what is under test is
+    whether that failure is the drain refusal.
+    """
+    try:
+        manager.start_stream("idle", "new work")
+    except BaseException as exc:  # noqa: BLE001 — its type is the assertion
+        return exc
+    return None
+
+
+# An update whose drain times out cancels it. Without this the running engine
+# would keep refusing turns forever, which is a far worse outcome than the
+# update it was meant to enable, and the PWA's restart overlay would stick on
+# a perfectly healthy engine.
+def test_cancel_restart_drain_reopens_admission() -> None:
+    manager = _bare_manager()
+    captured: list[dict] = []
+    manager._events.publish = captured.append  # type: ignore[method-assign]
+
+    manager.begin_restart_drain()
+    assert isinstance(_admission_refusal(manager), RestartDrainingError)
+
+    manager.cancel_restart_drain()
+    manager.cancel_restart_drain()  # idempotent — one event only
+
+    assert manager._restart_draining is False
+    # Admission is genuinely open again, not just flagged off.
+    assert not isinstance(_admission_refusal(manager), RestartDrainingError)
+    assert [event["type"] for event in captured] == [
+        "server_restarting",
+        "server_restart_cancelled",
+    ]
+
+
+# The update drain routes have to tell *whose* drain this is — the update's own
+# cancel reopens admission, a Settings restart's must not — and they read it
+# through this rather than the private flag.
+def test_restart_draining_is_readable_without_the_private_flag() -> None:
+    manager = _bare_manager()
+    assert manager.restart_draining is False
+
+    manager.begin_restart_drain()
+    assert manager.restart_draining is True
+
+    manager.cancel_restart_drain()
+    assert manager.restart_draining is False

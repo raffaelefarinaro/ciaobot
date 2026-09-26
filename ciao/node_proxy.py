@@ -61,6 +61,13 @@ EXCLUDED_LOCAL_PATHS: set[str] = {
     "/api/auth/logout",
     "/api/auth/check",
     "/api/auth/bridge",
+    # An update applies to the engine the operator ran it against. Forwarded,
+    # `ciao update apply` on this node would drain the *host* and swap the
+    # host's install, while the local engine kept running the version the
+    # receipt here describes. Mirroring them would also reopen admission on the
+    # host when a local apply gives up.
+    "/api/admin/drain",
+    "/api/admin/drain/cancel",
 }
 
 # Prefixes handled locally: this machine's role, connection, and own install.
