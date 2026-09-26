@@ -71,6 +71,7 @@ receipt_kind=
 receipt_installed_version=
 receipt_started_at=
 receipt_workspace=
+receipt_host_url=
 receipt_retiring_desktop=0
 receipt_before_server_plist=
 receipt_before_desktop_plist=
@@ -459,6 +460,7 @@ load_migration_receipt() {
     receipt_installed_version=
     receipt_started_at=
     receipt_workspace=
+    receipt_host_url=
     receipt_retiring_desktop=0
     receipt_before_server_plist=
     receipt_before_desktop_plist=
@@ -551,6 +553,7 @@ print("kind=" + kind)
 print("version=" + str(data.get("version") or ""))
 print("started_at=" + str(data.get("started_at") or ""))
 print("workspace=" + str(data.get("workspace") or ""))
+print("host_url=" + str(data.get("host_url") or ""))
 print("retiring_desktop=" + ("1" if data.get("retiring_desktop") is True else "0"))
 for name in IMAGES:
     print("before_" + name + "=" + images[name])
@@ -567,6 +570,7 @@ for name in IMAGES:
             version=*) receipt_installed_version=${field#version=} ;;
             started_at=*) receipt_started_at=${field#started_at=} ;;
             workspace=*) receipt_workspace=${field#workspace=} ;;
+            host_url=*) receipt_host_url=${field#host_url=} ;;
             retiring_desktop=1) receipt_retiring_desktop=1 ;;
             before_server_plist=*) receipt_before_server_plist=${field#before_server_plist=} ;;
             before_desktop_plist=*) receipt_before_desktop_plist=${field#before_desktop_plist=} ;;
@@ -606,13 +610,18 @@ for name in IMAGES:
                         resume_unfinished_host=1
                         ;;
                     desktop_invalid)
-                        # A `--as-host` decision the user has to make again on
-                        # this run: with the plist already repointed, the
-                        # classifier cannot recover either the kind or the
-                        # workspace, so the same override is what continues the
-                        # hand-over. Without it the explicit-choice refusal
-                        # stands.
-                        if [ "$as_host" -ne 0 ]; then
+                        # The receipt is the record of the decision the user has
+                        # already made, and a host hand-over records no URL. A
+                        # `--as-client` run does record one, and it never runs
+                        # `ciao setup`, so the classifier still sees the desktop
+                        # engine and dispatches the client path on its own.
+                        # Requiring `--as-host` to be passed again would not be
+                        # cautious, just silent about the common case: the
+                        # transition release and the re-run one-liner both pass
+                        # exactly `--migrate`, and on this branch a plain retry
+                        # would answer `skip` and install over the transaction the
+                        # receipt still holds.
+                        if [ -z "$receipt_host_url" ]; then
                             resume_unfinished_host=1
                         fi
                         ;;
@@ -1109,6 +1118,22 @@ print(state.get("host_url", ""))
             # nothing changed and asks again.
             fail "Ciaobot.app is running but its engine state could not be read; re-run with --migrate --as-host, or --migrate --as-client https://your-host"
         fi
+    fi
+    if [ "$receipt_valid" -ne 0 ] && [ "$migrate_path" = skip ]; then
+        case "$receipt_phase" in
+            started|installed_no_start|interrupted)
+                # The dispatch above found nothing to migrate, and a validated
+                # receipt says a hand-over on this Mac has not settled. Those two
+                # cannot both be acted on by installing: `skip` is the ordinary
+                # install, and it would run to completion and exit 0 with the
+                # app's own agent still loaded next to the engine that was meant
+                # to replace it - the receipt never advances and nothing says so.
+                # So an open transaction is never installed over, whatever future
+                # kind or branch produces this combination; it is answered again,
+                # with the same question and nothing changed.
+                fail "Ciaobot could not tell whether this Mac is the host or a client (node state unreadable). Re-run with --migrate --as-host, or --migrate --as-client https://your-host"
+                ;;
+        esac
     fi
     # A host hand-over is only ever a hand-over of one particular workspace, so
     # the workspace it would use is settled here - before the before-images are

@@ -2179,6 +2179,150 @@ def test_migrate_host_completes_an_interruption_after_setup(tmp_path: Path) -> N
 
 
 @needs_local_tools
+def test_migrate_as_host_completes_an_unfinished_no_start_handover(
+    tmp_path: Path,
+) -> None:
+    # The same window as the test above, on the branch that needs an override to
+    # enter at all. The user answered "this Mac is the host" with `--as-host` and
+    # the receipt is where that answer is recorded, so a retry that only carries
+    # `--migrate` - which is exactly what the transition release sends, and
+    # exactly what a user re-running the one-liner types - has to finish the
+    # hand-over rather than classify the repointed plist as an ordinary install
+    # and exit 0 with Ciaobot.app's own agent still loaded beside it.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    workspace = _desktop_install(harness, tmp_path, "{not json at all")
+    original_plist = (home / "Library/LaunchAgents/com.ciao.server.plist").read_bytes()
+
+    first = _run_installer(
+        harness, "--version", VERSION, "--migrate", "--as-host", "--no-start"
+    )
+
+    assert first.returncode == 0, first.stderr
+    receipt = _migration_receipt(harness)
+    assert receipt["phase"] == "installed_no_start"
+    assert receipt["kind"] == "desktop_invalid"
+    # A host hand-over records no URL, and that absence is the record of the
+    # decision: it is what tells a retry this was not a client run.
+    assert receipt["host_url"] == ""
+    assert (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+    # Setup has repointed the engine plist, so the retry's own classifier reads
+    # this Mac as an ordinary installer-managed engine - the whole reason the
+    # receipt, and not the classifier, has to be what the retry trusts.
+    with (home / "Library/LaunchAgents/com.ciao.server.plist").open("rb") as handle:
+        assert plistlib.load(handle)["ProgramArguments"][0] == str(
+            home / ".local/bin/ciao"
+        )
+
+    retry = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert retry.returncode == 0, retry.stderr
+    settled = _migration_receipt(harness)
+    assert settled["phase"] == "migrated"
+    # Finished as the hand-over it was, not re-decided into something else.
+    assert settled["kind"] == "desktop_invalid"
+    assert not (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+    log = _log(harness, "launchctl.log")
+    assert f"bootout gui/{os.getuid()}/Ciaobot" in log
+    assert f"disable gui/{os.getuid()}/Ciaobot" in log
+    # The originals the first run snapshotted are still what a rollback would put
+    # back, and the engine was set up in the workspace that hand-over recorded.
+    assert (migration_before(harness) / "com.ciao.server.plist").read_bytes() == (
+        original_plist
+    )
+    ciao = home / ".local/bin/ciao"
+    assert f"setup --workspace {workspace} --python {ciao} --yes --load-launchd\n" in (
+        _log(harness, "ciao-calls.log")
+    )
+    assert "Ciaobot.app is no longer needed" in retry.stdout
+
+
+@needs_local_tools
+def test_migrate_as_host_completes_an_interruption_after_setup(tmp_path: Path) -> None:
+    # The same branch, interrupted the other way: `ciao setup` has repointed the
+    # engine plist and the process goes away before the service is started or the
+    # app's agent is retired. The `interrupted` receipt names `desktop_invalid`
+    # and carries no URL, so it is a host hand-over the user already decided -
+    # and a plain `--migrate` retry has to finish it instead of answering `skip`
+    # and installing over it.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    workspace = _desktop_install(harness, tmp_path, "{not json at all")
+    _knob(harness, "interrupt-after-setup")
+
+    interrupted = _run_installer(
+        harness, "--version", VERSION, "--migrate", "--as-host"
+    )
+
+    assert interrupted.returncode == 130, interrupted.stdout
+    receipt = _migration_receipt(harness)
+    assert receipt["phase"] == "interrupted"
+    assert receipt["kind"] == "desktop_invalid"
+    assert receipt["host_url"] == ""
+    with (home / "Library/LaunchAgents/com.ciao.server.plist").open("rb") as handle:
+        assert plistlib.load(handle)["ProgramArguments"][0] == str(
+            home / ".local/bin/ciao"
+        )
+
+    retry = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert retry.returncode == 0, retry.stderr
+    assert _migration_receipt(harness)["phase"] == "migrated"
+    assert not (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+    assert f"disable gui/{os.getuid()}/Ciaobot" in _log(harness, "launchctl.log")
+    ciao = home / ".local/bin/ciao"
+    assert f"setup --workspace {workspace} --python {ciao} --yes --load-launchd\n" in (
+        _log(harness, "ciao-calls.log")
+    )
+
+
+@needs_local_tools
+def test_migrate_invalid_client_receipt_is_not_resumed_as_a_host_handover(
+    tmp_path: Path,
+) -> None:
+    # The guard on the fix above: an empty host_url is what says "this was a
+    # `--as-host` hand-over", so a receipt that records a URL has to stay on the
+    # client side of the question. Reading it as a host hand-over would be the
+    # worse mistake of the two - it runs `ciao setup` on a Mac whose state nobody
+    # could read, and turns the very second writer the `--as-client` decision was
+    # made to prevent. Here the interruption lands before the app's plist is
+    # removed, so the classifier still says `desktop_invalid` and the retry has
+    # to refuse with the same question rather than decide for the user.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    _desktop_install(harness, tmp_path, "{not json at all")
+    _knob(harness, "interrupt-after-bootout-Ciaobot")
+
+    interrupted = _run_installer(
+        harness, "--version", VERSION, "--migrate", "--as-client", "https://mini.ts.net"
+    )
+
+    assert interrupted.returncode == 130, interrupted.stdout
+    receipt = _migration_receipt(harness)
+    assert receipt["phase"] == "interrupted"
+    assert receipt["kind"] == "desktop_invalid"
+    assert receipt["host_url"] == "https://mini.ts.net"
+    assert (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+    # launchd was already asked for the three calls the client path makes before
+    # the interruption; the retry must add none.
+    after_interruption = _log(harness, "launchctl.log")
+
+    retry = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert retry.returncode == 1
+    assert "--as-host" in retry.stderr
+    # Not resumed as a host: nothing was installed, set up, or started, and the
+    # app's own agent is exactly as the interrupted run left it.
+    assert "tool install" not in _log(harness, "uv-calls.log")
+    assert "setup" not in _log(harness, "ciao-calls.log")
+    assert _log(harness, "launchctl.log") == after_interruption
+    assert (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+    # The transaction is still open, and the receipt still says which way the
+    # user answered it.
+    assert _migration_receipt(harness)["phase"] == "interrupted"
+
+
+@needs_local_tools
 def test_migrate_retry_of_an_unfinished_handover_undoes_itself(tmp_path: Path) -> None:
     # Finishing an unfinished hand-over means the retry is a host transaction,
     # so a retry that fails has to undo itself against the originals the *first*
