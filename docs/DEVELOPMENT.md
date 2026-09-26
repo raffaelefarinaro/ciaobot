@@ -89,9 +89,65 @@ release minisign key embedded in the script, and the wheel's digest and size,
 before anything is installed; installs the verified wheel with `uv tool install`;
 writes the install receipt with absolute paths; then runs `ciao setup` and
 `ciao service start` and prints the one-time login URL to the terminal. It
-refuses to take over an engine that Ciaobot.app manages (migrating those
-installs is #576) and refuses to overwrite a `ciao` it did not install. The
-workflow attaches it as the `install-engine.sh` release asset.
+refuses to take over an engine that Ciaobot.app manages unless it is re-run with
+`--migrate`, and refuses to overwrite a `ciao` it did not install. `--migrate`
+is the desktop→terminal hand-over (#576): after the same manifest and digest
+verification, it classifies the Mac from the verified wheel, takes before-images
+of the two plists, the shim, the install receipt and any existing uv tool
+environment in `~/.local/state/ciaobot/migration/before/` (an absent file is
+recorded as absent, so a rollback removes only what the migration created, and
+the tool environment is copied only when one is already there — the common
+hand-over from Ciaobot.app has none), and refuses to touch anything if
+Ciaobot.app is still running 20 s after it was asked to quit. It then either
+repoints `com.ciao.server` at the new engine and, only once that engine answers
+with the version just installed, retires the app's own agent — restoring the
+plists, the shim, the receipt, the tool environment and the launchd job on any
+failure, including a launchctl that refuses to put them back, and loading and
+starting that agent again whenever the transaction had already booted it out
+(the two are tracked separately, because a plist that is still there is not the
+same fact as a job launchd still holds) — or, for a client,
+disables the local engine and installs no service at all, leaving the user to
+sign in at the remote host. A client failure undoes the same state and never
+claims an engine was restored, because there was none. `--as-host` /
+`--as-client URL` are required when the node state cannot be read or trusted;
+the URL is checked with the classifier's own rule (scheme, host name, no
+credentials or whitespace), so an override like `https://` is refused before a
+single label or file is touched rather than after this Mac has given up its own
+engine. The migration receipt in `~/.local/state/ciaobot/migration/` (`schema`,
+`phase`, `before` block, `version`, `retiring_desktop`, `started_at`) is what
+makes the whole thing
+resumable: a retry reuses those originals rather than snapshotting the tool the
+previous attempt installed, and only a receipt that parses, records all five
+before-images at the paths this installer writes them to, still has them on
+disk, and agrees with the installed service — its version, its entry point and
+tool environment, and for a host the `com.ciao.server.plist` program pointing
+at that entry point rather than inside `Ciaobot.app` — is treated as
+"already migrated"; a corrupt, wrong-schema, incomplete or stale one is refused
+with recovery instructions instead, and a stale settled receipt is re-run from
+the originals it kept, out loud. An interrupted run records `interrupted`
+rather than pretending to have finished, a retirement that launchctl refuses
+leaves the app's agent in place instead of reporting success, and a `retiring`
+receipt that was being taken to `migrated` when the process stopped is finished
+rather than treated as an ordinary installer-managed engine. Any receipt naming
+an unfinished host hand-over (`started`, `installed_no_start`, `interrupted`)
+is finished the same way: by the time those phases are on disk, `ciao setup` has
+usually already repointed `com.ciao.server` at the tool this script installed, and
+an engine outside a `.app` is exactly what the classifier calls an ordinary
+install — so the kind and the workspace come from the receipt, which is the only
+thing left that knows what the run was doing, and taking the host path from them
+is what stops the app's own agent from staying loaded next to the engine that
+replaced it. That path also settles the workspace before it takes any
+before-image or asks the app to quit, and only ever hands over the one the
+engine being replaced runs in: a `--workspace` naming a different directory, one
+that does not exist, or a directory with no `.env` in it is refused, no
+workspace is created during a hand-over, and an `--as-host` override on a state
+whose workspace could not be recovered has to name an existing one rather than
+get a fresh `~/Ciaobot`. Taking a different workspace would start a second engine
+with a fresh password and a fresh runtime root next to the real ones, retire the
+app's agent, and leave the original and every chat in it behind while the receipt
+still named the original. The ordinary, non-`--migrate` path is unchanged: there
+`--workspace` is how a workspace is named, and it is created. The workflow
+attaches it as the `install-engine.sh` release asset.
 
 ## Branching and releases
 

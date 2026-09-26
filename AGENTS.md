@@ -7,6 +7,10 @@ Before changing code:
 - Read `web/README.md` before changing the PWA.
 - Read [`DESIGN.md`](DESIGN.md) before changing the PWA or tray UI, and keep its tokens and interaction principles aligned with the implementation.
 - Keep changes scoped and covered by tests.
+- Do not add fallbacks or compatibility shims. Delete dead or superseded code
+  outright rather than leaving a code path "just in case". When removing a
+  fallback would break an app that people already have installed, stop and ask
+  the maintainer before removing it.
 - Avoid new environment variables. Hardcode a sensible default as a
   constant; if a value truly must vary per user, make it a Settings option
   instead. Add an env var only when nothing else can work (secrets,
