@@ -76,6 +76,7 @@ namespaces = false
   "deploy/*.png",
   "deploy/*.svg",
   "evals/*.json",
+  "entity-types.yaml",
   "public/*.md",
   "workspace/*.md",
   "skills/.gitkeep",
