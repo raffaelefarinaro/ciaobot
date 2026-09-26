@@ -1,9 +1,33 @@
 <template>
   <div class="settings-pane">
+    <!-- One overlay at a time. The package-update path owns it while it runs;
+         otherwise an in-flight engine update does, driven by its record rather
+         than by a timer, so it never claims progress nobody made. A settled
+         record is the card's business, not a full-screen takeover.
+
+         Only the applying half of an engine update gets it: that run takes the
+         engine down, so the overlay is the whole window and is modal — this is
+         its inert boundary, and `useModalFocus` below moves focus into the
+         overlay's status region, so Tab can no longer reach Restart or Deploy
+         underneath it, then hands focus back to the card once the record
+         settles. Staging is the card's own inline progress instead, because
+         nothing goes down while it runs. -->
     <UpdateProgressView
       v-if="packageUpdating"
       :version="packageStatus?.latest_version"
     />
+    <div
+      v-else-if="engineUpdateOverlayOpen"
+      ref="engineUpdateOverlay"
+      class="engine-update-overlay"
+    >
+      <UpdateProgressView
+        ref="engineUpdateOverlayView"
+        :version="engineUpdateVersion"
+        :phase="engineUpdateOperation?.phase"
+        :error="engineUpdateOperation?.error"
+      />
+    </div>
     <PaneHeader page-tag="Settings" @open-sidebar="emit('open-sidebar')" />
     <div ref="bodyEl" class="pane-body" @scroll.passive="onBodyScroll">
       <div class="page-grid settings-grid">
@@ -142,6 +166,10 @@
                   This bundled app updates through the Ciaobot menu-bar icon. Choose
                   <strong>Update</strong> there, or run the one-line installer again.
                 </template>
+                <template v-else-if="packageStatus?.mode === 'installer' && engineUpdateEnabled">
+                  Installed with the Ciaobot engine installer. Stage a release below, then apply it;
+                  applying restarts Ciaobot once.
+                </template>
                 <template v-else-if="packageStatus?.mode === 'installer'">
                   Installed with the Ciaobot engine installer. To update, run it again:
                   <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install-engine.sh | sh</code>
@@ -162,6 +190,12 @@
               </button>
               <!-- Nothing to do: a status, not a disabled button. -->
               <span v-else class="settings-status">Up to date<template v-if="packageStatus.current_version"> · {{ packageStatus.current_version }}</template></span>
+            </div>
+            <!-- The same status for an engine this card can update: an installer
+                 with no job and nothing newer is up to date, and says so rather
+                 than leaving the card blank. -->
+            <div v-else-if="engineUpdateIdleAndCurrent" class="settings-card-header-actions">
+              <span class="settings-status">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
             </div>
           </div>
           <div v-if="packageLoading && !packageStatus" class="loading">
@@ -203,6 +237,128 @@
                 </button>
               </div>
             </div>
+          </div>
+
+          <!-- The engine update job (#608). One distinct panel per record state,
+               every word of it read off the persisted operation; nothing here
+               invents progress. A sibling of the package block because it is
+               driven by a different route, and either may fail alone. -->
+          <div v-if="engineUpdateVisible" ref="engineUpdatePanel" class="settings-form-panel engine-update-panel" tabindex="-1">
+            <p class="section-title">Engine update</p>
+
+            <!-- A coordinator refusal that wrote no record of its own: a release
+                 lookup, a lock, an engine already on the target. Nothing will
+                 ever arrive on a poll for a run that left no record, so the
+                 card says why and offers the action the record allows. Text
+                 alone would be a dead end until the page reloaded. A refusal
+                 parked against an existing record answers here too: the served
+                 reason is always the newer one, because the parked reason is
+                 only served while the record it was parked against is
+                 unchanged. -->
+            <template v-if="updateStatus?.error">
+              <p class="hint hint--warn hint--spaced">{{ updateStatus.error }}</p>
+              <!-- Parking a reason changes nothing about the record it was
+                   parked against, so a rollback is still a rollback and the
+                   version it went back to is still the one now running. -->
+              <p v-if="engineUpdateRolledBack && engineUpdateOperation?.from_version" class="hint hint--spaced">
+                Back on v{{ engineUpdateOperation.from_version }}.
+              </p>
+              <div class="action-row settings-actions">
+                <!-- The action has to be the one the record allows. A `staged`
+                     record is not terminal, so `/api/update/stage` refuses it
+                     with a 409 by design (`_update_refusal`), forever: a panel
+                     that answered a refusal with Stage alone could never apply
+                     the release it had already downloaded, and the parked
+                     reason lives on the server, so a reload kept it. Apply is
+                     what a `staged` record allows; a terminal record, or no
+                     record at all, is where a new run may be started. -->
+                <button
+                  v-if="engineUpdateStage === 'staged'"
+                  class="btn-primary"
+                  @click="doEngineUpdateApply"
+                  :disabled="updateActionPending || updatePolling || nodeStatusUnknown"
+                >
+                  {{ updateActionPending ? 'Applying…' : 'Apply update' }}
+                </button>
+                <button
+                  v-else
+                  class="btn-primary"
+                  @click="doEngineUpdateStage"
+                  :disabled="updateActionPending || updatePolling || nodeStatusUnknown"
+                >
+                  {{ updateActionPending ? 'Staging…' : (packageStatus?.update_available ? 'Stage update' : 'Try again') }}
+                </button>
+              </div>
+            </template>
+
+            <!-- Staging runs while the engine keeps serving, so it is not a
+                 takeover: the same progress rows the overlay would carry, in
+                 the card, with the rest of the app usable and reachable. The
+                 poll keeps running, so this moves on its own. -->
+            <UpdateProgressView
+              v-else-if="engineUpdateStagingNow"
+              ref="engineUpdateInlineView"
+              inline
+              :version="engineUpdateVersion"
+              :phase="engineUpdateOperation?.phase"
+              :error="engineUpdateOperation?.error"
+            />
+
+            <!-- Applying: the engine is replacing itself and the connection is
+                 about to drop, so the full-window overlay above carries the rows
+                 and this only names the phase it is in. -->
+            <p v-else-if="engineUpdateBusy" class="hint hint--spaced">
+              {{ engineUpdatePhaseText }}<template v-if="engineUpdateOperation"> · v{{ engineUpdateOperation.to_version }}</template>
+            </p>
+
+            <!-- Staged is not a failure and not a second chance: `/api/update/
+                 stage` refuses a non-terminal record with a 409 by design, so
+                 the only way forward from here is Apply. Staging again is
+                 offered from the terminal failure phases, where a new record
+                 may be written. -->
+            <template v-else-if="engineUpdateStage === 'staged'">
+              <p class="hint hint--spaced">
+                v{{ engineUpdateOperation?.to_version || packageStatus?.latest_version }} is downloaded and verified.
+                Applying it restarts Ciaobot.
+              </p>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="doEngineUpdateApply" :disabled="updateActionPending || updatePolling || nodeStatusUnknown">
+                  {{ updateActionPending ? 'Applying…' : 'Apply update' }}
+                </button>
+              </div>
+            </template>
+
+            <!-- Applied, and still the newest release: the record stays on disk
+                 after a successful apply, so an engine that has updated once
+                 would answer every later release with "up to date" and never
+                 offer a Stage again. -->
+            <template v-else-if="engineUpdateStage === 'done' && !engineUpdateStaleApplied">
+              <p class="hint hint--spaced">ciaobot is up to date.</p>
+            </template>
+
+            <template v-else-if="engineUpdateFailed">
+              <p class="hint hint--warn hint--spaced">{{ engineUpdateFailureText }}</p>
+              <p v-if="engineUpdateRolledBack && engineUpdateOperation?.from_version" class="hint hint--spaced">
+                Back on v{{ engineUpdateOperation.from_version }}.
+              </p>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling || nodeStatusUnknown">
+                  {{ updateActionPending ? 'Staging…' : (engineUpdateStage === 'rolled_back' ? 'Stage again' : 'Retry') }}
+                </button>
+              </div>
+            </template>
+
+            <template v-else-if="packageStatus?.update_available">
+              <p class="hint hint--spaced">
+                v{{ packageStatus.latest_version }} is available. Staging downloads and verifies it without
+                restarting Ciaobot.
+              </p>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling || nodeStatusUnknown">
+                  {{ updateActionPending ? 'Staging…' : 'Stage update' }}
+                </button>
+              </div>
+            </template>
           </div>
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
@@ -1902,6 +2058,7 @@ import {
   MIN_FONT_SCALE,
   useFontScale,
 } from '../composables/useFontScale'
+import { useModalFocus } from '../composables/useModalFocus'
 import type {
   AgentAssetsResponse,
   ArchivedWorkspace,
@@ -1930,9 +2087,18 @@ import type {
   PackageStatus,
   PackageChangelog,
   PackageUpdateResult,
+  EngineUpdateStatus,
   ProviderActionResult,
   LocalHandbackResult,
 } from '../lib/types'
+import {
+  updateFailed,
+  updateFailureText,
+  updateInFlight,
+  updatePhaseLabel,
+  updateStage,
+  updateStageInFlight,
+} from '../lib/engineUpdate'
 import { askConfirm } from '../lib/confirm'
 import { archiveConfirmMessage, restoreConfirmMessage, restoredMessage } from '../lib/workspaceArchive'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -4039,6 +4205,7 @@ onMounted(async () => {
   fetchRoutines()
   fetchAutomation()
   fetchPackageStatus()
+  fetchUpdateStatus()
   fetchProviderKeys().then(scrollToChatProvidersIfLinked)
   mcp.fetchStatus()
   mcp.fetchUsage()
@@ -4503,6 +4670,375 @@ async function doPackageUpdate() {
   }
 }
 
+// ── Engine update job (#608) ───────────────────────────────────────────────────
+// The persisted operation record is the only source of truth here. The card
+// keeps no local guess about how far a run got, so an engine restarted
+// mid-apply — or a Settings tab opened after the fact — shows what the record
+// says rather than what this session remembers doing.
+const updateStatus = ref<EngineUpdateStatus | null>(null)
+const updatePolling = ref(false)
+const updateActionPending = ref(false)
+// 2s. Staging is a download plus a wheel build, the apply tens of seconds more;
+// faster buys nothing a reader can use, only request volume.
+const UPDATE_POLL_MS = 2000
+let updatePollTimer: number | null = null
+// A 202 says the coordinator owns the run; only the record says how far it got,
+// and `stage_update` writes nothing until it has taken the lock, resolved the
+// release over the network and removed any previous staged environment. For the
+// first seconds of a run, then, the status route can only serve the record the
+// card was already holding — the previous run's. `updateRunStarted` says this
+// session asked for a run, `updateRunSeenInFlight` says it has since seen that
+// run's own record in flight: together they are the difference between the
+// previous run's outcome and this one's, and a poll that cannot tell them apart
+// ends a run that is still going.
+let updateRunStarted = false
+let updateRunSeenInFlight = false
+let updateRunStartedAt = 0
+// The refusal the card was already holding when it asked for this run. A parked
+// reason lives on the server and is served for as long as the record it was
+// parked against is unchanged, so the previous run's refusal is still on the
+// wire during this run's pre-record window and is not this run's answer. Empty
+// when the card held no refusal, which makes any served error this run's own.
+let updateRunErrorAtStart = ''
+// A ceiling on the pre-record window, never the end condition: a run that lands
+// no record and refuses nothing must not leave the card polling forever, but a
+// slow link, a cold DNS or a re-stage of a version whose environment is still on
+// disk all have to be waited out rather than given up on.
+const UPDATE_RUN_GRACE_MS = 60_000
+
+const engineUpdateOperation = computed(() => updateStatus.value?.operation ?? null)
+const engineUpdateStage = computed(() => updateStage(engineUpdateOperation.value))
+// `applied` is the last run's outcome, not a job: nothing ever unlinks the
+// record, so a machine that has updated once would answer every later release
+// with "up to date" and never offer a Stage again. The release page and the
+// installed version are read independently of it, so a newer release is
+// exactly the signal that the record is history rather than the answer.
+const engineUpdateStaleApplied = computed(
+  () => engineUpdateStage.value === 'done' && !!packageStatus.value?.update_available,
+)
+const engineUpdateBusy = computed(() => updateInFlight(engineUpdateOperation.value))
+const engineUpdateFailed = computed(() => updateFailed(engineUpdateOperation.value))
+const engineUpdateRolledBack = computed(() => engineUpdateStage.value === 'rolled_back')
+const engineUpdatePhaseText = computed(() => updatePhaseLabel(engineUpdateOperation.value))
+const engineUpdateFailureText = computed(() => updateFailureText(engineUpdateOperation.value))
+// Only an installer engine has an install to swap, so only it gets the job
+// surface. Every other mode keeps the guidance the card has always shown.
+const engineUpdateEnabled = computed(
+  () => !!updateStatus.value && updateStatus.value.install_mode === 'installer' && updateStatus.value.can_update,
+)
+// The panel is for the states that need an action or an answer. Idle and up to
+// date is a status, and the header already says so.
+const engineUpdateVisible = computed(
+  () => engineUpdateEnabled.value
+    && (engineUpdateStage.value !== 'idle'
+      || !!updateStatus.value?.error
+      || !!packageStatus.value?.update_available),
+)
+const engineUpdateVersion = computed(
+  () => engineUpdateOperation.value?.to_version || packageStatus.value?.latest_version,
+)
+// No job and nothing newer: the header's status, not a disabled button. A
+// `done` record is history rather than a job once a newer release exists, so it
+// counts as idle here too — and the `update_available` term is what keeps the
+// header quiet, so the header and the panel below it say the same thing. A
+// version check that never answered, or that answered with a rate limit, has
+// said nothing about the installed version at all: claiming "Up to date" over
+// the "Update check failed" line two rows below would be the card asserting
+// what it does not know.
+const engineUpdateIdleAndCurrent = computed(
+  () => engineUpdateEnabled.value
+    && (engineUpdateStage.value === 'idle' || engineUpdateStaleApplied.value)
+    && !updateStatus.value?.error
+    && !!packageStatus.value
+    && !packageStatus.value.error
+    && !packageStatus.value?.update_available,
+)
+
+async function fetchUpdateStatus() {
+  try {
+    updateStatus.value = await api.get<EngineUpdateStatus>('/api/update/status')
+    reconcileUpdatePoll()
+  } catch {
+    // best-effort, exactly like the package status: an engine too old to have
+    // the route keeps the guidance it always had.
+  }
+}
+
+/**
+ * The poll's own end condition, checked after every read.
+ *
+ * What ends a poll is "nothing this run can still do", and a record the card
+ * was already holding when it asked for the run is not that: the coordinator
+ * writes its first record only after the lock, the release lookup and the
+ * removal of any previous staged environment, so for the first seconds the
+ * status route can only serve the previous run's outcome. Reading that as the
+ * end of this run stopped the poll while the run went on staging invisibly,
+ * leaving a settled-looking panel with a re-enabled button and nothing left
+ * watching. So the record is only believed once this session has seen one in
+ * flight.
+ */
+function reconcileUpdatePoll() {
+  // A record in flight is a run that still moves on its own, and the first time
+  // one is seen the card can trust the record from then on.
+  if (engineUpdateBusy.value) {
+    updateRunSeenInFlight = true
+    return
+  }
+  const status = updateStatus.value
+  if (!status) return
+  // A served error is this run's own answer only if it is not the one the card
+  // was already holding when it asked: a parked reason is served for as long as
+  // the record it was parked against is unchanged, so the previous run's refusal
+  // is still on the wire during this run's pre-record window. Reading that as
+  // the end of this run stopped the poll while it staged invisibly, behind a
+  // panel showing the previous run's reason with a re-enabled button — and that
+  // button's second click is a 409, because by then the run really is in flight.
+  if (status.error && status.error !== updateRunErrorAtStart) {
+    updateRunStarted = false
+    updateRunSeenInFlight = false
+    updateRunErrorAtStart = ''
+    stopUpdatePoll()
+    return
+  }
+  // Once the record has been seen in flight, a record that is no longer in
+  // flight is that run's outcome and nothing will move it.
+  if (updateRunSeenInFlight) {
+    updateRunStarted = false
+    updateRunSeenInFlight = false
+    updateRunErrorAtStart = ''
+    stopUpdatePoll()
+    return
+  }
+  // Otherwise this session asked for a run whose record may not be on disk yet,
+  // so keep polling. The grace bound is a ceiling on that window and nothing
+  // more: past it, a run that has produced neither a record nor a refusal is
+  // not going to, and the card would otherwise hold every button disabled until
+  // the page reloaded.
+  if (updateRunStarted && Date.now() - updateRunStartedAt >= UPDATE_RUN_GRACE_MS) {
+    updateRunStarted = false
+    updateRunErrorAtStart = ''
+    stopUpdatePoll()
+  }
+}
+
+/**
+ * Record that a 202 has started a run the card is now watching.
+ *
+ * Only the two 202 paths call this, never `startUpdatePoll` — the tab watcher
+ * starts polls too, and it is not the card asking for anything. The
+ * seen-in-flight flag resets with it: a new run has to look for its own record,
+ * so a flag left over from an earlier run must not end this one on its first
+ * read. The refusal the card is holding is captured for the same reason: it is
+ * the previous run's until a different one arrives. Neither flag is cleared by
+ * `stopUpdatePoll`, so a Settings tab that is left and reopened during the
+ * pre-record window keeps watching the run.
+ */
+function beginUpdateRun() {
+  updateRunStarted = true
+  updateRunStartedAt = Date.now()
+  updateRunSeenInFlight = false
+  updateRunErrorAtStart = updateStatus.value?.error || ''
+}
+
+function stopUpdatePoll() {
+  if (updatePollTimer !== null) {
+    window.clearInterval(updatePollTimer)
+    updatePollTimer = null
+  }
+  updatePolling.value = false
+}
+
+function startUpdatePoll() {
+  if (updatePollTimer !== null) return
+  updatePolling.value = true
+  updatePollTimer = window.setInterval(() => { void fetchUpdateStatus() }, UPDATE_POLL_MS)
+}
+
+async function doEngineUpdateStage() {
+  if (nodeStatusUnknown.value) {
+    packageResult.value = 'Connection role is unavailable; open This device before updating.'
+    return
+  }
+  // A run the coordinator already owns: the 202 has not become a record yet, so
+  // the record alone cannot say the job is over. The backend refuses a second
+  // run with a 409, and the button is already disabled; both say the same thing.
+  if (updatePolling.value) return
+  updateActionPending.value = true
+  packageResult.value = ''
+  try {
+    await api.post('/api/update/stage')
+    // 202: the coordinator owns the run from here and the record is its progress.
+    // Its first record is written only after the lock, the release lookup and
+    // the removal of any previous staged environment, so the reads that follow
+    // can still be serving the last run's outcome; `beginUpdateRun` is what
+    // keeps the poll alive across them.
+    startUpdatePoll()
+    beginUpdateRun()
+    packageResult.value = 'Staging the update. Ciaobot keeps running until it is ready to apply.'
+  } catch (e) {
+    // One action, one line. The 400/409 that stage and apply answer with is a
+    // reason to read, not a stream of toasts.
+    packageResult.value = `Could not stage the update: ${apiErrorMessage(e, 'unknown error')}`
+    await fetchUpdateStatus()
+  } finally {
+    updateActionPending.value = false
+  }
+}
+
+async function doEngineUpdateApply() {
+  if (nodeStatusUnknown.value) {
+    packageResult.value = 'Connection role is unavailable; open This device before updating.'
+    return
+  }
+  if (updatePolling.value) return
+  updateActionPending.value = true
+  packageResult.value = ''
+  try {
+    await api.post('/api/update/apply')
+    // The apply drains and reboots the engine, so the restart overlay is the
+    // one a Settings restart already uses: it covers the downtime and reloads
+    // the tab onto the new version. A drain the engine gives up on cancels it
+    // through `server_restart_cancelled`, and the card re-reads the record.
+    restartAndReload('Updating Ciaobot… the engine will restart')
+    startUpdatePoll()
+    // Same pre-record window as a stage: `apply_update` writes `draining` from
+    // its own thread, so the first read can still be serving the `staged` record.
+    beginUpdateRun()
+    packageResult.value = 'Applying the update. Ciaobot restarts once it is ready.'
+  } catch (e) {
+    packageResult.value = `Could not apply the update: ${apiErrorMessage(e, 'unknown error')}`
+    await fetchUpdateStatus()
+  } finally {
+    updateActionPending.value = false
+  }
+}
+
+// Poll only while a run is in flight, and only on the tab that shows the card:
+// a Settings tab left open on an idle engine must not poll forever. A run this
+// session asked for counts as in flight for this purpose too: staging is not a
+// takeover, so leaving the Updates tab mid-download and coming back has to find
+// the run still being watched rather than a card frozen on the last record.
+watch([currentTab, engineUpdateBusy], ([tab, busy]) => {
+  if (tab === 'home' && (busy || updateRunStarted)) startUpdatePoll()
+  else stopUpdatePoll()
+}, { immediate: true })
+
+// The overlay is the whole window while it is up, so it is modal: focus moves
+// into its status region, the Settings behind it go inert so Tab cannot reach
+// Restart or Deploy under the overlay, and the card takes focus back when the
+// record settles.
+const engineUpdateOverlay = ref<HTMLElement | null>(null)
+const engineUpdateOverlayView = ref<InstanceType<typeof UpdateProgressView> | null>(null)
+const engineUpdatePanel = ref<HTMLElement | null>(null)
+const engineUpdateInlineView = ref<InstanceType<typeof UpdateProgressView> | null>(null)
+// The two halves of a run are not the same thing to the app, and `useModalFocus`
+// makes the background inert up to `document.body`, so which one is up decides
+// whether the whole app is locked while it runs.
+//
+// Staging (`resolving|downloading|verifying|staging`) is a release lookup, a
+// download and a wheel build, and the engine keeps serving through all of it —
+// the card's own copy says so. Taking the window over for minutes of that is
+// the plan contradicting itself, so staging is the card's business: the same
+// progress rows rendered inline below, with nothing inert anywhere.
+//
+// Applying (`draining|applying|stopping|swapping|starting|verifying_start`, and
+// the `rolling_back` that answers a failed swap) is the engine replacing itself.
+// It goes down, the connection drops, and nothing comes back until the new one
+// is up, so there the takeover is exactly right and the copy stays.
+const engineUpdateStagingNow = computed(() => engineUpdateStage.value === 'staging')
+const engineUpdateOverlayOpen = computed(
+  () => engineUpdateBusy.value && !engineUpdateStagingNow.value && engineUpdateEnabled.value,
+)
+// The overlay's own status region, not the inert boundary: a focus target with
+// a visible ring (DESIGN) beats an invisible full-window box.
+const engineUpdateStatusRegion = computed(() => engineUpdateOverlayView.value?.statusRegion ?? null)
+// The in-card region's own focus target, for the same reason on the staging half.
+const engineUpdateInlineStatusRegion = computed(() => engineUpdateInlineView.value?.statusRegion ?? null)
+
+useModalFocus(engineUpdateOverlay, engineUpdateOverlayOpen, {
+  initialFocus: engineUpdateStatusRegion,
+  // The card owns the way back, below: the control that started the run is
+  // usually replaced by its outcome, so the captured opener is often gone.
+  restoreFocus: false,
+  // Escape is claimed and does nothing on purpose: the run under this overlay is
+  // the engine replacing itself, and no key leaves it running. Letting the key
+  // through would hand it to a global shortcut, which is worse than swallowing
+  // it.
+  onEscape: () => {
+    // Intentionally inert.
+  },
+})
+
+// Staging takes over nothing, but the control that started it is replaced by the
+// progress that replaced it, and focus left on nothing at all is worse than
+// focus on the region that now describes the run. Nothing is inert here: this is
+// a move into the card, not a claim on the window, and Tab leaves it for the
+// rest of the app like any other. Only a run this session asked for counts — a
+// run that started on the CLI or on another device must not pull focus out of
+// wherever this tab was left — and only when that control's focus is what the
+// replacement took with it.
+watch(engineUpdateStagingNow, async (staging) => {
+  if (!staging || !updateRunStarted) return
+  await nextTick()
+  const active = document.activeElement
+  if (active && active !== document.body && !engineUpdatePanel.value?.contains(active)) return
+  engineUpdateInlineStatusRegion.value?.focus()
+})
+
+// Focus comes back to the card when the overlay closes. What the run produced is
+// what the card now offers — Apply for a staged release, Retry for a failure —
+// so that is where focus goes: never onto a control the record has replaced,
+// and never onto nothing at all. An `applied` record offers no control, so the
+// panel itself is the target — it carries `tabindex="-1"` and states its own
+// focus ring below, because a region has no ring of its own.
+watch(engineUpdateOverlayOpen, async (open) => {
+  if (open) return
+  await nextTick()
+  focusEngineUpdatePanel()
+})
+
+function focusEngineUpdatePanel() {
+  const panel = engineUpdatePanel.value
+  if (!panel) return
+  const control = panel.querySelector<HTMLElement>('button:not([disabled])')
+  const target = control ?? panel
+  target.focus()
+}
+
+/**
+ * Focus that fell on the document is not focus anyone put there.
+ *
+ * A re-render that removes the focused control drops focus on `body`, and the
+ * card can do that to itself: a record that settles on `applied` re-reads the
+ * version check, and a machine now on the release that check named has no
+ * control left in the panel — so the control the focus return just landed on is
+ * gone by the next answer. Focus the user moved themselves is left alone.
+ */
+function reclaimEngineUpdatePanelFocus() {
+  const active = document.activeElement
+  if (active && active !== document.body) return
+  focusEngineUpdatePanel()
+}
+
+// Applied: the record says the new version is running, so the package status is
+// re-read too and its "Up to date" is the engine's own answer.
+watch(() => engineUpdateStage.value, (stage, previous) => {
+  // "Staging…"/"Applying…" describes a run that is in flight. Once the record
+  // settles it is the last thing that happened rather than the state, and would
+  // otherwise sit under the panel that replaced it.
+  if (updateStageInFlight(previous) && !updateStageInFlight(stage)) packageResult.value = ''
+  if (stage !== 'done' || previous === 'done') return
+  void (async () => {
+    await Promise.all([fetchPackageStatus(), fetchUpdateStatus()])
+    // Those reads can replace the control the focus return landed on with a
+    // panel that has none, which is focus falling on the document rather than
+    // anywhere. The card takes it back; see `reclaimEngineUpdatePanelFocus`.
+    reclaimEngineUpdatePanelFocus()
+  })()
+})
+
+onUnmounted(stopUpdatePoll)
+
 </script>
 
 <!-- Styles the extracted Settings panels share with this view. Scoped rules
@@ -4518,6 +5054,21 @@ async function doPackageUpdate() {
   height: 100%;
   min-width: 0;
   container-type: inline-size;
+}
+
+/* The engine update's inert boundary: an empty full-window layer the overlay
+   paints into, so the Settings behind it can be made inert while it is up. */
+.engine-update-overlay {
+  position: fixed;
+  inset: 0;
+}
+
+/* The card's own focus target, for the run that leaves it with nothing to
+   click: the app's focus ring (DESIGN: 2px accent) does not reach a region, so
+   the panel states one exactly as the overlay's status region does. */
+.engine-update-panel:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .shortcut-list {

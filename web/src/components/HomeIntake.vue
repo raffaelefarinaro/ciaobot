@@ -121,6 +121,7 @@ import { useTaskStore } from '../stores/tasks'
 import { clearChatDraft } from '../lib/chatDrafts'
 import { openNewChatPicker } from '../lib/newChat'
 import { isApplePlatform } from '../lib/desktop'
+import { isMemoryProject } from '../lib/memoryPass'
 import { providerForModelSection, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import ModelSelector from './ModelSelector.vue'
 import { importDesktopDrop, uploadChatAttachments } from '../lib/chatAttachments'
@@ -148,8 +149,12 @@ const defaultProject = computed(() => {
     ? store.projects.find(project => project.project_id === preferredProjectId.value)
     : undefined
   if (chosen && chosen.workspace === workspace) return chosen
-  return store.projects.find(project => project.workspace === workspace && project.name === 'General')
-    ?? store.projects.find(project => project.workspace === workspace)
+  return store.projects.find(project => (
+    project.workspace === workspace && project.name === 'General' && !isMemoryProject(project)
+  ))
+    // Skips the hidden Memory project: a workspace whose only project is the
+    // app-owned one would otherwise name it as where the next chat starts.
+    ?? store.projects.find(project => project.workspace === workspace && !isMemoryProject(project))
 })
 const defaultProjectLabel = computed(() => defaultProject.value?.name || 'Choose a project')
 

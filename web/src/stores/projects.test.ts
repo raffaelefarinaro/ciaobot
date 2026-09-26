@@ -5515,3 +5515,72 @@ describe('loadSubagent', () => {
     expect(store.subagents.c1[0].messages).toHaveLength(1)
   })
 })
+
+describe('memory pass surfaces', () => {
+  function seedProjects(store: ReturnType<typeof useProjectStore>) {
+    store.activeWorkspace = 'personal'
+    store.projects = [
+      { project_id: 'p1', name: 'General', workspace: 'personal', order: 0 },
+      { project_id: 'p-mem', name: 'Memory', workspace: 'personal', order: 1, kind: 'memory' },
+      { project_id: 'p-mem-work', name: 'Memory', workspace: 'work', order: 0, kind: 'memory' },
+      { project_id: 'p2', name: 'Notes', workspace: 'work', order: 1 },
+    ] as unknown as typeof store.projects
+  }
+
+  test('hides the memory project from workspaceProjects', () => {
+    // The pass runs in an app-owned project; showing it would put a row in the
+    // sidebar for something the user never created and cannot use.
+    const store = useProjectStore()
+    seedProjects(store)
+    expect(store.workspaceProjects.map(p => p.project_id)).toEqual(['p1'])
+  })
+
+  test('finds the memory project for a workspace without showing it', () => {
+    const store = useProjectStore()
+    seedProjects(store)
+    expect(store.memoryProjectFor('personal')?.project_id).toBe('p-mem')
+    expect(store.memoryProjectFor('work')?.project_id).toBe('p-mem-work')
+  })
+
+  test('flags only an unclean pass as needing attention', () => {
+    const store = useProjectStore()
+    seedProjects(store)
+    store.chats = [
+      { chat_id: 'c-attention', project_id: 'p-mem', archived: false, helper: { kind: 'memory_pass', state: 'attention', source_chat_id: 'c1', archive_path: '', doc_path: '', source_title: '', source_project: '', archive_policy: 'when_clean' } },
+      { chat_id: 'c-running', project_id: 'p-mem', archived: false, helper: { kind: 'memory_pass', state: 'running', source_chat_id: 'c1', archive_path: '', doc_path: '', source_title: '', source_project: '', archive_policy: 'when_clean' } },
+      { chat_id: 'c-plain', project_id: 'p1', archived: false },
+    ] as unknown as typeof store.chats
+    expect(store.memoryPassNeedsAttention('c-attention')).toBe(true)
+    expect(store.memoryPassNeedsAttention('c-running')).toBe(false)
+    expect(store.memoryPassNeedsAttention('c-plain')).toBe(false)
+    expect(store.memoryPassNeedsAttention('missing')).toBe(false)
+  })
+
+  test('latestMemoryPassChat picks the newest non-archived pass in the workspace', () => {
+    const store = useProjectStore()
+    seedProjects(store)
+    store.chats = [
+      { chat_id: 'c-old', project_id: 'p-mem', archived: false, last_activity_at: '2026-08-15T10:00:00Z' },
+      { chat_id: 'c-clean', project_id: 'p-mem', archived: true, last_activity_at: '2026-08-18T10:00:00Z' },
+      { chat_id: 'c-new', project_id: 'p-mem', archived: false, last_activity_at: '2026-08-17T10:00:00Z' },
+      { chat_id: 'c-other-workspace', project_id: 'p-mem-work', archived: false, last_activity_at: '2026-08-19T10:00:00Z' },
+      { chat_id: 'c-not-a-pass', project_id: 'p1', archived: false, last_activity_at: '2026-08-20T10:00:00Z' },
+    ] as unknown as typeof store.chats
+    // A clean pass is archived by the time the owner could reach for it, and
+    // the newest row is an ordinary chat, so neither can win.
+    expect(store.latestMemoryPassChat('personal')?.chat_id).toBe('c-new')
+    expect(store.latestMemoryPassChat('work')?.chat_id).toBe('c-other-workspace')
+  })
+
+  test('latestMemoryPassChat returns null without a memory project or an open pass', () => {
+    const store = useProjectStore()
+    seedProjects(store)
+    store.chats = [] as unknown as typeof store.chats
+    expect(store.latestMemoryPassChat('work')).toBeNull()
+
+    store.chats = [
+      { chat_id: 'c-done', project_id: 'p-mem', archived: true },
+    ] as unknown as typeof store.chats
+    expect(store.latestMemoryPassChat('personal')).toBeNull()
+  })
+})

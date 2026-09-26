@@ -388,7 +388,9 @@ async def test_postprocess_unchanged_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
     streams: _FakeStreams,
 ) -> None:
-    assert memory_pass.MEMORY_PASS_CHATS is False
+    # Pinned here rather than read off the module: the point is the disabled
+    # path, which must stay pinned however the shipped constant is flipped.
+    monkeypatch.setattr(memory_pass, "MEMORY_PASS_CHATS", False)
     manager = _make_manager(tmp_path)
     source = _source(manager)
     project = manager.get_project(source.project_id)
@@ -785,3 +787,58 @@ def test_start_stream_is_attended(
     assert "doc.md" in prompt
     assert project.name in prompt
     assert streams.chat_ids == [memory_id]
+
+
+# ── Guardrails ───────────────────────────────────────────────────────────
+# A pass must be constrained beyond an ordinary chat: MCP and `gws` are denied
+# on Claude, and on opencode (which ignores `disallowed_tools`) the request
+# carries a marker that selects the guardrail ruleset.
+
+
+def _pass_chat(manager: ProjectChatManager) -> ChatInfo:
+    """A pass chat in this workspace's Memory project, on the claude provider."""
+    project = manager._memory_pass.ensure_project("work")
+    return manager.create_chat(
+        project.project_id,
+        title="Memory pass · Pricing rework",
+        helper={
+            "kind": "memory_pass",
+            "source_chat_id": "chat-1",
+            "archive_policy": "when_clean",
+        },
+    )
+
+
+def test_memory_pass_chat_denies_mcp_and_gws_tools(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    # A declared server reaches every workspace whose allowlist does not name
+    # it, so an ordinary chat already denies it; the pass must deny the rest.
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"n8n": {"command": "n8n"}}}), encoding="utf-8"
+    )
+    ordinary = _source(manager)
+    pass_chat = _pass_chat(manager)
+
+    denied = manager.disallowed_tools_for_chat(pass_chat)
+    base = manager.disallowed_tools_for_chat(ordinary)
+    # The workspace's own list is kept, not replaced.
+    assert denied[: len(base)] == base
+    assert "EnterPlanMode" in denied
+    assert "mcp__n8n" in denied
+    # gws is blocked at the skill layer: the shipped set, read from disk.
+    gws = [tool for tool in denied if tool.startswith("Skill(gws-")]
+    assert "Skill(gws-gmail)" in gws
+
+    # An ordinary chat is unchanged: no gws deny, and the declared server is
+    # denied for the reachability reason it always was.
+    assert not [tool for tool in base if tool.startswith("Skill(gws-")]
+    assert "mcp__n8n" in base
+
+
+def test_build_agent_request_marks_only_the_memory_pass(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    ordinary = _source(manager)
+    pass_chat = _pass_chat(manager)
+
+    assert manager.build_agent_request(pass_chat, prompt="p").memory_pass is True
+    assert manager.build_agent_request(ordinary, prompt="p").memory_pass is False

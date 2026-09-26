@@ -1,0 +1,164 @@
+# Stock categories for a Ciaobot vault. The effective list is this file
+# merged with <vault>/entity-types.yaml by id (see ciao/entity_types.py).
+#
+# Per entry:
+#   id             the frontmatter `type:` value; the merge key, and immutable
+#   label          what the UI shows
+#   kind           entity = the vault keeps a record OF the thing (person,
+#                   project, place, idea, resource) and the orphan linter
+#                   watches its folder; note = a document ABOUT something
+#   folder         where new notes go, and the type inferred from the path
+#                   when a note carries no frontmatter type ("" = no folder)
+#   description    one line saying when to use this category
+#   aliases        near-duplicate `type:` values a real vault used, mapped onto
+#                   this id by the indexer
+#   stale_after_days  days after which the note's facts count as unverified
+#                   (0 = the caller's default, not "never")
+#   enabled        false keeps the entry out of every derived view, so a user
+#                   can turn a builtin off without deleting it
+#   builtin        set by the loader, not by this file's author: stock entries
+#                   are builtin, a vault-only id is not
+- id: person
+  label: Person
+  kind: entity
+  folder: People
+  description: A human the user knows or works with. Use for people updates, roles, relationships.
+  aliases: []
+  stale_after_days: 90
+  enabled: true
+  builtin: true
+- id: project
+  label: Project
+  kind: entity
+  folder: Projects
+  description: Something with an outcome and a finish line. Use for status, decisions, next steps.
+  aliases: []
+  stale_after_days: 30
+  enabled: true
+  builtin: true
+- id: place
+  label: Place
+  kind: entity
+  folder: Places
+  description: A physical place, city, region or venue. Use for addresses, travel, local context.
+  aliases: []
+  stale_after_days: 0
+  enabled: true
+  builtin: true
+- id: idea
+  label: Idea
+  kind: entity
+  folder: Ideas
+  description: A thought worth keeping before it is a plan. Use for options and rough concepts.
+  aliases: []
+  stale_after_days: 0
+  enabled: true
+  builtin: true
+- id: resource
+  label: Resource
+  kind: entity
+  folder: Resources
+  description: Something to read, watch or use. Use for links, tools and pointers to other material.
+  aliases: []
+  stale_after_days: 0
+  enabled: true
+  builtin: true
+- id: product
+  label: Product
+  kind: note
+  folder: products
+  description: A product, service or line the user ships or sells. Use for versions, pricing, positioning.
+  aliases: []
+  stale_after_days: 0
+  enabled: true
+  builtin: true
+- id: feature
+  label: Feature
+  kind: note
+  folder: features
+  description: A capability of one product. Use for scope, state and spec-level detail.
+  aliases: [feature-brief]
+  stale_after_days: 0
+  enabled: true
+  builtin: true
+- id: automation
+  label: Automation
+  kind: note
+  folder: automations
+  description: A recurring or triggered routine. Use for what it does, when it fires, how it failed.
+  aliases: []
+  stale_after_days: 0
+  enabled: true
+  builtin: true
+- id: document
+  label: Document
+  kind: note
+  folder: Documents
+  description: A durable document of the user's own. Use for plans, templates and written material.
+  aliases: [doc, plan, planning-doc, template]
+  stale_after_days: 0
+  enabled: true
+  builtin: true
+- id: workspace
+  label: Workspace
+  kind: note
+  folder: Workspace
+  description: The agent's own working surface. Use for the queue, proposals and curation paperwork.
+  aliases: []
+  stale_after_days: 0
+  enabled: true
+  builtin: true
+- id: reference
+  label: Reference
+  kind: note
+  folder: references
+  description: Material quoted from elsewhere. Use for external analysis and citations.
+  aliases: [analysis]
+  stale_after_days: 0
+  enabled: true
+  builtin: true
+- id: content
+  label: Content
+  kind: note
+  folder: content
+  description: Something to publish. Use for drafts, posts and published material.
+  aliases: []
+  stale_after_days: 0
+  enabled: true
+  builtin: true
+- id: journal
+  label: Journal
+  kind: note
+  folder: journal
+  description: A dated record of what happened. Use for running notes and event logs.
+  aliases: [hackathon-log]
+  stale_after_days: 0
+  enabled: true
+  builtin: true
+- id: note
+  label: Note
+  kind: note
+  folder: ""
+  description: A note that fits no other category. Use before inventing a new one.
+  aliases: [discussion-prep]
+  stale_after_days: 0
+  enabled: true
+  builtin: true
+- id: log
+  label: Log
+  kind: note
+  folder: ""
+  description: An append-only trace of work done. Use for run history and receipts.
+  aliases: [project-log]
+  stale_after_days: 0
+  enabled: true
+  builtin: true
+- id: skill-proposal
+  label: Skill proposal
+  kind: note
+  folder: ""
+  description: A candidate new skill, proposed and not yet accepted. Use only for proposals.
+  aliases: []
+  stale_after_days: 0
+  enabled: true
+  builtin: true

@@ -29,6 +29,15 @@
         <path d="M5 12h13M13 6l6 6-6 6" />
       </svg>
     </button>
+    <!-- The pass itself, which is a chat — not the /memory view above. Only
+         shown while one is open: a pass that ended cleanly auto-archives, and
+         an affordance with nothing to open is a dead row. -->
+    <button v-if="latestPass" type="button" class="home-review-link" @click="openMemoryPass">
+      Open memory pass
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M5 12h13M13 6l6 6-6 6" />
+      </svg>
+    </button>
   </section>
 </template>
 
@@ -158,6 +167,11 @@ const visibleItems = computed(() => items.value.filter(
   item => item.state !== 'ready' || item.count > 0,
 ))
 
+// The newest pass still open in this workspace. The Memory project is hidden
+// from the sidebar, so this rail is the way in when a pass is queued, running,
+// or waiting on the owner.
+const latestPass = computed(() => projects.latestMemoryPassChat(projects.activeWorkspace))
+
 watch(
   () => projects.activeWorkspace,
   (workspace) => {
@@ -180,6 +194,10 @@ function formatRun(value: string): string {
 
 function openMemory() {
   void router.push('/memory')
+}
+
+function openMemoryPass() {
+  if (latestPass.value) void projects.switchChat(latestPass.value.chat_id)
 }
 
 function openItem(key: ReviewItem['key']) {

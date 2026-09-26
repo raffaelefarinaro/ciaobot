@@ -69,6 +69,29 @@ describe('HomeIntake', () => {
     wrapper.unmount()
   })
 
+  it('never falls back to the hidden Memory project for the chip', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'launch', name: 'Launch', workspace: 'personal', order: 0 },
+      { project_id: 'mem-personal', name: 'Memory', workspace: 'personal', kind: 'memory', order: 1 },
+      { project_id: 'mem-work', name: 'Memory', workspace: 'work', kind: 'memory', order: 0 },
+    ] as unknown as typeof store.projects
+    store.activeWorkspace = 'personal'
+
+    const wrapper = mount(HomeIntake)
+    // No General in this workspace, so the fallback has to choose. It picks the
+    // first ordinary project, not the app-owned one the sidebar hides.
+    expect(wrapper.get('.home-intake-project').text()).toContain('Launch')
+
+    // A workspace whose only project is the Memory one has no visible target,
+    // so the chip admits it has none instead of naming a hidden project.
+    store.activeWorkspace = 'work'
+    await nextTick()
+    expect(wrapper.get('.home-intake-project').text()).toContain('Choose a project')
+    expect(wrapper.get('.home-intake-project').text()).not.toContain('Memory')
+    wrapper.unmount()
+  })
+
   it('remembers a picked project without creating a chat or clearing the draft', async () => {
     const store = useProjectStore()
     store.projects = [
