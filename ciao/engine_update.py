@@ -926,26 +926,34 @@ def _retire_job(launch: Launchctl, domain_uid: int, label: str, *plists: Path) -
 
 
 def _install_recovery_agent(
-    op: Operation, root: Path, launch: Launchctl, domain_uid: int
+    op: Operation, python: str, root: Path, launch: Launchctl, domain_uid: int
 ) -> Path:
     """Load the durable recovery agent for ``op``; return the plist written.
 
-    Installed while the live env is still intact, from the staged interpreter,
-    and that placement is the whole design. A swap that is interrupted between
-    renaming the live env aside and ``uv`` recreating it leaves
-    ``com.ciao.server``'s program pointing at an interpreter that does not
-    exist, so launchd cannot start the engine at all — and a recovery reached
-    from inside the engine is then a recovery that cannot run. This one is
-    started by launchd, out of an env the swap never touches, and re-checked on
-    an interval, so it survives the crash, the reboot, the logout and the death
-    of the job that installed it.
+    This one is started by launchd rather than by anything inside the engine, and
+    re-checked on an interval, so it survives the crash, the reboot, the logout
+    and the death of the job that installed it. That is the whole design, and it
+    is needed because the window a swap can strand the machine in is one where
+    ``com.ciao.server``'s own program names a file that does not exist: launchd
+    cannot start the engine, and a recovery reached from inside the engine is
+    then a recovery that cannot run.
+
+    Which is why ``python`` is an explicit argument and not read off ``op``: the
+    net is only worth anything if its program is a file that exists, so every
+    caller has to place it in an env the swap does not *consume*.
+    :func:`apply_update` installs it while the live env is still intact, from
+    the staged interpreter; :func:`run_apply` re-points it at
+    ``<stage>/previous-env/bin/python`` the moment the live env is renamed
+    aside, because the swap then moves the staged env into the live env's place
+    and the agent's program would be a dangling path forever after. The
+    ``previous-env`` is complete from that instant and is only ever moved again
+    by the rollback — which is the recovery.
 
     bootout before bootstrap, as everywhere else here: a job left loaded from an
     earlier attempt would make bootstrap fail with "service already loaded" and
     leave the machine with no net at all. A job that is not there is the normal
     case, so the bootout's non-zero exit is ignored.
     """
-    python = op.env_python or str(Path(op.stage_dir) / "env" / "bin" / "python")
     plist = _write_recover_plist(op, python, root)
     launch(["bootout", f"gui/{domain_uid}/{RECOVER_LABEL}"])
     bootstrap = launch(["bootstrap", f"gui/{domain_uid}", str(plist)])
@@ -1105,23 +1113,33 @@ def _console_scripts(wheel: Path) -> list[str]:
     return names
 
 
+def _first_line(path: Path) -> str:
+    """A file's first line, or ``""`` for anything unreadable.
+
+    The one question both the shebang rewrite and its check below ask: does the
+    first line of a file that just moved still name the env it was staged in?
+    Unreadable reads as empty rather than raising — a file that cannot be read
+    is not one this module can repair, and the entry points that matter are
+    checked by the caller either way.
+    """
+    try:
+        return path.read_text(encoding="utf-8").partition("\n")[0]
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
 def _relocate_shebang(path: Path, staged_prefix: str, live_prefix: str) -> None:
     """Repoint a script's ``#!`` line from the staged env to the live one.
 
     A shebang is a fixed prefix of the first line, so this is a bounded textual
     replacement and not a guess at what a script means: a file whose first line
     is not a shebang, or one naming neither environment, is left exactly as it
-    is. Anything unreadable is likewise left alone — a file that is not a script
-    is not this function's business, and the entry points that matter are
-    checked by the caller.
+    is.
     """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return
-    first, newline, rest = text.partition("\n")
+    first = _first_line(path)
     if not first.startswith("#!") or staged_prefix not in first:
         return
+    _, newline, rest = path.read_text(encoding="utf-8").partition("\n")
     path.write_text(
         first.replace(staged_prefix, live_prefix) + newline + rest, encoding="utf-8"
     )
@@ -1141,8 +1159,8 @@ def _install_staged_env(
     it again — from the network or from a cache — could only ever produce a
     different one (#611).
 
-    A move breaks exactly two things that name the env by absolute path, and
-    both are repaired rather than tolerated:
+    A move breaks exactly two things *that matter* that name the env by absolute
+    path, and both are repaired rather than tolerated:
 
     * the shebang of the scripts in ``<live_env>/bin``, which uv wrote naming
       the *staged* interpreter and which would otherwise be a program that
@@ -1150,9 +1168,16 @@ def _install_staged_env(
     * the entry points in ``bin_dir``, which uv places as links into the env
       and which would otherwise dangle.
 
-    ``uv-receipt.toml`` needs no repair: uv wrote it during staging and the
-    rename carries it, so ``uv tool list`` still reports this install and the
-    installer's own "was this installed by Ciaobot" guard keeps working.
+    A real tool env leaves two more absolute paths behind, both stale-but-harmless
+    and both left alone: the seven ``bin/activate*`` files, which each embed
+    ``VIRTUAL_ENV="<env>"``, and the ``install-path`` entry in
+    ``uv-receipt.toml``, which names the env's ``bin`` where it was staged.
+    Nothing in this repo sources a tool env's ``activate``, and ``uv tool list``
+    reads the requirement rather than the path.
+
+    ``uv-receipt.toml`` itself rides along, so ``uv tool list`` still reports this
+    install and the installer's own "was this installed by Ciaobot" guard keeps
+    working.
 
     Anything that cannot be placed raises, which is what makes the caller's
     rollback the answer: an update that cannot put in place the environment it
@@ -1170,6 +1195,23 @@ def _install_staged_env(
     for script in scripts:
         if script.is_file() and not script.is_symlink():
             _relocate_shebang(script, staged_prefix, live_prefix)
+    # Fail closed on a survivor: `_relocate_shebang` only rewrites a first line
+    # that *is* a shebang, so a launcher naming the interpreter some other way —
+    # a wrapper whose first line is `exec <staged>/bin/python` — keeps naming a
+    # directory the swap has just renamed away, and the entry point it leaves is
+    # one that answers `bad interpreter`. Tolerated, that only surfaces as a new
+    # engine that never comes up, at the end of a swap that has already cost the
+    # operator their engine; refusing here is a rollback instead.
+    for script in scripts:
+        if (
+            script.is_file()
+            and not script.is_symlink()
+            and staged_prefix in _first_line(script)
+        ):
+            raise UpdateError(
+                f"the staged path is still in the first line of {script.name}, "
+                "so it would not start"
+            )
     for name in _console_scripts(wheel):
         script = live_env / "bin" / name
         if not script.is_file():
@@ -1358,7 +1400,10 @@ def apply_update(
         # the startup hook that would otherwise finish the swap cannot run
         # either. This job is started by launchd, from the staged interpreter,
         # and re-checks on an interval — so it is still there after the reboot,
-        # the logout, or the death of the updater it is standing behind.
+        # the logout, or the death of the updater it is standing behind. The
+        # staged interpreter is the right one *here* and only here: the swap has
+        # not moved anything yet, and `run_apply` re-points the job at the env it
+        # keeps the moment it does.
         #
         # Best effort with a loud log rather than a refusal: the swap can still
         # succeed, `recover_interrupted_apply` still covers the cases where the
@@ -1367,7 +1412,7 @@ def apply_update(
         # held here, so the agent's first tick stands down rather than racing
         # the apply that installed it.
         try:
-            _install_recovery_agent(op, root, launch, domain_uid)
+            _install_recovery_agent(op, str(staged_python), root, launch, domain_uid)
         except Exception as exc:  # noqa: BLE001 — a missing net is not a failed update
             logger.warning(
                 "could not install the %s agent, so a swap interrupted from here "
@@ -1567,8 +1612,8 @@ def _runs_the_receipt_install(
     *beside* it in `~/.local/bin`; `install-engine.sh` then runs
     `ciao setup --python "$ciao"`, so the LaunchAgent's `ProgramArguments[0]` is
     that bin entry point — the receipt's own `executable`, and outside the env.
-    Both belong to the one install: `run_apply` re-points `UV_TOOL_BIN_DIR` at
-    that entry point's directory on every swap. Accepting only the env would
+    Both belong to the one install: `run_apply` re-points the entry-point links
+    in that entry point's directory on every swap. Accepting only the env would
     refuse every healthy terminal install, which is the install the feature
     exists for.
 
@@ -1656,9 +1701,10 @@ def run_apply(
     The detached half of the apply, launched by :func:`apply_update` through
     launchd. It boots the engine *out* before touching a file, because the
     engine's own 60-second file watcher would otherwise restart a half-swapped
-    environment, then renames the live env aside, moves the staged env into
-    its place, rewrites the receipt, starts the service and waits for the target
-    version to answer.
+    environment, then renames the live env aside, re-points the durable recovery
+    agent at the env it just set aside, moves the staged env into its place,
+    rewrites the receipt, starts the service and waits for the target version to
+    answer.
 
     Nothing here resolves a dependency: the environment the swap installs is the
     one :func:`stage_update` built and verified, moved rather than rebuilt
@@ -1804,6 +1850,36 @@ def run_apply(
             # a failure has something to undo, which is what `env_moved` says.
             _move_env(live_env, previous_env)
             env_moved = True
+            # The net is re-pointed at the env the swap just set aside, and before
+            # the staged env is moved into the live env's place: `apply_update`
+            # installed `com.ciao.recover` from the staged interpreter, and that
+            # directory is about to become the live one, so the agent's program
+            # would be a dangling path from the rename onwards — the one window in
+            # which nothing can still bring the engine back, and so the one window
+            # where launchd has to be able to run `run-recover` on its own. The
+            # `previous-env` exists from this instant, is a complete old
+            # installation, and is only moved again by the rollback.
+            #
+            # Best effort with a loud log, as in `apply_update`: a net that could
+            # not be re-pointed still leaves `recover_interrupted_apply` covering
+            # the paths where the engine does come back, and failing a swap that
+            # is otherwise fine over a missing net costs the operator the update.
+            try:
+                _install_recovery_agent(
+                    op,
+                    str(previous_env / "bin" / "python"),
+                    root,
+                    launch,
+                    domain_uid,
+                )
+            except Exception as exc:  # noqa: BLE001 — a missing net is not a failed swap
+                logger.warning(
+                    "could not re-point the %s agent at %s, so a swap interrupted "
+                    "from here is only recoverable when the engine starts: %s",
+                    RECOVER_LABEL,
+                    previous_env / "bin" / "python",
+                    exc,
+                )
             # What was verified is what gets installed (#611). The staged env is
             # a real uv tool env, so installing it is a rename plus the two
             # absolute paths a move breaks: no resolver runs here, so the apply
@@ -1984,13 +2060,14 @@ def _swap_in_flight(launch: Launchctl, domain_uid: int) -> bool:
 def _recover_python(op: Operation) -> str:
     """The interpreter the recovery job runs from.
 
-    The staged env first: it is the one environment the swap never touches, and
-    it is what `run-apply` itself runs from. Then the previous env — the install
-    a rollback is about to put back, so it is both the second-best thing to run
-    the recovery *from* and the last one guaranteed to have `ciao` importable.
-    Failing both, this process's own interpreter: it is the engine that is
-    running the recovery, and the recovery job is a *sibling* of
-    `com.ciao.server`, so the bootout that follows cannot take it down.
+    Whichever of the two envs the swap has not consumed yet: the staged one
+    while it is still only a directory, because that is what `run-apply` itself
+    runs from; then the previous env, which exists from the moment the live one
+    is renamed aside and is both the second-best thing to run the recovery *from*
+    and the last one guaranteed to have `ciao` importable. Failing both, this
+    process's own interpreter: it is the engine that is running the recovery, and
+    the recovery job is a *sibling* of `com.ciao.server`, so the bootout that
+    follows cannot take it down.
     """
     for candidate in (
         op.env_python,

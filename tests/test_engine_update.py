@@ -62,8 +62,13 @@ RELEASE_BASE = "https://example.test/releases/download"
 # after. Both are read by the swap rather than spelled out anywhere in
 # `engine_update`: the entry-point names come out of the wheel's own
 # `entry_points.txt`, and the env's name is the distribution's, which uv
-# normalises.
+# normalises. So the two are not the same string here either: `TOOL_DIR_NAME` is
+# what uv would actually create for the `TOOL_NAME` distribution, and every fake
+# below writes the env under that name — a fake that agreed with the
+# distribution's spelling could not tell "read it off the directory" from
+# "spelled it out and got lucky".
 TOOL_NAME = "ciaobot"
+TOOL_DIR_NAME = "ciao_bot"
 ENTRY_POINTS = ("ciao", "ciaobot")
 
 
@@ -170,10 +175,7 @@ def fake_run() -> tuple[Any, list[list[str]]]:
     def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(list(argv))
         if "tool" in argv:
-            # "Installing" means writing the tool env uv would have created,
-            # under the tool dir the caller pinned. The wheel is the last
-            # argument, so the stage dir it was staged into is known from here.
-            _write_tool_env(Path(argv[-1]).parent / "tool" / TOOL_NAME, TO_VERSION)
+            _fake_tool_install(kwargs)
         if "freeze" in argv:
             return subprocess.CompletedProcess(
                 argv, 0, f"{TOOL_NAME}=={TO_VERSION}\n", ""
@@ -211,8 +213,11 @@ def test_stage_update_happy_path(tmp_path: Path, release: FakeRelease, fake_run)
 
     # A real tool env in a tool dir of this update's own, so the apply can move
     # it into the live env's place — its `uv-receipt.toml` and its entry points
-    # are part of what the swap has to install.
-    env_dir = Path(op.stage_dir) / "tool" / TOOL_NAME
+    # are part of what the swap has to install. Found by reading the directory,
+    # under the name uv chose for the distribution rather than the one the
+    # distribution is spelled: spelling it out is the mistake this pins down.
+    env_dir = Path(op.stage_dir) / "tool" / TOOL_DIR_NAME
+    assert TOOL_DIR_NAME != TOOL_NAME
     assert calls[0] == ["/fake/uv", "tool", "install", "--python", "3.13", op.wheel]
     assert (env_dir / "uv-receipt.toml").is_file()
     assert op.env_python == str(env_dir / "bin" / "python")
@@ -329,7 +334,7 @@ def test_stage_update_rejects_version_check_mismatch(
     def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(list(argv))
         if "tool" in argv:
-            _write_tool_env(Path(argv[-1]).parent / "tool" / TOOL_NAME, TO_VERSION)
+            _fake_tool_install(kwargs)
         return subprocess.CompletedProcess(argv, 0, stdout="9.9.9\n", stderr="")
 
     with pytest.raises(UpdateError):
@@ -615,6 +620,17 @@ def _write_tool_env(env: Path, version: str) -> Path:
     return python
 
 
+def _fake_tool_install(kwargs: dict[str, Any], version: str = TO_VERSION) -> None:
+    """Stand in for `uv tool install`: write the env into the tool dir pinned.
+
+    The tool dir comes from the `UV_TOOL_DIR` the caller pinned rather than from
+    the wheel's own argument, because that pinned directory is where the code
+    afterwards looks for what uv built — the one fact a fake has to agree on.
+    """
+    tool_dir = Path((kwargs.get("env") or {})["UV_TOOL_DIR"])
+    _write_tool_env(tool_dir / TOOL_DIR_NAME, version)
+
+
 def _env_version(env: Path) -> str:
     try:
         return (env / "bin" / "python").read_text(encoding="utf-8").splitlines()[1][5:]
@@ -762,7 +778,7 @@ def _staged(
     """
     state = root / "updates"
     stage_dir = state / TO_VERSION
-    staged_env = stage_dir / "tool" / TOOL_NAME
+    staged_env = stage_dir / "tool" / TOOL_DIR_NAME
     staged_env.mkdir(parents=True)
     staged_python = _write_tool_env(staged_env, TO_VERSION)
     for name in ENTRY_POINTS:
@@ -774,7 +790,7 @@ def _staged(
     )
     previous_receipt = stage_dir / "previous-receipt.json"
 
-    live_env = root / "tools" / TOOL_NAME
+    live_env = root / "tools" / TOOL_DIR_NAME
     live_python = _write_tool_env(live_env, from_version)
     # The entry points `uv tool install` puts in the bin dir: links into the
     # env, outside it, which is what `install-engine.sh` then points the
@@ -913,6 +929,18 @@ def _install_recovery_agent(state: Path, op: Operation) -> Path:
     return engine_update._write_recover_plist(
         op, op.env_python or str(Path(op.stage_dir) / "env" / "bin" / "python"), state
     )
+
+
+def _agent_program(state: Path) -> str:
+    """The durable agent's `ProgramArguments[0]`, read off the plist on disk.
+
+    The program is the whole question — a net whose program is a path that does
+    not exist is not a net — so it is read where launchd reads it, rather than
+    out of whatever the test last computed.
+    """
+    plist, _ = engine_update._recovery_plists(state)
+    with plist.open("rb") as handle:
+        return plistlib.load(handle)["ProgramArguments"][0]
 
 
 def _login_recover_plist() -> Path:
@@ -1164,9 +1192,11 @@ def test_apply_drains_then_bootstraps_updater(tmp_path: Path) -> None:
     assert plist["AbandonProcessGroup"] is True
     # From the staged env: the job must not be running the env it replaces. That
     # env is a uv tool env of this update's own, under the stage dir — the
-    # directory the apply moves into the live env's place, so the job runs from
-    # an environment the swap never touches.
-    assert op.env_python == str(Path(op.stage_dir) / "tool" / TOOL_NAME / "bin" / "python")
+    # directory the apply moves into the live env's place, so this job is running
+    # an env the swap *does* consume, and `run_apply` re-points the durable
+    # recovery agent at the `previous-env` it keeps for exactly that reason.
+    staged_env = Path(op.stage_dir) / "tool" / TOOL_DIR_NAME
+    assert op.env_python == str(staged_env / "bin" / "python")
     assert not Path(op.env_python).is_relative_to(engine.live_env)
     assert plist["ProgramArguments"] == [
         op.env_python,
@@ -1208,7 +1238,7 @@ def test_apply_refuses_without_staged_update(tmp_path: Path) -> None:
     state.mkdir()
 
     with pytest.raises(UpdateError, match="nothing staged"):
-        _apply(_FakeEngine(tmp_path / "tools" / "ciaobot"), state)
+        _apply(_FakeEngine(tmp_path / "tools" / TOOL_DIR_NAME), state)
 
     assert read_operation(state) is None
 
@@ -1355,6 +1385,30 @@ def test_run_apply_falls_back_to_rollback_when_shims_cannot_be_written(
     # update did to the environment behind it.
     assert engine.starts == 1
     assert engine.up is True
+
+
+def test_run_apply_refuses_an_entry_point_the_staged_path_survives_in(
+    tmp_path: Path,
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # A launcher that names the interpreter on its first line without it being a
+    # shebang — the shape a rewrite of `#!` lines cannot see, and so the shape
+    # that survives the move naming a directory which is about to stop existing.
+    # Left there it is a program that cannot start, and the only way to find that
+    # out is a new engine that never comes up, at the end of a swap that has
+    # already cost the operator their engine.
+    (Path(op.env_python).parent.parent / "bin" / "ciao-launcher").write_text(
+        f"{op.env_python} -m ciao.cli\n", encoding="utf-8"
+    )
+
+    result = _run(engine, op, state, receipt_path)
+
+    # Failed closed instead: a swap that cannot place a runnable environment is
+    # a rollback, and this is before the receipt or the service is touched.
+    assert result.phase == "rolled_back"
+    assert "still in the first line" in result.error
+    assert _env_version(engine.live_env) == FROM_VERSION
+    assert not (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
 
 
 def test_run_apply_rolls_back_when_the_new_env_cannot_be_probed(
@@ -1604,7 +1658,7 @@ def test_run_apply_refuses_when_the_install_changed(tmp_path: Path) -> None:
         InstallReceipt(
             version="1.3.0",
             executable=str(tmp_path / "bin" / "ciao"),
-            python=str(_write_env(tmp_path / "tools" / "ciaobot", "1.3.0")),
+            python=str(_write_env(tmp_path / "tools" / TOOL_DIR_NAME, "1.3.0")),
             service_backend="launchd",
             service_label=SERVER_LABEL,
             installed_at="2026-09-26T09:00:00+00:00",
@@ -2188,6 +2242,77 @@ def test_apply_installs_the_recovery_agent_before_the_engine_is_stopped(
     # stopped, because the crash window it covers is one where nothing inside the
     # engine can run to notice.
     assert where("bootstrap", RECOVER_PLIST_NAME) < where("bootout", SERVER_LABEL)
+
+
+def test_the_swap_re_points_the_recovery_agent_away_from_the_staged_env(
+    tmp_path: Path,
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path)
+    staged_python = op.env_python
+    previous_python = str(Path(op.stage_dir) / PREVIOUS_ENV_NAME / "bin" / "python")
+
+    _apply(engine, state)
+
+    # Out of the staged env, which is the one env the swap is about to move into
+    # the live env's place.
+    assert _agent_program(state) == staged_python
+    assert Path(staged_python).is_file()
+
+    # Read in the gap the swap itself opens — between the rename and the entry
+    # points being repaired — which is the window where `com.ciao.server` cannot
+    # start at all and launchd is the only thing left that can finish the job.
+    mid_swap: list[str] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        mid_swap.append(_agent_program(state))
+        return engine.probe_run(argv, **kwargs)
+
+    def killed(starts: int) -> dict[str, Any]:
+        raise KeyboardInterrupt
+
+    engine.readiness = killed
+    with pytest.raises(KeyboardInterrupt):
+        _run(engine, op, state, receipt_path, run=run)
+
+    # Killed where the reviewer's own reproduction dies: the record sits in
+    # `verifying_start` with the engine up, and `main.py` already deferred at
+    # that boot, so nothing is going to re-invoke the startup hook.
+    record = read_operation(state)
+    assert record is not None
+    assert record.phase == "verifying_start"
+    # The staged env is gone — consumed by the swap, which installs it as the
+    # live one — and the net is not: its program is the env the swap kept.
+    assert not Path(staged_python).exists()
+    assert _env_version(engine.live_env) == TO_VERSION
+    assert Path(previous_python).is_file()
+    assert mid_swap == [previous_python]
+    assert _agent_program(state) == previous_python
+    assert Path(_agent_program(state)).is_file()
+
+
+def test_a_recovery_agent_that_cannot_be_re_pointed_does_not_fail_the_swap(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path)
+    _apply(engine, state)
+    # Nothing left for the re-point to write over: the record of the agent is a
+    # directory. The swap is fine on its own terms, and this is the same bargain
+    # `apply_update` makes: a missing net must not cost the operator an update
+    # that works — `recover_interrupted_apply` still covers the paths where the
+    # engine comes back.
+    (state / RECOVER_PLIST_NAME).unlink()
+    (state / RECOVER_PLIST_NAME).mkdir()
+
+    with caplog.at_level("WARNING"):
+        result = _run(engine, op, state, receipt_path)
+
+    assert result.phase == "applied"
+    assert result.error == ""
+    # Loudly: the operator has to be able to tell this from a swap that was
+    # never covered at all.
+    assert "could not re-point" in caplog.text
+    assert _env_version(engine.live_env) == TO_VERSION
+    assert (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
 
 
 def test_a_successful_swap_retires_the_recovery_agent(tmp_path: Path) -> None:
