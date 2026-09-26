@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -139,7 +140,9 @@ def test_refuses_desktop_engine_and_foreign_ciao() -> None:
     refuse_desktop = _function_source("refuse_desktop_engine")
 
     assert ".app/" in refuse_desktop
-    assert "not supported yet (#576)" in refuse_desktop
+    # The refusal has to name the way out, or the user is stuck on it: the
+    # migration is what replaced "not supported yet (#576)".
+    assert "re-run with --migrate" in refuse_desktop
     # A `ciao` this installer did not write stays: the desktop shim (its marker
     # line) and an existing uv tool entry point are the only ones replaced.
     assert "# Ciaobot shim (managed by the Ciaobot installer)" in SCRIPT_TEXT
@@ -219,6 +222,12 @@ case "${1:-}" in
             fi
             shift
         done
+        # `--migrate` classifies through the wheel with `python -I -m ciao....
+        # The wheel the installer hands over is a fake file, so the module is
+        # resolved out of this checkout instead - and `-I` drops PYTHONPATH, so
+        # it goes with it.
+        printf '%s\\n' "$*" >> "$HOME/uv-run-calls.log"
+        if [ "${1:-}" = "-I" ]; then shift; fi
         PYTHONPATH="__REPO_ROOT__" exec "__PYTHON__" "$@"
         ;;
     tool)
@@ -281,24 +290,39 @@ def _harness(tmp_path: Path) -> dict[str, Any]:
     )
     (release / WHEEL_NAME).write_bytes(WHEEL_BYTES)
 
-    script = tmp_path / "install-engine.sh"
-    script.write_text(
-        re.sub(
-            r'^RELEASE_PUBLIC_KEY=".*?"$',
-            f'RELEASE_PUBLIC_KEY="{public_key}"',
-            SCRIPT_TEXT,
-            count=1,
-            flags=re.MULTILINE,
-        ),
-        encoding="utf-8",
-    )
-    script.chmod(0o755)
-
     fakebin = tmp_path / "fakebin"
     fakebin.mkdir()
     _write_exec(fakebin / "uname", "#!/bin/sh\necho Darwin\n")
     _write_exec(fakebin / "sw_vers", '#!/bin/sh\n[ "$1" = "-productVersion" ] && echo 14.5\n')
     _write_exec(fakebin / "uv", _fake_uv())
+    # launchd records what it was asked to do and always succeeds; the app and
+    # `pgrep` are not there, which is the state of a Mac with no Ciaobot.app.
+    _write_exec(
+        fakebin / "launchctl", '#!/bin/sh\nprintf "%s\\n" "$*" >> "$HOME/launchctl.log"\n'
+    )
+    _write_exec(fakebin / "osascript", "#!/bin/sh\nexit 1\n")
+    _write_exec(fakebin / "pgrep", "#!/bin/sh\nexit 1\n")
+
+    # The four tools a migration reaches for are script variables, so the test
+    # rewrites the lines that set them instead of setting environment
+    # variables: a run here must never touch this Mac's real launchd, the
+    # running Ciaobot.app, or a real `pgrep`.
+    rewritten = re.sub(
+        r'^RELEASE_PUBLIC_KEY=".*?"$',
+        f'RELEASE_PUBLIC_KEY="{public_key}"',
+        SCRIPT_TEXT,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    rewritten = re.sub(
+        r"^(PLISTBUDDY|LAUNCHCTL|OSASCRIPT|PGREP)=.*$",
+        lambda m: f"{m.group(1)}={fakebin / m.group(1).lower()}",
+        rewritten,
+        flags=re.MULTILINE,
+    )
+    script = tmp_path / "install-engine.sh"
+    script.write_text(rewritten, encoding="utf-8")
+    script.chmod(0o755)
 
     return {
         "home": home,
@@ -502,6 +526,7 @@ def _run_refuse_desktop_engine(
         [
             f"PLISTBUDDY={plistbuddy}",
             "SERVER_LABEL=com.ciao.server",
+            "migrate=0",
             _function_source("fail"),
             _function_source("refuse_desktop_engine"),
             "refuse_desktop_engine",
@@ -541,3 +566,198 @@ def test_engine_installer_ignores_plist_of_deleted_app(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert result.stderr == ""
+
+
+# --- the Ciaobot.app → terminal-engine migration (#576) -------------------
+#
+# The classifier these tests run against is the real one, out of this checkout,
+# over a fake `$HOME`: a real `--migrate` on this Mac would migrate the machine
+# running the tests.
+
+
+def _desktop_install(
+    harness: dict[str, Any], tmp_path: Path, node_state: object = None
+) -> Path:
+    """Put a live Ciaobot.app engine on the fake Mac and return its workspace.
+
+    `node_state` is what the runtime root holds: None (nothing) is the host
+    case, a dict is a node role, and a string is written verbatim so an
+    unreadable state can be reproduced.
+    """
+    home: Path = harness["home"]
+    app_engine = (
+        tmp_path / "Ciaobot.app" / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
+    )
+    app_engine.parent.mkdir(parents=True)
+    _write_exec(app_engine, "#!/bin/sh\nexit 0\n")
+    _write_desktop_shim(home, app_engine)
+
+    workspace = home / "Ciaobot"
+    (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
+    (workspace / ".env").write_text("PWA_PORT=8443\n", encoding="utf-8")
+    if node_state is not None:
+        text = node_state if isinstance(node_state, str) else json.dumps(node_state)
+        (workspace / ".runtime" / "node_state.json").write_text(text, encoding="utf-8")
+
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    for label in ("com.ciao.server", "Ciaobot"):
+        (agents / f"{label}.plist").write_bytes(
+            plistlib.dumps(
+                {
+                    "Label": label,
+                    "ProgramArguments": [str(app_engine), "run"],
+                    "EnvironmentVariables": {"CIAO_WORKSPACE": str(workspace)},
+                    "WorkingDirectory": str(workspace),
+                }
+            )
+        )
+    return workspace
+
+
+def _migration_receipt(harness: dict[str, Any]) -> dict[str, Any]:
+    path: Path = harness["home"] / ".local/state/ciaobot/migration/receipt.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _install_receipt(harness: dict[str, Any]) -> dict[str, Any]:
+    path: Path = harness["home"] / ".local/state/ciaobot/install-receipt.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@needs_local_tools
+def test_migrate_host_repoints_and_retires_app_agent(tmp_path: Path) -> None:
+    # --no-start because the health poll needs a real engine to answer; what is
+    # under test here is everything up to the point where the app's own agent
+    # would be retired, which is the ordering the whole migration turns on.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    workspace = _desktop_install(harness, tmp_path)
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate", "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    before = home / ".local/state/ciaobot/migration/before"
+    for name in ("com.ciao.server.plist", "Ciaobot.plist", "ciao"):
+        assert (before / name).exists(), f"{name} was not backed up"
+    # The before-image is a copy of what was there, not a rewrite of it.
+    assert (before / "com.ciao.server.plist").read_bytes() == (
+        home / "Library/LaunchAgents/com.ciao.server.plist"
+    ).read_bytes()
+
+    ciao = home / ".local" / "bin" / "ciao"
+    calls = _log(harness, "ciao-calls.log")
+    # The workspace the app's engine was already running in, and --yes for the
+    # same reason the auto-detection passes it. No --load-launchd: nothing is
+    # started, so there is no job definition to reload.
+    assert f"setup --workspace {workspace} --python {ciao} --yes\n" in calls
+    assert "--load-launchd" not in calls
+
+    assert _migration_receipt(harness)["phase"] == "installed_no_start"
+    # Nothing was retired, so nothing may have been booted out either.
+    assert "com.ciao.server" not in _log(harness, "launchctl.log")
+
+
+@needs_local_tools
+def test_migrate_client_disables_local_engine_and_never_sets_up(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _desktop_install(
+        harness, tmp_path, {"role": "standby", "host_url": "https://mini.ts.net"}
+    )
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 0, result.stderr
+    log = _log(harness, "launchctl.log")
+    for label in ("com.ciao.server", "Ciaobot"):
+        assert f"bootout gui/{os.getuid()}/{label}" in log, label
+        assert f"disable gui/{os.getuid()}/{label}" in log, label
+    # The Mac it is migrating to must not end up running an engine of its own.
+    calls = _log(harness, "ciao-calls.log")
+    assert "setup" not in calls
+    assert "service start" not in calls
+    assert _install_receipt(harness)["service_backend"] == "none"
+    assert _migration_receipt(harness)["phase"] == "migrated_client"
+    assert "https://mini.ts.net" in result.stdout
+
+
+@needs_local_tools
+def test_migrate_invalid_requires_explicit_choice(tmp_path: Path) -> None:
+    # A node state nobody can read is not a licence to guess: guessing "host"
+    # would put a second writer on a runtime root that may already have one.
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path, "{not json at all")
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 1
+    assert "--as-host" in result.stderr
+    assert "tool install" not in _log(harness, "uv-calls.log")
+
+
+@needs_local_tools
+def test_migrate_invalid_as_client_uses_given_url(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path, "{not json at all")
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--migrate", "--as-client", "https://h.example"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "https://h.example" in result.stdout
+    # The override is the decision, so it is what the receipt records - not a
+    # host_url that was in a state file this script could not read.
+    receipt = _migration_receipt(harness)
+    assert receipt["kind"] == "desktop_invalid"
+    assert receipt["host_url"] == "https://h.example"
+    assert receipt["phase"] == "migrated_client"
+    assert "setup" not in _log(harness, "ciao-calls.log")
+    assert f"disable gui/{os.getuid()}/com.ciao.server" in _log(harness, "launchctl.log")
+
+
+@needs_local_tools
+def test_without_migrate_live_desktop_still_refused_with_hint(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path)
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 1
+    assert "--migrate" in result.stderr
+    assert "tool install" not in _log(harness, "uv-calls.log")
+
+
+@needs_local_tools
+def test_migrate_is_a_noop_after_success(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    migration = harness["home"] / ".local/state/ciaobot/migration"
+    migration.mkdir(parents=True)
+    (migration / "receipt.json").write_text(
+        json.dumps({"schema": 1, "kind": "desktop_host", "phase": "migrated"}),
+        encoding="utf-8",
+    )
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 0, result.stderr
+    assert "already migrated" in result.stdout
+    assert "tool install" not in _log(harness, "uv-calls.log")
+
+
+@needs_local_tools
+def test_migrate_verification_still_first(tmp_path: Path) -> None:
+    # A migration is the one path that rewrites a working install, so the
+    # signed-manifest and digest checks have to come before it - including
+    # before the classifier, which runs code out of the wheel.
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path)
+    (harness["release"] / WHEEL_NAME).write_bytes(b"a wheel nobody signed")
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate", "--no-start")
+
+    assert result.returncode == 1
+    assert "does not match the signed manifest" in result.stderr
+    assert "engine_migration" not in _log(harness, "uv-run-calls.log")
+    assert not (harness["home"] / ".local/state/ciaobot/migration").exists()
+    assert _log(harness, "launchctl.log") == ""

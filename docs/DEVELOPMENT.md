@@ -89,9 +89,18 @@ release minisign key embedded in the script, and the wheel's digest and size,
 before anything is installed; installs the verified wheel with `uv tool install`;
 writes the install receipt with absolute paths; then runs `ciao setup` and
 `ciao service start` and prints the one-time login URL to the terminal. It
-refuses to take over an engine that Ciaobot.app manages (migrating those
-installs is #576) and refuses to overwrite a `ciao` it did not install. The
-workflow attaches it as the `install-engine.sh` release asset.
+refuses to take over an engine that Ciaobot.app manages unless it is re-run with
+`--migrate`, and refuses to overwrite a `ciao` it did not install. `--migrate`
+is the desktop→terminal hand-over (#576): after the same manifest and digest
+verification, it classifies the Mac from the verified wheel, keeps before-images
+of the plists and the shim in `~/.local/state/ciaobot/migration/before/`, quits
+Ciaobot.app, and either repoints `com.ciao.server` at the new engine and retires
+the app's own agent once the new engine answers with the right version — rolling
+back to the app's engine if any step fails — or, for a client, disables the local
+engine and installs no service at all, leaving the user to sign in at the remote
+host. `--as-host` / `--as-client URL` are required when the node state cannot be
+read, and re-running after a successful migration does nothing. The workflow
+attaches it as the `install-engine.sh` release asset.
 
 ## Branching and releases
 
