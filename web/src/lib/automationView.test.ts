@@ -9,7 +9,6 @@ import {
   lastRunSentence,
   overallHealth,
   pipelineSteps,
-  retryModelOptions,
   runOutcome,
 } from './automationView'
 
@@ -57,31 +56,31 @@ describe('overallHealth', () => {
   it('reports a failing bulk variant as the parent failing', () => {
     const insights = job({
       sub_jobs: [
-        job({ job: 'backfill_insights', label: 'Insights backfill', last_run: run({ status: 'error' }) }),
+        job({ job: 'insights_sweep', label: 'Insights sweep', last_run: run({ status: 'error' }) }),
       ],
     })
 
     expect(automationHealth(insights)).toBe('ok')
     expect(overallHealth(insights)).toBe('error')
-    expect(attentionSource(insights).job).toBe('backfill_insights')
+    expect(attentionSource(insights).job).toBe('insights_sweep')
   })
 
   it('names the failing variant so the row is not misread', () => {
     const insights = job({
       sub_jobs: [
-        job({ job: 'backfill_insights', label: 'Insights backfill', last_run: run({ status: 'error' }) }),
+        job({ job: 'insights_sweep', label: 'Insights sweep', last_run: run({ status: 'error' }) }),
       ],
     })
 
     expect(lastRunSentence(insights, () => '2 days ago')).toBe(
-      'Insights backfill: failed 2 days ago',
+      'Insights sweep: failed 2 days ago',
     )
   })
 
   it('prefers the job’s own failure over a variant’s', () => {
     const insights = job({
       last_run: run({ status: 'error' }),
-      sub_jobs: [job({ job: 'backfill_insights', last_run: run({ status: 'error' }) })],
+      sub_jobs: [job({ job: 'insights_sweep', last_run: run({ status: 'error' }) })],
     })
 
     expect(attentionSource(insights).job).toBe('insights')
@@ -154,38 +153,10 @@ describe('runOutcome', () => {
   it('prefers the skip reason, then the summary, then the error', () => {
     expect(runOutcome(run({ status: 'skipped', extra: { skip_reason: 'client mode' } })))
       .toBe('Skipped: client mode')
-    expect(runOutcome(run({ extra: { summary: 'Backfilled 3 archives' } })))
-      .toBe('Backfilled 3 archives')
+    expect(runOutcome(run({ extra: { summary: 'Rebuilt 3 indexes' } })))
+      .toBe('Rebuilt 3 indexes')
     expect(runOutcome(run({ status: 'error', error: 'TimeoutError' }))).toBe('TimeoutError')
     expect(runOutcome(run())).toBe('')
-  })
-})
-
-describe('retryModelOptions', () => {
-  it('flattens provider model lists into concrete model ids', () => {
-    const options = retryModelOptions(
-      {
-        ollama: ['qwen3-coder:30b', 'qwen3:4b'],
-        openrouter: ['anthropic/claude-sonnet-5'],
-      },
-      { ollama: 'Ollama (local)', openrouter: 'OpenRouter' },
-    )
-
-    expect(options.map((o) => o.value)).toEqual([
-      'qwen3-coder:30b',
-      'qwen3:4b',
-      'anthropic/claude-sonnet-5',
-    ])
-    expect(options[0].label).toBe('Ollama (local) — qwen3-coder:30b')
-  })
-
-  it('drops duplicate model ids and survives a missing table', () => {
-    const options = retryModelOptions({
-      ollama: ['qwen3:4b', 'qwen3:4b'],
-    })
-
-    expect(options).toHaveLength(1)
-    expect(retryModelOptions(undefined)).toEqual([])
   })
 })
 

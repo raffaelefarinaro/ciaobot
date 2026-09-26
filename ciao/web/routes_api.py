@@ -4729,67 +4729,6 @@ async def list_automation(request: Request) -> JSONResponse:
     })
 
 
-async def trigger_backfill_insights(request: Request) -> JSONResponse:
-    """Run session insights over every archive that is missing them.
-
-    Accepts an optional ``model`` for a one-off run with a different model —
-    the recovery path when the configured insights model keeps failing (it
-    times out on slow local backends). The stored Settings → Models choice is
-    left alone.
-    """
-    from ciao.job_runs import track
-    from ciao.insights import backfill_insights_task, format_backfill_summary
-
-    config = request.app.state.config
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001 — empty body means "use the configured model"
-        body = {}
-    body = body if isinstance(body, dict) else {}
-    model = body.get("model")
-    model = model.strip() if isinstance(model, str) else ""
-    force = body.get("force") is True
-    if not getattr(config, "insights_enabled", True) and not force:
-        return JSONResponse(
-            {"error": "session insights are disabled in Settings"},
-            status_code=409,
-        )
-    coordinator = getattr(request.app.state, "backfill_coordinator", None)
-    if coordinator is None:
-        return JSONResponse({"error": "backfill coordinator unavailable"}, status_code=503)
-    chat_workspaces = request.app.state.project_chat_manager.chat_workspaces()
-
-    async def _run_backfill():
-        async with track(
-            "backfill_insights", "Insights backfill", category="system",
-            model=model,
-        ) as handle:
-            result = await backfill_insights_task(
-                config,
-                mode="both",
-                model_override=model,
-                manual=True,
-                force=force,
-                chat_workspaces=chat_workspaces,
-            )
-            handle.extra.update(result)
-            summary = format_backfill_summary(result)
-            handle.extra["summary"] = summary
-            if model:
-                handle.extra["model_override"] = model
-            if force:
-                handle.extra["forced"] = True
-            if result["errors"]:
-                handle.status = "error"
-                handle.error = summary
-
-    coordinator.submit(_run_backfill)
-    return JSONResponse(
-        {"status": "queued", "model": model, "forced": force},
-        status_code=202,
-    )
-
-
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager

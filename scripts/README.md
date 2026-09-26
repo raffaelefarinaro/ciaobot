@@ -11,5 +11,4 @@ Operator scripts. Run from the repo root; most expect the project venv at `.venv
 | `gws-profile.sh` | Back-compat shim for the `gws` CLI: forwards to `ciao gws` (route profile `<name>` to `secrets/gws-<name>/`). |
 | `install-custom-skills.sh` | Compatibility wrapper for `ciao sync-skills`, which syncs canonical `skills/`, `subagents/`, and `commands/` into Claude catalogs. |
 | `vault_index.py` | Compatibility wrapper for `ciao vault-index`. Default prints TSV; `--write` regenerates `memory-vault/INDEX.md`. Supports `--type`, `--tag`, `--related-to`, `--neighbors`. |
-| `backfill_insights.py` | Backfill `## Session insights` sections into archived chats that predate the feature. One-shot; live archives are handled by `ciao/insights.py`. Refuses to run while Automatic session insights is off unless `--force` is passed. |
 | `cleanup_sdk_blobs.py` | Compatibility wrapper for `ciao cleanup-sdk-blobs`. Reclaims `~/.claude/projects/.../*.jsonl` blobs for chats already archived to the vault. Dry-run by default; `--apply` to delete. |

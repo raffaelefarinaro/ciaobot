@@ -5,12 +5,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from ciao import job_runs as jr
-
 
 
 def _read_lines(tmp_path: Path) -> list[dict]:
@@ -134,48 +132,6 @@ def test_track_sync_records(tmp_path: Path) -> None:
     assert rows[0]["extra"]["proposal_count"] == 3
 
 
-@pytest.mark.parametrize(
-    ("bootstrap", "insights_enabled", "active", "expected_calls"),
-    [
-        (False, True, True, 1),
-        (False, True, False, 0),
-        (False, False, True, 0),
-        (True, True, True, 0),
-    ],
-)
-async def test_startup_backfill_runs_only_on_a_configured_host(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    bootstrap: bool,
-    insights_enabled: bool,
-    active: bool,
-    expected_calls: int,
-) -> None:
-    from ciao import main
-
-    calls: list[dict[str, str]] = []
-
-    async def fake_backfill(_config, *, chat_workspaces):
-        calls.append(chat_workspaces)
-        return {"errors": 0}
-
-    monkeypatch.setattr("ciao.insights.backfill_insights_task", fake_backfill)
-    jr.configure(tmp_path)
-    config = SimpleNamespace(
-        bootstrap_mode=bootstrap,
-        insights_enabled=insights_enabled,
-    )
-    pcm = SimpleNamespace(chat_workspaces=lambda: {"chat-1": "personal"})
-    node_state = SimpleNamespace(is_active=lambda: active)
-
-    await main._run_startup_backfill(config, pcm, node_state)
-
-    assert len(calls) == expected_calls
-    if expected_calls:
-        assert calls == [{"chat-1": "personal"}]
-        assert _read_lines(tmp_path)[0]["job"] == "backfill_insights"
-
-
 # ── rotation / fail-open ─────────────────────────────────────────────────
 
 
@@ -208,7 +164,7 @@ class _Phase:
 
 
 def test_record_startup_phase_maps_and_skips(tmp_path: Path) -> None:
-    jr.record_startup_phase(_Phase("update_skills", "done", "No archives needed backfill."))
+    jr.record_startup_phase(_Phase("update_skills", "done", "Skills already current."))
     jr.record_startup_phase(_Phase("refresh_vault_index", "failed", "index refresh failed"))
     jr.record_startup_phase(_Phase("connect_pi", "done"))  # not a tracked job
 
@@ -216,7 +172,7 @@ def test_record_startup_phase_maps_and_skips(tmp_path: Path) -> None:
     jobs = {r["job"]: r for r in rows}
     assert set(jobs) == {"skills_update", "vault_index"}
     assert jobs["skills_update"]["duration_ms"] == 2000
-    assert jobs["skills_update"]["extra"]["summary"] == "No archives needed backfill."
+    assert jobs["skills_update"]["extra"]["summary"] == "Skills already current."
     assert jobs["vault_index"]["status"] == "error"
     assert jobs["vault_index"]["error"] == "index refresh failed"
 
@@ -254,23 +210,22 @@ def test_summary_includes_never_run_jobs(tmp_path: Path) -> None:
     assert step_jobs == ["project_doc_update", "trajectory", "memory_proposals"]
     # a step explains when it is skipped instead of faking a trigger
     assert all(step["step_condition"] for step in summary["insights"]["steps"])
-    # the bulk variant stays a sub_job, not a step: it is the same work on a
-    # different trigger, which is a different relationship
-    assert [sub["job"] for sub in summary["insights"]["sub_jobs"]] == [
-        "backfill_insights"
-    ]
+    # no bulk variants remain: the insights backfill was retired in #627, and
+    # the key is omitted entirely rather than shipped empty
+    assert "sub_jobs" not in summary["insights"]
 
 
-def test_summary_hides_retired_jobs(tmp_path: Path) -> None:
+@pytest.mark.parametrize("retired", sorted(jr.RETIRED_JOBS))
+def test_summary_hides_retired_jobs(tmp_path: Path, retired: str) -> None:
     """A job removed from the code must not linger on the Automation page."""
-    jr.record_run(jr.JobRun(job="pwa_rebuild", label="PWA rebuild", status="ok",
+    jr.record_run(jr.JobRun(job=retired, label=retired, status="ok",
                             category="system", duration_ms=5))
     jr.record_run(jr.JobRun(job="insights", label="Session insights", status="ok", duration_ms=5))
 
-    assert "pwa_rebuild" not in {item["job"] for item in jr.automation_summary()}
+    assert retired not in {item["job"] for item in jr.automation_summary()}
     # the record itself is untouched on disk, and readable on request
-    assert "pwa_rebuild" in {r["job"] for r in _read_lines(tmp_path)}
-    assert "pwa_rebuild" in jr.load_runs(keep_retired=True)
+    assert retired in {r["job"] for r in _read_lines(tmp_path)}
+    assert retired in jr.load_runs(keep_retired=True)
 
 
 def test_summary_hides_jobs_whose_only_schedule_is_not_installed(tmp_path: Path) -> None:
@@ -288,16 +243,6 @@ def test_summary_hides_jobs_whose_only_schedule_is_not_installed(tmp_path: Path)
     assert "memory_proposals" not in summary
     steps = {step["job"]: step for step in summary["insights"]["steps"]}
     assert steps["memory_proposals"]["schedule_id"] == "system-memory-curation"
-
-
-def test_summary_nests_the_insights_backfill_under_session_insights(tmp_path: Path) -> None:
-    jr.record_run(jr.JobRun(job="backfill_insights", label="Insights backfill",
-                            category="system", status="ok", duration_ms=7))
-    summary = {item["job"]: item for item in jr.automation_summary()}
-    assert "backfill_insights" not in summary
-    subs = summary["insights"]["sub_jobs"]
-    assert [s["job"] for s in subs] == ["backfill_insights"]
-    assert subs[0]["last_run"]["status"] == "ok"
 
 
 # ── Live state: in-flight registry + publisher ────────────────────────────

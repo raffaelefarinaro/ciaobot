@@ -24,7 +24,7 @@ A personal assistant's memory must be, with **zero user configuration**:
    correction is the only reliable fix for extraction errors.
 7. **Private by choice** — automatic archive extraction and trajectory capture
    are on by default, but Settings → Automations can stop each automatic
-   process; explicit one-time backfill remains available.
+   process.
 
 ## Architecture: two layers, verbatim long tail
 

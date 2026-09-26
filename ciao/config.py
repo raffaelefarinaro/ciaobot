@@ -531,9 +531,8 @@ class CiaoConfig:
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab. Empty means the provider's own default applies.
     opencode: OpencodeSettings = field(default_factory=OpencodeSettings)
-    # Fallback when session insights run without workspace context (e.g.
-    # ``scripts/backfill_insights.py``). Live archives use
-    # :func:`ciao.insights.resolve_insights_model` instead.
+    # Fallback when session insights run without workspace context. Live
+    # archives use :func:`ciao.insights.resolve_insights_model` instead.
     insights_model: str = "sonnet"
     insights_enabled: bool = True
     # Operator override for the insights model, set from the PWA Settings →

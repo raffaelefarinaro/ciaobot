@@ -86,7 +86,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/schedule-run/{schedule_id}` | Run now. 409 for an interval entry whose target chat has a turn in flight (refused, not queued) |
 | PATCH, DELETE | `/api/schedules/{schedule_id}` | Update, pause/resume (`{"enabled": bool}`), or delete |
 | GET | `/api/automation` | Background-job status (Settings → Automations): per job its trigger, last run, duration, model, errors, and bulk `sub_jobs`. Omits retired jobs and schedule-only jobs whose schedule is not installed. With `?include=outcomes` answers `{"jobs": [...], "proposal_outcomes": {"promoted": n, "dismissed": m, "by_workspace": {…}, "recent_30d": {…}}}` — the memory-proposal promoted-vs-dismissed tally shown beside the job stats; without it the response stays the bare list |
-| POST | `/api/automation/backfill-insights` | Queue Session insights over every archived chat missing them behind any startup/manual bulk pass already running. Optional `{"model":"<model-id>"}` chooses a one-off model; `{"force":true}` permits one explicit run while automatic insights are off. Returns 202 `{status:"queued",model,forced}`; without `force`, a disabled setting returns 409 |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
 | GET | `/api/commands` | List slash commands |
 | GET | `/api/agent-assets` | List subagents, slash commands, and workspace health for Settings |
@@ -610,9 +609,8 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 # Read internal-routine settings: the automatic-session-insights and trajectory
 # capture switches, insights and critique model overrides, the per-provider
 # default model / thinking / routine-model maps, and the effective models after
-# defaults. insights_enabled=false stops live extraction, automatic resume, and
-# startup backfill; trajectories_enabled=false stops trajectory records; the
-# explicit bulk backfill route can still run with force=true.
+# defaults. insights_enabled=false stops the memory pass; trajectories_enabled=false
+# stops trajectory records.
 #
 # insights_model_effective is the PRIMARY workspace's answer only. With no
 # override the insights routine resolves from the chat's own workspace, so

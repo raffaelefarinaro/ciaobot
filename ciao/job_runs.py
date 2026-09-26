@@ -245,10 +245,6 @@ REGISTRY: tuple[JobSpec, ...] = (
             trigger="Once, on the first skills sync after upgrading or onboarding an "
                     "existing vault. A no-op afterwards.",
             one_time=True),
-    JobSpec("backfill_insights", "Insights backfill", "system",
-            "Runs session insights over every archive that is missing them.", True, True,
-            trigger="On server startup when enabled, and on demand from this page.",
-            parent="insights"),
 )
 
 # Jobs that no longer exist in the code. ``job_runs_latest.json`` keeps the
@@ -258,6 +254,7 @@ REGISTRY: tuple[JobSpec, ...] = (
 RETIRED_JOBS: frozenset[str] = frozenset({
     "pwa_rebuild",       # startup PWA rebuild phase, removed
     "insights_backfill",  # renamed to backfill_insights
+    "backfill_insights",  # bulk insights pass, removed in #627
     "startup_sync",      # opt-in startup git pull, removed
 })
 
