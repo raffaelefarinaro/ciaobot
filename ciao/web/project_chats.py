@@ -5043,7 +5043,66 @@ class ProjectChatManager:
         if not self._restart_draining:
             return
         self._restart_draining = False
+        # Admission is open again, so the wakes the drain deferred are
+        # deliverable now. Skipping this loses them: nothing restarts the
+        # server any more to replay them at the next start().
+        self.resume_after_cancelled_drain()
         self._events.publish({"type": "server_restart_cancelled"})
+
+    def resume_after_cancelled_drain(self) -> None:
+        """Replay the wakes a cancelled drain deferred "to the next start".
+
+        A draining server defers two kinds of wake, both of which assume a
+        restart follows: a background command run is marked ``wake_pending``
+        by the wake flusher, and a chat's CLI-task watcher leaves its loop
+        because a restart is coming (``sweep_orphaned_cli_tasks`` picks it up
+        after one). A drain that is cancelled has no restart, so without this
+        the owning chat silently never learns its command finished.
+
+        Runs after admission reopens and through the same delivery paths as
+        every other wake. Total by design: a failed replay must not keep the
+        engine refusing turns, which is the one thing the cancel guarantees.
+        """
+        # ``_background_runner`` is typed Any (wired after construction), so
+        # the annotation is what keeps the replayed list typed.
+        runner: Any = self._background_runner
+        if runner is not None:
+            try:
+                replayed: list[Any] = runner.replay_pending_wakes()
+            except Exception:  # noqa: BLE001 — a replay failure must not break the cancel
+                logger.exception("Deferred background wake replay failed")
+            else:
+                if replayed:
+                    logger.info(
+                        "Cancelled drain replayed %s deferred background wake(s)",
+                        len(replayed),
+                    )
+        try:
+            for chat in list(self._chats.values()):
+                self._replay_deferred_cli_task_wakes(chat)
+        except Exception:  # noqa: BLE001 — the cancel is the one thing that must not fail
+            logger.exception("Deferred CLI task wake replay failed")
+
+    def _replay_deferred_cli_task_wakes(self, chat: ChatInfo) -> None:
+        """Wake *chat* for the CLI tasks a cancelled drain left without one.
+
+        The tasks are the ones this process has not already woken for and whose
+        owning CLI is gone: a live CLI still answers its own task notifications,
+        so waking it would only talk over its turn. The sweep's 7-day activity
+        filter stays out of it — that one is about surviving a restart, and
+        every chat here is live in this very process. Never raises.
+        """
+        if chat.archived or not chat.session_id:
+            return
+        try:
+            tasks = self._subagents.cli_task_candidates(chat)
+            if not tasks or self._cli_owner_alive(chat.chat_id):
+                return
+            self._subagents.wake_for_dead_cli_tasks(chat, chat.project_id, tasks)
+        except Exception:  # noqa: BLE001 — one chat must not strand the others
+            logger.exception(
+                "Deferred CLI task wake replay failed for chat %s", chat.chat_id
+            )
 
     @property
     def restart_draining(self) -> bool:
