@@ -30,6 +30,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -159,7 +160,14 @@ def default_state_dir() -> Path:
 
 @dataclass
 class Operation:
-    """The durable record of one staging run, rewritten at every phase."""
+    """The durable record of one staging run, rewritten at every phase.
+
+    ``env_freeze`` is what the staged environment was resolved to, recorded
+    while it is still only a directory nobody runs: the apply moves that very
+    env rather than resolving anything, so this is the one place the dependency
+    set of an update is ever known. Audit-only, and nothing in the apply reads
+    it — a record written before the field existed reads as ``""``.
+    """
 
     id: str
     phase: str
@@ -172,6 +180,7 @@ class Operation:
     wheel: str = ""
     wheel_sha256: str = ""
     env_python: str = ""
+    env_freeze: str = ""
     previous_receipt: str = ""
 
 
@@ -383,6 +392,27 @@ def _pick_wheel(manifest: dict[str, Any]) -> dict[str, Any]:
     return wheel
 
 
+def _staged_env_python(tool_dir: Path) -> Path:
+    """The interpreter of the one tool env ``uv`` built in ``tool_dir``.
+
+    Read off the directory rather than spelled out: a tool env is named after
+    the *distribution* (``ciaobot``), not the wheel file, and the rule uv
+    normalises that name by is uv's business, not this module's. The tool dir
+    belongs to one staging run and is emptied before it, so anything in it is
+    what this run just installed — and an amount other than one is a refusal,
+    because the record's ``env_python`` has to name the env the apply moves.
+    """
+    try:
+        found = sorted({path.parent.parent for path in tool_dir.glob("*/bin/python")})
+    except OSError as exc:
+        raise UpdateError(f"could not read the staged tool directory: {exc}") from exc
+    if len(found) != 1:
+        raise UpdateError(
+            f"expected one staged tool environment in {tool_dir}, found {len(found)}"
+        )
+    return found[0] / "bin" / "python"
+
+
 def stage_update(
     target_version: str | None = None,
     *,
@@ -503,33 +533,33 @@ def _stage_locked(
         op.wheel_sha256 = digest
 
         advance("staging")
-        env_dir = stage_dir / "env"
         uv_bin = uv or find_uv(_receipt_uv())
         py = python_version or f"{sys.version_info.major}.{sys.version_info.minor}"
-        env_python = env_dir / "bin" / "python"
+        # A real tool env, in a tool dir of this update's own, because the apply
+        # moves this directory into the live env's place: it has to be the shape
+        # `uv tool install` produces — its `uv-receipt.toml`, its entry points —
+        # and not a venv that merely looks like one. Every dependency is
+        # resolved here, while the engine is up and the network is there, so the
+        # swap is a rename plus the two absolute paths a move breaks (#611).
+        tool_dir = stage_dir / "tool"
         run(
-            [uv_bin, "venv", "--python", py, str(env_dir)],
+            [uv_bin, "tool", "install", "--python", py, str(wheel_path)],
             check=True,
             capture_output=True,
             text=True,
             timeout=_UV_TIMEOUT,
+            # Pinned to this update's own directories, for the same reason the
+            # apply used to pin the install it replaced: an inherited
+            # `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR` would build the environment
+            # somewhere the apply does not know to look, and the version check
+            # below would then be checking a directory nothing will ever move.
+            env={
+                **os.environ,
+                "UV_TOOL_DIR": str(tool_dir),
+                "UV_TOOL_BIN_DIR": str(stage_dir / "bin"),
+            },
         )
-        # Every dependency is installed here, before any downtime, so the swap
-        # in #570 is a rename rather than a network-bound install.
-        run(
-            [
-                uv_bin,
-                "pip",
-                "install",
-                "--python",
-                str(env_python),
-                str(wheel_path),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=_UV_TIMEOUT,
-        )
+        env_python = _staged_env_python(tool_dir)
         out = run(
             [str(env_python), "-I", "-c", "import ciao; print(ciao.__version__)"],
             check=True,
@@ -539,6 +569,18 @@ def _stage_locked(
         if out != target:
             raise UpdateError(f"staged env reports version {out!r}, not {target}")
         op.env_python = str(env_python)
+        # What this update is about to bring in, taken from the env itself and
+        # not from the manifest: the pins that matter are the ones the resolver
+        # chose, transitive ones included. `check=True` because a staging run
+        # that cannot say what it resolved should not record `staged`; the env
+        # is discarded either way, and this costs no network.
+        op.env_freeze = run(
+            [uv_bin, "pip", "freeze", "--python", str(env_python)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_UV_TIMEOUT,
+        ).stdout.strip()
 
         from ciao import install_receipt
 
@@ -1020,27 +1062,132 @@ def _move_env(source: Path, dest: Path) -> None:
         shutil.move(str(source), str(dest))
 
 
-def _staged_python_version(run: Runner, python: str) -> str:
-    """The ``X.Y`` of the staged env's interpreter, which is what uv installs with.
+def _console_scripts(wheel: Path) -> list[str]:
+    """The console-script names the wheel's own metadata declares.
 
-    Taken from the staged env and not from this process: staging that env is
-    how the verified release got its interpreter, and installing with any other
-    one would produce an environment nobody verified.
+    Read from the verified wheel rather than from the staged environment, so
+    the set of entry points the swap has to place is a fact about the release
+    and not about how a particular uv happened to lay a tool env out. A wheel
+    that cannot be read here is refused, because the alternative is an install
+    whose ``ciao`` silently is not the release's own.
     """
-    out = run(
-        [
-            python,
-            "-I",
-            "-c",
-            "import sys;print(f'{sys.version_info[0]}.{sys.version_info[1]}')",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    if not out:
-        raise UpdateError("the staged environment did not report a Python version")
-    return out
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            entries = [
+                name
+                for name in archive.namelist()
+                if name.endswith(".dist-info/entry_points.txt")
+            ]
+            # Deliberately not folded into the `except` below: a wheel with the
+            # wrong number of entry-point files is a refusal of its own, and the
+            # message should say which.
+            if len(entries) != 1:
+                raise UpdateError(
+                    f"the wheel {wheel.name} describes {len(entries)} "
+                    "entry-point files, not one"
+                )
+            text = archive.read(entries[0]).decode("utf-8")
+    except (OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
+        raise UpdateError(
+            f"could not read the entry points of {wheel.name}: {exc}"
+        ) from exc
+
+    names: list[str] = []
+    in_console_scripts = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_console_scripts = stripped == "[console_scripts]"
+        elif in_console_scripts and "=" in stripped:
+            names.append(stripped.partition("=")[0].strip())
+    if not names:
+        raise UpdateError(f"the wheel {wheel.name} declares no console scripts")
+    return names
+
+
+def _relocate_shebang(path: Path, staged_prefix: str, live_prefix: str) -> None:
+    """Repoint a script's ``#!`` line from the staged env to the live one.
+
+    A shebang is a fixed prefix of the first line, so this is a bounded textual
+    replacement and not a guess at what a script means: a file whose first line
+    is not a shebang, or one naming neither environment, is left exactly as it
+    is. Anything unreadable is likewise left alone — a file that is not a script
+    is not this function's business, and the entry points that matter are
+    checked by the caller.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return
+    first, newline, rest = text.partition("\n")
+    if not first.startswith("#!") or staged_prefix not in first:
+        return
+    path.write_text(
+        first.replace(staged_prefix, live_prefix) + newline + rest, encoding="utf-8"
+    )
+
+
+def _install_staged_env(
+    staged_env: Path,
+    live_env: Path,
+    *,
+    bin_dir: Path,
+    wheel: Path,
+) -> None:
+    """Put the staged env where the live one was, and re-point what names it.
+
+    A rename wherever the filesystem allows one, and nothing else: the staged
+    env *is* the environment `stage_update` resolved and verified, so installing
+    it again — from the network or from a cache — could only ever produce a
+    different one (#611).
+
+    A move breaks exactly two things that name the env by absolute path, and
+    both are repaired rather than tolerated:
+
+    * the shebang of the scripts in ``<live_env>/bin``, which uv wrote naming
+      the *staged* interpreter and which would otherwise be a program that
+      cannot start (`bad interpreter`);
+    * the entry points in ``bin_dir``, which uv places as links into the env
+      and which would otherwise dangle.
+
+    ``uv-receipt.toml`` needs no repair: uv wrote it during staging and the
+    rename carries it, so ``uv tool list`` still reports this install and the
+    installer's own "was this installed by Ciaobot" guard keeps working.
+
+    Anything that cannot be placed raises, which is what makes the caller's
+    rollback the answer: an update that cannot put in place the environment it
+    verified is not an update.
+    """
+    _move_env(staged_env, live_env)
+    # A shebang is POSIX and uv writes absolute POSIX paths into it, so the
+    # prefixes are spelled with a literal separator rather than `os.sep`.
+    staged_prefix = f"{staged_env}/bin/"
+    live_prefix = f"{live_env}/bin/"
+    try:
+        scripts = sorted((live_env / "bin").iterdir())
+    except OSError as exc:
+        raise UpdateError(f"the moved environment has no bin directory: {exc}") from exc
+    for script in scripts:
+        if script.is_file() and not script.is_symlink():
+            _relocate_shebang(script, staged_prefix, live_prefix)
+    for name in _console_scripts(wheel):
+        script = live_env / "bin" / name
+        if not script.is_file():
+            raise UpdateError(f"the staged environment has no {name} entry point")
+        shim = bin_dir / name
+        if shim.is_symlink() or not shim.exists():
+            # uv's own shape: a link into the env. The move broke it, because
+            # it names the staged path, and a `bin_dir` that has lost the entry
+            # point entirely gets the link it should have had.
+            shim.unlink(missing_ok=True)
+            shim.symlink_to(script)
+        else:
+            # A plain file here (a copy rather than a link, or a shim a previous
+            # release wrote) is repaired in place: replacing it would throw away
+            # whatever else it carries.
+            _relocate_shebang(shim, staged_prefix, live_prefix)
+        if not shim.is_file():
+            raise UpdateError(f"the {name} entry point {shim} does not resolve")
 
 
 def _prune_previous_envs(root: Path, op: Operation) -> None:
@@ -1112,7 +1259,15 @@ def apply_update(
     handle = acquire_lock(root)
     try:
         op = read_operation(root)
-        staged_python = Path(op.stage_dir, "env", "bin", "python") if op else None
+        # The record's own interpreter, not a path rebuilt from the stage dir: a
+        # tool env's directory is named after the distribution, so `<stage>/env`
+        # stopped being where the staged interpreter lives in #611. The venv
+        # layout is only the fallback for a record staged before that.
+        staged_python = (
+            Path(op.env_python)
+            if op is not None and op.env_python
+            else (Path(op.stage_dir, "env", "bin", "python") if op else None)
+        )
         if (
             op is None
             or op.phase != "staged"
@@ -1489,7 +1644,6 @@ def run_apply(
     http_post: PostJson | None = None,
     http_get: GetJson | None = None,
     launchctl: Launchctl | None = None,
-    uv: str | None = None,
     run: Runner = subprocess.run,
     start_service: ServiceStarter | None = None,
     uid: int | None = None,
@@ -1502,9 +1656,14 @@ def run_apply(
     The detached half of the apply, launched by :func:`apply_update` through
     launchd. It boots the engine *out* before touching a file, because the
     engine's own 60-second file watcher would otherwise restart a half-swapped
-    environment, then renames the live env aside, installs the verified wheel
-    over it, rewrites the receipt, starts the service and waits for the target
+    environment, then renames the live env aside, moves the staged env into
+    its place, rewrites the receipt, starts the service and waits for the target
     version to answer.
+
+    Nothing here resolves a dependency: the environment the swap installs is the
+    one :func:`stage_update` built and verified, moved rather than rebuilt
+    (#611). That is what makes an apply work with no network at all, and what
+    makes "apply what was verified" true rather than nearly true.
 
     Nothing here raises once the engine is down: every failure is answered by a
     rollback and a persisted phase, because the process that has to survive this
@@ -1585,10 +1744,6 @@ def run_apply(
                 f"the installed engine is {receipt.version}, but this update was "
                 f"staged from {op.from_version}; run: ciao update stage"
             )
-        try:
-            uv_bin = uv or find_uv(receipt.uv)
-        except UpdateError as exc:
-            return record(_reason(exc))
 
         live_env = Path(receipt.python).parent.parent
         # Before anything moves: the swap is only meaningful against the env the
@@ -1649,35 +1804,17 @@ def run_apply(
             # a failure has something to undo, which is what `env_moved` says.
             _move_env(live_env, previous_env)
             env_moved = True
-            run(
-                [
-                    uv_bin,
-                    "tool",
-                    "install",
-                    "--force",
-                    "--python",
-                    _staged_python_version(run, op.env_python),
-                    op.wheel,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=_UV_TIMEOUT,
-                # This runs under the updater's own launchd job, whose
-                # environment is launchd's — not the installer's. If that job
-                # ever inherits `UV_TOOL_DIR`/`XDG_DATA_HOME` (a login shell
-                # that exported them, a wrapper that set them), uv would
-                # install somewhere other than the env we just moved aside and
-                # re-point the `ciao` shim: the new env would never run, the
-                # old one would be gone, and the rollback would report
-                # `rollback_failed` over an install that was never replaced.
-                # Pinned to the install we own, from the receipt, which is what
-                # the installer did.
-                env={
-                    **os.environ,
-                    "UV_TOOL_DIR": str(live_env.parent),
-                    "UV_TOOL_BIN_DIR": str(Path(receipt.executable).parent),
-                },
+            # What was verified is what gets installed (#611). The staged env is
+            # a real uv tool env, so installing it is a rename plus the two
+            # absolute paths a move breaks: no resolver runs here, so the apply
+            # needs no network and a dependency released since staging cannot
+            # change what is installed. `UV_TOOL_DIR` and `UV_TOOL_BIN_DIR` are
+            # not pinned here any more because uv is not called here at all.
+            _install_staged_env(
+                Path(op.env_python).parent.parent,
+                live_env,
+                bin_dir=Path(receipt.executable).parent,
+                wheel=Path(op.wheel),
             )
             reported = run(
                 [
