@@ -158,8 +158,13 @@ describe('engine offline screen wiring', () => {
 
     engine.onChange?.('unreachable')
     await nextTick()
+    // While the engine boots its startup-status never reports ready: keep the
+    // boot view's restarted poll pending, or it would finish startup on its
+    // own and hide the state this test is about.
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))
     engine.onChange?.('booting')
     await nextTick()
+    expect(wrapper.find('.startup-stub').exists()).toBe(true)
     engine.onChange?.('unreachable')
     await nextTick()
 
