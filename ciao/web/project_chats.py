@@ -5088,11 +5088,14 @@ class ProjectChatManager:
 
         The tasks are the ones this process has not already woken for and whose
         owning CLI is gone: a live CLI still answers its own task notifications,
-        so waking it would only talk over its turn. The sweep's 7-day activity
-        filter stays out of it — that one is about surviving a restart, and
-        every chat here is live in this very process. Never raises.
+        so waking it would only talk over its turn. The sweep's provider filter
+        is kept, so the two wake paths read the same chats; its 7-day activity
+        filter stays out — that one is about surviving a restart, and every chat
+        here is live in this very process. Never raises.
         """
         if chat.archived or not chat.session_id:
+            return
+        if chat.provider != "claude":
             return
         try:
             tasks = self._subagents.cli_task_candidates(chat)

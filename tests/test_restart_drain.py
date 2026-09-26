@@ -51,6 +51,11 @@ def _bare_manager() -> ProjectChatManager:
     # Read by a cancelled drain's wake replay; wired after construction on a
     # real manager, so the hand-built one has to carry it.
     manager._background_runner = None
+    # The cancelled-drain replay also scans the chat registry for CLI tasks.
+    # Without it, the scan raises AttributeError and the replay's blanket
+    # ``except`` swallows it — the tests below would pass through a logged
+    # traceback while covering nothing.
+    manager._chats = {}
     return manager
 
 
@@ -141,12 +146,21 @@ def test_cancel_restart_drain_reopens_admission() -> None:
     manager.cancel_restart_drain()
     manager.cancel_restart_drain()  # idempotent — one event only
 
+    # Asserted before the reopen probe below: that probe now gets *past* the
+    # drain check and opens a real stream, which announces itself, so reading
+    # the drain's own events after it would mix the two.
     assert manager._restart_draining is False
-    # Admission is genuinely open again, not just flagged off.
+    assert [event["type"] for event in captured] == [
+        "server_restarting",
+        "server_restart_cancelled",
+    ]
+    # Admission is genuinely open again, not just flagged off: the turn the
+    # drain refused is admitted now, and admitting it starts a stream.
     assert not isinstance(_admission_refusal(manager), RestartDrainingError)
     assert [event["type"] for event in captured] == [
         "server_restarting",
         "server_restart_cancelled",
+        "chat_streaming_started",
     ]
 
 
@@ -169,7 +183,6 @@ def test_restart_draining_is_readable_without_the_private_flag() -> None:
 # chat never learns the command finished.
 def test_cancel_restart_drain_replays_deferred_wakes() -> None:
     manager = _bare_manager()
-    manager._chats = {}  # the replay scans the chat registry for CLI tasks
     runner = _FakeRunner()
     manager._background_runner = runner
 
@@ -181,7 +194,6 @@ def test_cancel_restart_drain_replays_deferred_wakes() -> None:
     # Nothing was draining, so nothing was deferred: the cancel is a no-op
     # and must not touch the runner at all.
     idle = _bare_manager()
-    idle._chats = {}
     idle_runner = _FakeRunner()
     idle._background_runner = idle_runner
     idle.cancel_restart_drain()
@@ -192,7 +204,6 @@ def test_cancel_restart_drain_replays_deferred_wakes() -> None:
 # boot-time jobs: they would resolve runs that are still live in this process.
 def test_cancel_restart_drain_replays_without_calling_start() -> None:
     manager = _bare_manager()
-    manager._chats = {}
     runner = _FakeRunner()
     manager._background_runner = runner
 
@@ -207,7 +218,6 @@ def test_cancel_restart_drain_replays_without_calling_start() -> None:
 # fails must not take the reopen down with it.
 def test_resume_after_cancelled_drain_is_total() -> None:
     manager = _bare_manager()
-    manager._chats = {}
     manager._background_runner = _FakeRunner(boom=RuntimeError("store is gone"))
     captured: list[dict] = []
     manager._events.publish = captured.append  # type: ignore[method-assign]
