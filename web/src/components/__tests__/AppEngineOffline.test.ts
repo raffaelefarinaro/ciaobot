@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import App from '../../App.vue'
+import { useProjectStore } from '../../stores/projects'
 
 vi.mock('vue-router', () => ({
   useRoute: () => ({ path: '/' }),
@@ -47,10 +48,16 @@ const stubs = {
   'router-link': { template: '<a><slot /></a>' },
 }
 
-async function mountApp() {
+// A named stub, for the tests that have to tell the boot view and the curtain
+// apart: the default `StartupView: true` renders `<startup-view-stub>`.
+const startupStub = { template: '<div class="startup-stub" />' }
+
+async function mountApp(extraStubs: Record<string, unknown> = {}) {
   const pinia = createPinia()
   setActivePinia(pinia)
-  const wrapper = mount(App, { global: { plugins: [pinia], stubs } })
+  const wrapper = mount(App, {
+    global: { plugins: [pinia], stubs: { ...stubs, ...extraStubs } },
+  })
   await flushPromises()
   return wrapper
 }
@@ -106,5 +113,60 @@ describe('engine offline screen wiring', () => {
     engine.onChange?.('auth_required')
     await nextTick()
     expect(wrapper.find('.engine-offline-stub').exists()).toBe(false)
+  })
+
+  it('shows the curtain instead of an empty StartupView on a cold launch with the engine down', async () => {
+    // With the engine down, /api/startup-status never answers, so the boot view
+    // has nothing to render: phases, progress and a Skip button around an
+    // engine that is simply not there.
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new TypeError('Failed to fetch')
+    }))
+    const wrapper = await mountApp({ StartupView: startupStub })
+
+    engine.onChange?.('unreachable')
+    await nextTick()
+
+    expect(wrapper.find('.engine-offline-stub').exists()).toBe(true)
+    expect(wrapper.find('.startup-stub').exists()).toBe(false)
+  })
+
+  it('shows boot progress again when the engine comes back booting after an outage', async () => {
+    // The curtain lifting on the first non-failure probe would drop the user
+    // into a half-started engine; the boot view has to stay up until
+    // overall_ready.
+    const wrapper = await mountApp({ StartupView: startupStub })
+    expect(wrapper.find('.engine-offline-stub').exists()).toBe(false)
+
+    engine.onChange?.('unreachable')
+    await nextTick()
+    expect(wrapper.find('.engine-offline-stub').exists()).toBe(true)
+
+    engine.onChange?.('booting')
+    await nextTick()
+
+    expect(wrapper.find('.startup-stub').exists()).toBe(true)
+    expect(wrapper.find('.engine-offline-stub').exists()).toBe(false)
+  })
+
+  it('nudges sockets when the engine recovers', async () => {
+    await mountApp()
+    const nudge = vi.spyOn(useProjectStore(), 'reconnectNow')
+
+    engine.onChange?.('unreachable')
+    await nextTick()
+    expect(nudge).not.toHaveBeenCalled()
+
+    // Both sockets may be in a 2s-64s backoff, or the chat one gone for good
+    // after five failed handshakes, so recovery has to reset that.
+    engine.onChange?.('ready')
+    await nextTick()
+    expect(nudge).toHaveBeenCalledTimes(1)
+
+    // A login prompt is not a recovery: nothing was listening to reconnect.
+    engine.onChange?.('auth_required')
+    await nextTick()
+    expect(nudge).toHaveBeenCalledTimes(1)
+    nudge.mockRestore()
   })
 })

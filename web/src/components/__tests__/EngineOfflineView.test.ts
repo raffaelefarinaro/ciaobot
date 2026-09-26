@@ -1,8 +1,14 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
 import EngineOfflineView from '../EngineOfflineView.vue'
+
+// The curtain registers a capture-phase keydown listener on `window` while it is
+// up. A wrapper that is never unmounted leaves that listener behind, and it goes
+// on swallowing shortcuts for the rest of the file -- so the test that checks the
+// curtain *stops* swallowing them would be reading other tests' leftovers.
+enableAutoUnmount(afterEach)
 
 type ViewProps = {
   state: 'updating' | 'unreachable'
@@ -87,6 +93,53 @@ describe('engine offline screen', () => {
     // would land on a control the user cannot see.
     const retry = wrapper.find('.engine-offline-actions .btn-primary').element
     expect(document.activeElement).toBe(retry)
+    wrapper.unmount()
+  })
+
+  it('suppresses global shortcuts while mounted', () => {
+    // ChatLayout's bare 1-9, Esc and modifier shortcuts are still live behind
+    // the curtain, and nothing there is inert: without this the first key press
+    // switches workspace under a screen the user cannot see.
+    const wrapper = mount(EngineOfflineView, {
+      props: { ...baseProps },
+      attachTo: document.body,
+    })
+    const spy = vi.fn()
+    window.addEventListener('keydown', spy)
+    try {
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true }))
+      expect(spy).not.toHaveBeenCalled()
+
+      // The listener dies with the curtain: a normal page must still hear keys.
+      wrapper.unmount()
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true }))
+      expect(spy).toHaveBeenCalled()
+    } finally {
+      window.removeEventListener('keydown', spy)
+    }
+  })
+
+  it('traps Tab focus inside the curtain', () => {
+    const wrapper = mount(EngineOfflineView, {
+      props: { ...baseProps },
+      attachTo: document.body,
+    })
+    const buttons = wrapper.findAll('button')
+    const first = buttons[0].element as HTMLElement
+    const last = buttons[buttons.length - 1].element as HTMLElement
+    expect(first).not.toBe(last)
+
+    // Forward from the last control wraps to the first...
+    last.focus()
+    expect(document.activeElement).toBe(last)
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    expect(document.activeElement).toBe(first)
+
+    // ...and back again, so neither end walks into the app behind the curtain.
+    document.body.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }),
+    )
+    expect(document.activeElement).toBe(last)
     wrapper.unmount()
   })
 })

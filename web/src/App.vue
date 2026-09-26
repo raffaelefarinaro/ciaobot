@@ -106,14 +106,16 @@ const overallReady = ref(false)
 const serverVersion = ref('')
 const skipped = ref(false)
 const startupDone = ref(false)
+/** Set once /api/startup-status has answered at all. Without it a cold launch
+ *  with the engine down never learns anything from the poll, and the boot view
+ *  would sit there empty instead of the recovery curtain. */
+const startupReached = ref(false)
 const clientMode = ref(false)
 const clientStateUnknown = ref(false)
 const canUseDeviceControls = isLoopbackPage()
 const clientHostUrl = ref('')
 const clientHasSession = ref(false)
 const switchingToHost = ref(false)
-
-const showStartup = computed(() => !startupDone.value && !skipped.value)
 
 // An engine that stops answering (crash, `ciao service stop`, reboot) used to
 // leave a loaded tab with no honest state: API calls failed one at a time and
@@ -125,12 +127,26 @@ const engineRetrying = ref(false)
 const engineHost = window.location.host
 const engineMonitor = createEngineMonitor({
   isUpdating: () => projectStore.serverRestarting,
-  onChange: (s) => { engineState.value = s },
+  onChange: (s) => {
+    const prev = engineState.value
+    engineState.value = s
+    const wasDown = prev === 'unreachable' || prev === 'updating'
+    if (wasDown && s === 'booting') { startupDone.value = false; skipped.value = false }   // show boot progress again
+    if (wasDown && (s === 'ready' || s === 'booting')) projectStore.reconnectNow()
+  },
 })
+const engineUnreachable = computed(() => engineState.value === 'unreachable' || engineState.value === 'updating')
+
+// A cold launch with the engine down never gets a startup answer, so the boot
+// view would have nothing to show: hand over to the curtain instead, unless the
+// engine has since come back (it then has to boot out loud before we trust it).
+const showStartup = computed(() =>
+  !startupDone.value && !skipped.value && !(engineUnreachable.value && !startupReached.value),
+)
 // Over the app, never replacing it: the route, its scroll position and its
 // in-memory state have to survive the outage.
 const showEngineOffline = computed(() =>
-  !showStartup.value && (engineState.value === 'unreachable' || engineState.value === 'updating'),
+  engineUnreachable.value && (!showStartup.value || !startupReached.value),
 )
 async function retryEngine() {
   engineRetrying.value = true
@@ -203,6 +219,7 @@ async function pollStartup() {
       return
     }
     const data = await res.json()
+    startupReached.value = true
     if (data.version && serverVersion.value !== data.version) {
       serverVersion.value = data.version
     }
@@ -278,6 +295,7 @@ onUnmounted(() => {
 
 watch(showStartup, (show) => {
   if (!show) stopPolling()
+  else if (!pollTimer) void pollStartup().then(scheduleNextPoll)
 })
 </script>
 

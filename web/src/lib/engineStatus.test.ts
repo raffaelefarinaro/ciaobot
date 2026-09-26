@@ -137,6 +137,25 @@ describe('createEngineMonitor', () => {
     monitor.stop()
   })
 
+  it('keeps polling after a probe throws', async () => {
+    vi.useFakeTimers()
+    const onChange = vi.fn()
+    // A throwing probe (a stubbed fetch that rejects, a browser that throws on
+    // the abort) must not end the loop: nothing else can raise the curtain
+    // again, and no Retry button is reachable while it is up.
+    const probe = vi.fn<() => Promise<ProbeResult>>()
+    probe.mockRejectedValueOnce(new Error('probe exploded'))
+    probe.mockResolvedValue('ready')
+    const monitor = createEngineMonitor({ probe, onChange })
+    monitor.start()
+    await vi.advanceTimersByTimeAsync(HEALTHY_INTERVAL_MS * 2)
+    // The rejection reported no state (the state stays `ready`, failures 0), so
+    // the next round is a healthy one.
+    expect(probe).toHaveBeenCalledTimes(2)
+    expect(monitor.state).toBe('ready')
+    monitor.stop()
+  })
+
   it('probes immediately on retry', async () => {
     vi.useFakeTimers()
     const onChange = vi.fn()
