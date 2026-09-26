@@ -5,7 +5,7 @@ persistence.  This collaborator owns the part of a schedule run that turns one
 stored :class:`~ciao.schedules.ScheduleEntry` into a stream, waits for any
 background work, grades the run, and decides whether the resulting chat can be
 auto-archived.  Target-chat preparation and the attention classifier live here
-too because they are part of the same dispatch transaction; archive extraction
+too because they are part of the same dispatch transaction; the memory pass
 and the rest of the archive pipeline deliberately remain manager concerns.
 
 The manager keeps delegating methods under their old names.  Calls back into

@@ -446,7 +446,7 @@ replaced when it changes, or an **event**, a thing that happened which gets
 appended to a log and never edited. The regions are a state surface.
 
 The write policy for every path that can touch durable memory — attended
-remember, archive extraction, unattended curation, direct edit, and proposal
+remember, the memory pass, unattended curation, direct edit, and proposal
 acceptance — is stated once in `ciao/memory_policy.py` and described in
 `docs/ARCHITECTURE.md` under "Memory write policy matrix". Two rules matter for
 any change here: the region cap is **advisory** on every path (a write goes

@@ -7,8 +7,8 @@ from rewriting the same region from two stale reads.
 
 These tests pin the three claims that replaced that: an idle workspace is
 computable as idle without a model turn, a budget-limited run resumes rather
-than restarts, and a held lease is honoured by the second run *and* by
-archive-time auto-apply.
+than restarts, and a held lease is honoured by the second run and released as
+soon as the holder has no work left.
 """
 
 from __future__ import annotations
@@ -588,7 +588,7 @@ def test_curation_begin_exits_temp_fail_when_another_run_holds_the_lease(
 def test_curation_begin_releases_the_lease_on_a_quiet_night(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An idle run must not keep archive-time auto-apply standing down."""
+    """A run with nothing to do must not sit on the lease."""
     from ciao.cli import _curation_begin_command
 
     vault = _vault(tmp_path)

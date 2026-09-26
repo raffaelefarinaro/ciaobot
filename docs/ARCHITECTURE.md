@@ -397,9 +397,8 @@ stock assets to it so they cannot drift apart again.
 | Direct edit / `memory_update` | regions | Human-controlled maintenance | Advisory (`over_cap` reported) | — |
 | Proposal acceptance (PWA/CLI) | regions, people, learnings | Reviewer action | Advisory | Replaced region entry → undo log |
 
-**Why curation is narrower than archive extraction.** "Archive extraction" is the
-post-archive work the memory pass now does, and it runs right after the user's own
-conversation, so a confident, state-shaped fact is attributable to a turn the user
+**Why curation is narrower than the memory pass.** The pass runs right after the
+user's own conversation, so a fact it lifts is attributable to a turn the user
 typed; the unattended curator runs nightly with no reviewer, so it only consolidates
 the region's existing entries and queues everything new.
 **Unattended runs defer; they do not route around the missing reviewer.** The
