@@ -13,6 +13,7 @@ import {
 import { errorMessage } from '../lib/errorMessage'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft } from '../lib/chatDrafts'
 import { isPostprocessing, postprocessNeedsRetry } from '../lib/postprocessView'
+import { isMemoryProject, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
 import type {
   ArchiveChatResponse,
   ArchivedWorkspace,
@@ -816,6 +817,10 @@ export const useProjectStore = defineStore('projects', () => {
   const workspaceProjects = computed(() =>
     projects.value
       .filter(p => p.workspace === activeWorkspace.value)
+      // The Memory project is app-owned (memory passes run in it) and hidden
+      // here, the one point every list agrees: sidebar, move-to menu, reorder,
+      // selectFirstChat and the Home "new chat" fallback all read this.
+      .filter(p => !isMemoryProject(p))
       .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
   )
 
@@ -1120,6 +1125,35 @@ export const useProjectStore = defineStore('projects', () => {
     return isPostprocessing(chatPostprocess(chatId))
   }
 
+  // ── Memory pass ───────────────────────────────────────────────────────
+  // A memory pass is an ordinary chat in the workspace's app-owned Memory
+  // project, which `workspaceProjects` hides. It queues behind the other passes
+  // in that workspace, auto-archives when it ends cleanly, and lands in
+  // `attention` when it does not — the one state that needs the owner.
+
+  /** True when this chat is a memory pass that ended unclean. */
+  function memoryPassNeedsAttention(chatId: string): boolean {
+    return memoryPassNeedsAttentionFor(chats.value.find(c => c.chat_id === chatId))
+  }
+
+  /**
+   * The newest pass still open in *workspace*, or null when none is. A clean
+   * pass is archived by the time the owner could want it, so "archived" is the
+   * answer for every pass that finished well — only a queued, running or
+   * attention pass is reachable, and those are exactly the ones worth linking.
+   */
+  function latestMemoryPassChat(workspace: WorkspaceName = activeWorkspace.value): ChatInfo | null {
+    const memory = memoryProjectFor(workspace)
+    if (!memory) return null
+    return (
+      chats.value
+        .filter(c => c.project_id === memory.project_id && !c.archived)
+        .sort((a, b) =>
+          (b.last_activity_at || b.created_at).localeCompare(a.last_activity_at || a.created_at),
+        )[0] || null
+    )
+  }
+
   // Archived chats matching a predicate, newest archive first. Shared by
   // postprocessingChats/insightsFailedChats so both stay consistent with
   // their *Count siblings below. Archived chats are excluded from
@@ -1310,6 +1344,15 @@ export const useProjectStore = defineStore('projects', () => {
       projects.value.find(
         p => p.workspace === workspace && p.is_auto && p.name === 'General',
       ) ?? null
+    )
+  }
+
+  // The app-owned project memory passes run in. Never shown to the user (it is
+  // filtered out of `workspaceProjects`), so it is looked up directly rather
+  // than through the visible lists.
+  function memoryProjectFor(workspace: WorkspaceName = activeWorkspace.value): ProjectInfo | null {
+    return (
+      projects.value.find(p => p.workspace === workspace && isMemoryProject(p)) ?? null
     )
   }
 
@@ -5849,6 +5892,7 @@ export const useProjectStore = defineStore('projects', () => {
     chatUnread, chatNeedsInput, chatPendingQuestion, chatLastSnippet, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
+    memoryPassNeedsAttention, latestMemoryPassChat, memoryProjectFor,
     insightsFailedChats, workspaceInsightsFailedCount,
     archivingChats, isArchiving, archivingChatsList, workspaceArchivingCount, projectArchivingCount,
     // Actions

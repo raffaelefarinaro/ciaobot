@@ -97,7 +97,7 @@
                        that sorted the row into its tier, so the sub-line can
                        never claim more than the tier heading above it. -->
                   <span class="home-chat-meta">
-                    <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project">{{ store.projectFor(chat.chat_id)?.name }}</span>
+                    <span v-if="store.memoryPassNeedsAttention(chat.chat_id) || store.projectFor(chat.chat_id)?.name" class="home-chat-project">{{ memoryPassTitle(chat, store.projectFor(chat.chat_id)?.name || '') }}</span>
                     <span class="home-chat-status">{{ tierPhrase(entry.key) }}</span>
                     <span v-if="chat.local === false" class="remote-chip">remote</span>
                   </span>
@@ -215,6 +215,7 @@ import { useProjectStore } from '../stores/projects'
 import type { ChatInfo, ProjectInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
 import { postprocessErroredSteps, postprocessLabel, postprocessUnfinished, stepNoun } from '../lib/postprocessView'
+import { memoryPassTitle } from '../lib/memoryPass'
 import { errorMessage } from '../lib/errorMessage'
 import { formatRelative } from '../lib/relativeTime'
 import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
