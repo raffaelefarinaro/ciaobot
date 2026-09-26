@@ -205,6 +205,10 @@ class _DriveHost:
         del chat_id
         return False
 
+    async def _memory_pass_turn_finished(self, chat_id: str) -> bool:
+        del chat_id
+        return False
+
     def _discard_result_announce(self, chat_id: str, token: int | None = None) -> None:
         del token
         self.discarded.append(chat_id)
@@ -284,7 +288,10 @@ async def test_drive_keeps_websocket_payloads_and_lifecycle_events(
     assert host.drain_awaits == ["chat-1"]
     assert host.discarded == ["chat-1"]
     assert host.announcements == [("chat-1", "project-1", "Contract", "done")]
-    assert host.detached_names == ["archive-proposal-helper-chat-1"]
+    assert host.detached_names == [
+        "archive-proposal-helper-chat-1",
+        "memory-pass-chat-1",
+    ]
     assert stream.done is True
     assert host._broker.get("chat-1") is None
     assert host.chat.last_response == "done"

@@ -185,6 +185,8 @@ class ChatStreamingHost(Protocol):
 
     async def _maybe_archive_proposal_helper(self, chat_id: str) -> bool: ...
 
+    async def _memory_pass_turn_finished(self, chat_id: str) -> bool: ...
+
     def _discard_result_announce(
         self, chat_id: str, token: int | None = None
     ) -> None: ...
@@ -938,6 +940,10 @@ class ChatStreaming:
                         self._host._maybe_archive_proposal_helper(chat_id),
                         f"archive-proposal-helper-{chat_id}",
                     )
+                    self._host._spawn_detached(
+                        self._host._memory_pass_turn_finished(chat_id),
+                        f"memory-pass-{chat_id}",
+                    )
 
     async def drive_stream(
         self,
@@ -1333,6 +1339,10 @@ class ChatStreaming:
                         self._host._spawn_detached(
                             self._host._maybe_archive_proposal_helper(chat_id),
                             f"archive-proposal-helper-{chat_id}",
+                        )
+                        self._host._spawn_detached(
+                            self._host._memory_pass_turn_finished(chat_id),
+                            f"memory-pass-{chat_id}",
                         )
         except asyncio.CancelledError:
             cancelled = True

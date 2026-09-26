@@ -144,6 +144,20 @@ class ArchivePipelineHost(Protocol):
 
     def _insights_model_for(self, chat: ChatInfo, workspace: str) -> str: ...
 
+    def enqueue_memory_pass(
+        self,
+        source: ChatInfo,
+        project: ProjectInfo | None,
+        archive_path: Path,
+        doc_path: str,
+    ) -> str | None: ...
+
+
+# The stages that consume insights text. When the memory pass replaces the
+# one-shot extraction these three can never run, including on a manifest that
+# was already in flight when the constant was flipped.
+_INSIGHTS_STAGES = ("insights", "project_doc_update", "memory_proposals")
+
 
 class ArchivePipeline:
     """Own archive postprocess state, manifests, retries, and completion hooks."""
@@ -313,6 +327,8 @@ class ArchivePipeline:
         The method name is kept for route/back-compat; PWA_API.md documents it
         as "retry unfinished steps".
         """
+        from ciao.web import memory_pass
+
         chat = self._host._chats.get(chat_id)
         if chat is None:
             return "not_found"
@@ -343,6 +359,17 @@ class ArchivePipeline:
         job.reset_failed(include_blocked=True)
         if not job.resumable():
             return "complete"
+        if memory_pass.MEMORY_PASS_CHATS:
+            # Same filter the startup resume applies: a manifest written before
+            # the pass replaced the one-shot stages must not run them on an
+            # explicit retry either.
+            stages = [
+                name for name in job.resumable() if name not in _INSIGHTS_STAGES
+            ]
+            if not stages:
+                return "complete"
+            self._host._launch_job(chat_id, job, inputs, stages=stages)
+            return "started"
         self._host._launch_job(chat_id, job, inputs)
         return "started"
 
@@ -808,6 +835,7 @@ class ArchivePipeline:
         bounded concurrency. Blocked and tombstoned jobs are left alone.
         """
         from ciao.archive_jobs import MAX_AUTO_ATTEMPTS, RUNNING, list_jobs
+        from ciao.web import memory_pass
 
         jobs = list_jobs(self._host._runtime_root)
         semaphore = asyncio.Semaphore(max(1, max_concurrency))
@@ -853,16 +881,11 @@ class ArchivePipeline:
                 self._host._overlay_job_postprocess(job.chat_id, job)
                 continue
             resumable = job.resumable()
-            if not getattr(self._host._config, "insights_enabled", True):
-                resumable = [
-                    name
-                    for name in resumable
-                    if name not in (
-                        "insights",
-                        "project_doc_update",
-                        "memory_proposals",
-                    )
-                ]
+            if (
+                not getattr(self._host._config, "insights_enabled", True)
+                or memory_pass.MEMORY_PASS_CHATS
+            ):
+                resumable = [name for name in resumable if name not in _INSIGHTS_STAGES]
             if not getattr(self._host._config, "trajectories_enabled", True):
                 resumable = [name for name in resumable if name != "trajectory"]
             if not resumable:
@@ -915,10 +938,23 @@ class ArchivePipeline:
             and outcome.filtered_jsonl is not None
             and outcome.session_id != ""
         )
-        run_insights = bool(
-            getattr(config, "insights_enabled", True) and outcome.filtered_jsonl
-        )
+        from ciao.web import memory_pass
+
         chat = self._host._chats.get(chat_id)
+        # A memory pass is a normal chat of the app's own, so archiving one
+        # must not kick off a pass of its own (or a one-shot extraction over
+        # memory bookkeeping).
+        is_pass = (
+            memory_pass.is_memory_pass_chat(chat, project_meta)
+            if chat is not None
+            else False
+        )
+        run_insights = bool(
+            getattr(config, "insights_enabled", True)
+            and outcome.filtered_jsonl
+            and not memory_pass.MEMORY_PASS_CHATS
+            and not is_pass
+        )
         if chat is None:
             # Nothing durable to key a manifest on; index the archive below so
             # the file is still searchable.
@@ -1019,6 +1055,30 @@ class ArchivePipeline:
                     self._tasks.pop(_cid, None)
 
                 task.add_done_callback(_drop_archive)
+
+            # With the pass in charge, this archive's memory work happens in a
+            # chat instead of here. Gated on the same conditions that used to
+            # mean "run insights", so an empty archive or an unresolved vault
+            # does not queue a pass with nothing to read.
+            if (
+                memory_pass.MEMORY_PASS_CHATS
+                and not is_pass
+                and getattr(config, "insights_enabled", True)
+                and outcome.path is not None
+                and outcome.turn_count > 0
+                and inputs["proposal_vault_root"] is not None
+            ):
+                try:
+                    self._host.enqueue_memory_pass(
+                        chat,
+                        project_meta,
+                        outcome.path,
+                        str(inputs["project_doc_path"]),
+                    )
+                except Exception:  # noqa: BLE001 — the archive already succeeded
+                    logger.exception(
+                        "Failed to enqueue a memory pass for %s", chat_id
+                    )
 
         # Index the newly archived file in the FTS5 database. The control
         # plane now runs its own index passes in bounded workers, so this
