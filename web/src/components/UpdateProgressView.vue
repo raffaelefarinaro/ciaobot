@@ -1,6 +1,17 @@
 <template>
   <div class="update-progress-overlay">
-    <div class="update-progress-content">
+    <!-- The overlay's status region, and where focus lands when a caller treats
+         this overlay as the modal it is (the Settings engine-update card does).
+         `tabindex="-1"` keeps it out of the tab order: nothing here is
+         actionable, so Tab belongs to the curtain that holds focus, not to a row
+         in a log. Announced politely as the record's phase moves. -->
+    <div
+      ref="statusRegion"
+      class="update-progress-content"
+      role="status"
+      aria-live="polite"
+      tabindex="-1"
+    >
       <div class="update-progress-head">
         <span class="wordmark wordmark--lg">ciaobot</span>
         <span class="update-progress-version">update · v{{ version || '…' }}</span>
@@ -63,15 +74,20 @@ const props = defineProps<{
   version?: string
   finishing?: boolean
   /**
-   * The persisted job's phase (`GET /api/update/status`). With it the rows track
-   * the real record and the boot timer never starts; without it this is the boot
-   * screen's staged animation, which is what it has always been.
+   * The persisted job's phase (`GET /api/update/status`). With it the rows are
+   * the record's own phases, in the order the engine runs them, and the boot
+   * timer never starts; without it this is the boot screen's staged animation,
+   * which is what it has always been.
    */
   phase?: string
   /** The record's own reason, for a run that failed. */
   error?: string
 }>()
 
+/**
+ * The boot animation's six stages. Untouched by the real-job path below: a run
+ * nobody is performing is an animation, and it has always advanced on a timer.
+ */
 const STAGES = [
   'checking the current Ciaobot version',
   'preparing the local engine',
@@ -82,27 +98,40 @@ const STAGES = [
 ] as const
 
 /**
- * Which of the six stages a real phase sits inside.
+ * The real run's rows, in the order `ciao/engine_update.py:PHASES` runs them.
  *
- * The apply half is one coarse step for this list: the drain, the swap and the
- * restart all read as "getting ready to restart", and the phase named under the
- * header is what tells them apart. A phase with no row here (a failure, or one
- * a newer engine added) lands on the last stage — the run reached the end of
- * the sequence — rather than inventing a position for it.
+ * The record is the only clock this screen has, so a row is a phase and the
+ * order is the coordinator's: `downloading` is row 2 and `verifying` row 3, as
+ * they actually happen. A list that put a later phase on an earlier row moved
+ * the bar backwards and un-completed a row on every ordinary update.
  */
-const PHASE_STAGE_INDEX: Record<string, number> = {
-  resolving: 0,
-  verifying: 2,
-  downloading: 3,
-  staging: 4,
-  staged: 5,
-  draining: 5,
-  applying: 5,
-  stopping: 5,
-  swapping: 5,
-  starting: 5,
-  verifying_start: 5,
-}
+const PHASE_ROWS: readonly string[] = [
+  'resolving',
+  'downloading',
+  'verifying',
+  'staging',
+  'staged',
+  'draining',
+  'applying',
+  'stopping',
+  'swapping',
+  'starting',
+  'verifying_start',
+  'applied',
+]
+
+/**
+ * The rollback track, listed only once the record names a rollback.
+ *
+ * A run heading forward has no reason to show what it has not started, and
+ * `rolling_back` has to read as the rollback it is rather than as whatever row
+ * it would otherwise land on. `rolled_back` and `rollback_failed` are its two
+ * terminals.
+ */
+const ROLLBACK_ROWS: readonly string[] = ['rolling_back', 'rolled_back', 'rollback_failed']
+
+/** The phase of a run that stopped, naming no phase it stopped at. */
+const FAILED_PHASE = 'failed'
 
 const PROGRESS_WIDTH = 28
 const DOTS_TARGET = 28
@@ -119,6 +148,14 @@ const activeIndex = ref(0)
 const startedAt = ref<Record<string, string>>({})
 let stageTimer: number | null = null
 
+/**
+ * The overlay's status region, handed to a caller that treats this overlay as
+ * the modal it is so focus can land inside it (SettingsView's engine update).
+ */
+const statusRegion = ref<HTMLElement | null>(null)
+
+defineExpose({ statusRegion })
+
 /** The record's phase in plain language; empty on the boot path. */
 const phaseName = computed(() => (props.phase ? updatePhaseName(props.phase) : ''))
 
@@ -134,22 +171,59 @@ const failureText = computed(() => {
 
 const ready = computed(() => !!props.finishing || props.phase === UPDATE_APPLIED_PHASE)
 
-/** Where the real job is, or null when this is the boot animation. */
+/** The rows this record's phase is listed against, or the boot screen's. */
+const phaseRows = computed<readonly string[]>(() => {
+  const phase = props.phase
+  if (!phase) return STAGES
+  // A phase with no row of its own is shown as a row of its own and nothing
+  // else. `failed` names no phase it broke at, and a phase a newer engine
+  // added is unknown here, so in both cases the record says the run stopped
+  // here and says nothing about what came before: no earlier row may claim to
+  // be done.
+  if (phase === FAILED_PHASE) return [FAILED_PHASE]
+  const track = ROLLBACK_ROWS.includes(phase)
+    ? [...PHASE_ROWS, ...ROLLBACK_ROWS]
+    : PHASE_ROWS
+  return track.includes(phase) ? track : [phase]
+})
+
+/** The record's row on that list, or null on the boot path. */
 const phaseIndex = computed<number | null>(() => {
   const phase = props.phase
-  if (!phase) return null
-  if (phase === UPDATE_APPLIED_PHASE) return STAGES.length
-  if (isUpdateFailurePhase(phase)) return STAGES.length - 1
-  const mapped = PHASE_STAGE_INDEX[phase]
-  return mapped === undefined ? null : mapped
+  return phase ? phaseRows.value.indexOf(phase) : null
 })
 
 /** The stage the log is on: the record's, or the animation's. */
 const currentIndex = computed(() => phaseIndex.value ?? activeIndex.value)
 
+/**
+ * How many rows are behind the record.
+ *
+ * A phase the run is in is live, so the boundary is that row. `applied` is the
+ * one phase the run is not in any more — it landed — so every row is behind it.
+ */
+const rowsBehind = computed(() => {
+  if (phaseIndex.value === null) return Math.min(currentIndex.value, STAGES.length)
+  return props.phase === UPDATE_APPLIED_PHASE ? PHASE_ROWS.length : phaseIndex.value
+})
+
+/**
+ * The bar's percentage.
+ *
+ * The forward track is the bar: `resolving` at 0%, `applied` at 100%. A rollback
+ * holds the 100% mark because it is the response to a forward run that
+ * finished, and the log and the phase line say which version and why; a record
+ * that says only `failed` proves no phase completed, so it stays at the start
+ * rather than claiming progress the record does not show.
+ */
 const progressPercent = computed(() => {
-  const finished = Math.min(currentIndex.value, STAGES.length)
-  return Math.round((finished / STAGES.length) * 100)
+  if (phaseIndex.value === null) {
+    const finished = Math.min(currentIndex.value, STAGES.length)
+    return Math.round((finished / STAGES.length) * 100)
+  }
+  const total = PHASE_ROWS.length - 1
+  const steps = Math.min(Math.max(rowsBehind.value, 0), total)
+  return Math.round((steps / total) * 100)
 })
 
 const progressTrack = computed(() => {
@@ -161,9 +235,11 @@ function pad(n: number): string {
   return n.toString().padStart(2, '0')
 }
 
-// Prefer the activation clock; fall back to a synthesized t+offset so
-// pending stages still show something, like the boot screen.
-function timestampFor(name: string): string {
+// Prefer the activation clock; fall back to a synthesized t+offset so pending
+// stages still show something, like the boot screen. For a real job that offset
+// is the record's own order and no clock: the record timestamps the run, not
+// this screen.
+function timestampFor(name: string, index: number): string {
   const iso = startedAt.value[name]
   if (iso) {
     const d = new Date(iso)
@@ -171,16 +247,21 @@ function timestampFor(name: string): string {
       return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
     }
   }
-  const index = STAGES.indexOf(name as (typeof STAGES)[number])
   return `t+${index.toString().padStart(2, '0')}`
 }
 
 const rows = computed<Row[]>(() =>
-  STAGES.map((name, i) => {
+  phaseRows.value.map((phase, i) => {
+    // The log's own voice is lower case, like the boot rows, and it is the same
+    // vocabulary the phase line above uses. A phase this build has no name for
+    // shows its identifier: better the record's word than an invented one.
+    const name = phaseIndex.value === null
+      ? phase
+      : (updatePhaseName(phase) || phase).toLowerCase()
     const failed = !!failureText.value && i === currentIndex.value
     const status: Row['status'] = failed
       ? 'error'
-      : i < currentIndex.value
+      : i < rowsBehind.value
         ? 'done'
         : i === currentIndex.value
           ? 'in_progress'
@@ -194,7 +275,7 @@ const rows = computed<Row[]>(() =>
           ? '…'
           : 'wait'
     const dots = ' ' + '.'.repeat(Math.max(3, DOTS_TARGET - name.length))
-    return { name, ts: timestampFor(name), dots, status, statusLabel }
+    return { name, ts: timestampFor(phase, i), dots, status, statusLabel }
   }),
 )
 
@@ -245,6 +326,18 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  /* A real job lists a row per phase, which is taller than the boot screen's
+     six. Scroll it rather than let a short window clip the reason a run failed
+     off the bottom. */
+  max-height: 100%;
+  overflow-y: auto;
+}
+
+/* The app's focus ring (DESIGN: 2px accent) does not reach a region, so the
+   overlay's focus target states itself the same way a control would. */
+.update-progress-content:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .update-progress-head {
