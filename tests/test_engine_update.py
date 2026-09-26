@@ -832,30 +832,81 @@ def _loaded_job(
     return launchctl
 
 
-def _running_updater(engine: _FakeEngine, *, running: bool) -> Any:
+# What a real `com.ciao.updater` is running when a swap is in flight: the verb
+# `apply_update` writes, with the one-shot's own arguments beside it.
+_RUN_APPLY_ARGUMENTS = (
+    "-I",
+    "-m",
+    "ciao.engine_update",
+    "run-apply",
+    "--operation",
+    "20260925T100000-0.9.0",
+)
+
+
+def _updater_print(running: bool, arguments: tuple[str, ...] | None) -> str:
+    """What `launchctl print` says about `com.ciao.updater`, in its own rendering.
+
+    A one-shot LaunchAgent stays *loaded* in launchd after its process exits, so
+    "loaded" alone cannot tell a live swap from a dead one — the `pid` line is
+    what says a process is running it. The `arguments` block beside it says which
+    one, and is rendered whether or not the job is running, the way launchd
+    renders it: one argument per line inside a block of its own.
+    """
+    body = [
+        f"{UPDATER_LABEL} = {{",
+        "\tactive count = 0",
+        "\ttype = LaunchAgent",
+        f"\tstate = {'running' if running else 'not running'}",
+        f"\tlast exit code = {0 if running else 1}",
+        "\tprogram = /fake/env/bin/python",
+    ]
+    if arguments is not None:
+        body.append("\targuments = {")
+        body.extend(f"\t\t{argument}" for argument in arguments)
+        body.append("\t}")
+    if running:
+        body.append("\tpid = 4242")
+    body.append("}")
+    return "\n".join(body) + "\n"
+
+
+def _running_updater(
+    engine: _FakeEngine,
+    *,
+    running: bool,
+    arguments: tuple[str, ...] | None = _RUN_APPLY_ARGUMENTS,
+) -> Any:
     """A launchctl that reports `com.ciao.updater` loaded, and maybe running.
 
-    A one-shot LaunchAgent stays loaded in launchd after its process exits, so
-    "loaded" alone cannot tell a live swap from a dead one — which is why the
-    recovery job asks for the pid as well.
+    The `arguments` block is the second half of the question recovery asks about
+    that job, and the reason it is modelled here: the recovery job
+    `recover_interrupted_apply` bootstraps runs under *this* label too, so a live
+    pid on its own cannot say whether the process behind it is a swap in flight
+    or the recovery standing on its own doorstep.
     """
 
     def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
         if args[0] == "print" and args[-1].endswith(UPDATER_LABEL):
-            body = [
-                f"{UPDATER_LABEL} = {{",
-                "\tactive count = 0",
-                "\ttype = LaunchAgent",
-                f"\tstate = {'running' if running else 'not running'}",
-                f"\tlast exit code = {0 if running else 1}",
-            ]
-            if running:
-                body.append("\tpid = 4242")
-            body.append("}")
-            return subprocess.CompletedProcess(args, 0, "\n".join(body) + "\n", "")
+            return subprocess.CompletedProcess(
+                args, 0, _updater_print(running, arguments), ""
+            )
         return engine.launchctl(args)
 
     return launchctl
+
+
+def _updater_running_its_own_plist(engine: _FakeEngine, state: Path) -> Any:
+    """A launchctl reporting the `com.ciao.updater` the handoff just wrote, running.
+
+    The verb is read back out of the plist on disk rather than spelled out here,
+    so this stands in for exactly the job launchd would start — and a fix that
+    recognised one hard-coded verb instead of reading the loaded job's own
+    arguments would still fail the test that uses it.
+    """
+    plist = plistlib.loads((state / UPDATER_PLIST_NAME).read_bytes())
+    arguments = tuple(str(argument) for argument in plist["ProgramArguments"])
+    return _running_updater(engine, running=True, arguments=arguments)
 
 
 def _server_plist_path() -> Path:
@@ -882,6 +933,23 @@ def _write_server_plist(program: str | Path) -> Path:
             handle,
         )
     return path
+
+
+def _entry_point(root: Path, target: Path) -> Path:
+    """A `bin` entry point as `uv tool install` leaves it: a link into the env.
+
+    `install-engine.sh` installs the wheel as a uv *tool*, so the interpreter is
+    in `~/.local/share/uv/tools/ciaobot` (`receipt.python`, so `live_env`) and
+    the entry point is a link in `~/.local/bin` (`receipt.executable`) — outside
+    that env. The script then runs `ciao setup --python "$ciao"`, so this is what
+    `com.ciao.server` runs on every healthy terminal install, and it is part of
+    the install the receipt names.
+    """
+    link = root / "bin" / "ciao"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.unlink(missing_ok=True)
+    link.symlink_to(target)
+    return link
 
 
 def _interrupted(
@@ -2051,6 +2119,8 @@ def test_run_recover_stands_down_for_a_running_updater(tmp_path: Path) -> None:
     # updater that is *running* while this job holds it means the two are not the
     # process one would assume. Rolling back over a live swap is the one thing
     # this job must never do, so it stands down and tries again in 30 seconds.
+    # The double's arguments name `run-apply`: a live swap is what the pid plus
+    # that verb together mean, and both are needed — see the next test.
     result = _recover_apply(
         engine,
         op,
@@ -2068,6 +2138,88 @@ def test_run_recover_stands_down_for_a_running_updater(tmp_path: Path) -> None:
     # Standing down is not standing down for good: the net is still there.
     assert (state / RECOVER_PLIST_NAME).exists()
     assert not engine.booted_out(RECOVER_LABEL)
+
+
+def test_run_recover_does_not_stand_down_against_itself(
+    tmp_path: Path, phases: list[str]
+) -> None:
+    op, state, receipt_path, engine = _interrupted(tmp_path, "swapping")
+    # The whole startup fast path, as launchd runs it. The engine comes back with
+    # a stranded swap, bootstraps `com.ciao.updater` in `run-recover` mode, and
+    # that job is the process that executes `recover_apply` — under the label the
+    # stand-down check reads. `launchctl print` therefore reports *its own* live
+    # pid back to it, and a check that asked only "is anything running under
+    # com.ciao.updater?" would stand this job down against itself, boot nothing
+    # out and restore nothing: the machine stays exactly as broken as it is, on
+    # every path where the engine comes back (which is the whole path this
+    # feature is for).
+    assert _handoff(engine, state) is not None
+    plist = plistlib.loads((state / UPDATER_PLIST_NAME).read_bytes())
+    assert "run-recover" in plist["ProgramArguments"]
+
+    result = _recover_apply(
+        engine,
+        op,
+        state,
+        receipt_path,
+        launchctl=_updater_running_its_own_plist(engine, state),
+    )
+
+    assert result is not None
+    assert result.phase == "rolled_back"
+    assert "interrupted during recovery" in result.error
+    assert read_operation(state) == result
+    assert phases == ["rolling_back", "rolled_back"]
+    # The env the operator was running is back, the engine was stopped before it
+    # was touched, and they get a running engine.
+    assert _env_version(engine.live_env) == FROM_VERSION
+    assert not (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
+    assert engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 1
+    assert engine.up is True
+
+
+@pytest.mark.parametrize(
+    "running,arguments,expected",
+    [
+        (True, _RUN_APPLY_ARGUMENTS, True),
+        # This process, under the same label. A recovery that stands down here
+        # strands the machine, so it has to read the verb as well as the pid.
+        (True, ("-I", "-m", "ciao.engine_update", "run-recover", "--operation", "x"), False),
+        # A one-shot job stays loaded after it dies: no pid, no swap in flight.
+        (False, _RUN_APPLY_ARGUMENTS, False),
+        # Nothing usable rendered at all. The lock this job already holds is the
+        # real guard, and answering True would strand every interrupted swap.
+        (True, None, False),
+    ],
+    ids=["live-swap", "live-recovery", "dead-job", "no-arguments"],
+)
+def test_swap_in_flight_reads_the_loaded_job_arguments(
+    running: bool, arguments: tuple[str, ...] | None, expected: bool
+) -> None:
+    printed = subprocess.CompletedProcess(
+        ["print"], 0, _updater_print(running, arguments), ""
+    )
+
+    def launchctl(_args: list[str]) -> subprocess.CompletedProcess[str]:
+        return printed
+
+    assert engine_update._swap_in_flight(launchctl, 501) is expected
+
+
+def test_swap_in_flight_is_false_for_a_job_launchd_does_not_have() -> None:
+    def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args,
+            113,
+            "",
+            f'Could not find service "{UPDATER_LABEL}" in domain for uid: 501',
+        )
+
+    # A job launchd has never heard of cannot be running a swap, and answering
+    # True here would strand every interrupted swap on a machine whose updater
+    # never loaded.
+    assert engine_update._swap_in_flight(launchctl, 501) is False
 
 
 @pytest.mark.parametrize("settled", ["applied", "rollback_failed"])
@@ -2100,9 +2252,11 @@ def test_run_recover_stands_down_for_a_settled_record(
     assert not _login_recover_plist().exists()
 
 
-@pytest.mark.parametrize("wrong_id", [True, False], ids=["wrong-id", "no-record"])
+@pytest.mark.parametrize(
+    "wrong_id,stale", [(True, False), (False, True)], ids=["wrong-id", "no-record"]
+)
 def test_recover_apply_ignores_a_missing_or_wrong_operation(
-    tmp_path: Path, wrong_id: bool
+    tmp_path: Path, wrong_id: bool, stale: bool
 ) -> None:
     op, state, receipt_path, engine = _interrupted(tmp_path, "swapping")
     _install_recovery_agent(state, op)
@@ -2136,12 +2290,23 @@ def test_recover_apply_ignores_a_missing_or_wrong_operation(
         assert record.id == "20260101T000000-9.9.9"
     else:
         assert read_operation(state) is None
-    # The plist named an operation that is not there, so it is stale. Both
-    # copies go: a login-time copy left behind would load a job for a
-    # transaction that is over.
-    assert engine.changed_jobs() == [["bootout", f"gui/501/{RECOVER_LABEL}"]]
-    assert not (state / RECOVER_PLIST_NAME).exists()
-    assert not _login_recover_plist().exists()
+    # Only a plist that is stale in the sense that *nothing* replaced it may
+    # retire itself. A stale one-shot whose operation a newer update has taken
+    # over would be taking the newer net down with it — the same label, the same
+    # two plists, and the only recovery for the update actually in flight.
+    if stale:
+        # The plist named an operation that is not there, so it is stale. Both
+        # copies go: a login-time copy left behind would load a job for a
+        # transaction that is over.
+        assert engine.changed_jobs() == [["bootout", f"gui/501/{RECOVER_LABEL}"]]
+        assert not (state / RECOVER_PLIST_NAME).exists()
+        assert not _login_recover_plist().exists()
+    else:
+        # The net belongs to the update in flight now, so it stays up: the stale
+        # job keeps answering for its own retired id until the newer one settles.
+        assert engine.changed_jobs() == []
+        assert (state / RECOVER_PLIST_NAME).exists()
+        assert _login_recover_plist().exists()
 
 
 @pytest.mark.parametrize("phase", ["swapping", "starting", "verifying_start"])
@@ -2255,6 +2420,77 @@ def test_run_apply_allows_a_loaded_job_that_runs_the_receipt_env(
     assert engine.starts == 1
 
 
+def test_run_apply_allows_a_server_plist_that_runs_the_receipt_entry_point(
+    tmp_path: Path,
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # The install `install-engine.sh` actually produces, and the one the feature
+    # exists for. `uv tool install` puts the interpreter in the tool env
+    # (`live_env`) and the entry point in `~/.local/bin` (the receipt's
+    # `executable`), then `ciao setup --python "$ciao"` points the LaunchAgent at
+    # that entry point — outside the env, and a symlink into it. Accepting only
+    # the env directory refused every healthy terminal install: the update never
+    # ran at all, and the operator was told the service ran the wrong env.
+    entry_point = _entry_point(tmp_path, engine.live_env / "bin" / "ciao")
+    assert not entry_point.is_relative_to(engine.live_env)
+    assert read_receipt(receipt_path).executable == str(entry_point)
+    _write_server_plist(entry_point)
+
+    result = _run(engine, op, state, receipt_path)
+
+    # Through the pre-flight, all the way to the new engine: the swap is the only
+    # thing that makes the receipt's own entry point worth re-pointing.
+    assert result.phase == "applied"
+    assert read_operation(state) == result
+    assert _env_version(engine.live_env) == TO_VERSION
+    assert engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 1
+    assert [c for c in engine.run_calls if "tool" in c] != []
+
+
+def test_run_apply_allows_a_loaded_job_that_runs_the_receipt_entry_point(
+    tmp_path: Path,
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # The same install, answered by launchd instead of by the plist on disk: the
+    # job is loaded, and what it runs is the receipt's entry point. The two
+    # answers are the same fact read two ways, so the pre-flight has to agree
+    # with itself about both.
+    entry_point = _entry_point(tmp_path, engine.live_env / "bin" / "ciao")
+    _write_server_plist(tmp_path / "elsewhere" / "ciaobot" / "bin" / "python")
+
+    result = _run(
+        engine, op, state, receipt_path, launchctl=_loaded_job(engine, entry_point)
+    )
+
+    assert result.phase == "applied"
+    assert read_operation(state) == result
+    assert _env_version(engine.live_env) == TO_VERSION
+    assert engine.starts == 1
+
+
+def test_run_apply_still_refuses_an_entry_point_the_receipt_does_not_name(
+    tmp_path: Path,
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # Accepting the receipt's entry point must not accept any entry point: another
+    # install's `bin/ciao`, linking into an env this receipt knows nothing about,
+    # is exactly the disagreement the pre-flight is for.
+    _entry_point(tmp_path, engine.live_env / "bin" / "ciao")
+    other = _entry_point(
+        tmp_path / "other", tmp_path / "other" / "ciaobot" / "bin" / "ciao"
+    )
+    _write_server_plist(other)
+
+    result = _run(engine, op, state, receipt_path)
+
+    assert result.phase == "failed"
+    assert "not the receipt's environment" in result.error
+    assert str(other) in result.error
+    assert engine.changed_jobs() == []
+    assert [c for c in engine.run_calls if "tool" in c] == []
+
+
 @pytest.mark.parametrize(
     "printed,expected",
     [
@@ -2277,3 +2513,59 @@ def test_loaded_program_argument_reads_launchctl_output(
     # The formats launchd has used for a loaded job's program, and the two answers
     # that must never refuse an update: no program, and no output at all.
     assert engine_update._loaded_program_argument(printed) == expected
+
+
+@pytest.mark.parametrize(
+    "printed,expected",
+    [
+        # launchd's own shape for a loaded job: one argument per line in a block.
+        (
+            "com.ciao.updater = {\n\targuments = {\n\t\t-I\n\t\t-m\n"
+            "\t\tciao.engine_update\n\t\trun-recover\n\t}\n}",
+            ["-I", "-m", "ciao.engine_update", "run-recover"],
+        ),
+        # Other versions: the whole list on the key's own line, braces or parens.
+        (
+            "com.ciao.updater = {\n\targuments = { -I -m ciao.engine_update run-apply }\n}",
+            ["-I", "-m", "ciao.engine_update", "run-apply"],
+        ),
+        (
+            "com.ciao.updater = {\n\targuments = ( -I -m ciao.engine_update run-apply )\n}",
+            ["-I", "-m", "ciao.engine_update", "run-apply"],
+        ),
+        # A key launchd did not render at all answers nothing, so a recovery is
+        # never stood down on evidence that was never there.
+        ("com.ciao.updater = {\n\tpid = 4242\n}", []),
+    ],
+)
+def test_loaded_tokens_reads_a_jobs_arguments(
+    printed: str, expected: list[str]
+) -> None:
+    assert engine_update._loaded_tokens(printed, "arguments") == expected
+
+
+def test_the_receipt_entry_point_is_compared_resolved(tmp_path: Path) -> None:
+    # `bin/ciao` is a link into the tool env, and the directory holding it is
+    # routinely reached through a link of its own — `/var` → `/private/var` under
+    # a macOS test, a relocated `$HOME` on a real machine. Comparing the two
+    # paths as text would refuse the install the receipt names; comparing what
+    # they point at does not.
+    env = tmp_path / "tools" / "ciaobot"
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "ciao").write_text("#!/bin/sh\n", encoding="utf-8")
+    executable = _entry_point(tmp_path, env / "bin" / "ciao")
+    alias = tmp_path / "alias"
+    alias.unlink(missing_ok=True)
+    alias.symlink_to(tmp_path / "bin")
+    spelled_differently = alias / "ciao"
+    assert str(spelled_differently) != str(executable)
+    assert engine_update._runs_the_receipt_install(spelled_differently, env, executable)
+    # The interpreter inside the env agrees too, by the env half of the check.
+    assert engine_update._runs_the_receipt_install(
+        env / "bin" / "python", env, executable
+    )
+    # And another install's entry point is still a disagreement, link or not.
+    other = _entry_point(
+        tmp_path / "other", tmp_path / "other" / "env" / "bin" / "ciao"
+    )
+    assert engine_update._runs_the_receipt_install(other, env, executable) is False

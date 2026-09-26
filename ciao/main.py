@@ -529,8 +529,16 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             if recovered is None:
                 tracker.done("recover_engine_update")
             else:
+                # Deliberately not "handed to a recovery job": returning a record
+                # is not the same thing as scheduling one. A `com.ciao.updater`
+                # that is still running means a live swap owns that record, and
+                # recovery stood down for it — announcing a handoff that did not
+                # happen sends an operator looking for a job that was never
+                # loaded. `recover_interrupted_apply` logs which of the three
+                # answers it took (job bootstrapped, job that would not load,
+                # stood down for a live swap) at the same level.
                 logger.warning(
-                    "Interrupted engine update %s (%s) handed to a recovery job",
+                    "Interrupted engine update %s found at startup in phase %s",
                     recovered.id,
                     recovered.phase,
                 )

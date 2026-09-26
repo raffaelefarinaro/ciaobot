@@ -1329,31 +1329,56 @@ def _rollback(
     return errors
 
 
-def _loaded_program_argument(printed: str) -> str | None:
-    """The program ``launchctl print`` says a loaded job runs, or ``None``.
+def _loaded_field(printed: str, key: str) -> str:
+    """The text ``launchctl print`` rendered for ``key``, or ``""``.
 
-    launchd renders a loaded job's arguments as a bare ``program = /path/python``
-    with an ``arguments`` block beside it, and other versions as a single
-    parenthesised or braced list — on one line or as a block of its own. The
-    program is the first token inside the value in every shape, so all of them
-    are read the same way. Nothing recognisable answers ``None``, which is
-    evidence of nothing and so never refuses an update.
+    launchd has printed a job's values in three shapes across versions: a bare
+    scalar on the key's own line, a list opened on that same line, and a list
+    whose opening bracket is on the line *after* the key. A list of any shape is
+    flattened to its own lines here, so the callers only decide what a token in
+    it means, and a key launchd did not render at all answers ``""`` — which is
+    evidence of nothing, and so never refuses an update and never stands a
+    recovery down.
     """
     lines = printed.splitlines()
     for index, line in enumerate(lines):
         head, separator, rest = line.partition("=")
-        if not separator or head.strip() != "program":
+        if not separator or head.strip() != key:
             continue
         value = rest.strip()
-        if value[:1] in {"(", "{"}:
-            value = value[1:].strip()
-            if not value:
-                # A list that opens on the line after the key.
-                value = next(
-                    (nxt.strip() for nxt in lines[index + 1 :] if nxt.strip()), ""
-                )
-        return re.split(r"[,)}\s]", value, maxsplit=1)[0].strip("\"'") or None
-    return None
+        if value[:1] not in {"(", "{"}:
+            return value
+        parts = [value]
+        # The list's own delimiters, so a block that opens here is collected up
+        # to the line that closes it — one argument per line, in every shape.
+        depth = value.count("(") + value.count("{") - value.count(")") - value.count("}")
+        for nxt in lines[index + 1 :]:
+            parts.append(nxt)
+            depth += nxt.count("(") + nxt.count("{") - nxt.count(")") - nxt.count("}")
+            if depth <= 0:
+                break
+        return "\n".join(parts)
+    return ""
+
+
+def _loaded_tokens(printed: str, key: str) -> list[str]:
+    """The tokens in a value ``launchctl print`` rendered for ``key``."""
+    return [
+        token
+        for line in _loaded_field(printed, key).splitlines()
+        for token in re.findall(r"[^\s,(){}]+", line)
+    ]
+
+
+def _loaded_program_argument(printed: str) -> str | None:
+    """The program ``launchctl print`` says a loaded job runs, or ``None``.
+
+    The first token of the ``program`` value in every shape launchd prints it
+    (see :func:`_loaded_field`); nothing recognisable answers ``None``, which is
+    evidence of nothing and so never refuses an update.
+    """
+    tokens = _loaded_tokens(printed, "program")
+    return tokens[0].strip("\"'") if tokens else None
 
 
 def _loaded_server_program(launch: Launchctl, domain_uid: int) -> str | None:
@@ -1377,8 +1402,38 @@ def _loaded_server_program(launch: Launchctl, domain_uid: int) -> str | None:
     return _loaded_program_argument(printed.stdout or "")
 
 
+def _runs_the_receipt_install(
+    program: Path, live_env: Path, executable: str | Path | None
+) -> bool:
+    """Whether ``program`` is part of the install the receipt names.
+
+    Two shapes, and the README install has both. `uv tool install` puts the
+    interpreter inside the tool env (`live_env`) and the `ciao` entry point
+    *beside* it in `~/.local/bin`; `install-engine.sh` then runs
+    `ciao setup --python "$ciao"`, so the LaunchAgent's `ProgramArguments[0]` is
+    that bin entry point — the receipt's own `executable`, and outside the env.
+    Both belong to the one install: `run_apply` re-points `UV_TOOL_BIN_DIR` at
+    that entry point's directory on every swap. Accepting only the env would
+    refuse every healthy terminal install, which is the install the feature
+    exists for.
+
+    The executable is compared resolved, because that entry point is a symlink
+    into the tool env on a real install and comparing the link would refuse the
+    install it names.
+    """
+    if program.is_relative_to(live_env):
+        return True
+    if not executable:
+        return False
+    return program.resolve() == Path(executable).resolve()
+
+
 def _server_plist_disagreement(
-    live_env: Path, *, launch: Launchctl, domain_uid: int
+    live_env: Path,
+    *,
+    executable: str | Path | None = None,
+    launch: Launchctl,
+    domain_uid: int,
 ) -> str:
     """Why the loaded ``com.ciao.server`` does not run ``live_env``, or ``""``.
 
@@ -1395,10 +1450,13 @@ def _server_plist_disagreement(
     on-disk plist answers only for a job that is genuinely not loaded, which is
     also when a hand-edited plist is all there is to go on.
 
+    Agreement is the whole install, not just the env directory: the receipt's
+    entry point is part of it (see :func:`_runs_the_receipt_install`).
+
     A missing, unreadable or argument-less plist is *not* a disagreement: a
     service that has not been loaded yet is restored by the rollback's own start
     step, and a plist this process cannot parse is evidence of nothing. Only an
-    answer that names a program outside the receipt's env refuses.
+    answer that names a program outside the receipt's install refuses.
     """
     program = _loaded_server_program(launch, domain_uid)
     if program is None:
@@ -1414,7 +1472,7 @@ def _server_plist_disagreement(
         if not isinstance(arguments, list) or not arguments:
             return ""
         program = str(arguments[0])
-    if Path(program).is_relative_to(live_env):
+    if _runs_the_receipt_install(Path(program), live_env, executable):
         return ""
     return (
         f"the loaded {SERVER_LABEL} runs {program}, not the receipt's "
@@ -1536,9 +1594,15 @@ def run_apply(
         # Before anything moves: the swap is only meaningful against the env the
         # service actually runs, and a receipt that disagrees with the loaded
         # job means the receipt is the thing that is wrong. Refusing here is the
-        # same "nothing is touched" class as the pre-flight checks above.
+        # same "nothing is touched" class as the pre-flight checks above. The
+        # receipt's entry point is passed in with its env: `install-engine.sh`
+        # points the LaunchAgent at `~/.local/bin/ciao`, which is outside the
+        # tool env and is re-pointed by this very swap.
         disagreement = _server_plist_disagreement(
-            live_env, launch=launch, domain_uid=domain_uid
+            live_env,
+            executable=receipt.executable,
+            launch=launch,
+            domain_uid=domain_uid,
         )
         if disagreement:
             return record(disagreement)
@@ -1715,13 +1779,33 @@ _POST_MOVE_PHASES = ("swapping", "starting", "verifying_start", "rolling_back")
 
 
 # A `launchctl print` renders `pid = <n>` only while a process is running the
-# job, which is the one fact that separates "a swap is in flight" from "a
-# one-shot job is still registered in launchd".
+# job, and the job's `arguments` block says what that process is running. Both
+# are needed to tell a live *swap* from a live *recovery*, because the two share
+# a label: `recover_interrupted_apply` bootstraps `com.ciao.updater` in
+# `run-recover` mode, so the recovery job sees its own pid in that print and
+# would stand down against itself.
 _LOADED_PID = re.compile(r"^[ \t]*pid = (?P<pid>\d+)\s*$", re.MULTILINE)
 
 
+def _loaded_updater(launch: Launchctl, domain_uid: int) -> str:
+    """What ``launchctl print`` says about ``com.ciao.updater``, or ``""``.
+
+    Empty for every answer that names no loaded job: a non-zero exit, a
+    launchctl that cannot be run at all, or output with no field in it. A
+    one-shot LaunchAgent stays registered in launchd after its process exits, so
+    this being non-empty says the job is *loaded*, and nothing more than that.
+    """
+    try:
+        printed = launch(["print", f"gui/{domain_uid}/{UPDATER_LABEL}"])
+    except OSError:
+        return ""
+    if printed.returncode != 0:
+        return ""
+    return printed.stdout or ""
+
+
 def _updater_running(launch: Launchctl, domain_uid: int) -> bool:
-    """Whether a swap is running *right now* in ``com.ciao.updater``.
+    """Whether a process is running ``com.ciao.updater`` *right now*.
 
     Deliberately not "is the job loaded". A one-shot LaunchAgent stays loaded
     in launchd after its process exits, and nothing here ever boots it out, so
@@ -1734,13 +1818,30 @@ def _updater_running(launch: Launchctl, domain_uid: int) -> bool:
     missing job does: there is no swap in flight, and the rollback that follows
     is the same total one `run_apply` would have run itself.
     """
-    try:
-        printed = launch(["print", f"gui/{domain_uid}/{UPDATER_LABEL}"])
-    except OSError:
+    return _LOADED_PID.search(_loaded_updater(launch, domain_uid)) is not None
+
+
+def _swap_in_flight(launch: Launchctl, domain_uid: int) -> bool:
+    """Whether a live ``run-apply`` owns ``com.ciao.updater`` — a real swap.
+
+    The pid alone is not enough, and getting this wrong strands the machine
+    recovery exists to repair. ``run-recover`` runs under the *same* label
+    (:func:`recover_interrupted_apply` bootstraps it there), so the process
+    executing :func:`recover_apply` is `com.ciao.updater` and `launchctl print`
+    reports its own live pid back to it. A job whose arguments name `run-recover`
+    is this very recovery and must proceed; only a loaded *and* running job whose
+    arguments name `run-apply` is a swap in flight.
+
+    Anything launchd does not render — no pid, no arguments block — answers
+    False, for the same reason a launchctl that cannot be run does: there is no
+    swap in flight to race, the lock this job already holds is what actually
+    keeps the two apart, and answering True here would leave every interrupted
+    swap unrolled back.
+    """
+    printed = _loaded_updater(launch, domain_uid)
+    if _LOADED_PID.search(printed) is None:
         return False
-    if printed.returncode != 0:
-        return False
-    return _LOADED_PID.search(printed.stdout or "") is not None
+    return "run-apply" in _loaded_tokens(printed, "arguments")
 
 
 def _recover_python(op: Operation) -> str:
@@ -1803,7 +1904,10 @@ def recover_interrupted_apply(
       evidence that the updater died, and two rollbacks over one env is the race
       this function exists to prevent. A job that is only still *loaded* — which
       is what a killed updater leaves behind — is not a running swap and does
-      not defer, or nothing would ever recover the crash it left.
+      not defer, or nothing would ever recover the crash it left. This asks only
+      whether *anything* is running that label, which is the safe direction
+      here: a deferral costs one boot, while standing down in the job it
+      bootstraps would cost the rollback entirely (see :func:`_swap_in_flight`).
     * A recovery job that will not load leaves the phase alone and writes the
       reason onto the record, so the next boot tries again and the operator can
       read why it did not.
@@ -1913,6 +2017,12 @@ def recover_apply(
     window it exists for. Nothing is posted and nothing is written when it
     stands down: the swap in flight owns the record, and it owns the drain.
 
+    That stand-down is asked with :func:`_swap_in_flight` rather than "is
+    ``com.ciao.updater`` running", because the one-shot job this function also
+    runs under carries the *same* label: reading the bare pid made the recovery
+    stand down against its own process and restore nothing, which is the
+    acceptance criterion for the whole feature.
+
     Once the lock is held, this is the only process working on the record, so
     every other answer here is final for this operation: no record, a different
     operation, or a phase that has already been settled all mean there is
@@ -1920,6 +2030,10 @@ def recover_apply(
     re-reading that same answer in 30 seconds. None of those is a failure, and
     none of them touches the engine, the env or the record — a recovery that
     never owned the drain must not reopen admission that someone else closed.
+    A *newer* update's net is the exception to the retiring: it is installed
+    under this same label and in these same two plists, so a stale one-shot
+    that pulls them down would take away the only recovery for the update that
+    is actually in flight.
 
     Nothing here raises once the engine is down, and nothing before the stop
     touches a file: the record is the outcome, and the operator's engine is
@@ -1953,12 +2067,27 @@ def recover_apply(
         return None
     try:
         op = read_operation(root)
-        if op is None or op.id != operation_id:
-            # Either this plist outlived the operation it names, or a newer
-            # update has taken the record over. Both mean the same thing: there
-            # is nothing here to undo, and the operation in flight is not this
-            # job's to rewrite. The engine is untouched and still serving.
+        if op is None:
+            # No record at all: the transaction this plist was installed for is
+            # gone, so the net has nothing left to guard and retires itself.
             _retire_job(launch, domain_uid, RECOVER_LABEL, *_recovery_plists(root))
+            return None
+        if op.id != operation_id:
+            # A newer update has taken the record over, and there is nothing
+            # here to undo: the operation in flight is not this job's to
+            # rewrite, and the engine is untouched and still serving. This plist
+            # *is* stale — but the net in front of the operator now is the new
+            # update's, installed under this same label and in these same two
+            # plists, so retiring from here would pull down the only recovery
+            # for the swap that is actually in flight. It stays loaded and keeps
+            # answering for its own (retired) id until the newer one settles and
+            # retires the pair.
+            logger.info(
+                "engine update %s is the one in flight, not %s; leaving the "
+                "recovery net standing",
+                op.id,
+                operation_id,
+            )
             return None
         if op.phase not in _POST_MOVE_PHASES:
             # The transaction finished while this job was starting. It settled
@@ -1966,12 +2095,15 @@ def recover_apply(
             # an outcome the operator already has.
             _retire_job(launch, domain_uid, RECOVER_LABEL, *_recovery_plists(root))
             return None
-        if _updater_running(launch, domain_uid):
+        if _swap_in_flight(launch, domain_uid):
             # Belt to the lock above: an apply that holds the record and is
             # still running must not be second-guessed by a second rollback over
-            # one env, whatever the lock is doing about it.
+            # one env, whatever the lock is doing about it. A live job of this
+            # same label running `run-recover` is *this* process — see
+            # `_swap_in_flight` — and the check has to let it through.
             logger.warning(
-                "engine update %s is %s and %s is running; standing down",
+                "engine update %s is %s and a %s run-apply is still running; "
+                "standing down",
                 op.id,
                 op.phase,
                 UPDATER_LABEL,
