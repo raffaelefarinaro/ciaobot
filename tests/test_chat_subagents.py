@@ -1824,6 +1824,105 @@ async def test_task_only_watcher_exits_on_restart_drain(
     assert chat.chat_id not in pcm.active_chat_ids()
 
 
+async def test_cancelled_drain_wakes_dead_cli_task(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A cancelled drain has no boot to sweep up after it, so it wakes the chat.
+
+    The task-only watcher above exits on a drain on the promise of
+    ``sweep_orphaned_cli_tasks`` at the next start. A cancelled drain has no next
+    start, so the chat that left a Monitor running has to be woken here or the
+    task is never reported.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-cancel", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-cancel-test")
+    chat.session_id = "sess-task-cancel-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-cancel-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    pcm.begin_restart_drain()
+    # The watcher gives up on the task while the drain is up, waking nothing.
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    assert wakes == []
+    assert chat.chat_id not in pcm.active_chat_ids()
+
+    pcm.cancel_restart_drain()
+
+    assert len(wakes) == 1
+    parent, prompt, count = wakes[0]
+    assert parent is chat
+    assert count == 1
+    assert prompt.startswith(subagent_tracking.CLI_TASK_WAKE_PREFIX)
+    assert "bl7dzu4ku" in prompt
+
+
+async def test_cancelled_drain_does_not_wake_live_cli_owner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The replay must not talk over a CLI that is still alive.
+
+    Same setup as ``test_cancelled_drain_wakes_dead_cli_task`` with the owner
+    alive, and the same expectation of no wake — the CLI itself still answers
+    its task notifications, so a replay that woke it would interleave a turn
+    into one the user is already having. The drain replay and the boot sweep
+    both reach their wakes through ``_cli_owner_alive``, so this pins the
+    guard both paths share.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("task-live", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="task-live-test")
+    chat.session_id = "sess-task-live-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-task-live-1.jsonl"
+    _write_jsonl(session_path, _monitor_task_records())
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda *args, **kwargs: session_path,
+    )
+    monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: True)
+
+    wakes: list[tuple[object, str, int]] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+    )
+
+    pcm.begin_restart_drain()
+    # The watcher gives up on the task while the drain is up, waking nothing.
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    assert wakes == []
+    assert chat.chat_id not in pcm.active_chat_ids()
+
+    pcm.cancel_restart_drain()
+
+    # A live owner handles the notification itself; the replay stays out.
+    assert wakes == []
+
+
 async def test_failed_wake_is_not_rearmed(tmp_path: Path, monkeypatch) -> None:
     """A wake that never reaches the JSONL must not re-arm forever."""
     pcm = _make_manager(tmp_path)
