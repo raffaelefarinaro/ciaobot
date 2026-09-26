@@ -3160,68 +3160,6 @@ def _eval_command(args: argparse.Namespace) -> int:
     return 2
 
 
-def _insights_compare_command(args: argparse.Namespace) -> int:
-    """Dry-run: extract the same archived chats one-shot and as an agent.
-
-    Writes one Markdown report and nothing else — no proposals file, no
-    regions, no archive edits. Per-chat results are cached under
-    `.runtime/insights_compare/<run id>/`, so an interrupted run resumes
-    instead of re-paying for the chats it already finished.
-    """
-    import asyncio
-
-    from ciao import critique
-    from ciao.config import CiaoConfig
-    from ciao.insights_compare import (
-        default_report_path,
-        render_report,
-        run_compare,
-        select_archives,
-    )
-
-    env = dict(os.environ)
-    env.setdefault("PWA_AUTH_TOKEN", "insights-compare")
-    config = CiaoConfig.from_env(env)
-    critique.apply_app_settings_overlay(config)
-
-    today = datetime.date.today().isoformat()
-    cands = select_archives(
-        config,
-        workspace=args.workspace,
-        last=args.last,
-        sample=args.sample,
-        seed=args.seed,
-    )
-    if not cands:
-        print("No archived chats matched.")
-        return 1
-
-    cache_dir = config.state_path.parent / "insights_compare" / args.run_id
-    results = asyncio.run(
-        run_compare(
-            config, cands,
-            cache_dir=cache_dir,
-            concurrency=args.concurrency,
-        )
-    )
-    # The report belongs in the vault whose notes were compared. Routing
-    # followed `--workspace`, so writing it under the install-wide vault put
-    # it outside the workspace the run actually read.
-    out_vault = (
-        config.workspace_vault_root(args.workspace)
-        if args.workspace
-        else config.vault_root
-    )
-    out = args.out or default_report_path(out_vault, today)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(
-        render_report(results, workspace=args.workspace, started=today),
-        encoding="utf-8",
-    )
-    print(f"Wrote {out}")
-    return 0
-
-
 # A busy lease is not an error the caller should retry immediately, and it is
 # not success either. 75 is EX_TEMPFAIL, which is what a scheduled run that
 # found the vault already being curated actually means.
@@ -5099,50 +5037,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit the structured comparison as JSON."
     )
     eval_compare.set_defaults(func=_eval_command)
-
-    insights_compare_parser = subparsers.add_parser(
-        "insights-compare",
-        help=(
-            "Dry run: extract archived chats with today's one-shot path and "
-            "with a read-only agent, and write a Markdown comparison. "
-            "Nothing is applied to memory."
-        ),
-    )
-    insights_compare_parser.add_argument(
-        "--workspace", default="",
-        help="Workspace name to compare. Empty means every workspace.",
-    )
-    insights_compare_parser.add_argument(
-        "--last", type=int, default=50,
-        help="How many archived chats to compare (default: 50).",
-    )
-    insights_compare_parser.add_argument(
-        "--sample", default="varied", choices=["recent", "varied"],
-        help=(
-            "'recent' takes the newest chats; 'varied' spreads them over "
-            "transcript length and provider (default: varied)."
-        ),
-    )
-    insights_compare_parser.add_argument(
-        "--seed", type=int, default=0,
-        help="Seed for the 'varied' sampler, so a rerun picks the same chats.",
-    )
-    insights_compare_parser.add_argument(
-        "--concurrency", type=int, default=3,
-        help="Chats compared at once; each one is up to two model runs.",
-    )
-    insights_compare_parser.add_argument(
-        "--out", type=Path, default=None,
-        help="Report path (default: <vault>/Workspace/Insights-Compare-<date>.md).",
-    )
-    insights_compare_parser.add_argument(
-        "--run-id", default=datetime.date.today().isoformat(),
-        help=(
-            "Cache directory name for resuming an interrupted run "
-            "(default: today's date)."
-        ),
-    )
-    insights_compare_parser.set_defaults(func=_insights_compare_command)
 
     skills_parser = subparsers.add_parser(
         "skills",

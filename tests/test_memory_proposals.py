@@ -496,11 +496,11 @@ _ROUTE_SAMPLE = (
 def test_route_insights_is_pure_and_matches_archive_routing(
     tmp_path: Path,
 ) -> None:
-    """The comparison's routing is the pipeline's routing, minus the writes.
+    """Archive-time routing writes nothing: it classifies and suppresses only.
 
-    The insights-compare report is only worth reading if both modes are
-    scored by the same function the live pipeline uses, and it is only safe
-    to call that function from a dry run if it writes nothing.
+    ``route_insights`` decides where each fact belongs before anything is
+    filed, so a caller can score or preview a routing verdict without the
+    vault moving.
     """
     vault = tmp_path / "vault"
     vault.mkdir()

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime
 import json
 import plistlib
 import sqlite3
@@ -199,106 +198,6 @@ def test_cli_workspace_census_dispatches_command(
     assert cli.main(["workspace-census", "--vault-root", "/tmp/vault", "--json"]) == 0
     assert str(called[0].vault_root) == "/tmp/vault"
     assert called[0].json is True
-
-
-def test_insights_compare_parses_args(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = []
-
-    monkeypatch.setattr(
-        cli, "_insights_compare_command", lambda args: called.append(args) or 0
-    )
-
-    assert cli.main([
-        "insights-compare",
-        "--workspace", "personal",
-        "--last", "25",
-        "--sample", "recent",
-        "--seed", "7",
-        "--concurrency", "5",
-        "--run-id", "run-1",
-    ]) == 0
-    assert called[0].workspace == "personal"
-    assert called[0].last == 25
-    assert called[0].sample == "recent"
-    assert called[0].seed == 7
-    assert called[0].concurrency == 5
-    assert called[0].run_id == "run-1"
-    assert called[0].out is None
-
-    # The defaults are the ones the plan fixes, so a bare invocation is the
-    # 50-chat varied sample of today's date.
-    cli.main(["insights-compare"])
-    assert called[1].workspace == ""
-    assert called[1].last == 50
-    assert called[1].sample == "varied"
-    assert called[1].concurrency == 3
-    assert called[1].run_id == datetime.date.today().isoformat()
-
-
-def test_insights_compare_writes_the_report_into_the_named_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`--workspace personal` must land the report in that workspace's vault.
-
-    Both modes were routed against that workspace's notes, so a report under
-    the install-wide vault is a file in a vault the run never read — and the
-    acceptance criterion for this command is that it changes nothing outside
-    the workspace it compared.
-    """
-    from ciao import critique
-    from ciao.config import CiaoConfig, WorkspaceConfig
-    from ciao import insights_compare
-
-    config = CiaoConfig(
-        pwa_auth_token="t",
-        workspace_root=tmp_path / "ws",
-        state_path=tmp_path / "ws" / ".runtime" / "state.json",
-        media_root=tmp_path / "ws" / ".runtime" / "media",
-        vault_root=tmp_path / "vault",
-        workspaces={
-            "personal": WorkspaceConfig(name="personal", vault_root="personal")
-        },
-    )
-    (config.workspace_root / ".runtime").mkdir(parents=True)
-
-    monkeypatch.setattr(
-        CiaoConfig, "from_env", staticmethod(lambda env=None: config)
-    )
-    monkeypatch.setattr(
-        critique, "apply_app_settings_overlay", lambda cfg: None
-    )
-    monkeypatch.setattr(
-        insights_compare, "select_archives", lambda *a, **k: [
-            insights_compare.Candidate(
-                archive_path=tmp_path / "chat.md", chat_id="chat-1",
-                provider="claude", workspace="personal", chars=2000,
-            )
-        ]
-    )
-
-    async def fake_run_compare(config, candidates, **kwargs):
-        return [
-            {
-                "chat_id": cand.chat_id, "provider": cand.provider,
-                "workspace": cand.workspace, "chars": cand.chars,
-                "oneshot": {"status": "ok", "seconds": 1.0, "kept": []},
-                "agent": {"status": "ok", "seconds": 2.0, "kept": []},
-            }
-            for cand in candidates
-        ]
-
-    monkeypatch.setattr(insights_compare, "run_compare", fake_run_compare)
-
-    assert cli.main(["insights-compare", "--workspace", "personal"]) == 0
-
-    today = datetime.date.today().isoformat()
-    written = config.workspace_vault_root("personal") / "Workspace" / (
-        f"Insights-Compare-{today}.md"
-    )
-    assert config.workspace_vault_root("personal") != config.vault_root
-    assert written.exists()
-    assert "### chat-1" in written.read_text(encoding="utf-8")
-    assert not (config.vault_root / "Workspace").exists()
 
 
 def _write_healthy_audit_workspace(root: Path) -> None:
