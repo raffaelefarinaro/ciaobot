@@ -17,6 +17,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import logging
 import math
 import os
 import plistlib
@@ -31,9 +32,11 @@ import urllib.request
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Any, Callable
+from typing import IO, Any, Callable, Sequence
 
 from ciao import install_receipt, macos_service, package_version, release_manifest
+
+logger = logging.getLogger(__name__)
 
 # `verifying` is the manifest/digest check of the staging half, so the
 # post-start readiness check gets its own name: an operator reading the record
@@ -646,8 +649,20 @@ def _drain_timeout_arg(value: str) -> float:
     return seconds
 
 
-def _write_updater_plist(op: Operation, python: str, state_dir: Path) -> Path:
+def _write_updater_plist(
+    op: Operation,
+    python: str,
+    state_dir: Path,
+    *,
+    verb: str = "run-apply",
+    args: Sequence[str] | None = None,
+) -> Path:
     """Write the one-shot updater LaunchAgent and return the path written.
+
+    `verb` and `args` are what the job runs: `run-apply` for a staged swap and
+    `run-recover` for one an earlier reboot left half-finished. Everything else
+    is identical on purpose — both are the same detached, abandon-process-group,
+    run-once job, differing only in what the operation asks them to do.
 
     Owner-only, and through a temp file, because ``launchctl bootstrap`` reads
     it immediately afterwards and a half-written plist would be a job that
@@ -661,9 +676,8 @@ def _write_updater_plist(op: Operation, python: str, state_dir: Path) -> Path:
             "-I",
             "-m",
             "ciao.engine_update",
-            "run-apply",
-            "--operation",
-            op.id,
+            verb,
+            *(args if args is not None else ["--operation", op.id]),
         ],
         # RunAtLoad, once: the job performs the swap and exits. `KeepAlive`
         # false is the safety property here — a failed swap must not become a
@@ -1081,6 +1095,42 @@ def _rollback(
     return errors
 
 
+def _server_plist_disagreement(live_env: Path) -> str:
+    """Why the loaded ``com.ciao.server`` does not run ``live_env``, or ``""``.
+
+    The swap replaces the env the receipt names, so it only means anything if
+    that is the env the service is actually running: a Ciaobot.app installed
+    over a terminal install, or a hand-edited plist, leaves the receipt and the
+    loaded job disagreeing, and the swap would then replace an env nothing is
+    using. Checked before anything moves, so the refusal costs the operator a
+    re-apply and not their install.
+
+    A missing, unreadable or argument-less plist is *not* a disagreement: a
+    service that has not been loaded yet is restored by the rollback's own start
+    step, and a plist this process cannot parse is evidence of nothing. Only an
+    answer that names a program outside the receipt's env refuses.
+    """
+    path = macos_service.default_launch_agents_dir() / f"{SERVER_LABEL}.plist"
+    try:
+        with path.open("rb") as handle:
+            loaded: Any = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return ""
+    if not isinstance(loaded, dict):
+        return ""
+    arguments = loaded.get("ProgramArguments")
+    if not isinstance(arguments, list) or not arguments:
+        return ""
+    program = str(arguments[0])
+    if Path(program).is_relative_to(live_env):
+        return ""
+    return (
+        f"the loaded {SERVER_LABEL} runs {program}, not the receipt's "
+        f"environment {live_env}; point the LaunchAgent at the install the "
+        "receipt names, or reinstall, then apply again"
+    )
+
+
 def run_apply(
     operation_id: str,
     *,
@@ -1191,6 +1241,13 @@ def run_apply(
             return record(_reason(exc))
 
         live_env = Path(receipt.python).parent.parent
+        # Before anything moves: the swap is only meaningful against the env the
+        # service actually runs, and a receipt that disagrees with the loaded
+        # plist means the receipt is the thing that is wrong. Refusing here is
+        # the same "nothing is touched" class as the pre-flight checks above.
+        disagreement = _server_plist_disagreement(live_env)
+        if disagreement:
+            return record(disagreement)
         previous_env = Path(op.stage_dir) / PREVIOUS_ENV_NAME
         env_moved = False
 
@@ -1338,6 +1395,283 @@ def run_apply(
         release_lock(handle)
 
 
+# The phases an interrupted swap can leave behind, and the only ones recovery
+# acts on. `stopping` is deliberately absent: nothing has moved yet, and a
+# rollback that deleted the only copy of a live env over it would be the very
+# damage recovery exists to prevent. Every other phase is a decision the
+# transaction already made and an operator should not have to re-make.
+_POST_MOVE_PHASES = ("swapping", "starting", "verifying_start", "rolling_back")
+
+
+def _updater_loaded(launch: Launchctl, domain_uid: int) -> bool:
+    """Whether the one-shot updater job is still loaded, i.e. still swapping.
+
+    `launchctl print` exits non-zero for a job that is not loaded, which is the
+    normal answer: the one-shot job runs the swap and exits. A launchctl that
+    cannot be run at all answers False for the same reason — there is no job
+    loaded to own the record, and the rollback that follows is the same total
+    one `run_apply` would have run itself.
+    """
+    try:
+        return launch(["print", f"gui/{domain_uid}/{UPDATER_LABEL}"]).returncode == 0
+    except OSError:
+        return False
+
+
+def _recover_python(op: Operation) -> str:
+    """The interpreter the recovery job runs from.
+
+    The staged env first: it is the one environment the swap never touches, and
+    it is what `run-apply` itself runs from. Then the previous env — the install
+    a rollback is about to put back, so it is both the second-best thing to run
+    the recovery *from* and the last one guaranteed to have `ciao` importable.
+    Failing both, this process's own interpreter: it is the engine that is
+    running the recovery, and the recovery job is a *sibling* of
+    `com.ciao.server`, so the bootout that follows cannot take it down.
+    """
+    for candidate in (
+        op.env_python,
+        str(Path(op.stage_dir) / PREVIOUS_ENV_NAME / "bin" / "python"),
+    ):
+        if candidate and Path(candidate).exists():
+            return candidate
+    return sys.executable
+
+
+def recover_interrupted_apply(
+    *,
+    state_dir: Path | None = None,
+    launchctl: Launchctl | None = None,
+    uid: int | None = None,
+    updater_loaded: Callable[[], bool] | None = None,
+) -> Operation | None:
+    """Hand a swap an earlier boot interrupted to a detached recovery job.
+
+    :func:`run_apply` moves the live env aside from a *sibling* launchd job, so
+    the engine being up says nothing at all about whether the apply is still
+    running: a machine that reboots mid-swap comes back with the record in one
+    of the post-move phases, the env renamed to `previous-env`, and launchd's
+    `KeepAlive` on `com.ciao.server` perfectly willing to start the
+    half-installed engine. Called once from `ciao/main.py` at startup, on the
+    machine that owns the state dir, this recognises that record and bootstraps
+    `com.ciao.updater` in `run-recover` mode, which is what actually rolls back
+    (:func:`recover_apply`).
+
+    Nothing is moved, stopped or waited on in this process, and that is the
+    whole design: the engine cannot roll back the environment it is running out
+    of, the `bootout` that has to come first would take it down before it
+    finished, and `/api/startup-status` has nothing to answer until the server
+    binds. The recovery job is outside all of that by construction, which is the
+    same reason `apply_update` hands its half to a job rather than doing it
+    inline.
+
+    Fail-safe at every step, because a recovery that guesses is worse than one
+    that does nothing:
+
+    * A record that is not in a post-move phase is left alone, terminal phases
+      included: it is an outcome, not an interrupted transaction. `stopping` is
+      in that set because nothing has moved yet, and a rollback that deleted the
+      only copy of a live env over it would be the damage this exists to
+      prevent.
+    * A loaded `com.ciao.updater` means another process owns the swap, so the
+      record comes back untouched. The engine being up is not evidence that the
+      updater died, and two rollbacks over one env is the race this function
+      exists to prevent.
+    * A recovery job that will not load leaves the phase alone and writes the
+      reason onto the record, so the next boot tries again and the operator can
+      read why it did not.
+    * Nothing raises. A startup path must not die on bookkeeping, so any
+      unexpected failure is logged and reported as "nothing was recovered".
+    """
+    root = state_dir or default_state_dir()
+    op: Operation | None = None
+    try:
+        op = read_operation(root)
+        if op is None or op.phase not in _POST_MOVE_PHASES:
+            return None
+        # A local alias, not a closure over `op`: this is the record recovery
+        # is about, and it has to be writable from inside `advance`.
+        record: Operation = op
+        interrupted_at = record.phase
+
+        launch = launchctl or (lambda args: macos_service._launchctl(args))
+        domain_uid = os.getuid() if uid is None else uid
+        loaded = (
+            updater_loaded()
+            if updater_loaded is not None
+            else _updater_loaded(launch, domain_uid)
+        )
+        if loaded:
+            logger.warning(
+                "engine update %s is %s and %s is still loaded; leaving it to the updater",
+                record.id,
+                interrupted_at,
+                UPDATER_LABEL,
+            )
+            return record
+
+        def advance(phase: str) -> None:
+            record.phase = phase
+            record.updated_at = _now()
+            write_operation(record, root)
+
+        plist_path = _write_updater_plist(
+            record, _recover_python(record), root, verb="run-recover"
+        )
+        # bootout before bootstrap, as in `apply_update`: a job left loaded from
+        # an earlier attempt would make bootstrap fail with "service already
+        # loaded" and leave a half-swapped env with nothing to finish it. The
+        # loaded check above is the real guard; this is the belt to it.
+        launch(["bootout", f"gui/{domain_uid}/{UPDATER_LABEL}"])
+        bootstrap = launch(["bootstrap", f"gui/{domain_uid}", str(plist_path)])
+        if bootstrap.returncode != 0:
+            detail = (bootstrap.stderr or bootstrap.stdout or "").strip()
+            logger.error(
+                "could not start the recovery job for %s: %s",
+                record.id,
+                detail or "launchctl bootstrap failed",
+            )
+            # The phase stays where it was: this is still an interrupted swap, so
+            # the next boot tries again. The reason goes on the record, because a
+            # record that says nothing is what leaves an operator guessing.
+            record.error = (
+                f"interrupted during {interrupted_at}; recovery job did not "
+                f"start: {detail or 'launchctl bootstrap failed'}"
+            )
+            _advance_ignoring_failure(advance, interrupted_at)
+            return record
+        logger.warning(
+            "engine update %s was interrupted during %s; recovery job bootstrapped",
+            record.id,
+            interrupted_at,
+        )
+        return record
+    except Exception:  # noqa: BLE001 — a startup path must not die on recovery
+        logger.exception("Engine update recovery failed")
+        return op
+
+
+def recover_apply(
+    operation_id: str,
+    *,
+    state_dir: Path | None = None,
+    port: int | None = None,
+    http_post: PostJson | None = None,
+    http_get: GetJson | None = None,
+    launchctl: Launchctl | None = None,
+    start_service: ServiceStarter | None = None,
+    uid: int | None = None,
+    sleep: Sleep = time.sleep,
+    clock: Clock = time.monotonic,
+    receipt_path: Path | None = None,
+) -> Operation:
+    """Stop the engine and run the same ``_rollback`` for an interrupted swap.
+
+    The detached half of :func:`recover_interrupted_apply`, launched through the
+    same one-shot ``com.ciao.updater`` job as :func:`run_apply` and for the same
+    reason: the engine cannot restore the env it is running out of, and the
+    ``bootout`` that has to come first would kill a child process of the job
+    doing the restoring. So this is ``run_apply``'s post-preflight sequence with
+    a rollback in place of a swap — lock, read the record, stop the engine, then
+    the same total ``_rollback`` — and it settles the record the same way.
+
+    Nothing here raises once the engine is down, and nothing before the stop
+    touches a file: the record is the outcome, and the operator's engine is
+    started again either way.
+    """
+    root = state_dir or default_state_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    post = http_post or _post_json
+    get = http_get or _get_json
+    launch = launchctl or (lambda args: macos_service._launchctl(args))
+    start = start_service or (lambda: macos_service.start_service())
+    domain_uid = os.getuid() if uid is None else uid
+    base = f"http://localhost:{_engine_port() if port is None else port}"
+    status_url = f"{base}/api/startup-status"
+
+    try:
+        handle = _acquire_lock_waiting(root, sleep, clock)
+    except UpdateInProgress:
+        # Someone else owns the state dir, and this job has not stopped
+        # anything, so the cancel goes out before the failure propagates.
+        _reopen_admission(post, base)
+        raise
+    try:
+        op = read_operation(root)
+        if op is None or op.id != operation_id:
+            _reopen_admission(post, base)
+            raise UpdateError(f"no update with id {operation_id!r} to recover")
+        if op.phase not in _POST_MOVE_PHASES:
+            # The transaction finished while this job was starting. It settled
+            # the record itself, and a rollback over a settled phase would undo
+            # an outcome the operator already has.
+            _reopen_admission(post, base)
+            raise UpdateError(
+                f"update {operation_id} is {op.phase}, not an interrupted swap"
+            )
+
+        def advance(phase: str) -> None:
+            op.phase = phase
+            op.updated_at = _now()
+            write_operation(op, root)
+
+        def record_failure(message: str) -> Operation:
+            """Settle the record as an unrecovered swap, touching no file."""
+            op.error = message
+            _advance_ignoring_failure(advance, "rollback_failed")
+            _reopen_admission(post, base)
+            return op
+
+        receipt = install_receipt.read_receipt(receipt_path)
+        if receipt is None:
+            # The rollback is built from the receipt: without one there is no
+            # live env to put back, and the engine is still up and serving.
+            return record_failure(
+                "no install receipt, so the interrupted swap cannot be rolled back"
+            )
+
+        live_env = Path(receipt.python).parent.parent
+        previous_env = Path(op.stage_dir) / PREVIOUS_ENV_NAME
+        # Only a move that really happened is undone. A swap interrupted before
+        # its rename left the live env exactly as the operator runs it, and
+        # "restoring" that would mean deleting the only working copy of the
+        # engine — the case `_rollback` is careful about for the same reason.
+        env_moved = previous_env.exists() and not live_env.exists()
+
+        logger.warning(
+            "recovering engine update %s interrupted during %s", op.id, op.phase
+        )
+        _advance_ignoring_failure(advance, "rolling_back")
+        errors = _rollback(
+            op,
+            receipt=receipt,
+            receipt_path=receipt_path,
+            live_env=live_env,
+            previous_env=previous_env,
+            env_moved=env_moved,
+            domain_uid=domain_uid,
+            status_url=status_url,
+            launch=launch,
+            get=get,
+            start=start,
+            sleep=sleep,
+            clock=clock,
+        )
+        if errors:
+            op.error = (
+                f"interrupted during recovery; rollback failed: {'; '.join(errors)}"
+            )
+            _advance_ignoring_failure(advance, "rollback_failed")
+        else:
+            op.error = (
+                f"interrupted during recovery; rolled back to {op.from_version}"
+            )
+            _advance_ignoring_failure(advance, "rolled_back")
+        return op
+    finally:
+        release_lock(handle)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for ``ciao update``."""
     parser = argparse.ArgumentParser(prog="ciao update", description=__doc__)
@@ -1369,6 +1703,12 @@ def main(argv: list[str] | None = None) -> int:
     detached = sub.add_parser("run-apply", help=argparse.SUPPRESS)
     detached.add_argument("--operation", required=True, help="staged operation id")
 
+    # Hidden, and the same job in its recovery role: `recover_interrupted_apply`
+    # bootstraps this when it finds a swap an earlier boot interrupted, and it
+    # exits 0 for the same reason `run-apply` does.
+    recovery = sub.add_parser("run-recover", help=argparse.SUPPRESS)
+    recovery.add_argument("--operation", required=True, help="interrupted operation id")
+
     args = parser.parse_args(argv)
 
     if args.command == "status":
@@ -1382,6 +1722,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run-apply":
         try:
             run_apply(args.operation)
+        except Exception as exc:  # noqa: BLE001 — the record is the outcome
+            print(f"Error: {exc}", file=sys.stderr)
+        return 0
+
+    if args.command == "run-recover":
+        try:
+            recover_apply(args.operation)
         except Exception as exc:  # noqa: BLE001 — the record is the outcome
             print(f"Error: {exc}", file=sys.stderr)
         return 0

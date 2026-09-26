@@ -503,6 +503,37 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         tracker.fail("recover_memory_receipts", "receipt recovery failed")
         logger.exception("Memory receipt recovery failed")
 
+    # An engine update interrupted by a reboot, a logout or a killed updater job
+    # leaves its record in a post-move phase with the env moved aside and
+    # nothing resuming it: the `ciao` shim and the LaunchAgent can point into a
+    # half-installed env, and launchd's `KeepAlive` on `com.ciao.server` will
+    # start it anyway. Recognised once here, on the machine that owns the state
+    # dir, before the server binds. It only *bootstraps* the detached
+    # `com.ciao.updater` job that does the rollback — this process cannot: it is
+    # the engine being booted out, and moving the env it is running out of from
+    # under itself is how a recovery turns into a second outage. So this never
+    # waits on the recovery, only on the job launch. macOS-only because the swap
+    # is launchd's; the state dir is absent elsewhere, and the call is then a
+    # cheap no-op.
+    if sys.platform == "darwin":
+        tracker.start("recover_engine_update")
+        try:
+            from ciao.engine_update import recover_interrupted_apply
+
+            recovered = await asyncio.to_thread(recover_interrupted_apply)
+            if recovered is None:
+                tracker.done("recover_engine_update")
+            else:
+                logger.warning(
+                    "Interrupted engine update %s (%s) handed to a recovery job",
+                    recovered.id,
+                    recovered.phase,
+                )
+                tracker.done("recover_engine_update", recovered.phase)
+        except Exception:
+            tracker.fail("recover_engine_update", "engine update recovery failed")
+            logger.exception("Engine update recovery failed")
+
     # The PWA ships pre-built in the installed package; workspaces never
     # contain app source, so there is no frontend rebuild at startup.
 
