@@ -278,11 +278,6 @@ async def test_postprocess_failure_cleans_state_and_persists(tmp_path: Path) -> 
 async def test_retry_and_startup_resume_use_owned_manifest_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The one-shot insights stage is filtered once memory passes are on, which
-    # leaves a resume with nothing to launch. This test is about the manifest
-    # state the resume reads, not about which stages are registered, so it pins
-    # the flag Off to keep exercising the resume.
-    monkeypatch.setattr(memory_pass, "MEMORY_PASS_CHATS", False)
     host, pipeline, chat = _host(tmp_path)
     job = aj.create_job(
         host._runtime_root,
@@ -292,7 +287,7 @@ async def test_retry_and_startup_resume_use_owned_manifest_state(
             host._config.workspace_root / chat.archive_path
         ),
     )
-    job.mark("insights", aj.FAILED, "temporary failure")
+    job.mark("trajectory", aj.FAILED, "temporary failure")
     job.save()
     host.job = job
     host.inputs = {
@@ -306,7 +301,7 @@ async def test_retry_and_startup_resume_use_owned_manifest_state(
 
     # A running stage left by a dead process is made pending and resumed through
     # the same task registry that delete cancellation consumes.
-    job.stage("insights").status = aj.RUNNING
+    job.stage("trajectory").status = aj.RUNNING
     job.save()
     assert await pipeline.resume_interrupted_jobs(max_concurrency=1) == 1
     await asyncio.sleep(0)
@@ -316,7 +311,7 @@ async def test_retry_and_startup_resume_use_owned_manifest_state(
     assert pipeline.tasks == {}
     reloaded = aj.load_job(host._runtime_root, job.job_id)
     assert reloaded is not None
-    assert reloaded.status_of("insights") == aj.SUCCEEDED
+    assert reloaded.status_of("trajectory") == aj.SUCCEEDED
 
 
 @pytest.mark.asyncio

@@ -12,15 +12,12 @@ import {
 import type { ChatPostprocess } from './types'
 
 function running(step: string): ChatPostprocess {
-  return { state: 'running', step, expected: ['insights'], steps: {} }
+  return { state: 'running', step, expected: ['trajectory'], steps: {} }
 }
 
 describe('postprocessLabel', () => {
   it('names the step that is running', () => {
-    expect(postprocessLabel(running('insights'))).toBe('extracting insights')
-    expect(postprocessLabel(running('project_doc_update'))).toBe('folding into project doc')
     expect(postprocessLabel(running('trajectory'))).toBe('saving trajectory')
-    expect(postprocessLabel(running('memory_proposals'))).toBe('proposing memories')
   })
 
   it('always says something for an unknown or missing step', () => {
@@ -31,74 +28,60 @@ describe('postprocessLabel', () => {
   })
 
   it('says nothing once the pipeline has settled', () => {
-    expect(postprocessLabel({ state: 'done', step: 'insights' })).toBe('')
+    expect(postprocessLabel({ state: 'done', step: 'trajectory' })).toBe('')
     expect(postprocessLabel(null)).toBe('')
   })
 })
 
 describe('isPostprocessing', () => {
   it('is true only while the pipeline is alive', () => {
-    expect(isPostprocessing(running('insights'))).toBe(true)
+    expect(isPostprocessing(running('trajectory'))).toBe(true)
     expect(isPostprocessing({ state: 'done' })).toBe(false)
     expect(isPostprocessing(undefined)).toBe(false)
   })
 })
 
 describe('postprocessOutcomes', () => {
-  const full: ChatPostprocess = {
-    state: 'done',
-    steps: {
-      insights: { status: 'ok' },
-      project_doc_update: { status: 'ok', extra: { wrote: true } },
-      trajectory: { status: 'ok', extra: { path: '/x.json' } },
-      memory_proposals: { status: 'ok', extra: { proposals: 3, promoted: 1 } },
-    },
-  }
-
-  it('reports what the pipeline produced, in execution order', () => {
-    expect(postprocessOutcomes(full)).toEqual([
-      'insights added',
-      'project doc updated',
-      'trajectory saved',
-      '3 memory proposals',
-      '1 memory saved',
-    ])
-  })
-
-  it('counts proposals rather than reporting a bare boolean', () => {
-    const one: ChatPostprocess = {
+  it('reports what the pipeline produced', () => {
+    const done: ChatPostprocess = {
       state: 'done',
-      steps: { memory_proposals: { status: 'ok', extra: { proposals: 1 } } },
+      steps: { trajectory: { status: 'ok', extra: { path: '/x.json' } } },
     }
-    expect(postprocessOutcomes(one)).toEqual(['1 memory proposal'])
+    expect(postprocessOutcomes(done)).toEqual(['trajectory saved'])
   })
 
-  it('omits a project doc that had no material change to fold', () => {
-    const noop: ChatPostprocess = {
+  it('ignores a step the manifest never planned', () => {
+    // A chat archived by an older build carries the removed stages. They are
+    // history, not outcomes this pipeline produced.
+    const legacy: ChatPostprocess = {
       state: 'done',
       steps: {
         insights: { status: 'ok' },
-        project_doc_update: { status: 'ok', extra: { wrote: false } },
+        project_doc_update: { status: 'ok', extra: { wrote: true } },
+        memory_proposals: { status: 'ok', extra: { proposals: 3 } },
+        trajectory: { status: 'ok' },
       },
     }
-    expect(postprocessOutcomes(noop)).toEqual(['insights added'])
+    expect(postprocessOutcomes(legacy)).toEqual(['trajectory saved'])
   })
 
-  it('drops skipped steps but never drops a failure', () => {
-    const mixed: ChatPostprocess = {
+  it('drops a skipped step but never drops a failure', () => {
+    const skipped: ChatPostprocess = {
       state: 'done',
-      steps: {
-        insights: { status: 'error' },
-        trajectory: { status: 'ok' },
-        memory_proposals: { status: 'skipped' },
-      },
+      steps: { trajectory: { status: 'skipped' } },
+    }
+    expect(postprocessOutcomes(skipped)).toEqual([])
+
+    const failed: ChatPostprocess = {
+      state: 'done',
+      steps: { trajectory: { status: 'error' } },
     }
     // This line is the only place in the app a user would see the failure.
-    expect(postprocessOutcomes(mixed)).toEqual(['insights failed', 'trajectory saved'])
+    expect(postprocessOutcomes(failed)).toEqual(['trajectory failed'])
   })
 
   it('ignores steps that have not finished yet', () => {
-    expect(postprocessOutcomes(running('insights'))).toEqual([])
+    expect(postprocessOutcomes(running('trajectory'))).toEqual([])
   })
 })
 
@@ -106,17 +89,14 @@ describe('postprocessSummary', () => {
   it('joins the outcomes into one line', () => {
     const pp: ChatPostprocess = {
       state: 'done',
-      steps: {
-        insights: { status: 'ok' },
-        trajectory: { status: 'ok' },
-      },
+      steps: { trajectory: { status: 'ok' } },
     }
-    expect(postprocessSummary(pp)).toBe('insights added · trajectory saved')
+    expect(postprocessSummary(pp)).toBe('trajectory saved')
   })
 
   it('stays silent while the pipeline is still running', () => {
     // The live label covers that state; two lines at once would contradict.
-    expect(postprocessSummary(running('insights'))).toBe('')
+    expect(postprocessSummary(running('trajectory'))).toBe('')
   })
 
   it('says a pipeline produced nothing rather than rendering blank', () => {
@@ -134,20 +114,18 @@ describe('postprocessSummary', () => {
   })
 
   it('reports partial completion as unfinished work, not success', () => {
-    // The whole point of the manifest: a crash after insights must not read
-    // as "everything settled cleanly".
+    // The whole point of the manifest: a crash before the trajectory landed must
+    // not read as "everything settled cleanly".
     const pp: ChatPostprocess = {
       state: 'incomplete',
-      steps: { insights: { status: 'ok' } },
+      steps: { trajectory: { status: 'error' } },
       job: {
         job_id: 'j',
         state: 'incomplete',
-        unfinished: ['project_doc_update', 'memory_proposals'],
+        unfinished: ['trajectory'],
       },
     }
-    expect(postprocessSummary(pp)).toBe(
-      'insights added · project doc, memory proposals not finished',
-    )
+    expect(postprocessSummary(pp)).toBe('trajectory failed · trajectory not finished')
   })
 
   it('names the blocked reason when a job needs attention', () => {
@@ -161,8 +139,8 @@ describe('postprocessSummary', () => {
 
 describe('postprocessFailed', () => {
   it('is true when any step errored', () => {
-    expect(postprocessFailed({ state: 'done', steps: { insights: { status: 'error' } } })).toBe(true)
-    expect(postprocessFailed({ state: 'done', steps: { insights: { status: 'ok' } } })).toBe(false)
+    expect(postprocessFailed({ state: 'done', steps: { trajectory: { status: 'error' } } })).toBe(true)
+    expect(postprocessFailed({ state: 'done', steps: { trajectory: { status: 'ok' } } })).toBe(false)
     expect(postprocessFailed(null)).toBe(false)
   })
 })
@@ -172,20 +150,18 @@ describe('postprocessNeedsRetry', () => {
     expect(
       postprocessNeedsRetry({
         state: 'incomplete',
-        steps: { insights: { status: 'ok' }, memory_proposals: { status: 'error' } },
-        job: { job_id: 'j', state: 'incomplete', unfinished: ['memory_proposals'] },
+        steps: { trajectory: { status: 'error' } },
+        job: { job_id: 'j', state: 'incomplete', unfinished: ['trajectory'] },
       }),
     ).toBe(true)
     expect(postprocessNeedsRetry({ state: 'blocked' })).toBe(true)
-    // Back-compat: a legacy record with an errored insights step.
-    expect(postprocessNeedsRetry({ state: 'done', steps: { insights: { status: 'error' } } })).toBe(true)
   })
 
   it('is false while running or when everything settled', () => {
     // A running pipeline is still trying, not a retry case.
-    expect(postprocessNeedsRetry(running('insights'))).toBe(false)
-    expect(postprocessNeedsRetry({ state: 'done', steps: { insights: { status: 'ok' } } })).toBe(false)
-    expect(postprocessNeedsRetry({ state: 'done', steps: { insights: { status: 'skipped' } } })).toBe(false)
+    expect(postprocessNeedsRetry(running('trajectory'))).toBe(false)
+    expect(postprocessNeedsRetry({ state: 'done', steps: { trajectory: { status: 'ok' } } })).toBe(false)
+    expect(postprocessNeedsRetry({ state: 'done', steps: { trajectory: { status: 'skipped' } } })).toBe(false)
     expect(postprocessNeedsRetry(null)).toBe(false)
   })
 })
@@ -195,9 +171,9 @@ describe('postprocessUnfinished', () => {
     expect(
       postprocessUnfinished({
         state: 'incomplete',
-        job: { job_id: 'j', state: 'incomplete', unfinished: ['memory_proposals'] },
+        job: { job_id: 'j', state: 'incomplete', unfinished: ['trajectory'] },
       }),
-    ).toEqual(['memory_proposals'])
+    ).toEqual(['trajectory'])
     expect(postprocessUnfinished({ state: 'done' })).toEqual([])
     expect(postprocessUnfinished(null)).toEqual([])
   })

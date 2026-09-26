@@ -166,40 +166,12 @@ class JobSpec:
 
 
 REGISTRY: tuple[JobSpec, ...] = (
-    # The archive pipeline. All four run inside one `extract_and_append` task
-    # (ciao/insights.py), spawned once when a chat is archived — so they share
-    # one trigger and are reported as one group with four steps, in the order
-    # they actually execute.
-    JobSpec("insights", "Session insights", "content",
-            "Extracts durable insights from an archived session transcript.", True, True,
-            trigger="When a chat is archived and Automatic session insights is on.",
-            pipeline_label="When you archive a chat"),
-
-    JobSpec("project_doc_update", "Project doc update", "content",
-            "Folds a session's decisions and open loops into the project document.",
-            True, True,
-            trigger="After session insights, for chats that belong to a project.",
-            step_of="insights",
-            step_condition="if the chat belongs to a real project"),
+    # The archive postprocess. The trajectory is the one stage left of the
+    # archive pipeline (ciao/insights.py:run_archive_pipeline), spawned once
+    # when a chat is archived.
     JobSpec("trajectory", "Trajectory capture", "content",
             "Records a structured trajectory of the session for skill mining.", False, True,
-            trigger="When a chat is archived and Automatic trajectory capture is on.",
-            step_of="insights",
-            # Runs in a `finally`, so a failed extraction still leaves a
-            # trajectory; and `run_archive_postprocess` writes one directly
-            # when trajectory capture is enabled and insights is off, or when
-            # the chat is under the size gate.
-            step_condition="when enabled — also runs standalone"),
-    JobSpec("memory_proposals", "Memory proposals", "content",
-            "Proposes durable facts from a session's insights.", False, True,
-            trigger=(
-                "After session insights; confident facts are applied at "
-                "archive time. The daily system-memory-curation schedule "
-                "processes the uncertain or failed remainder."
-            ),
-            schedule_id="system-memory-curation",
-            step_of="insights",
-            step_condition="if insights produced output"),
+            trigger="When a chat is archived and Automatic trajectory capture is on."),
     JobSpec("skill_evolution", "Skill reflection", "content",
             "Weekly: proposes skill edits from underperforming trajectories.", True, True,
             trigger="Weekly per workspace, via the system-skill-evolution schedule.",
@@ -256,6 +228,11 @@ RETIRED_JOBS: frozenset[str] = frozenset({
     "insights_backfill",  # renamed to backfill_insights
     "backfill_insights",  # bulk insights pass, removed in #627
     "startup_sync",      # opt-in startup git pull, removed
+    # The one-shot archive stages, removed in #627; the memory pass does that
+    # work in a chat of its own now.
+    "insights",
+    "project_doc_update",
+    "memory_proposals",
 })
 
 # StartupTracker phase name -> registry job id (phases not listed are skipped,

@@ -19,9 +19,9 @@ The flow is split in two phases for safety:
   before ``delete_sdk_session_blob`` removes the JSONL from disk. It
   reads the file, drops noise, truncates large read-only tool_result
   bodies, and returns a much smaller string ready for the model.
-* :func:`extract_and_append` runs asynchronously via
-  ``asyncio.create_task`` from the route handler. It calls the model,
-  retries once on failure, and appends the result to the archive file.
+* :func:`run_archive_pipeline` runs asynchronously via
+  ``asyncio.create_task`` from the archive route handler. It is the manifest
+  runner, and it drives the trajectory stage.
 """
 
 from __future__ import annotations
@@ -739,162 +739,6 @@ def _stringify_content(content: object) -> str:
     return ""
 
 
-async def extract_and_append(
-    *,
-    archive_path: Path,
-    filtered_jsonl: str,
-    config,
-    model: str,
-    session_id: str = "",
-    trajectory_meta: dict[str, str] | None = None,
-    workspace_root: Path | None = None,
-    vault_root: Path | None = None,
-    proposal_vault_root: Path | None = None,
-    trajectories_enabled: bool = True,
-    memory_proposals_enabled: bool = True,
-    provider: str = "claude",
-    project_doc_path: str = "",
-    text_mode: bool = False,
-    force: bool = False,
-    guide_path: Path | None = None,
-) -> Any:
-    """Run the post-archive pipeline for one archive (stage-resumable).
-
-    Returns the in-memory job, so a caller can read how the insights stage
-    settled (succeeded, skipped for lack of signal, or failed).
-
-    This is a thin, backward-compatible wrapper over
-    :func:`run_archive_pipeline`. It builds an in-memory
-    :class:`~ciao.archive_jobs.ArchiveJob`, seeds the stage plan from the
-    arguments, and runs every stage. The resumable path used by
-    ``ProjectChatManager`` supplies a persisted manifest instead, so a crash
-    between stages can be repaired without re-running model extraction — see
-    ``ciao/archive_jobs.py``.
-
-    ``text_mode`` uses the rendered archive markdown as the extraction input
-    when the raw session JSONL is gone (the retry/backfill recovery path).
-    Extraction is skipped when the archive already carries a real insights
-    section; the later stages still run, which is the whole point of the
-    resume: an archive whose insights landed but whose project fold or memory
-    writes did not must still be repairable.
-    """
-    from ciao.archive_jobs import ArchiveJob
-
-    job = ArchiveJob(
-        job_id="",
-        chat_id=str((trajectory_meta or {}).get("chat_id") or ""),
-        archive_path=str(archive_path),
-        runtime_root="",
-    )
-    inputs = _pipeline_inputs(
-        archive_path=archive_path,
-        filtered_jsonl=filtered_jsonl,
-        config=config,
-        model=model,
-        session_id=session_id,
-        trajectory_meta=trajectory_meta,
-        workspace_root=workspace_root,
-        vault_root=vault_root,
-        proposal_vault_root=proposal_vault_root,
-        trajectories_enabled=trajectories_enabled,
-        memory_proposals_enabled=memory_proposals_enabled,
-        provider=provider,
-        project_doc_path=project_doc_path,
-        text_mode=text_mode,
-        force=force,
-        guide_path=guide_path,
-    )
-    job.inputs = {
-        key: value
-        for key, value in inputs.items()
-        if key
-        not in (
-            "force",
-            "guide_path",
-            "workspace_root",
-            "vault_root",
-            "proposal_vault_root",
-        )
-    }
-    await run_archive_pipeline(job, inputs)
-    return job
-
-
-def _pipeline_inputs(
-    *,
-    archive_path: Path,
-    filtered_jsonl: str,
-    config,
-    model: str,
-    session_id: str,
-    trajectory_meta: dict[str, str] | None,
-    workspace_root: Path | None,
-    vault_root: Path | None,
-    proposal_vault_root: Path | None,
-    trajectories_enabled: bool,
-    memory_proposals_enabled: bool,
-    provider: str,
-    project_doc_path: str,
-    text_mode: bool,
-    force: bool,
-    guide_path: Path | None,
-) -> dict[str, Any]:
-    """The resolved per-run inputs a stage needs, frozen once per invocation.
-
-    Kept in one dict so the manager can persist the JSON-safe subset on the
-    manifest and hand it back on the next resume: the model/provider are pinned
-    at first run so a resume after a model change does not silently rewrite the
-    archive with a different model, while paths are re-resolved from the live
-    config by the caller when they must not be frozen.
-    """
-    return {
-        "archive_path": archive_path,
-        "filtered_jsonl": filtered_jsonl,
-        "config": config,
-        "model": model,
-        "session_id": session_id,
-        "trajectory_meta": dict(trajectory_meta or {}),
-        "workspace_root": workspace_root,
-        "vault_root": vault_root,
-        "proposal_vault_root": proposal_vault_root,
-        "trajectories_enabled": trajectories_enabled,
-        "memory_proposals_enabled": memory_proposals_enabled,
-        "provider": provider,
-        "project_doc_path": project_doc_path,
-        "text_mode": text_mode,
-        "force": force,
-        "guide_path": guide_path,
-    }
-
-
-def _insights_body_from_archive(archive_path: Path) -> str:
-    """The existing appended insights body, or '' when there is none."""
-    try:
-        text = archive_path.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    location = locate_insights_section(text)
-    if location is None:
-        return ""
-    return text[location[1]:].strip()
-
-
-def _record_post_insights_revision(job: Any, archive_path: Path) -> None:
-    """Pin the archive revision the downstream stages will consume.
-
-    Insights is the only stage that rewrites the archive. Recording the
-    revision right after it settles gives a downstream-only resume a real
-    expected value to compare against, so an edit to the transcript or its
-    insights section between insights succeeding and a later resume is
-    detected instead of silently folded into the project doc and proposals.
-    """
-    from ciao.archive_jobs import archive_content_revision
-
-    revision = archive_content_revision(archive_path)
-    if revision:
-        job.post_insights_revision = revision
-
-
 async def run_archive_pipeline(
     job: Any,
     inputs: dict[str, Any],
@@ -903,27 +747,18 @@ async def run_archive_pipeline(
 ) -> Any:
     """Execute the requested pipeline stages, recording each on the manifest.
 
-    ``stages`` defaults to the job's resumable set. Each stage re-derives its
-    own prior completion from the archive/destinations (the same guards the old
-    all-in-one function used), so running a stage twice is safe: insights is a
-    no-op when the section exists, the doc fold has its equal-content guard, the
-    trajectory overwrites its own file, and proposals/reconcile dedupe against
-    the queue, sidecar and region.
+    One stage: the session trajectory. Everything that used to write to the
+    vault here — the insights section, the project-doc fold, the memory
+    proposals — moved to the memory pass, a chat of the app's own that the
+    archive enqueues instead (see ``ciao/web/memory_pass.py``). The trajectory
+    stayed because it is the one output that must exist while the raw session
+    JSONL is still on disk: archive time is the only moment it can be built.
 
-    Stages are independent where the old code made them so. A failed insights
-    stage leaves the project fold and memory proposals *pending* (they need its
-    text), while the trajectory still runs — mirroring the old ``finally`` that
-    always wrote one. A single failing stage is recorded ``failed`` and never
-    crashes the caller.
+    ``stages`` defaults to the job's resumable set. The stage re-derives its own
+    prior completion (it overwrites its own file), so running it twice is safe.
+    A failure is recorded ``failed`` and never crashes the caller.
     """
-    from ciao.archive_jobs import (
-        FAILED,
-        RUNNING,
-        SKIPPED,
-        SUCCEEDED,
-        TOMBSTONED,
-        text_revision,
-    )
+    from ciao.archive_jobs import FAILED, RUNNING, SKIPPED, SUCCEEDED, TOMBSTONED
 
     if job.tombstoned or job.state == TOMBSTONED:
         logger.info(
@@ -947,84 +782,19 @@ async def run_archive_pipeline(
 
     job.started = True
     config = inputs["config"]
-    if not getattr(config, "insights_enabled", True) and not inputs.get("force"):
-        order = [
-            name
-            for name in order
-            if name not in ("insights", "project_doc_update", "memory_proposals")
-        ]
-        if not order:
-            return job
-    model = str(inputs.get("model") or "")
-    provider = str(inputs.get("provider") or "claude")
     filtered_jsonl = str(inputs.get("filtered_jsonl") or "")
     session_id = str(inputs.get("session_id") or "")
     workspace_root = inputs.get("workspace_root")
-    proposal_vault_root = inputs["proposal_vault_root"]
-    guide_path = inputs.get("guide_path")
     trajectory_meta = dict(inputs.get("trajectory_meta") or {})
     trajectories_enabled = bool(inputs.get("trajectories_enabled", True)) and bool(
         getattr(config, "trajectories_enabled", True)
     )
-    memory_proposals_enabled = bool(inputs.get("memory_proposals_enabled", True))
-    project_doc_path = str(inputs.get("project_doc_path") or "")
-    text_mode = bool(inputs.get("text_mode", False))
-
-    # Carry the cross-stage facts on the manifest so a resume reconstructs the
-    # same decisions the original run would have made.
-    output = str(job.inputs.get("insights_output") or "")
-    doc_fold_wrote = bool(job.inputs.get("doc_fold_wrote", False))
-    resolved_doc_path = str(job.inputs.get("resolved_doc_path") or "")
-    effective_model = str(job.inputs.get("effective_model") or model)
-    effective_provider = str(job.inputs.get("effective_provider") or provider)
-    if not output and _has_insights_section(archive_path):
-        output = _insights_body_from_archive(archive_path)
 
     for name in order:
         if job.tombstoned:
             return job
         if job.status_of(name) in (SUCCEEDED, SKIPPED):
             continue
-
-        # ── Eligibility: a dependent stage waits for the text it needs ─────
-        if name in ("project_doc_update", "memory_proposals"):
-            # Both stages consume the extraction's text. While insights is
-            # still pending/running (or failed), leave them pending so a resume
-            # runs them once the text exists.
-            if not output and not job.is_settled("insights"):
-                continue
-        if name == "project_doc_update":
-            if not (output and project_doc_path):
-                job.mark(
-                    name,
-                    SKIPPED,
-                    "no insights text" if not output else "no canonical project doc",
-                )
-                job.save()
-                continue
-        if name == "memory_proposals":
-            if proposal_vault_root is None:
-                # A chat that runs in a workspace but whose vault root cannot be
-                # resolved is a broken owner: the facts are real and fileable
-                # once the registry is fixed, so this is blocked/recoverable,
-                # not a silent skip. A chat with no workspace at all (General)
-                # legitimately has no queue to write to.
-                if memory_proposals_enabled and trajectory_meta.get("workspace"):
-                    job.block(name, "workspace owner unavailable")
-                else:
-                    job.mark(name, SKIPPED, "workspace owner unavailable")
-                job.save()
-                continue
-            if not (memory_proposals_enabled and output):
-                job.mark(
-                    name,
-                    SKIPPED,
-                    "memory proposals disabled"
-                    if not memory_proposals_enabled
-                    else "no insights text",
-                )
-                job.save()
-                continue
         if name == "trajectory" and not (
             trajectories_enabled and session_id and filtered_jsonl
         ):
@@ -1035,155 +805,12 @@ async def run_archive_pipeline(
         try:
             job.mark(name, RUNNING)
             if not job.save():
-                # Same rule the insights append applies below: a stage that
-                # cannot record that it started must not run. Otherwise the
-                # project fold, trajectory or proposal write lands while the
-                # durable manifest still says pending, and a crash has startup
-                # replay work that already happened. The handler below marks
-                # the stage failed, which is retryable.
+                # A stage that cannot record that it started must not run:
+                # otherwise the trajectory write lands while the durable
+                # manifest still says pending, and a crash has startup replay
+                # work that already happened. The handler below marks the stage
+                # failed, which is retryable.
                 raise RuntimeError("could not persist the archive job manifest")
-
-            if name == "insights":
-                if _has_insights_section(archive_path):
-                    output = output or _insights_body_from_archive(archive_path)
-                    job.inputs["insights_output"] = output
-                    job.mark(name, SKIPPED, "archive already has insights")
-                    _record_post_insights_revision(job, archive_path)
-                    job.save()
-                    continue
-                effective_model, effective_provider, note = _resolve_insights_call(
-                    config, model, provider=provider
-                )
-                job.inputs["effective_model"] = effective_model
-                job.inputs["effective_provider"] = effective_provider
-                model_error = ""
-                async with job_runs.track(
-                    "insights", "Session insights", model=effective_model,
-                    extra={
-                        "archive": archive_path.name,
-                        "session_id": session_id,
-                        "chat_id": chat_id,
-                    },
-                ) as run:
-                    if note:
-                        run.extra["fallback"] = note
-                        logger.info("Insights %s", note)
-                    # Off the loop: a vault walk, note reads and a scan of the whole
-                    # transcript would otherwise stall every chat on this server.
-                    context_block = await asyncio.to_thread(
-                        lambda: _known_context_block(
-                            guide_path,
-                            proposal_vault_root,
-                            transcript=(
-                                filtered_jsonl
-                                if not text_mode
-                                else _archive_body_for_mentions(archive_path)
-                            ),
-                        )
-                    )
-                    run.extra["extraction"] = "text" if text_mode else "markdown"
-                    if text_mode:
-                        extracted, model_error = await _run_text_model_with_retry(
-                            archive_path=archive_path,
-                            model=effective_model,
-                            provider=effective_provider,
-                            cwd=workspace_root,
-                            context_block=context_block,
-                        )
-                    else:
-                        extracted, model_error = await _run_model_with_retry(
-                            filtered_jsonl=filtered_jsonl,
-                            model=effective_model,
-                            provider=effective_provider,
-                            cwd=workspace_root,
-                            context_block=context_block,
-                        )
-                    if extracted:
-                        # The model call above is an await point: a delete may
-                        # have tombstoned this job while it ran. Re-check before
-                        # the append so cancellation cannot be raced by a write
-                        # of derived state for a deleted chat.
-                        if job.tombstoned:
-                            return job
-                        # Record the exact section hash *before* the write, so a
-                        # crash between the append and the stage mark leaves
-                        # evidence a resume can authenticate against. If that
-                        # evidence cannot be persisted, do not mutate the
-                        # archive: a crash would otherwise leave a job that can
-                        # never authenticate its own append.
-                        section = _format_section(extracted)
-                        if section:
-                            job.insights_append_revision = text_revision(section)
-                            if not job.save():
-                                raise RuntimeError(
-                                    "could not persist the insights append evidence"
-                                )
-                        _append_section(archive_path, extracted)
-                        output = extracted
-                        logger.info("Appended session insights to %s", archive_path)
-                    elif model_error:
-                        run.status = "error"
-                        run.error = model_error
-                    else:
-                        run.skip("no durable signal in this session")
-                if model_error:
-                    # Keep the exact upstream reason; the runner records the
-                    # stage failed so a retry resumes here.
-                    raise RuntimeError(model_error)
-                job.inputs["insights_output"] = output
-                if output:
-                    job.mark(name, SUCCEEDED)
-                else:
-                    job.mark(name, SKIPPED, "no durable signal in this session")
-                _record_post_insights_revision(job, archive_path)
-                job.save()
-                continue
-
-            if name == "project_doc_update":
-                doc_model = effective_model
-                doc = Path(project_doc_path)
-                if not doc.is_absolute() and workspace_root is not None:
-                    doc = workspace_root / project_doc_path
-                resolved_doc_path = str(doc)
-                wrote = False
-                # `False` alone is ambiguous: the helper returns it both for a
-                # legitimate no-op (NO_CHANGES, guards) and for a provider or
-                # write failure. The error list separates the two so a real
-                # failure stays retryable instead of settling as success.
-                doc_errors: list[str] = []
-                async with job_runs.track(
-                    "project_doc_update", "Project doc update", model=doc_model,
-                    extra={"doc": str(doc), "archive": archive_path.name, "chat_id": chat_id},
-                ) as run:
-                    from ciao.project_doc_update import update_project_doc
-
-                    # The fold does its own model call: re-check the tombstone
-                    # so a delete during this stage cannot fold the doc for a
-                    # chat that no longer exists.
-                    if job.tombstoned:
-                        return job
-                    wrote = await update_project_doc(
-                        doc_path=doc,
-                        insights_md=output,
-                        model=doc_model,
-                        provider=effective_provider,
-                        cwd=workspace_root,
-                        error_out=doc_errors,
-                    )
-                    run.extra["wrote"] = wrote
-                    if doc_errors:
-                        run.status = "error"
-                        run.error = doc_errors[-1]
-                    elif not wrote:
-                        run.skip("no material changes for the project doc")
-                if doc_errors:
-                    raise RuntimeError(doc_errors[-1])
-                doc_fold_wrote = wrote
-                job.inputs["doc_fold_wrote"] = doc_fold_wrote
-                job.inputs["resolved_doc_path"] = resolved_doc_path
-                job.mark(name, SUCCEEDED)
-                job.save()
-                continue
 
             if name == "trajectory":
                 from ciao.trajectory_builder import build_and_persist_trajectory
@@ -1197,7 +824,6 @@ async def run_archive_pipeline(
                         session_id=session_id,
                         filtered_jsonl=filtered_jsonl,
                         archive_path=archive_path,
-                        insights_text=output or "",
                         context=trajectory_meta.get("context", ""),
                         project_id=trajectory_meta.get("project_id", ""),
                         chat_id=trajectory_meta.get("chat_id", ""),
@@ -1221,152 +847,12 @@ async def run_archive_pipeline(
                 job.save()
                 continue
 
-            if name == "memory_proposals":
-                from ciao.memory_proposals import (
-                    DeferredFact,
-                    defer_region_facts,
-                    plan_region_reconcile,
-                    proposals_from_archive,
-                    unsupported_region_facts,
-                )
-
-                # Write-time reconcile (Mem0's ADD/UPDATE/COVERED): one small
-                # model call per region. Best-effort — a failure never records
-                # a stage failure on its own.
-                region_decisions = None
-                if guide_path is not None:
-                    try:
-                        region_decisions = await plan_region_reconcile(
-                            archive_path,
-                            guide_path,
-                            model=effective_model,
-                            provider=effective_provider,
-                            cwd=workspace_root,
-                        )
-                    except Exception:  # noqa: BLE001 — reconcile is optional
-                        logger.exception(
-                            "Region reconcile failed for %s", archive_path
-                        )
-                        # Leaving this None would read downstream as "no
-                        # reconcile was needed", which is the plain append
-                        # path — the same obsolete-fact-beside-its-replacement
-                        # the planner's own defer rows exist to prevent. Defer
-                        # the facts it would have compared instead.
-                        region_decisions = defer_region_facts(
-                            archive_path,
-                            guide_path,
-                            reason="region reconcile raised",
-                        )
-
-                # Evidence gate. The reconcile above only compares a fact
-                # against the region; nothing so far asks whether any turn the
-                # user typed supports it, so a fluent bullet with a fabricated
-                # `[idx=N]` — or none at all — was auto-saved into
-                # always-loaded context on formatting alone. Overlaid *after*
-                # the reconcile so an evidence failure outranks the model's
-                # add/update/covered verdict, and routed through the same
-                # "defer" outcome: an unverifiable fact is an uncertain fact,
-                # and uncertain facts are queued for review, never dropped.
-                unverified = 0
-                try:
-                    evidence_defers = unsupported_region_facts(
-                        archive_path, filtered_jsonl=filtered_jsonl
-                    )
-                except Exception:  # noqa: BLE001 — a failed check must not promote
-                    logger.exception(
-                        "Evidence check failed for %s", archive_path
-                    )
-                    # Same reasoning as the reconcile fallback above: an empty
-                    # map reads as "everything is supported", which is the one
-                    # thing a crashed check cannot claim.
-                    evidence_defers = {}
-                    if guide_path is not None:
-                        evidence_defers = defer_region_facts(
-                            archive_path,
-                            guide_path,
-                            reason="evidence check raised",
-                        ) or {}
-                if evidence_defers:
-                    unverified = len(evidence_defers)
-                    region_decisions = {
-                        **(region_decisions or {}),
-                        **evidence_defers,
-                    }
-
-                # The reconcile above awaits a model: re-check before writing
-                # proposals so a delete during it cannot file facts for a chat
-                # that no longer exists.
-                if job.tombstoned:
-                    return job
-                proposal_errors: list[str] = []
-                with job_runs.track_sync(
-                    "memory_proposals", "Memory proposals",
-                    extra={"archive": archive_path.name, "chat_id": chat_id},
-                ) as run:
-                    proposal_stats: dict[str, int] = {}
-                    proposal_deferrals: list[DeferredFact] = []
-                    proposals_result = proposals_from_archive(
-                        archive_path,
-                        proposal_vault_root,
-                        auto_promote_memory=True,
-                        guide_path=guide_path,
-                        stats=proposal_stats,
-                        project_doc_path=resolved_doc_path,
-                        project_fold_wrote=doc_fold_wrote,
-                        region_decisions=region_decisions,
-                        workspace=trajectory_meta.get("workspace", ""),
-                        error_out=proposal_errors,
-                        deferrals=proposal_deferrals,
-                    )
-                    run.extra["wrote"] = bool(proposals_result)
-                    run.extra["proposals"] = proposal_stats.get("proposed", 0)
-                    run.extra["promoted"] = proposal_stats.get("promoted", 0)
-                    # Queued *because* reconcile could not be trusted, not
-                    # because the fact was unsure. Without its own count this
-                    # is indistinguishable from an ordinary review row, and a
-                    # reconcile backend that is quietly down looks like a
-                    # sudden taste for review.
-                    run.extra["deferred"] = proposal_stats.get("deferred", 0)
-                    if proposal_deferrals:
-                        # The count says a reconcile backend is down or a model
-                        # is asserting uncited facts; only the reasons say
-                        # which facts are waiting and on what. Capped so one
-                        # bad archive cannot bloat the job manifest.
-                        run.extra["deferred_reasons"] = [
-                            {
-                                "text": item.text,
-                                "region": item.region,
-                                "reason": item.reason,
-                                "competing": list(item.competing),
-                            }
-                            for item in proposal_deferrals[:10]
-                        ]
-                    # Split out of `deferred` on purpose: a reconcile that
-                    # cannot decide and a fact no user turn supports look the
-                    # same in the queue, but only the second one means the
-                    # extraction model asserted something it could not cite.
-                    run.extra["unverified"] = unverified
-                    if proposal_errors:
-                        run.status = "error"
-                        run.error = proposal_errors[-1]
-                if proposal_errors:
-                    # A queue that could not be written, or a raise inside the
-                    # helper, means unapplied facts were not queued: keep the
-                    # stage retryable rather than settling it.
-                    raise RuntimeError(proposal_errors[-1])
-                job.mark(name, SUCCEEDED)
-                job.save()
-                continue
-
         except Exception as exc:  # noqa: BLE001 — never crash the caller
             logger.exception(
                 "Archive pipeline stage %s failed for %s", name, archive_path
             )
             job.mark(name, FAILED, f"{type(exc).__name__}: {exc}"[:400])
             job.save()
-            # Keep going: a later independent stage (the trajectory) must still
-            # get its chance, exactly as the old `finally` guaranteed. Stages
-            # that depended on this one stay pending and are retried together.
             continue
 
     job.save()

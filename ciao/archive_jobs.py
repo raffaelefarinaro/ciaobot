@@ -1,14 +1,10 @@
 """Persisted per-archive pipeline manifest for resumable post-processing.
 
-Archiving a chat runs one in-process ``asyncio`` task that extracts session
-insights, folds the project doc, captures a trajectory, reconciles bounded
-regions and files memory proposals (``ciao/insights.py:extract_and_append``).
-The task is not durable: a server crash or a provider failure part-way through
-leaves the archive with some stages done and the rest missing, and the old
-pipeline could not repair them. ``_has_insights_section`` made the whole
-function return early, and the insights retry refused any archive that already
-had insights — so a crash after insights but before the project fold or the
-memory writes was unrecoverable.
+Archiving a chat runs one in-process ``asyncio`` task that captures the session
+trajectory (``ciao/insights.py:run_archive_pipeline``); the memory pass — a chat
+of the app's own — owns everything that writes to the vault. The task is not
+durable: a server crash or a provider failure part-way through leaves the
+trajectory unwritten, and nothing else in the process would ever write it.
 
 This module is the small durable record that fixes that: one manifest per
 archive, keyed by archive identity and pipeline version, holding a
@@ -74,14 +70,15 @@ MAX_AUTO_ATTEMPTS = 3
 
 #: Execution order, shared by the runner, the postprocess UI and the manifest.
 #: These are the same ids the per-step job events carry, so a manifest overlay
-#: and the live telemetry agree. The best-effort region reconcile runs inside
-#: ``memory_proposals`` (it only feeds that stage's write decisions).
-PIPELINE_STAGES: tuple[str, ...] = (
-    "insights",
-    "project_doc_update",
-    "trajectory",
-    "memory_proposals",
-)
+#: and the live telemetry agree.
+#:
+#: One stage. The insights/doc-fold/proposals stages were removed in #627; the
+#: memory pass does that work in a chat of its own now. This tuple is the only
+#: place that knows the shape, so a manifest written by an older build — which
+#: still carries the three extra stage rows — settles on its own: every method
+#: below iterates ``PIPELINE_STAGES``, never ``self.stages``, so the stale rows
+#: are inert rather than permanently pending.
+PIPELINE_STAGES: tuple[str, ...] = ("trajectory",)
 
 _JOBS_DIR = "archive_jobs"
 
@@ -257,16 +254,14 @@ class ArchiveJob:
     archive_path: str
     runtime_root: str
     content_revision: str = ""
-    #: The archive revision after the insights section landed. Downstream
-    #: stages (project fold, memory proposals) are resumed against this, so an
-    #: edit to the archive between insights succeeding and a later resume is
-    #: detected instead of being silently consumed. Empty until insights
-    #: settles.
+    #: The archive revision after the insights section landed, and the hash of
+    #: the exact section the pipeline appended. Both belong to the removed
+    #: insights stage and are written only by a manifest from before #627, but
+    #: they are still read: such a manifest recorded the *pre-insights* digest,
+    #: and its archive carries the appended section, so without the append
+    #: authentication a resume would see the file as externally edited and
+    #: block the trajectory. New manifests leave both empty.
     post_insights_revision: str = ""
-    #: Hash of the exact section the pipeline appended, set immediately before
-    #: ``_append_section`` writes it. A crashed-append resume authenticates the
-    #: on-disk section against this, so an edit confined to the appended body
-    #: is refused rather than consumed. Empty for a job that never appended.
     insights_append_revision: str = ""
     pipeline_version: int = PIPELINE_VERSION
     manifest_version: int = MANIFEST_VERSION
@@ -314,26 +309,12 @@ class ArchiveJob:
         """Stages an *automatic* startup resume may act on.
 
         A blocked stage means the job needs a human or a config change, so the
-        whole job is excluded: re-running its dependents on every boot would be
-        a silent retry loop around a blocked precondition. A stage that has
-        already used up its automatic attempts is excluded too — an explicit
-        user retry clears that by resetting the stage to pending.
-
-        A dependent stage is also excluded while the predecessor it needs has
-        exhausted its automatic attempts. `project_doc_update` and
-        `memory_proposals` both consume the insights text, so with `insights`
-        out of budget they would be launched on every startup, immediately skip
-        for lack of output, and leave the manifest unchanged forever.
+        whole job is excluded: re-running it on every boot would be a silent
+        retry loop around a blocked precondition. A stage that has already used
+        up its automatic attempts is excluded too — an explicit user retry
+        clears that by resetting the stage to pending.
         """
         if any(self.status_of(n) == BLOCKED for n in PIPELINE_STAGES):
-            return []
-        exhausted = {
-            n
-            for n in PIPELINE_STAGES
-            if self.status_of(n) in INCOMPLETE
-            and self.stage(n).attempts >= MAX_AUTO_ATTEMPTS
-        }
-        if "insights" in exhausted:
             return []
         return [
             n
@@ -350,22 +331,18 @@ class ArchiveJob:
         """Drop the heavy session payload once no stage can still need it.
 
         The filtered session JSONL (assistant thinking, full Write/Edit/Bash
-        inputs and results) is kept on the manifest only so insights and the
-        trajectory can run. Once those stages are settled — or impossible to
-        retry — the payload is dead weight that duplicates transcript data on
-        every archived chat, so it is removed.
+        inputs and results) is kept on the manifest only so the trajectory can
+        run. Once that stage is settled — or impossible to retry — the payload
+        is dead weight that duplicates transcript data on every archived chat,
+        so it is removed.
 
-        A *blocked* insights/trajectory still counts as needing it: startup
-        blocks those stages when the archive is missing, and the missing-file
-        path explicitly supports a later restore, after which an explicit retry
-        resets them to pending. Dropping the payload then would leave the retry
+        A *blocked* trajectory still counts as needing it: startup blocks the
+        stage when the archive is missing, and the missing-file path
+        explicitly supports a later restore, after which an explicit retry
+        resets it to pending. Dropping the payload then would leave the retry
         with an empty transcript, permanently skipping the trajectory.
         """
-        needs_payload = any(
-            self.status_of(n) in (INCOMPLETE | {BLOCKED})
-            for n in ("insights", "trajectory")
-        )
-        if not needs_payload:
+        if self.status_of("trajectory") not in (INCOMPLETE | {BLOCKED}):
             self.inputs.pop("filtered_jsonl", None)
 
     def mark(self, name: str, status: str, reason: str = "") -> None:
@@ -505,8 +482,7 @@ class ArchiveJob:
 
         Callers that are about to perform a stage mutation rely on the manifest
         being durable *before* the mutation. A direct caller with no runtime
-        root (the legacy ``extract_and_append``, tests) is intentionally
-        in-memory only and reports success.
+        root (tests) is intentionally in-memory only and reports success.
         """
         if not self.runtime_root:
             return True

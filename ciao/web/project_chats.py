@@ -3559,14 +3559,12 @@ class ProjectChatManager:
         *,
         filtered_jsonl: str = "",
         session_id: str = "",
-        text_mode: bool = False,
     ) -> dict[str, object]:
         return self._archive_pipeline_for()._job_inputs(
             chat,
             project,
             filtered_jsonl=filtered_jsonl,
             session_id=session_id,
-            text_mode=text_mode,
         )
 
     def _insights_model_for(self, chat: ChatInfo, workspace: str) -> str:

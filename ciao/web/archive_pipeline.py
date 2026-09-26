@@ -26,7 +26,6 @@ from ciao.archive_jobs import ArchiveJob
 from ciao.config import CiaoConfig
 from ciao.web import chat_service
 from ciao.web.chat_broker import EventsHub
-from ciao.workspace_guide import guide_path as workspace_guide_path
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ciao.web.project_chats import ArchiveOutcome, ChatInfo, ProjectInfo
@@ -133,7 +132,6 @@ class ArchivePipelineHost(Protocol):
         *,
         filtered_jsonl: str = ...,
         session_id: str = ...,
-        text_mode: bool = ...,
     ) -> ArchiveInputs: ...
 
     def _restore_job_inputs(
@@ -151,12 +149,6 @@ class ArchivePipelineHost(Protocol):
         archive_path: Path,
         doc_path: str,
     ) -> str | None: ...
-
-
-# The stages that consume insights text. When the memory pass replaces the
-# one-shot extraction these three can never run, including on a manifest that
-# was already in flight when the constant was flipped.
-_INSIGHTS_STAGES = ("insights", "project_doc_update", "memory_proposals")
 
 
 class ArchivePipeline:
@@ -315,8 +307,7 @@ class ArchivePipeline:
     def retry_insights(self, chat_id: str) -> str:
         """Resume the unfinished post-archive stages for an archived chat.
 
-        An archive that already carries insights but whose project fold,
-        trajectory or memory writes never landed is exactly the case this
+        An archive whose trajectory never landed is exactly the case this
         repairs (see ``ciao/archive_jobs.py``). Returns ``"started"`` when a
         resume task is launched, ``"running"`` when the chat's pipeline is
         already live, ``"complete"`` when nothing is left to do, ``"blocked"``
@@ -327,8 +318,6 @@ class ArchivePipeline:
         The method name is kept for route/back-compat; PWA_API.md documents it
         as "retry unfinished steps".
         """
-        from ciao.web import memory_pass
-
         chat = self._host._chats.get(chat_id)
         if chat is None:
             return "not_found"
@@ -351,25 +340,10 @@ class ArchivePipeline:
         if not job.unfinished():
             return "complete"
         # An explicit user retry is a deliberate action: always clear failed
-        # stages, blocks, and exhausted attempt budgets before launching, even
-        # when `resumable()` is nominally non-empty because a *dependent*
-        # pending stage kept it so. Otherwise an exhausted `insights` whose
-        # dependents are still pending would be skipped, and the launch would
-        # run only work that immediately waits for it — a silent no-op retry.
+        # stages, blocks, and exhausted attempt budgets before launching.
         job.reset_failed(include_blocked=True)
         if not job.resumable():
             return "complete"
-        if memory_pass.MEMORY_PASS_CHATS:
-            # Same filter the startup resume applies: a manifest written before
-            # the pass replaced the one-shot stages must not run them on an
-            # explicit retry either.
-            stages = [
-                name for name in job.resumable() if name not in _INSIGHTS_STAGES
-            ]
-            if not stages:
-                return "complete"
-            self._host._launch_job(chat_id, job, inputs, stages=stages)
-            return "started"
         self._host._launch_job(chat_id, job, inputs)
         return "started"
 
@@ -500,12 +474,11 @@ class ArchivePipeline:
         *,
         filtered_jsonl: str = "",
         session_id: str = "",
-        text_mode: bool = False,
     ) -> dict[str, object]:
         """Resolve every stage input for one chat's archive job.
 
         Paths are re-derived from the live config rather than stored, so a
-        resume after a workspace move still finds the right guide/vault; the
+        resume after a workspace move still finds the right vault; the
         JSON-safe subset is persisted on the manifest by
         :meth:`_persist_job_inputs`.
         """
@@ -521,6 +494,8 @@ class ArchivePipeline:
             and session_id
             and filtered_jsonl
         )
+        # The memory pass reads the canonical project doc, so the enqueue below
+        # still needs it; nothing in the stage runner does.
         project_doc_path = (
             project.vault_doc_path
             if project and not project.is_auto and not is_system_chat
@@ -529,19 +504,11 @@ class ArchivePipeline:
         proposal_vault_root = (
             self._host._workspace_vault_root(workspace) if workspace else None
         )
-        guide_path = (
-            workspace_guide_path(config.agent_root(workspace))
-            if workspace and config.workspace(workspace) is not None
-            else None
-        )
         return {
             "archive_path": self._host._archive_path_for_chat(chat),
             "config": config,
-            "model": self._host._insights_model_for(chat, workspace),
-            "provider": chat.provider or "claude",
             "session_id": session_id,
             "filtered_jsonl": filtered_jsonl,
-            "text_mode": text_mode,
             "trajectory_meta": {
                 "context": project.context if project else "",
                 "project_id": chat.project_id,
@@ -550,11 +517,8 @@ class ArchivePipeline:
                 "workspace": workspace,
             },
             "workspace_root": config.workspace_root,
-            "vault_root": config.vault_root,
             "proposal_vault_root": proposal_vault_root,
-            "guide_path": guide_path,
             "trajectories_enabled": trajectories_enabled,
-            "memory_proposals_enabled": True,
             "project_doc_path": project_doc_path,
         }
 
@@ -570,16 +534,10 @@ class ArchivePipeline:
         """Store the JSON-safe subset a resume needs on the manifest."""
         job.inputs.update(
             {
-                "model": str(inputs.get("model") or ""),
-                "provider": str(inputs.get("provider") or "claude"),
                 "session_id": str(inputs.get("session_id") or ""),
                 "filtered_jsonl": str(inputs.get("filtered_jsonl") or ""),
-                "text_mode": bool(inputs.get("text_mode", False)),
                 "trajectory_meta": dict(_input_trajectory_meta(inputs)),
                 "trajectories_enabled": bool(inputs.get("trajectories_enabled", True)),
-                "memory_proposals_enabled": bool(
-                    inputs.get("memory_proposals_enabled", True)
-                ),
                 "project_doc_path": str(inputs.get("project_doc_path") or ""),
                 "workspace": str(
                     _input_trajectory_meta(inputs).get("workspace", "")
@@ -596,34 +554,21 @@ class ArchivePipeline:
         if not workspace and project is not None:
             workspace = project.workspace
         config = self._host._config
-        guide_path = (
-            workspace_guide_path(config.agent_root(workspace))
-            if workspace and config.workspace(workspace) is not None
-            else None
-        )
         proposal_vault_root = (
             self._host._workspace_vault_root(workspace) if workspace else None
         )
         return {
             "archive_path": self._host._archive_path_for_chat(chat),
             "config": config,
-            "model": str(job.inputs.get("model") or ""),
-            "provider": str(job.inputs.get("provider") or chat.provider or "claude"),
             "session_id": str(job.inputs.get("session_id") or ""),
             "filtered_jsonl": str(job.inputs.get("filtered_jsonl") or ""),
-            "text_mode": bool(job.inputs.get("text_mode", False)),
             "trajectory_meta": meta,
             "workspace_root": config.workspace_root,
-            "vault_root": config.vault_root,
             "proposal_vault_root": proposal_vault_root,
-            "guide_path": guide_path,
             "trajectories_enabled": bool(
                 getattr(config, "trajectories_enabled", True)
             )
             and bool(job.inputs.get("trajectories_enabled", True)),
-            "memory_proposals_enabled": bool(
-                job.inputs.get("memory_proposals_enabled", True)
-            ),
             "project_doc_path": str(job.inputs.get("project_doc_path") or ""),
         }
 
@@ -649,14 +594,11 @@ class ArchivePipeline:
         """Load (or seed) the manifest for an archived chat.
 
         A chat archived before this feature has no manifest, so one is seeded
-        from the archive's current state: insights settled when the section is
-        present, trajectory unavailable (the raw JSONL is gone), and the fold
-        and proposals pending — which is what makes a legacy archive
-        repairable.
+        from the archive's current state: the trajectory is unavailable (the raw
+        JSONL is gone), which is what makes a legacy archive repairable.
         """
         from ciao.archive_jobs import (
             SKIPPED,
-            SUCCEEDED,
             archive_content_revision,
             create_job,
             load_job,
@@ -671,7 +613,7 @@ class ArchivePipeline:
         if job is None:
             job = load_job(self._host._runtime_root, new_job_id(chat_id, chat.archive_path))
         if job is None:
-            inputs = self._host._job_inputs(chat, project, text_mode=True)
+            inputs = self._host._job_inputs(chat, project)
             job = create_job(
                 self._host._runtime_root,
                 chat_id=chat_id,
@@ -679,10 +621,6 @@ class ArchivePipeline:
                 content_revision_value=archive_content_revision(archive_path),
             )
             self._host._persist_job_inputs(job, inputs)
-            from ciao.insights import _has_insights_section
-
-            if _has_insights_section(archive_path):
-                job.mark("insights", SUCCEEDED)
             if not job.inputs.get("filtered_jsonl"):
                 job.mark("trajectory", SKIPPED, "raw session no longer available")
             job.save()
@@ -736,14 +674,15 @@ class ArchivePipeline:
         from ciao.insights import run_archive_pipeline
 
         try:
-            # Revision validation runs for every resume, not only an
-            # insights-pending one. While insights is still pending/running the
-            # recorded revision is the pre-insights one, and the pipeline's own
-            # append is accepted only when the on-disk section authenticates
-            # against the exact output the pipeline recorded before writing it.
-            # Once insights settles, a full-file match against the
-            # post-insights revision is required.
-            insights_pending = job.status_of("insights") in (PENDING, RUNNING)
+            # A manifest written before #627 recorded the archive revision from
+            # *before* the pipeline appended its insights section, and may carry
+            # the hash of the section it was about to write. Such a manifest must
+            # still resume, so its own append is accepted — authenticated against
+            # that hash — rather than read as an external edit. A manifest
+            # without the stage row never appended anything, so its plain
+            # content revision is the whole story.
+            legacy = job.stages.get("insights")
+            insights_pending = legacy is not None and legacy.status in (PENDING, RUNNING)
             recorded = (
                 job.content_revision if insights_pending else job.post_insights_revision
             ) or job.content_revision
@@ -753,21 +692,17 @@ class ArchivePipeline:
                 recorded,
                 expected_append_revision=expected_append,
             ):
-                if insights_pending:
-                    blocked = ["insights"]
-                else:
-                    # Whatever this resume was actually asked to run and has
-                    # not settled — not a hardcoded stage. Blocking
-                    # `project_doc_update` unconditionally overwrote the audit
-                    # state of a fold that had already succeeded while leaving
-                    # the genuinely pending stage untouched, so a retry reset
-                    # the fold and could run it a second time.
-                    requested = list(stages) if stages else list(job.resumable())
-                    blocked = [
-                        name
-                        for name in requested
-                        if job.status_of(name) in (PENDING, RUNNING)
-                    ] or list(job.unfinished())
+                # Whatever this resume was actually asked to run and has not
+                # settled — not a hardcoded stage. Blocking one stage
+                # unconditionally overwrote the audit state of work that had
+                # already succeeded while leaving the genuinely pending stage
+                # untouched, so a retry could run it a second time.
+                requested = list(stages) if stages else list(job.resumable())
+                blocked = [
+                    name
+                    for name in requested
+                    if job.status_of(name) in (PENDING, RUNNING)
+                ] or list(job.unfinished())
                 for name in blocked:
                     job.block(
                         name,
@@ -835,7 +770,6 @@ class ArchivePipeline:
         bounded concurrency. Blocked and tombstoned jobs are left alone.
         """
         from ciao.archive_jobs import MAX_AUTO_ATTEMPTS, RUNNING, list_jobs
-        from ciao.web import memory_pass
 
         jobs = list_jobs(self._host._runtime_root)
         semaphore = asyncio.Semaphore(max(1, max_concurrency))
@@ -881,11 +815,6 @@ class ArchivePipeline:
                 self._host._overlay_job_postprocess(job.chat_id, job)
                 continue
             resumable = job.resumable()
-            if (
-                not getattr(self._host._config, "insights_enabled", True)
-                or memory_pass.MEMORY_PASS_CHATS
-            ):
-                resumable = [name for name in resumable if name not in _INSIGHTS_STAGES]
             if not getattr(self._host._config, "trajectories_enabled", True):
                 resumable = [name for name in resumable if name != "trajectory"]
             if not resumable:
@@ -942,26 +871,17 @@ class ArchivePipeline:
 
         chat = self._host._chats.get(chat_id)
         # A memory pass is a normal chat of the app's own, so archiving one
-        # must not kick off a pass of its own (or a one-shot extraction over
-        # memory bookkeeping).
+        # must not kick off a pass of its own.
         is_pass = (
             memory_pass.is_memory_pass_chat(chat, project_meta)
             if chat is not None
             else False
-        )
-        run_insights = bool(
-            getattr(config, "insights_enabled", True)
-            and outcome.filtered_jsonl
-            and not memory_pass.MEMORY_PASS_CHATS
-            and not is_pass
         )
         if chat is None:
             # Nothing durable to key a manifest on; index the archive below so
             # the file is still searchable.
             pass
         if chat is not None:
-            from ciao.archive_jobs import SKIPPED
-
             # The archive path may not be on the chat yet (this runs right after
             # `archive_chat` set it, but a caller can pass the outcome directly);
             # use the outcome's path as the authoritative one for the job.
@@ -981,61 +901,13 @@ class ArchivePipeline:
             inputs["archive_path"] = outcome.path
             inputs["trajectories_enabled"] = trajectories_enabled
 
-            # Declare the plan up front so a surface can say "3 steps" honestly
-            # and a stage that was never going to run is not reported as a
-            # failure. System chats keep insights and memory proposals but skip
-            # the project-doc fold (there is no canonical doc to fold into).
-            # `project_doc_update` and `memory_proposals` consume the insights
-            # text, so they are only planned when extraction actually runs;
-            # otherwise there is nothing to fold or route.
-            expected: list[str] = []
-            if run_insights:
-                expected.append("insights")
-                if inputs["project_doc_path"]:
-                    expected.append("project_doc_update")
-            if trajectories_enabled:
-                expected.append("trajectory")
-            if run_insights and inputs["proposal_vault_root"] is not None:
-                expected.append("memory_proposals")
+            # Declare the plan up front so a surface can say "1 step" honestly.
+            # With nothing to run there is no manifest either: a job whose every
+            # stage is settled would only add a file per archived chat.
+            expected: list[str] = ["trajectory"] if trajectories_enabled else []
 
             if expected:
                 job = self._host._new_job_for_chat(chat, inputs)
-                # Stages that cannot run for this chat settle as skipped now, so
-                # the manifest is an accurate plan even before the task starts
-                # and a stage that was intentionally never planned is not left
-                # pending (which would read as "incomplete" and offer a retry).
-                if not run_insights:
-                    # Extraction is disabled or there is no transcript, so all
-                    # three insights-dependent stages are settled together.
-                    job.mark("insights", SKIPPED, "insights disabled or no transcript")
-                    job.mark(
-                        "project_doc_update", SKIPPED, "no insights extraction planned"
-                    )
-                    job.mark(
-                        "memory_proposals", SKIPPED, "no insights extraction planned"
-                    )
-                else:
-                    if not inputs["project_doc_path"]:
-                        job.mark(
-                            "project_doc_update", SKIPPED, "no canonical project doc"
-                        )
-                    if inputs["proposal_vault_root"] is None:
-                        if _input_trajectory_meta(inputs).get("workspace"):
-                            # The chat runs in a workspace but its vault root did
-                            # not resolve: recoverable once the registry is fixed.
-                            job.block(
-                                "memory_proposals", "workspace owner unavailable"
-                            )
-                        else:
-                            job.mark(
-                                "memory_proposals",
-                                SKIPPED,
-                                "workspace owner unavailable",
-                            )
-                if not trajectories_enabled:
-                    job.mark(
-                        "trajectory", SKIPPED, "no session input or trajectories disabled"
-                    )
                 job.save()
 
                 self._host._begin_postprocess(chat_id, expected)
