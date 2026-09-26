@@ -549,6 +549,16 @@ class _FakeEngine:
         # finish.
         self.busy = False
         self.run_calls: list[list[str]] = []
+        self.run_envs: list[dict[str, str] | None] = []
+        # How many more readiness probes answer after *each* bootout before
+        # the engine stops answering, modelling launchd finishing with a job
+        # after `bootout` has already returned. 0 is the well-behaved case
+        # where a bootout takes effect at once.
+        self.lingering = 0
+        self.lingering_after_bootout = 0
+        # Set by a test that wants the engine to answer a probe with a
+        # failure — a rolled-back-up opener that cannot reach it.
+        self.post_error: Exception | None = None
 
     # -- the engine's HTTP surface ----------------------------------------
     def version(self) -> str:
@@ -556,15 +566,24 @@ class _FakeEngine:
 
     def post(self, url: str) -> dict[str, Any]:
         self.posts.append(url)
+        if self.post_error is not None:
+            raise self.post_error
+        if url.endswith("/api/admin/drain"):
+            # The drain is polled by asking again, so this is where the active
+            # chat list is read from.
+            self.polls += 1
+            if self.active_script:
+                return {"draining": True, "active_chat_ids": self.active_script.pop(0)}
+            return {"draining": True, "active_chat_ids": ["still-busy"] if self.busy else []}
         return {}
 
     def get(self, url: str) -> dict[str, Any] | None:
-        if url.endswith("/api/active-chats"):
-            self.polls += 1
-            if self.active_script:
-                return {"active_chat_ids": self.active_script.pop(0)}
-            return {"active_chat_ids": ["still-busy"] if self.busy else []}
         if not self.up:
+            if self.lingering > 0:
+                # Booted out, but launchd has not finished with the process
+                # yet: it keeps answering for a while after `bootout` returns.
+                self.lingering -= 1
+                return {"version": self.version(), "overall_ready": True}
             return None
         if self.readiness is not None:
             return self.readiness(self.starts)
@@ -575,6 +594,9 @@ class _FakeEngine:
         self.launchctl_calls.append(list(args))
         if args[0] == "bootout" and args[-1].endswith(SERVER_LABEL) and not self.stubborn:
             self.up = False
+            # Every bootout relights the lingering window, so each one has to
+            # be waited out on its own.
+            self.lingering = self.lingering_after_bootout
         return subprocess.CompletedProcess(args, 0, "", "")
 
     def start_service(self) -> SimpleNamespace:
@@ -589,8 +611,11 @@ class _FakeEngine:
         engine claims: a subprocess running the installed interpreter and a
         server reporting `/api/startup-status` are different facts, and the
         swap checks the first while the readiness check looks at the second.
+        The environment each call was given is kept, because where uv is told
+        to install is a real answer and not an implementation detail.
         """
         self.run_calls.append(list(argv))
+        self.run_envs.append(kwargs.get("env"))
         if "tool" in argv and "install" in argv:
             # "Installing" means writing the env uv would have created.
             _write_env(self.live_env, self.target)
@@ -663,10 +688,9 @@ def _apply(engine: _FakeEngine, state: Path, **kwargs: Any) -> Operation:
         state_dir=state,
         port=PORT,
         http_post=engine.post,
-        http_get=engine.get,
         launchctl=engine.launchctl,
         uid=501,
-        sleep=lambda seconds: None,
+        sleep=kwargs.pop("sleep", lambda seconds: None),
         clock=kwargs.pop("clock", _FakeClock()),
         **kwargs,
     )
@@ -677,11 +701,12 @@ def _run(engine: _FakeEngine, op: Operation, state: Path, receipt_path: Path, **
         op.id,
         state_dir=state,
         port=PORT,
+        http_post=engine.post,
         http_get=engine.get,
-        launchctl=engine.launchctl,
-        uv="/fake/uv",
+        launchctl=kwargs.pop("launchctl", engine.launchctl),
+        uv=kwargs.pop("uv", "/fake/uv"),
         run=kwargs.pop("run", engine.uv_run),
-        start_service=engine.start_service,
+        start_service=kwargs.pop("start_service", engine.start_service),
         uid=501,
         sleep=lambda seconds: None,
         clock=kwargs.pop("clock", _FakeClock()),
@@ -717,7 +742,10 @@ def test_apply_drains_then_bootstraps_updater(tmp_path: Path) -> None:
 
     result = _apply(engine, state)
 
-    assert engine.posts == [f"{BASE}/api/admin/drain"]
+    # The drain is polled by POSTing it again rather than by reading
+    # `/api/active-chats`, which a client-mode node would forward to the host.
+    # Every request the engine saw is the drain itself.
+    assert engine.posts == [f"{BASE}/api/admin/drain"] * 5
     assert result.phase == "applying"
     assert read_operation(state) == result
     # Two readings with work in flight, then exactly three settled ones: a
@@ -767,8 +795,10 @@ def test_apply_drain_timeout_cancels_and_leaves_engine(tmp_path: Path) -> None:
     assert "drain timed out after 5s" in record.error
     assert "left untouched" in record.error
     # Admission is reopened: an engine left refusing turns is worse than the
-    # update it was waiting for.
-    assert engine.posts == [f"{BASE}/api/admin/drain", f"{BASE}/api/admin/drain/cancel"]
+    # update it was waiting for. The cancel is the last thing asked of the
+    # engine — everything before it is the drain itself, polled by re-POSTing.
+    assert engine.posts[-1] == f"{BASE}/api/admin/drain/cancel"
+    assert set(engine.posts) == {f"{BASE}/api/admin/drain", f"{BASE}/api/admin/drain/cancel"}
     # Nothing was stopped, and no updater job was started.
     assert engine.launchctl_calls == []
     assert not (state / UPDATER_PLIST_NAME).exists()
@@ -819,6 +849,17 @@ def test_run_apply_happy_path(tmp_path: Path, phases: list[str]) -> None:
     assert install[4] == "--python"
     assert install[5] == "3.13"  # the staged env's interpreter, not this process's
     assert install[-1] == op.wheel
+
+    # Where uv installs is pinned to the install this receipt describes. The
+    # updater runs under launchd's own environment, and an inherited
+    # `UV_TOOL_DIR`/`XDG_DATA_HOME` would send the install somewhere else and
+    # re-point the `ciao` shim at it — leaving the new env unused, the old one
+    # gone, and a rollback that reports failure over an install that was never
+    # replaced.
+    env = engine.run_envs[engine.run_calls.index(install)]
+    assert env is not None
+    assert env["UV_TOOL_DIR"] == str(engine.live_env.parent)
+    assert env["UV_TOOL_BIN_DIR"] == str(Path(installed.executable).parent)
 
 
 def test_run_apply_rolls_back_when_uv_install_fails(
@@ -1000,6 +1041,283 @@ def test_run_apply_prunes_older_previous_env_only_after_success(tmp_path: Path) 
 
     # A failed update has not superseded anything, so the older env stays.
     assert kept.exists()
+
+
+# ── review round 1 ───────────────────────────────────────────────────────
+#
+# Each of these is a liveness or robustness hole the round-1 review found in
+# this PR's own code. The comments say why the wrong behaviour is worse, not
+# just what the assertion is.
+
+
+def test_apply_interrupt_reopens_admission(tmp_path: Path) -> None:
+    _, state, _, engine = _staged(tmp_path)
+    engine.busy = True  # a turn that never settles
+
+    def interrupt(seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _apply(engine, state, drain_timeout=600.0, sleep=interrupt)
+
+    record = read_operation(state)
+    assert record is not None
+    # Ctrl-C, SIGHUP and SIGTERM are the ordinary ways a wait of up to ten
+    # minutes ends. Skipping the cancel on any of them leaves the engine
+    # refusing every turn with nothing in the record to say why.
+    assert record.phase == "failed"
+    assert engine.posts[-1] == f"{BASE}/api/admin/drain/cancel"
+    # The engine was never stopped, so the staged env is intact and the apply
+    # can simply be run again.
+    assert engine.launchctl_calls == []
+    assert _env_version(engine.live_env) == FROM_VERSION
+
+
+def test_apply_after_failed_apply_names_the_failure(tmp_path: Path) -> None:
+    op, state, _, engine = _staged(tmp_path)
+    op.phase = "failed"
+    op.error = "drain timed out after 5s; the running engine was left untouched"
+    write_operation(op, state)
+
+    with pytest.raises(UpdateError, match="last apply failed: drain timed out after 5s"):
+        _apply(engine, state)
+
+    # Nothing was drained this time: the refusal is before the drain.
+    assert engine.posts == []
+
+
+def test_run_apply_preflight_refusal_reopens_admission(tmp_path: Path) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # The receipt the swap replaces is gone. The pre-flight refuses here,
+    # which is the whole answer — but the foreground half has already closed
+    # admission on the engine that is still running, and nothing else would
+    # reopen it.
+    receipt_path.unlink()
+
+    result = _run(engine, op, state, receipt_path)
+
+    assert result.phase == "failed"
+    assert "no install receipt" in result.error
+    assert engine.posts == [f"{BASE}/api/admin/drain/cancel"]
+    # Nothing was touched: the engine is the install it was, still running.
+    assert engine.starts == 0
+    assert engine.launchctl_calls == []
+    assert _env_version(engine.live_env) == FROM_VERSION
+
+
+def test_run_apply_refuses_when_the_install_changed(tmp_path: Path) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # The user reinstalled between stage and apply. Applying would silently
+    # downgrade the new install; rolling back would restore a receipt that no
+    # longer describes what is on disk.
+    write_receipt(
+        InstallReceipt(
+            version="1.3.0",
+            executable=str(tmp_path / "bin" / "ciao"),
+            python=str(_write_env(tmp_path / "tools" / "ciaobot", "1.3.0")),
+            service_backend="launchd",
+            service_label=SERVER_LABEL,
+            installed_at="2026-09-26T09:00:00+00:00",
+            uv="/fake/uv",
+        ),
+        receipt_path,
+    )
+
+    result = _run(engine, op, state, receipt_path)
+
+    assert result.phase == "failed"
+    assert "the installed engine is 1.3.0" in result.error
+    assert f"staged from {FROM_VERSION}" in result.error
+    assert "ciao update stage" in result.error
+    assert engine.posts == [f"{BASE}/api/admin/drain/cancel"]
+    # The install the user actually has is untouched.
+    assert _env_version(engine.live_env) == "1.3.0"
+    assert [c for c in engine.run_calls if "tool" in c] == []
+
+
+def test_run_apply_rolls_back_when_the_record_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    real = engine_update.write_operation
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "tool" in argv:
+            raise subprocess.CalledProcessError(1, argv, output="", stderr="uv: broken")
+        return engine.uv_run(argv, **kwargs)
+
+    def flaky(op_written: Operation, state_dir: Path | None = None) -> None:
+        # A full disk — the usual cause of a failed record write, and often
+        # the same one that broke the swap. It must not be able to stop the
+        # rollback, because that is what leaves the env moved aside and the
+        # engine down.
+        if op_written.phase in {"rolling_back", "rolled_back", "rollback_failed"}:
+            raise OSError(28, "no space left on device")
+        real(op_written, state_dir)
+
+    monkeypatch.setattr(engine_update, "write_operation", flaky)
+
+    _run(engine, op, state, receipt_path, run=run)
+
+    # Every step of the rollback ran, and the operator gets their engine back.
+    assert _env_version(engine.live_env) == FROM_VERSION
+    assert engine.starts == 1
+    assert engine.up is True
+    # The persisted record is the last phase that could be written, which is
+    # what an operator reading `ciao update status` sees.
+    persisted = read_operation(state)
+    assert persisted is not None
+    assert persisted.phase == "swapping"
+
+
+def test_run_apply_applied_survives_a_failed_record_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    real = engine_update.write_operation
+
+    def flaky(op_written: Operation, state_dir: Path | None = None) -> None:
+        if op_written.phase == "applied":
+            raise OSError(28, "no space left on device")
+        real(op_written, state_dir)
+
+    monkeypatch.setattr(engine_update, "write_operation", flaky)
+
+    result = _run(engine, op, state, receipt_path)
+
+    # The new engine passed readiness and is serving. A record write that
+    # fails afterwards is bookkeeping, and must not undo an install that is
+    # already up: the env is the new one, the receipt names it, and nothing
+    # was restarted or rolled back.
+    assert result.phase == "applied"
+    assert result.error == ""
+    assert _env_version(engine.live_env) == TO_VERSION
+    written = read_receipt(receipt_path)
+    assert written is not None
+    assert written.version == TO_VERSION
+    assert engine.starts == 1
+    assert engine.up is True
+    assert not engine.launchctl_calls or not any(
+        call[0] == "bootout" and call[-1].endswith(SERVER_LABEL)
+        for call in engine.launchctl_calls[1:]
+    )
+
+
+def test_rollback_waits_for_the_engine_to_stop_before_restarting(tmp_path: Path) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # The forward path stops the engine by waiting for it to stop answering.
+    # The rollback used to boot it out and start it again about half a second
+    # later, which is the same race `scripts/install.sh` works around: launchd
+    # removes a job asynchronously, and a start landing in that window comes
+    # back against a stale environment. The engine below keeps answering for
+    # two probes after its bootout, so a rollback that does not wait starts it
+    # while the old process is still there.
+    engine.lingering_after_bootout = 2
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "tool" in argv:
+            raise subprocess.CalledProcessError(1, argv, output="", stderr="uv: broken")
+        return engine.uv_run(argv, **kwargs)
+
+    # Whether the old process was still answering at the moment the start was
+    # issued: that, not the flag the bootout set, is the race.
+    started_while_up: list[bool] = []
+
+    def start_service() -> SimpleNamespace:
+        started_while_up.append(engine.get(f"{BASE}/api/startup-status") is not None)
+        return engine.start_service()
+
+    result = _run(engine, op, state, receipt_path, run=run, start_service=start_service)
+
+    assert result.phase == "rolled_back"
+    assert started_while_up == [False]
+    assert _env_version(engine.live_env) == FROM_VERSION
+
+
+def test_local_opener_bypasses_the_system_proxy() -> None:
+    # urllib's default opener honours the macOS system proxy settings, so on a
+    # Mac configured with one every loopback probe would go through a proxy
+    # that may not resolve `localhost` — and from a rollback that reads as
+    # "the restored engine never came back". An empty `ProxyHandler` registers
+    # no proxy at all, so the opener only knows how to open a URL directly.
+    opener = engine_update._LOCAL_OPENER
+    assert not [
+        h for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler)
+    ]
+    for protocol in ("http", "https"):
+        assert not [
+            h
+            for h in opener.handle_open.get(protocol, [])
+            if isinstance(h, urllib.request.ProxyHandler)
+        ]
+    # Both helpers default to it, so the proxy cannot be reintroduced for one
+    # and forgotten for the other.
+    for helper in (engine_update._post_json, engine_update._get_json):
+        assert helper.__kwdefaults__["opener"] == opener.open  # type: ignore[index]
+
+
+def test_default_fetch_caps_the_download_and_leaves_nothing_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = b"far more than the manifest described" * 1024
+
+    class _Response(io.BytesIO):
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            self.close()
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda request, timeout=0.0: _Response(payload)
+    )
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda seconds: slept.append(seconds))
+
+    dest = tmp_path / "out" / "big.bin"
+    with pytest.raises(UpdateError, match="larger than"):
+        default_fetch("https://example.test/big.bin", dest, max_bytes=1024)
+
+    # Not retried: the server is answering fine, it is just serving something
+    # this release does not describe.
+    assert slept == []
+    assert not dest.exists()
+    # The oversized bytes are dropped rather than left for a retry to find.
+    assert list(dest.parent.glob("*.part")) == []
+
+
+def test_cli_apply_rejects_an_unusable_drain_timeout(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A timeout below the floor is a typo, and `inf` is worse than one: it
+    # removes the deadline, so a drain that never completes keeps the engine
+    # refusing turns with no upper bound on when that ends. Both are refused
+    # as arguments, before anything is drained.
+    for value in ("0", "-5", "0.5", "inf", "nan", "soon"):
+        with pytest.raises(SystemExit):
+            main(["apply", "--drain-timeout", value])
+        assert "--drain-timeout" in capsys.readouterr().err, value
+
+    # The default is still the long one, and the floor is accepted.
+    assert engine_update._drain_timeout_arg("600") == 600.0
+    assert engine_update._drain_timeout_arg("1") == 1.0
+
+
+def test_cli_apply_reports_an_interrupted_apply(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "ciao.package_version.detect_install_mode", lambda: "installer"
+    )
+
+    def interrupt(**kwargs: Any) -> Any:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(engine_update, "apply_update", interrupt)
+
+    assert main(["apply"]) == 130
+
+    assert "cancelled" in capsys.readouterr().err
 
 
 def test_status_prints_new_phases(capsys: pytest.CaptureFixture[str]) -> None:

@@ -13,12 +13,15 @@ readiness check and the rollback all survive the engine being booted out.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import plistlib
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -83,6 +86,18 @@ _UV_TIMEOUT = 600
 _STOP_TIMEOUT = 30.0
 _READY_TIMEOUT = 120.0
 _LOCK_TIMEOUT = 30.0
+# How long a drain waits for active chats, and the floor an operator may set.
+# Below a second there is no time to read the first poll, and a non-finite
+# value would turn the deadline into no deadline at all.
+_DEFAULT_DRAIN_TIMEOUT = 600.0
+_MIN_DRAIN_TIMEOUT = 1.0
+# Every loopback probe in this module is to the engine on *this* machine, so
+# none of them may be routed through the system HTTP proxy: urllib honours the
+# macOS proxy settings, and a Mac configured with one (a PAC URL, a corporate
+# VPN) can turn a healthy engine into a probe that never answers — which, from
+# a rollback, means `rollback_failed`. An empty `ProxyHandler` disables the
+# lookup for this opener alone and changes nothing else about the process.
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 # A `fetch` is called with the URL and destination, and may take extra keyword
 # bounds (`max_bytes`). Typed loosely on purpose: a test double is a plain
@@ -266,7 +281,11 @@ def default_fetch(
                         if max_bytes and written > max_bytes:
                             # Not an OSError, so this is not retried: the
                             # server is answering fine, it is just serving
-                            # something this release does not describe.
+                            # something this release does not describe. The
+                            # partial bytes are dropped first: they are not a
+                            # release anybody can install, and leaving them
+                            # makes a retry look like it is resuming.
+                            part.unlink(missing_ok=True)
                             raise UpdateError(
                                 f"{url} is larger than the {max_bytes} bytes expected"
                             )
@@ -533,12 +552,13 @@ def _stage_locked(
     return op
 
 
-def _reason(exc: Exception) -> str:
+def _reason(exc: BaseException) -> str:
     """The operator-facing explanation of ``exc``, subprocess output included.
 
     ``run(..., check=True)`` reports only "returned non-zero exit status 1";
     uv's own reason is in the captured output, and dropping it is what makes a
-    failed update unexplainable from the record.
+    failed update unexplainable from the record. ``BaseException`` because an
+    interrupted drain (Ctrl-C, SIGHUP) is recorded through this too.
     """
     message = str(exc)
     if isinstance(exc, subprocess.CalledProcessError):
@@ -562,7 +582,7 @@ def _decode_body(raw: bytes) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _post_json(url: str, *, opener: Opener = urllib.request.urlopen) -> dict[str, Any]:
+def _post_json(url: str, *, opener: Opener = _LOCAL_OPENER.open) -> dict[str, Any]:
     """POST an empty body to ``url`` and return the JSON object answer.
 
     ``opener`` is a parameter so the failure-injection tests never open a
@@ -575,7 +595,7 @@ def _post_json(url: str, *, opener: Opener = urllib.request.urlopen) -> dict[str
 
 
 def _get_json(
-    url: str, *, opener: Opener = urllib.request.urlopen
+    url: str, *, opener: Opener = _LOCAL_OPENER.open
 ) -> dict[str, Any] | None:
     """GET ``url`` and decode a JSON object, or None for any failure at all.
 
@@ -596,6 +616,34 @@ def _drain_timeout(drain_timeout: float) -> UpdateError:
     return UpdateError(
         f"drain timed out after {int(drain_timeout)}s; the running engine was left untouched"
     )
+
+
+def _drain_timeout_arg(value: str) -> float:
+    """``--drain-timeout`` as a usable number of seconds, or a usage error.
+
+    A value below the floor is a typo (`--drain-timeout 60` meaning
+    milliseconds, or `0` meaning "do not wait" and stopping the engine
+    mid-turn), and a non-finite one (`inf`) is worse than a typo: it removes
+    the deadline entirely, so a drain that never completes keeps the engine
+    refusing turns with no upper bound on when that ends. argparse reports
+    both as what they are — a bad argument — rather than letting the apply
+    start and fail later, with the engine already drained.
+    """
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"not a number of seconds: {value!r}"
+        ) from None
+    if not math.isfinite(seconds):
+        raise argparse.ArgumentTypeError(
+            f"must be a finite number of seconds, got {value!r}"
+        )
+    if seconds < _MIN_DRAIN_TIMEOUT:
+        raise argparse.ArgumentTypeError(
+            f"must be at least {int(_MIN_DRAIN_TIMEOUT)}s, got {value!r}"
+        )
+    return seconds
 
 
 def _write_updater_plist(op: Operation, python: str, state_dir: Path) -> Path:
@@ -654,6 +702,22 @@ def _reopen_admission(post: PostJson, base: str) -> None:
     try:
         post(f"{base}/api/admin/drain/cancel")
     except Exception:  # noqa: BLE001 — best effort by definition
+        pass
+
+
+def _advance_ignoring_failure(advance: Callable[[str], None], phase: str) -> None:
+    """Advance the record, swallowing a write that cannot land.
+
+    A record write fails on a full disk, on a read-only state directory, on a
+    vanished parent — and the most likely way to get there is the same full
+    disk that broke the swap in the first place. A phase write is bookkeeping,
+    so losing one must never cost the operator the thing the phase describes:
+    a rollback that never runs, or an update that is rolled back after it has
+    already passed readiness. The caller keeps its own outcome either way.
+    """
+    try:
+        advance(phase)
+    except Exception:  # noqa: BLE001 — bookkeeping must not escalate
         pass
 
 
@@ -786,11 +850,10 @@ def _previous_receipt(op: Operation) -> install_receipt.InstallReceipt | None:
 
 def apply_update(
     *,
-    drain_timeout: float = 600.0,
+    drain_timeout: float = _DEFAULT_DRAIN_TIMEOUT,
     state_dir: Path | None = None,
     port: int | None = None,
     http_post: PostJson | None = None,
-    http_get: GetJson | None = None,
     launchctl: Launchctl | None = None,
     uid: int | None = None,
     sleep: Sleep = time.sleep,
@@ -812,13 +875,14 @@ def apply_update(
     sibling job, in an environment the swap has not touched.
 
     Everything is injectable so the tests exercise the handshake, the timeout
-    and the handoff without launchd, a network, or a real engine.
+    and the handoff without launchd, a network, or a real engine. Note there is
+    no ``http_get``: the drain is polled by POSTing it again, so this half
+    never asks the engine a question the drain answer does not carry.
     """
     root = state_dir or default_state_dir()
     root.mkdir(parents=True, exist_ok=True)
     os.chmod(root, 0o700)
     post = http_post or _post_json
-    get = http_get or _get_json
     launch = launchctl or (lambda args: macos_service._launchctl(args))
     domain_uid = os.getuid() if uid is None else uid
     base = f"http://localhost:{_engine_port() if port is None else port}"
@@ -832,6 +896,11 @@ def apply_update(
             or staged_python is None
             or not staged_python.exists()
         ):
+            if op is not None and op.phase == "failed" and op.error:
+                # The record knows why, and "nothing staged" would be a lie:
+                # the staged env is usually still there, and only the apply
+                # has to be run again.
+                raise UpdateError(f"last apply failed: {op.error}; run: ciao update stage")
             raise UpdateError("nothing staged; run: ciao update stage")
 
         def advance(phase: str) -> None:
@@ -850,13 +919,20 @@ def apply_update(
         try:
             advance("draining")
             post(f"{base}/api/admin/drain")
+            # Polled by re-POSTing the drain, not by reading
+            # `/api/active-chats`: on a client-mode node that path is mirrored
+            # to the host, so a GET would drain *this* machine and then wait on
+            # the host's chats. The drain POST is local (see
+            # `EXCLUDED_LOCAL_PATHS`), and `begin_restart_drain` is
+            # idempotent, so asking again is free and answers the same
+            # question.
             # Three consecutive empty readings rather than one: a chat can look
             # idle between two of its own phases, and stopping the engine then
             # would cut a turn short.
             deadline = clock() + drain_timeout
             idle = 0
             while True:
-                body = get(f"{base}/api/active-chats") or {}
+                body = post(f"{base}/api/admin/drain")
                 active = body.get("active_chat_ids") or []
                 idle = idle + 1 if not active else 0
                 if idle >= _IDLE_POLLS_REQUIRED:
@@ -864,9 +940,15 @@ def apply_update(
                 if clock() >= deadline:
                     raise _drain_timeout(drain_timeout)
                 sleep(_POLL_INTERVAL)
-        except Exception as exc:
+        except BaseException as exc:
+            # `BaseException`, not `Exception`: a Ctrl-C, a SIGHUP or a SIGTERM
+            # during a wait of up to ten minutes is the most likely way this
+            # ends, and skipping `fail()` there would leave the engine refusing
+            # every turn with nothing in the record to say why.
             message = _reason(exc)
             fail(message)
+            if not isinstance(exc, Exception):
+                raise
             raise UpdateError(message) from exc
 
         try:
@@ -884,9 +966,11 @@ def apply_update(
                 raise UpdateError(
                     f"could not start the updater job: {detail or 'launchctl bootstrap failed'}"
                 )
-        except Exception as exc:
+        except BaseException as exc:
             message = _reason(exc)
             fail(message)
+            if not isinstance(exc, Exception):
+                raise
             raise UpdateError(message) from exc
 
         # The lock is released by the `finally` on the way out, which is the
@@ -958,6 +1042,17 @@ def _rollback(
         "stop the engine",
         lambda: launch(["bootout", f"gui/{domain_uid}/{SERVER_LABEL}"]),
     )
+    # `launchctl bootout` returns before launchd has finished with the job, and
+    # the forward path already waits for the engine to stop before touching a
+    # file. Starting it again in that window is the race
+    # `scripts/install.sh` works around: a service start that lands while
+    # launchd is still unloading comes back with a stale environment. The
+    # answer is ignored — an engine that is still up is started anyway below —
+    # but waiting costs one probe.
+    step(
+        "wait for the engine to stop",
+        lambda: _wait_until_unreachable(get, status_url, _STOP_TIMEOUT, sleep, clock),
+    )
     if env_moved:
         step(
             "remove the half-installed env",
@@ -991,6 +1086,7 @@ def run_apply(
     *,
     state_dir: Path | None = None,
     port: int | None = None,
+    http_post: PostJson | None = None,
     http_get: GetJson | None = None,
     launchctl: Launchctl | None = None,
     uv: str | None = None,
@@ -1012,10 +1108,13 @@ def run_apply(
 
     Nothing here raises once the engine is down: every failure is answered by a
     rollback and a persisted phase, because the process that has to survive this
-    one dying is the operator's terminal, not the job.
+    one dying is the operator's terminal, not the job. Everything that refuses
+    *before* the engine is stopped reopens admission on the way out, because
+    the foreground half has already closed it and nothing else would.
     """
     root = state_dir or default_state_dir()
     root.mkdir(parents=True, exist_ok=True)
+    post = http_post or _post_json
     get = http_get or _get_json
     launch = launchctl or (lambda args: macos_service._launchctl(args))
     start = start_service or (lambda: macos_service.start_service())
@@ -1023,14 +1122,25 @@ def run_apply(
     base = f"http://localhost:{_engine_port() if port is None else port}"
     status_url = f"{base}/api/startup-status"
 
-    handle = _acquire_lock_waiting(root, sleep, clock)
+    try:
+        handle = _acquire_lock_waiting(root, sleep, clock)
+    except UpdateInProgress:
+        # The handoff lost to a second update. The engine is still running and
+        # still drained, and this job is the only thing that knows it, so the
+        # cancel goes out before the failure propagates.
+        _reopen_admission(post, base)
+        raise
     try:
         op = read_operation(root)
         if op is None or op.id != operation_id:
             # A record describing a different update is not this job's to
             # rewrite, so this is the one failure with no phase of its own.
+            # The engine is still up and still drained: reopen admission
+            # before it propagates.
+            _reopen_admission(post, base)
             raise UpdateError(f"no staged update with id {operation_id!r}")
         if op.phase != "applying":
+            _reopen_admission(post, base)
             raise UpdateError(f"update {operation_id} is {op.phase}, not applying")
 
         def advance(phase: str) -> None:
@@ -1042,7 +1152,18 @@ def run_apply(
             op.phase = "failed"
             op.error = message
             op.updated_at = _now()
-            write_operation(op, root)
+            try:
+                write_operation(op, root)
+            except OSError:
+                # A record write fails on a full disk, which is one of the
+                # things that brings a run here in the first place. The
+                # refusal is still real, so it is returned either way.
+                pass
+            # Every pre-flight refusal lands here with the engine still up and
+            # still drained by the foreground half, and nothing else reopens
+            # it. Past the stop there is nothing left to reopen: the cancel is a
+            # no-op against a dead engine, which is started again either way.
+            _reopen_admission(post, base)
             return op
 
         # Pre-flight, while the engine is still serving: every one of these
@@ -1055,6 +1176,15 @@ def run_apply(
             return record("the staged wheel is gone; nothing to install")
         if not op.env_python or not Path(op.env_python).exists():
             return record("the staged environment is gone; nothing to install")
+        if receipt.version != op.from_version:
+            # The install is not the one this update was staged against — the
+            # user reinstalled in between. Applying would silently downgrade
+            # the new install, and rolling back would restore a receipt that
+            # no longer describes what is on disk.
+            return record(
+                f"the installed engine is {receipt.version}, but this update was "
+                f"staged from {op.from_version}; run: ciao update stage"
+            )
         try:
             uv_bin = uv or find_uv(receipt.uv)
         except UpdateError as exc:
@@ -1071,6 +1201,7 @@ def run_apply(
         # (still running, or just stopped) engine is started again, which is
         # idempotent either way.
         stopped = False
+        ok = False
         try:
             advance("stopping")
             launch(["bootout", f"gui/{domain_uid}/{SERVER_LABEL}"])
@@ -1108,6 +1239,21 @@ def run_apply(
                 capture_output=True,
                 text=True,
                 timeout=_UV_TIMEOUT,
+                # This runs under the updater's own launchd job, whose
+                # environment is launchd's — not the installer's. If that job
+                # ever inherits `UV_TOOL_DIR`/`XDG_DATA_HOME` (a login shell
+                # that exported them, a wrapper that set them), uv would
+                # install somewhere other than the env we just moved aside and
+                # re-point the `ciao` shim: the new env would never run, the
+                # old one would be gone, and the rollback would report
+                # `rollback_failed` over an install that was never replaced.
+                # Pinned to the install we own, from the receipt, which is what
+                # the installer did.
+                env={
+                    **os.environ,
+                    "UV_TOOL_DIR": str(live_env.parent),
+                    "UV_TOOL_BIN_DIR": str(Path(receipt.executable).parent),
+                },
             )
             reported = run(
                 [
@@ -1148,13 +1294,20 @@ def run_apply(
                 clock,
                 subject="the new engine",
             )
-
-            advance("applied")
-            _prune_previous_envs(root, op)
-            return op
+            # Past readiness the update is a fact about the machine, not a
+            # claim to be withdrawn: the new engine is installed, the receipt
+            # names it and it answered for itself. Recorded as such, past the
+            # try below, so a record write that fails cannot roll back an
+            # install that is already serving.
+            ok = True
         except Exception as exc:
             original = _reason(exc)
-            advance("rolling_back")
+            # Every phase write from here on is best-effort. A record write can
+            # fail on a full disk — usually the same full disk that broke the
+            # swap — and a phase write is bookkeeping: losing it must not stop
+            # the rollback that restores the operator's engine, nor override
+            # the outcome the rollback already decided.
+            _advance_ignoring_failure(advance, "rolling_back")
             errors = _rollback(
                 op,
                 receipt=receipt,
@@ -1172,11 +1325,15 @@ def run_apply(
             )
             if errors:
                 op.error = f"{original}; rollback failed: {'; '.join(errors)}"
-                advance("rollback_failed")
+                _advance_ignoring_failure(advance, "rollback_failed")
             else:
                 op.error = f"{original}; rolled back to {op.from_version}"
-                advance("rolled_back")
+                _advance_ignoring_failure(advance, "rolled_back")
             return op
+        if ok:
+            _advance_ignoring_failure(advance, "applied")
+            _prune_previous_envs(root, op)
+        return op
     finally:
         release_lock(handle)
 
@@ -1193,9 +1350,12 @@ def main(argv: list[str] | None = None) -> int:
     apply_cmd = sub.add_parser("apply", help="Drain, then apply a staged update")
     apply_cmd.add_argument(
         "--drain-timeout",
-        type=float,
-        default=600.0,
-        help="seconds to wait for active chats before giving up (default: 600)",
+        type=_drain_timeout_arg,
+        default=_DEFAULT_DRAIN_TIMEOUT,
+        help=(
+            "seconds to wait for active chats before giving up "
+            f"(default: {int(_DEFAULT_DRAIN_TIMEOUT)}, minimum: {int(_MIN_DRAIN_TIMEOUT)})"
+        ),
     )
     apply_cmd.add_argument("--json", action="store_true", help="print the operation record")
 
@@ -1238,11 +1398,40 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     if args.command == "apply":
+        # A drain can wait ten minutes, and closing the terminal (SIGHUP) or a
+        # supervisor stopping the process (SIGTERM) is as ordinary a way to end
+        # that wait as Ctrl-C is. Both default to killing the process outright,
+        # which would skip the cancel that reopens admission and leave the
+        # engine refusing every turn with nothing in the record to explain it.
+        # Turning them into the KeyboardInterrupt the handler below already
+        # deals with, and restoring the previous handlers on the way out, is
+        # the whole of the fix. `signal.signal` needs the main thread and a
+        # real handler; neither holds everywhere this is callable, and neither
+        # failure is worth refusing an update over.
+        def _interrupt(_signum: int, _frame: Any) -> None:
+            raise KeyboardInterrupt
+
+        restore: dict[signal.Signals, Any] = {}
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            with contextlib.suppress(ValueError, OSError, AttributeError):
+                restore[sig] = signal.getsignal(sig)
+                signal.signal(sig, _interrupt)
         try:
             op = apply_update(drain_timeout=args.drain_timeout)
+        except KeyboardInterrupt:
+            # 130 is the conventional exit for SIGINT, and this is the same
+            # event: the apply was interrupted, the record says why, and
+            # admission has been reopened.
+            print("Error: update cancelled", file=sys.stderr)
+            return 130
         except UpdateError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
+        finally:
+            for sig, handler in restore.items():
+                if handler is not None:
+                    with contextlib.suppress(ValueError, OSError, AttributeError):
+                        signal.signal(sig, handler)
         if args.json:
             print(_format(op, True))
         else:

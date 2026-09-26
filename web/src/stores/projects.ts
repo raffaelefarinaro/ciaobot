@@ -3716,11 +3716,27 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Global events WS (cross-chat awareness) ─────────────────────────
 
+  // The reload loop of the drain in progress, so a cancel can stop it: an
+  // update drain that gives up leaves a healthy engine running, and a loop
+  // left behind would hard-reload every tab at the end of its timeout.
+  let restartReloadAbort: AbortController | null = null
+
   function beginServerRestart(message?: string) {
     if (serverRestarting.value) return
     serverRestarting.value = true
     serverRestartMessage.value = restartMessageForDisplay(message)
-    void reloadWhenServerReady()
+    // A drain that never went up (or a fresh one replacing an abandoned loop)
+    // must not leave the previous loop's reload pending.
+    restartReloadAbort?.abort()
+    restartReloadAbort = new AbortController()
+    void reloadWhenServerReady(undefined, restartReloadAbort.signal)
+  }
+
+  function cancelServerRestart() {
+    serverRestarting.value = false
+    serverRestartMessage.value = ''
+    restartReloadAbort?.abort()
+    restartReloadAbort = null
   }
 
   function undoOptimisticSend(chatId: string) {
@@ -3966,8 +3982,7 @@ export const useProjectStore = defineStore('projects', () => {
       // The engine reopened admission: an update drain that timed out. The
       // overlay would otherwise stick and block a perfectly working engine.
       case 'server_restart_cancelled':
-        serverRestarting.value = false
-        serverRestartMessage.value = ''
+        cancelServerRestart()
         break
       case 'chat_streaming_started':
         projectStreaming.value[msg.chat_id] = true

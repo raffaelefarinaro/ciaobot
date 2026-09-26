@@ -125,3 +125,17 @@ def test_cancel_restart_drain_reopens_admission() -> None:
         "server_restarting",
         "server_restart_cancelled",
     ]
+
+
+# The update drain routes have to tell *whose* drain this is — the update's own
+# cancel reopens admission, a Settings restart's must not — and they read it
+# through this rather than the private flag.
+def test_restart_draining_is_readable_without_the_private_flag() -> None:
+    manager = _bare_manager()
+    assert manager.restart_draining is False
+
+    manager.begin_restart_drain()
+    assert manager.restart_draining is True
+
+    manager.cancel_restart_drain()
+    assert manager.restart_draining is False

@@ -47,6 +47,15 @@ def test_device_scoped_api_stays_local():
     assert is_local_path("/api/device") is True
 
 
+def test_update_drain_is_local_not_mirrored():
+    # An update applies to the engine the operator ran it against. Mirrored, a
+    # `ciao update apply` on this node would drain the host and swap the
+    # host's install, and its cancel would reopen admission there — while this
+    # node kept running the version its own receipt describes.
+    assert is_local_path("/api/admin/drain") is True
+    assert is_local_path("/api/admin/drain/cancel") is True
+
+
 def test_password_settings_are_mirrored_not_local():
     # The password a client logs in with is the host's, so Settings must edit
     # the host's — while login/logout/check stay local, they mint and clear
