@@ -10,7 +10,10 @@ the flag is read through the module attribute and never imported by value.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +21,7 @@ import pytest
 
 from ciao import archive_jobs as aj
 from ciao.config import CiaoConfig
+from ciao.models import AgentRequest, ResultEvent, StreamEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web import chat_service, memory_pass
@@ -127,6 +131,70 @@ def _source(
 def _replied(chat: ChatInfo, text: str, status: str = "success") -> None:
     chat.last_response = text
     chat.last_response_status = status
+
+
+class _TerminalProvider:
+    """A provider whose pass ends on a scripted result.
+
+    ``current_session_id`` stays None so the turn stamps no provider session,
+    which keeps these tests off the subagent watcher and the between-turns
+    drain: the foreground turn has to be the only thing that settles a pass.
+    """
+
+    current_session_id = None
+
+    def __init__(self, events: list[StreamEvent]) -> None:
+        self._events = events
+
+    async def execute_streaming(
+        self, request: AgentRequest
+    ) -> AsyncGenerator[StreamEvent, None]:
+        del request
+        for event in self._events:
+            yield event
+
+
+class _SilentProvider(_TerminalProvider):
+    """A pass that never answers, so its turn stays in flight."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+
+    async def execute_streaming(
+        self, request: AgentRequest
+    ) -> AsyncGenerator[StreamEvent, None]:
+        del request
+        await asyncio.Event().wait()
+        yield  # pragma: no cover - unreachable: the wait never returns
+
+
+class _DrainingProvider:
+    """A between-turns drain that answers with a scripted result."""
+
+    can_drain = True
+
+    def __init__(self, events: list[StreamEvent]) -> None:
+        self._events = events
+
+    async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
+        for event in self._events:
+            yield event
+
+
+async def _await_detached(manager: ProjectChatManager) -> None:
+    """Let the hooks a terminal turn spawned run, and what they spawn in turn.
+
+    ``_spawn_detached`` registers each task synchronously and drops it from a
+    done callback, so a task that already finished only needs one loop turn for
+    the set to drain. Awaiting ``gather`` alone would spin on exactly those,
+    never yielding.
+    """
+    while True:
+        pending = [task for task in manager._detached_tasks if not task.done()]
+        if not pending:
+            return
+        await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.sleep(0)
 
 
 def _no_model_calls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -548,6 +616,120 @@ async def test_resume_after_restart(
     ).postprocess["steps"]["memory_pass"]["status"] == "attention"
     assert reloaded_streams.chat_ids == [ids[1]]
     assert reloaded.get_chat(ids[1]).helper["state"] == "running"
+
+
+# ── The terminal turn a pass settles on ────────────────────────────────────
+#
+# `on_turn_finished` above is called directly, which pins the queue but proves
+# nothing about whether anything ever calls it: the scheduling lived in the
+# streaming loop and only ever ran for a clean result, so an errored or empty
+# pass stayed `running` and blocked its workspace queue for good. These drive
+# the real turn.
+
+
+@pytest.mark.parametrize(
+    ("result", "is_error", "status"),
+    [
+        ("the vault is locked", True, "error"),
+        ("", False, "empty"),
+    ],
+)
+async def test_an_unclean_foreground_turn_frees_the_workspace_slot(
+    tmp_path: Path,
+    passes_enabled: None,
+    result: str,
+    is_error: bool,
+    status: str,
+) -> None:
+    manager = _make_manager(tmp_path)
+    archive = tmp_path / "archive.md"
+    archive.write_text("# chat\n", encoding="utf-8")
+    sources = [_source(manager, name) for name in ("First", "Second")]
+    ids = [
+        manager.enqueue_memory_pass(source, None, archive, "")
+        for source in sources
+    ]
+    first_id, second_id = ids
+    # One at a time: the first pass holds the live turn, the second waits.
+    assert manager.get_chat(first_id).helper["state"] == "running"
+    assert manager.get_chat(second_id).helper["state"] == "queued"
+
+    # Registered before the loop runs the drive task the queue just created, so
+    # the turn streams from these and never from a real CLI.
+    manager._providers[first_id] = _TerminalProvider(  # type: ignore[assignment]
+        [ResultEvent(type="result", result=result, is_error=is_error)]
+    )
+    manager._providers[second_id] = _SilentProvider()  # type: ignore[assignment]
+    try:
+        turn = manager._streaming.drive_task(first_id)
+        assert turn is not None
+        await turn
+        await _await_detached(manager)
+
+        first = manager.get_chat(first_id)
+        assert first.last_response_status == status
+        # A pass that ended badly is left open for its owner, never archived.
+        assert first.archived is False
+        assert first.helper["state"] == "attention"
+        assert manager.get_chat(
+            sources[0].chat_id
+        ).postprocess["steps"]["memory_pass"]["status"] == "attention"
+        # And it is no longer holding the workspace, so the queue moved on.
+        assert manager.get_chat(second_id).helper["state"] == "running"
+        assert manager._streaming.drive_task(second_id) is not None
+    finally:
+        # The second pass is still streaming when the test ends; unwind it so
+        # the loop closes clean, and let its own terminal settle run.
+        second_turn = manager._streaming.drive_task(second_id)
+        if second_turn is not None:
+            second_turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await second_turn
+        await _await_detached(manager)
+
+
+async def test_an_errored_drain_settles_a_pass_waiting_on_background_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    passes_enabled: None,
+    streams: _FakeStreams,
+) -> None:
+    """A pass that handed the turn to background work settles on its result.
+
+    The drain is a terminal result in its own right, and an errored one is the
+    case the pass must not miss: it has to persist as an error, or the pass
+    reads the clean status left by the earlier turn and archives the failure.
+    """
+    manager = _make_manager(tmp_path)
+    proposed: list[str] = []
+
+    async def _proposal_helper(chat_id: str) -> bool:
+        proposed.append(chat_id)
+        return False
+
+    monkeypatch.setattr(manager, "_maybe_archive_proposal_helper", _proposal_helper)
+    archive = tmp_path / "archive.md"
+    archive.write_text("# chat\n", encoding="utf-8")
+    pass_id = manager.enqueue_memory_pass(_source(manager, "First"), None, archive, "")
+    chat = manager.get_chat(pass_id)
+    assert chat is not None
+    # Mid-turn, as `stream_chat` leaves a chat: the slot is held, nothing settled.
+    chat.last_response = ""
+    chat.last_response_status = "running"
+    manager._providers[pass_id] = _DrainingProvider(  # type: ignore[assignment]
+        [ResultEvent(type="result", result="the vault is locked", is_error=True)]
+    )
+
+    await manager._drain_between_turns(pass_id, chat.project_id)
+    await _await_detached(manager)
+
+    assert chat.last_response_status == "error"
+    assert chat.archived is False
+    assert chat.helper["state"] == "attention"
+    # The proposal helper stays success-gated: a failure proposes nothing, and
+    # the queued pass is untouched because this one already held the slot.
+    assert proposed == []
+    assert streams.chat_ids == [pass_id]
 
 
 # ── Notifications and turn shape ──────────────────────────────────────────

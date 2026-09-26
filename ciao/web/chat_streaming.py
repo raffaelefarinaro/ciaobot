@@ -940,10 +940,15 @@ class ChatStreaming:
                         self._host._maybe_archive_proposal_helper(chat_id),
                         f"archive-proposal-helper-{chat_id}",
                     )
-                    self._host._spawn_detached(
-                        self._host._memory_pass_turn_finished(chat_id),
-                        f"memory-pass-{chat_id}",
-                    )
+            # A memory pass settles on EVERY terminal turn, not only a clean one.
+            # An errored or empty pass is exactly what `attention` is for: left
+            # `running`, it holds its workspace slot forever and every pass
+            # queued behind it never starts. Scheduled once here, below the
+            # announce, so a clean turn still runs it once rather than twice.
+            self._host._spawn_detached(
+                self._host._memory_pass_turn_finished(chat_id),
+                f"memory-pass-{chat_id}",
+            )
 
     async def drive_stream(
         self,
@@ -1316,13 +1321,13 @@ class ChatStreaming:
                     is_error = bool(event.is_error)
                     self._last_drain_result[chat_id] = (text, is_error)
                     close_stream(is_error)
+                    chat_now = self._host._chats.get(chat_id)
                     if (
                         not is_error
                         and text
                         and self._host._is_worth_announcing_nudge_reply(text)
                     ):
                         snippet = self._host._result_snippet(text)
-                        chat_now = self._host._chats.get(chat_id)
                         if chat_now is not None:
                             chat_now.last_activity_at = chat_service._now_iso()
                             chat_now.last_snippet = snippet
@@ -1340,10 +1345,30 @@ class ChatStreaming:
                             self._host._maybe_archive_proposal_helper(chat_id),
                             f"archive-proposal-helper-{chat_id}",
                         )
-                        self._host._spawn_detached(
-                            self._host._memory_pass_turn_finished(chat_id),
-                            f"memory-pass-{chat_id}",
+                    elif chat_now is not None:
+                        # Not worth announcing is a notification decision, not
+                        # an outcome one: the result still ended a turn, so its
+                        # status is persisted here exactly as the turn-done path
+                        # persists it. Without this an errored drain leaves the
+                        # chat reading as the clean success that preceded it, and
+                        # a memory pass waiting on this result archives an error.
+                        chat_now.last_response = text[
+                            -chat_service._PROVIDER_HANDOVER_MAX_CHARS :
+                        ]
+                        chat_now.last_response_status = (
+                            "error"
+                            if is_error
+                            else "success"
+                            if text.strip()
+                            else "empty"
                         )
+                        self._host._save()
+                    # A pass that was waiting on background work ends here, and
+                    # ends once per terminal result whatever that result was.
+                    self._host._spawn_detached(
+                        self._host._memory_pass_turn_finished(chat_id),
+                        f"memory-pass-{chat_id}",
+                    )
         except asyncio.CancelledError:
             cancelled = True
             raise
