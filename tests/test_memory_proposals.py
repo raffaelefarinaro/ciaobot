@@ -675,14 +675,6 @@ def test_promote_ignores_rule_label_quoted_inside_user_text(tmp_path: Path) -> N
     assert remaining == []
 
 
-def test_durable_rule_label_matches_extraction_prompts() -> None:
-    """The prompts and the consumer regex share one label; drift must fail."""
-    from ciao import insights as insights_mod
-
-    assert mp.DURABLE_RULE_LABEL in insights_mod._INSIGHTS_SYSTEM_PROMPT
-    assert mp.DURABLE_RULE_LABEL in insights_mod._TEXT_MODE_SYSTEM_PROMPT
-
-
 # ── Destination tags and routing ──────────────────────────────────────────
 
 

@@ -111,17 +111,6 @@ def _job(tmp_path: Path, archive: Path, **kwargs: object) -> aj.ArchiveJob:
     )
 
 
-def _patch_insights_model(monkeypatch: pytest.MonkeyPatch, output: str) -> None:
-    async def fake_call(filtered_jsonl: str, model: str, **kwargs: object) -> str:
-        return output
-
-    async def fake_text_call(body: str, model: str, **kwargs: object) -> str:
-        return output
-
-    monkeypatch.setattr(insights, "_call_model", fake_call)
-    monkeypatch.setattr(insights, "_call_text_model", fake_text_call)
-
-
 # ── Manifest basics ───────────────────────────────────────────────────────
 
 
@@ -1246,31 +1235,37 @@ def test_a_stage_does_not_run_when_its_start_cannot_be_recorded(
 ) -> None:
     """An unwritable manifest must stop the stage before it does any work.
 
-    `job.mark(name, RUNNING)` was followed by an unchecked `job.save()`, so a
-    stage whose start could not be recorded ran anyway: the model was called,
-    and the project fold, trajectory or proposal write could land while the
-    durable manifest still said pending — leaving startup to replay work that
-    had already happened.
+    `job.mark(name, RUNNING)` is followed by a checked `job.save()`, so a stage
+    whose start could not be recorded must not go on to write the trajectory
+    while the durable manifest still says pending — that would leave startup to
+    replay work which had already happened.
 
-    The discriminator is the model call, not the final status: the insights
-    append already refused without its evidence, so the stage ended FAILED
-    either way. What changes is that it now fails *before* doing the work.
+    The discriminator is the write, not the final status: the stage ends FAILED
+    either way. What matters is that it fails *before* doing the work.
     """
     archive = _archive(tmp_path)
     called: list[str] = []
 
-    async def fake_call(body: str, model: str, **kwargs: object) -> str:
-        called.append("model")
-        return "## Decisions\n- Chose sqlite. [idx=1]\n"
+    def fake_trajectory(**kwargs: object) -> Path:
+        called.append("trajectory")
+        return tmp_path / "traj.json"
 
-    monkeypatch.setattr(insights, "_call_text_model", fake_call)
+    monkeypatch.setattr(
+        "ciao.trajectory_builder.build_and_persist_trajectory", fake_trajectory
+    )
     job = _job(tmp_path, archive)
     monkeypatch.setattr(job, "save", lambda: False)
-    inputs = _job_inputs(tmp_path, archive)
+    inputs = _job_inputs(
+        tmp_path,
+        archive,
+        session_id="sess-1",
+        filtered_jsonl="line",
+        trajectories_enabled=True,
+    )
 
-    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["insights"]))
+    asyncio.run(insights.run_archive_pipeline(job, inputs, stages=["trajectory"]))
 
-    assert job.status_of("insights") == aj.FAILED
+    assert job.status_of("trajectory") == aj.FAILED
     assert called == [], "the stage must not run once its start could not be recorded"
 
 

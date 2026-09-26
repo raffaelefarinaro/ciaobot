@@ -2564,7 +2564,7 @@ def entity_key(name: str) -> str:
 def known_entities(vault_root: Path) -> tuple[dict[str, Path], dict[str, str]]:
     """Known projects (key → canonical doc) and people (key → note stem).
 
-    The same roster the extraction prompt is shown (``insights._known_context_block``)
+    The same roster the extraction prompt is shown (the extraction prompt's known-context block)
     read back so code can enforce what the prompt only asks: a fact about an
     entity the vault already has belongs in that entity's note.
     """

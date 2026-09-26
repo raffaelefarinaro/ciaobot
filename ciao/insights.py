@@ -1,27 +1,34 @@
-"""Post-archive session insights extraction.
+"""Post-archive session reading: the transcript filter, the retry policy, and
+the archive pipeline's one stage.
 
 When a chat is archived, the user/assistant text turns are rendered to
 ``memory-vault/Logs/Chats/<context>/claude/<file>.md`` by
 ``TranscriptStore.archive_session``. That renderer drops everything that
 isn't plain text: tool_use, tool_result, thinking blocks, errors, retries.
+:func:`filter_session_jsonl` mines the raw Claude Code session JSONL (at
+``~/.claude/projects/-home-ubuntu-ciao/<session-id>.jsonl``) for the signal
+those layers contain, so the trajectory built from it sees the same picture
+the renderer does.
 
-This module mines the raw Claude Code session JSONL (at
-``~/.claude/projects/-home-ubuntu-ciao/<session-id>.jsonl``) for the
-durable signal those layers contain, runs it through a fast cheap model
-(DeepSeek Flash by default), and appends a ``## Session insights``
-section to the archived markdown. Downstream consumers (memory curation,
-work daily log, weekly review) read that section instead of mining the
-JSONL themselves.
-
-The flow is split in two phases for safety:
+Three things live here, and they share one reason to: they are the pieces of
+archive-time session reading with no other home.
 
 * :func:`filter_session_jsonl` runs synchronously inside ``archive_chat``
-  before ``delete_sdk_session_blob`` removes the JSONL from disk. It
-  reads the file, drops noise, truncates large read-only tool_result
-  bodies, and returns a much smaller string ready for the model.
-* :func:`run_archive_pipeline` runs asynchronously via
-  ``asyncio.create_task`` from the archive route handler. It is the manifest
-  runner, and it drives the trajectory stage.
+  before ``delete_sdk_session_blob`` removes the JSONL from disk. It reads the
+  file, drops noise, truncates large read-only tool_result bodies, and flags
+  the unattended turns of a system-schedule run.
+* :func:`call_with_retry` (with :class:`RetryOutcome`,
+  :func:`is_context_overflow` and :func:`is_terminal_failure`) is the one
+  retry policy every one-shot in the app shares, so a context-window overflow
+  and an auth rejection are never both answered with "try again".
+* :func:`run_archive_pipeline` is the manifest runner. Its one stage is the
+  trajectory; the memory pass, a chat of the app's own, owns everything that
+  writes to the vault.
+
+:func:`locate_insights_section` and :func:`_has_insights_section` read the
+``## Session insights`` section an older build appended. Nothing appends one
+any more, but :mod:`ciao.archive_jobs` authenticates a crashed append from
+before this change against them, so a manifest written then still resumes.
 """
 
 from __future__ import annotations
@@ -72,7 +79,7 @@ def resolve_insights_model(
 # fired it. The value lives in ciao/memory_policy.py with the rest of the
 # policy, so the capsule and the extractor cannot disagree on the marker.
 _INSIGHTS_HEADER = "## Session insights"
-# Written by _append_section immediately before the header so the real
+# Written immediately before the header by the removed insights stage, so the real
 # appended section is distinguishable from a transcript that merely quotes
 # the header text (curation chats do this routinely). Archives written
 # before the stamp existed are handled by the heuristic in
@@ -125,169 +132,11 @@ _DEFAULT_MAX_INPUT_CHARS = 320_000
 # Cap on the fact-augmented "Known context" block prepended to the extraction
 # prompt. Small by design: it is reference data (current region entries plus
 # an entity roster), not a second transcript.
-_KNOWN_CONTEXT_MAX_CHARS = 6000
-_KNOWN_CONTEXT_MAX_NAMES = 120
-
-
-def _known_context_block(
-    guide_path: Path | None, vault_root: Path | None, transcript: str = ""
-) -> str:
-    """Workspace context the extractor should know, fetched by code.
-
-    Fact-augmented extraction (see docs/MEMORY_DESIGN.md): the model gets the
-    current always-loaded memory entries and a roster of known people and
-    projects — so it can omit already-covered facts, emit changed ones, and
-    only call an entity "new" when it is absent from the roster — without
-    getting tools. Retrieval stays deterministic and the model stays
-    sandboxed. Best-effort: any failure returns what was gathered so far, and
-    an empty result means the prompt simply carries no context section.
-    """
-    parts: list[str] = []
-    try:
-        if guide_path is not None and guide_path.exists():
-            from ciao.memory_tool import read_region
-
-            for region in ("memory", "profile"):
-                entries, diags = read_region(guide_path, region)
-                if diags or not entries:
-                    continue
-                parts.append(f"Current `ciao:{region}` entries:")
-                parts.extend(f"- {entry}" for entry in entries)
-    except Exception:  # noqa: BLE001 — context is optional
-        logger.exception("Known-context: could not read regions")
-    projects: dict[str, Path] = {}
-    people: dict[str, str] = {}
-    try:
-        if vault_root is not None and vault_root.exists():
-            # The same roster `memory_proposals` resolves `[project: <name>]`
-            # and `[people: <Name>]` against, so the prompt never offers a
-            # name code cannot route (a folder with no doc, `general`).
-            from ciao.memory_proposals import known_entities, project_name
-
-            projects, people = known_entities(vault_root)
-            names = sorted(people.values())[:_KNOWN_CONTEXT_MAX_NAMES]
-            if names:
-                parts.append("Known people: " + ", ".join(names))
-            names = sorted({project_name(doc) for doc in projects.values()})
-            if names:
-                parts.append("Known projects: " + ", ".join(names[:_KNOWN_CONTEXT_MAX_NAMES]))
-    except Exception:  # noqa: BLE001 — context is optional
-        logger.exception("Known-context: could not build entity roster")
-    if not parts:
-        return ""
-    block = (
-        "## Known context (fetched from the workspace, NOT transcript content)\n"
-        + "\n".join(parts)
-    )
-    if len(block) > _KNOWN_CONTEXT_MAX_CHARS:
-        # Cut at a line boundary: a mid-entry or mid-name cut would present a
-        # corrupted entry (or half a person's name) as reference data the
-        # prompt tells the model to trust.
-        cut = block.rfind("\n", 0, _KNOWN_CONTEXT_MAX_CHARS)
-        block = block[:_KNOWN_CONTEXT_MAX_CHARS] if cut <= 0 else block[:cut]
-    notes = ""
-    if transcript and vault_root is not None:
-        try:
-            notes = _entity_notes_block(vault_root, transcript, projects, people)
-        except Exception:  # noqa: BLE001 — context is optional
-            logger.exception("Known-context: could not excerpt entity notes")
-    return block + "\n\n" + notes
 
 
 # Excerpts of the notes this session's entities already have. Capped apart
 # from the roster above so a long roster can never crowd them out, and small:
 # enough for the model to see what a note already says, not the note itself.
-_ENTITY_NOTES_MAX = 8
-_ENTITY_NOTE_MAX_LINES = 6
-_ENTITY_NOTE_LINE_CHARS = 240
-_ENTITY_NOTES_MAX_CHARS = 8000
-
-
-def _archive_body_for_mentions(archive_path: Path) -> str:
-    """The rendered archive text-mode extraction reads, for entity mentions."""
-    try:
-        return archive_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-
-
-def _note_excerpt(path: Path) -> str:
-    """A note's ``description:`` plus its newest body lines, each clipped."""
-    from ciao.vault_index import FENCED_CODE_RE, FRONTMATTER_RE, _parse_frontmatter
-
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    # FRONTMATTER_RE wants LF endings and a newline after the closing fence.
-    text = text.replace("\r\n", "\n")
-    if not text.endswith("\n"):
-        text += "\n"
-    description = str(_parse_frontmatter(text).get("description") or "").strip()
-    match = FRONTMATTER_RE.match(text)
-    body = FENCED_CODE_RE.sub("", text[match.end():] if match else text)
-    lines = [
-        line.strip()
-        for line in body.splitlines()
-        if line.strip() and not line.lstrip().startswith(("#", "<!--", "|"))
-    ][-_ENTITY_NOTE_MAX_LINES:]
-    out = [f"description: {' '.join(description.split())}"] if description else []
-    for line in lines:
-        if len(line) > _ENTITY_NOTE_LINE_CHARS:
-            line = line[: _ENTITY_NOTE_LINE_CHARS - 1].rstrip() + "…"
-        out.append(line)
-    return "\n".join(out)
-
-
-def _entity_notes_block(
-    vault_root: Path,
-    transcript: str,
-    projects: dict[str, Path],
-    people: dict[str, str],
-) -> str:
-    """Excerpts of the known people/project notes the transcript mentions.
-
-    The roster alone told the model which names exist but not what their
-    notes say, so it could not tell a new fact from a restated one, and it
-    re-proposed "Project: Wedding - civil wedding + party" for a project whose
-    doc says exactly that. Each excerpt is headed by the destination tag that
-    routes to it, so the tag the model writes is the one code resolves.
-    """
-    from ciao.memory_proposals import entity_mention_counts, project_name
-
-    # A person and a project may share a name; a mention of it shows both.
-    notes: dict[str, list[tuple[str, Path]]] = {}
-    for key, doc in projects.items():
-        notes.setdefault(key, []).append((f"[project: {project_name(doc)}]", doc))
-    for key, stem in people.items():
-        notes.setdefault(key, []).append(
-            (f"[people: {stem}]", vault_root / "People" / f"{stem}.md")
-        )
-    counts = entity_mention_counts(transcript, notes)
-    ranked = [
-        note
-        for key in sorted(counts, key=lambda key: -counts[key])
-        for note in notes[key]
-    ]
-    sections: list[str] = []
-    total = 0
-    for tag, path in ranked[:_ENTITY_NOTES_MAX]:
-        excerpt = _note_excerpt(path)
-        if not excerpt:
-            continue
-        section = f"{tag}\n{excerpt}"
-        if total + len(section) > _ENTITY_NOTES_MAX_CHARS:
-            break
-        sections.append(section)
-        total += len(section) + 2
-    if not sections:
-        return ""
-    return (
-        "## Known notes for entities this session mentions "
-        "(fetched from the workspace, NOT transcript content)\n"
-        + "\n\n".join(sections)
-        + "\n\n"
-    )
 
 
 def _resolve_insights_call(
@@ -306,32 +155,6 @@ def _resolve_insights_call(
             return model[len(prefix):] or "sonnet", routed_provider, None
 
     return model, provider, None
-
-
-def _fit_transcript(filtered_jsonl: str, *, reserve: int = 0) -> tuple[str, int]:
-    """Trim a transcript to the input budget, dropping oldest lines first.
-
-    Returns ``(payload, dropped_line_count)``. Newest turns are kept because
-    they carry the session's conclusions; the surviving lines keep their
-    original ``idx`` values, so the citations the prompt demands stay valid.
-
-    ``reserve`` is subtracted from the budget for prompt text prepended after
-    fitting (the known-context block) — the oversized-input rejection is
-    deliberately not retried, so the first call must already be within budget.
-    """
-    budget = max(0, _DEFAULT_MAX_INPUT_CHARS - reserve)
-    if len(filtered_jsonl) <= budget:
-        return filtered_jsonl, 0
-    lines = filtered_jsonl.splitlines()
-    kept: list[str] = []
-    total = 0
-    for line in reversed(lines):
-        total += len(line) + 1
-        if total > budget:
-            break
-        kept.append(line)
-    kept.reverse()
-    return "\n".join(kept), len(lines) - len(kept)
 
 
 def is_context_overflow(exc: Exception) -> bool:
@@ -454,117 +277,8 @@ async def call_with_retry(
 # Rules shared verbatim by both extraction prompts (JSONL and text mode).
 # Stated once so the two modes cannot drift apart — the same reason the
 # curation contract was collapsed into one skill file.
-_KNOWN_CONTEXT_RULE = """\
-- The user prompt may open with a "Known context" section fetched from the
-  workspace: current always-loaded memory entries and a roster of known
-  people and projects. It is reference data, not transcript content. A fact
-  already covered by a current memory entry must be OMITTED; when the
-  transcript shows a known fact CHANGED, emit the updated fact. A person or
-  project in the roster is never a New entity — only names absent from the
-  roster qualify.
-- A "Known notes" section, when present, excerpts the existing note of each
-  known person or project this session mentions, headed by the tag that
-  files into it. A fact that note already states must be OMITTED. A new or
-  changed fact about that entity goes in whichever section fits, tagged with
-  that heading's tag exactly as written.
-"""
-
-_FINAL_STATEMENT_RULE = """\
-- Be terse. One line per item where possible. Every bullet is a final
-  statement: never narrate reconsideration, hedging, or self-correction
-  inside a bullet — resolve it first, then write only the surviving fact.
-"""
-
-
-_INSIGHTS_RULES = """\
-You are extracting durable signal from a Claude Code session transcript.
-The user is the workspace owner. Output Markdown with the exact section headers below.
-Omit a section entirely if empty - do NOT write "none" or "n/a".
-Cite the message index `[idx=N]` for every claim. Indices start at 1;
-never cite `[idx=0]`. Do not invent facts.
-Do not summarise the conversation - that is already saved.
-
-Rules:
-- Emit ONLY durable, cross-session facts. A fact is worth keeping only if it
-  will matter in a future session: a standing preference, a reusable lesson, a
-  real error pattern, a recurring tool, a new person/project. Omit a section
-  entirely rather than fill it with session-local noise — a one-off choice
-  about this one repo, a single loop, or a phrasing pushback that was only
-  about this session has no place here.
-- If this is a scheduled maintenance session (memory curation, hygiene
-  audits, skill evolution), never extract the session's own operating
-  instructions, prompt rules, or memory-system procedures as facts — they
-  are machinery, not knowledge about the user.
-- A user message flagged `"unattended": true` is an automation turn (a
-  schedule or routine fired it), not the user typing. Never extract a fact
-  from an unattended turn or from the assistant work it triggered. Only
-  extract facts from turns the user actually typed. A real user turn in an
-  otherwise-automated session is still fair game.
-""" + _KNOWN_CONTEXT_RULE + """\
-- When a fact is only true from or until a date, append `[as-of: YYYY-MM-DD]`
-  or `[expires: YYYY-MM-DD]` to the bullet, before the citation and
-  destination tag. Never invent a date the transcript does not support.
-- End every bullet with exactly one destination tag, after the citation:
-  - [memory] - true regardless of which project is open: a standing
-    preference, an environment fact, a cross-project lesson.
-  - [profile] - who the user is: identity, role, communication style.
-  - [project] - true only within this chat's own project/repo: its
-    decisions, constraints, status. When unsure whether a fact is
-    project-scoped or global, use [review] instead of guessing.
-  - [project: <name>] - true only within a DIFFERENT project listed under
-    "Known projects"; use the name exactly as listed. Never invent one.
-  - [people: <Name>] - a durable fact about a person; for someone under
-    "Known people", use the name exactly as listed.
-  - [learnings] - reusable how-to knowledge that spans projects.
-  - [review] - durable, but you are not sure where it belongs.
-- Skip routine successful tool calls.
-- Skip anything obvious from user/assistant text alone.
-- "Errors" = tool/model/system failure, not just things the user disliked.
-- "User corrections" = a correction that implies a preference the user wants to
-  hold in future sessions. Drop corrections that only fixed this session's
-  output. Append the "Durable rule:" sentence ONLY when the user stated a
-  present-tense standing rule; if the correction has no durable rule, do NOT
-  write the bullet at all.
-- "New entities" = people, phrases, places, or products mentioned for the first
-  time that the user will keep dealing with — not generic nouns, not one-off
-  references to something in this transcript.
-- "Decisions" = choices that set a precedent for future sessions ("chose X over
-  Y, and we should keep doing X"). Drop one-off picks about this transcript.
-  Decisions is not a changelog: never list what the session fixed, added,
-  deleted or committed, and never restate an edit already listed under
-  "Vault changes" — that file already holds it.
-- When citing a vault link, use a relative Markdown link with the path from the
-  vault root: [Mo](./People/Mo.md). Do NOT use [[bracketed-wikilinks]] and do NOT wrap the link in backticks, quotes, or other formatting.
-""" + _FINAL_STATEMENT_RULE
 
 # The Markdown output contract, kept apart from the grounding rules above.
-_INSIGHTS_SECTION_SCHEMA = """
-## Errors
-- <what failed> -> <how it was resolved, or "unresolved">. Only a failure whose fix is worth remembering. [idx=N] <tag>
-
-## User corrections
-- <the standing rule that holds in future sessions>, phrased as present-tense state. Durable rule: <the same rule, present tense>. Never "User said: <quote> -> assistant did <x>" alone. [idx=N] <tag>
-
-## New entities
-- <type>: <name> - <one-line context>. Only recurring names. [idx=N] <tag>
-
-## Decisions
-- Chose <X> over <Y> because <reason>; this governs future sessions. Only precedent-setting choices. [idx=N] <tag>
-
-## Reusable snippets
-- <one-line description>:
-  ```<lang>
-  <command/query/config>
-  ```
-
-## Open loops
-- <thing left undone, with any deadline or condition>. [idx=N] <tag>
-
-## Vault changes
-- <path> - <one-line summary of edit>. [idx=N]
-"""
-
-_INSIGHTS_SYSTEM_PROMPT = _INSIGHTS_RULES + _INSIGHTS_SECTION_SCHEMA
 
 def filter_session_jsonl(
     workspace_root: Path,
@@ -873,8 +587,8 @@ def locate_insights_section(text: str) -> tuple[int, int] | None:
     bullets. Resolution order:
 
     * A stamped section is authoritative — but only a stamp immediately
-      followed by the header line, the exact shape :func:`_append_section`
-      writes, with no transcript structure after it. The section is always
+      followed by the header line, the exact shape that stage wrote, with no
+      transcript structure after it. The section is always
       the last thing in the file, so anything transcript-shaped after the
       header (a turn heading, a trailer, or a line-start ``` — rendered
       archives fence quoted text, so a quoted stamp is followed by at least
@@ -920,268 +634,4 @@ def _has_insights_section(path: Path) -> bool:
         return locate_insights_section(path.read_text(encoding="utf-8")) is not None
     except OSError:
         return False
-
-
-def _indent_body_fences(text: str) -> str:
-    """Indent any line-start ``` in the body we are about to append.
-
-    `_is_appended_tail` treats a line-start fence after the stamp as proof the
-    stamp is quoted transcript content, and its docstring asserts that the
-    appended body's own fences are always indented. The prompt's "## Reusable
-    snippets" template does indent them - but the model does not reliably
-    preserve that, and one unindented fence made the whole section invisible:
-    `locate_insights_section` returned None, so memory proposals filed nothing
-    and every backfill run appended ANOTHER copy of the section.
-
-    Indenting here makes that invariant true by construction instead of by
-    convention. Two spaces is what the template already uses, and is still a
-    fence to any CommonMark renderer (up to three spaces of indent).
-    """
-    return "\n".join(
-        f"  {line}" if line.startswith("```") else line for line in text.split("\n")
-    )
-
-
-def _format_section(body: str) -> str:
-    """The exact insights section ``_append_section`` writes, or '' for empty."""
-    text = _indent_body_fences(body.strip())
-    if not text:
-        return ""
-    return f"{_INSIGHTS_STAMP}\n{_INSIGHTS_HEADER}\n\n{text}\n"
-
-
-def _append_section(path: Path, body: str) -> str:
-    """Append the insights section; return the exact section text written.
-
-    The returned string is the section from its stamp onward — exactly what
-    ``locate_insights_section`` points at — so a caller can record its hash as
-    crash-recovery evidence: a resume authenticates the on-disk section against
-    it instead of trusting any tail that follows a matching prefix.
-    """
-    section = _format_section(body)
-    if not section:
-        return ""
-    with path.open("a", encoding="utf-8") as f:
-        f.write(f"\n\n{section}")
-    return section
-
-
-async def _run_model_with_retry(
-    *,
-    filtered_jsonl: str,
-    model: str,
-    provider: str = "claude",
-    cwd: Path | None = None,
-    context_block: str = "",
-) -> tuple[str, str]:
-    """Call the model; on a transient failure, wait 30s and retry once.
-
-    An oversized-input rejection is not retried: the payload is already
-    trimmed to the configured budget before the first call, so a second
-    identical request would fail the same way.
-    """
-    # The context block is prepended AFTER fitting, so its length is reserved
-    # here — otherwise the final prompt overshoots the budget the no-retry
-    # oversized-input policy relies on.
-    reserve = len(context_block)
-    payload, dropped = _fit_transcript(filtered_jsonl, reserve=reserve)
-    budget = max(0, _DEFAULT_MAX_INPUT_CHARS - reserve)
-    if dropped:
-        logger.info(
-            "Insights transcript over the %d-char budget; dropped %d oldest line(s)",
-            budget,
-            dropped,
-        )
-
-    async def call() -> str:
-        if provider == "claude":
-            return await _call_model(payload, model, context_block=context_block)
-        return await _call_model(
-            payload, model, provider=provider, cwd=cwd, context_block=context_block
-        )
-
-    outcome = await call_with_retry(call, label="Insights model call")
-    return outcome.output, outcome.error
-
-
-def _text_user_prompt(body: str, context_block: str = "") -> str:
-    """Prompt for text-mode extraction (archive markdown, no JSONL indices)."""
-    return (
-        context_block
-        + "Below is a rendered Markdown chat transcript. Tool calls, errors, "
-        "and thinking blocks are not preserved - only user/assistant text. "
-        "Extract durable signal per the system prompt's section schema.\n\n"
-        f"{body}"
-    )
-
-
-async def _call_text_model(
-    body: str,
-    model: str,
-    *,
-    provider: str = "claude",
-    cwd: Path | None = None,
-    context_block: str = "",
-) -> str:
-    """Run text-mode extraction for ``model`` on a rendered archive body."""
-    from ciao.providers.oneshot import run_oneshot
-
-    return await run_oneshot(
-        _text_user_prompt(body, context_block),
-        system_prompt=_TEXT_MODE_SYSTEM_PROMPT,
-        model=model,
-        timeout_s=_DEFAULT_TIMEOUT_S,
-        cwd=cwd,
-        provider=provider,
-    )
-
-
-async def _run_text_model_with_retry(
-    *,
-    archive_path: Path,
-    model: str,
-    provider: str = "claude",
-    cwd: Path | None = None,
-    context_block: str = "",
-) -> tuple[str, str]:
-    """Run text-mode extraction on ``archive_path``; retry once on failure.
-
-    Mirrors :func:`_run_model_with_retry` for the rendered-archive input, so a
-    failed archive can be retried even after its raw JSONL is reclaimed.
-    """
-    try:
-        body = archive_path.read_text(encoding="utf-8")
-    except OSError:
-        logger.exception("Could not read archive %s for insights retry", archive_path)
-        return "", "archive unreadable"
-
-    async def call() -> str:
-        return await _call_text_model(
-            body, model, provider=provider, cwd=cwd, context_block=context_block
-        )
-
-    # An overflow is refused here for the same reason it is on the JSONL path:
-    # the payload does not change between attempts, so the retry buys a second
-    # slow call (the timeout budget is 600s) plus the 30s wait to reach the
-    # identical rejection. This path used to retry it, which was an accident of
-    # the policy existing in two copies rather than a decision.
-    #
-    # No fitting step, though, unlike the JSONL path — and measurement says it
-    # does not need one. Text mode's input is the *rendered* archive, which is
-    # the stripped rendering (no tool_use, tool_result or thinking blocks); the
-    # 320k-char budget exists for raw JSONL, observed at 131k-262k tokens
-    # against a 126k-token window. Across 1568 real archives the rendered form
-    # runs ~2.6k tokens at the median and ~23k at p99, with exactly one
-    # outlier (134k tokens) able to overflow a 126k-token model at all.
-    # Truncating would be a general mechanism for a single archive.
-    outcome = await call_with_retry(
-        call, label="Insights text call", budget_applies=False
-    )
-    return outcome.output, outcome.error
-
-
-async def _call_model(
-    filtered_jsonl: str,
-    model: str,
-    *,
-    provider: str = "claude",
-    cwd: Path | None = None,
-    context_block: str = "",
-) -> str:
-    from ciao.providers.oneshot import run_oneshot
-
-    user_prompt = (
-        context_block
-        + "Below is a coding-agent session transcript as line-oriented JSON.\n"
-        "Each line is one message with a numeric `idx` you must cite.\n"
-        "Extract durable signal per the system prompt's section schema.\n\n"
-        f"{filtered_jsonl}"
-    )
-
-    kwargs: dict[str, Any] = {
-        "system_prompt": _INSIGHTS_SYSTEM_PROMPT,
-        "model": model,
-        "timeout_s": _DEFAULT_TIMEOUT_S,
-    }
-    if provider != "claude":
-        kwargs.update({"provider": provider, "cwd": cwd})
-    return await run_oneshot(user_prompt, **kwargs)
-
-
-_TEXT_MODE_SYSTEM_PROMPT = """\
-You are extracting durable signal from a Claude Code chat transcript.
-The user is the workspace owner. The transcript is a rendered Markdown summary -
-tool calls, tool errors, thinking blocks, and intermediate states are
-NOT included, only the user/assistant text turns. Adjust accordingly:
-sections like Errors, Reusable snippets, and Vault changes will often
-be empty. Omit empty sections - do NOT write "none" or "n/a".
-
-Cite by short paraphrase or quote (no `[idx=N]` indices in this mode).
-Do not invent facts. Do not summarise the conversation - that is the
-transcript itself.
-
-Rules:
-- Emit ONLY durable, cross-session facts: a standing preference, a reusable
-  lesson, a real error pattern, a recurring name. Omit a section entirely
-  rather than fill it with session-local noise — a one-off choice about this
-  one repo, a single exchange, or a phrasing pushback that only fixed this
-  session has no place here.
-- If this is a scheduled maintenance session (memory curation, hygiene
-  audits, skill evolution), never extract the session's own operating
-  instructions, prompt rules, or memory-system procedures as facts — they
-  are machinery, not knowledge about the user.
-- A user message flagged `"unattended": true` is an automation turn (a
-  schedule or routine fired it), not the user typing. Never extract a fact
-  from an unattended turn or from the assistant work it triggered. Only
-  extract facts from turns the user actually typed. A real user turn in an
-  otherwise-automated session is still fair game.
-""" + _KNOWN_CONTEXT_RULE + """\
-- When a fact is only true from or until a date, append `[as-of: YYYY-MM-DD]`
-  or `[expires: YYYY-MM-DD]` to the bullet, before the destination tag.
-  Never invent a date the transcript does not support.
-- End every bullet with exactly one destination tag:
-  - [memory] - true regardless of which project is open: a standing
-    preference, an environment fact, a cross-project lesson.
-  - [profile] - who the user is: identity, role, communication style.
-  - [project] - true only within this chat's own project/repo: its
-    decisions, constraints, status. When unsure whether a fact is
-    project-scoped or global, use [review] instead of guessing.
-  - [project: <name>] - true only within a DIFFERENT project listed under
-    "Known projects"; use the name exactly as listed. Never invent one.
-  - [people: <Name>] - a durable fact about a person; for someone under
-    "Known people", use the name exactly as listed.
-  - [learnings] - reusable how-to knowledge that spans projects.
-  - [review] - durable, but you are not sure where it belongs.
-- "User corrections" = a correction that implies a preference the user wants to
-  hold in future sessions. Drop corrections that only fixed this session's
-  output. Append the "Durable rule:" sentence ONLY when the user stated a
-  present-tense standing rule; if there is no durable rule, do NOT write the
-  bullet at all.
-- "New entities" = people/projects/places/products the user will keep dealing
-  with, not one-off references in this transcript.
-- "Decisions" = choices that set a precedent for future sessions; drop one-off
-  picks about this transcript. Not a changelog: never list what the session
-  fixed, added, deleted or committed, or restate an edit it already saved.
-""" + _FINAL_STATEMENT_RULE + """
-Your entire response must be Markdown using only the section headers below. Never
-return JSON, a code-fenced transcript, session metadata, or a generic recap.
-
-## User corrections
-- <the standing rule that holds in future sessions>, phrased as present-tense state. Durable rule: <the same rule, present tense>. Never "User said: <quote> -> assistant did <x>" alone. <tag>
-
-## New entities
-- <type>: <name> - <one-line context>. Only recurring names. <tag>
-
-## Decisions
-- Chose <X> over <Y> because <reason>; this governs future sessions. Only precedent-setting choices. <tag>
-
-## Open loops
-- <thing left undone, with any deadline or condition>. <tag>
-
-## Errors
-- <if the transcript itself describes a failure resolution that's worth keeping> <tag>
-
-## Reusable snippets
-- <only if a fully formed command or query appears in the assistant text>
-"""
 

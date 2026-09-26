@@ -112,10 +112,11 @@ def archive_content_revision(path: Path) -> str:
     """The revision recorded on an archive job.
 
     Trailing whitespace is stripped so the digest is stable across the exact
-    number of newlines an append adds: the pipeline prepends ``\\n\\n`` to the
-    existing text, so a raw digest of the pre-insights archive and of the text
-    before its own section differ only by whitespace. Normalizing at write time
-    lets :func:`resume_revision_matches` recognize the pipeline's own append.
+    number of newlines an append adds: the removed insights stage prepended
+    ``\\n\\n`` to the existing text, so a raw digest of the pre-insights archive
+    and of the text before its own section differ only by whitespace.
+    Normalizing at write time is what lets :func:`resume_revision_matches`
+    recognize such a manifest's own append.
     """
     try:
         return _sha(path.read_text(encoding="utf-8", errors="replace").rstrip())
@@ -141,11 +142,10 @@ def _pre_insights_text(text: str) -> str:
 def _appended_insights_tail(text: str) -> str | None:
     """The exact appended insights section (stamp included), or None.
 
-    Returns ``text[section_start:]`` — the bytes :func:`ciao.insights._append_section`
-    writes — so a resume can authenticate the *whole* appended section rather
-    than trusting any tail that happens to follow a matching prefix. An edit
-    confined to the appended body then fails the check instead of being
-    consumed by the fold and proposal stages.
+    Returns ``text[section_start:]`` — the whole section, not any tail that
+    happens to follow a matching prefix — so a resume can authenticate the
+    bytes the removed pipeline wrote. An edit confined to the appended body
+    then fails the check instead of being consumed.
     """
     from ciao.insights import locate_insights_section
 
@@ -163,10 +163,10 @@ def resume_revision_matches(
 ) -> bool:
     """True when a resume may proceed against the archive on disk.
 
-    A crash can land after ``_append_section`` wrote the insights but before
-    the manifest marked the stage succeeded. The archive then differs from the
-    recorded revision by the pipeline's own append, which must not be mistaken
-    for an external edit and block the job.
+    A crash can land after the removed insights stage wrote its section but
+    before the manifest marked the stage succeeded. The archive then differs
+    from the recorded revision by the pipeline's own append, which must not be
+    mistaken for an external edit and block the job.
 
     The append is authenticated, not assumed. When ``expected_append_revision``
     is set (the hash of the exact section the pipeline was about to write), a

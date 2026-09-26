@@ -478,7 +478,7 @@ class ChatInfo:
     helper: dict = field(default_factory=dict)
     # What the post-archive pipeline is doing, or did. Archiving a chat kicks
     # off insights extraction, a project-doc fold, a trajectory and memory
-    # proposals (ciao/insights.py:extract_and_append), and until now none of
+    # proposals (ciao/insights.py:run_archive_pipeline), and until now none of
     # that was visible anywhere in the app. Lives on the chat rather than in
     # job_runs because it has to survive a restart and the run-log's own
     # rotation: an archived chat opened next month should still be able to say
