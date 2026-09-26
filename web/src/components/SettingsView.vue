@@ -1,8 +1,18 @@
 <template>
   <div class="settings-pane">
+    <!-- One overlay at a time. The package-update path owns it while it runs;
+         otherwise an in-flight engine update does, driven by its record rather
+         than by a timer, so it never claims progress nobody made. A settled
+         record is the card's business, not a full-screen takeover. -->
     <UpdateProgressView
       v-if="packageUpdating"
       :version="packageStatus?.latest_version"
+    />
+    <UpdateProgressView
+      v-else-if="engineUpdateBusy && engineUpdateEnabled"
+      :version="engineUpdateVersion"
+      :phase="engineUpdateOperation?.phase"
+      :error="engineUpdateOperation?.error"
     />
     <PaneHeader page-tag="Settings" @open-sidebar="emit('open-sidebar')" />
     <div ref="bodyEl" class="pane-body" @scroll.passive="onBodyScroll">
@@ -142,6 +152,10 @@
                   This bundled app updates through the Ciaobot menu-bar icon. Choose
                   <strong>Update</strong> there, or run the one-line installer again.
                 </template>
+                <template v-else-if="packageStatus?.mode === 'installer' && engineUpdateEnabled">
+                  Installed with the Ciaobot engine installer. Stage a release below, then apply it;
+                  applying restarts Ciaobot once.
+                </template>
                 <template v-else-if="packageStatus?.mode === 'installer'">
                   Installed with the Ciaobot engine installer. To update, run it again:
                   <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install-engine.sh | sh</code>
@@ -162,6 +176,12 @@
               </button>
               <!-- Nothing to do: a status, not a disabled button. -->
               <span v-else class="settings-status">Up to date<template v-if="packageStatus.current_version"> · {{ packageStatus.current_version }}</template></span>
+            </div>
+            <!-- The same status for an engine this card can update: an installer
+                 with no job and nothing newer is up to date, and says so rather
+                 than leaving the card blank. -->
+            <div v-else-if="engineUpdateIdleAndCurrent" class="settings-card-header-actions">
+              <span class="settings-status">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
             </div>
           </div>
           <div v-if="packageLoading && !packageStatus" class="loading">
@@ -203,6 +223,68 @@
                 </button>
               </div>
             </div>
+          </div>
+
+          <!-- The engine update job (#608). One distinct panel per record state,
+               every word of it read off the persisted operation; nothing here
+               invents progress. A sibling of the package block because it is
+               driven by a different route, and either may fail alone. -->
+          <div v-if="engineUpdateVisible" class="settings-form-panel">
+            <p class="section-title">Engine update</p>
+
+            <!-- A coordinator refusal that wrote no record of its own. -->
+            <p v-if="updateStatus?.error && !engineUpdateFailed" class="hint hint--warn hint--spaced">
+              {{ updateStatus.error }}
+            </p>
+
+            <!-- In flight: the overlay above carries the rows, this names the
+                 phase the record is in. -->
+            <p v-else-if="engineUpdateBusy" class="hint hint--spaced">
+              {{ engineUpdatePhaseText }}<template v-if="engineUpdateOperation"> · v{{ engineUpdateOperation.to_version }}</template>
+            </p>
+
+            <template v-else-if="engineUpdateStage === 'staged'">
+              <p class="hint hint--spaced">
+                v{{ engineUpdateOperation?.to_version || packageStatus?.latest_version }} is downloaded and verified.
+                Applying it restarts Ciaobot.
+              </p>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="doEngineUpdateApply" :disabled="updateActionPending || updatePolling || nodeStatusUnknown">
+                  {{ updateActionPending ? 'Applying…' : 'Apply update' }}
+                </button>
+                <button class="btn-small" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling || nodeStatusUnknown">
+                  Re-stage
+                </button>
+              </div>
+            </template>
+
+            <template v-else-if="engineUpdateStage === 'done'">
+              <p class="hint hint--spaced">ciaobot is up to date.</p>
+            </template>
+
+            <template v-else-if="engineUpdateFailed">
+              <p class="hint hint--warn hint--spaced">{{ engineUpdateFailureText }}</p>
+              <p v-if="engineUpdateRolledBack && engineUpdateOperation?.from_version" class="hint hint--spaced">
+                Back on v{{ engineUpdateOperation.from_version }}.
+              </p>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling || nodeStatusUnknown">
+                  {{ updateActionPending ? 'Staging…' : (engineUpdateStage === 'rolled_back' ? 'Stage again' : 'Retry') }}
+                </button>
+              </div>
+            </template>
+
+            <template v-else-if="packageStatus?.update_available">
+              <p class="hint hint--spaced">
+                v{{ packageStatus.latest_version }} is available. Staging downloads and verifies it without
+                restarting Ciaobot.
+              </p>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling || nodeStatusUnknown">
+                  {{ updateActionPending ? 'Staging…' : 'Stage update' }}
+                </button>
+              </div>
+            </template>
           </div>
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
@@ -1930,9 +2012,17 @@ import type {
   PackageStatus,
   PackageChangelog,
   PackageUpdateResult,
+  EngineUpdateStatus,
   ProviderActionResult,
   LocalHandbackResult,
 } from '../lib/types'
+import {
+  updateFailed,
+  updateFailureText,
+  updateInFlight,
+  updatePhaseLabel,
+  updateStage,
+} from '../lib/engineUpdate'
 import { askConfirm } from '../lib/confirm'
 import { archiveConfirmMessage, restoreConfirmMessage, restoredMessage } from '../lib/workspaceArchive'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -4039,6 +4129,7 @@ onMounted(async () => {
   fetchRoutines()
   fetchAutomation()
   fetchPackageStatus()
+  fetchUpdateStatus()
   fetchProviderKeys().then(scrollToChatProvidersIfLinked)
   mcp.fetchStatus()
   mcp.fetchUsage()
@@ -4502,6 +4593,142 @@ async function doPackageUpdate() {
     packageUpdating.value = false
   }
 }
+
+// ── Engine update job (#608) ───────────────────────────────────────────────────
+// The persisted operation record is the only source of truth here. The card
+// keeps no local guess about how far a run got, so an engine restarted
+// mid-apply — or a Settings tab opened after the fact — shows what the record
+// says rather than what this session remembers doing.
+const updateStatus = ref<EngineUpdateStatus | null>(null)
+const updatePolling = ref(false)
+const updateActionPending = ref(false)
+// 2s. Staging is a download plus a wheel build, the apply tens of seconds more;
+// faster buys nothing a reader can use, only request volume.
+const UPDATE_POLL_MS = 2000
+let updatePollTimer: number | null = null
+
+const engineUpdateOperation = computed(() => updateStatus.value?.operation ?? null)
+const engineUpdateStage = computed(() => updateStage(engineUpdateOperation.value))
+const engineUpdateBusy = computed(() => updateInFlight(engineUpdateOperation.value))
+const engineUpdateFailed = computed(() => updateFailed(engineUpdateOperation.value))
+const engineUpdateRolledBack = computed(() => engineUpdateStage.value === 'rolled_back')
+const engineUpdatePhaseText = computed(() => updatePhaseLabel(engineUpdateOperation.value))
+const engineUpdateFailureText = computed(() => updateFailureText(engineUpdateOperation.value))
+// Only an installer engine has an install to swap, so only it gets the job
+// surface. Every other mode keeps the guidance the card has always shown.
+const engineUpdateEnabled = computed(
+  () => !!updateStatus.value && updateStatus.value.install_mode === 'installer' && updateStatus.value.can_update,
+)
+// The panel is for the states that need an action or an answer. Idle and up to
+// date is a status, and the header already says so.
+const engineUpdateVisible = computed(
+  () => engineUpdateEnabled.value
+    && (engineUpdateStage.value !== 'idle'
+      || !!updateStatus.value?.error
+      || !!packageStatus.value?.update_available),
+)
+const engineUpdateVersion = computed(
+  () => engineUpdateOperation.value?.to_version || packageStatus.value?.latest_version,
+)
+// No job and nothing newer: the header's status, not a disabled button.
+const engineUpdateIdleAndCurrent = computed(
+  () => engineUpdateEnabled.value
+    && engineUpdateStage.value === 'idle'
+    && !updateStatus.value?.error
+    && !packageStatus.value?.update_available,
+)
+
+async function fetchUpdateStatus() {
+  try {
+    updateStatus.value = await api.get<EngineUpdateStatus>('/api/update/status')
+  } catch {
+    // best-effort, exactly like the package status: an engine too old to have
+    // the route keeps the guidance it always had.
+  }
+}
+
+function stopUpdatePoll() {
+  if (updatePollTimer !== null) {
+    window.clearInterval(updatePollTimer)
+    updatePollTimer = null
+  }
+  updatePolling.value = false
+}
+
+function startUpdatePoll() {
+  if (updatePollTimer !== null) return
+  updatePolling.value = true
+  updatePollTimer = window.setInterval(() => { void fetchUpdateStatus() }, UPDATE_POLL_MS)
+}
+
+async function doEngineUpdateStage() {
+  if (nodeStatusUnknown.value) {
+    packageResult.value = 'Connection role is unavailable; open This device before updating.'
+    return
+  }
+  // A run the coordinator already owns: the 202 has not become a record yet, so
+  // the record alone cannot say the job is over. The backend refuses a second
+  // run with a 409, and the button is already disabled; both say the same thing.
+  if (updatePolling.value) return
+  updateActionPending.value = true
+  packageResult.value = ''
+  try {
+    await api.post('/api/update/stage')
+    // 202: the coordinator owns the run from here and the record is its progress.
+    startUpdatePoll()
+    packageResult.value = 'Staging the update. Ciaobot keeps running until it is ready to apply.'
+  } catch (e) {
+    // One action, one line. The 400/409 that stage and apply answer with is a
+    // reason to read, not a stream of toasts.
+    packageResult.value = `Could not stage the update: ${apiErrorMessage(e, 'unknown error')}`
+    await fetchUpdateStatus()
+  } finally {
+    updateActionPending.value = false
+  }
+}
+
+async function doEngineUpdateApply() {
+  if (nodeStatusUnknown.value) {
+    packageResult.value = 'Connection role is unavailable; open This device before updating.'
+    return
+  }
+  if (updatePolling.value) return
+  updateActionPending.value = true
+  packageResult.value = ''
+  try {
+    await api.post('/api/update/apply')
+    // The apply drains and reboots the engine, so the restart overlay is the
+    // one a Settings restart already uses: it covers the downtime and reloads
+    // the tab onto the new version. A drain the engine gives up on cancels it
+    // through `server_restart_cancelled`, and the card re-reads the record.
+    restartAndReload('Updating Ciaobot… the engine will restart')
+    startUpdatePoll()
+    packageResult.value = 'Applying the update. Ciaobot restarts once it is ready.'
+  } catch (e) {
+    packageResult.value = `Could not apply the update: ${apiErrorMessage(e, 'unknown error')}`
+    await fetchUpdateStatus()
+  } finally {
+    updateActionPending.value = false
+  }
+}
+
+// Poll only while a run is in flight, and only on the tab that shows the card:
+// a Settings tab left open on an idle engine must not poll forever.
+watch([currentTab, engineUpdateBusy], ([tab, busy]) => {
+  if (tab === 'home' && busy) startUpdatePoll()
+  else stopUpdatePoll()
+}, { immediate: true })
+
+// Applied: the record says the new version is running, so the package status is
+// re-read too and its "Up to date" is the engine's own answer.
+watch(() => engineUpdateStage.value, (stage, previous) => {
+  if (stage === 'done' && previous !== 'done') {
+    void fetchPackageStatus()
+    void fetchUpdateStatus()
+  }
+})
+
+onUnmounted(stopUpdatePoll)
 
 </script>
 
