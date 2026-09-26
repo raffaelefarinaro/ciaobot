@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
@@ -41,6 +42,7 @@ from ciao import proposal_kinds
 from ciao import proposal_outcomes
 from ciao import subagent_tracking
 from ciao import desktop_build
+from ciao import entity_types
 from ciao import provider_registry
 from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueReceiptUnavailable
@@ -88,10 +90,14 @@ from ciao.setup_status import setup_status
 from ciao.cli import _auth_command_for_provider
 from ciao.skills_inventory import build_skill_inventory
 from ciao.vault_index import (
+    Entry,
     _build_graph,
+    canonical_type,
     filter_entries,
     scan_targets,
+    scan_vault,
     strip_references,
+    write_vocabulary_file,
 )
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.async_reads import run_read
@@ -3986,6 +3992,201 @@ async def vault_delete_note(request: Request) -> JSONResponse:
     except OSError as exc:
         return JSONResponse({"error": f"delete failed: {exc}"}, status_code=500)
     return JSONResponse({"ok": True, "edited_backlinks": edited})
+
+
+def _scan_entity_types(
+    vault: Path, workspace: str, registry: entity_types.EntityTypeRegistry
+) -> tuple[list[Entry], dict[str, int]]:
+    """One scan of *vault*: its entries, and its notes per ``type:`` value.
+
+    A note counts under both the value it carries and the owner that value
+    resolves to, because the two questions the callers ask are different. The
+    owning side is what the index and the linter mean by a count, so
+    ``type: doc`` counts for ``document``. The literal side is what a category's
+    own notes say, and it is not redundant: a category the user has just added
+    is in none of the static tables, so a count resolved through those tables
+    alone would report every new category as empty, and the delete guard below
+    would drop a category whose notes still carried its ``type:``. The indexer
+    only reads the registry once the consumer swap lands, so until then the
+    literal side is the only one that sees a new category at all.
+
+    *registry* is the caller's already-loaded registry, not a second load, and
+    it is the only thing that knows a custom category's own aliases: a note typed
+    with one of those is the category's note, not drift under a spelling no row
+    claims. The static table is consulted first, so a stock alias keeps
+    resolving the way the index and the linter resolve it. The registry's alias
+    view is enabled-only, which is right here too: a disabled category claims no
+    ``type:``, so its aliases stay drift.
+
+    A ``type:`` that is neither a category nor an alias of one is drift. It is
+    counted under its own spelling, which no row claims, so it stays visible as
+    an unlisted type instead of inflating a category that does not own it.
+    """
+    entries = scan_vault(vault, workspace=workspace)
+    aliases = registry.aliases()
+    counts: dict[str, int] = defaultdict(int)
+    for entry in entries:
+        raw = entry.type.strip()
+        if raw:
+            counts[raw] += 1
+        owner = canonical_type(raw) or aliases.get(raw, "")
+        if owner and owner != raw:
+            counts[owner] += 1
+    return entries, dict(counts)
+
+
+def _regenerate_vocabulary(
+    vault: Path, workspace: str
+) -> tuple[dict[str, int], entity_types.EntityTypeRegistry]:
+    """Rewrite ``VOCABULARY.md`` with the Categories section; return the counts
+    and the registry they were counted against.
+
+    One worker thread for the scan and the write, and one load of the registry
+    the save left on disk, shared by all three consumers of it — the counts, the
+    Categories section and the body the caller answers — because a Categories
+    section that disagreed with the type census beside it, or with the rows the
+    response lists, would be worse than no section. The counts ride back out
+    because the caller needs them for the response and the scan that produced
+    them is already paid for.
+    """
+    registry = entity_types.load_entity_types(vault)
+    entries, counts = _scan_entity_types(vault, workspace, registry)
+    write_vocabulary_file(entries, vault / "VOCABULARY.md", registry=registry)
+    return counts, registry
+
+
+async def memory_entity_types(request: Request) -> JSONResponse:
+    """GET the effective category list; PATCH the user's edits to it.
+
+    One handler for both, as in ``settings_routines``, and both answer the same
+    body: a PATCH returns the list it produced, so a client never has to re-GET
+    a vault scan it can already have.
+
+    The registry is per vault FILE, and ``<vault>`` is the agent vault root —
+    the one that owns ``VOCABULARY.md`` and ``entity-types.yaml``, not a
+    workspace's notes root. On a pre-re-rooting install that root is shared, so
+    two workspaces editing categories edit the same list; that is the same
+    sharing ``INDEX.md`` and ``VOCABULARY.md`` already have, and the registry
+    follows its file rather than inventing a per-workspace split.
+
+    A PATCH is the desired list of entries, not a diff: idempotent, and a
+    client that sends the GET's own rows back unchanged writes nothing. Two
+    rules in ``ciao.entity_types`` make the resubmission safe, both stated
+    precisely because they hold for a stock id and not for a custom one: a row
+    whose id is a stock id is a partial override of the shipped default (so a
+    client that changes one field of a stock row resets nothing), and a stock
+    row identical to the shipped default is not persisted at all (so an
+    upgrade's change to a default still reaches the install). A custom id has
+    no shipped default to fall back on, so a field it leaves out takes the
+    built-in default instead — the contract is to send the whole list, which is
+    exactly what the GET hands a client.
+    """
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip()
+    if not workspace or config.workspace(workspace) is None:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    try:
+        vault = Path(config.agent_vault_root(workspace))
+    except (AttributeError, ValueError, OSError) as exc:
+        return JSONResponse({"error": f"vault unavailable: {exc}"}, status_code=409)
+
+    if request.method == "GET":
+        # One registry for the scan and the body: the counts have to resolve a
+        # custom category's own aliases, and that registry is the same one the
+        # rows are rendered from, so the two cannot describe different lists.
+        registry = entity_types.load_entity_types(vault)
+        _entries, counts = await asyncio.to_thread(
+            functools.partial(_scan_entity_types, vault, workspace, registry)
+        )
+        return JSONResponse(_entity_types_body(vault, workspace, counts, registry))
+
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict) or not isinstance(body.get("types"), list):
+        return JSONResponse({"error": "expected an object with a types list"}, status_code=400)
+    try:
+        entries = entity_types.parse_payload(body["types"])
+        entity_types.validate_entries(entries)
+    except entity_types.EntityTypeFileError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    # A custom category the list omits is deleted from the file, and the notes
+    # that carry its `type:` would be left pointing at nothing. So the delete is
+    # refused while those notes exist, with the count that blocks it: the fix
+    # is to retype them, not to lose the category. A stock id is never deleted
+    # — omitting one leaves it at its default, and `enabled: false` is how a
+    # user turns one off.
+    registry = entity_types.load_entity_types(vault)
+    submitted = {entry.id for entry in entries}
+    orphaned = [
+        entry
+        for entry in registry.entries()
+        if not entry.builtin and entry.id not in submitted
+    ]
+    if orphaned:
+        _entries, counts = await asyncio.to_thread(
+            functools.partial(_scan_entity_types, vault, workspace, registry)
+        )
+        blocking = [
+            f"{entry.id} ({counts[entry.id]} note{'' if counts[entry.id] == 1 else 's'})"
+            for entry in orphaned
+            if counts.get(entry.id, 0)
+        ]
+        if blocking:
+            return JSONResponse(
+                {
+                    "error": "refusing to delete a category its notes still use: "
+                    + ", ".join(blocking)
+                    + " — retype those notes first, or keep the category"
+                },
+                status_code=400,
+            )
+
+    try:
+        await asyncio.to_thread(
+            functools.partial(entity_types.write_vault_file, vault, entries)
+        )
+    except OSError as exc:
+        return JSONResponse(
+            {"error": f"could not write the categories file: {exc}"}, status_code=500
+        )
+    try:
+        counts, fresh = await asyncio.to_thread(
+            functools.partial(_regenerate_vocabulary, vault, workspace)
+        )
+    except OSError as exc:
+        return JSONResponse(
+            {
+                "error": "categories saved, but VOCABULARY.md could not be "
+                f"regenerated: {exc}"
+            },
+            status_code=500,
+        )
+    # The write cleared the registry cache, so this body is read back off the
+    # file that was just written: the list a client gets is the one the next GET
+    # will serve, not the submission echoed at it.
+    return JSONResponse(_entity_types_body(vault, workspace, counts, fresh))
+
+
+def _entity_types_body(
+    vault: Path,
+    workspace: str,
+    counts: dict[str, int],
+    registry: entity_types.EntityTypeRegistry,
+) -> dict[str, Any]:
+    """The response both methods answer: the vault, and its effective list.
+
+    The registry is the caller's, loaded once by the method that already had to
+    read it, so the counts in the body and the rows beside them are the same
+    configuration rather than two reads that could straddle a write.
+    """
+    return {
+        "workspace": workspace,
+        "vault": str(vault),
+        "types": entity_types.effective_payload(registry, counts),
+    }
 
 
 # Binary downloads (PDFs, ZIPs, office docs) live under their own endpoint so

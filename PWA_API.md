@@ -102,6 +102,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/housekeeping/{action_id}/run` | Perform one action's mechanical work, re-run detection, and return the fresh action list; unknown id is 404 |
 | POST | `/api/housekeeping/{action_id}/dismiss` | Record a "not now" for an ask-style action (e.g. the GitHub star nudge), re-run detection, and return the fresh action list; unknown id is 404 |
 | GET | `/api/models` | List configured models, plus `providers[]` (id, labels, capabilities) from the runtime-provider registry. `?refresh=1` bypasses the provider catalog caches |
+| GET, PATCH | `/api/memory/entity-types` | The vault's category list (`?workspace=` required) as `{workspace, vault, types}`, where each row is `{id, label, kind, folder, description, aliases, stale_after_days, enabled, builtin, note_count}`. `GET` returns every effective entry, disabled ones included; `note_count` is the notes carrying that `type:` (an alias counts for its category, drift under its own spelling). A `PATCH` sends the whole desired list as `{"types": [...]}` — a row whose `id` is a shipped one is a partial override of that category's default (an omitted field falls back to the shipped default; a custom row's omitted fields take the built-in defaults instead, so send the whole list), only rows that differ from the shipped default are written to `<agent vault root>/entity-types.yaml`, and the write regenerates `VOCABULARY.md` with a `## Categories` section. 400 for a malformed body, a duplicate id, two enabled categories sharing a folder, an alias that is another entry's id, a missing label, a negative `stale_after_days`, or a delete of a custom category whose notes still name it; 500 when the file cannot be written (the old file is left in place) |
 | GET, PATCH | `/api/status` | Read or update status |
 | GET | `/api/mcp/status` | Project MCP server inventory (env-key status + observed tools) and active-session counts (no credentials); Ciaobot's own surface is reported by `/api/agent/status` |
 | GET | `/api/mcp/usage` | Agent surface per-operation call/error counters, plus a `window` object naming the aggregation window (lifetime totals vs. the retained detail records behind them) (no credentials) |
@@ -843,6 +844,28 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/memory/receipt
 # operation (undo would otherwise delete an unrelated later fact), 400 when the
 # receipt is unsupported/view-only, 404 when the id is unknown.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/memory/receipts/$RECEIPT_ID/undo"
+
+# The vault's category list. `?workspace=` is required, and it resolves the AGENT
+# vault root - the one that owns entity-types.yaml, INDEX.md and VOCABULARY.md -
+# not the workspace's notes root, so a pre-re-rooting install (one shared vault)
+# edits the same list from either workspace. Every effective row comes back,
+# disabled ones included, each with `builtin` and a `note_count`.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/memory/entity-types?workspace=personal"
+
+# Save the desired list. NOT a diff: the body is the whole list, and a row is a
+# partial override of the shipped category with that id, so
+#   {"types": [{"id": "person", "label": "Human"}]}
+# relabels a person and leaves its folder, aliases and staleness alone, and a
+# client that sends the GET's rows back unchanged writes nothing at all. Only
+# rows that differ from the shipped default reach the file, so an upgrade to a
+# default still lands; omitting a stock id is not deleting it (send
+# "enabled": false to turn one off), while omitting a CUSTOM id deletes it and is
+# refused with 400 while any note still carries that type. The reply is the same
+# body as the GET, and the write regenerates VOCABULARY.md's Categories section.
+curl -sS -b /tmp/ciao.jar -X PATCH \
+  -H 'Content-Type: application/json' \
+  -d "{\"types\": [{\"id\": \"person\", \"label\": \"Human\"}]}" \
+  "http://localhost:${PWA_PORT:-8443}/api/memory/entity-types?workspace=personal"
 ```
 
 
