@@ -118,6 +118,7 @@ from ciao.web.chat_broker import (
 from ciao.web.archive_pipeline import ArchivePipeline
 from ciao.web.chat_streaming import ChatStreaming
 from ciao.web.chat_streaming import StreamOutcome as _StreamOutcome
+from ciao.web.memory_pass import MemoryPassCoordinator
 from ciao.web.schedule_dispatch import ScheduleDispatcher
 from ciao.web.document_conversion import convert_document, is_anydoc_document
 from ciao.web.file_snapshots import SnapshotStore
@@ -305,6 +306,11 @@ class ProjectInfo:
     created_at: str = ""
     order: int = 0
     vault_folder: str = ""  # e.g. "store-intelligence-platform"
+    # Marks a project the app owns rather than one the user made. "memory" is
+    # the per-workspace Memory project the end-of-conversation pass runs in.
+    # Empty for every ordinary project, so this is not a behaviour switch for
+    # an existing install.
+    kind: str = ""
     # Runtime-only: relative path to the canonical vault doc (e.g.
     # "memory-vault/personal/projects/active/ciao-improvements/README.md"). Not
     # persisted in JSON; recomputed on every vault discovery pass.
@@ -316,7 +322,7 @@ class ProjectInfo:
 
     @property
     def is_system(self) -> bool:
-        return self.name == "Claude Code CLI"
+        return self.kind == "memory" or self.name == "Claude Code CLI"
 
     def to_dict(self) -> dict:
         return {
@@ -327,6 +333,7 @@ class ProjectInfo:
             "created_at": self.created_at,
             "order": self.order,
             "vault_folder": self.vault_folder,
+            "kind": self.kind,
             "vault_doc_path": self.vault_doc_path,
             "is_system": self.is_system,
             "is_auto": self.is_auto,
@@ -647,8 +654,10 @@ class ProjectChatManager:
         # chat, the last count published per chat, and the wakes already sent —
         # and reaches back into this class only through SubagentWatcherHost.
         # `self` is that host; the properties further down keep the old
-        # attribute names pointing at its state.
-        self._subagents = SubagentWatchers(self)
+        # attribute names pointing at its state. Annotated explicitly: passing
+        # `self` to a collaborator that reads `_subagents` would otherwise make
+        # mypy resolve this assignment's own type through the cycle.
+        self._subagents: SubagentWatchers = SubagentWatchers(self)
         self._streaming = ChatStreaming(self)
         # Scheduled dispatch is a separate lifecycle with its own typed host
         # seam; this manager remains the coordinator for the target chat and
@@ -657,6 +666,10 @@ class ProjectChatManager:
         # Archive post-processing state, manifests, retries, and completion
         # hooks are owned together; the manager keeps only coordinating seams.
         self._archive_pipeline: ArchivePipeline = ArchivePipeline(self)
+        # The end-of-conversation memory pass, as a normal chat in the
+        # workspace's Memory project. Inert while ciao.web.memory_pass's
+        # MEMORY_PASS_CHATS is False; see that module for the lifecycle.
+        self._memory_pass = MemoryPassCoordinator(self)
         # Result announces parked while the synthesis nudge decides whether it
         # will speak instead. See `_park_result_announce`. chat_id ->
         # (token, project_id, title, snippet).
@@ -749,6 +762,7 @@ class ProjectChatManager:
                 created_at=pd.get("created_at", ""),
                 order=pd.get("order", 0),
                 vault_folder=pd.get("vault_folder", ""),
+                kind=pd.get("kind", ""),
             )
         for cid, cd in data.get("chats", {}).items():
             chat_model = cd.get("model", self._config.claude_default_model)
@@ -856,6 +870,7 @@ class ProjectChatManager:
                     "created_at": p.created_at,
                     "order": p.order,
                     "vault_folder": p.vault_folder,
+                    "kind": p.kind,
                 }
                 for pid, p in self._projects.items()
             },
@@ -2085,10 +2100,15 @@ class ProjectChatManager:
         # Index manually-created projects (no vault_folder yet) by name so we
         # can adopt a matching vault entry instead of creating a duplicate.
         # Scoped per-workspace because work and personal can share names.
+        # The Memory project is not a candidate: it is app-owned and has no
+        # vault entry, so a vault folder that happens to share its name would
+        # bind the system project to the wrong doc.
         unbound_by_name: dict[str, dict[str, ProjectInfo]] = {
             ws: {} for ws in workspace_names
         }
         for p in self._projects.values():
+            if p.kind == "memory":
+                continue
             if p.workspace in unbound_by_name and not p.vault_folder:
                 unbound_by_name[p.workspace][p.name] = p
 
@@ -2460,7 +2480,7 @@ class ProjectChatManager:
         project = self._projects.get(project_id)
         if project is None:
             return False
-        if project.is_auto:
+        if project.is_auto or project.kind == "memory":
             raise ValueError(
                 f"The {project.name} project is auto-managed and cannot be deleted."
             )
@@ -3275,6 +3295,31 @@ class ProjectChatManager:
         if outcome is not None:
             self.run_archive_postprocess(chat_id, outcome, chat, project)
         return bool(chat.archived)
+
+    # ── Memory pass ──────────────────────────────────────────────────────
+    #
+    # Thin seams over ``self._memory_pass`` so the archive pipeline and main.py
+    # talk to the manager, not to the collaborator directly.
+
+    def enqueue_memory_pass(
+        self,
+        source: ChatInfo,
+        project: ProjectInfo | None,
+        archive_path: Path,
+        doc_path: str,
+    ) -> str | None:
+        return self._memory_pass.enqueue(source, project, archive_path, doc_path)
+
+    async def resume_memory_passes(self) -> None:
+        self._memory_pass.resume()
+
+    async def _memory_pass_turn_finished(self, chat_id: str) -> bool:
+        try:
+            finished: bool = await self._memory_pass.on_turn_finished(chat_id)
+        except Exception:  # noqa: BLE001 — a pass must not break the turn
+            logger.exception("Memory pass turn-end handling failed for %s", chat_id)
+            return False
+        return finished
 
     # ── Session management ───────────────────────────────────────────────
 
@@ -5666,6 +5711,17 @@ class ProjectChatManager:
         task for the same chat so rapid successive replies coalesce into a
         single push fired after the last reply settles.
         """
+        chat = self._chats.get(chat_id)
+        if (
+            chat is not None
+            and chat_service._normalize_chat_helper(chat.helper).get("kind")
+            == "memory_pass"
+        ):
+            # The pass is the app updating its own memory, not a conversation
+            # the owner started: a normal result there is not worth waking them
+            # for. Permission and question pushes travel their own paths and are
+            # still delivered — that is exactly when a pass needs the owner.
+            return
         if self.notify_result_cb is None:
             return
         self._cancel_pending_push(chat_id)
@@ -5790,6 +5846,10 @@ class ProjectChatManager:
         self._spawn_detached(
             self._maybe_archive_proposal_helper(chat_id),
             f"archive-proposal-helper-{chat_id}",
+        )
+        self._spawn_detached(
+            self._memory_pass_turn_finished(chat_id),
+            f"memory-pass-{chat_id}",
         )
         return True
 

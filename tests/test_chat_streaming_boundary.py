@@ -205,6 +205,10 @@ class _DriveHost:
         del chat_id
         return False
 
+    async def _memory_pass_turn_finished(self, chat_id: str) -> bool:
+        del chat_id
+        return False
+
     def _discard_result_announce(self, chat_id: str, token: int | None = None) -> None:
         del token
         self.discarded.append(chat_id)
@@ -284,11 +288,63 @@ async def test_drive_keeps_websocket_payloads_and_lifecycle_events(
     assert host.drain_awaits == ["chat-1"]
     assert host.discarded == ["chat-1"]
     assert host.announcements == [("chat-1", "project-1", "Contract", "done")]
-    assert host.detached_names == ["archive-proposal-helper-chat-1"]
+    assert host.detached_names == [
+        "archive-proposal-helper-chat-1",
+        "memory-pass-chat-1",
+    ]
     assert stream.done is True
     assert host._broker.get("chat-1") is None
     assert host.chat.last_response == "done"
     assert host.chat.last_response_status == "success"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("events", "status"),
+    [
+        (
+            [ResultEvent(type="result", result="the vault is locked", is_error=True)],
+            "error",
+        ),
+        ([ResultEvent(type="result", result="")], "empty"),
+    ],
+)
+async def test_an_unclean_terminal_turn_still_settles_a_memory_pass(
+    tmp_path: Path,
+    events: list[StreamEvent],
+    status: str,
+) -> None:
+    """The memory-pass hook fires on every terminal turn, not only a clean one.
+
+    Gating it on a clean result is what left an errored pass recorded as
+    `running` forever, holding its workspace slot and every pass queued behind
+    it. The proposal helper stays success-gated: a failed turn must not propose
+    anything, and an error must never be archived as a clean success.
+    """
+    host = _DriveHost(events, tmp_path)
+    streaming = ChatStreaming(cast(ChatStreamingHost, host))
+    stream = ChatStream(prompt_text="hello")
+    host._broker.register("chat-1", stream)
+
+    await streaming.drive(
+        chat_id="chat-1",
+        project_id="project-1",
+        prompt="hello",
+        images=None,
+        turn_index=None,
+        chat_meta=host.chat,
+        stream=stream,
+        is_retry=False,
+        unattended=False,
+    )
+
+    assert host.detached_names == ["memory-pass-chat-1"]
+    assert host.announcements == []
+    # The terminal status is what the pass reads, so it has to say what happened.
+    assert host.chat.last_response_status == status
+    assert host.chat.last_response == ""
+    assert stream.done is True
+    assert host._broker.get("chat-1") is None
 
 
 @pytest.mark.asyncio

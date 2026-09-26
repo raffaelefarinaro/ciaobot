@@ -501,9 +501,40 @@ def _set_frontmatter_description(text: str, description: str) -> str | None:
     return "\n".join(lines[:start] + [quoted] + lines[end:])
 
 
+def _normalize_memory_pass_helper(value: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed on a memory-pass helper, same contract as the proposal one.
+
+    A rejected helper is not merely metadata loss: it is what makes the chat
+    unrecognisable as a pass, so a caller must never let a half-valid dict
+    through and have the queue treat the chat as an ordinary one.
+    """
+    state = str(value.get("state") or "queued")
+    if state not in {"queued", "running", "done", "attention"}:
+        return {}
+    if str(value.get("archive_policy") or "") != "when_clean":
+        return {}
+    source_chat_id = str(value.get("source_chat_id") or "")
+    if not source_chat_id or len(source_chat_id) > 128:
+        return {}
+    return {
+        "kind": "memory_pass",
+        "source_chat_id": source_chat_id,
+        "archive_path": str(value.get("archive_path") or ""),
+        "doc_path": str(value.get("doc_path") or ""),
+        "source_title": str(value.get("source_title") or ""),
+        "source_project": str(value.get("source_project") or ""),
+        "state": state,
+        "archive_policy": "when_clean",
+    }
+
+
 def _normalize_chat_helper(value: Any) -> dict[str, Any]:
     """Fail closed on lifecycle metadata supplied by older or invalid clients."""
-    if not isinstance(value, dict) or value.get("kind") != "proposal":
+    if not isinstance(value, dict):
+        return {}
+    if value.get("kind") == "memory_pass":
+        return _normalize_memory_pass_helper(value)
+    if value.get("kind") != "proposal":
         return {}
     intent = str(value.get("intent") or "")
     policy = str(value.get("archive_policy") or "")
