@@ -48,8 +48,10 @@ const visible = computed(() => {
   if (window.isSecureContext !== true) return false
   if (!probed.value) return false
   // A browser without push has no second step to complete, so an installed app
-  // there is done, not stuck.
-  return touched.value || !(installDone.value && (pushOn.value || !pushAvailable.value))
+  // there is done, not stuck. Nor is an installed app whose notifications are
+  // blocked: nothing in this card can unblock them, and the Settings
+  // notifications card still explains how.
+  return touched.value || !(installDone.value && (pushOn.value || !pushAvailable.value || denied.value))
 })
 
 onMounted(async () => {

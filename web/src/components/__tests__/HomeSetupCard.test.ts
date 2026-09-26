@@ -243,6 +243,25 @@ describe('HomeSetupCard', () => {
     expect(view.find('.home-setup').exists()).toBe(false)
   })
 
+  it('stays hidden in an installed app whose notifications are blocked', async () => {
+    // Nothing on this card can lift a browser-level block, so coming back on
+    // every Home visit is nagging, not guidance; the Settings notifications
+    // card is where the block gets explained.
+    vi.stubGlobal('Notification', { permission: 'denied' })
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: (query: string) => ({
+        matches: query.includes('standalone'),
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    })
+
+    const view = await mountCard()
+    expect(view.find('.home-setup').exists()).toBe(false)
+  })
+
   it('renders nothing on an insecure origin', async () => {
     Object.defineProperty(window, 'isSecureContext', { value: false, configurable: true })
     const view = await mountCard()

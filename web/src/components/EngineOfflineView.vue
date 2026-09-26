@@ -6,6 +6,7 @@
        the service worker caches; a lazy chunk would 404 exactly when it is
        needed. -->
   <div
+    ref="rootEl"
     class="engine-offline"
     role="alertdialog"
     aria-modal="true"
@@ -31,7 +32,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 const props = defineProps<{
   state: 'updating' | 'unreachable'
@@ -45,11 +46,39 @@ const emit = defineEmits<{ (e: 'retry'): void }>()
 const commands = ['ciao service start', 'ciao service status']
 const copied = ref('')
 const retryButton = ref<HTMLButtonElement | null>(null)
+const rootEl = ref<HTMLElement | null>(null)
 
 // Nothing behind the curtain unmounts, so focus would stay wherever it was and
 // the first Tab would reach a control the user cannot see. Retry is the one
 // thing to do here, so it takes focus when the curtain appears.
-onMounted(() => retryButton.value?.focus())
+onMounted(() => {
+  retryButton.value?.focus()
+  // Modal means modal: ChatLayout's bare 1-9, Esc and modifier shortcuts are
+  // still live behind the curtain, and they would switch workspace under a view
+  // the user cannot see. Capture phase so they are stopped before the app's own
+  // bubble-phase listeners ever see the key.
+  window.addEventListener('keydown', onKeydown, true)
+})
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
+
+function onKeydown(event: KeyboardEvent) {
+  const root = rootEl.value
+  if (!root) return
+  if (event.key === 'Tab') {
+    const focusables = Array.from(root.querySelectorAll<HTMLElement>('button:not([disabled])'))
+    if (focusables.length === 0) return
+    const first = focusables[0], last = focusables[focusables.length - 1]
+    const active = document.activeElement as HTMLElement | null
+    if (event.shiftKey && (active === first || !root.contains(active))) { event.preventDefault(); last.focus() }
+    else if (!event.shiftKey && (active === last || !root.contains(active))) { event.preventDefault(); first.focus() }
+    return
+  }
+  // Our own buttons keep their native Enter/Space activation (a default
+  // action, unaffected by stopping propagation), but no app listener may see the key.
+  if (root.contains(event.target as Node)) { event.stopImmediatePropagation(); return }
+  event.preventDefault()
+  event.stopImmediatePropagation()
+}
 
 async function copy(cmd: string) {
   if (!navigator.clipboard) return
@@ -85,11 +114,13 @@ const text = computed(() => {
 .engine-offline {
   position: fixed;
   inset: 0;
-  z-index: 900;
+  /* Above the dialogs (1000): while the engine is down they cannot be acted
+     on, so a confirm or prompt left open must not float over the curtain. */
+  z-index: 1100;
   display: grid;
   place-items: center;
   background: var(--bg);
-  padding: var(--page-gutter, 16px);
+  padding: max(var(--page-gutter, 16px), env(safe-area-inset-top, 0px)) max(var(--page-gutter, 16px), env(safe-area-inset-right, 0px)) max(var(--page-gutter, 16px), env(safe-area-inset-bottom, 0px)) max(var(--page-gutter, 16px), env(safe-area-inset-left, 0px));
 }
 .engine-offline-content {
   max-width: 34rem;
