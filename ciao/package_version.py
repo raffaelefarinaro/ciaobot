@@ -444,7 +444,7 @@ def update_package(
             "ok": False,
             "mode": mode,
             "error": "This engine was installed by the Ciaobot installer. Stage an update with `ciao update stage`; applying it from the app arrives in a later release.",
-            "command": "ciao update stage" if sys.platform.startswith("linux") else "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh",
+            "command": "ciao update stage" if sys.platform.startswith("linux") else "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install-engine.sh | sh",
         }
     if sys.platform.startswith("linux"):
         # The documented Linux install is `pip install -e`, which

@@ -5802,7 +5802,7 @@ def _restart_only(config, *, dev_mode: bool) -> bool:
     """
     from ciao.package_version import detect_install_mode
 
-    if detect_install_mode() == "bundled_app":
+    if detect_install_mode() in ("bundled_app", "installer"):
         return True
     if sys.platform.startswith("linux") and not dev_mode:
         return True
@@ -5815,6 +5815,12 @@ _BUNDLED_DEPLOY_REFUSAL = (
     "This engine runs from the installed Ciaobot.app, not a source checkout, "
     "so there is nothing to pull or rebuild. Use Restart to restart it; updates "
     "come from the in-app updater or the one-line installer."
+)
+
+_INSTALLER_DEPLOY_REFUSAL = (
+    "This engine was installed by the Ciaobot engine installer, not run from a "
+    "source checkout, so it cannot be redeployed from source. Re-run the "
+    "installer to update it."
 )
 
 
@@ -5849,9 +5855,10 @@ async def admin_deploy(request: Request) -> JSONResponse:
 
     # Refuse before the secrets preflight and the snapshot: a packaged app can
     # never be redeployed from source, so none of the steps below may run.
-    if detect_install_mode() == "bundled_app":
+    mode = detect_install_mode()
+    if mode in ("bundled_app", "installer"):
         return JSONResponse(
-            {"steps": [], "ok": False, "error": _BUNDLED_DEPLOY_REFUSAL},
+            {"steps": [], "ok": False, "error": _BUNDLED_DEPLOY_REFUSAL if mode == "bundled_app" else _INSTALLER_DEPLOY_REFUSAL},
             status_code=400,
         )
 

@@ -175,3 +175,64 @@ async def test_deploy_refuses_bundled_app_before_any_step(tmp_path, monkeypatch)
     assert payload["steps"] == []
     assert "Ciaobot.app" in payload["error"] and "Restart" in payload["error"]
     assert calls == []
+
+
+def _run_as_installer(monkeypatch):
+    # An engine the terminal installer put in place with `uv tool install`: it
+    # has a receipt, but it has no source checkout to redeploy from (#568).
+    monkeypatch.setattr(
+        "ciao.package_version.detect_install_mode", lambda: "installer"
+    )
+
+
+async def test_admin_deploy_refuses_installer_mode(tmp_path, monkeypatch):
+    import json
+
+    from ciao.web import routes_api
+
+    _run_as_installer(monkeypatch)
+
+    async def must_not_run(*args, **kwargs):
+        raise AssertionError("deploy steps must not run on an installer engine")
+
+    monkeypatch.setattr(routes_api, "_commit_and_push", must_not_run)
+    monkeypatch.setattr(routes_api, "_git_pull_with_retry", must_not_run)
+
+    class Manager:
+        async def preflight(self):
+            raise AssertionError("preflight must not run on an installer engine")
+
+    calls: list = []
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        config=SimpleNamespace(
+            app_repo=str(_checkout(tmp_path)), workspace_root=tmp_path,
+        ),
+        local_session_manager=Manager(),
+        request_restart=calls.append,
+    )))
+    response = await routes_api.admin_deploy(request)
+    payload = json.loads(response.body)
+    assert response.status_code == 400
+    assert payload["ok"] is False
+    assert payload["steps"] == []
+    assert "engine installer" in payload["error"]
+    assert calls == []
+
+
+async def test_restart_only_for_installer_mode(tmp_path, monkeypatch):
+    import json
+
+    from ciao.web import routes_api
+
+    _run_as_installer(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    # Even with a checkout configured and dev mode on, an installer engine has
+    # nothing to redeploy from, so Settings must offer Restart only.
+    assert routes_api._restart_only(None, dev_mode=True) is True
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        config=SimpleNamespace(app_repo=str(_checkout(tmp_path))),
+        local_session_manager=SimpleNamespace(status=lambda: {"dev_mode": True}),
+    )))
+    response = await local_status(request)
+    assert json.loads(response.body)["restart_only"] is True

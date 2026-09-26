@@ -70,6 +70,16 @@ def test_publish_workflow_ships_signed_engine_manifest() -> None:
     assert workflow.index("Build PWA assets") < workflow.index("Build engine wheel")
 
 
+def test_publish_uploads_engine_installer() -> None:
+    # The engine-only installer is served from /releases/latest/download, which
+    # is a release asset, so it has to be attached with the rest (#568).
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "scripts/install-engine.sh" in workflow
+
+
 def test_cold_start_uses_the_embedded_engine_for_launchagent_setup() -> None:
     workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"

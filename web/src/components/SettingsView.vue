@@ -142,12 +142,16 @@
                   This bundled app updates through the Ciaobot menu-bar icon. Choose
                   <strong>Update</strong> there, or run the one-line installer again.
                 </template>
+                <template v-else-if="packageStatus?.mode === 'installer'">
+                  Installed with the Ciaobot engine installer. To update, run it again:
+                  <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install-engine.sh | sh</code>
+                </template>
                 <template v-else>
                   Check the installed package version and upgrade this local app.
                 </template>
               </p>
             </div>
-            <div v-if="packageStatus && packageStatus.mode !== 'bundled_app'" class="settings-card-header-actions">
+            <div v-if="packageStatus && !['bundled_app', 'installer'].includes(packageStatus.mode ?? '')" class="settings-card-header-actions">
               <button
                 v-if="packageStatus.update_available"
                 class="btn-primary btn-small"
@@ -168,7 +172,7 @@
               Update check failed: {{ packageStatus.error }}
             </div>
 
-            <div v-if="showUpdatePanel && packageStatus.mode !== 'bundled_app'" class="settings-form-panel">
+            <div v-if="showUpdatePanel && !['bundled_app', 'installer'].includes(packageStatus.mode ?? '')" class="settings-form-panel">
               <p class="section-title">What&rsquo;s new in {{ packageStatus.latest_version }}</p>
               <div v-if="changelogLoading" class="loading">Loading changelog&hellip;</div>
               <template v-else>
