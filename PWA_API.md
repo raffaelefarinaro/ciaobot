@@ -119,6 +119,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/device/package-status` | Same as `/api/package/status`, but never proxied: in client mode this reports *this* machine's install while `/api/package/status` reports the host's |
 | GET | `/api/device/changelog` | Commits between this machine's installed version and the latest release (never proxied) |
 | POST | `/api/device/update` | Return app-owned update guidance for *this* machine, not the host it mirrors (never proxied) |
+| GET | `/api/update/status` | Installed-engine update job: install mode, whether it can update, and the persisted operation record |
+| POST | `/api/update/stage` | Start staging a release for an installer-managed engine (background; poll status) |
+| POST | `/api/update/apply` | Apply the staged release: drain, detached swap, restart, rollback (background; poll status) |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
 | GET | `/api/setup/list-dirs` | List local subdirectories for the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/setup/inspect-folder` | Probe a candidate workspace folder for vault mode and any nested workspaces (bootstrap mode, localhost only) |

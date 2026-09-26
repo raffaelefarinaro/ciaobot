@@ -47,7 +47,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Endpoints that MUST always be handled locally on the client node
+# Endpoints that MUST always be handled locally on the client node. `/api/update/*`
+# is deliberately absent: like `/api/package/*` it is host-scoped, so in client mode
+# the Settings update card reports and updates the host until node mode is removed.
 EXCLUDED_LOCAL_PATHS: set[str] = {
     "/api/node/status",
     "/api/node/handover",
