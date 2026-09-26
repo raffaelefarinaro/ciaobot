@@ -92,14 +92,30 @@ writes the install receipt with absolute paths; then runs `ciao setup` and
 refuses to take over an engine that Ciaobot.app manages unless it is re-run with
 `--migrate`, and refuses to overwrite a `ciao` it did not install. `--migrate`
 is the desktop→terminal hand-over (#576): after the same manifest and digest
-verification, it classifies the Mac from the verified wheel, keeps before-images
-of the plists and the shim in `~/.local/state/ciaobot/migration/before/`, quits
-Ciaobot.app, and either repoints `com.ciao.server` at the new engine and retires
-the app's own agent once the new engine answers with the right version — rolling
-back to the app's engine if any step fails — or, for a client, disables the local
-engine and installs no service at all, leaving the user to sign in at the remote
-host. `--as-host` / `--as-client URL` are required when the node state cannot be
-read, and re-running after a successful migration does nothing. The workflow
+verification, it classifies the Mac from the verified wheel, takes before-images
+of the two plists, the shim, the install receipt and any existing uv tool
+environment in `~/.local/state/ciaobot/migration/before/` (an absent file is
+recorded as absent, so a rollback removes only what the migration created, and
+the tool environment is copied only when one is already there — the common
+hand-over from Ciaobot.app has none), and refuses to touch anything if
+Ciaobot.app is still running 20 s after it was asked to quit. It then either
+repoints `com.ciao.server` at the new engine and, only once that engine answers
+with the version just installed, retires the app's own agent — restoring the
+plists, the shim, the receipt, the tool environment and the launchd job on any
+failure, including a launchctl that refuses to put them back — or, for a client,
+disables the local engine and installs no service at all, leaving the user to
+sign in at the remote host. A client failure undoes the same state and never
+claims an engine was restored, because there was none. `--as-host` /
+`--as-client URL` are required when the node state cannot be read or trusted,
+and the migration receipt in `~/.local/state/ciaobot/migration/` (`schema`,
+`phase`, `before` block, `version`, `started_at`) is what makes the whole thing
+resumable: a retry reuses those originals rather than snapshotting the tool the
+previous attempt installed, and only a receipt that parses, names before-images
+that are still there and agrees with the installed service is treated as
+"already migrated" — a corrupt, wrong-schema, incomplete or stale one is refused
+with recovery instructions instead. An interrupted run records `interrupted`
+rather than pretending to have finished, and a retirement that launchctl refuses
+leaves the app's agent in place instead of reporting success. The workflow
 attaches it as the `install-engine.sh` release asset.
 
 ## Branching and releases
