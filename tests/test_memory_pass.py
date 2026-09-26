@@ -388,7 +388,9 @@ async def test_postprocess_unchanged_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
     streams: _FakeStreams,
 ) -> None:
-    assert memory_pass.MEMORY_PASS_CHATS is False
+    # Pinned here rather than read off the module: the point is the disabled
+    # path, which must stay pinned however the shipped constant is flipped.
+    monkeypatch.setattr(memory_pass, "MEMORY_PASS_CHATS", False)
     manager = _make_manager(tmp_path)
     source = _source(manager)
     project = manager.get_project(source.project_id)

@@ -24,6 +24,7 @@ from ciao.web.archive_pipeline import (
     ArchivePipeline,
     ArchivePipelineHost,
 )
+from ciao.web import memory_pass
 from ciao.web.chat_broker import EventsHub
 from ciao.web.project_chats import ArchiveOutcome, ChatInfo, ProjectInfo
 
@@ -274,7 +275,14 @@ async def test_postprocess_failure_cleans_state_and_persists(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_retry_and_startup_resume_use_owned_manifest_state(tmp_path: Path) -> None:
+async def test_retry_and_startup_resume_use_owned_manifest_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The one-shot insights stage is filtered once memory passes are on, which
+    # leaves a resume with nothing to launch. This test is about the manifest
+    # state the resume reads, not about which stages are registered, so it pins
+    # the flag Off to keep exercising the resume.
+    monkeypatch.setattr(memory_pass, "MEMORY_PASS_CHATS", False)
     host, pipeline, chat = _host(tmp_path)
     job = aj.create_job(
         host._runtime_root,

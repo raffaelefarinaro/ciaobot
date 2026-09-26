@@ -269,4 +269,51 @@ describe('NewChatPicker', () => {
     press('Escape')
     expect(await settle(second)).toBeNull()
   })
+
+  it('never offers the app-owned Memory project as a new-chat target', async () => {
+    // The sidebar hides the Memory project, so listing it here would hand out a
+    // target the user cannot then find or move the chat out of. This picker is
+    // the chooser behind Home's composer chip, both "+ new" affordances, Cmd+T
+    // and Option+N, so it needs its own filter rather than inheriting
+    // `workspaceProjects` (it also previews workspaces the app is not in).
+    store.projects = [
+      ...store.projects,
+      { project_id: 'p-mem', name: 'Memory', workspace: 'home', kind: 'memory', context: '', created_at: '', order: 2, vault_folder: '' },
+      { project_id: 'p-mem-c', name: 'Memory', workspace: 'client', kind: 'memory', context: '', created_at: '', order: 2, vault_folder: '' },
+    ]
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
+    const answer = openNewChatPicker()
+    await nextTick()
+    await nextTick()
+
+    expect(labels()).toEqual(['General'])
+
+    // The same holds in a previewed workspace, not just the active one.
+    press('2')
+    await nextTick()
+    expect(labels()).toEqual(['General', 'Shipping'])
+
+    press('Escape')
+    expect(await settle(answer)).toBeNull()
+  })
+
+  it('still offers a user project that merely happens to be named Memory', async () => {
+    // Only `kind` discriminates: the app-owned project is the one with
+    // `kind: 'memory'`, so a user project sharing the name stays a valid
+    // target.
+    store.projects = [
+      ...store.projects,
+      { project_id: 'p-mine', name: 'Memory', workspace: 'home', context: '', created_at: '', order: 2, vault_folder: '' },
+    ]
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
+    const answer = openNewChatPicker()
+    await nextTick()
+    await nextTick()
+
+    expect(labels()).toEqual(['General', 'Memory'])
+    press('ArrowDown')
+    await nextTick()
+    press('Enter')
+    expect(await settle(answer)).toBe('p-mine')
+  })
 })

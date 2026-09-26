@@ -6,10 +6,11 @@ attended ``bypass`` chat in a per-workspace system project called ``Memory``:
 one running pass per workspace, FIFO, auto-archived when it ends cleanly, left
 open for the owner when it does not, and silent on a normal result.
 
-Everything here is inert until ``MEMORY_PASS_CHATS`` is flipped. The archive
-pipeline reads that module attribute — never a ``from … import`` copy, so tests
-can monkeypatch it — both to suppress the one-shot insights / project-doc /
-memory-proposal stages and to enqueue the pass chat.
+Everything here was inert until ``MEMORY_PASS_CHATS`` was flipped, and is live
+now. The archive pipeline reads that module attribute — never a
+``from … import`` copy, so tests can monkeypatch it — both to suppress the
+one-shot insights / project-doc / memory-proposal stages and to enqueue the pass
+chat.
 
 The project id is derived from a vault folder that is never written to disk, so
 auto-discovery cannot claim the project, the name is free to be localised, and
@@ -29,9 +30,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 
-# Off until the guardrail work (D2a-2) and the PWA work (D2a-3) land. Every
+# On since the guardrail work (D2a-2) and the PWA work (D2a-3) landed. Every
 # reader must go through this module attribute so the flip is a single edit.
-MEMORY_PASS_CHATS = False
+MEMORY_PASS_CHATS = True
 
 MEMORY_PROJECT_NAME = "Memory"
 MEMORY_PROJECT_KIND = "memory"

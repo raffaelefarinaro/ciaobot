@@ -13,6 +13,12 @@
       <span v-if="density === 'card'" class="chat-signal-label">needs you</span>
     </span>
     <span
+      v-else-if="primarySignal === 'memory'"
+      class="chat-signal chat-signal--memory"
+      title="Memory pass needs you"
+      aria-label="Memory pass needs you"
+    >✦</span>
+    <span
       v-else-if="primarySignal === 'working'"
       class="chat-signal chat-signal--working"
       title="Working"
@@ -123,10 +129,16 @@ const tidying = computed(() => store.chatIsPostprocessing(props.chatId))
 const tidyingLabel = computed(() => postprocessLabel(store.chatPostprocess(props.chatId)))
 const tidyingTitle = computed(() => `Ciaobot is ${tidyingLabel.value || 'tidying up'}`)
 
+// A memory pass that ended unclean. Ranked below `needs` and above `working`:
+// it is the one background job whose unfinished state is the owner's problem,
+// so it must outrank the "still going" signals that are not asking anything.
+const memoryAttention = computed(() => store.memoryPassNeedsAttention(props.chatId))
+
 // Unread is a separate static notification dot. The per-chat value is binary,
 // so the numeric counts remain reserved for project/workspace rollups.
-const primarySignal = computed<'needs' | 'working' | 'agents' | 'runs' | 'retry' | 'tidying' | null>(() => {
+const primarySignal = computed<'needs' | 'memory' | 'working' | 'agents' | 'runs' | 'retry' | 'tidying' | null>(() => {
   if (needsInput.value) return 'needs'
+  if (memoryAttention.value) return 'memory'
   if (working.value) return 'working'
   if (agentCount.value > 0) return 'agents'
   if (runCount.value > 0) return 'runs'
@@ -262,6 +274,15 @@ const intervalTitle = computed(() => {
   color: var(--warning);
   font-size: var(--text-lg);
   font-weight: 700;
+}
+
+/* A pass that stopped and needs the owner. The warning colour, not the accent:
+   the accent pulse below already means "your turn is live", and a glyph that
+   borrows it would say the opposite of what this says. */
+.chat-signal--memory {
+  color: var(--warning);
+  font-size: var(--text-sm);
+  line-height: 1;
 }
 
 /* Post-archive tidy-up. The accent pulse above means "your turn is live" or

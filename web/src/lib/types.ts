@@ -167,6 +167,9 @@ export interface ProjectInfo {
   vault_doc_path?: string
   is_system?: boolean
   is_auto?: boolean
+  // 'memory' marks the app-owned per-workspace Memory project. The PWA hides
+  // it from the sidebar; a user project may legitimately be named "Memory".
+  kind?: string
 }
 
 export interface ChatInfo {
@@ -227,6 +230,17 @@ export interface ChatInfo {
     intent: 'resolve' | 'review'
     proposal_ids: string[]
     archive_policy: 'when_resolved' | 'manual'
+  } | {
+    // A memory pass: the background chat that distils an archived chat into
+    // memory. `state === 'attention'` means it ended unclean and needs the owner.
+    kind: 'memory_pass'
+    source_chat_id: string
+    archive_path: string
+    doc_path: string
+    source_title: string
+    source_project: string
+    state: 'queued' | 'running' | 'done' | 'attention'
+    archive_policy: 'when_clean'
   }
   // What the post-archive pipeline is doing, or did. Present only on archived
   // chats that ran it. Drives the greyed activity signal and the settled
@@ -255,7 +269,9 @@ export interface ArchiveJobView {
 
 /** One step of the post-archive pipeline, as reported by ciao/job_runs.py. */
 export interface ChatPostprocessStep {
-  status: 'ok' | 'error' | 'skipped'
+  // 'queued' | 'running' | 'attention' come from the memory-pass stages; the
+  // one-shot pipeline only ever settles a step to ok/error/skipped.
+  status: 'ok' | 'error' | 'skipped' | 'queued' | 'running' | 'attention'
   extra?: Record<string, unknown>
   /** Manifest projection: pending/running/blocked/ok/skipped/error. */
   manifest_status?: ArchiveJobStep['status']
@@ -1120,6 +1136,30 @@ export interface PackageStatus {
   error?: string
   /** Public URL that redirects to the latest release page. */
   source?: string
+}
+
+/**
+ * One engine update run, as the coordinator persists it
+ * (`ciao/engine_update.py:Operation`). `phase` is one of `engine_update.PHASES`
+ * and `error` carries the reason when the run failed.
+ */
+export interface EngineUpdateOperation {
+  id: string
+  phase: string
+  from_version: string
+  to_version: string
+  started_at: string
+  updated_at: string
+  error?: string
+}
+
+/** `GET /api/update/status` — the engine update coordinator's persisted job. */
+export interface EngineUpdateStatus {
+  install_mode: string
+  can_update: boolean
+  operation: EngineUpdateOperation | null
+  /** A coordinator refusal that wrote no operation of its own. */
+  error?: string
 }
 
 /** One home-screen operator action (see `ciao/operator_actions.py`). */
