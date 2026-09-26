@@ -48,12 +48,17 @@ _PUBLIC_API = {
 # `/api/menubar-chats` and `/api/menubar-notifications` are how the tray reads
 # chat titles and pending banners (it holds no cookie), and `/api/node/handover`
 # is the client-mode escape hatch offered on the login screen, which by
-# definition runs before any session exists. All are gated on the peer address
-# rather than the Host header, which a caller controls.
+# definition runs before any session exists. `/api/admin/drain` and
+# `/api/admin/drain/cancel` are the update coordinator's own drain handshake,
+# driven by `ciao update apply` before it bootstraps the detached updater job.
+# All are gated on the peer address rather than the Host header, which a caller
+# controls.
 _LOOPBACK_ONLY_API = {
     "/api/menubar-chats",
     "/api/menubar-notifications",
     "/api/node/handover",
+    "/api/admin/drain",
+    "/api/admin/drain/cancel",
 }
 
 

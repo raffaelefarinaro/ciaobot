@@ -5849,6 +5849,72 @@ async def admin_restart(request: Request) -> JSONResponse:
     )
 
 
+# The updater addresses the engine as `localhost`, and it is the only caller
+# allowed to. A page that rebinds DNS to a name resolving to 127.0.0.1 is a
+# loopback *peer* whose Origin matches its own Host, so the origin check alone
+# does not exclude it — and these routes need no session. The Host check
+# closes that: the name in the request is the only part of a rebound request
+# the attacker controls, so it has to be one this engine serves.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _forbidden_host(request: Request) -> JSONResponse | None:
+    """The 403 a request for a host this engine does not serve gets, or None."""
+    host = (request.url.hostname or "").lower()
+    if host in _LOOPBACK_HOSTS:
+        return None
+    return JSONResponse({"error": "forbidden host"}, status_code=403)
+
+
+async def admin_drain(request: Request) -> JSONResponse:
+    """Close admission for new turns (update drain); loopback-only, no session.
+
+    The updater's foreground half calls this before it hands the rest of the
+    transaction to the detached updater job, so a turn started after the drain
+    began cannot extend the downtime it is waiting out. The active chat IDs
+    come back in the same response the engine already publishes, so the caller
+    does not have to make a second request to find out what it is waiting for.
+
+    Refused while a Settings restart is already draining: that restart owns the
+    same flag, and taking it over would let the update's cancel reopen
+    admission underneath a restart that is still waiting for its chats. The
+    update's own repeated calls (it polls by asking again) are idempotent.
+    """
+    refusal = _forbidden_host(request)
+    if refusal is not None:
+        return refusal
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        return JSONResponse({"error": "drain unavailable"}, status_code=503)
+    if pcm.restart_draining and not getattr(request.app.state, "update_drain_active", False):
+        return JSONResponse({"error": "a restart is already draining"}, status_code=409)
+    request.app.state.update_drain_active = True
+    pcm.begin_restart_drain()
+    return JSONResponse({"draining": True, "active_chat_ids": pcm.active_chat_ids()})
+
+
+async def admin_drain_cancel(request: Request) -> JSONResponse:
+    """Reopen admission after an update's drain timed out; no session.
+
+    Without this a drain that never completes would leave the running engine
+    refusing turns forever, which is a far worse outcome than the update it was
+    meant to enable. Only an update's own drain is cancelled: one that is not
+    the engine's to cancel is left exactly as it is and reported as such, so a
+    caller cannot reopen admission under a pending Settings restart.
+    """
+    refusal = _forbidden_host(request)
+    if refusal is not None:
+        return refusal
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        return JSONResponse({"error": "drain unavailable"}, status_code=503)
+    if not getattr(request.app.state, "update_drain_active", False):
+        return JSONResponse({"draining": pcm.restart_draining})
+    request.app.state.update_drain_active = False
+    pcm.cancel_restart_drain()
+    return JSONResponse({"draining": False})
+
+
 async def admin_deploy(request: Request) -> JSONResponse:
     """Snapshot local work, pull latest, rebuild frontend, restart service."""
     from ciao.package_version import detect_install_mode
