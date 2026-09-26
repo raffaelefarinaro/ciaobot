@@ -1087,6 +1087,82 @@ async def test_a_finished_run_wakes_its_chat_end_to_end(
     assert run.run_id in text
 
 
+async def test_cancelled_drain_replays_marked_wake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drain that is cancelled never restarts, so the mark is replayed here.
+
+    ``mark_wake_pending`` defers the wake to the next
+    ``BackgroundRunner.start()``. There is no next start after a cancelled
+    drain, so without the replay the run stays marked and the owning chat
+    never learns its command finished.
+    """
+    monkeypatch.setattr(
+        "ciao.web.project_chats._BACKGROUND_WAKE_WINDOW_SECONDS", 0.05
+    )
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Runs", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Owner")
+    queued: list[tuple[str, str]] = []
+
+    def _queue_message(chat_id: str, text: str) -> bool:
+        # What the real queue_message does for an idle chat: there is no stream
+        # to append to, so _deliver_wake falls through to start_stream — which
+        # a drain refuses and which, after the cancel, would start a real turn.
+        # Stand in for both: refuse while the drain is up, take the wake after.
+        if manager._restart_draining:
+            return False
+        queued.append((chat_id, text))
+        return True
+
+    manager.queue_message = _queue_message  # type: ignore[method-assign]
+    published: list[dict] = []
+    monkeypatch.setattr(manager._events, "publish", published.append)
+
+    def _finished(run: BackgroundRun, tail: list[str]) -> None:
+        manager.queue_background_wake(
+            run.parent_chat_id,
+            run_id=run.run_id,
+            label=run.label,
+            status=run.status,
+            exit_code=run.exit_code,
+            last_lines=tail,
+            log_path=str(runner.log_path(run.run_id)),
+            error=run.error,
+        )
+
+    runner = _runner(tmp_path, on_finish=_finished)
+    manager._background_runner = runner
+    # The run finishes while admission is closed, so its wake cannot be
+    # delivered and the flusher marks it instead.
+    manager.begin_restart_drain()
+
+    run = await runner.start_run(
+        parent_chat_id=chat.chat_id,
+        cmd=["/bin/sh", "-c", "echo report-ready"],
+        label="nightly",
+    )
+    await _await_terminal(runner, run.run_id)
+    await asyncio.sleep(0.3)
+
+    stored = runner.get(run.run_id)
+    assert stored is not None and stored.wake_pending is True
+    assert queued == []
+    assert [e for e in published if e.get("type") == "chat_runs_reported"] == []
+
+    manager.cancel_restart_drain()
+    await asyncio.sleep(0.3)
+
+    stored = runner.get(run.run_id)
+    assert stored is not None and stored.wake_pending is False
+    assert len(queued) == 1
+    _, text = queued[0]
+    assert "report-ready" in text
+    reported = [e for e in published if e.get("type") == "chat_runs_reported"]
+    assert len(reported) == 1
+    assert reported[0]["chat_id"] == chat.chat_id
+
+
 # ── control plane scoping ─────────────────────────────────────────────────
 
 
