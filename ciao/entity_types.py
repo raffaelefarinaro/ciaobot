@@ -13,11 +13,14 @@ ships the defaults; ``<vault>/entity-types.yaml`` holds the user's edits; the
 effective list is the two merged by ``id``. The owner reads and writes that
 file over ``GET``/``PATCH /api/memory/entity-types`` (:func:`effective_payload`
 and :func:`write_vault_file`), and the generated ``VOCABULARY.md`` names the
-categories it holds. No *consumer* reads the registry yet — the swap that
-makes ``vault_index``'s folder map and the linter's orphan set follow the
-user's list is a separate change — so this half is additive, behaviour with no
-vault file is byte-identical to before, and ``tests/test_entity_types.py``
-pins every derived view against the live constant it will eventually replace.
+categories it holds. Three consumers read the registry: ``vault_index``'s
+``canonical_type`` / ``scan_vault``, ``vault_lint``'s ``run_validation`` and
+``memory_audit``'s staleness predicates. Each takes an optional
+``registry=`` keyword and loads one from the vault root it already holds when
+the caller passes none, so a caller with no vault in hand keeps the shipped
+tables and behaviour with no vault file is byte-identical to before;
+``tests/test_entity_types.py`` pins every derived view against the live
+constant it replaced.
 
 **Which vault.** ``<vault>`` is the *agent* vault root
 (``CiaoConfig.agent_vault_root(name)``) — the root that owns the generated
