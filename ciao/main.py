@@ -937,6 +937,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         except Exception:
             logger.exception("Archive job resume failed")
 
+        # The memory-pass queue is durable on the memory chats' helpers, so a
+        # restart picks it back up: a pass that was running died with the old
+        # process and is surfaced for attention, and anything still queued is
+        # pumped again.
+        try:
+            from ciao.web import memory_pass
+
+            if memory_pass.MEMORY_PASS_CHATS:
+                await pcm.resume_memory_passes()
+        except Exception:
+            logger.exception("Memory pass resume failed")
+
         # Fire each schedule once when its latest expected occurrence was missed
         # (for example while the server was down). This does not replay every
         # skipped interval. Runs asynchronously so it doesn't block uvicorn from
