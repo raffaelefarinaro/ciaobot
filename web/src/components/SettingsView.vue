@@ -955,8 +955,6 @@
           :routines="routines"
           :routines-saving="routinesSaving"
           :save-routines="saveRoutines"
-          :provider-models="workspaceModels?.provider_models"
-          :provider-labels="aliasProviderLabels"
         />
       </template>
 
@@ -2580,14 +2578,6 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
     })
   }
   return sections
-})
-
-// Provider key -> human label, for components that render model ids from the
-// default-model table (Automations offers a one-off retry model).
-const aliasProviderLabels = computed<Record<string, string>>(() => {
-  const labels: Record<string, string> = { claude: 'Anthropic (via Claude Code)' }
-  for (const section of aliasProviderSections.value) labels[section.key] = section.label
-  return labels
 })
 
 function getProviderSection(provider: string): AliasProviderSection | undefined {

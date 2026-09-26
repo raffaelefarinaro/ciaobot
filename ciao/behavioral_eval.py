@@ -544,18 +544,21 @@ def code_revision(repo_root: Path | None = None) -> str:
 def extraction_prompt_sha256() -> str:
     """Hash of the shipped extraction prompts, or ``""`` when unavailable.
 
-    All three prompt variants (JSONL insights, rendered text, region reconcile)
-    are hashed as one value, so any of them changing moves the provenance.
+    One value over every prompt that shapes what gets written to the vault, so
+    any of them changing moves the provenance. The two one-shot extraction
+    prompts (JSONL insights, rendered text) were deleted in #627 with the
+    one-shot pipeline itself; the region reconcile is what remains.
     """
     try:
-        from ciao import insights, memory_proposals
+        from ciao import memory_proposals
 
-        parts = [
-            getattr(insights, "_INSIGHTS_SYSTEM_PROMPT", ""),
-            getattr(insights, "_TEXT_MODE_SYSTEM_PROMPT", ""),
-            getattr(memory_proposals, "_RECONCILE_SYSTEM_PROMPT", ""),
-        ]
+        parts = [getattr(memory_proposals, "_RECONCILE_SYSTEM_PROMPT", "")]
     except Exception:  # noqa: BLE001
+        return ""
+    if not any(parts):
+        # Every prompt this field covered is gone. Hashing the empty join would
+        # report a stable provenance for a pipeline that no longer exists, which
+        # reads as "the prompts did not change" — the one wrong answer here.
         return ""
     return _sha256_text("\x00".join(str(part) for part in parts))
 

@@ -542,63 +542,6 @@ def test_advancing_the_marker_keeps_the_existing_log_body(tmp_path: Path) -> Non
 # ── Serialization against archive-time writes ─────────────────────────────
 
 
-def test_archive_auto_apply_stands_down_while_curation_holds_the_lease(
-    tmp_path: Path,
-) -> None:
-    """Acceptance: a curation run cannot overlap archive-time region writes.
-
-    The fact is not lost — it falls through to the queue the curation run is
-    about to work, which is the path uncertain facts already take.
-    """
-    from ciao import memory_proposals as mp
-
-    vault = _vault(tmp_path)
-    guide = _guide(tmp_path)
-    archive = tmp_path / "chat-2026-09-19.md"
-    archive.write_text(
-        "# Chat\n\n## Session insights\n\n### User corrections\n"
-        "- The user deploys with uv, never pip. [memory]\n",
-        encoding="utf-8",
-    )
-
-    cr.begin_run(vault, holder="nightly")
-    mp.proposals_from_archive(
-        archive, vault, auto_promote_memory=True, guide_path=guide
-    )
-
-    from ciao.memory_tool import read_region
-
-    entries, _ = read_region(guide, "memory")
-    assert entries == []
-    queued = mp.list_proposals(vault / cr.PROPOSALS_RELATIVE)
-    assert any("uv" in row["text"] for row in queued)
-
-
-def test_archive_auto_apply_still_writes_when_no_run_holds_the_lease(
-    tmp_path: Path,
-) -> None:
-    """The gate must be the lease, not a blanket disabling of auto-apply."""
-    from ciao import memory_proposals as mp
-
-    vault = _vault(tmp_path)
-    guide = _guide(tmp_path)
-    archive = tmp_path / "chat-2026-09-19.md"
-    archive.write_text(
-        "# Chat\n\n## Session insights\n\n### User corrections\n"
-        "- The user deploys with uv, never pip. [memory]\n",
-        encoding="utf-8",
-    )
-
-    mp.proposals_from_archive(
-        archive, vault, auto_promote_memory=True, guide_path=guide
-    )
-
-    from ciao.memory_tool import read_region
-
-    entries, _ = read_region(guide, "memory")
-    assert any("uv" in entry for entry in entries)
-
-
 def test_the_gate_never_breaks_archiving_when_the_state_is_unreadable(
     tmp_path: Path,
 ) -> None:

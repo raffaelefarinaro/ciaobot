@@ -478,7 +478,7 @@ class ChatInfo:
     helper: dict = field(default_factory=dict)
     # What the post-archive pipeline is doing, or did. Archiving a chat kicks
     # off insights extraction, a project-doc fold, a trajectory and memory
-    # proposals (ciao/insights.py:extract_and_append), and until now none of
+    # proposals (ciao/insights.py:run_archive_pipeline), and until now none of
     # that was visible anywhere in the app. Lives on the chat rather than in
     # job_runs because it has to survive a restart and the run-log's own
     # rotation: an archived chat opened next month should still be able to say
@@ -3559,14 +3559,12 @@ class ProjectChatManager:
         *,
         filtered_jsonl: str = "",
         session_id: str = "",
-        text_mode: bool = False,
     ) -> dict[str, object]:
         return self._archive_pipeline_for()._job_inputs(
             chat,
             project,
             filtered_jsonl=filtered_jsonl,
             session_id=session_id,
-            text_mode=text_mode,
         )
 
     def _insights_model_for(self, chat: ChatInfo, workspace: str) -> str:
@@ -4318,9 +4316,9 @@ class ProjectChatManager:
         workspace — so an archive's path says which CHAT wrote it and nothing
         about where that chat ran. Anything filtering archives by workspace has
         to come back through the registry, which is here and not in
-        ``ciao.insights``; the backfill scanner compared the chat-id path
-        segment to a workspace name directly, which can never match, so a
-        workspace-scoped run silently found nothing.
+        ``ciao.insights``; the insights backfill that used to live there
+        compared the chat-id path segment to a workspace name directly, which
+        can never match, so a workspace-scoped run silently found nothing.
         """
         return {
             chat_id: getattr(self._projects.get(chat.project_id), "workspace", "") or ""

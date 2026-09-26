@@ -1112,10 +1112,10 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   // ── Post-archive pipeline ────────────────────────────────────────────────
-  // Archiving a chat starts insights extraction, a project-doc fold, a
-  // trajectory and memory proposals. The state lives on the chat itself (so an
-  // archived chat can still report what was learned from it after a reload);
-  // these are the read paths every surface shares.
+  // Archiving a chat writes the session trajectory; the vault work went to the
+  // memory pass, a chat of the app's own, in #627. The state lives on the chat
+  // itself (so an archived chat can still report what was taken from it after a
+  // reload); these are the read paths every surface shares.
 
   function chatPostprocess(chatId: string): ChatPostprocess | null {
     return chats.value.find(c => c.chat_id === chatId)?.postprocess || null

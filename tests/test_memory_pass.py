@@ -347,9 +347,8 @@ async def test_postprocess_enqueues_and_skips_one_shot_when_enabled(
         aj.new_job_id(source.chat_id, source.archive_path),
     )
     assert job is not None
-    for stage in ("insights", "project_doc_update", "memory_proposals"):
-        assert job.status_of(stage) == aj.SKIPPED
-    # Trajectory does not consume insights text, so it still runs.
+    # The trajectory is all the manifest plans; the vault work is the pass's.
+    assert list(job.stages) == ["trajectory"]
     assert job.status_of("trajectory") == aj.PENDING
 
     memory_project = manager._memory_pass.ensure_project("work")
@@ -409,7 +408,7 @@ async def test_postprocess_unchanged_when_disabled(
         aj.new_job_id(source.chat_id, source.archive_path),
     )
     assert job is not None
-    assert job.status_of("insights") != aj.SKIPPED
+    assert job.status_of("trajectory") != aj.SKIPPED
     assert streams.calls == []
     assert all(p.kind == "" for p in manager._projects.values())
     assert (
@@ -452,8 +451,7 @@ async def test_memory_pass_chat_archive_does_not_recurse(
         aj.new_job_id(memory_id, memory_chat.archive_path),
     )
     assert job is not None
-    assert job.status_of("insights") == aj.SKIPPED
-    assert job.status_of("memory_proposals") == aj.SKIPPED
+    assert list(job.stages) == ["trajectory"]
 
 
 def test_dedupe_by_source_chat(

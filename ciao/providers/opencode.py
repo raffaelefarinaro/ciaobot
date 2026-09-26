@@ -668,26 +668,6 @@ def memory_pass_guardrail_rules(
     return rules
 
 
-def readonly_agent_rules(roots: Sequence[Path]) -> list[dict[str, str]]:
-    """Deny everything except reading inside ``roots`` (read-only memory agent).
-
-    The opencode counterpart of the Claude read-only tool gate
-    (``ciao.providers.oneshot.path_allowed``): same question, answered by the
-    server's own ruleset. ``glob`` and ``grep`` stay denied even with the
-    roots allowed, because V2 sends the *search pattern* as the resource
-    rather than the search root, so a search cannot be scoped to a directory
-    at all. The agent reads notes by path instead.
-    """
-    rules = _rules(("*", "deny"))
-    for root in roots:
-        base = str(Path(root).resolve())
-        for action in ("read", "external_directory"):
-            rules.append({"action": action, "resource": base, "effect": "allow"})
-            rules.append({"action": action, "resource": f"{base}/**", "effect": "allow"})
-    rules.extend(opencode_credential_deny_rules())
-    return rules
-
-
 def _session_permission_matches(
     payload: object, expected: list[dict[str, str]]
 ) -> bool:
@@ -1274,9 +1254,8 @@ class OpencodeProvider(BaseSDKProvider):
             None if developer_instructions is None else developer_instructions.strip()
         )
         self._tools_enabled = tools_enabled
-        # A custom ruleset replaces the mode's one entirely. The read-only
-        # memory agent needs exactly one shape, and no Ciaobot mode is it; see
-        # `readonly_agent_rules`. `None` keeps `mode_settings`.
+        # A custom ruleset replaces the mode's one entirely. `None` keeps
+        # `mode_settings`.
         self._permission_rules = permission_rules
         self._process: asyncio.subprocess.Process | None = None
         # Reads the server's stderr for its whole life; see
@@ -1453,8 +1432,8 @@ class OpencodeProvider(BaseSDKProvider):
         """The (agent, permission rules) this turn's session runs under.
 
         A caller that supplied ``permission_rules`` is not running a Ciaobot
-        mode — it is the read-only memory agent — so its ruleset is used
-        verbatim and the mode only picks the agent. A memory pass runs under
+        mode, so its ruleset is used verbatim and the mode only picks the
+        agent. A memory pass runs under
         :func:`memory_pass_guardrail_rules` rather than its ``bypass`` mode's
         blanket allow. Everyone else gets :func:`mode_settings`, unchanged.
         """

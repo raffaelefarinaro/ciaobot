@@ -26,9 +26,9 @@ function nested(item: AutomationProcess): AutomationProcess[] {
 
 /**
  * Health of a job including its bulk variants and pipeline steps: a failed
- * insights backfill is a failure of Session insights as far as the user is
- * concerned, and a failed memory-proposals step is a failure of the archive
- * pipeline. Either would otherwise hide inside a row badged as healthy.
+ * memory-proposals step is a failure of the archive pipeline, and a failed
+ * bulk variant is a failure of the job it belongs to. Either would otherwise
+ * hide inside a row badged as healthy.
  */
 export function overallHealth(item: AutomationProcess): AutomationHealth {
   if (automationHealth(item) === 'error') return 'error'
@@ -58,10 +58,10 @@ export interface PipelineStep {
 /**
  * The steps of a pipeline, owning job first.
  *
- * The job that owns the pipeline is a step of it too — Session insights is the
- * first thing that runs when you archive a chat — so it belongs in this list
- * rather than being represented only by the group heading. Returns [] for a job
- * that is not a pipeline, which is how callers decide whether to render a list.
+ * The job that owns the pipeline is a step of it too, so it belongs in this
+ * list rather than being represented only by the group heading. Returns [] for a
+ * job that is not a pipeline, which is how callers decide whether to render a
+ * list.
  */
 export function pipelineSteps(item: AutomationProcess): PipelineStep[] {
   const steps = item.steps || []
@@ -156,31 +156,4 @@ export function runOutcome(run: JobRun): string {
   if (summary) return summary
   if (run.status === 'error') return run.error || 'Failed'
   return ''
-}
-
-/**
- * Candidate models for a one-off retry, flattened from the routing table the
- * Models tab already uses: `{ provider: { tier: modelId } }`. Values are real
- * model ids, so the run does exactly what the label says.
- */
-export interface RetryModelOption {
-  value: string
-  label: string
-}
-
-export function retryModelOptions(
-  providerModels: Record<string, string[]> | undefined,
-  providerLabels: Record<string, string> = {},
-): RetryModelOption[] {
-  const out: RetryModelOption[] = []
-  const seen = new Set<string>()
-  for (const [provider, models] of Object.entries(providerModels || {})) {
-    const label = providerLabels[provider] || provider
-    for (const model of models || []) {
-      if (!model || seen.has(model)) continue
-      seen.add(model)
-      out.push({ value: model, label: `${label} — ${model}` })
-    }
-  }
-  return out
 }

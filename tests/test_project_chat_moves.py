@@ -249,136 +249,6 @@ async def test_archive_postprocess_runs_insights_for_all_chats(
     assert bool(calls) is True
 
 
-@pytest.mark.asyncio
-async def test_archive_postprocess_names_the_guide_promotion_writes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The live archive path has to say which guide auto-promotion writes.
-
-    ``apply_proposals`` deliberately leaves ``[memory]`` and ``[profile]`` facts
-    queued when no guide is supplied, so omitting this argument silently turned
-    ``auto_promote_memory=True`` into a no-op for durable facts: the backfill
-    path passed the workspace's agent-root guide, the live one passed nothing.
-    """
-    pcm = _make_manager(tmp_path)
-    # A chat always runs in a registered workspace; the guard on the call mirrors
-    # the backfill path and resolves nothing for an unknown one.
-    pcm._config.workspaces["work"] = WorkspaceConfig(
-        name="work", vault_root=str(tmp_path / "work" / "memory-vault")
-    )
-    project = pcm.create_project("guide-project", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="guide chat")
-    calls: list[dict] = []
-
-    async def fake_pipeline(job: object, inputs: dict, **kwargs: object) -> None:
-        calls.append(inputs)
-
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
-
-    pcm.run_archive_postprocess(
-        chat.chat_id,
-        ArchiveOutcome(
-            path=tmp_path / "archive.md",
-            session_id="session-guide",
-            turn_count=2,
-            filtered_jsonl="filtered transcript",
-        ),
-        chat,
-        project,
-    )
-    await asyncio.sleep(0)
-
-    assert calls, "the insights pipeline never started"
-    guide = calls[0]["guide_path"]
-    assert guide is not None, "no guide means every durable fact stays queued"
-    assert guide == Path(pcm._config.agent_root("work")) / "AGENTS.md"
-
-
-@pytest.mark.asyncio
-async def test_archive_postprocess_system_chat_keeps_memory_writes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A system-schedule chat keeps insights AND memory proposals.
-
-    The nightly curation chat's transcript contains the curation prompt's own
-    rules; extracting them as "Decisions" auto-promoted the machinery's
-    self-description into the bounded regions. That pollution is now blocked
-    at extraction time (the "unattended" rule in ciao/insights.py ignores
-    automation turns), so memory proposals stay enabled: a real user statement
-    made mid-run is still caught. Only the project-doc fold stays off, since
-    a system chat has no canonical project doc to fold into.
-    """
-    pcm = _make_manager(tmp_path)
-    pcm._config.workspaces["work"] = WorkspaceConfig(
-        name="work", vault_root=str(tmp_path / "work" / "memory-vault")
-    )
-    project = pcm.create_project("curation-project", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="Memory curation")
-    chat.schedule_id = "system-memory-curation@work"
-    calls: list[dict] = []
-
-    async def fake_pipeline(job: object, inputs: dict, **kwargs: object) -> None:
-        calls.append(inputs)
-
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
-
-    pcm.run_archive_postprocess(
-        chat.chat_id,
-        ArchiveOutcome(
-            path=tmp_path / "archive.md",
-            session_id="session-system",
-            turn_count=3,
-            filtered_jsonl="filtered transcript",
-        ),
-        chat,
-        project,
-    )
-    await asyncio.sleep(0)
-
-    assert calls, "insights must still run for system chats"
-    assert calls[0]["memory_proposals_enabled"] is True
-    assert calls[0]["project_doc_path"] == ""
-
-
-@pytest.mark.asyncio
-async def test_archive_postprocess_user_chat_keeps_memory_writes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The system-chat gate must not disable memory writes for user chats."""
-    pcm = _make_manager(tmp_path)
-    pcm._config.workspaces["work"] = WorkspaceConfig(
-        name="work", vault_root=str(tmp_path / "work" / "memory-vault")
-    )
-    project = pcm.create_project("user-project", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="ordinary chat")
-    chat.schedule_id = "sched-abc123"
-    calls: list[dict] = []
-
-    async def fake_pipeline(job: object, inputs: dict, **kwargs: object) -> None:
-        calls.append(inputs)
-
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
-
-    pcm.run_archive_postprocess(
-        chat.chat_id,
-        ArchiveOutcome(
-            path=tmp_path / "archive.md",
-            session_id="session-user",
-            turn_count=3,
-            filtered_jsonl="filtered transcript",
-        ),
-        chat,
-        project,
-    )
-    await asyncio.sleep(0)
-
-    assert calls
-    assert calls[0]["memory_proposals_enabled"] is True
-
-
 # ── Empty-chat cleanup ──────────────────────────────────────────────────
 
 
@@ -586,7 +456,7 @@ async def test_archive_postprocess_indexes_under_the_shared_write_lock(
 
     monkeypatch.setattr(async_reads, "keyed_lock", _recording_keyed_lock)
     monkeypatch.setattr(fts_search, "index_file", _recording_index_file)
-    monkeypatch.setattr("ciao.insights.extract_and_append", _noop_extract)
+    monkeypatch.setattr("ciao.insights.run_archive_pipeline", _noop_pipeline)
 
     archive_path = tmp_path / "archive.md"
     archive_path.write_text("# chat\n\nfindme archive body\n", encoding="utf-8")
@@ -631,7 +501,7 @@ def test_synchronous_archive_indexing_is_best_effort(
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(fts_search, "index_file", _explode)
-    monkeypatch.setattr("ciao.insights.extract_and_append", _noop_extract)
+    monkeypatch.setattr("ciao.insights.run_archive_pipeline", _noop_pipeline)
 
     archive_path = tmp_path / "archive.md"
     archive_path.write_text("# chat\n\nbody\n", encoding="utf-8")
@@ -651,5 +521,5 @@ def test_synchronous_archive_indexing_is_best_effort(
     )
 
 
-async def _noop_extract(**_kwargs: object) -> None:
+async def _noop_pipeline(**_kwargs: object) -> None:
     return None

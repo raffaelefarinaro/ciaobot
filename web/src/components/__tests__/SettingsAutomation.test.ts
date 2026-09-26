@@ -4,7 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import SettingsAutomation from '../settings/SettingsAutomation.vue'
-import { api } from '../../lib/api'
 import type { AutomationProcess, ProposalOutcomes, RoutineSettings } from '../../lib/types'
 
 function item(overrides: Partial<AutomationProcess> = {}): AutomationProcess {
@@ -40,8 +39,6 @@ const baseProps = {
   routines: null,
   routinesSaving: false,
   saveRoutines: vi.fn(() => Promise.resolve()),
-  providerModels: undefined,
-  providerLabels: {},
 }
 
 let wrapper: VueWrapper | null = null
@@ -142,20 +139,7 @@ describe('SettingsAutomation insights privacy toggle', () => {
     const view = mountPanel({ routines })
 
     expect(view.find('.insights-toggle').text()).toBe('Off')
-    expect(view.find('.insights-control').text()).toContain('explicit one-time choice')
-  })
-
-  it('fails closed for a bulk run while routine settings are unavailable', async () => {
-    const post = vi.spyOn(api, 'post').mockResolvedValue({})
-    const view = mountPanel()
-
-    await view.find('.btn-run').trigger('click')
-
-    expect(post).toHaveBeenCalledWith(
-      '/api/automation/backfill-insights',
-      { force: true },
-    )
-    post.mockRestore()
+    expect(view.find('.insights-control').text()).toContain('Off stops the model pass')
   })
 
   it('shows and saves the trajectory capture state', async () => {
@@ -169,19 +153,5 @@ describe('SettingsAutomation insights privacy toggle', () => {
     await toggles[1].trigger('click')
 
     expect(saveRoutines).toHaveBeenCalledWith({ trajectories_enabled: false })
-  })
-
-  it('forces the explicit bulk run when automatic insights are off', async () => {
-    const post = vi.spyOn(api, 'post').mockResolvedValue({})
-    const routines = { insights_enabled: false } as RoutineSettings
-    const view = mountPanel({ routines })
-
-    await view.find('.btn-run').trigger('click')
-
-    expect(post).toHaveBeenCalledWith(
-      '/api/automation/backfill-insights',
-      { force: true },
-    )
-    post.mockRestore()
   })
 })
