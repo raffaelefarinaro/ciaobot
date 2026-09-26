@@ -11,6 +11,12 @@ second writer on a runtime root that may already have one, and guessing
 "client" strands a user who has no engine anywhere. So an unreadable plist, a
 runtime root that is not there, an unknown role and a host URL that is not an
 address all end in the same answer.
+
+The CLI has two subcommands, both run from the verified wheel by the same
+script: `classify` prints the state as JSON, and `check-client-url` applies the
+one host-URL rule of this module to an explicit `--as-client` override, so the
+address a user types is held to the same standard as the one this module read
+out of a state file.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ import argparse
 import json
 import os
 import plistlib
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -125,6 +132,29 @@ def _client_host_url(value: Any) -> str:
     if parts.username or parts.password:
         return ""
     return candidate
+
+
+def check_client_url(value: str) -> str:
+    """`value` if it is a host URL a `--as-client` override may name, else "".
+
+    The same rules `_client_host_url` applies to a state file's `host_url`,
+    because an explicit override is the one host URL this migration never read
+    from disk and still hands straight to the user: `scripts/install-engine.sh`
+    prints it, `open`s it and writes it into the migration receipt. A prefix
+    check accepts `https://`, which opens nothing, so the URL is parsed here
+    exactly as the classifier parses it instead of being spelled out a second
+    time in the shell.
+
+    One extra rule, of this function's own: whitespace *inside* the value is
+    refused. The answer is printed on a single line and read back into a shell
+    variable, so a value that cannot survive that round trip intact has to be
+    refused rather than silently truncated to a different host. Whitespace
+    around it is a copy-paste artefact and is trimmed, exactly as
+    `_client_host_url` trims it.
+    """
+    if any(char.isspace() for char in value.strip()):
+        return ""
+    return _client_host_url(value)
 
 
 def _runtime_is_readable(root: str) -> bool:
@@ -291,7 +321,27 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="LaunchAgents directory (default: the user's own)",
     )
+    check_parser = sub.add_parser(
+        "check-client-url",
+        help="print an explicit --as-client URL if it is one to hand a client",
+    )
+    check_parser.add_argument("url", help="the URL passed to --as-client")
     args = parser.parse_args(argv)
+
+    if args.command == "check-client-url":
+        # Exit status is the answer the installer branches on, so it does not
+        # have to parse anything: a printed URL is the one that passed, and why
+        # the others did not is on stderr for whoever is reading the run.
+        checked = check_client_url(args.url)
+        if not checked:
+            print(
+                "not an address Ciaobot could hand a client to: an http:// or "
+                "https:// URL with a host name, and no whitespace or credentials",
+                file=sys.stderr,
+            )
+            return 1
+        print(checked)
+        return 0
 
     result = classify(
         Path(args.launch_agents_dir) if args.launch_agents_dir else None

@@ -102,20 +102,33 @@ Ciaobot.app is still running 20 s after it was asked to quit. It then either
 repoints `com.ciao.server` at the new engine and, only once that engine answers
 with the version just installed, retires the app's own agent — restoring the
 plists, the shim, the receipt, the tool environment and the launchd job on any
-failure, including a launchctl that refuses to put them back — or, for a client,
+failure, including a launchctl that refuses to put them back, and loading and
+starting that agent again whenever the transaction had already booted it out
+(the two are tracked separately, because a plist that is still there is not the
+same fact as a job launchd still holds) — or, for a client,
 disables the local engine and installs no service at all, leaving the user to
 sign in at the remote host. A client failure undoes the same state and never
 claims an engine was restored, because there was none. `--as-host` /
-`--as-client URL` are required when the node state cannot be read or trusted,
-and the migration receipt in `~/.local/state/ciaobot/migration/` (`schema`,
-`phase`, `before` block, `version`, `started_at`) is what makes the whole thing
+`--as-client URL` are required when the node state cannot be read or trusted;
+the URL is checked with the classifier's own rule (scheme, host name, no
+credentials or whitespace), so an override like `https://` is refused before a
+single label or file is touched rather than after this Mac has given up its own
+engine. The migration receipt in `~/.local/state/ciaobot/migration/` (`schema`,
+`phase`, `before` block, `version`, `retiring_desktop`, `started_at`) is what
+makes the whole thing
 resumable: a retry reuses those originals rather than snapshotting the tool the
-previous attempt installed, and only a receipt that parses, names before-images
-that are still there and agrees with the installed service is treated as
-"already migrated" — a corrupt, wrong-schema, incomplete or stale one is refused
-with recovery instructions instead. An interrupted run records `interrupted`
-rather than pretending to have finished, and a retirement that launchctl refuses
-leaves the app's agent in place instead of reporting success. The workflow
+previous attempt installed, and only a receipt that parses, records all five
+before-images at the paths this installer writes them to, still has them on
+disk, and agrees with the installed service — its version, its entry point and
+tool environment, and for a host the `com.ciao.server.plist` program pointing
+at that entry point rather than inside `Ciaobot.app` — is treated as
+"already migrated"; a corrupt, wrong-schema, incomplete or stale one is refused
+with recovery instructions instead, and a stale settled receipt is re-run from
+the originals it kept, out loud. An interrupted run records `interrupted`
+rather than pretending to have finished, a retirement that launchctl refuses
+leaves the app's agent in place instead of reporting success, and a `retiring`
+receipt that was being taken to `migrated` when the process stopped is finished
+rather than treated as an ordinary installer-managed engine. The workflow
 attaches it as the `install-engine.sh` release asset.
 
 ## Branching and releases

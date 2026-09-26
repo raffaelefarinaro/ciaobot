@@ -45,10 +45,16 @@ migration_started_at=
 # Set once this run has started a migration transaction, so a signal handler can
 # tell "nothing has been touched yet" from "this stopped halfway".
 migration_active=0
-# Set when this transaction removed the app's own plist, which is what a
-# rollback has to load again: an agent whose plist is gone cannot be
-# bootstrapped, and one that was never booted out does not need it.
-desktop_plist_removed=0
+# Set when this transaction has taken the app's own LaunchAgent out of launchd,
+# which is not the same fact as having removed its plist: an agent that was
+# booted out and never loaded again is an unloaded one, and an enabled label with
+# no job behind it never starts. A rollback reloads and starts that agent
+# whenever this is 1, and re-enables it alone when it is 0.
+desktop_bootout_done=0
+# Recorded in the migration receipt once the transaction has begun retiring the
+# app's own agent, so a run that stops in the middle of that cannot be resumed
+# as though launchd still had the job.
+retiring_desktop=0
 # The before-images, as paths in the migration receipt. An empty one is a fact
 # about this Mac ("there was nothing here"), not a missing variable: a rollback
 # acts on the difference instead of inventing a file.
@@ -64,11 +70,22 @@ receipt_reason=none
 receipt_kind=
 receipt_installed_version=
 receipt_started_at=
+receipt_workspace=
+receipt_retiring_desktop=0
 receipt_before_server_plist=
 receipt_before_desktop_plist=
 receipt_before_shim=
 receipt_before_install_receipt=
 receipt_before_tool_env=
+# Set when the receipt says a host migration stopped while it was taking the
+# app's own agent out of launchd. `ciao setup` has already repointed the engine
+# plist at the new engine by then, so the classifier reads that Mac as an
+# ordinary installer-managed install; it is not one, and this is the flag that
+# says so.
+resume_retiring=0
+# Why a settled receipt is not believed, when it names a phase this script
+# settles but the install on this Mac does not match it.
+settled_mismatch=
 
 usage() {
     cat >&2 <<'USAGE'
@@ -88,9 +105,10 @@ Installs the Ciaobot engine for the current user with uv; the PWA is its UI.
                        is changed at all.
   --as-host            With --migrate: treat this Mac as the host, even when its
                        node state cannot be read or trusted.
-  --as-client URL      With --migrate: treat this Mac as a client of URL. Its
-                       local engine is disabled and never replaced, so the Mac
-                       does not become a second writer.
+  --as-client URL      With --migrate: treat this Mac as a client of URL, which
+                       has to be an http:// or https:// address with a host name.
+                       Its local engine is disabled and never replaced, so the
+                       Mac does not become a second writer.
 USAGE
 }
 
@@ -126,7 +144,10 @@ done
 
 # --as-host and --as-client answer a question only the migration asks, and
 # they answer it in opposite directions: a URL is not a host, and a host is not
-# a URL. Either without --migrate is a plain typo, not a silent no-op.
+# a URL. Either without --migrate is a plain typo, not a silent no-op. The
+# scheme check here is a fast answer for an obvious typo, before anything is
+# downloaded; whether the value is an *address* is asked of the verified wheel
+# later, in validate_client_url, before anything on this Mac is touched.
 case "$as_client" in
     http://*|https://*) ;;
     '') ;;
@@ -374,6 +395,7 @@ migration_receipt() {
 import json, os, pathlib, sys, tempfile
 phase, kind, workspace, host_url, error, started_at, path, version = sys.argv[1:9]
 server_plist, desktop_plist, shim, install_receipt, tool_env = sys.argv[9:14]
+retiring_desktop = sys.argv[14]
 payload = {
     "schema": 1,
     "kind": kind,
@@ -381,6 +403,10 @@ payload = {
     "workspace": workspace,
     "host_url": host_url,
     "version": version,
+    # Whether the app agent has been, or is being, taken out of launchd. A
+    # rollback that stopped caring about this leaves a Mac whose desktop engine
+    # never starts again while it reports the engine restored.
+    "retiring_desktop": retiring_desktop == "1",
     "before": {
         "server_plist": server_plist,
         "desktop_plist": desktop_plist,
@@ -405,28 +431,32 @@ os.replace(tmp, target)
         "$migration_error" "$migration_started_at" "$migration_dir/receipt.json" \
         "$version" \
         "${before_server_plist:-}" "${before_desktop_plist:-}" "${before_shim:-}" \
-        "${before_install_receipt:-}" "${before_tool_env:-}"
+        "${before_install_receipt:-}" "${before_tool_env:-}" "$retiring_desktop"
 }
 
 load_migration_receipt() {
     # The existing migration receipt, read as a whole and checked field by
     # field. `receipt_valid` is 1 only when the file parsed, the schema is this
-    # script's, the phase is one this script writes, and every before-image it
-    # names is still on disk: anything less is a state to refuse rather than a
-    # state to resume from. The old `grep '"phase":' ` answer is not good enough
-    # here - it is satisfied by a truncated file, and a truncated file on an
-    # unmigrated Mac reads as "already done".
+    # script's, the phase is one this script writes, and all five before-images
+    # it has to carry are recorded, are the ones this installer writes and are
+    # still on disk: anything less is a state to refuse rather than a state to
+    # resume from. The old `grep '"phase":' ` answer is not good enough here - it
+    # is satisfied by a truncated file, and a truncated file on an unmigrated Mac
+    # reads as "already done".
     receipt_valid=0
     receipt_phase=
     receipt_reason=none
     receipt_kind=
     receipt_installed_version=
     receipt_started_at=
+    receipt_workspace=
+    receipt_retiring_desktop=0
     receipt_before_server_plist=
     receipt_before_desktop_plist=
     receipt_before_shim=
     receipt_before_install_receipt=
     receipt_before_tool_env=
+    resume_retiring=0
     [ -f "$migration_dir/receipt.json" ] || return 0
     if ! "$uv" run --quiet --no-project --python "$PYTHON_VERSION" python -c '
 # migration-receipt-read: validates an existing receipt.json, one field per line
@@ -445,7 +475,13 @@ PHASES = (
     "rolled_back",
     "interrupted",
 )
-IMAGES = ("server_plist", "desktop_plist", "shim", "install_receipt", "tool_env")
+IMAGES = {
+    "server_plist": "com.ciao.server.plist",
+    "desktop_plist": "Ciaobot.plist",
+    "shim": "ciao",
+    "install_receipt": "install-receipt.json",
+    "tool_env": "tool-env",
+}
 
 try:
     with open(sys.argv[1], encoding="utf-8") as handle:
@@ -467,19 +503,35 @@ if not isinstance(before, dict):
 
 
 def image(name):
-    # "" is the recorded absence of the file; a path is believed only while it
-    # is still there, because a before-image that is gone cannot roll anything
-    # back and must not be reported as one that can.
-    value = before.get(name)
-    if value is None or value == "":
+    # A key that is not there at all is not a record of "this Mac had no such
+    # file": it is a receipt that does not say what it replaced, and a rollback
+    # that read the omission as absence deletes a file the user had before the
+    # migration started. So all five keys have to be present, they have to be
+    # strings, and a path has to be the before-image this installer writes under
+    # that name - and still be on disk, since a snapshot that is gone cannot roll
+    # anything back and must not be reported as one that can.
+    if name not in before or not isinstance(before[name], str):
+        raise KeyError(name)
+    value = before[name]
+    if value == "":
         return ""
-    if not isinstance(value, str) or not pathlib.Path(value).is_file():
+    path = pathlib.Path(value)
+    if path.parent != pathlib.Path(sys.argv[2]) or path.name != IMAGES[name]:
+        raise ValueError(name)
+    # A tool environment is a directory and the rest are files, so this is the
+    # one shape both of them pass.
+    if not path.exists():
         raise ValueError(name)
     return value
 
 
 try:
     images = {name: image(name) for name in IMAGES}
+except KeyError:
+    # An incomplete receipt is not a state to resume from and not one to read
+    # as an absence either: there is nothing here to roll back *to*.
+    print("reason=incomplete-image")
+    raise SystemExit(0)
 except ValueError:
     print("reason=missing-image")
     raise SystemExit(0)
@@ -488,9 +540,11 @@ print("phase=" + phase)
 print("kind=" + kind)
 print("version=" + str(data.get("version") or ""))
 print("started_at=" + str(data.get("started_at") or ""))
+print("workspace=" + str(data.get("workspace") or ""))
+print("retiring_desktop=" + ("1" if data.get("retiring_desktop") is True else "0"))
 for name in IMAGES:
     print("before_" + name + "=" + images[name])
-' "$migration_dir/receipt.json" > "$tmp/receipt-fields.txt" 2>/dev/null; then
+' "$migration_dir/receipt.json" "$migration_dir/before" > "$tmp/receipt-fields.txt" 2>/dev/null; then
         printf '%s\n' "reason=unreadable" > "$tmp/receipt-fields.txt"
     fi
     # Read with `case` rather than `IFS=`, so a before-image path with a space
@@ -502,6 +556,8 @@ for name in IMAGES:
             kind=*) receipt_kind=${field#kind=} ;;
             version=*) receipt_installed_version=${field#version=} ;;
             started_at=*) receipt_started_at=${field#started_at=} ;;
+            workspace=*) receipt_workspace=${field#workspace=} ;;
+            retiring_desktop=1) receipt_retiring_desktop=1 ;;
             before_server_plist=*) receipt_before_server_plist=${field#before_server_plist=} ;;
             before_desktop_plist=*) receipt_before_desktop_plist=${field#before_desktop_plist=} ;;
             before_shim=*) receipt_before_shim=${field#before_shim=} ;;
@@ -512,6 +568,14 @@ for name in IMAGES:
     done < "$tmp/receipt-fields.txt"
     if [ "$receipt_valid" -eq 0 ]; then
         receipt_phase=
+    elif [ "$receipt_phase" = retiring ] && [ "$receipt_retiring_desktop" -ne 0 ]; then
+        # The transaction this receipt came from had already started taking the
+        # app's own agent out of launchd, so launchd may already have dropped the
+        # job on this Mac. Two things follow, and both are about not lying about
+        # that agent: this run's rollback has to load it again, and this run is
+        # finishing a retirement rather than installing over the top of it.
+        desktop_bootout_done=1
+        resume_retiring=1
     fi
 }
 
@@ -537,7 +601,33 @@ refuse_unusable_receipt() {
         missing-image)
             fail "the migration receipt at $migration_dir/receipt.json refers to before-images that are no longer in $migration_dir/before, so a failed migration could no longer be rolled back. Finish the install by hand: ciao setup --workspace <workspace> --python <ciao> && ciao service start"
             ;;
+        incomplete-image)
+            fail "the migration receipt at $migration_dir/receipt.json does not record every before-image this migration keeps, so this run cannot tell a file this Mac never had from one it was not told about, and refuses to replace anything. Its snapshots are still in $migration_dir/before: put back what you need from there and finish by hand (ciao setup --workspace <workspace> --python <ciao> && ciao service start), or move the receipt aside (mv $migration_dir/receipt.json $migration_dir/receipt.json.bak) once this Mac is in the state you want and re-run with --migrate"
+            ;;
     esac
+}
+
+server_plist_program() {
+    # ProgramArguments:0 out of the engine LaunchAgent, read raw by the same
+    # interpreter that reads the migration receipt: the plist is what a
+    # migration is judged on, and a program read out of a shell word would be a
+    # different answer on a file this script did not write. Prints nothing when
+    # the file is missing or is not a plist, which is a fact the caller has to
+    # hear about rather than a program it can compare.
+    "$uv" run --quiet --no-project --python "$PYTHON_VERSION" python -c '
+# engine-plist-program: ProgramArguments:0 out of a LaunchAgent plist
+import plistlib
+import sys
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        payload = plistlib.load(handle)
+except Exception:
+    raise SystemExit(0)
+arguments = payload.get("ProgramArguments") if isinstance(payload, dict) else None
+if isinstance(arguments, (list, tuple)) and arguments:
+    print(str(arguments[0] or ""))
+' "$1" 2>/dev/null
 }
 
 migration_matches_install() {
@@ -545,8 +635,10 @@ migration_matches_install() {
     # installed agree. A receipt is a file on disk, and a Mac that was restored
     # from a backup, or that had a later install written over it, still carries
     # one - and a stale success that exits 0 is a Mac with no engine and a
-    # message saying it has one. So the version, the service role and the
-    # retired desktop agent all have to line up with the receipt.
+    # message saying it has one. So the version, the service role, the retired
+    # desktop agent, the tool the install receipt names and - for a host - the
+    # engine LaunchAgent itself all have to line up with the receipt.
+    settled_mismatch=
     case "$receipt_phase" in
         migrated) expected_backend=launchd; expected_label=$SERVER_LABEL ;;
         migrated_client) expected_backend=none; expected_label= ;;
@@ -566,7 +658,52 @@ migration_matches_install() {
     # The app's own agent is retired by both migrating paths, so a plist still
     # sitting in LaunchAgents means the retirement never happened.
     [ ! -f "$HOME/Library/LaunchAgents/$DESKTOP_LABEL.plist" ] || return 1
+    # A receipt outlives the install it recorded: a `uv tool uninstall`, a wiped
+    # state directory or a half-removed tool environment all leave the file
+    # behind, and a "migrated" Mac whose `ciao` cannot run is a Mac with no
+    # engine whatever the receipt says.
+    expected_executable=$(awk -F'"' '/^[[:space:]]*"executable":/ {print $4; exit}' \
+        "$install_receipt" 2>/dev/null || true)
+    expected_interpreter=$(awk -F'"' '/^[[:space:]]*"python":/ {print $4; exit}' \
+        "$install_receipt" 2>/dev/null || true)
+    if [ -z "$expected_executable" ] || [ ! -x "$expected_executable" ]; then
+        settled_mismatch="the ciao entry point it names (${expected_executable:-none}) is not there"
+        return 1
+    fi
+    if [ -z "$expected_interpreter" ] || [ ! -x "$expected_interpreter" ]; then
+        settled_mismatch="the engine it was installed into (${expected_interpreter:-none}) is not there"
+        return 1
+    fi
+    if [ "$expected_backend" != launchd ]; then
+        # A client runs no engine of its own, and its plist is left in place
+        # pointing inside Ciaobot.app on purpose: that is the agent that was
+        # disabled, and the host is where that engine went. There is nothing here
+        # to compare a program against.
+        return 0
+    fi
+    # A host's engine is the com.ciao.server agent, so the plist has to be the
+    # one this install wrote: a program inside Ciaobot.app is the desktop's
+    # engine, which is exactly what a settled migration replaced, and a missing
+    # plist is a Mac with nothing running.
+    server_plist="$HOME/Library/LaunchAgents/$SERVER_LABEL.plist"
+    installed_program=$(server_plist_program "$server_plist")
+    if [ -z "$installed_program" ]; then
+        settled_mismatch="there is no $SERVER_LABEL.plist in $HOME/Library/LaunchAgents"
+        return 1
+    fi
+    if [ "$installed_program" != "$expected_executable" ]; then
+        settled_mismatch="$SERVER_LABEL.plist still points at $installed_program"
+        return 1
+    fi
     return 0
+}
+
+warn_settled_mismatch() {
+    # Not fatal, and not silent: the originals are still in before/, and
+    # re-running the migration from them is what puts this Mac back into the
+    # state the receipt claims. What is not acceptable is a settled receipt
+    # quietly re-migrating a Mac, or one that was believed and was not true.
+    echo "Ciaobot engine installer: the migration receipt says $receipt_phase, but $settled_mismatch, so it does not describe this Mac and is not believed. Re-running the migration from the before-images in $migration_dir/before" >&2
 }
 
 quit_desktop_app() {
@@ -597,9 +734,13 @@ retire_desktop_agent() {
     # supposed to replace it - which is not a migration that worked, so the
     # caller rolls back instead of reporting success.
     "$LAUNCHCTL" bootout "gui/$(id -u)/$DESKTOP_LABEL" 2>/dev/null || return 1
+    # Recorded the moment launchd has dropped the job, which is a different fact
+    # from having removed the plist: from here the app's agent is unloaded, and a
+    # rollback that only re-enables its label leaves a desktop engine that never
+    # starts again.
+    desktop_bootout_done=1
     "$LAUNCHCTL" disable "gui/$(id -u)/$DESKTOP_LABEL" 2>/dev/null || return 1
     rm -f "$HOME/Library/LaunchAgents/$DESKTOP_LABEL.plist" || return 1
-    desktop_plist_removed=1
     return 0
 }
 
@@ -611,10 +752,16 @@ disable_local_engine() {
     # point of this path is that the local engine stops.
     "$LAUNCHCTL" bootout "gui/$(id -u)/$SERVER_LABEL" 2>/dev/null || return 1
     "$LAUNCHCTL" disable "gui/$(id -u)/$SERVER_LABEL" 2>/dev/null || return 1
-    "$LAUNCHCTL" bootout "gui/$(id -u)/$DESKTOP_LABEL" 2>/dev/null || true
-    "$LAUNCHCTL" disable "gui/$(id -u)/$DESKTOP_LABEL" 2>/dev/null || true
+    # The app's own agent is held to the same standard as the engine's, and the
+    # order matters. A client that stopped the engine but left the app's agent
+    # loaded comes back on the next relaunch with a desktop engine running next
+    # to the host it was just handed to, so neither bootout nor disable is
+    # ignored - and the refusal happens before the plist is removed, which is
+    # what the rollback restores it from.
+    "$LAUNCHCTL" bootout "gui/$(id -u)/$DESKTOP_LABEL" 2>/dev/null || return 1
+    desktop_bootout_done=1
+    "$LAUNCHCTL" disable "gui/$(id -u)/$DESKTOP_LABEL" 2>/dev/null || return 1
     rm -f "$HOME/Library/LaunchAgents/$DESKTOP_LABEL.plist" || return 1
-    desktop_plist_removed=1
     return 0
 }
 
@@ -663,23 +810,29 @@ restore_before_state() {
 }
 
 restore_desktop_agent() {
-    # The app's own LaunchAgent, if this transaction removed it. Its plist comes
-    # back from the before-image and is loaded and started again, because a host
-    # handed back to Ciaobot.app with its agent still disabled is a Mac whose
-    # engine never comes back on its own. When this transaction never removed
-    # the plist the agent was never booted out either, so it is only re-enabled:
-    # bootstrapping a label launchd already holds is an error, and reporting a
-    # rollback as incomplete for that would be a lie.
+    # The app's own LaunchAgent, if this transaction took it out of launchd. Its
+    # plist comes back from the before-image - restore_before_state has already
+    # put it back, or taken it away again if this Mac never had one - and the
+    # agent is loaded and started, because a host handed back to Ciaobot.app
+    # with its agent still unloaded is a Mac whose engine never comes back on its
+    # own. bootstrap and kickstart are checked, so a rollback that could not put
+    # the app's engine back says so instead of claiming it did. When this
+    # transaction never booted the agent out, or the Mac had no app agent to
+    # begin with, there is nothing to load: launchd already holds the job, and
+    # bootstrapping a label it holds is an error that would report a complete
+    # rollback as incomplete.
     "$LAUNCHCTL" enable "gui/$(id -u)/$DESKTOP_LABEL" 2>/dev/null || return 1
-    if [ "$desktop_plist_removed" -eq 0 ]; then
-        return 0
+    if [ "$desktop_bootout_done" -ne 0 ] &&
+        [ -f "$HOME/Library/LaunchAgents/$DESKTOP_LABEL.plist" ]; then
+        "$LAUNCHCTL" bootstrap "gui/$(id -u)" \
+            "$HOME/Library/LaunchAgents/$DESKTOP_LABEL.plist" 2>/dev/null || return 1
+        "$LAUNCHCTL" kickstart -k "gui/$(id -u)/$DESKTOP_LABEL" 2>/dev/null || return 1
     fi
-    if [ ! -f "$HOME/Library/LaunchAgents/$DESKTOP_LABEL.plist" ]; then
-        return 0
-    fi
-    "$LAUNCHCTL" bootstrap "gui/$(id -u)" \
-        "$HOME/Library/LaunchAgents/$DESKTOP_LABEL.plist" 2>/dev/null || return 1
-    "$LAUNCHCTL" kickstart -k "gui/$(id -u)/$DESKTOP_LABEL" 2>/dev/null || return 1
+    # The app's agent is enabled and loaded again, so this transaction is no
+    # longer one that took it out of launchd. The receipt the rollback writes
+    # says so, or the run after it would reload a job launchd already holds.
+    desktop_bootout_done=0
+    retiring_desktop=0
     return 0
 }
 
@@ -766,6 +919,24 @@ abort_install() {
     fail "$1"
 }
 
+validate_client_url() {
+    # `--as-client` is the one input this migration never read from a state
+    # file: it is the user's answer to a question this Mac could not answer, and
+    # it is printed back at them as the address to open. A prefix check accepts
+    # `https://`, which opens nothing - taking the client path with it would
+    # disable this Mac's own engine and then hand it over to no host at all. So
+    # the override goes through the same parsed check the classifier applies to
+    # a host_url, asked of the verified wheel, and the answer replaces the value
+    # the rest of this run uses.
+    [ -n "$as_client" ] || return 0
+    if ! client_url=$("$uv" run --quiet --no-project --python "$PYTHON_VERSION" \
+        --with "$wheel" python -I -m ciao.engine_migration check-client-url \
+        "$as_client" 2>/dev/null); then
+        fail "--as-client takes an address this Mac can be handed over to, and \"$as_client\" is not one: an http:// or https:// URL with a host name - a prefix, a bare path, credentials or whitespace in it is not an address. Re-run with --migrate --as-client https://your-host"
+    fi
+    as_client=$client_url
+}
+
 classify_install() {
     # Reads the state through the *verified* wheel - the only code that has been
     # checked against the signed manifest at this point - and prints one JSON
@@ -823,6 +994,19 @@ print(state.get("host_url", ""))
             fail "could not classify this install: unknown kind: $migrate_kind"
             ;;
     esac
+    if [ "$resume_retiring" -ne 0 ]; then
+        # The last run stopped while it was retiring the app's own agent, which
+        # means it had already installed the new engine and repointed the engine
+        # plist at it. The classifier reads that as an installer-managed engine -
+        # correctly, on its own - and the ordinary install would leave the app's
+        # agent behind forever, in a receipt that never settles. So this run
+        # finishes the transaction the receipt describes, with the kind and the
+        # workspace that transaction was started with.
+        migrate_kind=$receipt_kind
+        [ -z "$receipt_workspace" ] || migrate_workspace=$receipt_workspace
+        migrate_path=host
+        return 0
+    fi
     if [ "$desktop_live" -ne 0 ] && [ "$migrate_path" = skip ]; then
         # A live Ciaobot.app was found before verification, and the state it
         # lives in says there is nothing to take over. Installing anyway would
@@ -860,6 +1044,10 @@ actual_size=$(wc -c < "$wheel" | tr -d ' ')
 # signed, and not one byte of this Mac has been touched yet. Everything below
 # may change the install; everything above may not.
 if [ "$migrate" -ne 0 ]; then
+    # An override the user typed is checked before the receipt is read and before
+    # anything is touched: a client path taken with an address that opens nothing
+    # stops this Mac's engine and then hands the user nowhere to sign in.
+    validate_client_url
     # Read before anything else, because a migration in progress is resumed
     # from its receipt rather than started again from whatever this Mac looks
     # like now - and a receipt that cannot be trusted stops the run outright.
@@ -869,6 +1057,10 @@ if [ "$migrate" -ne 0 ]; then
         echo "This Mac was already migrated ($receipt_phase); nothing to do."
         exit 0
     fi
+    # A settled receipt that does not describe this Mac is re-run from the
+    # before-images it kept, and says so, rather than either being believed or
+    # quietly starting a second migration.
+    [ -z "$settled_mismatch" ] || warn_settled_mismatch
     classify_install
 fi
 
@@ -1068,11 +1260,17 @@ fi
 if [ "$migrate_path" = host ]; then
     if [ "$no_start" -eq 0 ]; then
         # A durable phase a crash can resume from: the new engine is proven, and
-        # the app's own agent is not retired yet. Only once the retirement
+        # the app's own agent is not retired yet. `retiring_desktop` goes in with
+        # it because from this line on launchd may be about to lose that job, and
+        # a run that stops in the middle of the retirement has to be resumed as
+        # though it did - otherwise its rollback re-enables a label with no job
+        # behind it and reports the engine restored. Only once the retirement
         # itself has succeeded does this become `migrated`.
+        retiring_desktop=1
         install_step "could not write the migration receipt" migration_receipt retiring
         migration_active=0
         if retire_desktop_agent; then
+            retiring_desktop=0
             install_step "could not write the migration receipt" migration_receipt migrated
         else
             # The new engine is up, but the app's agent is still loaded: a

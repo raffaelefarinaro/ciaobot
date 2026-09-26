@@ -16,7 +16,13 @@ from pathlib import Path
 import pytest
 
 from ciao import engine_migration
-from ciao.engine_migration import Classification, classify, main
+from ciao.engine_migration import (
+    Classification,
+    _client_host_url,
+    check_client_url,
+    classify,
+    main,
+)
 
 PORT = 9555
 
@@ -406,3 +412,70 @@ def test_main_readable_line(
     assert main(["classify", "--launch-agents-dir", str(agents)]) == 0
 
     assert capsys.readouterr().out == f"kind=desktop_host workspace={workspace}\n"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://mini.ts.net",
+        "http://192.168.1.4:8443",
+        "https://h.example/ciao",
+        # Surrounding whitespace is what a copy-paste leaves behind, and the
+        # trimmed value is the address.
+        "  https://h.example  ",
+    ],
+)
+def test_check_client_url_accepts_an_address(url: str) -> None:
+    assert check_client_url(url) == url.strip()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("   ", id="blank"),
+        # A prefix is not an address, and a prefix check accepts all of these.
+        pytest.param("https://", id="scheme-only"),
+        pytest.param("https:///ciao", id="empty-host"),
+        pytest.param("https://:8443", id="port-without-host"),
+        pytest.param("ftp://h.example", id="other-scheme"),
+        # Whitespace inside the value cannot survive the one-line round trip
+        # between this module and the shell that reads the answer back.
+        pytest.param("https://h.example/a b", id="whitespace"),
+        pytest.param("https://h.exa\nmple", id="newline"),
+        # Credentials would be printed at the user and written into the receipt.
+        pytest.param("https://user:secret@h.example", id="credentials"),
+        pytest.param("https://[::1", id="unparseable"),
+    ],
+)
+def test_check_client_url_refuses_what_is_not_one(url: str) -> None:
+    assert check_client_url(url) == ""
+
+
+def test_check_client_url_matches_the_state_file_rule(tmp_path: Path) -> None:
+    # One rule, not two: whatever this accepts has to be exactly what a client's
+    # `host_url` may be in a state file, or the same Mac would be a client with
+    # `--as-client` and undecidable without it.
+    agents, workspace = _fixture(tmp_path)
+
+    for state_url, override_url in (
+        ("https://mini.ts.net", "https://mini.ts.net"),
+        ("https://", "https://"),
+        ("https://user:secret@h.example", "https://user:secret@h.example"),
+    ):
+        _write_node_state(workspace, {"role": "standby", "host_url": state_url})
+        assert check_client_url(override_url) == _client_host_url(state_url)
+
+
+def test_main_check_client_url(
+    capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    # The installer branches on the exit status and prints the value, so the two
+    # answers have to be told apart by the status rather than by parsing prose.
+    assert main(["check-client-url", "https://mini.ts.net"]) == 0
+    assert capsys.readouterr().out == "https://mini.ts.net\n"
+
+    assert main(["check-client-url", "https://"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "not an address" in captured.err

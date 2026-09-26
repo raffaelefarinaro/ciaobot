@@ -322,6 +322,31 @@ case "${1:-}" in
             exit 143
         fi
         if [ -f "$HOME/fail-ciao-setup" ]; then exit 1; fi
+        # `ciao setup` repoints the engine LaunchAgent at the engine this run
+        # installed, and several checks read that plist back as the truth about
+        # what is installed on this Mac, so the stub writes a real one instead of
+        # leaving a plist behind that still points into Ciaobot.app.
+        program=
+        previous=
+        for argument in "$@"; do
+            if [ "$previous" = "--python" ]; then program=$argument; fi
+            previous=$argument
+        done
+        if [ -n "$program" ]; then
+            "__PYTHON__" - "$program" "$HOME/Library/LaunchAgents/com.ciao.server.plist" <<'PLIST'
+import pathlib
+import plistlib
+import sys
+
+program, target = sys.argv[1:3]
+path = pathlib.Path(target)
+path.parent.mkdir(parents=True, exist_ok=True)
+with path.open("wb") as handle:
+    plistlib.dump(
+        {"Label": "com.ciao.server", "ProgramArguments": [program, "run"]}, handle
+    )
+PLIST
+        fi
         ;;
     service)
         if [ -f "$HOME/fail-ciao-service-start" ]; then exit 1; fi
@@ -409,6 +434,13 @@ def _harness(tmp_path: Path) -> dict[str, Any]:
         'if [ -f "$HOME/fail-launchctl-$1-$label" ] || [ -f "$HOME/fail-launchctl-$1" ]; then\n'
         '    printf \'launchctl-failed %s\\n\' "$*" >> "$HOME/trace.log"\n'
         '    exit 1\n'
+        'fi\n'
+        '# An interruption in the middle of a retirement: launchd has done what\n'
+        '# it was asked and the process goes away before the next call, which is\n'
+        '# what a Ctrl-C there looks like. From here the label is unloaded.\n'
+        'if [ -f "$HOME/interrupt-after-$1-$label" ]; then\n'
+        '    rm -f "$HOME/interrupt-after-$1-$label"\n'
+        '    kill -TERM "$PPID"\n'
         'fi\n'
         'exit 0\n',
     )
@@ -758,6 +790,7 @@ def test_migrate_host_repoints_and_retires_app_agent(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
     home: Path = harness["home"]
     workspace = _desktop_install(harness, tmp_path)
+    original_plist = (home / "Library/LaunchAgents/com.ciao.server.plist").read_bytes()
 
     result = _run_installer(harness, "--version", VERSION, "--migrate", "--no-start")
 
@@ -765,10 +798,11 @@ def test_migrate_host_repoints_and_retires_app_agent(tmp_path: Path) -> None:
     before = home / ".local/state/ciaobot/migration/before"
     for name in ("com.ciao.server.plist", "Ciaobot.plist", "ciao"):
         assert (before / name).exists(), f"{name} was not backed up"
-    # The before-image is a copy of what was there, not a rewrite of it.
-    assert (before / "com.ciao.server.plist").read_bytes() == (
-        home / "Library/LaunchAgents/com.ciao.server.plist"
-    ).read_bytes()
+    # The before-image is a copy of what was there, not of what setup went on to
+    # write: the app's plist is the only way back to the engine that is running
+    # now, and an image taken after `ciao setup` would restore the new engine's
+    # own plist instead.
+    assert (before / "com.ciao.server.plist").read_bytes() == original_plist
 
     ciao = home / ".local" / "bin" / "ciao"
     calls = _log(harness, "ciao-calls.log")
@@ -781,6 +815,58 @@ def test_migrate_host_repoints_and_retires_app_agent(tmp_path: Path) -> None:
     assert _migration_receipt(harness)["phase"] == "installed_no_start"
     # Nothing was retired, so nothing may have been booted out either.
     assert "com.ciao.server" not in _log(harness, "launchctl.log")
+
+
+@needs_local_tools
+@pytest.mark.parametrize(
+    "knob,booted_out",
+    [
+        # A launchd that will not boot the app's own agent out: nothing has been
+        # unloaded, so a rollback only has to re-enable the label.
+        pytest.param("fail-launchctl-bootout-Ciaobot", False, id="bootout"),
+        # A launchd that will not disable it. The bootout before it went
+        # through, so the agent is unloaded and the rollback has to load and
+        # start it again - an enabled label with no job behind it never runs.
+        pytest.param("fail-launchctl-disable-Ciaobot", True, id="disable"),
+    ],
+)
+def test_migrate_client_retirement_failure_rolls_back(
+    tmp_path: Path, knob: str, booted_out: bool
+) -> None:
+    # A client that stopped the engine but left the app's own agent loaded comes
+    # back on the next relaunch with a desktop engine running next to the host it
+    # was just handed to - and a `migrated_client` receipt on top of that tells
+    # the user the hand-over is done. So neither bootout nor disable of that
+    # agent is shrugged off: the run aborts, the plist stays where it was, both
+    # labels go back, and nothing claims the migration finished.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    _desktop_install(
+        harness, tmp_path, {"role": "standby", "host_url": "https://mini.ts.net"}
+    )
+    _knob(harness, knob)
+    untouched = _replaced_state(harness)
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 1, result.stdout
+    assert "the local engine could not be stopped" in result.stderr
+    # The plist is not taken away from an agent that is still loaded.
+    assert (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+    assert _replaced_state(harness) == untouched, knob
+    assert _migration_receipt(harness)["phase"] == "rolled_back"
+    log = _log(harness, "launchctl.log")
+    for label in ("com.ciao.server", "Ciaobot"):
+        assert f"enable gui/{os.getuid()}/{label}" in log, label
+    desktop_plist = home / "Library/LaunchAgents/Ciaobot.plist"
+    if booted_out:
+        assert f"bootstrap gui/{os.getuid()} {desktop_plist}" in log
+        assert f"kickstart -k gui/{os.getuid()}/Ciaobot" in log
+    # Nothing this transaction created is left behind, and the user is never
+    # told a hand-over happened: a client has no engine, and no host to be at.
+    assert not _tool_env(harness).exists()
+    assert "no longer runs its own engine" not in result.stdout
+    assert "already" not in result.stdout
 
 
 @needs_local_tools
@@ -1009,7 +1095,11 @@ def _write_settled_migration(
     The before-images are copied from the fake Mac as it is, the install receipt
     records the version and the service role the migration settled on, and a
     settled phase means the app's own plist is gone - which is what a Mac that
-    was really migrated looks like.
+    was really migrated looks like. The rest of that is built too, because the
+    gate is only worth having if the Mac it approves of is the one a migration
+    actually leaves behind: the `ciao` entry point and the tool environment it
+    was installed into exist, and a host's engine LaunchAgent execs the entry
+    point rather than the program inside Ciaobot.app.
     """
     home: Path = harness["home"]
     migration = home / ".local/state/ciaobot/migration"
@@ -1018,17 +1108,41 @@ def _write_settled_migration(
     images: dict[str, str] = {}
     for name in ("server_plist", "desktop_plist", "shim", "install_receipt", "tool_env"):
         images[name] = ""
-    for name, source in (
-        ("server_plist", home / "Library/LaunchAgents/com.ciao.server.plist"),
-        ("desktop_plist", home / "Library/LaunchAgents/Ciaobot.plist"),
-        ("shim", home / ".local/bin/ciao"),
+    # Under the names the installer itself writes them under, because a receipt
+    # is only a receipt of a before-image the installer can put back.
+    agents = home / "Library/LaunchAgents"
+    for name, source, copied in (
+        ("server_plist", agents / "com.ciao.server.plist", "com.ciao.server.plist"),
+        ("desktop_plist", agents / "Ciaobot.plist", "Ciaobot.plist"),
+        ("shim", home / ".local/bin/ciao", "ciao"),
     ):
         if source.exists():
-            shutil.copyfile(source, before / f"before-{name}")
-            images[name] = str(before / f"before-{name}")
+            shutil.copyfile(source, before / copied)
+            images[name] = str(before / copied)
     if phase in ("migrated", "migrated_client"):
         (home / "Library/LaunchAgents/Ciaobot.plist").unlink(missing_ok=True)
         images["desktop_plist"] = ""
+    executable = home / ".local/bin/ciao"
+    if phase in ("migrated", "migrated_client"):
+        # The tool the receipt claims this migration installed: without it the
+        # Mac is one a `uv tool uninstall`, or a wiped state directory, could
+        # have been left as, and the receipt outlives both.
+        _write_exec(executable, "#!/bin/sh\nexit 0\n")
+        (_tool_env(harness) / "bin").mkdir(parents=True)
+        _write_exec(_tool_env(harness) / "bin" / "python", "#!/bin/sh\nexit 0\n")
+    if phase == "migrated":
+        # A host's engine is the com.ciao.server agent, so its plist is the one
+        # `ciao setup` wrote. A client has no engine: its plist is left pointing
+        # inside Ciaobot.app on purpose, and the gate has to know the difference.
+        (home / "Library/LaunchAgents").mkdir(parents=True, exist_ok=True)
+        (home / "Library/LaunchAgents/com.ciao.server.plist").write_bytes(
+            plistlib.dumps(
+                {
+                    "Label": "com.ciao.server",
+                    "ProgramArguments": [str(executable), "run"],
+                }
+            )
+        )
     state = home / ".local/state/ciaobot"
     state.mkdir(parents=True, exist_ok=True)
     # Indented and sorted, because the installer's receipt reader picks its
@@ -1037,7 +1151,7 @@ def _write_settled_migration(
         json.dumps(
             {
                 "version": VERSION,
-                "executable": str(home / ".local/bin/ciao"),
+                "executable": str(executable),
                 "python": str(_tool_env(harness) / "bin" / "python"),
                 "service_backend": backend,
                 "service_label": "com.ciao.server" if backend == "launchd" else "",
@@ -1198,6 +1312,14 @@ def test_migrate_interruption_retry_preserves_originals(tmp_path: Path) -> None:
         pytest.param("truncated", "Move it aside", id="truncated"),
         pytest.param("wrong-schema", "Move it aside", id="wrong-schema"),
         pytest.param("unknown-phase", "Move it aside", id="unknown-phase"),
+        # A key that is not there at all. Read as an absence it is the most
+        # dangerous receipt there is: a rollback then deletes a file the user
+        # had before the migration started, and says the engine was restored.
+        pytest.param(
+            "incomplete-image",
+            "does not record every before-image",
+            id="incomplete-image",
+        ),
         # A before-image that is no longer there: a transaction that can no
         # longer be undone, and a different recovery to offer.
         pytest.param("missing-image", "Finish the install by hand", id="missing-image"),
@@ -1237,6 +1359,11 @@ def test_migrate_rejects_invalid_or_stale_receipts(
             json.dumps({"schema": 1, "kind": "desktop_host", "phase": "done"}),
             encoding="utf-8",
         )
+    elif case == "incomplete-image":
+        _write_settled_migration(harness, phase="started")
+        receipt = json.loads((migration / "receipt.json").read_text(encoding="utf-8"))
+        del receipt["before"]["shim"]
+        (migration / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
     else:
         migration = _write_settled_migration(harness, phase="started")
         receipt = json.loads((migration / "receipt.json").read_text(encoding="utf-8"))
@@ -1253,6 +1380,278 @@ def test_migrate_rejects_invalid_or_stale_receipts(
 
 
 @needs_local_tools
+def test_migrate_retry_accepts_a_tool_environment_before_image(tmp_path: Path) -> None:
+    # A Mac that already had an engine installed through uv has a tool
+    # environment before this migration, and its before-image is a *directory* -
+    # `cp -pR` of the environment, not a file. Read as a file it looks like a
+    # snapshot that has been deleted, so the retry would refuse a transaction it
+    # could in fact undo: the worst possible answer on the one Mac where there is
+    # something to roll back to.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    _desktop_install(harness, tmp_path)
+    original_shim = (home / ".local/bin/ciao").read_text(encoding="utf-8")
+    state = home / ".local/state/ciaobot"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "install-receipt.json").write_text(
+        json.dumps(
+            {
+                "version": "0.9.0",
+                "executable": str(home / ".local/bin/ciao"),
+                "python": str(_tool_env(harness) / "bin" / "python"),
+                "service_backend": "launchd",
+                "service_label": "com.ciao.server",
+                "installed_at": "2026-09-01T10:00:00+00:00",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (_tool_env(harness) / "bin").mkdir(parents=True)
+    _write_exec(_tool_env(harness) / "bin" / "python", "#!/bin/sh\nexit 0\n")
+    _knob(harness, "fail-ciao-setup")
+
+    failed = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert failed.returncode == 1
+    assert _migration_receipt(harness)["phase"] == "rolled_back"
+    before = migration_before(harness)
+    assert (before / "tool-env" / "bin" / "python").exists()
+
+    (home / "fail-ciao-setup").unlink()
+    retry = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert retry.returncode == 0, retry.stderr
+    assert _migration_receipt(harness)["phase"] == "migrated"
+    # Resumed from the originals the first run kept, not from a fresh snapshot
+    # taken after the install that failed.
+    assert (before / "ciao").read_text(encoding="utf-8") == original_shim
+
+
+@needs_local_tools
+def test_migrate_never_reads_an_unrecorded_before_image_as_an_absence(
+    tmp_path: Path,
+) -> None:
+    # A `started` receipt with no `shim` key is not a receipt saying this Mac had
+    # no shim; it is a receipt that does not say what it replaced. Treating the
+    # omission as the recorded absence it looks like is how a rollback deletes
+    # the shim Ciaobot.app is using and then reports the engine restored, so the
+    # receipt is refused with the recovery spelled out - before the install is
+    # even attempted, which is what the armed `uv tool install` failure here is
+    # there to prove.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    _desktop_install(harness, tmp_path)
+    original_shim = (home / ".local/bin/ciao").read_text(encoding="utf-8")
+    migration = home / ".local/state/ciaobot/migration"
+    _write_settled_migration(harness, phase="started")
+    receipt = json.loads((migration / "receipt.json").read_text(encoding="utf-8"))
+    del receipt["before"]["shim"]
+    (migration / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+    _arm(harness, "fail-uv-tool-install")
+    untouched = _replaced_state(harness)
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 1, result.stdout
+    assert "does not record every before-image" in result.stderr
+    assert "move the receipt aside" in result.stderr
+    # Refused, not rolled back: the original shim and everything else it is
+    # holding is exactly as it was, and nothing claims an engine came back.
+    assert (home / ".local/bin/ciao").read_text(encoding="utf-8") == original_shim
+    assert _replaced_state(harness) == untouched
+    assert "tool install" not in _log(harness, "uv-calls.log")
+    assert "engine was restored" not in result.stderr
+    assert _log(harness, "launchctl.log") == ""
+
+
+@needs_local_tools
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Not a string at all: a `null` is what a half-written receipt looks
+        # like, and reading it as an absence would delete a real file.
+        pytest.param(None, id="null"),
+        pytest.param(0, id="number"),
+        pytest.param(["ciao"], id="list"),
+    ],
+)
+def test_migrate_rejects_a_before_image_that_is_not_a_path(
+    tmp_path: Path, value: object
+) -> None:
+    # The recorded absence of a file is the empty string and only the empty
+    # string. Anything else - a null, a number, a list - is a receipt this
+    # installer cannot read, not a fact about this Mac.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    _desktop_install(harness, tmp_path)
+    migration = home / ".local/state/ciaobot/migration"
+    _write_settled_migration(harness, phase="started")
+    receipt = json.loads((migration / "receipt.json").read_text(encoding="utf-8"))
+    receipt["before"]["shim"] = value
+    (migration / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+    untouched = _replaced_state(harness)
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 1, result.stdout
+    assert "does not record every before-image" in result.stderr
+    assert _replaced_state(harness) == untouched
+    assert "tool install" not in _log(harness, "uv-calls.log")
+    assert _log(harness, "launchctl.log") == ""
+
+
+@needs_local_tools
+def test_migrate_is_a_noop_after_a_real_migration(tmp_path: Path) -> None:
+    # The same no-op claim, asked of a Mac this script really migrated rather than
+    # of a fixture: the receipt it wrote, the install receipt, the tool
+    # environment and the engine LaunchAgent `ciao setup` repointed all have to
+    # agree, and only then is a second run a no-op that touches nothing.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    _desktop_install(harness, tmp_path)
+
+    first = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert first.returncode == 0, first.stderr
+    assert _migration_receipt(harness)["phase"] == "migrated"
+    ciao = home / ".local/bin/ciao"
+    assert _tool_env(harness).exists()
+    # The engine LaunchAgent is the one setup wrote, execing the installed ciao.
+    program = plistlib.loads(
+        (home / "Library/LaunchAgents/com.ciao.server.plist").read_bytes()
+    )["ProgramArguments"][0]
+    assert program == str(ciao)
+
+    settled = _replaced_state(harness)
+    installed = _log(harness, "uv-calls.log")
+    labels = _log(harness, "launchctl.log")
+    second = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert second.returncode == 0, second.stderr
+    assert "already migrated (migrated)" in second.stdout
+    # A no-op is a no-op: nothing was installed, no label was touched, and the
+    # install on this Mac is byte for byte what the first run left.
+    assert _log(harness, "uv-calls.log") == installed
+    assert _log(harness, "launchctl.log") == labels
+    assert _replaced_state(harness) == settled
+
+
+@needs_local_tools
+@pytest.mark.parametrize(
+    "break_engine",
+    [
+        # The engine agent is gone: a receipt next to no server plist describes a
+        # Mac with nothing running on its port.
+        pytest.param("missing-server-plist", id="missing-server-plist"),
+        # The plist is back and points into Ciaobot.app again, which is the
+        # desktop's engine - the one this migration replaced.
+        pytest.param("desktop-pointing-plist", id="desktop-pointing-plist"),
+        # The tool the receipt names is gone: the Mac has a receipt saying it
+        # migrated and no `ciao` to run.
+        pytest.param("missing-tool", id="missing-tool"),
+    ],
+)
+def test_migrate_settled_receipt_must_describe_this_mac(
+    tmp_path: Path, break_engine: str
+) -> None:
+    # "Already migrated" is a claim about this Mac, and the engine LaunchAgent is
+    # the part of it the receipt cannot see for itself. A settled receipt on a Mac
+    # whose plist was deleted, put back, or whose tool environment was removed is
+    # not believed: the migration runs again from the originals the receipt kept,
+    # and the run says why it did not stop at "nothing to do".
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    _desktop_install(harness, tmp_path)
+    _write_settled_migration(harness, phase="migrated")
+    server_plist = home / "Library/LaunchAgents/com.ciao.server.plist"
+    if break_engine == "missing-server-plist":
+        server_plist.unlink()
+    elif break_engine == "desktop-pointing-plist":
+        # Back to the program inside the bundle - and the same workspace the
+        # plist carried, because that is what the classifier reads the runtime
+        # root from, not just the program.
+        workspace = home / "Ciaobot"
+        server_plist.write_bytes(
+            plistlib.dumps(
+                {
+                    "Label": "com.ciao.server",
+                    "ProgramArguments": [
+                        str(
+                            tmp_path
+                            / "Ciaobot.app/Contents/Resources/ciao-runtime/bin/ciao"
+                        ),
+                        "run",
+                    ],
+                    "EnvironmentVariables": {"CIAO_WORKSPACE": str(workspace)},
+                    "WorkingDirectory": str(workspace),
+                }
+            )
+        )
+    else:
+        (home / ".local/bin/ciao").unlink()
+        (home / ".local/bin/ciao").write_text("not there\n", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 0, result.stderr
+    assert "already migrated" not in result.stdout
+    assert "is not believed" in result.stderr
+    # And it is not left claiming more than the Mac has: the receipt settles
+    # again from the originals it kept, and the app's own agent stays retired.
+    assert _migration_receipt(harness)["phase"] == "migrated"
+    assert not (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+    if server_plist.exists():
+        program = plistlib.loads(server_plist.read_bytes())["ProgramArguments"][0]
+        assert program == str(home / ".local/bin/ciao")
+
+
+@needs_local_tools
+@pytest.mark.parametrize(
+    "url",
+    [
+        # The prefix check accepts all of these, and none of them is an address:
+        # a client handed one has no engine of its own and nowhere to sign in.
+        pytest.param("https://", id="scheme-only"),
+        pytest.param("https:///app", id="empty-host"),
+        pytest.param("https://:8443", id="no-host"),
+        # A URL the parser itself rejects is not an address either.
+        pytest.param("https://[::1", id="unparseable-ipv6"),
+        # Credentials in the URL would be printed back at the user and stored in
+        # the receipt, so they are refused rather than passed on.
+        pytest.param("https://user:secret@h.example", id="credentials"),
+        pytest.param("https://h.example/a b", id="whitespace"),
+    ],
+)
+def test_migrate_rejects_a_malformed_as_client_override(
+    tmp_path: Path, url: str
+) -> None:
+    # A node state nobody can read, and an override that is a prefix rather than
+    # an address: this Mac must not lose its engine before anyone has checked
+    # where the user is being sent instead. The refusal is before any mutation at
+    # all - no label, no file, not even the migration directory.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    _desktop_install(harness, tmp_path, "{not json at all")
+    untouched = _replaced_state(harness)
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--migrate", "--as-client", url
+    )
+
+    assert result.returncode == 1, result.stdout
+    assert "--as-client takes an address" in result.stderr
+    assert "tool install" not in _log(harness, "uv-calls.log")
+    assert _log(harness, "launchctl.log") == ""
+    assert _replaced_state(harness) == untouched
+    assert not (home / ".local/state/ciaobot/migration").exists()
+    # Nothing told the user to open an address that opens nothing.
+    assert "no longer runs its own engine" not in result.stdout
+
+
+@needs_local_tools
 def test_migrate_does_not_believe_a_stale_success_receipt(
     tmp_path: Path,
 ) -> None:
@@ -1261,9 +1660,16 @@ def test_migrate_does_not_believe_a_stale_success_receipt(
     # message saying it is migrated. The receipt is not believed, and it is not
     # thrown away either: the migration is done again from the originals it kept.
     harness = _harness(tmp_path)
+    home: Path = harness["home"]
     _desktop_install(harness, tmp_path)
     _write_settled_migration(harness, phase="migrated")
-    (harness["home"] / "Library/LaunchAgents/Ciaobot.plist").write_bytes(b"<plist/>")
+    # Ciaobot.app is back: its own agent's plist and the engine plist it wrote
+    # are both back, restored out of the very before-images the receipt kept -
+    # which is what a Mac restored from a backup looks like, and the one case
+    # where the receipt claims a migration this Mac plainly has not had.
+    before = migration_before(harness)
+    for name in ("com.ciao.server.plist", "Ciaobot.plist"):
+        shutil.copyfile(before / name, home / "Library/LaunchAgents" / name)
 
     result = _run_installer(harness, "--version", VERSION, "--migrate")
 
@@ -1585,11 +1991,64 @@ def test_migrate_host_retirement_failure_rolls_back(tmp_path: Path) -> None:
     assert (home / "Library/LaunchAgents/Ciaobot.plist").exists()
     assert _replaced_state(harness) == untouched
     assert _migration_receipt(harness)["phase"] == "rolled_back"
+    # The bootout before the failed disable did go through, so the app's agent is
+    # unloaded. A rollback that only re-enabled its label would leave a host
+    # whose Ciaobot.app engine never starts again while reporting the engine
+    # restored, so the agent is loaded and started again here.
+    log = _log(harness, "launchctl.log")
+    desktop_plist = home / "Library/LaunchAgents/Ciaobot.plist"
+    assert f"bootstrap gui/{os.getuid()} {desktop_plist}" in log
+    assert f"kickstart -k gui/{os.getuid()}/Ciaobot" in log
+    assert "Ciaobot.app's engine was restored" in result.stderr
     # The durable phase a crash would resume from was written before the
     # retirement was attempted, and `migrated` was never reached.
     trace = _trace(harness)
     assert "receipt-write retiring" in trace
     assert "receipt-write migrated" not in trace
+
+
+@needs_local_tools
+def test_migrate_host_interruption_after_bootout_reloads_the_app_agent(
+    tmp_path: Path,
+) -> None:
+    # An interruption in the middle of the retirement is the same fact reached a
+    # different way: launchd has dropped the app's own agent, and the process
+    # goes away before the disable. The receipt has to record that the agent was
+    # being taken out, or the retry's rollback re-enables a label with no job
+    # behind it - a host whose desktop engine never comes back, reported as one
+    # whose engine was restored.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    _desktop_install(harness, tmp_path)
+    original_shim = (home / ".local/bin/ciao").read_text(encoding="utf-8")
+    _knob(harness, "interrupt-after-bootout-Ciaobot")
+
+    interrupted = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert interrupted.returncode == 130, interrupted.stdout
+    assert _migration_receipt(harness)["phase"] == "retiring"
+    assert _migration_receipt(harness)["retiring_desktop"] is True
+    assert (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+
+    # The retry, this time with a launchd that refuses the bootout. The agent is
+    # already out of launchd from the interrupted run, so the rollback has to
+    # load and start it again - and it rolls back to the originals the first run
+    # snapshotted, not to whatever it had put in place.
+    (home / "interrupt-after-bootout-Ciaobot").unlink(missing_ok=True)
+    _knob(harness, "fail-launchctl-bootout-Ciaobot")
+    retry = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert retry.returncode == 1, retry.stdout
+    assert "could not be retired" in retry.stderr
+    log = _log(harness, "launchctl.log")
+    desktop_plist = home / "Library/LaunchAgents/Ciaobot.plist"
+    assert f"bootstrap gui/{os.getuid()} {desktop_plist}" in log
+    assert f"kickstart -k gui/{os.getuid()}/Ciaobot" in log
+    assert "Ciaobot.app's engine was restored" in retry.stderr
+    assert _migration_receipt(harness)["phase"] == "rolled_back"
+    assert (home / ".local/bin/ciao").read_text(encoding="utf-8") == original_shim
+    kept_plist = migration_before(harness) / "Ciaobot.plist"
+    assert desktop_plist.read_bytes() == kept_plist.read_bytes()
 
 
 @needs_local_tools
