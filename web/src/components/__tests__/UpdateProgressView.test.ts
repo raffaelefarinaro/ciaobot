@@ -199,6 +199,61 @@ describe('with a real phase', () => {
     expect(percent(wrapper)).toBe(0)
     wrapper.unmount()
   })
+
+  it('names the failure in the bar, rather than calling it progress', () => {
+    const wrapper = mount(UpdateProgressView, {
+      props: { phase: 'rolled_back', error: 'the new engine never answered' },
+    })
+    // A bar labelled "Updating 100 percent" beside a `[failed]` footer is a
+    // progress indicator claiming work in flight for a run that has stopped.
+    const label = wrapper.get('.update-progress').attributes('aria-label') ?? ''
+    expect(label).toContain('the new engine never answered')
+    expect(label).toContain('Rolled back to the previous version')
+    expect(label).not.toMatch(/^Updating \d+ percent$/)
+    wrapper.unmount()
+  })
+
+  it('still labels a running bar with its percentage', () => {
+    const wrapper = mount(UpdateProgressView, { props: { version: '0.20.0', phase: 'swapping' } })
+    expect(wrapper.get('.update-progress').attributes('aria-label')).toBe(`Updating ${percent(wrapper)} percent`)
+    wrapper.unmount()
+  })
+})
+
+describe('inline (a run that is not a takeover)', () => {
+  it('drops the full-window layer and keeps the record', () => {
+    const wrapper = mount(UpdateProgressView, {
+      props: { version: '0.20.0', phase: 'downloading', inline: true },
+    })
+    // The class is the whole difference: the rows, the bar, the phase line and
+    // the footer are the overlay's, so a staged run reads the same either way.
+    expect(wrapper.get('.update-progress-overlay').classes()).toContain('update-progress-overlay--inline')
+    expect(wrapper.find('.update-progress-phase').text()).toBe('Downloading the release')
+    expect(rowFor(rows(wrapper), 'downloading the release'))
+      .toEqual(['downloading the release', '…'])
+    expect(wrapper.get('.update-progress-content').attributes('role')).toBe('status')
+    wrapper.unmount()
+  })
+
+  it('is not a takeover: the card holds it, not the window', () => {
+    const wrapper = mount(UpdateProgressView, { props: { phase: 'downloading', inline: true } })
+    // The one thing an inline run must not be is a claim on the window: this is
+    // a child element the caller places, so there is no modal layer, no inert
+    // boundary and nothing in the document for one to be applied to.
+    const overlay = wrapper.get('.update-progress-overlay').element as HTMLElement
+    expect(overlay.parentElement?.tagName).not.toBe('BODY')
+    expect(overlay.closest('.engine-update-overlay')).toBeNull()
+    expect(Array.from(document.body.children).every(node => !(node instanceof HTMLElement) || !node.inert)).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('leaves the boot screen exactly as it was', () => {
+    const wrapper = mount(UpdateProgressView, { props: { version: '0.20.0' } })
+    // `inline` is the caller's choice, and absent must mean the boot screen is
+    // what it has always been: the full-window layer, with no inline class.
+    expect(wrapper.get('.update-progress-overlay').classes()).toEqual(['update-progress-overlay'])
+    wrapper.unmount()
+  })
 })
 
 describe('without a phase (the boot animation)', () => {

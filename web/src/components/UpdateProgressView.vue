@@ -1,5 +1,5 @@
 <template>
-  <div class="update-progress-overlay">
+  <div class="update-progress-overlay" :class="{ 'update-progress-overlay--inline': inline }">
     <!-- The overlay's status region, and where focus lands when a caller treats
          this overlay as the modal it is (the Settings engine-update card does).
          All three attributes are for a real job only, and the boot path — an
@@ -26,7 +26,7 @@
       <p v-if="phaseName" class="update-progress-phase">{{ phaseName }}</p>
 
       <!-- Mono progress bar: filled █, empty ░ -->
-      <div class="update-progress" :aria-label="`Updating ${progressPercent} percent`">
+      <div class="update-progress" :aria-label="progressLabel">
         <span class="update-progress-track">{{ progressTrack }}</span>
         <span class="update-progress-pct">{{ progressPercent.toString().padStart(3, ' ') }}%</span>
       </div>
@@ -86,6 +86,15 @@ const props = defineProps<{
   phase?: string
   /** The record's own reason, for a run that failed. */
   error?: string
+  /**
+   * Render in the caller's flow rather than over the window, for a run that is
+   * not a takeover: the Settings engine-update card uses it for staging, which
+   * runs while the engine keeps serving and must leave the rest of the app
+   * usable. Same rows, same record, no full-window layer and no inert
+   * background. Absent — the boot screen and the applying overlay — nothing
+   * about this screen changes.
+   */
+  inline?: boolean
 }>()
 
 /**
@@ -243,6 +252,20 @@ const progressTrack = computed(() => {
   return '█'.repeat(filled) + '░'.repeat(PROGRESS_WIDTH - filled)
 })
 
+/**
+ * What the bar announces.
+ *
+ * A run that failed is not "Updating 100 percent": the record says it stopped,
+ * and a bar that still called itself an update is a progress indicator claiming
+ * work in flight. The failure is named, the phase before it, so the bar and the
+ * footer say the same thing.
+ */
+const progressLabel = computed(() => {
+  if (!failureText.value) return `Updating ${progressPercent.value} percent`
+  const where = phaseName.value
+  return where ? `${where}: ${failureText.value}` : `Update failed: ${failureText.value}`
+})
+
 function pad(n: number): string {
   return n.toString().padStart(2, '0')
 }
@@ -330,6 +353,28 @@ onUnmounted(() => {
   background-image:
     linear-gradient(180deg, rgba(255, 77, 109, 0.04) 0%, transparent 60%),
     repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.012) 0 1px, transparent 1px 3px);
+}
+
+/* The same screen inside a panel, for a run that is not a takeover. Only the
+   full-window layer is undone — the record's rows, bar, phase line and footer
+   are the same ones, so a staged run reads the same either way. */
+.update-progress-overlay--inline {
+  position: static;
+  inset: auto;
+  z-index: auto;
+  padding: 0;
+  background: none;
+  background-image: none;
+}
+
+.update-progress-overlay--inline .wordmark--lg {
+  display: none;
+}
+
+/* A panel is not a window: bound the job list so the card keeps its shape, and
+   let it scroll inside that bound rather than grow without one. */
+.update-progress-overlay--inline .update-progress-content--job {
+  max-height: 20rem;
 }
 
 .update-progress-content {

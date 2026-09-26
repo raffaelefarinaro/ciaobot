@@ -32,11 +32,13 @@ const POLL_MS = 2000
  *
  * `update` may be a list, which the card reads in order and then keeps reading
  * the last of: that is how a run is driven forward across polls, one record at
- * a time. `attach` puts the view in the document, which focus assertions need.
+ * a time. `packageStatus` takes a list the same way, for the reads a settled
+ * record makes. `attach` puts the view in the document, which focus assertions
+ * need.
  */
 async function mountCard(
   update: EngineUpdateStatus | EngineUpdateStatus[],
-  packageStatus: Record<string, unknown> = { mode: 'installer', current_version: '0.19.0', update_available: true, latest_version: '0.20.0' },
+  packageStatus: Record<string, unknown> | Record<string, unknown>[] = { mode: 'installer', current_version: '0.19.0', update_available: true, latest_version: '0.20.0' },
   { attach = false }: { attach?: boolean } = {},
 ) {
   setActivePinia(createPinia())
@@ -44,7 +46,9 @@ async function mountCard(
   await router.push('/settings')
   await router.isReady()
   const answers = Array.isArray(update) ? [...update] : [update]
+  const packageAnswers = Array.isArray(packageStatus) ? [...packageStatus] : [packageStatus]
   let reads = 0
+  let packageReads = 0
   vi.spyOn(api, 'get').mockImplementation(async (path) => {
     if (path === '/api/startup-status') return { node_role: 'host', state_valid: true } as never
     if (path === '/api/local/status') return { git_repo: true, branch: 'main', dirty: false, restart_only: true } as never
@@ -53,7 +57,11 @@ async function mountCard(
       reads += 1
       return answer as never
     }
-    if (path === '/api/package/status') return packageStatus as never
+    if (path === '/api/package/status') {
+      const answer = packageAnswers[Math.min(packageReads, packageAnswers.length - 1)]
+      packageReads += 1
+      return answer as never
+    }
     throw new Error('Unrelated settings data unavailable in this test')
   })
   const post = vi.spyOn(api, 'post').mockResolvedValue({ started: true } as never)
@@ -63,7 +71,11 @@ async function mountCard(
     attachTo: attach ? document.body : undefined,
   })
   await flushPromises()
-  return { wrapper, post, beginRestart }
+  // How many times the card has read the status route, which is the poll's own
+  // scoreboard: a run whose record has not landed yet is only visible as a read
+  // that still happened.
+  const statusReads = () => reads
+  return { wrapper, post, beginRestart, statusReads }
 }
 
 function buttonLabels(wrapper: Awaited<ReturnType<typeof mountCard>>['wrapper']) {
@@ -221,9 +233,11 @@ it('recovers from a refusal that never wrote a record', async () => {
 
 it('moves focus into the overlay while it is up and back to the card when it settles', async () => {
   vi.useFakeTimers()
+  // The applying half is the takeover: the engine is replacing itself, so the
+  // overlay is modal for as long as that lasts.
   const { wrapper } = await mountCard([
     { install_mode: 'installer', can_update: true, operation: null },
-    { install_mode: 'installer', can_update: true, operation: operation('downloading') },
+    { install_mode: 'installer', can_update: true, operation: operation('draining') },
     { install_mode: 'installer', can_update: true, operation: operation('staged') },
   ], undefined, { attach: true })
   try {
@@ -262,6 +276,208 @@ it('moves focus into the overlay while it is up and back to the card when it set
     const apply = button(wrapper, 'Apply update')
     expect(apply).toBeDefined()
     expect(document.activeElement).toBe(apply!.element)
+    wrapper.unmount()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('leaves the app usable while a run is staging', async () => {
+  vi.useFakeTimers()
+  // Staging is a release lookup, a download and a wheel build with the engine
+  // still serving, so the card's copy says Ciaobot keeps running until it is
+  // ready to apply. A full-window modal would contradict that for minutes, and
+  // `useModalFocus` makes the background inert all the way to `document.body` —
+  // so the staging half renders its progress in the card and takes nothing over.
+  const { wrapper, statusReads } = await mountCard([
+    { install_mode: 'installer', can_update: true, operation: null },
+    { install_mode: 'installer', can_update: true, operation: operation('downloading') },
+    { install_mode: 'installer', can_update: true, operation: operation('staged') },
+  ], undefined, { attach: true })
+  try {
+    await button(wrapper, 'Stage update')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
+
+    await poll()
+    const body = wrapper.get('.pane-body').element as HTMLElement
+    // No takeover: no overlay, and nothing in the app behind it is inert, so
+    // Restart, Deploy and the other panes stay reachable.
+    expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
+    expect(body.inert).not.toBe(true)
+    expect(body.getAttribute('aria-hidden')).toBeNull()
+    expect(document.body.inert).not.toBe(true)
+    // The rows are the overlay's rows, in the card, driven by the record.
+    const progress = wrapper.get('.engine-update-panel .update-progress-content')
+    expect(progress.text()).toContain('Downloading the release')
+    expect(wrapper.findAll('.update-progress-log-row.is-in_progress').map(r => r.find('.update-progress-log-name').text()))
+      .toEqual(['downloading the release'])
+    // Focus went to the region that replaced the button, not to a takeover.
+    expect(document.activeElement).toBe(progress.element)
+    // Tab is not claimed: the card is one place in a live app again.
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    window.dispatchEvent(tab)
+    expect(tab.defaultPrevented).toBe(false)
+
+    // The poll keeps running, and the run still ends on the staged panel.
+    const reads = statusReads()
+    await poll()
+    expect(statusReads()).toBeGreaterThan(reads)
+    expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
+    expect(buttonLabels(wrapper)).toContain('Apply update')
+    wrapper.unmount()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('does not pull focus for a run this tab did not start', async () => {
+  // A run can start on the CLI or on another device, in which case this tab's
+  // first read already finds it in flight. Staging is not a takeover, so it must
+  // not take the focus the user has either — the card shows the rows and leaves
+  // the keyboard where it was.
+  const { wrapper } = await mountCard(
+    { install_mode: 'installer', can_update: true, operation: operation('downloading') },
+    undefined, { attach: true },
+  )
+  try {
+    const restart = button(wrapper, 'Restart')!
+    expect(restart).toBeDefined()
+    restart.element.focus()
+    expect(document.activeElement).toBe(restart.element)
+
+    await flushPromises()
+    expect(wrapper.find('.update-progress-phase').text()).toBe('Downloading the release')
+    expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
+    expect(document.activeElement).toBe(restart.element)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('keeps polling a run whose record has not landed yet', async () => {
+  vi.useFakeTimers()
+  // A stage POST is answered 202 before the coordinator has written anything, and
+  // it writes its first record only after the lock, the release lookup over the
+  // network and the removal of any previous staged environment. The first reads
+  // can therefore be serving the previous run's `failed` record — a record the
+  // card was already holding when it asked for this one. Reading that as the end
+  // of the run stops the poll, and the run then stages invisibly behind a panel
+  // with a re-enabled button and nothing watching it.
+  const { wrapper, post, statusReads } = await mountCard([
+    { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the wheel could not be built' }) },
+    { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the wheel could not be built' }) },
+    { install_mode: 'installer', can_update: true, operation: operation('downloading') },
+    { install_mode: 'installer', can_update: true, operation: operation('staged') },
+  ])
+  try {
+    expect(statusReads()).toBe(1)
+    await button(wrapper, 'Retry')!.trigger('click')
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith('/api/update/stage')
+
+    // Read two: the previous run's outcome, before the coordinator's first
+    // write. The poll has to still be alive afterwards.
+    await poll()
+    expect(statusReads()).toBe(2)
+
+    // Read three: this run's own record, in flight, in the card.
+    await poll()
+    expect(statusReads()).toBe(3)
+    expect(wrapper.find('.update-progress-phase').text()).toBe('Downloading the release')
+    // Staging is not a takeover, so the full-window overlay is not up.
+    expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
+
+    // Read four: the run's outcome, which ends the poll and the panel.
+    await poll()
+    expect(statusReads()).toBe(4)
+    expect(buttonLabels(wrapper)).toContain('Apply update')
+
+    const settled = statusReads()
+    await poll()
+    expect(statusReads()).toBe(settled)
+    wrapper.unmount()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('stops a pre-record poll at the grace bound, so it cannot run forever', async () => {
+  vi.useFakeTimers()
+  // The other end of the same window: a run that produces neither a record nor
+  // a refusal — a coordinator that died between the 202 and its first write.
+  // Waiting has to be bounded, or every button in the card stays disabled until
+  // the page is reloaded.
+  const { wrapper, statusReads } = await mountCard(
+    { install_mode: 'installer', can_update: true, operation: operation('failed') },
+  )
+  try {
+    await button(wrapper, 'Retry')!.trigger('click')
+    await flushPromises()
+    const afterClick = statusReads()
+
+    await vi.advanceTimersByTimeAsync(61_000)
+    await flushPromises()
+    const afterGrace = statusReads()
+    expect(afterGrace).toBeGreaterThan(afterClick)
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(statusReads()).toBe(afterGrace)
+    // The card is a way out again, which is the point of giving up.
+    const retry = button(wrapper, 'Retry')
+    expect(retry).toBeDefined()
+    expect(retry!.attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('does not claim up to date when the version check failed', async () => {
+  // `package_status` answers `update_available: false` with the reason in `error`
+  // on a rate limit or any network failure, and the cached variant only papers
+  // over that once a good answer has been seen. The card would then read "Up to
+  // date · 0.19.0" with "Update check failed" directly beneath it.
+  const { wrapper } = await mountCard(
+    { install_mode: 'installer', can_update: true, operation: null },
+    { mode: 'installer', current_version: '0.19.0', update_available: false, latest_version: '', error: 'HTTP 403: rate limit exceeded' },
+  )
+  try {
+    expect(wrapper.text()).not.toContain('Up to date')
+    // The reason is shown instead of a claim the card cannot support.
+    expect(wrapper.text()).toContain('Update check failed: HTTP 403: rate limit exceeded')
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('returns focus to the card itself when a run leaves it nothing to click', async () => {
+  vi.useFakeTimers()
+  // An `applied` record is the run's outcome and offers no action, so there is no
+  // button to focus: the panel is the target, and it carries `tabindex="-1"` so
+  // focus never lands on nothing at all.
+  const { wrapper } = await mountCard([
+    { install_mode: 'installer', can_update: true, operation: null },
+    { install_mode: 'installer', can_update: true, operation: operation('draining') },
+    { install_mode: 'installer', can_update: true, operation: operation('applied') },
+  ], [
+    { mode: 'installer', current_version: '0.19.0', update_available: true, latest_version: '0.20.0' },
+    // The apply succeeded, so the next check answers with the version that is
+    // now installed: the record is history, and there is nothing left to do.
+    { mode: 'installer', current_version: '0.20.0', update_available: false, latest_version: '0.20.0' },
+  ], { attach: true })
+  try {
+    await button(wrapper, 'Stage update')!.trigger('click')
+    await flushPromises()
+    await poll()
+    expect(document.activeElement).toBe(wrapper.get('.update-progress-content').element)
+
+    await poll()
+    const panel = wrapper.get('.engine-update-panel')
+    expect(panel.attributes('tabindex')).toBe('-1')
+    expect(panel.findAll('button')).toHaveLength(0)
+    expect(document.activeElement).toBe(panel.element)
+    expect(wrapper.text()).toContain('ciaobot is up to date')
     wrapper.unmount()
   } finally {
     vi.useRealTimers()
