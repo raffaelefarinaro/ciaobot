@@ -1028,6 +1028,29 @@ async def _promote_region_row(
     )
 
 
+def _entity_roots(config, workspace: str) -> tuple[Path, Path]:
+    """The two roots a ``[people]`` row needs: ``(notes_root, registry_root)``.
+
+    Two, because they are different directories on an install that has not
+    re-rooted, and which is which is the whole point — a caller that resolves
+    one and uses it for both is the bug this pair exists to make impossible:
+
+    - the note goes under the workspace's **notes** root
+      (``workspace_vault_root``), which is where that person's other notes are;
+    - the category comes from the **agent** vault root (``agent_vault_root``),
+      the one that owns ``entity-types.yaml`` and ``VOCABULARY.md`` and the one
+      ``GET``/``PATCH /api/memory/entity-types`` reads and writes (#624).
+
+    Reading the registry from the notes root meant an owner's category edit —
+    ``person.folder: Humans`` — was invisible here, and the accept went on
+    writing ``People/Mo.md`` beside the very file that renamed it.
+    """
+    return (
+        Path(config.workspace_vault_root(workspace)),
+        Path(config.agent_vault_root(workspace)),
+    )
+
+
 async def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
     """Write an accepted `[people]` fact into its person note.
 
@@ -1051,24 +1074,28 @@ async def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
     if not name:
         return AcceptOutcome(ok=False, error="the bullet names no person")
     try:
-        vault = config.workspace_vault_root(row["workspace"])
+        notes_root, registry_root = _entity_roots(config, row["workspace"])
     except (AttributeError, ValueError) as exc:
         return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
-    note = entity_note_path(vault, PERSON_TYPE_ID, name)
+    note = entity_note_path(
+        notes_root, PERSON_TYPE_ID, name, registry_root=registry_root
+    )
     if note is None:
-        # Two real causes, one unrouteable row: the payload is not a filename,
-        # or the vault has no `person` category to file a note in (disabled, or
-        # without a folder). Both are the operator's to fix, not the row's.
+        # Three real causes, one unrouteable row: the payload is not a filename,
+        # the vault has no `person` category to file a note in (disabled, or
+        # without a folder), or that folder is not one inside the vault. All are
+        # the operator's to fix, not the row's.
         return AcceptOutcome(
             ok=False,
             error=(
-                "this vault has no person category with a folder, or the "
-                "bullet's name is not usable as a filename"
+                "this vault has no person category whose folder is one inside "
+                "the vault, or the bullet's name is not usable as a filename"
             ),
         )
-    # Relative to the vault, so the destination names the folder the category
-    # is filed in rather than a spelling this function hardcodes.
-    destination = note.relative_to(vault).as_posix()
+    # Relative to the notes root the note is written under, so the destination
+    # names the folder the category is filed in rather than a spelling this
+    # function hardcodes.
+    destination = note.relative_to(notes_root).as_posix()
     if note.exists():
         errors: list[str] = []
         wrote = await fold_fact_into_person_note(
@@ -1087,7 +1114,9 @@ async def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
             )
         return AcceptOutcome(ok=True, destination=destination)
     try:
-        outcome = write_entity_note(vault, PERSON_TYPE_ID, name, row["text"])
+        outcome = write_entity_note(
+            notes_root, PERSON_TYPE_ID, name, row["text"], registry_root=registry_root
+        )
     except OSError as exc:
         return AcceptOutcome(ok=False, error=f"could not write the note: {exc}")
     if outcome != "written":
@@ -1365,7 +1394,10 @@ def _people_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
 
     A new note is shown exactly. An existing note is folded by a model at
     accept time, so, like a `[project]` fold, the preview shows the note as it
-    is and marks the result inexact rather than inventing the merge.
+    is and marks the result inexact rather than inventing the merge. The
+    destination comes from the same two roots the accept resolves
+    (:func:`_entity_roots`), so the card cannot name a folder the accept would
+    not write to.
     """
     from ciao.memory_proposals import (
         PERSON_TYPE_ID,
@@ -1380,18 +1412,20 @@ def _people_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
         out["reason"] = "the bullet names no person"
         return out
     try:
-        vault = Path(config.workspace_vault_root(row["workspace"]))
+        notes_root, registry_root = _entity_roots(config, row["workspace"])
     except (AttributeError, ValueError) as exc:
         out["reason"] = f"could not resolve the vault: {exc}"
         return out
-    note = entity_note_path(vault, PERSON_TYPE_ID, name)
+    note = entity_note_path(
+        notes_root, PERSON_TYPE_ID, name, registry_root=registry_root
+    )
     if note is None:
         out["reason"] = (
-            "this vault has no person category with a folder, or the "
-            "bullet's name is not usable as a filename"
+            "this vault has no person category whose folder is one inside "
+            "the vault, or the bullet's name is not usable as a filename"
         )
         return out
-    out["destination"] = note.relative_to(vault).as_posix()
+    out["destination"] = note.relative_to(notes_root).as_posix()
     out["destination_path"] = str(note)
     if note.exists():
         # Folded by a model at accept time, like a `[project]` doc: the note is
@@ -1561,8 +1595,13 @@ def destination_revision(config, row: dict[str, Any]) -> str:
         if accept.action == "write_people_note":
             from ciao.memory_proposals import PERSON_TYPE_ID, entity_note_path
 
-            vault = Path(config.workspace_vault_root(row["workspace"]))
-            note = entity_note_path(vault, PERSON_TYPE_ID, str(row.get("target") or ""))
+            notes_root, registry_root = _entity_roots(config, row["workspace"])
+            note = entity_note_path(
+                notes_root,
+                PERSON_TYPE_ID,
+                str(row.get("target") or ""),
+                registry_root=registry_root,
+            )
             if note is None:
                 return ""
             if not note.exists():

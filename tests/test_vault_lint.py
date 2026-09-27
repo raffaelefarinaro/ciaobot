@@ -110,7 +110,10 @@ def test_a_note_the_entity_writer_created_is_not_an_unknown_type(
 
     vault = tmp_path / "memory-vault"
     vault.mkdir()
-    assert write_entity_note(vault, "person", "Alice", "Leads the pilot.") == "written"
+    written = write_entity_note(
+        vault, "person", "Alice", "Leads the pilot.", registry_root=vault
+    )
+    assert written == "written"
 
     issues = vault_lint.run_validation(vault)
 

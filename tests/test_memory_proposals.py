@@ -685,6 +685,12 @@ def test_reconcile_region_fact_defers_when_the_retry_also_fails(
 # hardcoded `People/`, so an accepted `[people]` proposal produced a note the
 # linter flags and a category the owner added had no writer for. The writer is
 # now the category's: the folder and the `type:` both come from the registry.
+#
+# The two roots are named apart, because they are apart on a pre-re-rooting
+# install: `vault_root` is the notes root the note is written under,
+# `registry_root` the agent vault root holding `entity-types.yaml`. Most of
+# these tests point both at one directory — the re-rooted shape — and the one
+# that differs says so.
 
 
 def _entity_vault(tmp_path: Path, overrides: str = "") -> Path:
@@ -699,7 +705,10 @@ def _entity_vault(tmp_path: Path, overrides: str = "") -> Path:
 def test_entity_note_carries_type_updated_and_tags(tmp_path: Path) -> None:
     vault = _entity_vault(tmp_path)
 
-    assert mp.write_entity_note(vault, mp.PERSON_TYPE_ID, "Mo", "Leads the pilot.") == "written"
+    written = mp.write_entity_note(
+        vault, mp.PERSON_TYPE_ID, "Mo", "Leads the pilot.", registry_root=vault
+    )
+    assert written == "written"
 
     note = vault / "People" / "Mo.md"
     assert note.is_file()
@@ -723,11 +732,41 @@ def test_entity_note_lands_in_a_custom_category_folder(tmp_path: Path) -> None:
         ),
     )
 
-    assert mp.write_entity_note(vault, "customer", "Acme", "Signs off in March.") == "written"
+    written = mp.write_entity_note(
+        vault, "customer", "Acme", "Signs off in March.", registry_root=vault
+    )
+    assert written == "written"
 
     note = vault / "Customers" / "Acme.md"
     assert note.is_file(), "a custom category's folder, not a hardcoded People/"
     assert "type: customer" in note.read_text(encoding="utf-8")
+
+
+def test_entity_note_reads_its_category_at_the_registry_root(tmp_path: Path) -> None:
+    """The two roots are named separately, so an edit at one is honoured.
+
+    The category lives in the agent vault root — `entity-types.yaml` beside
+    `VOCABULARY.md`, the file the category editor writes — while the note lands
+    in a workspace's notes root, where that person's other notes already are.
+    On an install that has not re-rooted those are different directories, and
+    reading the category from the notes root is how an owner's
+    `person.folder: Humans` ended up invisible to the accept meant to honour it.
+    """
+    agent_root = _entity_vault(tmp_path, overrides="- id: person\n  folder: Humans\n")
+    notes_root = tmp_path / "memory-vault" / "personal"
+    notes_root.mkdir(parents=True)
+
+    written = mp.write_entity_note(
+        notes_root,
+        mp.PERSON_TYPE_ID,
+        "Mo",
+        "Leads the pilot.",
+        registry_root=agent_root,
+    )
+    assert written == "written"
+
+    assert (notes_root / "Humans" / "Mo.md").is_file(), notes_root.name
+    assert not (notes_root / "People").exists(), "the stock folder, not the owner's"
 
 
 @pytest.mark.parametrize(
@@ -756,18 +795,63 @@ def test_entity_note_refuses_a_category_it_cannot_write(
 ) -> None:
     vault = _entity_vault(tmp_path, overrides=overrides)
 
-    assert mp.write_entity_note(vault, type_id, "Mo", "A fact.") == "refused", label
-    assert mp.entity_note_path(vault, type_id, "Mo") is None, label
+    assert (
+        mp.write_entity_note(vault, type_id, "Mo", "A fact.", registry_root=vault)
+        == "refused"
+    ), label
+    assert mp.entity_note_path(vault, type_id, "Mo", registry_root=vault) is None, label
     # A refusal touches nothing: no folder created, no stray note beside the vault.
     expected = ["entity-types.yaml"] if overrides else []
     assert [entry.name for entry in vault.iterdir()] == expected, label
 
 
+@pytest.mark.parametrize(
+    "folder",
+    [
+        # An absolute folder: the note would land outside the vault entirely, and
+        # the accept's `relative_to(vault)` would raise instead of reporting it.
+        pytest.param("{escaped}", id="absolute"),
+        # A `..` segment, which `validate_entries` does not police: the registry
+        # file is editable in the vault, not only through the category editor.
+        pytest.param("../escaped", id="parent-relative"),
+        pytest.param("People/../../escaped", id="escaping-mid-path"),
+    ],
+)
+def test_entity_note_refuses_a_folder_that_leaves_the_vault(
+    tmp_path: Path, folder: str
+) -> None:
+    """`entry.folder` is a value the owner typed, and it is checked before use.
+
+    Both shapes were acted on before this check: the note was written outside
+    the vault, or the caller's `relative_to` raised — a 500 on an accept rather
+    than a refused row. A refusal is the same shape as every other one.
+    """
+    escaped = tmp_path / "escaped"
+    spelled = folder.format(escaped=escaped.as_posix())
+    vault = _entity_vault(tmp_path, overrides=f"- id: person\n  folder: {spelled}\n")
+
+    outcome = mp.write_entity_note(
+        vault, mp.PERSON_TYPE_ID, "Mo", "A fact.", registry_root=vault
+    )
+
+    assert outcome == "refused", folder
+    path = mp.entity_note_path(vault, mp.PERSON_TYPE_ID, "Mo", registry_root=vault)
+    assert path is None, path
+    assert not escaped.exists(), "nothing was written outside the vault"
+    assert [entry.name for entry in vault.iterdir()] == ["entity-types.yaml"], folder
+
+
 def test_entity_note_refuses_an_unusable_name(tmp_path: Path) -> None:
     vault = _entity_vault(tmp_path)
 
-    assert mp.write_entity_note(vault, mp.PERSON_TYPE_ID, "///", "A fact.") == "refused"
-    assert mp.entity_note_path(vault, mp.PERSON_TYPE_ID, "///") is None
+    refused = mp.write_entity_note(
+        vault, mp.PERSON_TYPE_ID, "///", "A fact.", registry_root=vault
+    )
+    assert refused == "refused"
+    unusable = mp.entity_note_path(
+        vault, mp.PERSON_TYPE_ID, "///", registry_root=vault
+    )
+    assert unusable is None
 
 
 def test_entity_note_never_overwrites_an_existing_note(tmp_path: Path) -> None:
@@ -777,7 +861,10 @@ def test_entity_note_never_overwrites_an_existing_note(tmp_path: Path) -> None:
     note.parent.mkdir(parents=True)
     note.write_text("---\ntype: person\n---\n# Mo\n\nCurated already.\n", encoding="utf-8")
 
-    assert mp.write_entity_note(vault, mp.PERSON_TYPE_ID, "Mo", "A new fact.") == "exists"
+    outcome = mp.write_entity_note(
+        vault, mp.PERSON_TYPE_ID, "Mo", "A new fact.", registry_root=vault
+    )
+    assert outcome == "exists"
     assert "Curated already." in note.read_text(encoding="utf-8")
     assert "A new fact." not in note.read_text(encoding="utf-8")
 
@@ -793,7 +880,8 @@ def test_render_entity_note_is_exactly_what_the_write_lands(tmp_path: Path) -> N
     )
 
     real = mp.render_entity_note("person", "Mo", "F.")
-    assert mp.write_entity_note(vault, "person", "Mo", "F.") == "written"
+    written = mp.write_entity_note(vault, "person", "Mo", "F.", registry_root=vault)
+    assert written == "written"
     assert (vault / "People" / "Mo.md").read_text(encoding="utf-8") == real
 
 

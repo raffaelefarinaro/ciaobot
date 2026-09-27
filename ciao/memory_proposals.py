@@ -711,40 +711,87 @@ the fact needs a *merge* into it rather than a create — the review queue folds
 that with a model and reports no change when the note already covers the fact.
 ``refused`` is a routing failure with nothing written: a ``type_id`` the vault
 has no category for, a category the owner disabled, a category with no folder to
-write into, or a name that cannot be a filename.
+write into, a folder that would put the note outside the vault, or a name that
+cannot be a filename.
 """
 
 
-def _entity_folder(vault_root: Path, type_id: str) -> str | None:
+def _entity_folder(registry_root: Path, type_id: str) -> str | None:
     """The folder *type_id*'s notes live in, or None when it takes no notes.
 
     Read from the category registry rather than from a constant here, which is
     what gives a category the owner added a writer at all. A disabled entry is
     refused with the rest: it is out of every derived view on purpose, so it is
     not a ``type:`` a new note should carry.
+
+    *registry_root* is the vault that holds ``entity-types.yaml`` — the agent
+    vault root, which is not the notes root the note itself lands in. See
+    :func:`entity_note_path`, which takes both.
     """
     from ciao.entity_types import load_entity_types
 
-    entry = load_entity_types(vault_root).get(type_id)
+    entry = load_entity_types(registry_root).get(type_id)
     if entry is None or not entry.enabled or not entry.folder:
         return None
     return entry.folder
 
 
-def entity_note_path(vault_root: Path, type_id: str, name: str) -> Path | None:
+def _inside(root: Path, candidate: Path) -> bool:
+    """Whether *candidate* stays under *root*, without touching the disk.
+
+    Lexical, because that is the comparison the caller makes: the destination is
+    rendered with ``relative_to``, a parts comparison, so a resolved answer here
+    could disagree with the path the operator is shown (a vault reached through
+    a symlink — ``/var`` on macOS — resolves to a different string than the root
+    it was joined to). It is also how a parts comparison reads: ``relative_to``
+    matches a prefix, so ``vault/../elsewhere/Mo.md`` looks like a path *inside*
+    ``vault`` with a ``..`` on the end rather than one outside it.
+
+    A ``..`` is refused rather than collapsed, because collapsing it means
+    resolving, and a category folder is one folder name, not a path expression.
+    """
+    root_parts = root.parts
+    parts = candidate.parts
+    if parts[: len(root_parts)] != root_parts:
+        return False
+    return ".." not in parts[len(root_parts):]
+
+
+def entity_note_path(
+    vault_root: Path, type_id: str, name: str, *, registry_root: Path
+) -> Path | None:
     """Where a note in category *type_id* would be written, or ``None``.
 
-    None covers the three ways there is no such note: the category takes no
-    notes (:func:`_entity_folder`), the name is not usable as a filename, or
-    neither. Public so the review queue can name the destination — and say
-    whether the note already exists — before the accept runs, without a second
-    copy of the rules :func:`write_entity_note` applies.
+    Two roots, and neither one implies the other. *vault_root* is where the note
+    is written: a workspace's **notes** root, which is where that person's other
+    notes already are. *registry_root* is where the category is looked up: the
+    vault holding ``entity-types.yaml``, i.e. the **agent** vault root, the one
+    that owns ``VOCABULARY.md`` and the file
+    ``GET``/``PATCH /api/memory/entity-types`` reads and writes. They are the
+    same directory only on a re-rooted install, so a caller that passes one for
+    both is how an owner's category edit came to be invisible to the very accept
+    meant to honour it.
+
+    None covers the ways there is no such note: the category takes no notes
+    (:func:`_entity_folder`), the name is not usable as a filename, or the
+    category's folder would put the note outside the vault. That last one is a
+    value the owner typed — an absolute folder, or one spelled with ``..`` — and
+    it is refused with the rest rather than acted on: the note would be written
+    outside the vault, and the caller's ``relative_to`` would raise instead of
+    reporting it. The category editor validates the list before it stores it;
+    a hand-edited ``entity-types.yaml`` is the reachable case.
+    Public so the review queue can name the destination — and say whether the
+    note already exists — before the accept runs, without a second copy of the
+    rules :func:`write_entity_note` applies.
     """
-    folder = _entity_folder(vault_root, type_id)
+    folder = _entity_folder(registry_root, type_id)
     stem = _safe_name(name)
     if folder is None or not stem:
         return None
-    return vault_root / folder / f"{stem}.md"
+    note = vault_root / folder / f"{stem}.md"
+    if not _inside(vault_root, note):
+        return None
+    return note
 
 
 def render_entity_note(type_id: str, name: str, text: str, *, today: str = "") -> str:
@@ -768,7 +815,7 @@ def render_entity_note(type_id: str, name: str, text: str, *, today: str = "") -
 
 
 def write_entity_note(
-    vault_root: Path, type_id: str, name: str, text: str
+    vault_root: Path, type_id: str, name: str, text: str, *, registry_root: Path
 ) -> EntityNoteOutcome:
     """Create a stub note for one entity, typed as *type_id* in its own folder.
 
@@ -778,11 +825,14 @@ def write_entity_note(
     added (``customer`` → ``Customers/``) has a writer and every note written
     here carries a ``type:`` the linter accepts — the missing ``type:`` on a
     person note is what left an accepted person note untyped and lint-flagged.
+    The two roots are the ones :func:`entity_note_path` names: the note lands
+    under the notes root, the category is read from the root that holds the
+    registry.
 
     Never overwrites: an existing note is reported as ``exists`` so the caller
     merges into it.
     """
-    path = entity_note_path(vault_root, type_id, name)
+    path = entity_note_path(vault_root, type_id, name, registry_root=registry_root)
     if path is None:
         return "refused"
     if path.exists():
