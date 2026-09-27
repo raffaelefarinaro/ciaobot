@@ -1484,7 +1484,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     vault_root = (args.vault_root or default_vault_root()).resolve()
-    entries = scan_vault(vault_root)
+    # The scan and the two renderings below must share one closed set, or a
+    # folder-inferred custom type shows in INDEX.md while VOCABULARY.md calls
+    # its own scan's notes drift. Load once and thread it through.
+    registry = load_entity_types(vault_root)
+    entries = scan_vault(vault_root, registry=registry)
 
     if args.write:
         dest = vault_root / "INDEX.md"
@@ -1493,8 +1497,8 @@ def main(argv: list[str] | None = None) -> int:
         # Same parsed frontmatter, no extra I/O: the vocabulary is a second
         # rendering of the entries already in hand.
         vocabulary = vault_root / "VOCABULARY.md"
-        write_vocabulary_file(entries, vocabulary)
-        drift = vocabulary_report(entries)["type_drift"]
+        write_vocabulary_file(entries, vocabulary, registry=registry)
+        drift = vocabulary_report(entries, registry=registry)["type_drift"]
         print(
             f"wrote {vocabulary} ({len(drift)} non-canonical type"
             f"{'' if len(drift) == 1 else 's'})",

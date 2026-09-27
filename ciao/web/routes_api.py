@@ -4003,11 +4003,13 @@ def _scan_entity_types(
     owning side is what the index and the linter mean by a count, so
     ``type: doc`` counts for ``document``. The literal side is what a category's
     own notes say, and it is not redundant: a category the user has just added
-    is in none of the static tables, so a count resolved through those tables
-    alone would report every new category as empty, and the delete guard below
-    would drop a category whose notes still carried its ``type:``. The indexer
-    only reads the registry once the consumer swap lands, so until then the
-    literal side is the only one that sees a new category at all.
+    is in none of the static tables when its notes are typed with that
+    category's own alias, so a count resolved through those tables alone would
+    report every such new category as empty, and the delete guard below would
+    drop a category whose notes still carried its ``type:``. The index, the
+    linter and the staleness check all read the registry now (#626), but this
+    scan runs its own literal-plus-canonical fold, so the literal side is what
+    keeps a just-added category's notes counted here regardless.
 
     *registry* is the caller's already-loaded registry, not a second load, and
     it is the only thing that knows a custom category's own aliases: a note typed

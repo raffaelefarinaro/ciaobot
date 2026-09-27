@@ -512,13 +512,12 @@ def _stale_type_key(
     from ciao.vault_index import canonical_type
 
     raw = (note_type or "").strip()
+    # ``canonical_type`` already resolves aliases (case-insensitively) against
+    # the same registry, so a separate alias lookup here could never add an
+    # owner it did not already return.
     canonical = canonical_type(raw, registry=registry)
     if canonical:
         return canonical
-    if registry is not None:
-        owner = registry.aliases().get(raw, "")
-        if owner:
-            return owner
     return raw.lower()
 
 
