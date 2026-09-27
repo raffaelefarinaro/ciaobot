@@ -641,6 +641,10 @@ fn host_url_from_answer(answer: &str) -> Option<String> {
 /// Download the pinned installer for this app's own version, start it detached
 /// with `--migrate`, and quit so the hand-over can proceed.
 ///
+/// The same version is passed to the run, so the installer installs the release
+/// its own script came from instead of resolving `latest` a second time while
+/// the app is already on its way out.
+///
 /// `install-engine.sh` owns the sequencing, the before-images and the rollback,
 /// so this does not migrate anything itself: it asks the app to stop being the
 /// engine's owner, which is the one thing the installer cannot do for itself
@@ -682,13 +686,14 @@ fn begin_engine_migration(app: AppHandle, extra: Vec<String>) {
         tray_log(
             &app,
             &format!(
-                "engine migration: {} --migrate {} → transcript {}",
+                "engine migration: {} --migrate --version {} {} → transcript {}",
                 script.display(),
+                version,
                 extra.join(" "),
                 log.display()
             ),
         );
-        if let Err(error) = service::spawn_engine_migration(&script, &extra, &log) {
+        if let Err(error) = service::spawn_engine_migration(&script, &version, &extra, &log) {
             tray_log(&app, &format!("engine migration FAILED: {error}"));
             show_error(&app, "Could not move the engine", error);
             restore(&app);

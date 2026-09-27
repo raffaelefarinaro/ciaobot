@@ -197,10 +197,13 @@ pub fn bootstrap_existing_service(server_plist: &Path) -> Result<(), String> {
 
 const INSTALLER_NAME: &str = "install-engine.sh";
 const INSTALLER_BASE_URL: &str = "https://github.com/raffaelefarinaro/ciaobot/releases/download/";
-/// The only flag the app ever passes on its own. `--as-host` and
-/// `--as-client URL` are answers to a question only a `--migrate` run asks, and
-/// they are never guessed: the installer refuses either without `--migrate`.
+/// The only flags the app ever passes on its own. `--migrate` is what turns a
+/// re-run of the one-liner into the hand-over, and `--version` pins the run to
+/// the release this app was downloaded from; `--as-host` and `--as-client URL`
+/// are answers to a question only a `--migrate` run asks, and they are never
+/// guessed: the installer refuses either without `--migrate`.
 const MIGRATE_FLAG: &str = "--migrate";
+const VERSION_FLAG: &str = "--version";
 /// The program that detaches the installer, and the interpreter that runs it.
 ///
 /// `nohup` is the detach mechanism, one of the two the design named. The app
@@ -316,12 +319,21 @@ fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// Split out from the spawn so the shape is testable without starting a
 /// process, and so [`spawn_engine_migration`] and its tests cannot disagree
 /// about it: the spawner builds its `Command` from exactly this.
-pub fn migration_argv(script: &Path, extra: &[String]) -> Vec<String> {
+///
+/// `version` is the running app's own version, the same value
+/// [`engine_installer_url`] pins the download to. Without it the script resolves
+/// `latest` for itself, and a release published between the download and the
+/// run would install a different engine than the installer this app just
+/// fetched. The extras follow the pin, so the script's own flags can never be
+/// read as part of a version string.
+pub fn migration_argv(script: &Path, version: &str, extra: &[String]) -> Vec<String> {
     let mut argv = vec![
         DETACH_PROGRAM.to_string(),
         INSTALLER_SHELL.to_string(),
         script.display().to_string(),
         MIGRATE_FLAG.to_string(),
+        VERSION_FLAG.to_string(),
+        version.to_string(),
     ];
     argv.extend(extra.iter().cloned());
     argv
@@ -332,8 +344,13 @@ pub fn migration_argv(script: &Path, extra: &[String]) -> Vec<String> {
 /// The app quits immediately after this returns, so the child has to outlive it:
 /// `nohup` ignores the hangup, and the child is put in its own process group so
 /// nothing this app's own group receives can reach the migration.
-pub fn spawn_engine_migration(script: &Path, extra: &[String], log: &Path) -> Result<(), String> {
-    let argv = migration_argv(script, extra);
+pub fn spawn_engine_migration(
+    script: &Path,
+    version: &str,
+    extra: &[String],
+    log: &Path,
+) -> Result<(), String> {
+    let argv = migration_argv(script, version, extra);
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| "the migration command line is empty".to_string())?;
@@ -498,8 +515,8 @@ mod tests {
         assert!(error.contains("404"), "{error}");
     }
 
-    // `--migrate` is the app's only own argument: it is what turns a re-run of
-    // the one-liner into the hand-over, and the installer refuses an
+    // `--migrate` is the app's own argument: it is what turns a re-run of the
+    // one-liner into the hand-over, and the installer refuses an
     // `--as-host`/`--as-client` override without it.
     #[test]
     fn the_migration_runs_the_detached_shell_with_migrate() {
@@ -507,12 +524,53 @@ mod tests {
             Path::new("/Users/ciao/.local/state/ciaobot/engine-migration/install-engine.sh");
 
         assert_eq!(
-            migration_argv(script, &[]),
+            migration_argv(script, "0.18.1", &[]),
             [
                 "/usr/bin/nohup",
                 "/bin/sh",
                 "/Users/ciao/.local/state/ciaobot/engine-migration/install-engine.sh",
                 "--migrate",
+                "--version",
+                "0.18.1",
+            ]
+        );
+    }
+
+    // Left to itself the installer resolves `latest` for the wheel and the
+    // manifest it installs, so without this pin a release published between the
+    // download and the run hands the user an engine nobody told them about, from
+    // a script they never read. The version the installer was downloaded for is
+    // the version it has to install.
+    #[test]
+    fn the_migration_pins_the_install_to_the_app_version() {
+        let script = Path::new("/tmp/install-engine.sh");
+
+        let argv = migration_argv(script, "0.18.1", &["--as-host".to_string()]);
+
+        let pin = argv
+            .iter()
+            .position(|argument| argument == "--version")
+            .expect("the hand-over installs whatever release resolves latest");
+        assert_eq!(
+            argv[pin + 1],
+            "0.18.1",
+            "the pin must carry the app version"
+        );
+        assert_eq!(
+            argv.iter().position(|argument| argument == "--as-host"),
+            Some(pin + 2),
+            "the extras follow the pin, and never sit between the flag and its value"
+        );
+        assert_eq!(
+            argv,
+            [
+                "/usr/bin/nohup",
+                "/bin/sh",
+                "/tmp/install-engine.sh",
+                "--migrate",
+                "--version",
+                "0.18.1",
+                "--as-host",
             ]
         );
     }
@@ -523,12 +581,14 @@ mod tests {
 
         // One flag, no value: the installer reads it as a switch.
         assert_eq!(
-            migration_argv(script, &["--as-host".to_string()]),
+            migration_argv(script, "0.18.1", &["--as-host".to_string()]),
             [
                 "/usr/bin/nohup",
                 "/bin/sh",
                 "/tmp/install-engine.sh",
                 "--migrate",
+                "--version",
+                "0.18.1",
                 "--as-host"
             ]
         );
@@ -538,6 +598,7 @@ mod tests {
         assert_eq!(
             migration_argv(
                 script,
+                "0.18.1",
                 &[
                     "--as-client".to_string(),
                     "https://ciao.example:8443".to_string()
@@ -548,6 +609,8 @@ mod tests {
                 "/bin/sh",
                 "/tmp/install-engine.sh",
                 "--migrate",
+                "--version",
+                "0.18.1",
                 "--as-client",
                 "https://ciao.example:8443",
             ]
@@ -574,7 +637,7 @@ mod tests {
         )
         .unwrap();
 
-        spawn_engine_migration(&script, &["--as-host".to_string()], &log).unwrap();
+        spawn_engine_migration(&script, "0.18.1", &["--as-host".to_string()], &log).unwrap();
 
         let transcript = wait_for_lines(&log, 2);
         assert!(
