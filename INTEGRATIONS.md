@@ -316,11 +316,9 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 
 - `PWA_AUTH_TOKEN` (required): the dashboard password, doubling as the pre-shared
   token for PWA auth and the session-signing secret. The first-run wizard asks for
-  it and Settings → PWA password changes it. On a node in client
-  mode this local token is not what you log in with: the login screen
-  authenticates against the *host's* token, and Settings → PWA password edits the
-  host's too (that card is proxied). The local token still guards this machine's
-  own never-proxied routes, `/api/node/*` and `/api/device/*`.
+  it and Settings → PWA password changes it. There is one engine per install, so
+  this is the only password that install has: a second device runs its own engine
+  and its own token.
 - `PWA_PORT` (default `8443`), `PWA_HOST` (default `0.0.0.0`). The server binds
   all interfaces so the PWA is reachable over LAN and Tailscale; set
   `PWA_HOST=127.0.0.1` in `.env` for loopback-only access.
@@ -337,7 +335,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
   discovery for a local Tauri development server target.
 - Session cookies are HttpOnly. Production/domain-scoped cookies are also Secure, and state-changing browser requests must come from the same host via `Origin` or `Referer`.
 - Ciaobot sends baseline security headers from the Starlette app, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
-- In client mode, the relay serves remote content at `localhost`; local node/device/drop controls require a loopback peer at `127.0.0.1` and `X-Ciao-Local-Control: 1` on API requests. The macOS remote PWA has no Tauri capability; see `docs/REMOTE_BOUNDARY.md` for the remaining protocol and credential work.
+- There is one origin and one session: `/api/*` needs the signed `ciao_session` cookie (minus a small public allowlist), `/ws/*` handshakes are checked for same-origin and then the session, and state-changing requests must present a matching `Origin`/`Referer`. The tray feeds and the update drain stay loopback-only, gated on the TCP peer. The macOS remote PWA has no Tauri capability; see `docs/REMOTE_BOUNDARY.md` for the remaining protocol and credential work.
 - Workspace HTML artifact previews use a stricter sandbox CSP: inline scripts/styles and `data:` images/fonts/audio/video are allowed, while network connections, `blob:` sources, and same-origin session access are blocked.
 
 ### Optional env vars
@@ -416,10 +414,10 @@ Ciaobot runs on macOS under launchd.
 - Selecting `Update` from the menu-bar tray opens the bundled update window immediately. It reports engine/app milestones with a percentage and expandable terminal details, then restarts the app only after both halves are ready. The PWA's non-bundled package-update actions use the same visual progress surface while their restart is pending.
 - Stop: `launchctl unload ~/Library/LaunchAgents/com.ciao.server.plist`.
 - Remote access is not configured by the public app. Use localhost by default, or put Tailscale or another user-owned network layer in front of the local server.
-- In client mode, non-image chat files use the authenticated host tunnel.
-  Supported documents are converted from a temporary host source and only
-  Markdown is kept in the active project; the composer never receives a client
-  filesystem path. Generic ProjectView uploads are unchanged.
+- A dropped non-image chat file is converted locally: supported documents are
+  converted from the drop's own source and only Markdown is kept in the active
+  project; the composer never receives a filesystem path. Generic ProjectView
+  uploads are unchanged.
 
 ### Server startup behaviors
 

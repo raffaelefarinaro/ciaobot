@@ -47,7 +47,6 @@ from ciao import provider_registry
 from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.web.document_conversion import is_anydoc_document
-from ciao.native_sessions import live_sessions_for_workspace
 from ciao.config import (
     CLAUDE_MODELS,
     GWS_DEFAULT_PROFILE,
@@ -1795,10 +1794,10 @@ def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
         # provider to materialise it. Unlike EPERM the errno is unambiguous
         # here, so it needs no corroborating path check. The desktop shell
         # stages unreadable drops past this (`needs_drop_staging` in
-        # desktop/src-tauri/src/lib.rs); a file over the staging limit, an
-        # older shell, or a client node transferring a non-image still lands
-        # here. A non-image dropped on a host does not: the path is handed to
-        # the agent unread, so the agent hits the same errno on its own.
+        # desktop/src-tauri/src/lib.rs); a file over the staging limit or an
+        # older shell still lands here. A non-image dropped on this Mac does
+        # not: the path is handed to the agent unread, so the agent hits the
+        # same errno on its own.
         return (
             f"{_drop_display_name(path)} is not downloaded to this Mac yet. Right-click it in "
             "Finder, choose Download Now, then drag it in again."
@@ -1836,35 +1835,6 @@ def _safe_desktop_drop_error(path: Path, exc: Exception) -> str:
         message,
     )
     return message[:_DESKTOP_DROP_MAX_ERROR_BYTES]
-
-
-def _safe_remote_drop_error(value: object) -> str:
-    """Bound a host-side per-file error without reflecting its filesystem."""
-    message = str(value or "").strip()
-    if (
-        not message
-        or "/" in message
-        or "\\" in message
-        or "\x00" in message
-        or any(not char.isprintable() for char in message)
-    ):
-        return "host could not import this file"
-    return message[:_DESKTOP_DROP_MAX_ERROR_BYTES]
-
-
-def _safe_image_ref(value: object) -> str | None:
-    """Accept only a bounded, path-free image reference from a host."""
-    ref = str(value or "").strip()
-    if (
-        not ref
-        or len(ref) > 128
-        or "/" in ref
-        or "\\" in ref
-        or "\x00" in ref
-        or any(not char.isprintable() for char in ref)
-    ):
-        return None
-    return ref
 
 
 def _desktop_drop_ref(pcm, chat_id: str, path: Path) -> dict[str, str]:
@@ -2022,12 +1992,6 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
-        node_mgr = getattr(request.app.state, "node_state_manager", None)
-        from ciao.web.remote_boundary import is_client_mode, is_invalid_node_state
-
-        if is_invalid_node_state(request):
-            return JSONResponse({"error": "node state is invalid"}, status_code=503)
-        is_client = is_client_mode(request)
         image_paths = [
             path
             for path in paths
@@ -2037,222 +2001,65 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
         errors: list[dict[str, str]] = []
         file_refs: list[dict[str, str]] = []
 
-        if not is_client:
-            pcm = getattr(request.app.state, "project_chat_manager", None)
-            if pcm is None:
-                return JSONResponse({"error": "project chat manager unavailable"}, status_code=503)
-            chat = pcm.get_chat(chat_id)
-            if chat is None:
-                return JSONResponse({"error": "chat not found"}, status_code=404)
-            project_id = chat.project_id
-            image_refs: list[str] = []
-            for path in image_paths:
-                try:
-                    if path.stat().st_size > MAX_IMAGE_SIZE_BYTES:
-                        raise ValueError("image too large")
-                    image_data = await asyncio.to_thread(
-                        _read_native_file_limited, path, MAX_IMAGE_SIZE_BYTES
-                    )
-                    image_refs.append(pcm.save_image_upload(image_data, path.name).path.name)
-                except (OSError, ValueError) as exc:
-                    errors.append(
-                        {
-                            "filename": _drop_display_name(path),
-                            "error": _safe_desktop_drop_error(path, exc),
-                        }
-                    )
-            for path in regular_paths:
-                if not path.is_file():
-                    errors.append(
-                        {
-                            "filename": _drop_display_name(path),
-                            "error": "folders cannot be attached",
-                        }
-                    )
-                    continue
-                try:
-                    if is_anydoc_document(path.name):
-                        converted = await asyncio.to_thread(
-                            pcm.convert_chat_document, project_id, path
-                        )
-                        generated = Path(str(converted.get("markdown_path") or ""))
-                        if not generated.is_file():
-                            raise ValueError("document conversion produced no file")
-                        file_refs.append(_desktop_drop_ref(pcm, chat_id, generated))
-                        keep_paths.add(path)
-                    else:
-                        file_refs.append(_desktop_drop_ref(pcm, chat_id, path))
-                        keep_paths.add(path)
-                except (OSError, LookupError, RuntimeError, ValueError) as exc:
-                    errors.append(
-                        {
-                            "filename": _drop_display_name(path),
-                            "error": _safe_desktop_drop_error(path, exc),
-                        }
-                    )
-            preserve_staged = True
-            return JSONResponse(
-                {
-                    "file_refs": file_refs,
-                    "image_refs": image_refs,
-                    "errors": errors,
-                }
-            )
-
-        if node_mgr is None:
-            return JSONResponse({"error": "client node state unavailable"}, status_code=503)
-        host_url = node_mgr.get_active_peer_url()
-        from ciao.node_state import peer_url_is_allowed
-
-        if not host_url:
-            return JSONResponse({"error": "client has no reachable host"}, status_code=503)
-        if not peer_url_is_allowed(host_url, str(request.url.scheme or "")):
-            return JSONResponse({"error": "client peer transport is not allowed"}, status_code=503)
-
-        import httpx
-
-        from ciao.web.auth import SESSION_COOKIE
-
-        headers = {
-            "origin": host_url.rstrip("/"),
-            "x-ciao-desktop-drop": "1",
-        }
-        host_session = node_mgr.get_host_session()
-        if host_session:
-            headers["cookie"] = f"{SESSION_COOKIE}={host_session}"
-        timeout = httpx.Timeout(10 * 60.0, connect=5.0)
-        client_image_refs: list[str] = []
-
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-            image_files = []
-            for index, path in enumerate(image_paths):
-                try:
-                    if path.stat().st_size > MAX_IMAGE_SIZE_BYTES:
-                        errors.append(
-                            {"filename": _drop_display_name(path), "error": "image too large"}
-                        )
-                        continue
-                    data = await asyncio.to_thread(
-                        _read_native_file_limited, path, MAX_IMAGE_SIZE_BYTES
-                    )
-                except (OSError, ValueError) as exc:
-                    errors.append(
-                        {
-                            "filename": _drop_display_name(path),
-                            "error": _safe_desktop_drop_error(path, exc),
-                        }
-                    )
-                    continue
-                image_files.append(
-                    (
-                        f"file{index}",
-                        (
-                            path.name,
-                            data,
-                            mimetypes.guess_type(path.name)[0] or "application/octet-stream",
-                        ),
-                    )
+        pcm = getattr(request.app.state, "project_chat_manager", None)
+        if pcm is None:
+            return JSONResponse({"error": "project chat manager unavailable"}, status_code=503)
+        chat = pcm.get_chat(chat_id)
+        if chat is None:
+            return JSONResponse({"error": "chat not found"}, status_code=404)
+        project_id = chat.project_id
+        image_refs: list[str] = []
+        for path in image_paths:
+            try:
+                if path.stat().st_size > MAX_IMAGE_SIZE_BYTES:
+                    raise ValueError("image too large")
+                image_data = await asyncio.to_thread(
+                    _read_native_file_limited, path, MAX_IMAGE_SIZE_BYTES
                 )
-            if image_files:
-                response = await client.post(
-                    f"{host_url.rstrip('/')}/api/chats/{chat_id}/images",
-                    headers=headers,
-                    files=image_files,
+                image_refs.append(pcm.save_image_upload(image_data, path.name).path.name)
+            except (OSError, ValueError) as exc:
+                errors.append(
+                    {
+                        "filename": _drop_display_name(path),
+                        "error": _safe_desktop_drop_error(path, exc),
+                    }
                 )
-                try:
-                    payload = response.json()
-                except ValueError:
-                    payload = {}
-                if not response.is_success or not isinstance(payload, list):
-                    raise ValueError("host image upload failed")
-                for entry in payload:
-                    if not isinstance(entry, dict):
-                        continue
-                    if entry.get("ref"):
-                        image_ref = _safe_image_ref(entry.get("ref"))
-                        if image_ref:
-                            client_image_refs.append(image_ref)
-                    elif entry.get("error"):
-                        errors.append(
-                            {
-                                "filename": _drop_display_name(Path(str(entry.get("filename") or "file"))),
-                                "error": _safe_remote_drop_error(entry["error"]),
-                            }
-                        )
-
-            files: list[tuple[str, tuple[str, bytes, str]]] = []
-            for path in regular_paths:
-                if not path.is_file():
-                    errors.append(
-                        {
-                            "filename": _drop_display_name(path),
-                            "error": "folders cannot be transferred to the host",
-                        }
-                    )
-                    continue
-                try:
-                    if path.stat().st_size > chat_service._PROJECT_UPLOAD_MAX_BYTES:
-                        errors.append(
-                            {"filename": _drop_display_name(path), "error": "file too large"}
-                        )
-                        continue
-                    data = await asyncio.to_thread(
-                        _read_native_file_limited,
-                        path,
-                        chat_service._PROJECT_UPLOAD_MAX_BYTES,
-                    )
-                except (OSError, ValueError) as exc:
-                    errors.append(
-                        {
-                            "filename": _drop_display_name(path),
-                            "error": _safe_desktop_drop_error(path, exc),
-                        }
-                    )
-                    continue
-                files.append(
-                    (
-                        f"file{len(files)}",
-                        (
-                            path.name,
-                            data,
-                            mimetypes.guess_type(path.name)[0] or "application/octet-stream",
-                        ),
-                    )
+        for path in regular_paths:
+            if not path.is_file():
+                errors.append(
+                    {
+                        "filename": _drop_display_name(path),
+                        "error": "folders cannot be attached",
+                    }
                 )
-            if files:
-                response = await client.post(
-                    f"{host_url.rstrip('/')}/api/chats/{chat_id}/attachments",
-                    headers=headers,
-                    files=files,
-                )
-                try:
-                    payload = response.json()
-                except ValueError:
-                    payload = {}
-                if not response.is_success or not isinstance(payload, dict):
-                    raise ValueError("host file upload failed")
-                for entry in payload.get("file_refs", []):
-                    if not isinstance(entry, dict):
-                        continue
-                    ref = str(entry.get("ref") or "")
-                    if not ref or not re.fullmatch(r"drop_[0-9a-f]{32}", ref):
-                        continue
-                    file_refs.append(
-                        {
-                            "ref": ref,
-                            "name": _drop_display_name(Path(str(entry.get("name") or "file"))),
-                        }
+                continue
+            try:
+                if is_anydoc_document(path.name):
+                    converted = await asyncio.to_thread(
+                        pcm.convert_chat_document, project_id, path
                     )
-                for entry in payload.get("errors", []):
-                    if isinstance(entry, dict):
-                        errors.append(
-                            {
-                                "filename": _drop_display_name(Path(str(entry.get("filename") or "file"))),
-                                "error": _safe_remote_drop_error(entry.get("error") or "upload failed"),
-                            }
-                        )
+                    generated = Path(str(converted.get("markdown_path") or ""))
+                    if not generated.is_file():
+                        raise ValueError("document conversion produced no file")
+                    file_refs.append(_desktop_drop_ref(pcm, chat_id, generated))
+                    keep_paths.add(path)
+                else:
+                    file_refs.append(_desktop_drop_ref(pcm, chat_id, path))
+                    keep_paths.add(path)
+            except (OSError, LookupError, RuntimeError, ValueError) as exc:
+                errors.append(
+                    {
+                        "filename": _drop_display_name(path),
+                        "error": _safe_desktop_drop_error(path, exc),
+                    }
+                )
+        preserve_staged = True
         return JSONResponse(
-            {"file_refs": file_refs, "image_refs": client_image_refs, "errors": errors}
+            {
+                "file_refs": file_refs,
+                "image_refs": image_refs,
+                "errors": errors,
+            }
         )
     except (OSError, ValueError) as exc:
         return JSONResponse({"error": _safe_desktop_drop_error(Path("file"), exc)}, status_code=502)
@@ -2759,29 +2566,6 @@ async def chat_message_part(request: Request) -> JSONResponse:
     row = dict(rows[idx])
     row["i"] = idx
     return JSONResponse(row)
-
-
-async def native_sessions(request: Request) -> JSONResponse:
-    """List locally-running Claude Code CLI sessions for a workspace.
-
-    Serves ``GET /api/native/sessions?workspace=<path>``; without the param
-    the configured workspace root is used. Read-only liveness probe used by
-    the node-handover flow to warn about externally-started CLI sessions.
-    """
-    params = _request_params(request)
-    workspace = params.get("workspace") or str(
-        request.app.state.config.workspace_root
-    )
-    try:
-        sessions = live_sessions_for_workspace(workspace)
-    except OSError:
-        logger.exception("Native session scan failed for %s", workspace)
-        sessions = []
-    return JSONResponse({
-        "sessions": sessions,
-        "workspace": workspace,
-        "checked_at": datetime.now(UTC).isoformat(),
-    })
 
 
 async def chat_subagents(request: Request) -> JSONResponse:
@@ -5224,12 +5008,9 @@ async def status_endpoint(request: Request) -> JSONResponse:
 
 
 async def startup_status_endpoint(request: Request) -> JSONResponse:
-    """Return startup phase progress and node role state."""
+    """Return startup phase progress and the host's own version state."""
     from ciao import __version__
 
-    node_mgr = getattr(request.app.state, "node_state_manager", None)
-    role = node_mgr.get_role() if node_mgr else "host"
-    active_peer_url = node_mgr.get_active_peer_url() if node_mgr else None
     config = getattr(request.app.state, "config", None)
 
     tracker = getattr(request.app.state, "startup_tracker", None)
@@ -5238,14 +5019,6 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
     payload.update({
         "version": __version__,
         "desktop_api_version": 1,
-        # Identifies the machine that answered. A client asks its host for this
-        # so the mirrored UI can name whose data it is showing.
-        "node_id": node_mgr.node_id if node_mgr else "",
-        "node_role": role,
-        "state_valid": bool(node_mgr.is_valid()) if node_mgr else True,
-        "active_peer_url": active_peer_url,
-        "host_url": node_mgr.get_host_url() if node_mgr else None,
-        "has_host_session": bool(node_mgr.get_host_session()) if node_mgr else False,
         "auth_required": bool(getattr(config, "pwa_auth_required", False)) if config else False,
         "latest_version": latest_version,
         "update_available": update_available,
@@ -5327,10 +5100,6 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
     session cookie) — see ``_LOOPBACK_ONLY_API`` in ``ciao.web.auth``. Unlike
     ``/api/active-chats`` this returns titles and workspace names, so it must
     not be reachable from the network.
-
-    In client mode the proxy forwards this to the active peer so the tray list
-    matches the chats that ``/api/active-chats`` reports as working — local
-    ``web_projects.json`` can lag the leader after handover.
     """
     limit_raw = request.query_params.get("limit", "10")
     try:
@@ -6339,11 +6108,10 @@ async def skill_import(request: Request) -> JSONResponse:
     config = request.app.state.config
     # Reject oversized bodies before multipart parsing. `request.form()` fully
     # consumes and spools the multipart file, so a very large upload would
-    # exhaust temporary disk (and, in client mode, the proxy buffers the body in
-    # memory) before the per-file cap below is ever applied. A missing or
-    # malformed Content-Length (chunked/HTTP2 clients) is rejected too: without
-    # it there is no cheap pre-parse bound, and a legitimate zip upload always
-    # carries the header.
+    # exhaust temporary disk before the per-file cap below is ever applied. A
+    # missing or malformed Content-Length (chunked/HTTP2 clients) is rejected
+    # too: without it there is no cheap pre-parse bound, and a legitimate zip
+    # upload always carries the header.
     max_zip_bytes = 10 * 1024 * 1024
     content_length = request.headers.get("content-length")
     try:

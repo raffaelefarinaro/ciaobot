@@ -1,50 +1,5 @@
 <template>
   <div id="ciao-app" :data-workspace-color="workspaceColor">
-    <div
-      v-if="(clientMode || clientStateUnknown) && !onDevicePage"
-      class="client-mode-banner"
-      :class="{ 'is-offline': hostUnreachable }"
-      :role="hostUnreachable ? 'alert' : 'status'"
-    >
-      <!-- The host can drop while no chat is open, and the per-chat card that
-           announces it lives inside ChatPanel. This banner is the only piece of
-           chrome present on every screen, so it carries the state too. -->
-      <span v-if="projectStore.hostAuthRequired" class="client-mode-banner-text">
-        The host needs its password again.
-        <a v-if="canUseDeviceControls" class="client-mode-banner-link" :href="contentHref('/login')">Log in again</a>
-      </span>
-      <span v-else-if="clientStateUnknown" class="client-mode-banner-text">
-        Ciaobot can’t tell whether this browser is on the host.
-      </span>
-      <span v-else-if="projectStore.hostPolicyBlocked" class="client-mode-banner-text">
-        A local policy is blocking the connection to the host.
-      </span>
-      <span v-else-if="hostUnreachable" class="client-mode-banner-text">
-        <span class="client-mode-banner-spinner" aria-hidden="true"></span>
-        Can’t reach <code>{{ clientHostLabel }}</code>. Reconnecting…
-      </span>
-      <span v-else class="client-mode-banner-text">
-        Client mode. Everything below is on
-        <code>{{ clientHostLabel }}</code><template v-if="!clientHasSession"> · host password needed</template>
-      </span>
-      <div class="client-mode-banner-actions">
-        <!-- The one screen that is about this computer, not the host. -->
-        <a
-          v-if="canUseDeviceControls"
-          class="client-mode-banner-link"
-          :href="deviceHref('/device')"
-        >{{ clientStateUnknown || projectStore.hostPolicyBlocked ? 'Open This device' : 'This device' }}</a>
-        <button
-          v-if="canUseDeviceControls"
-          type="button"
-          class="client-mode-banner-btn"
-          :disabled="switchingToHost"
-          @click="switchBackToHost"
-        >
-          {{ switchingToHost ? 'Switching…' : 'Switch to host' }}
-        </button>
-      </div>
-    </div>
     <Transition name="fade">
       <StartupView
         v-if="showStartup"
@@ -75,8 +30,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, provide, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import EngineOfflineView from './components/EngineOfflineView.vue'
 import InAppToast from './components/InAppToast.vue'
@@ -84,12 +38,10 @@ import NewChatPicker from './components/NewChatPicker.vue'
 import PromptDialog from './components/PromptDialog.vue'
 import RestartNotice from './components/RestartNotice.vue'
 import StartupView from './components/StartupView.vue'
-import { askConfirm } from './lib/confirm'
 import { createEngineMonitor, type EngineState } from './lib/engineStatus'
 import { normalizeWorkspaceColor } from './lib/workspaceColors'
-import { contentHref, deviceHref, isLoopbackPage, navigateToDevice } from './lib/originNavigation'
+import { isLoopbackPage } from './lib/loopback'
 import { useProjectStore } from './stores/projects'
-import { CONNECTION_ROLE_KEY, type ConnectionRole } from './lib/connectionRole'
 
 interface Phase {
   name: string
@@ -100,18 +52,14 @@ interface Phase {
 }
 
 const projectStore = useProjectStore()
-const route = useRoute()
 const phases = ref<Phase[]>([])
 const overallReady = ref(false)
 const serverVersion = ref('')
 const skipped = ref(false)
 const startupDone = ref(false)
-const clientMode = ref(false)
-const clientStateUnknown = ref(false)
+// The engine is either on this machine (a loopback origin) or on another one
+// the user reached over the network; the offline curtain names one or the other.
 const canUseDeviceControls = isLoopbackPage()
-const clientHostUrl = ref('')
-const clientHasSession = ref(false)
-const switchingToHost = ref(false)
 
 // An engine that stops answering (crash, `ciao service stop`, reboot) used to
 // leave a loaded tab with no honest state: API calls failed one at a time and
@@ -145,72 +93,18 @@ async function retryEngine() {
   engineRetrying.value = true
   try { await engineMonitor.retry() } finally { engineRetrying.value = false }
 }
-// The device panel is about this machine, so the "you are seeing the host"
-// banner would contradict it.
-const onDevicePage = computed(() => route.path.startsWith('/device'))
 const workspaceColor = computed(() => {
   const active = projectStore.activeWorkspace
   const ws = projectStore.workspaces.find((item) => item.name === active)
   return normalizeWorkspaceColor(ws?.color)
 })
-// True only in client mode: the local node proxy reports it cannot reach the
-// host (see the `host_unreachable` frame handling in the projects store).
-//
-// A mounted ChatPanel renders its own `host-connection-card` from the same
-// flag, with a richer recovery action, so the banner stands down there rather
-// than announcing the same outage twice -- to the eye and to a screen reader.
-// Keyed on the panel actually being on screen rather than on the URL: /chat
-// with no id and /chat/:id/subagent/:id are both chat paths that mount no
-// panel, and those screens need the banner like any other.
-const hostUnreachable = computed(
-  () => projectStore.hostConnectionUnavailable && projectStore.chatPanelsMounted === 0,
-)
-const clientHostLabel = computed(() => {
-  const raw = clientHostUrl.value
-  if (!raw) return 'remote host'
-  try {
-    return new URL(raw).host || raw
-  } catch {
-    return raw
-  }
-})
-
-provide(CONNECTION_ROLE_KEY, computed<ConnectionRole>(() => {
-  if (clientStateUnknown.value) return { kind: 'unknown' }
-  if (clientMode.value) {
-    return {
-      kind: 'client',
-      hostLabel: clientHostLabel.value,
-      reachable: !projectStore.hostConnectionUnavailable,
-    }
-  }
-  return { kind: 'host' }
-}))
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null
-let nodePollTimer: ReturnType<typeof setInterval> | null = null
-
-async function switchBackToHost() {
-  if (!canUseDeviceControls || switchingToHost.value) return
-  const confirmed = await askConfirm(
-    'Stop client mode and become host on this machine? Changes that exist only on the other host may not be synced.',
-    {
-      title: 'Become host on this device?',
-      confirmLabel: 'Disconnect and become host',
-    },
-  )
-  if (!confirmed) return
-  switchingToHost.value = true
-  navigateToDevice()
-}
 
 async function pollStartup() {
   try {
     const res = await fetch('/api/startup-status', { redirect: 'manual' })
-    if (!res.ok) {
-      clientStateUnknown.value = true
-      return
-    }
+    if (!res.ok) return
     const data = await res.json()
     if (data.version && serverVersion.value !== data.version) {
       serverVersion.value = data.version
@@ -226,31 +120,9 @@ async function pollStartup() {
     if (overallReady.value) {
       startupDone.value = true
     }
-    refreshClientBanner(data)
   } catch {
-    // A failed role probe is unknown, never evidence of host mode.
-    clientStateUnknown.value = true
-  }
-}
-
-function refreshClientBanner(data: Record<string, unknown>) {
-  const role = String(data.node_role || '')
-  clientStateUnknown.value = data.state_valid !== true || !['host', 'client', 'active', 'standby'].includes(role)
-  clientMode.value = !clientStateUnknown.value && (role === 'client' || role === 'standby')
-  clientHostUrl.value = String(data.host_url || data.active_peer_url || '')
-  clientHasSession.value = Boolean(data.has_host_session)
-}
-
-async function pollClientBanner() {
-  try {
-    const res = await fetch('/api/startup-status', { redirect: 'manual' })
-    if (!res.ok) {
-      clientStateUnknown.value = true
-      return
-    }
-    refreshClientBanner(await res.json())
-  } catch {
-    clientStateUnknown.value = true
+    // A failed probe is no news: the boot curtain keeps showing and the next
+    // tick re-reads it.
   }
 }
 
@@ -271,17 +143,11 @@ function stopPolling() {
 
 onMounted(() => {
   pollStartup().then(scheduleNextPoll)
-  void pollClientBanner()
-  nodePollTimer = setInterval(() => { void pollClientBanner() }, 5000)
   engineMonitor.start()
 })
 
 onUnmounted(() => {
   stopPolling()
-  if (nodePollTimer) {
-    clearInterval(nodePollTimer)
-    nodePollTimer = null
-  }
   engineMonitor.stop()
 })
 
@@ -292,92 +158,6 @@ watch(showStartup, (show) => {
 </script>
 
 <style>
-.client-mode-banner {
-  --banner-tone: var(--warning);
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 12px;
-  padding: 6px 16px;
-  background: color-mix(in srgb, var(--banner-tone) 8%, var(--bg));
-  border-bottom: 1px solid color-mix(in srgb, var(--banner-tone) 35%, var(--border));
-  color: var(--fg);
-  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, sans-serif);
-  font-size: var(--text-sm);
-  line-height: 1.45;
-}
-.client-mode-banner.is-offline { --banner-tone: var(--error); }
-.client-mode-banner-text { flex: 1 1 16rem; min-width: 0; }
-/* The state dot rides the sentence so it stays beside the first word when the
-   banner wraps on a phone. */
-.client-mode-banner-text::before {
-  content: "";
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  margin-right: 8px;
-  vertical-align: 1px;
-  border-radius: var(--radius-pill);
-  background: var(--banner-tone);
-}
-.client-mode-banner-spinner {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  margin-right: var(--space-2);
-  vertical-align: -1px;
-  border: 2px solid color-mix(in srgb, var(--fg) 30%, transparent);
-  border-top-color: var(--fg);
-  border-radius: var(--radius-pill);
-  animation: client-mode-banner-spin 0.9s linear infinite;
-}
-@keyframes client-mode-banner-spin {
-  to { transform: rotate(360deg); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .client-mode-banner-spinner { animation: none; }
-}
-.client-mode-banner code {
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 0.92em;
-  color: var(--fg);
-}
-.client-mode-banner-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-left: auto;
-  flex-shrink: 0;
-}
-.client-mode-banner-link {
-  color: var(--accent);
-  font-weight: 600;
-  text-decoration: none;
-  white-space: nowrap;
-}
-.client-mode-banner-link:hover { text-decoration: underline; text-underline-offset: 3px; }
-.client-mode-banner-btn {
-  min-height: 30px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 6px);
-  background: var(--bg-elev, var(--bg2));
-  color: var(--fg);
-  font: inherit;
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.client-mode-banner-btn:hover:not(:disabled) { border-color: var(--border-strong, var(--border)); }
-.client-mode-banner-btn:disabled { opacity: 0.6; cursor: wait; }
-@media (pointer: coarse) {
-  .client-mode-banner-btn, .client-mode-banner-link {
-    min-height: var(--touch, 44px);
-    display: inline-flex;
-    align-items: center;
-  }
-}
-
 :root {
   /* Font scale multiplier. The reference is the original (pre-rescale) UI;
      the default 1.2 corresponds to "100%" in the Settings display, so the

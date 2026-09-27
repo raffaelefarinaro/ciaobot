@@ -12,15 +12,6 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 from starlette.websockets import WebSocket
 
-from ciao.web.remote_boundary import (
-    is_client_mode,
-    is_control_origin,
-    is_invalid_node_state,
-    is_local_control_api_path,
-    local_control_api_guard,
-    local_control_origin_allowed,
-)
-
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +25,6 @@ _LOOPBACK_ADDRESSES = {"127.0.0.1", "::1", "localhost"}
 # Endpoints reachable with no session at all, from anywhere.
 _PUBLIC_API = {
     "/api/auth",
-    "/api/auth/bridge",
     "/api/auth/check",
     "/api/startup-status",
     "/api/active-chats",
@@ -46,9 +36,7 @@ _PUBLIC_API = {
 
 # Endpoints usable without a session, but only from a process on this machine.
 # `/api/menubar-chats` and `/api/menubar-notifications` are how the tray reads
-# chat titles and pending banners (it holds no cookie), and `/api/node/handover`
-# is the client-mode escape hatch offered on the login screen, which by
-# definition runs before any session exists. `/api/admin/drain` and
+# chat titles and pending banners (it holds no cookie). `/api/admin/drain` and
 # `/api/admin/drain/cancel` are the update coordinator's own drain handshake,
 # driven by `ciao update apply` before it bootstraps the detached updater job.
 # All are gated on the peer address rather than the Host header, which a caller
@@ -56,7 +44,6 @@ _PUBLIC_API = {
 _LOOPBACK_ONLY_API = {
     "/api/menubar-chats",
     "/api/menubar-notifications",
-    "/api/node/handover",
     "/api/admin/drain",
     "/api/admin/drain/cancel",
 }
@@ -194,13 +181,6 @@ async def authorize_websocket(websocket: WebSocket) -> bool:
     Closes the socket and returns False when the connection is not allowed.
     """
     origin = websocket.headers.get("origin")
-    if is_invalid_node_state(websocket):
-        await websocket.close(code=4004, reason="node state is invalid")
-        return False
-    if is_client_mode(websocket):
-        if is_control_origin(websocket) or not origin:
-            await websocket.close(code=4003, reason="forbidden client websocket origin")
-            return False
     if origin and not _same_origin(websocket, origin):
         logger.warning(
             "WebSocket origin rejected: origin=%s host=%s x-forwarded-host=%s "
@@ -291,9 +271,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        control_guard = local_control_api_guard(request)
-        if control_guard is not None:
-            return control_guard
         setup_token = request.query_params.get("setup")
         if path == "/" and setup_token:
             return _redeem_setup_token(request, setup_token)
@@ -307,14 +284,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
             or path.startswith("/ws/")
         )
         if not protected:
-            return await call_next(request)
-        if (
-            is_client_mode(request)
-            and is_local_control_api_path(path)
-            and local_control_origin_allowed(request)
-        ):
-            if not _state_change_origin_allowed(request):
-                return JSONResponse({"error": "forbidden origin"}, status_code=403)
             return await call_next(request)
         if path in _LOOPBACK_ONLY_API and is_loopback_client(request):
             if not _state_change_origin_allowed(request):

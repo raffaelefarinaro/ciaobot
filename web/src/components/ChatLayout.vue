@@ -80,11 +80,7 @@
                homepage behind it after closing a chat would just duplicate the
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-            <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false">
-              <template v-if="!isMobile" #actions>
-                <HostStatusPill />
-              </template>
-            </PaneHeader>
+            <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
               <!-- The glanceable status (face + summary) lives inside the active
                    workspace's lane header now (HomeRecentChats.vue), right under
@@ -208,11 +204,7 @@
              homepage behind it after closing a chat would just duplicate the
              same list. Hide the empty-state whenever the mobile sidebar is open. -->
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-          <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false">
-            <template v-if="!isMobile" #actions>
-              <HostStatusPill />
-            </template>
-          </PaneHeader>
+          <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
           <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
             <!-- The glanceable status (face + summary) lives inside the active
                  workspace's lane header now (HomeRecentChats.vue), right under
@@ -297,7 +289,6 @@ const SettingsView = defineAsyncComponent(() => import('./SettingsView.vue'))
 import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
-import HostStatusPill from './HostStatusPill.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
 import HomeIntake from './HomeIntake.vue'
 import HomeReviewSummary from './HomeReviewSummary.vue'

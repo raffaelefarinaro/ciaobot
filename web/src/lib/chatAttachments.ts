@@ -34,10 +34,6 @@ export function fileRefText(ref: string | undefined): string | null {
   return formatAttachedFilePath(`ciao-drop:${ref}`)
 }
 
-function localControlHeaders(): Record<string, string> {
-  return window.location.hostname === '127.0.0.1' ? { 'X-Ciao-Local-Control': '1' } : {}
-}
-
 function refsFrom(entries: FileRef[] | undefined): string[] {
   return (entries || [])
     .map(entry => fileRefText(entry.ref))
@@ -55,7 +51,6 @@ export async function uploadChatAttachments(
   const response = await fetchImpl(`/api/chats/${encodeURIComponent(chatId)}/attachments?opaque=1`, {
     method: 'POST',
     credentials: 'same-origin',
-    headers: localControlHeaders(),
     redirect: 'manual',
     body: form,
   })
@@ -73,7 +68,7 @@ export async function importDesktopDrop(
   const response = await fetchImpl('/api/desktop-drop', {
     method: 'POST',
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', ...localControlHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     redirect: 'manual',
     body: JSON.stringify({ grant_id: grantId, project_id: target.projectId, chat_id: target.chatId }),
   })

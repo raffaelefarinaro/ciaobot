@@ -2202,22 +2202,18 @@ class ScheduleManager:
         replayed — and only once per slot (``last_recovered_on``), so a run
         that keeps failing cannot make every restart dispatch it again.
 
-        A client node catches up on nothing. Automatic firing belongs to the
-        host (the same rule :meth:`tick` follows), and the startup pass is
-        automatic: without this a second machine in client mode would dispatch
-        every missed slot locally, duplicating runs the host owns and writing
-        to its own vault. The guard sits ahead of
-        :meth:`reconcile_interrupted_runs` so a client does not rewrite
-        persisted run state either — the ``"running"`` stamps it would find
-        belong to the host's turns, and converting them to ``"error"`` would
-        both mislabel them and make them look recoverable. Manual "Run now"
-        (:meth:`dispatch_now`) stays available on a client: that is a person
-        asking, not an automation.
+        The startup pass is automatic, so it is gated on the same predicate
+        :meth:`tick` follows: an install whose legacy ``node_state.json`` reads
+        ``client``/``invalid`` must not dispatch every missed slot locally
+        against a vault it does not own. The guard sits ahead of
+        :meth:`reconcile_interrupted_runs` so such an install does not rewrite
+        persisted run state either. Manual "Run now" (:meth:`dispatch_now`)
+        stays available: that is a person asking, not an automation.
 
         Returns the list of schedule_ids that were fired.
         """
         if self._is_node_active is not None and not self._is_node_active():
-            logger.info("Schedule catch-up skipped: client mode — the host owns automatic runs")
+            logger.info("Schedule catch-up skipped: legacy node state says this install is not the engine's own")
             return []
         # Turns that were streaming when the previous process stopped are
         # indistinguishable from running ones until they are written down as

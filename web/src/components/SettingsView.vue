@@ -35,31 +35,6 @@
 
       <!-- HOME TAB -->
       <template v-if="currentTab === 'home'">
-        <!-- Whose settings am I looking at? In client mode every card below is
-             the host's, because the API calls behind them are tunneled. Say so
-             once, at the top, and point at the one screen that is local. -->
-        <div v-if="nodeStatusUnknown" class="card scope-card">
-          <div class="settings-card-header">
-            <p class="section-title">Connection role unavailable</p>
-            <p class="hint">
-              Ciaobot could not verify whether this browser is connected to a host. Settings actions
-              stay on this device until the connection is known.
-              <template v-if="canUseDeviceControls"> <a :href="deviceHref('/device')">Open the device panel</a>.</template>
-            </p>
-          </div>
-        </div>
-        <div v-else-if="isNodeClient" class="card scope-card">
-          <div class="settings-card-header">
-            <p class="section-title">You are viewing {{ hostScopeLabel }}</p>
-            <p class="hint">
-              This is the host's Settings, exactly as it looks on that machine. Changes here apply
-              there, including the password and restarts.
-              <template v-if="canUseDeviceControls"><a :href="deviceHref('/device')">This device</a></template>
-              has its own panel for role, host connection and its local app version.
-            </p>
-          </div>
-        </div>
-
         <!-- Appearance -->
         <div class="card">
           <div class="settings-card-header">
@@ -119,15 +94,14 @@
             <div>
               <p class="section-title">This host</p>
               <p class="hint">
-                Snapshot, sync, or restart
-                {{ isNodeClient ? `the host (${hostScopeLabel})` : nodeStatusUnknown ? 'the connected host (status unavailable)' : 'this local Ciaobot instance' }}.
+                Snapshot, sync, or restart this Ciaobot instance.
               </p>
             </div>
             <div class="settings-card-header-actions">
-              <button class="btn-secondary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="nodeStatusUnknown || !!actionPending">
+              <button class="btn-secondary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
                 {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
               </button>
-              <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="nodeStatusUnknown || !!actionPending" :title="localStatus?.restart_only ? 'Wait for active chats, then restart the installed server' : 'Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code'">
+              <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="!!actionPending" :title="localStatus?.restart_only ? 'Wait for active chats, then restart the installed server' : 'Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code'">
                 {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
               </button>
             </div>
@@ -155,14 +129,7 @@
             <div>
               <p class="section-title">Updates</p>
               <p class="hint">
-                <template v-if="nodeStatusUnknown">
-                  Update ownership is unknown until the connection role can be verified.
-                </template>
-                <template v-else-if="isNodeClient && packageStatus?.mode !== 'bundled_app'">
-                  The version installed on {{ hostScopeLabel }}. Updating restarts the host.
-                  <template v-if="canUseDeviceControls">To upgrade this computer, open <a :href="deviceHref('/device')">this device</a>.</template>
-                </template>
-                <template v-else-if="packageStatus?.mode === 'bundled_app'">
+                <template v-if="packageStatus?.mode === 'bundled_app'">
                   This bundled app updates through the Ciaobot menu-bar icon. Choose
                   <strong>Update</strong> there, or run the one-line installer again.
                 </template>
@@ -184,7 +151,7 @@
                 v-if="packageStatus.update_available"
                 class="btn-primary btn-small"
                 @click="openUpdatePanel"
-                :disabled="nodeStatusUnknown || packageUpdating || showUpdatePanel"
+                :disabled="packageUpdating || showUpdatePanel"
               >
                 {{ `Update to ${packageStatus.latest_version}` }}
               </button>
@@ -229,7 +196,7 @@
                 </p>
               </template>
               <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doPackageUpdate" :disabled="nodeStatusUnknown || packageUpdating">
+                <button class="btn-primary" @click="doPackageUpdate" :disabled="packageUpdating">
                   {{ packageUpdating ? 'Updating&hellip;' : 'Update &amp; Restart' }}
                 </button>
                 <button class="btn-small" @click="showUpdatePanel = false" :disabled="packageUpdating">
@@ -276,7 +243,7 @@
                   v-if="engineUpdateStage === 'staged'"
                   class="btn-primary"
                   @click="doEngineUpdateApply"
-                  :disabled="updateActionPending || updatePolling || nodeStatusUnknown"
+                  :disabled="updateActionPending || updatePolling"
                 >
                   {{ updateActionPending ? 'Applying…' : 'Apply update' }}
                 </button>
@@ -284,7 +251,7 @@
                   v-else
                   class="btn-primary"
                   @click="doEngineUpdateStage"
-                  :disabled="updateActionPending || updatePolling || nodeStatusUnknown"
+                  :disabled="updateActionPending || updatePolling"
                 >
                   {{ updateActionPending ? 'Staging…' : (packageStatus?.update_available ? 'Stage update' : 'Try again') }}
                 </button>
@@ -322,7 +289,7 @@
                 Applying it restarts Ciaobot.
               </p>
               <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doEngineUpdateApply" :disabled="updateActionPending || updatePolling || nodeStatusUnknown">
+                <button class="btn-primary" @click="doEngineUpdateApply" :disabled="updateActionPending || updatePolling">
                   {{ updateActionPending ? 'Applying…' : 'Apply update' }}
                 </button>
               </div>
@@ -342,7 +309,7 @@
                 Back on v{{ engineUpdateOperation.from_version }}.
               </p>
               <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling || nodeStatusUnknown">
+                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling">
                   {{ updateActionPending ? 'Staging…' : (engineUpdateStage === 'rolled_back' ? 'Stage again' : 'Retry') }}
                 </button>
               </div>
@@ -354,7 +321,7 @@
                 restarting Ciaobot.
               </p>
               <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling || nodeStatusUnknown">
+                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling">
                   {{ updateActionPending ? 'Staging…' : 'Stage update' }}
                 </button>
               </div>
@@ -424,17 +391,8 @@
             <div>
               <p class="section-title">PWA password</p>
               <p class="hint">
-                <template v-if="isNodeClient">
-                  The password on {{ hostScopeLabel }} — the one you typed to open this client.
-                  Changing it here keeps this device connected; other clients have to log in again.
-                </template>
-                <template v-else-if="nodeStatusUnknown">
-                  The connection role is unavailable, so this password cannot be safely attributed.
-                </template>
-                <template v-else>
-                  Ciaobot is always password-protected — this is the password you type to open it,
-                  and the one another device needs to connect as a client.
-                </template>
+                Ciaobot is always password-protected — this is the password you type to open it,
+                and the one another device needs to sign in.
               </p>
             </div>
             <span
@@ -447,7 +405,7 @@
           </div>
           <div v-if="!authSettings" class="action-row"><span class="loading">Loading&hellip;</span></div>
           <template v-else>
-            <div class="settings-form-panel node-peer-form">
+            <div class="settings-form-panel">
               <p v-if="!authSettings.auth_required" class="hint hint--warn">
                 This instance is running unprotected because PWA_AUTH_REQUIRED=false is set in the
                 workspace .env. Setting a password here turns protection back on.
@@ -477,7 +435,7 @@
                 <button
                   class="btn-primary btn-small"
                   @click="saveAuthSettings"
-                  :disabled="nodeStatusUnknown || authSettingsSaving || !canSaveAuthSettings"
+                  :disabled="authSettingsSaving || !canSaveAuthSettings"
                 >
                   {{ authSettingsSaving ? 'Saving…' : 'Save password' }}
                 </button>
@@ -571,11 +529,6 @@
             </div>
           </div>
           <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
-        </div>
-
-        <div v-if="canUseDeviceControls" class="device-tile">
-          <a class="btn-small" :href="deviceHref('/device')">Open this device</a>
-          <span class="hint">Role, host connection, and local app controls stay on the device origin.</span>
         </div>
 
         <!-- Open source. The face image on the right appears only while the
@@ -2045,7 +1998,6 @@ import { formatConnectorLabel } from '../lib/mcpLabels'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
-import { deviceHref, isLoopbackPage } from '../lib/originNavigation'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
 import { formatTime, formatDuration } from '../lib/time'
 import { isApplePlatform, isDesktopApp } from '../lib/desktop'
@@ -2070,7 +2022,6 @@ import type {
   GwsIntegrationSettings,
   LocalStatus,
   ModelsResponse,
-  NodeStatus,
   ProviderConfigSettings,
   ProviderConnection,
   ProposalOutcomes,
@@ -2116,13 +2067,12 @@ import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
-import { isGwsEngineHostEligible } from '../lib/gwsEngineHost'
+import { isLoopbackHostname } from '../lib/loopback'
 import { useMcpServers } from '../composables/useMcpServers'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
 // The tray owns package updates and native notifications in the desktop app.
 const inDesktopApp = isDesktopApp()
-const canUseDeviceControls = isLoopbackPage()
 // The web shortcuts bind altKey. Apple keyboards label that key Option (\u2325);
 // Windows and Linux keyboards label it Alt.
 const onApplePlatform = isApplePlatform()
@@ -2188,7 +2138,6 @@ function tocSections(): HTMLElement[] {
   if (!main) return []
   return Array.from(main.querySelectorAll<HTMLElement>('.card')).filter(card => (
     card.parentElement?.closest('.card') == null
-    && !card.classList.contains('scope-card')
     && card.querySelector('.section-title')
   ))
 }
@@ -2469,10 +2418,6 @@ async function fetchRoutines() {
 }
 
 async function saveRoutines(patch: Record<string, unknown>) {
-  if (nodeStatusUnknown.value) {
-    routinesResult.value = 'Connection role is unavailable; open This device before changing model settings.'
-    return
-  }
   routinesSaving.value = true
   routinesResult.value = ''
   try {
@@ -2967,25 +2912,19 @@ function gwsReloginHelpUrl(): string {
   return 'https://cloud.google.com/sdk/docs/install'
 }
 
-// The loopback re-login listener binds to the *engine's* 127.0.0.1, so the
-// consent redirect only reaches it when the browser is on the engine host
-// (localhost) and the integration API is not proxied to a remote host. From a
-// phone, LAN browser, or client-mode node the popup's redirect would target
-// the client's own loopback and never arrive — those users must use the
+// The loopback re-login listener binds to this engine's own 127.0.0.1, so the
+// consent redirect only reaches it when the browser is on that machine
+// (localhost). From a phone or a LAN browser the popup's redirect would target
+// the browser's own loopback and never arrive — those users must use the
 // manual paste flow instead.
 function gwsOnEngineHost(): boolean {
-  return isGwsEngineHostEligible(window.location.hostname, inDesktopApp, {
-    loaded: nodeStatusLoaded.value,
-    error: nodeStatusError.value,
-    isClient: isNodeClient.value,
-    stateValid: !nodeStatusUnknown.value,
-  })
+  return isLoopbackHostname(window.location.hostname)
 }
 
 async function gwsReloginStart(profileName: string) {
   gwsReloginError.value[profileName] = ''
   if (!gwsOnEngineHost()) {
-    // On a client/LAN browser the loopback redirect can never arrive. Open the
+    // On a remote browser the loopback redirect can never arrive. Open the
     // manual paste flow directly so the button does something useful instead of
     // just showing an error the user then has to act on.
     await startGwsAuth(profileName)
@@ -3311,10 +3250,6 @@ const healthFixPending = ref(false)
 const healthFixError = ref('')
 
 async function fixWorkspaceHealth() {
-  if (nodeStatusUnknown.value) {
-    healthFixError.value = 'Connection role is unavailable; open This device before changing the host.'
-    return
-  }
   healthFixPending.value = true
   healthFixError.value = ''
   try {
@@ -4190,7 +4125,6 @@ onMounted(async () => {
   fetchLocalStatus().then(() => {
     if (localStatus.value?.dev_mode) refreshDebugIssues()
   })
-  fetchNodeStatus()
   fetchAuthSettings()
   fetchRoutines()
   fetchAutomation()
@@ -4216,10 +4150,6 @@ watch(() => projectStore.workspaceRegistryRevision, () => {
 
 
 async function doSnapshot(confirmWarnings = false) {
-  if (nodeStatusUnknown.value) {
-    actionResult.value = 'Connection role is unavailable; open This device before changing the host.'
-    return
-  }
   actionPending.value = 'snapshot'
   actionResult.value = ''
   deploySteps.value = []
@@ -4257,10 +4187,6 @@ function restartAndReload(message: string) {
 }
 
 async function doDeploy(confirmWarnings = false) {
-  if (nodeStatusUnknown.value) {
-    actionResult.value = 'Connection role is unavailable; open This device before restarting the host.'
-    return
-  }
   // Fail closed on unknown host state: with no status, restart_only reads as
   // false, and guessing deploy on a production Linux host would
   // snapshot/pull/rebuild an administrator-managed checkout. Re-check once;
@@ -4331,10 +4257,6 @@ async function doDeploy(confirmWarnings = false) {
 }
 
 async function fixDeployErrorInChat() {
-  if (nodeStatusUnknown.value) {
-    notifyFailed('Connection role unavailable', 'Open This device before starting a host chat.')
-    return
-  }
   let errorMsg = ''
   if (deploySteps.value.some(s => !s.ok)) {
     errorMsg = deploySteps.value
@@ -4393,10 +4315,6 @@ async function refreshDebugIssues() {
 }
 
 async function fixIssuesInChat() {
-  if (nodeStatusUnknown.value) {
-    notifyFailed('Connection role unavailable', 'Open This device before starting a host chat.')
-    return
-  }
   debugPending.value = true
   try {
     await refreshDebugIssues()
@@ -4468,11 +4386,6 @@ async function fetchAuthSettings() {
 }
 
 async function saveAuthSettings() {
-  if (nodeStatusUnknown.value) {
-    authSettingsError.value = true
-    authSettingsResult.value = 'Connection role is unavailable; open This device before changing the password.'
-    return
-  }
   if (!authSettings.value || !canSaveAuthSettings.value) return
   authSettingsSaving.value = true
   authSettingsResult.value = ''
@@ -4496,72 +4409,7 @@ async function saveAuthSettings() {
   authSettingsSaving.value = false
 }
 
-// ── Host / client: labeling only ──────────────────────────────────────────
-// The device-scoped controls live in DeviceView (/device). What is left here is
-// just enough to answer "whose settings am I editing": in client mode every
-// other card on this page is served by the host through the tunnel.
-const nodeStatus = ref<NodeStatus | null>(null)
-// Tri-state signal for gwsOnEngineHost (issue #351): nodeStatus reading null
-// is ambiguous between "still loading" and "the fetch failed", and both must
-// not be silently treated as a confirmed host role off a loopback hostname.
-const nodeStatusLoaded = ref(false)
-const nodeStatusError = ref(false)
-
-const isNodeClient = computed(() => {
-  const role = nodeStatus.value?.role
-  return role === 'client' || role === 'standby'
-})
-
-const nodeStatusUnknown = computed(
-  () => nodeStatusError.value || !nodeStatus.value || nodeStatus.value.state_valid === false,
-)
-
-const connectedHostUrl = computed(
-  () => nodeStatus.value?.host_url || nodeStatus.value?.active_peer_url || '',
-)
-
-const hostScopeLabel = computed(() => {
-  if (nodeStatusUnknown.value) return 'the connected host (status unavailable)'
-  const named = nodeStatus.value?.host_node_id
-  const url = connectedHostUrl.value
-  if (named && url) return `${named} (${url})`
-  return named || url || 'the host'
-})
-
-async function fetchNodeStatus() {
-  try {
-    const data = await api.get<Record<string, unknown>>('/api/startup-status')
-    const rawRole = String(data.node_role || '')
-    const role = ['host', 'client', 'active', 'standby', 'invalid'].includes(rawRole)
-      ? rawRole as NodeStatus['role']
-      : 'invalid'
-    const stateValid = data.state_valid === true && role !== 'invalid'
-    nodeStatus.value = {
-      node_id: String(data.node_id || ''),
-      role,
-      mode: role === 'active' ? 'host' : role === 'standby' ? 'client' : role,
-      state_valid: stateValid,
-      active_since: null,
-      last_handover: null,
-      host_url: data.host_url ? String(data.host_url) : null,
-      active_peer_url: data.active_peer_url ? String(data.active_peer_url) : null,
-      has_host_session: Boolean(data.has_host_session),
-      peers: [],
-    }
-    nodeStatusError.value = !stateValid
-  } catch {
-    nodeStatus.value = null
-    nodeStatusError.value = true
-  } finally {
-    nodeStatusLoaded.value = true
-  }
-}
-
 async function localHandback(confirmWarnings = false) {
-  if (nodeStatusUnknown.value) {
-    actionResult.value = 'Connection role is unavailable; open This device before syncing.'
-    return
-  }
   if (!confirmWarnings && !await askConfirm('Sync changes with the remote repository?', {
     title: 'Sync with remote',
     confirmLabel: 'Sync with remote',
@@ -4636,10 +4484,6 @@ async function openUpdatePanel() {
 }
 
 async function doPackageUpdate() {
-  if (nodeStatusUnknown.value) {
-    packageResult.value = 'Connection role is unavailable; open This device before updating.'
-    return
-  }
   packageUpdating.value = true
   packageResult.value = 'Updating Ciaobot and restarting...'
   try {
@@ -4845,10 +4689,6 @@ function startUpdatePoll() {
 }
 
 async function doEngineUpdateStage() {
-  if (nodeStatusUnknown.value) {
-    packageResult.value = 'Connection role is unavailable; open This device before updating.'
-    return
-  }
   // A run the coordinator already owns: the 202 has not become a record yet, so
   // the record alone cannot say the job is over. The backend refuses a second
   // run with a 409, and the button is already disabled; both say the same thing.
@@ -4876,10 +4716,6 @@ async function doEngineUpdateStage() {
 }
 
 async function doEngineUpdateApply() {
-  if (nodeStatusUnknown.value) {
-    packageResult.value = 'Connection role is unavailable; open This device before updating.'
-    return
-  }
   if (updatePolling.value) return
   updateActionPending.value = true
   packageResult.value = ''
@@ -5214,15 +5050,6 @@ onUnmounted(stopUpdatePoll)
 @media (pointer: coarse) {
   .settings-disclosure { min-height: var(--touch); }
 }
-/* The inline device panel renders its own .card tiles; give the wrapper the
-   same width as every other card here so they line up with the rest. */
-.device-tile {
-  width: 100%;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
 /* Open-source card with the star ask still live: the pixel face sits on the
    right, out of the prose's flow. Without the nudge the card has no class and
    no image renders, so plain cards are untouched. */
@@ -5382,24 +5209,6 @@ a.btn-secondary {
   align-items: center;
   text-decoration: none;
 }
-/* Client mode: names the machine whose settings the rest of the page edits. */
-.scope-card.card {
-  padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--warning) 7%, transparent);
-}
-.scope-card .settings-card-header {
-  padding-bottom: 0;
-  border-bottom: 0;
-}
-.scope-card .section-title {
-  font-size: var(--text-base);
-}
-.scope-card .hint {
-  color: var(--fg2);
-}
-
 .action-result--error {
   color: var(--error);
 }
@@ -5473,111 +5282,6 @@ a.btn-secondary {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.node-path {
-  display: flex;
-  align-items: stretch;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  margin-top: var(--space-1);
-}
-.node-path-endpoint {
-  flex: 1 1 140px;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-}
-.node-path-endpoint--host {
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
-  background: color-mix(in srgb, var(--accent) 5%, var(--bg));
-}
-.node-path-label {
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  color: var(--fg3, var(--fg2));
-}
-.node-path-value {
-  color: var(--fg);
-  font-size: var(--text-sm);
-  font-family: var(--font);
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-.node-path-link {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 0 2px;
-  min-width: 72px;
-}
-.node-path-arrow {
-  color: var(--accent);
-  font-size: calc(18px * var(--font-scale));
-  font-weight: 700;
-  line-height: 1;
-}
-@container (max-width: 720px) {
-  .node-path {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .node-path-link {
-    flex-direction: row;
-    justify-content: flex-start;
-    min-width: 0;
-    padding: 2px 0;
-    gap: var(--space-2);
-  }
-  .node-path .node-path-arrow {
-    transform: rotate(90deg);
-  }
-}
-
-.node-peer-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  margin-bottom: var(--space-3);
-}
-.node-peer-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-}
-.node-peer-main {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.node-peer-form {
-  margin-top: 0;
-  margin-bottom: 0;
-}
-
-.connected-clients-panel {
-  margin-top: var(--space-4);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
-}
-.connected-clients-panel .section-title {
-  margin-bottom: var(--space-2);
 }
 
 .deploy-steps {

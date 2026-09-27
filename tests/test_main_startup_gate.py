@@ -1,21 +1,21 @@
-"""The fail-closed legacy node-state startup gate (#636).
+"""The fail-closed legacy node-state startup gate (#636, kept by #642).
 
 The behavior under test is one line of startup policy: a Mac whose
 `node_state.json` says it was a *client* of another host — or says something
 nobody can account for — must not run the writers, and a Mac that says *host*
 or has no such file must. That policy is what keeps a second writer off a
-runtime root that already has one once #577 removes node mode.
+runtime root that already has one, and it is now the *only* thing standing
+there: node mode, the manager that used to answer the same question live, and
+every route that could rewrite the role mid-session are gone (#642), so the
+boot verdict is no longer one term of a conjunction.
 
 `guard_legacy_writers` is the whole gate, so it is called directly; the
 `ScheduleManager` check is the real consumer of the verdict, wired through
-`main.legacy_writers_active` exactly as `main.py` wires it, so the predicate is
-shown to have teeth against an actual writer rather than only returning a
-boolean. The role is not fixed at boot in this child, so that wiring is
-exercised across a real mid-session role change too, and the second term's
-independence is pinned by a test of its own. The last test pins the wiring
-itself against the source, because the gate is only worth anything if the two
-writer sites in `_run_server_locked` read it — a gate nothing consults passes
-every assertion above it.
+`main.py`'s own closure the way `main.py` wires it, so the predicate is shown
+to have teeth against an actual writer rather than only returning a boolean.
+The module-level test pins the wiring itself against the source, because the
+gate is only worth anything if the two writer sites in `_run_server_locked`
+read it — a gate nothing consults passes every assertion above it.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -31,7 +30,6 @@ import pytest
 
 from ciao import main
 from ciao.legacy_node_state import writers_armed
-from ciao.node_state import NodeStateManager
 from ciao.schedules import ScheduleManager, ScheduleStore
 
 # The three runtime-root shapes the gate has to tell apart, and the answer each
@@ -39,11 +37,9 @@ from ciao.schedules import ScheduleManager, ScheduleStore
 _CLIENT = {"role": "client", "host_url": "https://studio.example:8443"}
 _INVALID = {"role": "replica"}
 _AFTER_THE_SLOT = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
-# 08:00 UTC on three consecutive days: `tick()` credits a slot to the day it
-# matched, so one entry can be watched over a role change a day at a time.
-_DAY_ONE = datetime(2026, 6, 15, 8, 0, tzinfo=UTC)
-_DAY_TWO = datetime(2026, 6, 16, 8, 0, tzinfo=UTC)
-_DAY_THREE = datetime(2026, 6, 17, 8, 0, tzinfo=UTC)
+# 08:00 UTC: `tick()` credits a slot to the day it matched, so the one entry can
+# be watched across the verdict the boot reached.
+_SLOT = datetime(2026, 6, 15, 8, 0, tzinfo=UTC)
 
 
 def _write_state(runtime_root: Path, payload: dict[str, object]) -> None:
@@ -58,20 +54,6 @@ def _runtime_root(tmp_path: Path, payload: dict[str, object] | None) -> Path:
     if payload is not None:
         _write_state(runtime_root, payload)
     return runtime_root
-
-
-def _wired_predicate(
-    armed: bool, manager: NodeStateManager
-) -> Callable[[], bool]:
-    """The predicate `main.py` hands `ScheduleManager`, built as it builds it.
-
-    `main._run_server_locked` wraps this in a closure over its own two locals,
-    which a test cannot reach without booting the whole server, so the call
-    itself is what gets exercised: a change to either half of the conjunction —
-    the boot verdict or the live role — is felt by every test that wires its
-    predicate through here.
-    """
-    return lambda: main.legacy_writers_active(armed, manager.is_active)
 
 
 @pytest.mark.parametrize(
@@ -161,15 +143,57 @@ def test_startup_does_not_crash_on_a_state_it_cannot_decode(
     assert "invalid" in warnings[0].getMessage()
 
 
+def test_no_node_state_manager_exists_and_the_gate_still_refuses(
+    tmp_path: Path,
+) -> None:
+    """#642: the verdict refuses with nothing behind it but the file.
+
+    The gate used to be ANDed with `NodeStateManager.is_active()`, a live
+    re-read of the same file that node mode's routes could rewrite mid-session.
+    The manager and those routes are gone, so the detector is the only input —
+    and the input it is given here is a file on disk and a fresh runtime root,
+    with no manager, no `/api/node/*` route and no proxy anywhere to soften the
+    answer. Nothing about the refusal may depend on machinery that no longer
+    exists.
+    """
+    import ciao
+    import ciao.main as main_module
+
+    # The module is gone from the package on disk, not merely unimported.
+    assert not (Path(ciao.__file__).parent / "node_state.py").exists()
+
+    for label, payload, kind in (
+        ("client", _CLIENT, "client"),
+        ("invalid", _INVALID, "invalid"),
+    ):
+        runtime_root = tmp_path / label
+        runtime_root.mkdir()
+        _write_state(runtime_root, payload)
+
+        # No manager to answer instead, and none left for the gate to ask.
+        assert not hasattr(main_module, "legacy_writers_active")
+        assert not hasattr(main_module, "node_state_manager")
+        assert "NodeStateManager" not in inspect.getsource(
+            main._run_server_locked
+        )
+
+        legacy, armed = main.guard_legacy_writers(runtime_root)
+        assert armed is False, label
+        assert legacy.kind == kind, label
+        # The state file is still there, untouched: the refusal is a refusal to
+        # write, never a deletion that would silently re-arm the next boot.
+        assert (runtime_root / "node_state.json").exists(), label
+
+
 async def test_the_wired_predicate_stops_the_scheduler_for_client_and_invalid(
     tmp_path: Path,
 ) -> None:
     """The predicate `main.py` hands the scheduler, against the real writer.
 
-    The wiring under test is `legacy_writers_active(verdict, is_active)`, so it
-    is built here through that call rather than with a hardcoded lambda: a
-    predicate that returned the wrong thing for a kind would be caught by the
-    gate tests but still let every missed slot fire.
+    The wiring under test is the boot verdict on its own, so it is built here
+    the way `main.py` builds it — `lambda: legacy_writers_armed` — rather than
+    with a hardcoded constant: a predicate that returned the wrong thing for a
+    kind would be caught by the gate tests but still let every missed slot fire.
     """
     for label, payload in (("client", _CLIENT), ("invalid", _INVALID)):
         store_dir = tmp_path / label
@@ -188,8 +212,8 @@ async def test_the_wired_predicate_stops_the_scheduler_for_client_and_invalid(
         store.replace(entry)
 
         runtime_root = _runtime_root(tmp_path, payload)
-        legacy, armed = main.guard_legacy_writers(runtime_root)
-        assert armed is False
+        _legacy, legacy_writers_armed = main.guard_legacy_writers(runtime_root)
+        assert legacy_writers_armed is False
 
         dispatched: list[str] = []
 
@@ -199,7 +223,7 @@ async def test_the_wired_predicate_stops_the_scheduler_for_client_and_invalid(
         mgr = ScheduleManager(
             store=store,
             dispatch_to_web=dispatch,
-            is_node_active=_wired_predicate(armed, NodeStateManager(runtime_root)),
+            is_node_active=lambda: legacy_writers_armed,
         )
 
         assert await mgr.catch_up(now=_AFTER_THE_SLOT) == [], label
@@ -226,24 +250,18 @@ async def test_the_wired_predicate_lets_the_scheduler_run_for_host_and_none(
         store.replace(entry)
 
         runtime_root = _runtime_root(tmp_path, payload)
-        legacy, armed = main.guard_legacy_writers(runtime_root)
-        assert armed is True
+        _legacy, legacy_writers_armed = main.guard_legacy_writers(runtime_root)
+        assert legacy_writers_armed is True
 
         dispatched: list[str] = []
 
         async def dispatch(entry, model, mode, provider, *, target_chat_id=None):
             dispatched.append(entry.schedule_id)
 
-        # A fresh install has no state file, so the manager is asked to create
-        # one — the write the detector exists to avoid. It answers `host`, which
-        # is why the verdict is the term that matters here: the manager's `host`
-        # must never be the reason a writer arms.
-        manager = NodeStateManager(runtime_root)
-
         mgr = ScheduleManager(
             store=store,
             dispatch_to_web=dispatch,
-            is_node_active=_wired_predicate(armed, manager),
+            is_node_active=lambda: legacy_writers_armed,
         )
 
         fired = await mgr.catch_up(now=_AFTER_THE_SLOT)
@@ -253,30 +271,33 @@ async def test_the_wired_predicate_lets_the_scheduler_run_for_host_and_none(
         assert fired == [entry.schedule_id], label
         assert dispatched == [entry.schedule_id], label
 
+        # The detector reads the file raw and never writes it, so an install
+        # that armed the writers with no state file still has none after the
+        # gate ran — the manager that used to create one on construction is
+        # gone, and with it the write.
+        if payload is None:
+            assert not (runtime_root / "node_state.json").exists(), label
 
-async def test_the_wired_predicate_follows_a_role_change_mid_session(
+
+async def test_the_wired_predicate_follows_the_verdict_across_a_rewritten_file(
     tmp_path: Path,
 ) -> None:
-    """A verdict read once is a snapshot; the role it was read from is not.
+    """A verdict read once is a snapshot; nothing may rewrite it under us now.
 
-    Node mode is still in this child, and its routes rewrite the role under a
-    running server: `/api/node/connect` and `/api/node/handover` do not request
-    a restart, so the file `main.py` classified at boot can be rewritten a
-    minute later. A predicate built from the verdict alone would keep
-    dispatching this Mac's slots while its PWA tunnels to the host it just
-    connected to — the second writer #636 exists to prevent — and would keep
-    automations dead for a client promoted back to host. So the same entry, the
-    same manager and the same wired predicate are watched across both
-    transitions, one day at a time.
-
-    This covers the interim conjunction and dies with it: #577B deletes the
-    manager and `/api/node/*`, and with them the mid-session transition this
-    test drives.
+    While node mode existed, `/api/node/connect` and `/api/node/handover`
+    rewrote the role under a running server and the live `is_active()` term is
+    what let a promoted client get its automations back. Both are gone, so the
+    honest property is the opposite one: a file rewritten after the boot does
+    not re-arm a writer this boot refused, because the verdict is the only
+    input and nothing re-reads it.
     """
-    runtime_root = _runtime_root(tmp_path, {"role": "host"})
-    _legacy, armed = main.guard_legacy_writers(runtime_root)
-    assert armed is True
-    manager = NodeStateManager(runtime_root)
+    runtime_root = _runtime_root(tmp_path, _CLIENT)
+    _legacy, legacy_writers_armed = main.guard_legacy_writers(runtime_root)
+    assert legacy_writers_armed is False
+
+    # The same file, rewritten to a role the old manager would have been happy
+    # with. Nothing consults it now.
+    _write_state(runtime_root, {"role": "host", "host_url": None})
 
     store_dir = tmp_path / "store"
     store_dir.mkdir()
@@ -301,63 +322,12 @@ async def test_the_wired_predicate_follows_a_role_change_mid_session(
     mgr = ScheduleManager(
         store=store,
         dispatch_to_web=dispatch,
-        is_node_active=_wired_predicate(armed, manager),
+        is_node_active=lambda: legacy_writers_armed,
     )
 
-    async def tick_and_settle(now: datetime) -> None:
-        await mgr.tick(now=now)
-        # The dispatch is awaited off-loop, so the fired list lands first.
-        await asyncio.sleep(0.05)
-
-    await tick_and_settle(_DAY_ONE)
-    assert dispatched == [entry.schedule_id], "a host runs its own slots"
-
-    # Settings -> Connect as client. The route writes the role and returns; the
-    # server is not restarted.
-    manager.connect_as_client("https://studio.example:8443")
-    await tick_and_settle(_DAY_TWO)
-    assert dispatched == [entry.schedule_id], (
-        "a client must not dispatch a slot the host it tunneled to owns"
-    )
-
-    # And back again: a promoted client gets its automations without a restart.
-    manager.promote()
-    await tick_and_settle(_DAY_THREE)
-    # Two of the three days, and the one in the middle is the client day.
-    assert dispatched == [entry.schedule_id] * 2, "a host runs its own slots"
-
-
-def test_a_manager_saying_host_never_overrides_the_verdict(
-    tmp_path: Path,
-) -> None:
-    """The conjunction's other half: the manager never arms a writer alone.
-
-    `NodeStateManager` answers `host` for a state this boot refused whenever the
-    file has been rewritten since — which is exactly what #577B leaves behind
-    when the detector's verdict becomes the only input. A predicate that took
-    the manager's answer on its own would arm a writer off a `client` or
-    `invalid` file the moment anything touched it, so both terms are required.
-    """
-    runtime_root = _runtime_root(tmp_path, _CLIENT)
-    _legacy, armed = main.guard_legacy_writers(runtime_root)
-    assert armed is False
-
-    manager = NodeStateManager(runtime_root)
-    # The same file, rewritten to a role the manager is happy with.
-    _write_state(runtime_root, {"role": "host", "host_url": None})
-    assert manager.is_active() is True
-
-    assert main.legacy_writers_active(armed, manager.is_active) is False
-    # The short circuit is what keeps a refused boot from re-reading the file
-    # on every tick as well: the manager is not consulted at all.
-    consulted: list[bool] = []
-
-    def _never_called() -> bool:
-        consulted.append(True)
-        return True
-
-    assert main.legacy_writers_active(armed, _never_called) is False
-    assert consulted == []
+    assert await mgr.tick(now=_SLOT) is None
+    await asyncio.sleep(0.05)
+    assert dispatched == []
 
 
 def test_main_wires_the_gate_into_both_writer_sites() -> None:
@@ -373,23 +343,14 @@ def test_main_wires_the_gate_into_both_writer_sites() -> None:
     source = inspect.getsource(main._run_server_locked)
 
     assert "guard_legacy_writers(" in source
-    # Both sites read the combined predicate rather than the boot verdict on
-    # its own, so a role change under a running server is felt by the scheduler
-    # and by the backup push alike.
-    assert "is_node_active=_writers_active" in source
-    assert "if not _writers_active():" in source
+    # Both sites read the boot verdict rather than anything derived from it, so
+    # the scheduler and the backup push alike stay shut on a refused boot.
+    assert "is_node_active=lambda: legacy_writers_armed" in source
+    assert "if not legacy_writers_armed:" in source
     assert "app.state.legacy_node_state = legacy_node_state" in source
 
-    # The detector's verdict is one of the two terms, and the manager's is never
-    # the whole of it: `is_active` alone would arm a writer for a state the
-    # detector called `client` or `invalid`, and that is the answer which has to
-    # win once #577B deletes the manager and `/api/node/*`.
-    assert "legacy_writers_armed, node_state_manager.is_active" in source
-    assert "is_node_active=node_state_manager.is_active" not in source
-
-    # Read before the manager is built, because that manager *writes* a host
-    # state when the file is absent: classified after it, a fresh install would
-    # come back `host` off the detector's own write.
-    assert source.index("guard_legacy_writers(") < source.index(
-        "NodeStateManager(config.state_path.parent)"
-    )
+    # The manager that used to be the second term is not reconstructed, and no
+    # live re-read replaces the verdict: the gate is the file, once.
+    assert "NodeStateManager" not in source
+    assert "node_state_manager" not in source
+    assert "legacy_writers_active" not in source
