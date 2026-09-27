@@ -1031,13 +1031,20 @@ async def _promote_region_row(
 async def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
     """Write an accepted `[people]` fact into its person note.
 
-    A missing note is created as a stub. An existing one is folded by a model
-    call, the same way a `[project]` accept folds its doc: merging into
-    someone's curated note needs judgment about where the fact goes, so it is
-    never a blind append. A fold that changes nothing (already covered) or
-    trips a guard keeps the row queued and says so.
+    A missing note is created as a stub, typed and filed through the category
+    registry (``write_entity_note``) rather than against a hardcoded ``People/``,
+    so the accept path and the writer cannot disagree about where the note goes
+    or what it is typed. An existing one is folded by a model call, the same way
+    a `[project]` accept folds its doc: merging into someone's curated note needs
+    judgment about where the fact goes, so it is never a blind append. A fold
+    that changes nothing (already covered) or trips a guard keeps the row queued
+    and says so.
     """
-    from ciao.memory_proposals import people_note_path, write_people_note
+    from ciao.memory_proposals import (
+        PERSON_TYPE_ID,
+        entity_note_path,
+        write_entity_note,
+    )
     from ciao.project_doc_update import fold_fact_into_person_note
 
     name = str(row.get("target") or "").strip()
@@ -1047,10 +1054,21 @@ async def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
         vault = config.workspace_vault_root(row["workspace"])
     except (AttributeError, ValueError) as exc:
         return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
-    note = people_note_path(Path(vault), name)
+    note = entity_note_path(vault, PERSON_TYPE_ID, name)
     if note is None:
-        return AcceptOutcome(ok=False, error="the bullet names no usable person")
-    destination = f"People/{note.name}"
+        # Two real causes, one unrouteable row: the payload is not a filename,
+        # or the vault has no `person` category to file a note in (disabled, or
+        # without a folder). Both are the operator's to fix, not the row's.
+        return AcceptOutcome(
+            ok=False,
+            error=(
+                "this vault has no person category with a folder, or the "
+                "bullet's name is not usable as a filename"
+            ),
+        )
+    # Relative to the vault, so the destination names the folder the category
+    # is filed in rather than a spelling this function hardcodes.
+    destination = note.relative_to(vault).as_posix()
     if note.exists():
         errors: list[str] = []
         wrote = await fold_fact_into_person_note(
@@ -1069,10 +1087,10 @@ async def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
             )
         return AcceptOutcome(ok=True, destination=destination)
     try:
-        created = write_people_note(Path(vault), name, row["text"])
+        outcome = write_entity_note(vault, PERSON_TYPE_ID, name, row["text"])
     except OSError as exc:
         return AcceptOutcome(ok=False, error=f"could not write the note: {exc}")
-    if not created:
+    if outcome != "written":
         # Created by someone else between the check and the write.
         return AcceptOutcome(
             ok=False,
@@ -1349,7 +1367,11 @@ def _people_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
     accept time, so, like a `[project]` fold, the preview shows the note as it
     is and marks the result inexact rather than inventing the merge.
     """
-    from ciao.memory_proposals import people_note_path
+    from ciao.memory_proposals import (
+        PERSON_TYPE_ID,
+        entity_note_path,
+        render_entity_note,
+    )
     from ciao.memory_receipts import content_revision
 
     out = _base_preview(row)
@@ -1362,11 +1384,14 @@ def _people_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
     except (AttributeError, ValueError) as exc:
         out["reason"] = f"could not resolve the vault: {exc}"
         return out
-    note = people_note_path(vault, name)
+    note = entity_note_path(vault, PERSON_TYPE_ID, name)
     if note is None:
-        out["reason"] = "the bullet names no usable person"
+        out["reason"] = (
+            "this vault has no person category with a folder, or the "
+            "bullet's name is not usable as a filename"
+        )
         return out
-    out["destination"] = f"People/{note.name}"
+    out["destination"] = note.relative_to(vault).as_posix()
     out["destination_path"] = str(note)
     if note.exists():
         # Folded by a model at accept time, like a `[project]` doc: the note is
@@ -1390,13 +1415,9 @@ def _people_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
             "says this, nothing is written and the row stays queued"
         )
         return out
-    after = (
-        "---\n"
-        "tags: [person]\n"
-        f"updated: {date.today().isoformat()}\n"
-        f"---\n# {note.stem}\n\n{text}\n"
-    )
-    after_clip, cut = _clip(after)
+    # The same renderer the accept writes through, so the card cannot show a
+    # note the accept would not produce.
+    after_clip, cut = _clip(render_entity_note(PERSON_TYPE_ID, name, text))
     out["operation"] = "add"
     out["revision"] = content_revision("")
     out["after"] = after_clip
@@ -1538,10 +1559,10 @@ def destination_revision(config, row: dict[str, Any]) -> str:
             vault = Path(config.workspace_vault_root(row["workspace"]))
             return content_revision(read_learnings(vault))
         if accept.action == "write_people_note":
-            from ciao.memory_proposals import people_note_path
+            from ciao.memory_proposals import PERSON_TYPE_ID, entity_note_path
 
             vault = Path(config.workspace_vault_root(row["workspace"]))
-            note = people_note_path(vault, str(row.get("target") or ""))
+            note = entity_note_path(vault, PERSON_TYPE_ID, str(row.get("target") or ""))
             if note is None:
                 return ""
             if not note.exists():

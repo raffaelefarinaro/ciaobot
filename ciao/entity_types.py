@@ -13,10 +13,12 @@ ships the defaults; ``<vault>/entity-types.yaml`` holds the user's edits; the
 effective list is the two merged by ``id``. The owner reads and writes that
 file over ``GET``/``PATCH /api/memory/entity-types`` (:func:`effective_payload`
 and :func:`write_vault_file`), and the generated ``VOCABULARY.md`` names the
-categories it holds. No *consumer* reads the registry yet — the swap that
-makes ``vault_index``'s folder map and the linter's orphan set follow the
-user's list is a separate change — so this half is additive, behaviour with no
-vault file is byte-identical to before, and ``tests/test_entity_types.py``
+categories it holds. The first *consumer* outside that pair is the entity-note
+writer (#637, :func:`ciao.memory_proposals.write_entity_note`): it resolves a
+category's folder and ``type:`` here, so a category the owner adds can be
+written to at all. The swap that makes ``vault_index``'s folder map and the
+linter's orphan set follow the user's list is a separate change, so behaviour
+with no vault file is byte-identical to before, and ``tests/test_entity_types.py``
 pins every derived view against the live constant it will eventually replace.
 
 **Which vault.** ``<vault>`` is the *agent* vault root

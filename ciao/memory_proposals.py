@@ -10,7 +10,9 @@ belongs. The destination vocabulary is :data:`DESTINATIONS`:
 * ``[profile]``  — identity/communication style → the ``ciao:profile`` region.
 * ``[project]``  — true only within this project → the project's canonical
   doc, which :mod:`ciao.project_doc_update` folds.
-* ``[people: <Name>]`` — durable fact about a person → ``People/<Name>.md``.
+* ``[people: <Name>]`` — durable fact about a person → the ``person``
+  category's note, in the folder the vault's category registry names for it
+  (``People/<Name>.md`` with the shipped categories).
 * ``[learnings]`` — reusable how-to knowledge → ``Workspace/Learnings.md``.
 * ``[review]``   — nobody was sure → waits for a human or the curator.
 
@@ -45,7 +47,12 @@ logger = logging.getLogger(__name__)
 
 _PROPOSALS_RELATIVE = "Workspace/Memory-Proposals.md"
 _LEARNINGS_RELATIVE = "Workspace/Learnings.md"
-_PEOPLE_DIR = "People"
+
+#: The category a ``[people]`` proposal's accept writes. ``people`` is the
+#: queue's label for a fact about a person; ``person`` is the id that category
+#: carries as a frontmatter ``type:`` and the folder it lives in. Named once so
+#: the accept path and the writer cannot drift apart on the mapping between them.
+PERSON_TYPE_ID = "person"
 
 
 # ── Typed decision statuses ───────────────────────────────────────────────
@@ -691,48 +698,98 @@ def accept_region_fact(
 
 
 def _safe_name(name: str) -> str:
-    """A person payload as a filename stem, without path separators."""
+    """A proposal payload as a filename stem, without path separators."""
     cleaned = re.sub(r"[\\/:*?\"<>|]+", " ", name).strip().rstrip(".")
     return cleaned[:80]
 
 
-def people_note_path(vault_root: Path, name: str) -> Path | None:
-    """Where a ``[people]`` accept would write, or None for an unusable name.
+EntityNoteOutcome = Literal["written", "exists", "refused"]
+"""What one entity-note write did.
 
-    Public so the review queue can name the destination — and say whether the
-    note already exists — before the accept runs, without a second copy of the
-    filename rules :func:`write_people_note` applies.
+``written`` is the stub on disk. ``exists`` means a note is already there, so
+the fact needs a *merge* into it rather than a create — the review queue folds
+that with a model and reports no change when the note already covers the fact.
+``refused`` is a routing failure with nothing written: a ``type_id`` the vault
+has no category for, a category the owner disabled, a category with no folder to
+write into, or a name that cannot be a filename.
+"""
+
+
+def _entity_folder(vault_root: Path, type_id: str) -> str | None:
+    """The folder *type_id*'s notes live in, or None when it takes no notes.
+
+    Read from the category registry rather than from a constant here, which is
+    what gives a category the owner added a writer at all. A disabled entry is
+    refused with the rest: it is out of every derived view on purpose, so it is
+    not a ``type:`` a new note should carry.
     """
-    stem = _safe_name(name)
-    if not stem:
+    from ciao.entity_types import load_entity_types
+
+    entry = load_entity_types(vault_root).get(type_id)
+    if entry is None or not entry.enabled or not entry.folder:
         return None
-    return vault_root / _PEOPLE_DIR / f"{stem}.md"
+    return entry.folder
 
 
-def write_people_note(vault_root: Path, name: str, text: str) -> bool:
-    """Create a stub person note. False when it already exists (needs a merge).
+def entity_note_path(vault_root: Path, type_id: str, name: str) -> Path | None:
+    """Where a note in category *type_id* would be written, or ``None``.
+
+    None covers the three ways there is no such note: the category takes no
+    notes (:func:`_entity_folder`), the name is not usable as a filename, or
+    neither. Public so the review queue can name the destination — and say
+    whether the note already exists — before the accept runs, without a second
+    copy of the rules :func:`write_entity_note` applies.
+    """
+    folder = _entity_folder(vault_root, type_id)
+    stem = _safe_name(name)
+    if folder is None or not stem:
+        return None
+    return vault_root / folder / f"{stem}.md"
+
+
+def render_entity_note(type_id: str, name: str, text: str, *, today: str = "") -> str:
+    """The note body :func:`write_entity_note` would write, without writing it.
+
+    Split out for the reason :func:`render_learning_append` is: the review card
+    shows the exact replacement before the accept performs it, so the preview and
+    the write cannot disagree about what lands.
+
+    ``updated:`` records the note's creation as its first verification, so an
+    entity the system stopped hearing about ages out visibly instead of relying
+    on mtime (which file copies and migrations reset silently).
+    """
+    return (
+        "---\n"
+        f"type: {type_id}\n"
+        f"updated: {today or date.today().isoformat()}\n"
+        f"tags: [{type_id}]\n"
+        f"---\n# {_safe_name(name)}\n\n{text}\n"
+    )
+
+
+def write_entity_note(
+    vault_root: Path, type_id: str, name: str, text: str
+) -> EntityNoteOutcome:
+    """Create a stub note for one entity, typed as *type_id* in its own folder.
 
     Public because accepting a ``[people]`` proposal from the review queue
-    performs exactly this write.
+    performs exactly this write, for :data:`PERSON_TYPE_ID`. Typed and
+    registry-routed rather than hardcoded to ``People/``, so a category the owner
+    added (``customer`` → ``Customers/``) has a writer and every note written
+    here carries a ``type:`` the linter accepts — the missing ``type:`` on a
+    person note is what left an accepted person note untyped and lint-flagged.
+
+    Never overwrites: an existing note is reported as ``exists`` so the caller
+    merges into it.
     """
-    stem = _safe_name(name)
-    path = people_note_path(vault_root, name)
+    path = entity_note_path(vault_root, type_id, name)
     if path is None:
-        return False
+        return "refused"
     if path.exists():
-        return False
+        return "exists"
     path.parent.mkdir(parents=True, exist_ok=True)
-    # `updated:` records the note's creation as its first verification, so a
-    # person the system stopped hearing about ages out visibly instead of
-    # relying on mtime (which file copies and migrations reset silently).
-    note = (
-        "---\n"
-        "tags: [person]\n"
-        f"updated: {date.today().isoformat()}\n"
-        f"---\n# {stem}\n\n{text}\n"
-    )
-    path.write_text(note, encoding="utf-8")
-    return True
+    path.write_text(render_entity_note(type_id, name, text), encoding="utf-8")
+    return "written"
 
 
 # One structured learning line. The shape is a contract: the curation skill

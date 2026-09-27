@@ -13,7 +13,10 @@ import json
 import os
 import re
 import unittest.mock
+from datetime import date
 from pathlib import Path
+
+import pytest
 
 from ciao import memory_proposals as mp
 from ciao import memory_tool as mt
@@ -674,6 +677,124 @@ def test_reconcile_region_fact_defers_when_the_retry_also_fails(
     assert outcome == "deferred"
     entries, _diags = mt.read_region(guide, "memory")
     assert entries == ["Office is in Zurich. [2026-01-01]"]
+
+
+# ---- Entity notes: the typed, registry-routed writer ------------------------
+#
+# `write_people_note` wrote `tags: [person]` and no `type:` at all, into a
+# hardcoded `People/`, so an accepted `[people]` proposal produced a note the
+# linter flags and a category the owner added had no writer for. The writer is
+# now the category's: the folder and the `type:` both come from the registry.
+
+
+def _entity_vault(tmp_path: Path, overrides: str = "") -> Path:
+    """A vault whose category registry carries *overrides* (YAML, if any)."""
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True, exist_ok=True)
+    if overrides:
+        (vault / "entity-types.yaml").write_text(overrides, encoding="utf-8")
+    return vault
+
+
+def test_entity_note_carries_type_updated_and_tags(tmp_path: Path) -> None:
+    vault = _entity_vault(tmp_path)
+
+    assert mp.write_entity_note(vault, mp.PERSON_TYPE_ID, "Mo", "Leads the pilot.") == "written"
+
+    note = vault / "People" / "Mo.md"
+    assert note.is_file()
+    text = note.read_text(encoding="utf-8")
+    assert text.startswith("---\ntype: person\n")
+    assert f"updated: {date.today().isoformat()}\n" in text
+    assert "tags: [person]" in text
+    assert text.endswith("---\n# Mo\n\nLeads the pilot.\n")
+
+
+def test_entity_note_lands_in_a_custom_category_folder(tmp_path: Path) -> None:
+    """A category the owner added is written like any other, in its own folder."""
+    vault = _entity_vault(
+        tmp_path,
+        overrides=(
+            "- id: customer\n"
+            "  label: Customer\n"
+            "  kind: entity\n"
+            "  folder: Customers\n"
+            "  enabled: true\n"
+        ),
+    )
+
+    assert mp.write_entity_note(vault, "customer", "Acme", "Signs off in March.") == "written"
+
+    note = vault / "Customers" / "Acme.md"
+    assert note.is_file(), "a custom category's folder, not a hardcoded People/"
+    assert "type: customer" in note.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("type_id", "overrides", "label"),
+    [
+        # A category with no folder has nowhere to put a note.
+        (
+            "ghost",
+            "- id: ghost\n  label: Ghost\n  kind: entity\n  folder: \"\"\n  enabled: true\n",
+            "a category with no folder",
+        ),
+        # `note` is a stock category with no folder: same refusal, no config.
+        ("note", "", "a stock folderless category"),
+        # An id the vault's registry does not hold at all.
+        ("nonexistent", "", "an unknown type_id"),
+        # Disabled: out of every derived view on purpose, so not writable to.
+        (
+            "person",
+            "- id: person\n  enabled: false\n",
+            "a category the owner disabled",
+        ),
+    ],
+)
+def test_entity_note_refuses_a_category_it_cannot_write(
+    tmp_path: Path, type_id: str, overrides: str, label: str
+) -> None:
+    vault = _entity_vault(tmp_path, overrides=overrides)
+
+    assert mp.write_entity_note(vault, type_id, "Mo", "A fact.") == "refused", label
+    assert mp.entity_note_path(vault, type_id, "Mo") is None, label
+    # A refusal touches nothing: no folder created, no stray note beside the vault.
+    expected = ["entity-types.yaml"] if overrides else []
+    assert [entry.name for entry in vault.iterdir()] == expected, label
+
+
+def test_entity_note_refuses_an_unusable_name(tmp_path: Path) -> None:
+    vault = _entity_vault(tmp_path)
+
+    assert mp.write_entity_note(vault, mp.PERSON_TYPE_ID, "///", "A fact.") == "refused"
+    assert mp.entity_note_path(vault, mp.PERSON_TYPE_ID, "///") is None
+
+
+def test_entity_note_never_overwrites_an_existing_note(tmp_path: Path) -> None:
+    """`exists` is not a boolean failure: the caller merges, so nothing is lost."""
+    vault = _entity_vault(tmp_path)
+    note = vault / "People" / "Mo.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("---\ntype: person\n---\n# Mo\n\nCurated already.\n", encoding="utf-8")
+
+    assert mp.write_entity_note(vault, mp.PERSON_TYPE_ID, "Mo", "A new fact.") == "exists"
+    assert "Curated already." in note.read_text(encoding="utf-8")
+    assert "A new fact." not in note.read_text(encoding="utf-8")
+
+
+def test_render_entity_note_is_exactly_what_the_write_lands(tmp_path: Path) -> None:
+    """The preview renders through the same function, so the two cannot disagree."""
+    vault = _entity_vault(tmp_path)
+    today = "2026-01-02"
+
+    written = mp.render_entity_note("person", "Mo", "F.", today=today)
+    assert written == (
+        "---\ntype: person\nupdated: 2026-01-02\ntags: [person]\n---\n# Mo\n\nF.\n"
+    )
+
+    real = mp.render_entity_note("person", "Mo", "F.")
+    assert mp.write_entity_note(vault, "person", "Mo", "F.") == "written"
+    assert (vault / "People" / "Mo.md").read_text(encoding="utf-8") == real
 
 
 # ---- Structured learnings -------------------------------------------------

@@ -535,6 +535,39 @@ def test_accept_writes_the_fact_into_the_region(tmp_path: Path) -> None:
     assert row["id"] not in {r["id"] for r in client.get("/api/proposals").json()["rows"]}
 
 
+def test_accepting_a_people_row_writes_a_typed_note(tmp_path: Path) -> None:
+    """A `[people]` accept files the note the category registry names, typed.
+
+    The writer used to emit `tags: [person]` and no `type:` at all, so the note
+    it created was one `ciao vault-lint` reports as untyped. Destination and
+    content both come from the registry now, and this pins the whole accept:
+    the row leaves the queue and a note with `type: person` is in `People/`.
+    """
+    config = _default_vault(tmp_path)
+    _write_queue(
+        config,
+        "personal",
+        "## 2026-08-19 curation pass (this pass)\n\n"
+        "- [people Mo] Leads the pilot.  _(from: Decisions)_\n",
+    )
+    client = _client(config)
+    row = _accept_kind_row(client, "people")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+    assert resp.status_code == 200
+    result = resp.json()["result"]
+    assert result["action"] == "write_people_note"
+    assert result["destination"] == "People/Mo.md"
+
+    note = config.workspace_vault_root(row["workspace"]) / "People" / "Mo.md"
+    text = note.read_text(encoding="utf-8")
+    assert "type: person" in text
+    assert "tags: [person]" in text
+    assert re.search(r"^updated: \d{4}-\d{2}-\d{2}$", text, re.MULTILINE), text
+    assert row["text"] in text
+    assert row["id"] not in {r["id"] for r in client.get("/api/proposals").json()["rows"]}
+
+
 def test_accept_persists_the_text_against_refiling(tmp_path: Path) -> None:
     """An accept must land in the same decision history a dismissal does.
 

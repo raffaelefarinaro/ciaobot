@@ -96,6 +96,28 @@ def test_reserved_frontmatter_exemptions_are_case_insensitive(
     assert vault_lint.run_validation(vault)["frontmatter_errors"] == []
 
 
+def test_a_note_the_entity_writer_created_is_not_an_unknown_type(
+    tmp_path: Path,
+) -> None:
+    """The regression: the writer used to emit no `type:` at all.
+
+    A person note accepted from the proposals queue was written with
+    `tags: [person]` alone, so the linter reported it as `missing_type` — the
+    one thing the writer exists to prevent. It carries `type: person` now, and
+    nothing else about a fresh vault changes.
+    """
+    from ciao.memory_proposals import write_entity_note
+
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    assert write_entity_note(vault, "person", "Alice", "Leads the pilot.") == "written"
+
+    issues = vault_lint.run_validation(vault)
+
+    assert issues["frontmatter_errors"] == []
+    assert "unknown_type" not in str(issues)
+
+
 def test_readme_still_requires_frontmatter(tmp_path: Path) -> None:
     vault = tmp_path / "memory-vault"
     vault.mkdir()
