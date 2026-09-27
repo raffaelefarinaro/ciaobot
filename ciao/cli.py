@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from dataclasses import asdict
 from importlib import resources
 from pathlib import Path
 from typing import Any, cast
@@ -3759,6 +3760,24 @@ def _service_command(args: argparse.Namespace) -> int:
         result = macos_service.update_engine(force=bool(args.force))
     elif action == "migrate":
         result = macos_service.migrate_legacy_companion(running_app=args.app_bundle)
+    elif action == "migration-classify":
+        # The bridge Ciaobot.app needs to decide whether to hand this Mac's
+        # engine over to the terminal installer (#604). The classifier is a
+        # module of its own, not a desktop-service action, and it already runs
+        # from the verified wheel inside install-engine.sh; importing it here
+        # rather than shelling out to `python -I -m ciao.engine_migration` is
+        # the smaller change, and it keeps the app off a second interpreter.
+        # It reads and never writes, so a Mac the app cannot interpret comes
+        # back as `desktop_invalid` and the app asks instead of guessing.
+        from ciao.engine_migration import classify
+
+        classification = classify()
+        result = macos_service.ServiceResult(
+            True,
+            "migration-classify",
+            f"this Mac classifies as {classification.kind}",
+            asdict(classification),
+        )
     elif action == "rollback":
         result = macos_service.rollback_legacy_companion()
     else:  # pragma: no cover - argparse constrains the action.
@@ -3850,7 +3869,16 @@ def build_parser() -> argparse.ArgumentParser:
     ) -> None:
         service_parser = subparsers.add_parser(name, help=help_text)
         service_sub = service_parser.add_subparsers(dest="service_action", required=True)
-        for action in ("status", "start", "restart", "stop", "update-engine", "migrate", "rollback"):
+        for action in (
+            "status",
+            "start",
+            "restart",
+            "stop",
+            "update-engine",
+            "migrate",
+            "migration-classify",
+            "rollback",
+        ):
             action_parser = service_sub.add_parser(action)
             action_parser.add_argument("--json", action="store_true", dest="as_json")
             if action in {"restart", "stop", "update-engine"}:

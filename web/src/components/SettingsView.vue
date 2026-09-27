@@ -5928,26 +5928,21 @@ a.btn-secondary {
   margin-top: var(--space-3);
 }
 .gws-profile-list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: stretch;
-  gap: var(--space-3);
+  display: flex;
+  flex-direction: column;
   margin-top: var(--space-3);
 }
-/* Equal-height cards: the grid stretches each card, and the action row is
-   pushed to the bottom (margin-top: auto) so both columns line up however
-   much description or how many chips one of them carries. */
+/* Account entries follow the flat settings-section rhythm rather than
+   competing card surfaces. */
 .gws-profile-card {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   min-width: 0;
-  height: 100%;
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  padding: var(--space-4) 0;
+  border-bottom: 1px solid var(--border);
 }
+.gws-profile-card:first-child { padding-top: 0; }
 /* Title, status chip and Remove share one wrapping row. No absolute or
    negative positioning: the title shrinks (min-width: 0) and the chip and
    button hold their size, so nothing can ever overprint the title. */
@@ -6061,9 +6056,7 @@ a.btn-secondary {
   font-size: var(--text-xs);
   font-weight: 500;
 }
-/* Pinned to the bottom of the card so both columns' buttons share a baseline. */
 .gws-profile-actions {
-  margin-top: auto;
   padding-top: var(--space-3);
   display: flex;
   flex-direction: column;
@@ -6228,11 +6221,7 @@ a.btn-secondary {
     min-width: 0;
     width: 100%;
   }
-  .gws-profile-list {
-    grid-template-columns: 1fr;
-  }
-  /* Single column: the heading takes the full row and the chip + Remove wrap
-     onto the line below it rather than squeezing against the title. */
+  /* The heading takes the full row; status and account actions wrap below. */
   .gws-profile-heading {
     flex: 1 1 100%;
   }

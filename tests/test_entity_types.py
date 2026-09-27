@@ -1,26 +1,23 @@
-"""Tests for the entity-type registry (#622, track A1).
+"""Tests for the entity-type registry (#622, track A1; consumed by #626, A2a-1).
 
-The registry is additive: nothing reads it yet, so the load-bearing assertion
-is the FIRST one. With no vault file, every derived view must be identical to
-the hardcoded constant it is going to replace, because the swap (track A2) is
-planned against whichever ``develop`` exists then and must not quietly change
-the vocabulary, the folder map or the lint's orphan set. Each view is asserted
-against the LIVE constant rather than a copy, so a change on either side fails
-here instead of at the consumer.
+With no vault file, every derived view must be identical to the hardcoded
+constant it replaced: the consumers read this registry, so a change on either
+side would quietly change the vocabulary, the folder map or the lint's orphan
+set. Each view is asserted against the LIVE constant rather than a copy, so a
+change on either side fails here instead of at the consumer — and, since #626,
+the last test asserts the same thing about the four consumers themselves rather
+than about a literal one of them used to hold.
 """
 
 from __future__ import annotations
 
-import ast
-import inspect
 import logging
-import textwrap
 from importlib import resources
 from pathlib import Path
 
 import pytest
 
-from ciao import entity_types, memory_audit, vault_index, vault_lint
+from ciao import config, entity_types, memory_audit, vault_index, vault_lint, vault_rehome
 from ciao.context import entity_tagger
 
 
@@ -35,24 +32,6 @@ def _clear_registry_cache():
     entity_types.clear_entity_types_cache()
     yield
     entity_types.clear_entity_types_cache()
-
-
-def _vault_lint_orphan_candidate_dirs() -> set[str]:
-    """The folders ``vault_lint`` actually reports orphans under.
-
-    It is a local inside ``run_validation`` rather than a module constant, so it
-    is read out of the source with ``ast`` instead of copied here: the point of
-    the assertion is that the linter and the registry cannot drift, and a copy in
-    this file would be a third list that drifts silently.
-    """
-    tree = ast.parse(textwrap.dedent(inspect.getsource(vault_lint.run_validation)))
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        if not any(isinstance(t, ast.Name) and t.id == "orphan_candidate_dirs" for t in node.targets):
-            continue
-        return set(ast.literal_eval(node.value))
-    raise AssertionError("vault_lint.run_validation no longer names orphan_candidate_dirs")
 
 
 def test_stock_registry_reproduces_the_hardcoded_constants(tmp_path: Path) -> None:
@@ -71,10 +50,18 @@ def test_stock_registry_reproduces_the_hardcoded_constants(tmp_path: Path) -> No
     assert registry.stale_thresholds() == memory_audit.STALE_NOTE_THRESHOLDS_DAYS
 
     # The folders the orphan linter watches: the entity categories' own folders
-    # plus the lower-case names an entry cannot express.
-    orphan_dirs = _vault_lint_orphan_candidate_dirs()
-    assert registry.orphan_dirs() == frozenset(orphan_dirs)
-    assert set(registry.entity_folders()) == orphan_dirs - {"projects", "references"}
+    # plus the lower-case names an entry cannot express. This used to be read
+    # out of `vault_lint.run_validation`'s source with `ast`, because the linter
+    # held a literal of its own and the point of the assertion was that the two
+    # could not drift. Since #626 the linter asks the registry for this view, so
+    # there is no second list left to read — the two are now structurally the
+    # same expression. `_ORPHAN_EXTRA_DIRS` is the name of the part of the view
+    # no entry can express, and `test_no_vault_file_is_identical_for_every_wired_
+    # consumer` below pins the linter's own output against the constants.
+    assert registry.orphan_dirs() == (
+        frozenset(registry.entity_folders()) | entity_types._ORPHAN_EXTRA_DIRS
+    )
+    assert len(registry.entity_folders()) == 5
 
     # The tagger's INDEX.md wire format, case variants included.
     assert registry.category_parts() == entity_tagger._CATEGORY_PARTS
@@ -238,3 +225,155 @@ def test_disabling_a_category_removes_it_from_the_effective_views(tmp_path: Path
     assert [entry.id for entry in registry.entries()] == [
         entry.id for entry in stock.entries()
     ], "disabling never removes a builtin; a user can switch it back on"
+
+
+def test_no_vault_file_is_identical_for_the_bootstrap_tagger_and_rehome(tmp_path: Path) -> None:
+    """No `<vault>/entity-types.yaml`: bootstrap, the tagger and re-home all read
+    the shipped list.
+
+    These are the three consumers #635 put the registry in front of, and each is
+    checked against the constant it replaced. The two that CAN be handed a
+    registry are also checked against the same answer that way, because a caller
+    that passes one has to get what the consumer would have loaded for itself or
+    the two forms of the same call drift; that plumbing is pinned in
+    `tests/test_entity_tagger.py` and `tests/test_vault_rehome.py`.
+
+    The bootstrap is the exception, and cannot be handed a registry at all: it runs
+    inside `CiaoConfig.__post_init__`, before any workspace is known, so its
+    evidence folders are stock-derived by construction and a vault file cannot
+    widen them. That is asserted here as the derived view it is; the literal it
+    replaced, and a vault naming a new entity folder that still does not claim
+    one, are pinned in `tests/test_config_role.py`.
+
+    A2a-1 (#626) wires the read path — the indexer, the linter, staleness — and
+    asserts the same "identical with no vault file" for those four consumers in
+    this same file. The two bodies are one test split across the two changes.
+    """
+    vault = tmp_path / "memory-vault"
+    (vault / "personal" / "People").mkdir(parents=True)
+    (vault / "work").mkdir(parents=True)
+    (vault / "personal" / "People" / "Alba.md").write_text(
+        "---\ntype: person\ntags: [colleague]\n---\n# Alba\n", encoding="utf-8"
+    )
+    (vault / "work" / "alpha.md").write_text(
+        "---\ntype: project\n---\n# Alpha\n", encoding="utf-8"
+    )
+    (vault / "INDEX.md").write_text(
+        "# Vault Index\n\n"
+        "- [personal/People/Alba](./personal/People/Alba.md) (tags: person; aliases: Alba)\n"
+        "- [work/alpha](./work/alpha.md) (tags: project; aliases: Alpha)\n",
+        encoding="utf-8",
+    )
+
+    registry = entity_types.load_entity_types(vault)
+
+    # Workspace bootstrap: a containment test, so it takes the entity categories'
+    # folders and adds the three names an entry's single folder cannot express.
+    assert config._WORKSPACE_EVIDENCE_DIRS == frozenset(
+        {"People", "Projects", "Places", "Ideas", "Resources", "Workspace", "journal", "projects"}
+    )
+    assert config._WORKSPACE_EVIDENCE_DIRS == (
+        frozenset(registry.entity_folders()) | config._WORKSPACE_EVIDENCE_EXTRA_DIRS
+    )
+    assert list(config._bootstrap_registry(vault)) == ["personal"], (
+        "one workspace per vault directory holding an evidence folder"
+    )
+
+    # The tagger: the folder -> category view is the shipped wire set, and the
+    # index resolves against it whether it was handed the registry or loaded it.
+    assert registry.category_parts() == entity_tagger._CATEGORY_PARTS
+    assert {e.category for e in entity_tagger.get_index(vault).find("Alba and Alpha")} == {
+        "People",
+        "work",
+    }
+
+    # Re-home: the person folder, and the folder map whose keys are not workspace
+    # names. Both are the shipped ones, and the misfiled note is still found.
+    assert vault_rehome.people_dirs(registry) == vault_rehome.people_dirs() == frozenset(
+        {"People"}
+    )
+    assert vault_rehome.dir_type_map(registry) == vault_rehome.dir_type_map()
+    assert vault_rehome.dir_type_map() == vault_index.DIR_TYPE_MAP
+    candidates = {c.path: c for c in vault_rehome.detect_misfiled_people(vault)}
+    assert [
+        (path, candidate.bucket, candidate.destination)
+        for path, candidate in candidates.items()
+    ] == [("personal/People/Alba.md", "mechanical", "work/People/Alba.md")]
+
+
+def test_no_vault_file_is_identical_for_the_index_lint_and_staleness(tmp_path: Path) -> None:
+    """No `<vault>/entity-types.yaml`: the four consumers read the shipped list.
+
+    `scan_vault`, `canonical_type`, `run_validation` and `note_threshold_days`
+    are the modules #626 put the registry in front of, and each is checked
+    twice: against the live constant it replaced, and against the same answer
+    when the caller hands the loaded registry over explicitly. A caller that
+    passes a registry has to get what the consumer would have loaded for itself,
+    or the two forms of the same call drift.
+
+    `Clients/` is the interesting half. A folder no category claims infers no
+    type, is not watched for orphans and reports its `type:` as drift — which is
+    precisely what the hardcoded map and the hardcoded orphan set did, and the
+    reason a vault that has not configured anything is unchanged by this swap.
+    """
+    vault = tmp_path / "memory-vault"
+    (vault / "People").mkdir(parents=True)
+    (vault / "Clients").mkdir(parents=True)
+    (vault / "People" / "Alba.md").write_text("# Alba\n", encoding="utf-8")
+    (vault / "People" / "Ben.md").write_text("---\ntype: doc\n---\n# Ben\n", encoding="utf-8")
+    (vault / "Clients" / "Acme.md").write_text(
+        "---\ntype: customer\n---\n# Acme\n", encoding="utf-8"
+    )
+
+    registry = entity_types.load_entity_types(vault)
+    assert registry.canonical_types() == vault_index.CANONICAL_TYPES
+    assert registry.dir_type_map() == vault_index.DIR_TYPE_MAP
+    assert registry.aliases() == vault_index.TYPE_ALIASES
+    assert registry.stale_thresholds() == memory_audit.STALE_NOTE_THRESHOLDS_DAYS
+
+    # Path -> type inference, read off the constant the shipped map is. The
+    # workspace half is the same map read for a different question — is this
+    # first segment a folder type or a workspace? — so `Clients/` reads as a
+    # workspace name here, exactly as it did before the swap.
+    entries = vault_index.scan_vault(vault)
+    assert {e.path.name: e.type for e in entries} == {
+        "Alba.md": "person",
+        "Ben.md": "doc",
+        "Acme.md": "customer",
+    }
+    assert {e.path.name: e.workspace for e in entries} == {
+        "Alba.md": "personal",
+        "Ben.md": "personal",
+        "Acme.md": "Clients",
+    }
+
+    # The closed set, over the whole range of a real vault's spellings.
+    for raw in ("project", "Person", "doc", "hackathon-log", "", "customer", "x"):
+        assert vault_index.canonical_type(raw, registry=registry) == vault_index.canonical_type(raw)
+
+    # The linter: an untyped note has no frontmatter, a stock alias and an
+    # unclaimed type are both drift (the second naming its target), and an
+    # unclaimed folder is not watched for orphans.
+    issues = vault_lint.run_validation(vault)
+    assert sorted(issues["orphans"]) == ["People/Alba.md", "People/Ben.md"]
+    assert sorted(
+        (e["kind"], e["source"]) for e in issues["frontmatter_errors"]
+    ) == [
+        ("missing_frontmatter", "People/Alba.md"),
+        ("unknown_type", "Clients/Acme.md"),
+        ("unknown_type", "People/Ben.md"),
+    ]
+    ben = next(
+        e for e in issues["frontmatter_errors"] if e["source"] == "People/Ben.md"
+    )
+    assert "document" in ben["message"]
+
+    # Every horizon, against the constant it replaced.
+    for note_type in (*sorted(registry.canonical_types()), "client", "x"):
+        expected = memory_audit.STALE_NOTE_THRESHOLDS_DAYS.get(
+            note_type, memory_audit.STALE_NOTE_DEFAULT_DAYS
+        )
+        assert memory_audit.note_threshold_days(note_type) == expected
+        assert (
+            memory_audit.note_threshold_days(note_type, registry=registry) == expected
+        )

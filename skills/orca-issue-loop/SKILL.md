@@ -26,9 +26,55 @@ Constants:
 | Base | `develop` (PRs target develop; `main` is release-only — `Closes #N` does **not** auto-close on a develop merge) |
 | Worktrees | `~/orca/workspaces/ciaobot/<name>`, branch auto-named `raffaelefarinaro/<name>` |
 | Prompt files | `~/orca/workspaces/ciaobot/plans/issue-<N>/` (outside git) |
+| Records | `plans/issue-<N>/record.md` + the running `plans/loop-state.md` (outside git, §0.1) |
 | Max review rounds | 5 |
 
 Prompt templates: `references/prompts.md`. Issue plan template: `references/plan-template.md`. Read both before starting.
+
+## 0. Maximize parallelism (default, not an exception)
+
+The queue is usually a **merge** order, not a **work** order. Most issues in a chain are only sequenced because a PR must merge first, not because the next one cannot be *written* concurrently. Your default is to run as many loops at once as the machine and the dependencies allow; serializing is the exception you justify.
+
+**Find the parallelism before you start anything.** For each queued issue, list the files and subsystems it touches (the plan names them). Two loops may run concurrently when:
+
+- their file sets do not overlap (or overlap only in a file one of them is not editing), **and**
+- neither consumes the other's *unmerged* code — an API, a route, a function, a schema. Importing a sibling's finished-and-merged work is fine; importing its open PR is not.
+
+If a "blocked" issue is only blocked by merge order and not by code, start it. If it is genuinely blocked (its plan calls an endpoint the other PR adds), do not fake a shim — sequence it.
+
+**Split anything oversized so it can parallelize.** A plan that needs more than ~8 files or two subsystems is not one loop; split it into children (`Part of #N`) with a checklist on the parent (see §1). A child with no dependency on the rest can run immediately — split a big, mostly-independent prerequisite out and start it now rather than after the parent's first child merges. Prefer a dependency graph of small children over one long chain.
+
+**How parallel loops share one coordinator:**
+
+- **One Run for all of them.** A coordinator terminal binds exactly one Run; create it once and write the id to `plans/shared-run.env`, then every loop's `worker-start` uses `--run <that run>` so all deliveries arrive in one inbox. Do not create a Run per loop.
+- **One waiter for the Run.** The `check --wait` waiter is a single slot per Run. Keep one `plans/wait-any.sh` running for all loops and route each delivery to the right issue by `payload.dispatchId`; never start a second waiter (it fails with `waiter_exists`, and killing one can leave its `check --wait` child holding the slot — kill `orchestration check --run` too before restarting).
+- **A practical concurrency cap.** Three to four cheap workers at once is the sweet spot on one Mac: each gate run is a full `pytest -n auto tests/` (~70s) plus `npm test`/`mypy`, so more than that mostly contends on CPU and slows every loop. Start the next loop as soon as one settles. Reviewers are I/O-bound and can overlap with implementers freely.
+- **One active session per worktree, always.** Parallelism is across *issues*, never two sessions in one checkout (§4).
+
+**Keep the fan-out visible.** Maintain `plans/loop-state.md` (§0.1) with a section per active issue (worktree, branch, PR, round, current status) so a take-over — or you, after a compaction — can see what is running without reading GitHub.
+
+## 0.1 Keep the implementation record current
+
+Alongside the plan, each loop keeps an **implementation record**: `plans/issue-<N>/record.md`. It documents the implementation as it actually shipped, not the intent. It is for the people and models who read the repo later (and for the next issue in the chain), so it must be current at every merge.
+
+Write it when the first worker commits, and rewrite the affected part after every fix round and at merge. Keep it tight and factual:
+
+```markdown
+# #<N> — <title> (<status: implementing | in review | merged #PR>)
+
+**Shipped:** <one paragraph: what the change is, in the code as it landed.>
+**Files:** <path> — <what it does now>.
+**Decisions & deviations:** <a plan detail that changed, why, and the ruling that made it; link the review comment.>
+**Verification:** <the exact gates run and their results.>
+**Follow-ups:** <issues filed or deferred, by number.>
+**PR / merge:** <PR link> · <merge sha>
+```
+
+Rules:
+- Update `record.md` in the same turn you push a worker's commit, and again on merge (the merge sha and the final status). Do not leave a merged issue's record saying "implementing".
+- A record states what is **true in the code**, not what the plan proposed. When review changes the design, the record carries the shipped shape and a one-line note that it superseded the plan.
+- The parent/child split, the round history, and any deferred finding go in the record, not only in scattered PR comments.
+- `plans/loop-state.md` carries the one-line cross-issue view (what is in flight, what merged); each `record.md` carries the depth for one issue.
 
 ## 1. Plan → GitHub issue (you, big model)
 
@@ -186,7 +232,8 @@ After round 5 without `APPROVE`: stop. Leave the PR as draft, comment on the iss
 3. `gh pr merge <PR> --repo raffaelefarinaro/ciaobot --merge --delete-branch` (the repo uses merge commits).
 4. `gh issue close <N> --repo raffaelefarinaro/ciaobot --comment "Merged into develop via #<PR> (<merge sha link>). Ships in the next release."` — needed because develop isn't the default branch. Tick the child on the parent's checklist comment if there is one.
 5. `orca worktree set --worktree id:<wt> --workspace-status completed --comment "merged #<PR>" --json`, then `orca worktree rm --worktree id:<wt> --force --json` (the branch is merged; nothing is lost).
-6. Report to the user: issue, PR, merge commit, rounds used, model, anything deferred into follow-up issues.
+6. Update the records: set `plans/issue-<N>/record.md` to `merged #<PR>` with the merge sha and the final shipped shape (§0.1), and mark the issue merged in `plans/loop-state.md`.
+7. Report to the user: issue, PR, merge commit, rounds used, model, anything deferred into follow-up issues.
 
 Stop and ask the user instead of merging if the diff touches auth/secrets/remote boundary (`docs/REMOTE_BOUNDARY.md`), `desktop/`, or release plumbing — those need `security-review` or `./scripts/check-desktop.sh`, and a human look.
 

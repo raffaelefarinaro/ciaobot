@@ -12,6 +12,12 @@ pub struct DesktopSettings {
     pub notifications_enabled: bool,
     pub auth_bootstrapped: bool,
     pub migration_notice_shown: bool,
+    /// The engine hand-over offer (#604) has already been put to this user.
+    ///
+    /// Its own flag, not `migration_notice_shown`: that one belongs to the
+    /// browser-PWA notice, and sharing it would silently suppress the offer to
+    /// every Mac that also had a browser copy installed.
+    pub engine_migration_notice_shown: bool,
     /// Drop the Dock tile once every window is closed, leaving Ciaobot in the
     /// menu bar. Defaults to true because that was the only behaviour before
     /// this became a preference. `#[serde(default)]` on the struct means a
@@ -26,6 +32,7 @@ impl Default for DesktopSettings {
             notifications_enabled: true,
             auth_bootstrapped: false,
             migration_notice_shown: false,
+            engine_migration_notice_shown: false,
             hide_dock_icon: true,
         }
     }
