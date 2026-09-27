@@ -517,6 +517,16 @@ describe('MemoryMapView sections', () => {
     apiGet.mockReset()
     apiGet.mockImplementation((url: string) => {
       if (url.includes('/api/vault/graph')) return Promise.resolve(graphPayload())
+      if (url.startsWith('/api/memory/entity-types')) {
+        return Promise.resolve({
+          workspace: 'personal', vault: '/tmp/vault',
+          types: [{
+            id: 'customer', label: 'Customer', kind: 'entity', folder: 'Customers',
+            description: 'Someone we do business with.', aliases: ['client'],
+            stale_after_days: 0, enabled: true, builtin: false, note_count: 2,
+          }],
+        })
+      }
       if (url.startsWith('/api/proposals/history')) {
         return Promise.resolve({
           rows: [{
@@ -607,6 +617,20 @@ describe('MemoryMapView sections', () => {
   it('shows the decision ledger on /memory/history', async () => {
     const { wrapper } = await mountSection('history')
     expect(wrapper.text()).toContain('Remember the thing')
+    wrapper.unmount()
+  })
+
+  it('shows the category list on /memory/categories', async () => {
+    const { wrapper, mm } = await mountSection('categories')
+    expect(mm.section).toBe('categories')
+    expect(wrapper.get('.pane-header').text()).toContain('Memory · Categories')
+    // The panel, for the active workspace: one row per effective entry.
+    expect(wrapper.findAll('.cat-row')).toHaveLength(1)
+    expect(wrapper.text()).toContain('Customer')
+    // Configuration, not a queue: the always-loaded budget rail is not beside
+    // it, and neither is the map's canvas.
+    expect(wrapper.find('.mm-review-rail').exists()).toBe(false)
+    expect(wrapper.find('.mm-body').exists()).toBe(false)
     wrapper.unmount()
   })
 

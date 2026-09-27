@@ -38,6 +38,7 @@ const SECTION_LABELS: Record<string, string> = {
   '/memory/suggested': 'Suggested memories',
   '/memory/revisit': 'Notes to revisit',
   '/memory/map': 'Memory map',
+  '/memory/categories': 'Categories',
   '/memory/retired': 'Retired notes',
   '/memory/history': 'Memory history',
   '/settings': 'Settings',

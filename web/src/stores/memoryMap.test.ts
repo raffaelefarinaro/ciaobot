@@ -7,7 +7,7 @@ import { api } from '../lib/api'
 vi.mock('../lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
 }))
-import { useMemoryMapStore, type MemoryGraphNode } from './memoryMap'
+import { useMemoryMapStore, isMemorySection, memorySectionPath, MEMORY_SECTIONS, type MemoryGraphNode } from './memoryMap'
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -123,6 +123,12 @@ describe('visibility', () => {
 })
 
 describe('sections', () => {
+  test('Categories is a section, and it lives at its own address', () => {
+    expect(MEMORY_SECTIONS).toContain('categories')
+    expect(memorySectionPath('categories')).toBe('/memory/categories')
+    expect(isMemorySection('categories')).toBe(true)
+  })
+
   test('setSection keeps the panels\' own state in step', () => {
     const mm = useMemoryMapStore()
     mm.setSection('revisit')
