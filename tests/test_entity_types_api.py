@@ -203,11 +203,11 @@ def test_patch_regenerates_vocabulary_with_a_categories_section(
     assert census.strip(), "the type census is still rendered"
     canonical, _, drift = census.partition("## Types (drift")
     assert "`person`" in canonical
-    assert "- `customer`" not in canonical, (
-        "the census is the hardcoded set until the consumers read the registry, "
-        "so a new category is still reported as drift below it"
+    assert "- `customer`" in canonical, (
+        "the census is the vault's own closed set, so a category the owner added "
+        "is offered as a `type:` rather than reported as drift below it (#626)"
     )
-    assert "`customer`" in drift
+    assert "`customer`" not in drift
 
 
 @pytest.mark.parametrize(

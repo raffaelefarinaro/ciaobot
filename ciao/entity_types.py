@@ -13,13 +13,16 @@ ships the defaults; ``<vault>/entity-types.yaml`` holds the user's edits; the
 effective list is the two merged by ``id``. The owner reads and writes that
 file over ``GET``/``PATCH /api/memory/entity-types`` (:func:`effective_payload`
 and :func:`write_vault_file`), and the generated ``VOCABULARY.md`` names the
-categories it holds. The first *consumer* outside that pair is the entity-note
-writer (#637, :func:`ciao.memory_proposals.write_entity_note`): it resolves a
-category's folder and ``type:`` here, so a category the owner adds can be
-written to at all. The swap that makes ``vault_index``'s folder map and the
-linter's orphan set follow the user's list is a separate change, so behaviour
-with no vault file is byte-identical to before, and ``tests/test_entity_types.py``
-pins every derived view against the live constant it will eventually replace.
+categories it holds. The consumers read the registry: ``vault_index``'s
+``canonical_type`` / ``scan_vault``, ``vault_lint``'s ``run_validation``,
+``memory_audit``'s staleness predicates, the entity-note writer
+(``ciao.memory_proposals.write_entity_note``, #637) and, for the bootstrap and
+re-home folds, ``config`` and ``vault_rehome``. Each takes an optional
+``registry=`` keyword and loads one from the vault root it already holds when
+the caller passes none, so a caller with no vault in hand keeps the shipped
+tables and behaviour with no vault file is byte-identical to before;
+``tests/test_entity_types.py`` pins every derived view against the live
+constant it replaced.
 
 **Which vault.** ``<vault>`` is the *agent* vault root
 (``CiaoConfig.agent_vault_root(name)``) — the root that owns the generated

@@ -686,3 +686,40 @@ def test_write_vocabulary_file_without_registry_is_byte_identical(tmp_path: Path
         "\n"
         "- `barcode` (1) — personal\n"
     )
+
+
+# ---- the category registry as the read path (#626) --------------------------
+
+
+def test_scan_vault_infers_a_custom_category_from_its_folder(tmp_path: Path):
+    """A folder the owner configured types the notes in it, and its aliases
+    resolve — the registry is what `type:` means, not the shipped tables.
+
+    `scan_vault` loads the registry from the root it just resolved, so the
+    caller only has to leave the file where the owner put it. The same
+    category's alias is resolved by a caller that already holds a registry,
+    which is the form the linter and the memory audit use.
+    """
+    from ciao import entity_types
+
+    vault = tmp_path / "memory-vault"
+    _write(vault / "Clients" / "Acme.md", "# Acme\n")
+    (vault / "entity-types.yaml").write_text(
+        "- id: customer\n"
+        "  label: Customer\n"
+        "  kind: entity\n"
+        "  folder: Clients\n"
+        "  aliases: [client, account]\n",
+        encoding="utf-8",
+    )
+
+    entries = vi.scan_vault(vault)
+
+    assert [(e.path.name, e.type) for e in entries] == [("Acme.md", "customer")]
+
+    registry = entity_types.load_entity_types(vault)
+    assert vi.canonical_type("client", registry=registry) == "customer"
+    assert vi.canonical_type("Account", registry=registry) == "customer"
+    # Without the registry the shipped tables still answer for themselves, which
+    # is what a caller that cannot reach a vault keeps.
+    assert vi.canonical_type("client") == ""

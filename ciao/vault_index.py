@@ -39,7 +39,7 @@ import yaml
 # (it is the module a consumer will import), and the Categories renderer takes
 # the registry as an argument rather than loading one, so this import is a type
 # and a name — no category is read until a caller asks for it.
-from ciao.entity_types import EntityTypeRegistry
+from ciao.entity_types import EntityTypeRegistry, load_entity_types
 from ciao.vault_links import (
     FENCED_CODE_RE,
     FM_LIST_ITEM_RE,
@@ -211,7 +211,7 @@ def temp_prefix(name: str) -> str:
     return f".{name}."
 
 
-def canonical_type(raw: str) -> str:
+def canonical_type(raw: str, *, registry: EntityTypeRegistry | None = None) -> str:
     """Return the canonical form of a frontmatter ``type``.
 
     A canonical value maps to itself, a known alias to its target, and anything
@@ -221,17 +221,34 @@ def canonical_type(raw: str) -> str:
     value (``Note`` beside ``note``, ``Doc`` beside ``doc``) still maps to the
     canonical/alias target, so the lint treats it as a safe rename rather than
     a brand-new type that needs promotion.
+
+    *registry* is the vault's own category list, and it is keyword-only and
+    optional on purpose: a caller that already loaded one passes it and the
+    user's categories join the closed set, and a caller that cannot reach a
+    vault (a pure unit seam, a module imported before any vault existed) keeps
+    the shipped tables below, which the stock registry reproduces exactly. The
+    two views are the same algorithm over different tables, so precedence is
+    the same too: canonical, then alias, then the case-insensitive pass over
+    each. There is deliberately no module-level "current registry" — a
+    long-lived server reads several vaults, and one workspace's categories must
+    never answer for another's notes.
     """
     value = (raw or "").strip()
-    if value in CANONICAL_TYPES:
+    if registry is not None:
+        canonical_types = registry.canonical_types()
+        aliases = registry.aliases()
+    else:
+        canonical_types = CANONICAL_TYPES
+        aliases = TYPE_ALIASES
+    if value in canonical_types:
         return value
-    if value in TYPE_ALIASES:
-        return TYPE_ALIASES[value]
+    if value in aliases:
+        return aliases[value]
     lowered = value.lower()
-    for canonical in CANONICAL_TYPES:
+    for canonical in canonical_types:
         if canonical.lower() == lowered:
             return canonical
-    for alias, target in TYPE_ALIASES.items():
+    for alias, target in aliases.items():
         if alias.lower() == lowered:
             return target
     return ""
@@ -299,20 +316,33 @@ def is_excluded(rel_path: Path) -> bool:
     return False
 
 
-def _infer_type(rel_path: Path) -> str:
+def _infer_type(rel_path: Path, dir_type_map: dict[str, str]) -> str:
+    """The ``type:`` a frontmatter-less note infers from where it sits.
+
+    *dir_type_map* is the folder -> type view of the caller's registry, passed in
+    rather than read from the module constant so a vault category's own folder
+    types its notes. A caller with no registry passes ``DIR_TYPE_MAP``, which
+    the stock registry reproduces exactly.
+    """
     for part in rel_path.parts:
-        if part in DIR_TYPE_MAP:
-            return DIR_TYPE_MAP[part]
+        if part in dir_type_map:
+            return dir_type_map[part]
     return ""
 
 
-def _workspace_of(rel_from_vault: Path) -> str:
+def _workspace_of(rel_from_vault: Path, dir_type_map: dict[str, str]) -> str:
     # Each workspace lives under memory-vault/<workspace>/. Legacy single-root
     # vaults without a workspace segment keep reporting "personal".
+    #
+    # The same map as `_infer_type`, and for the same reason it arrives as an
+    # argument: membership in its *keys* is what tells a folder name from a
+    # workspace name. A registry's map carries the same legacy `active` /
+    # `completed` keys, so a vault category adding a folder cannot silently
+    # turn that folder into a workspace.
     if not rel_from_vault.parts:
         return "personal"
     first = rel_from_vault.parts[0]
-    if first in DIR_TYPE_MAP:
+    if first in dir_type_map:
         return "personal"
     return first
 
@@ -524,6 +554,7 @@ def scan_vault(
     *,
     workspace: str = "",
     path_prefix: Path | None = None,
+    registry: EntityTypeRegistry | None = None,
 ) -> list[Entry]:
     """Scan one vault into entries.
 
@@ -538,8 +569,18 @@ def scan_vault(
     caller merging several roots into one graph must pass a per-root prefix,
     or two roots holding a note of the same name render the same path and
     collide — the same defect the search index had.
+
+    ``registry`` is the vault's category list, and it is optional: omitted, it
+    is loaded from the very root this scan resolved, so path -> type inference
+    follows a category the owner added. Loaded from *this* root rather than
+    ``default_vault_root()`` because a caller's scan and its registry must not
+    disagree about which vault is being read. The load is cached against the
+    file's mtime, so a hot path pays it once.
     """
     vault_root = (vault_root or default_vault_root()).resolve()
+    if registry is None:
+        registry = load_entity_types(vault_root)
+    dir_type_map = registry.dir_type_map()
     prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
     entries: list[Entry] = []
     for md_path in sorted(vault_root.rglob("*.md")):
@@ -564,7 +605,7 @@ def scan_vault(
             or h1
             or md_path.stem
         )
-        entry_type = (fm.get("type") or "").strip() or _infer_type(rel_from_vault)
+        entry_type = (fm.get("type") or "").strip() or _infer_type(rel_from_vault, dir_type_map)
         tags = _coerce_list(fm.get("tags"))
         aliases = _coerce_list(fm.get("aliases"))
         description = (fm.get("description") or "").strip()
@@ -589,7 +630,7 @@ def scan_vault(
                 tags=tags,
                 aliases=aliases,
                 related=related_refs,  # resolved below
-                workspace=workspace or _workspace_of(rel_from_vault),
+                workspace=workspace or _workspace_of(rel_from_vault, dir_type_map),
                 description=description,
                 updated=updated,
             )
@@ -1226,23 +1267,33 @@ def _resolve_workspace_ref(
     return found[0] if len(found) == 1 else None
 
 
-def vocabulary_report(entries: list[Entry]) -> dict[str, Any]:
+def vocabulary_report(
+    entries: list[Entry], *, registry: EntityTypeRegistry | None = None
+) -> dict[str, Any]:
     """Summarize the vocabulary actually in use across ``entries``.
 
     ``types`` counts canonical values; ``type_drift`` maps each non-canonical
     value to its alias target (``""`` when there is none) and the paths using
     it. Tags are counted with the workspaces they appear in, so a work-flavoured
     tag isn't offered to a personal chat as an established choice.
+
+    ``registry``, when given, is the closed set a note is judged against: a
+    category the owner added is canonical, its aliases are not drift, and its
+    id is not an unused type. It is keyword-only and optional because an entry
+    carries a rendered path and not a vault, so there is nothing to load the
+    registry from here — a caller that has one passes it, and a caller with no
+    vault in hand (a pure unit seam) keeps the shipped tables.
     """
     types: dict[str, int] = defaultdict(int)
     drift: dict[str, dict[str, Any]] = {}
     tags: dict[str, int] = defaultdict(int)
     tag_workspaces: dict[str, set[str]] = defaultdict(set)
+    canonical_types = CANONICAL_TYPES if registry is None else registry.canonical_types()
 
     for entry in entries:
         raw = (entry.type or "").strip()
         if raw:
-            canonical = canonical_type(raw)
+            canonical = canonical_type(raw, registry=registry)
             if canonical == raw:
                 types[raw] += 1
             else:
@@ -1268,26 +1319,35 @@ def vocabulary_report(entries: list[Entry]) -> dict[str, Any]:
         "tag_workspaces": {
             tag: sorted(names) for tag, names in sorted(tag_workspaces.items())
         },
-        "unused_canonical_types": sorted(CANONICAL_TYPES - set(types)),
+        "unused_canonical_types": sorted(canonical_types - set(types)),
     }
 
 
-def format_vocabulary(entries: list[Entry]) -> str:
+def format_vocabulary(
+    entries: list[Entry], *, registry: EntityTypeRegistry | None = None
+) -> str:
     """Render the vocabulary as the agent-facing `VOCABULARY.md` body.
 
     Types are a closed set, so they are listed with counts and any drift is
     called out with its target. Tags stay open, so they are stratified by use:
     an established tag should be reused, a one-off is a merge candidate or a
     typo. Advice for tags, enforcement for types.
+
+    ``registry`` is the same optional view :func:`vocabulary_report` takes, and
+    it has to be threaded to both: the report counts against one closed set and
+    the list below is rendered from another, and a file whose Types section
+    omitted a category the drift section had already resolved to it would
+    recommend a rename into a type the file does not offer.
     """
-    report = vocabulary_report(entries)
+    report = vocabulary_report(entries, registry=registry)
     tags: dict[str, int] = report["tags"]
     workspaces: dict[str, list[str]] = report["tag_workspaces"]
+    canonical_types = CANONICAL_TYPES if registry is None else registry.canonical_types()
     lines: list[str] = []
     established = DEFAULT_PROMOTION_THRESHOLD
 
     lines.append("## Types (canonical — choose one of these)\n")
-    for name in sorted(CANONICAL_TYPES):
+    for name in sorted(canonical_types):
         count = report["types"].get(name, 0)
         lines.append(f"- `{name}` ({count})")
 
@@ -1371,13 +1431,15 @@ def write_vocabulary_file(
     timestamp would dirty it in git on every rebuild even when the vocabulary
     itself never moved.
 
-    *registry*, when given, adds a `## Categories` section above the type
-    census: the configured categories and the notes that use them are two
-    different lists, and only this module knows the configured one. It is a
-    keyword argument defaulting to ``None`` so every existing caller — the CLI's
-    ``--write``, and the writers the memory pass and the proposal queue make —
-    renders byte-for-byte what it rendered before, which is what keeps the
-    registry's adoption a separate, reviewable change.
+    *registry*, when given, is the vault's category list, and it drives the
+    whole file: the `## Categories` section above the type census, and the
+    census and drift below it. One registry, one list of types — a Categories
+    section naming a category the Types list did not offer, or counting against
+    a different closed set than the drift beside it, would hand the agent two
+    vocabularies. It is a keyword argument defaulting to ``None`` so every
+    existing caller — the CLI's ``--write``, and the writers the memory pass and
+    the proposal queue make — renders byte-for-byte what it rendered before,
+    which is what keeps the registry's adoption a separate, reviewable change.
     """
     header = (
         "<!-- generated by ciao vault-index, do not edit by hand -->\n\n"
@@ -1387,7 +1449,7 @@ def write_vocabulary_file(
         "one; when a new tag is genuinely needed, use `namespace/value` form "
         "(e.g. `project/active`, `product/barcode-capture`).\n\n"
     )
-    sections = [format_vocabulary(entries)]
+    sections = [format_vocabulary(entries, registry=registry)]
     if registry is not None:
         sections.insert(0, entity_types_section(registry))
     dest.write_text(header + "\n".join(sections), encoding="utf-8")
@@ -1422,7 +1484,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     vault_root = (args.vault_root or default_vault_root()).resolve()
-    entries = scan_vault(vault_root)
+    # The scan and the two renderings below must share one closed set, or a
+    # folder-inferred custom type shows in INDEX.md while VOCABULARY.md calls
+    # its own scan's notes drift. Load once and thread it through.
+    registry = load_entity_types(vault_root)
+    entries = scan_vault(vault_root, registry=registry)
 
     if args.write:
         dest = vault_root / "INDEX.md"
@@ -1431,8 +1497,8 @@ def main(argv: list[str] | None = None) -> int:
         # Same parsed frontmatter, no extra I/O: the vocabulary is a second
         # rendering of the entries already in hand.
         vocabulary = vault_root / "VOCABULARY.md"
-        write_vocabulary_file(entries, vocabulary)
-        drift = vocabulary_report(entries)["type_drift"]
+        write_vocabulary_file(entries, vocabulary, registry=registry)
+        drift = vocabulary_report(entries, registry=registry)["type_drift"]
         print(
             f"wrote {vocabulary} ({len(drift)} non-canonical type"
             f"{'' if len(drift) == 1 else 's'})",
