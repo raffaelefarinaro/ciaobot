@@ -13,13 +13,17 @@ ships the defaults; ``<vault>/entity-types.yaml`` holds the user's edits; the
 effective list is the two merged by ``id``. The owner reads and writes that
 file over ``GET``/``PATCH /api/memory/entity-types`` (:func:`effective_payload`
 and :func:`write_vault_file`), and the generated ``VOCABULARY.md`` names the
-categories it holds. Three consumers read the registry: ``vault_index``'s
-``canonical_type`` / ``scan_vault``, ``vault_lint``'s ``run_validation`` and
-``memory_audit``'s staleness predicates. Each takes an optional
-``registry=`` keyword and loads one from the vault root it already holds when
-the caller passes none, so a caller with no vault in hand keeps the shipped
-tables and behaviour with no vault file is byte-identical to before;
-``tests/test_entity_types.py`` pins every derived view against the live
+categories it holds. The consumers read the registry: ``vault_index``'s
+``canonical_type`` / ``scan_vault``, ``vault_lint``'s ``run_validation``,
+``memory_audit``'s staleness predicates, the entity-note writer
+(``ciao.memory_proposals.write_entity_note``, #637) and, for the bootstrap and
+re-home folds, ``config`` and ``vault_rehome``. Most take an optional
+``registry=`` keyword and load one from the vault root they already hold when
+the caller passes none; the two that cannot — ``config``, which asks for the
+**stock** list (below), and the writer, which resolves two roots — ask the
+registry for what they can reach instead. So a caller with no vault in hand
+keeps the shipped tables, and behaviour with no vault file is byte-identical to
+before; ``tests/test_entity_types.py`` pins every derived view against the live
 constant it replaced.
 
 **Which vault.** ``<vault>`` is the *agent* vault root
@@ -27,7 +31,10 @@ constant it replaced.
 ``INDEX.md`` and ``VOCABULARY.md``, not a workspace's notes root. The two differ
 on a pre-re-rooting install (one shared vault, several workspaces), so
 ``load_entity_types`` takes the directory explicitly and leaves that choice to
-the caller.
+the caller. The entity-note writer is the one consumer that has to name two: the
+note lands in a workspace's **notes** root while the category it files that note
+under comes from the agent vault root, so an owner's category edit and the note
+routed by it cannot end up describing different directories.
 
 **Merge.** A vault entry is a *partial* override of the stock entry with the
 same ``id``: only the keys it states change, so hand-writing

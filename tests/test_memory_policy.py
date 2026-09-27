@@ -204,6 +204,42 @@ def test_remember_command_no_longer_claims_enforcement() -> None:
     assert "over_cap" in command
 
 
+def test_stock_prompts_route_categories_to_the_vocabulary_block() -> None:
+    """Every surface that writes a note must name the block that lists them.
+
+    The category list is the owner's: it gains rows in Settings, so an agent
+    that memorized it silently writes notes against a vocabulary that no longer
+    exists. Each of these files has to point at the **Categories** section, say
+    the note is filed in the folder it names, and route the no-fit case to the
+    owner instead of a coined `type:`.
+    """
+    for relative in (
+        "agents/memory.md",
+        "commands/remember.md",
+        "commands/interrogation.md",
+    ):
+        asset = _stock(relative)
+        assert "**Categories** section" in asset, relative
+        assert "new-category" in asset, relative
+
+
+def test_the_memory_agent_says_where_a_note_goes_and_who_adds_a_category() -> None:
+    role = _stock("agents/memory.md")
+    assert "Read it before writing a note and file the note in the folder its line names" in role
+    assert "queue a new-category question in `Workspace/Memory-Proposals.md`" in role
+    # The list is read, never memorized: a category added in Settings must reach
+    # the agent without editing this file.
+    assert "do not memorize this" in role
+
+
+def test_the_core_prompt_points_at_the_same_block() -> None:
+    from ciao.core_prompt import _system_instructions
+
+    core = _system_instructions()
+    assert "**Categories** section of `VOCABULARY.md`" in core
+    assert "a note that fits none is a new-category question" in core
+
+
 def test_curation_skill_defers_and_never_hard_caps() -> None:
     skill = _stock("skills/memory-curation/SKILL.md")
     assert "You are an unattended run: defer, never ask, never route around" in skill
