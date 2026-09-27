@@ -350,7 +350,10 @@ def test_run_validation_reads_each_included_markdown_once(
     reads: list[Path] = []
 
     def counted_read_text(path: Path, *args: object, **kwargs: object) -> str:
-        if path.is_relative_to(vault):
+        # Markdown only, which is what this guard is about: `run_validation` now
+        # also reads the vault's `entity-types.yaml` (#626), and a config file is
+        # not the "included markdown" this test says it reads exactly once.
+        if path.suffix.lower() in {".md", ".markdown"} and path.is_relative_to(vault):
             reads.append(path)
         return original_read_text(path, *args, **kwargs)
 
@@ -915,3 +918,44 @@ def test_a_symlinked_cross_root_link_is_not_a_broken_link(tmp_path: Path) -> Non
     # Landing inside the install does not make a dead link live: the lexical
     # branch probes before clearing, and this branch has to agree with it.
     assert "shared/Ghost.md" in flagged
+
+
+# ---- the category registry as the lint's closed set (#626) ------------------
+
+
+def test_a_vault_category_is_lint_clean_and_lints_its_folder(tmp_path: Path) -> None:
+    """A category the owner added is a `type:` and a watched folder — and
+    disabling it takes both away again.
+
+    All three states are checked, because the disabled one is the load-bearing
+    half: a folder whose category is off must stop producing orphan candidates
+    (an unlinked note in an unwatched folder is nobody's problem) and its `type:`
+    must go back to being drift, because a disabled category claims no `type:`.
+    """
+    from ciao import entity_types
+
+    vault = tmp_path / "memory-vault"
+    (vault / "Clients").mkdir(parents=True)
+    (vault / "Clients" / "Acme.md").write_text(
+        "---\ntype: customer\n---\n# Acme\n", encoding="utf-8"
+    )
+    categories = vault / "entity-types.yaml"
+    customer = "- id: customer\n  label: Customer\n  kind: entity\n  folder: Clients\n"
+
+    # No category file: `customer` is a type nothing claims and `Clients/` is a
+    # folder nothing owns, which is exactly what the hardcoded tables said.
+    absent = vault_lint.run_validation(vault)
+    assert [error["kind"] for error in absent["frontmatter_errors"]] == ["unknown_type"]
+    assert absent["orphans"] == []
+
+    categories.write_text(customer, encoding="utf-8")
+    entity_types.clear_entity_types_cache()
+    present = vault_lint.run_validation(vault)
+    assert present["frontmatter_errors"] == []
+    assert present["orphans"] == ["Clients/Acme.md"], "an entity category's folder is watched"
+
+    categories.write_text(customer + "  enabled: false\n", encoding="utf-8")
+    entity_types.clear_entity_types_cache()
+    disabled = vault_lint.run_validation(vault)
+    assert [error["kind"] for error in disabled["frontmatter_errors"]] == ["unknown_type"]
+    assert disabled["orphans"] == []
