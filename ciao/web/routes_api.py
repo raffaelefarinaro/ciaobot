@@ -6081,11 +6081,10 @@ async def skill_import(request: Request) -> JSONResponse:
     config = request.app.state.config
     # Reject oversized bodies before multipart parsing. `request.form()` fully
     # consumes and spools the multipart file, so a very large upload would
-    # exhaust temporary disk (and, in client mode, the proxy buffers the body in
-    # memory) before the per-file cap below is ever applied. A missing or
-    # malformed Content-Length (chunked/HTTP2 clients) is rejected too: without
-    # it there is no cheap pre-parse bound, and a legitimate zip upload always
-    # carries the header.
+    # exhaust temporary disk before the per-file cap below is ever applied. A
+    # missing or malformed Content-Length (chunked/HTTP2 clients) is rejected
+    # too: without it there is no cheap pre-parse bound, and a legitimate zip
+    # upload always carries the header.
     max_zip_bytes = 10 * 1024 * 1024
     content_length = request.headers.get("content-length")
     try:
