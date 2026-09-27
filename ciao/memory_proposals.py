@@ -16,6 +16,10 @@ belongs. The destination vocabulary is :data:`DESTINATIONS`:
 * ``[learnings]`` — reusable how-to knowledge → ``Workspace/Learnings.md``.
 * ``[review]``   — nobody was sure → waits for a human or the curator.
 
+It also owns the one note-rewriting primitive the queue needs outside a region:
+:func:`set_note_type`, which a `[category <id>]` accept uses to retype the notes
+that were already filed under a spelling nobody had written down.
+
 The one-shot archive-time producer of those bullets is gone (#627): the memory
 pass, a chat of the app's own, now writes memory directly. What this module
 owns is the half that outlives it — a person or the agent files a proposal by
@@ -53,6 +57,110 @@ _LEARNINGS_RELATIVE = "Workspace/Learnings.md"
 #: carries as a frontmatter ``type:`` and the folder it lives in. Named once so
 #: the accept path and the writer cannot drift apart on the mapping between them.
 PERSON_TYPE_ID = "person"
+
+
+# ── Note types ─────────────────────────────────────────────────────────────
+#
+# The only note-rewriting the queue does, and it is deliberately narrower than
+# `vault_migration._retype_frontmatter`: that one is the SAFE RENAME half of a
+# migration, so it refuses a note with no frontmatter and a note whose `type:`
+# line no longer says what it expected — both mean "not the note this pass
+# planned for". A category accept is not that. It was decided against a cluster
+# the owner was shown, and a note with no frontmatter at all is a perfectly
+# ordinary member of one.
+#
+# So the baseline check lives in the CALLER, which knows the type the proposal
+# was made against, and this function does the one thing it is for: set the
+# `type:` to a given value, creating the block when there is none, and leave
+# every other byte of the note alone.
+
+# The opening fence, the block (which may be empty), and the closing fence WITH
+# its line terminator. The block's own terminator is deliberately outside the
+# capture so a retyped note is rebuilt from parsed lines with one join, and an
+# empty block (``---\n---\n``) is a block rather than no block at all.
+_FRONTMATTER_RE = re.compile(r"\A(---[ \t]*\r?\n)(.*?\r?\n?)(---[ \t]*(?:\r?\n|\Z))", re.DOTALL)
+
+
+def read_note_type(path: Path) -> str:
+    """The note's frontmatter ``type:``, or "" when it has none.
+
+    "" covers both "no frontmatter" and "frontmatter with no ``type:`` line",
+    because a category accept treats them the same way: a note that never said
+    what it was is exactly the note a new category is being created for.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    match = _FRONTMATTER_RE.match(text)
+    if match is None:
+        return ""
+    for line in match.group(2).splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip() == "type":
+            return value.strip().strip("\"'")
+    return ""
+
+
+def set_note_type(path: Path, type_id: str) -> bool:
+    """Set the note's frontmatter ``type:`` to *type_id*; report whether it took.
+
+    Creates the frontmatter block when the note has none, rewrites only the
+    ``type:`` line when it has one, and leaves every other key, their order, the
+    body's bytes and the file's mode exactly as they were. A note already typed
+    *type_id* is a no-op reported as success, so an accept retried against a
+    half-finished cluster converges instead of failing.
+
+    False means the note could not be read or written — never that the write was
+    skipped for a judgement reason, so a caller can tell a refusal from a
+    failure without re-reading the file.
+
+    Atomic (a temp file beside the note plus one ``os.replace``) for the reason
+    the queue is: every reader of the vault parses a note's frontmatter, and a
+    truncated note is not "the old type" but an unparseable file that drops out
+    of the index.
+    """
+    from ciao.memory_receipts import write_queue_atomically
+
+    target = Path(path)
+    if not type_id:
+        return False
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    match = _FRONTMATTER_RE.match(text)
+    if match is None:
+        # No block at all: open one and put the type in it. The blank line after
+        # the closing fence is the separator every note in the vault has, so a
+        # retyped note reads like the ones around it.
+        rewritten = f"---\ntype: {type_id}\n---\n\n{text}"
+    else:
+        opening, block, closing = match.group(1), match.group(2), match.group(3)
+        eol = "\r\n" if opening.endswith("\r\n") else "\n"
+        lines = block.splitlines()
+        replaced = False
+        for index, line in enumerate(lines):
+            key, separator, value = line.partition(":")
+            if not separator or key.strip() != "type":
+                continue
+            if value.strip().strip("\"'") == type_id:
+                return True
+            lines[index] = f"type: {type_id}"
+            replaced = True
+            break
+        if not replaced:
+            lines.insert(0, f"type: {type_id}")
+        rewritten = (
+            opening + eol.join(lines) + eol + closing + text[match.end() :]
+        )
+    if rewritten == text:
+        return True
+    try:
+        write_queue_atomically(target, rewritten)
+    except OSError:
+        return False
+    return True
 
 
 # ── Typed decision statuses ───────────────────────────────────────────────

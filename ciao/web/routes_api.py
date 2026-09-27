@@ -45,7 +45,7 @@ from ciao import desktop_build
 from ciao import entity_types
 from ciao import provider_registry
 from ciao.jsonio import write_private_text
-from ciao.memory_receipts import QueueReceiptUnavailable
+from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.web.document_conversion import is_anydoc_document
 from ciao.config import (
     CLAUDE_MODELS,
@@ -3820,6 +3820,28 @@ def _scan_entity_types(
     return entries, dict(counts)
 
 
+def _write_entity_types_under_lock(
+    vault: Path, entries: list[entity_types.EntityType]
+) -> None:
+    """Write the whole category list under the lock the accept also takes.
+
+    ``write_vault_file`` is atomic but not locked, and the ``[category]`` accept
+    reads the registry, appends to it and writes it as one transaction under
+    this same lock — so a PATCH that wrote outside it could land between that
+    read and that write, and the accepted category would be dropped with no
+    error on either side. A PATCH is a full replacement rather than a diff, so
+    serialization is all it needs: whichever of the two arrives second wins,
+    which is the contract it already had.
+
+    Raises :class:`QueueLockError` rather than writing unlocked, like every
+    other managed writer of a file behind this lock.
+    """
+    from ciao.memory_receipts import queue_lock
+
+    with queue_lock(vault / entity_types.VAULT_FILENAME):
+        entity_types.write_vault_file(vault, entries)
+
+
 def _regenerate_vocabulary(
     vault: Path, workspace: str
 ) -> tuple[dict[str, int], entity_types.EntityTypeRegistry]:
@@ -3931,7 +3953,12 @@ async def memory_entity_types(request: Request) -> JSONResponse:
 
     try:
         await asyncio.to_thread(
-            functools.partial(entity_types.write_vault_file, vault, entries)
+            functools.partial(_write_entity_types_under_lock, vault, entries)
+        )
+    except QueueLockError as exc:
+        return JSONResponse(
+            {"error": f"the categories file is busy; nothing was written: {exc}"},
+            status_code=503,
         )
     except OSError as exc:
         return JSONResponse(
@@ -7287,6 +7314,25 @@ async def proposals_batch(request: Request) -> JSONResponse:
             # fact whose region was over cap, silently and in bulk.
             promoted: dict[str, proposal_service.AcceptOutcome] = {}
             keep_lines: set[int] = set()
+            if action == "dismiss":
+                # Same rule as the single-row route, and for the same reason: the
+                # row is the proposal, so the id-keyed refusal has to be on record
+                # before the bullet goes. A refusal that could not be written
+                # aborts the batch whole rather than half-resolving it.
+                for row in entry["rows"]:
+                    if row.get("kind") != "category":
+                        continue
+                    refusal = await asyncio.to_thread(
+                        proposal_service.decline_category_row, config, row
+                    )
+                    if refusal:
+                        return JSONResponse(
+                            {
+                                "error": refusal,
+                                "ids": sorted({ctx["row"]["id"] for ctx in resolved}),
+                            },
+                            status_code=409,
+                        )
             if action == "accept":
                 # The claim above only covers this process. Another resolver
                 # (the CLI, the undo path, a second server) may have taken a
@@ -7344,6 +7390,16 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         promotion = await proposal_service._accept_people_row(config, row)
                     elif accept.action == "append_learnings":
                         promotion = proposal_service._accept_learnings_row(config, row)
+                    elif accept.action == "add_category":
+                        # A registry the validator refuses (a folder another
+                        # category already claims) is the owner's problem to fix,
+                        # not a transient failure, so it is reported as a
+                        # refusal with the reason rather than retried. The row
+                        # stays queued, like every other failure in this loop.
+                        try:
+                            promotion = proposal_service._accept_category_row(config, row)
+                        except entity_types.EntityTypeFileError as exc:
+                            promotion = proposal_service.AcceptOutcome(ok=False, error=str(exc))
                     else:
                         # route_manually: nothing to perform, and the row stays.
                         promotion = proposal_service.AcceptOutcome(
@@ -7634,6 +7690,15 @@ async def proposal_action(request: Request) -> JSONResponse:
         )
     row = ctx["row"]
 
+    if action == "dismiss" and row.get("kind") == "category":
+        # Recorded BEFORE the bullet is removed, because the row IS the proposal:
+        # once it is gone the vault still has the cluster, and the sidecar flag is
+        # the only thing that keeps the next pass from filing it again. A refusal
+        # that could not be written keeps its row.
+        decline_error = proposal_service.decline_category_row(config, row)
+        if decline_error:
+            return JSONResponse({"error": decline_error, "id": pid}, status_code=409)
+
     if ctx.get("file"):
         # A whole file, not a bullet in a queue: the line-removal path below
         # would read it and delete line -1 of it.
@@ -7847,6 +7912,24 @@ async def proposal_action(request: Request) -> JSONResponse:
                 if not promoted.ok:
                     return JSONResponse(
                         {"error": promoted.error or "could not append", "id": pid},
+                        status_code=409,
+                    )
+            elif accept.action == "add_category":
+                # A registry the validator refuses — a folder another category
+                # already claims, a malformed id — is a 400 and not a 409: the
+                # proposal is sound, the category it would add is not, and the
+                # owner's next move is to edit the id or folder, not to retry.
+                # Nothing has been written, so the bullet stays.
+                try:
+                    promoted = proposal_service._accept_category_row(config, promote_row)
+                except entity_types.EntityTypeFileError as exc:
+                    return JSONResponse({"error": str(exc), "id": pid}, status_code=400)
+                if not promoted.ok:
+                    return JSONResponse(
+                        {
+                            "error": promoted.error or "could not add the category",
+                            "id": pid,
+                        },
                         status_code=409,
                     )
             else:

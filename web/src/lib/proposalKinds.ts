@@ -303,6 +303,24 @@ export const PROPOSAL_KINDS: Record<string, ProposalKindDescriptor> = {
     discussLabel: () => 'a re-home proposal',
   },
 
+  // The vault noticed three or more notes sharing a `type:` nobody wrote down
+  // and proposed the category for them. The id is the bullet's payload, which
+  // is also the registry id accepting it would add, so the destination is the
+  // category itself rather than a path — and there is no merge chat, because
+  // there is no prose to reconcile: the decision is which notes get retyped, and
+  // a refusal records the id so it is never offered again.
+  category: {
+    label: 'category',
+    destination: (row) => row.target || 'no category named',
+    consequence: (row) =>
+      row.target
+        ? `Adds the ${row.target} category and retypes the notes you tick`
+        : 'Adds a new category and retypes the notes you tick',
+    canAccept: ALWAYS,
+    fallback: null,
+    discussLabel: () => 'a `category` proposal',
+  },
+
   // A skill row is a file, not a bullet, and `accept_for('skill')` raises on the
   // server — accepting a proposed skill means implementing it, which is a chat.
   // The path, not the words "a skill proposal file": the row's whole content is

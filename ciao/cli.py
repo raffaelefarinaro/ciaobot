@@ -2640,7 +2640,13 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
 
 
 def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
-    """Shared workspace/vault resolution for the memory-proposal commands.
+    """Shared workspace/vault resolution for the memory-proposal commands."""
+    workspace, vault, _registry_root = _resolve_workspace_and_vaults(args)
+    return workspace, vault
+
+
+def _resolve_workspace_and_vaults(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    """``(workspace, notes vault, agent vault root)`` for one CLI invocation.
 
     A scheduled run exports ``CIAO_ACTIVE_WORKSPACE`` (the logical workspace
     name) next to a ``CIAO_VAULT_ROOT`` that points at the install-wide
@@ -2650,6 +2656,14 @@ def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
     through the workspace registry instead — the same authority the PWA's
     ``workspace_vault_root`` reads with. Explicit arguments still win for
     manual invocations.
+
+    The third value is where ``entity-types.yaml`` and ``VOCABULARY.md`` live:
+    the agent vault root, which is NOT the notes root before the re-rooting. A
+    registry read from the notes root is the stock list on every such install,
+    so a caller that measures notes against it (the category-cluster pass) sees
+    every category the owner already added as unlisted. In the explicit-argument
+    path there is no per-workspace split to resolve, so the vault the caller
+    named is both.
     """
     active = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
     if not getattr(args, "vault_root", None) and not getattr(args, "workspace", None):
@@ -2664,7 +2678,11 @@ def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
                 env_source.setdefault("PWA_AUTH_TOKEN", "memory-proposals")
                 config = CiaoConfig.from_env(env_source)
                 if config.workspace(active) is not None:
-                    return config.workspace_root, Path(config.workspace_vault_root(active))
+                    return (
+                        config.workspace_root,
+                        Path(config.workspace_vault_root(active)),
+                        Path(config.agent_vault_root(active)),
+                    )
             except Exception:  # noqa: BLE001 — fall through to the legacy path
                 pass
     workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
@@ -2673,7 +2691,8 @@ def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
     vault = Path(vault_raw).expanduser()
     if not vault.is_absolute():
         vault = workspace / vault
-    return workspace, vault.resolve()
+    resolved = vault.resolve()
+    return workspace, resolved, resolved
 
 
 def _memory_proposals_command(args: argparse.Namespace) -> int:
@@ -3205,29 +3224,31 @@ def _add_curation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
 
 
-def _curation_context(args: argparse.Namespace) -> tuple[Path, Path, Path, Any]:
+def _curation_context(args: argparse.Namespace) -> tuple[Path, Path, Path, Any, Path]:
     from ciao.curation_run import RunBudget
 
-    workspace, vault = _resolve_workspace_and_vault(args)
+    workspace, vault, registry_root = _resolve_workspace_and_vaults(args)
     guide = Path(args.guide).expanduser().resolve() if args.guide else guide_path(workspace)
     defaults = RunBudget()
     budget = RunBudget(
         max_items=args.max_items if args.max_items is not None else defaults.max_items,
         max_seconds=args.max_seconds if args.max_seconds is not None else defaults.max_seconds,
     )
-    return workspace, vault, guide, budget
+    return workspace, vault, guide, budget, registry_root
 
 
 def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
     from ciao.curation_run import build_worklist, load_state, plan_run
+    from ciao.entity_types import load_entity_types
 
-    workspace, vault, guide, budget = _curation_context(args)
+    workspace, vault, guide, budget, registry_root = _curation_context(args)
     state = load_state(vault)
     worklist = build_worklist(
         vault_root=vault,
         guide_path=guide,
         workspace_dir=workspace,
         done_keys=frozenset(state.done_keys),
+        category_registry=load_entity_types(registry_root),
     )
     plan = plan_run(worklist, budget)
     payload: dict[str, Any] = {
@@ -3276,7 +3297,7 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     """
     from ciao.curation_run import CurationBusy, begin_run, end_run
 
-    _workspace, vault, _guide, budget = _curation_context(args)
+    _workspace, vault, _guide, budget, _registry_root = _curation_context(args)
     try:
         lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds)
     except CurationBusy as exc:
@@ -3315,7 +3336,7 @@ def _curation_progress_command(args: argparse.Namespace) -> int:
     """Record finished worklist keys and renew the lease."""
     from ciao.curation_run import CurationBusy, record_done, renew_run
 
-    _workspace, vault, _guide, budget = _curation_context(args)
+    _workspace, vault, _guide, budget, _registry_root = _curation_context(args)
     holder = _curation_holder(args)
     if not holder:
         return 2
@@ -3349,7 +3370,7 @@ def _curation_end_command(args: argparse.Namespace) -> int:
     """
     from ciao.curation_run import CurationBusy, end_run
 
-    _workspace, vault, _guide, _budget = _curation_context(args)
+    _workspace, vault, _guide, _budget, _registry_root = _curation_context(args)
     holder = _curation_holder(args)
     if not holder:
         return 2

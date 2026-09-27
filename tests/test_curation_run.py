@@ -63,6 +63,21 @@ def _fresh_log(vault: Path, *, last_full_pass: str) -> None:
     )
 
 
+def _categories(vault: Path) -> "EntityTypeRegistry":
+    """The category list ``build_worklist`` measures the notes against.
+
+    The registry belongs to the agent vault root, which is a different directory
+    from a workspace's notes on an install that has not re-rooted — so it is
+    passed in rather than read from ``vault_root``. In these tests the two are the
+    same directory, which keeps every other worklist assertion about one tree;
+    :func:`test_a_cluster_the_registry_already_knows_is_not_offered` is the one
+    that separates them.
+    """
+    from ciao.entity_types import EntityTypeRegistry, load_entity_types
+
+    return load_entity_types(vault)
+
+
 # ── Worklist ──────────────────────────────────────────────────────────────
 
 
@@ -75,6 +90,7 @@ def test_a_fresh_idle_workspace_has_nothing_to_do(tmp_path: Path) -> None:
     worklist = cr.build_worklist(
         vault_root=vault,
         guide_path=guide,
+        category_registry=_categories(vault),
         workspace_dir=tmp_path,
         today=date(2026, 9, 19),
     )
@@ -108,6 +124,7 @@ def test_every_mechanical_signal_lands_in_the_worklist(tmp_path: Path) -> None:
     worklist = cr.build_worklist(
         vault_root=vault,
         guide_path=guide,
+        category_registry=_categories(vault),
         workspace_dir=tmp_path,
         today=date(2026, 9, 19),
     )
@@ -134,6 +151,139 @@ def test_every_mechanical_signal_lands_in_the_worklist(tmp_path: Path) -> None:
     ]
 
 
+def _cluster_vault(vault: Path, type_: str, count: int) -> None:
+    notes = vault / "Journals"
+    notes.mkdir(parents=True, exist_ok=True)
+    for index in range(count):
+        (notes / f"Note{index}.md").write_text(
+            f"---\ntype: {type_}\n---\n# Note{index}\n", encoding="utf-8"
+        )
+
+
+def test_a_three_note_cluster_becomes_a_category_item(tmp_path: Path) -> None:
+    """The pass files the bullet itself and reports the work.
+
+    It is the one pass here that writes, and deliberately so: the trigger is a
+    count over the notes on disk, so nothing about it needs a model and the
+    decision belongs in the queue, not in a chat.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _cluster_vault(vault, "recipe-book", 3)
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    by_pass = {item.pass_id: item for item in worklist.items}
+    assert cr.PASS_CATEGORIES in by_pass
+    assert by_pass[cr.PASS_CATEGORIES].keys == (
+        cr.item_key(cr.PASS_CATEGORIES, "recipe-book"),
+    )
+    queue = (vault / cr.PROPOSALS_RELATIVE).read_text(encoding="utf-8")
+    assert "- [category recipe-book]" in queue
+    # It is a real queue row, so the review pass sees it as work to route too.
+    assert cr.PASS_PROPOSALS in by_pass
+
+
+def test_a_cluster_the_registry_already_knows_is_not_offered(tmp_path: Path) -> None:
+    """A category the owner accepted is canonical, even when its registry file
+    lives in a different directory from the notes.
+
+    This is the pre-re-rooting layout: notes under ``memory-vault/personal`` and
+    ``entity-types.yaml`` in ``memory-vault``, which is where the accept writes
+    and where ``GET``/``PATCH /api/memory/entity-types`` reads. A pass that loaded
+    the registry from the notes root instead read a file that does not exist, so
+    the accepted id stayed unlisted — queued again the moment the cluster grew,
+    and then refused on accept as a duplicate nobody could resolve.
+    """
+    from ciao import entity_types
+
+    agent_vault = tmp_path / "memory-vault"
+    notes_vault = agent_vault / "personal"
+    (notes_vault / "Workspace").mkdir(parents=True)
+    guide = _guide(tmp_path)
+    _fresh_log(notes_vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _cluster_vault(notes_vault, "recipe-book", 3)
+    entity_types.write_vault_file(
+        agent_vault,
+        [
+            *entity_types.stock_entity_type_registry().entries(),
+            entity_types.EntityType(id="recipe-book", label="Recipe book"),
+        ],
+    )
+    assert not (notes_vault / entity_types.VAULT_FILENAME).exists()
+
+    worklist = cr.build_worklist(
+        vault_root=notes_vault,
+        guide_path=guide,
+        category_registry=entity_types.load_entity_types(agent_vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    assert cr.PASS_CATEGORIES not in {item.pass_id for item in worklist.items}
+    assert not (notes_vault / cr.PROPOSALS_RELATIVE).exists()
+
+
+def test_a_declined_category_is_not_work_twice(tmp_path: Path) -> None:
+    """The refusal is keyed by id, so the cluster it described never comes back
+    and the pass has nothing to report."""
+    from ciao.vocabulary_proposals import decline_category, read_category_sidecar
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _cluster_vault(vault, "recipe-book", 3)
+
+    first = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+    assert cr.PASS_CATEGORIES in {item.pass_id for item in first.items}
+    decline_category(vault, "recipe-book")
+    assert read_category_sidecar(vault, "recipe-book")["declined"] is True
+    # The bullet is gone, as it would be after the owner rejected it.
+    (vault / cr.PROPOSALS_RELATIVE).unlink()
+
+    second = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    assert cr.PASS_CATEGORIES not in {item.pass_id for item in second.items}
+    assert not (vault / cr.PROPOSALS_RELATIVE).exists()
+
+
+def test_a_two_note_cluster_is_not_category_work(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _cluster_vault(vault, "recipe-book", 2)
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    assert worklist.empty
+    assert not (vault / cr.PROPOSALS_RELATIVE).exists()
+
+
 def test_guide_review_is_weekly_but_not_a_required_hygiene_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -156,6 +306,7 @@ def test_guide_review_is_weekly_but_not_a_required_hygiene_key(
         for item in cr.build_worklist(
             vault_root=vault,
             guide_path=guide,
+            category_registry=_categories(vault),
             workspace_dir=tmp_path,
             today=date(2026, 9, 19),
         ).items
@@ -193,6 +344,7 @@ def test_queued_region_facts_are_not_work(tmp_path: Path) -> None:
     worklist = cr.build_worklist(
         vault_root=vault,
         guide_path=guide,
+        category_registry=_categories(vault),
         workspace_dir=tmp_path,
         today=date(2026, 9, 19),
     )
@@ -224,6 +376,7 @@ def test_proposals_sharing_one_sentence_are_separate_work(tmp_path: Path) -> Non
         return cr.build_worklist(
             vault_root=vault,
             guide_path=guide,
+            category_registry=_categories(vault),
             workspace_dir=tmp_path,
             today=date(2026, 9, 19),
             done_keys=frozenset(cr.load_state(vault).done_keys),
@@ -254,6 +407,7 @@ def test_a_missing_or_malformed_marker_leaves_the_weekly_pass_due(tmp_path: Path
     worklist = cr.build_worklist(
         vault_root=vault,
         guide_path=guide,
+        category_registry=_categories(vault),
         workspace_dir=tmp_path,
         today=date(2026, 9, 19),
     )
@@ -268,6 +422,7 @@ def test_a_region_over_the_consolidation_threshold_is_work(tmp_path: Path) -> No
     clear = cr.build_worklist(
         vault_root=vault,
         guide_path=guide,
+        category_registry=_categories(vault),
         workspace_dir=tmp_path,
         today=date(2026, 9, 19),
     )
@@ -276,6 +431,7 @@ def test_a_region_over_the_consolidation_threshold_is_work(tmp_path: Path) -> No
     full = cr.build_worklist(
         vault_root=vault,
         guide_path=guide,
+        category_registry=_categories(vault),
         workspace_dir=tmp_path,
         today=date(2026, 9, 19),
         memory_char_limit=30,
@@ -292,6 +448,7 @@ def test_an_expired_entry_is_work_even_well_under_cap(tmp_path: Path) -> None:
     worklist = cr.build_worklist(
         vault_root=vault,
         guide_path=guide,
+        category_registry=_categories(vault),
         workspace_dir=tmp_path,
         today=date(2026, 9, 19),
     )
@@ -315,6 +472,7 @@ def test_resolved_learnings_are_not_replanned(tmp_path: Path) -> None:
     worklist = cr.build_worklist(
         vault_root=vault,
         guide_path=guide,
+        category_registry=_categories(vault),
         workspace_dir=tmp_path,
         today=date(2026, 9, 19),
     )
@@ -367,7 +525,11 @@ def test_a_budget_limited_run_resumes_at_the_remainder(tmp_path: Path) -> None:
         (vault / cr.SKILL_PROPOSALS_RELATIVE / f"{name}.md").write_text("x", encoding="utf-8")
 
     first = cr.build_worklist(
-        vault_root=vault, guide_path=guide, workspace_dir=tmp_path, today=date(2026, 9, 19)
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
     )
     plan = cr.plan_run(first, cr.RunBudget(max_items=2))
     assert plan.planned_count == 2 and plan.deferred_count == 1
@@ -377,6 +539,7 @@ def test_a_budget_limited_run_resumes_at_the_remainder(tmp_path: Path) -> None:
     second = cr.build_worklist(
         vault_root=vault,
         guide_path=guide,
+        category_registry=_categories(vault),
         workspace_dir=tmp_path,
         today=date(2026, 9, 20),
         done_keys=frozenset(cr.load_state(vault).done_keys),
@@ -398,13 +561,18 @@ def test_a_worklist_whose_every_key_is_done_reports_empty(tmp_path: Path) -> Non
     (vault / cr.SKILL_PROPOSALS_RELATIVE / "a.md").write_text("x", encoding="utf-8")
 
     worklist = cr.build_worklist(
-        vault_root=vault, guide_path=guide, workspace_dir=tmp_path, today=date(2026, 9, 19)
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
     )
     cr.record_done(vault, [key for item in worklist.items for key in item.keys])
 
     again = cr.build_worklist(
         vault_root=vault,
         guide_path=guide,
+        category_registry=_categories(vault),
         workspace_dir=tmp_path,
         today=date(2026, 9, 19),
         done_keys=frozenset(cr.load_state(vault).done_keys),

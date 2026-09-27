@@ -110,6 +110,31 @@ def test_memory_profile_and_user_are_region_edits() -> None:
     assert user_accept.region == "profile"
 
 
+def test_category_parses_with_its_id_as_the_payload() -> None:
+    """`[category <id>]` is the shape the generator writes; the id is the
+    payload, the way a person name is for `[people]`."""
+    bullet = pk.parse_bullet(
+        "- [category recipe-book] Recipe Book → Recipe Books: three notes.  "
+        "_(from: 3 notes typed recipe-book)_"
+    )
+    assert bullet is not None
+    assert bullet.kind == "category"
+    assert bullet.target == "recipe-book"
+    assert bullet.text == "Recipe Book → Recipe Books: three notes."
+    assert bullet.source == "3 notes typed recipe-book"
+
+
+def test_category_accept_is_not_a_region_edit_or_a_move() -> None:
+    accept = pk.accept_for("category")
+    assert isinstance(accept, pk.CategoryAccept)
+    assert accept.action == "add_category"
+    # Structurally distinct from both other action families, so a caller
+    # branching on the descriptor can never route a category add through a
+    # region edit or a file move.
+    assert not isinstance(accept, pk.RegionAccept)
+    assert not isinstance(accept, pk.RehomeAccept)
+
+
 def test_stale_header_rewritten_bullets_untouched(tmp_path: Path) -> None:
     """The old header naming ~/.ciao/memory.md is refreshed in place.
 

@@ -66,6 +66,19 @@ describe('changeFor', () => {
     expect(changeFor(row({ kind: 'project' }), preview({ operation: '', can_accept: false, action: 'fold_doc' })).type).toBe('blocked')
   })
 
+  it('reads a proposed category as its own change, with a verb', () => {
+    // The verb is load-bearing: without one the row has no accept button of its
+    // own and falls through to "cannot be saved" on an accept that works.
+    const c = changeFor(row({ kind: 'category', target: 'recipe-book' }), preview({
+      action: 'add_category', operation: 'add_category', destination: 'recipe-book',
+      before: '', exact: true, separator: '\n',
+    }))
+    expect(c).toMatchObject({
+      type: 'category', label: 'New category', verb: 'Add category',
+      destination: 'recipe-book', qualifier: 'retypes the notes it came from',
+    })
+  })
+
   it('gives rows with no preview their own types', () => {
     expect(changeFor(row({ kind: 'skill', path: 'Workspace/skill-proposals/x.md' }), undefined).type).toBe('skill')
     expect(changeFor(row({ kind: 'review' }), undefined, { canAccept: false, fallbackQualifier: 'Needs you' }))

@@ -282,6 +282,32 @@ def test_learnings_keys(tmp_path):
     assert payload["destination"] == "Workspace/Learnings.md"
 
 
+def test_add_category_is_a_destination_not_a_rehome(tmp_path):
+    """`add_category` is a destination action, so the builder reports where the
+    category landed.
+
+    An action missing from `proposal_actions._DESTINATION_ACTIONS` falls through
+    to the re-home branch and reports `promoted=False` for a write that
+    succeeded — the row leaves the queue and the client is told the category was
+    not added.
+    """
+    from ciao import proposal_actions, proposal_kinds
+
+    accept = proposal_kinds.accept_for("category")
+    assert accept.action in proposal_actions._DESTINATION_ACTIONS
+    result = proposal_actions.build_accept_result(
+        "p1",
+        accept,
+        {"id": "p1", "kind": "category", "text": "Recipe Book"},
+        {"ok": True, "destination": "Recipe Books"},
+        include_usage=True,
+    )
+    payload = result.as_dict()
+    assert payload["promoted"] is True
+    assert payload["destination"] == "Recipe Books"
+    assert "justified" not in payload, "the re-home shape must not be reached"
+
+
 def test_project_keys(tmp_path, monkeypatch):
     config = _config(tmp_path)
     run = asyncio.run
