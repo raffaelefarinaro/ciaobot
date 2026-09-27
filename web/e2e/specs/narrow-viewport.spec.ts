@@ -128,7 +128,9 @@ test.describe('narrow viewport', () => {
 
     const rows = await small('.cat-row .cat-name-btn:visible, .cat-row .cat-switch:visible')
     expect(rows.length, 'no category row controls were measured').toBeGreaterThanOrEqual(4)
-    expect(rows.filter((b) => b.h < 44), `row controls below 44px: ${JSON.stringify(rows.filter((b) => b.h < 44))}`).toEqual([])
+    // Both directions: a 44px-tall 40px-wide switch is under the minimum, so
+    // height alone would call it a pass.
+    expect(rows.filter((b) => b.w < 44 || b.h < 44), `row controls below 44px: ${JSON.stringify(rows.filter((b) => b.w < 44 || b.h < 44))}`).toEqual([])
 
     // And the list must not push the document sideways.
     const { overflow, culprits } = await horizontalOverflow(page)

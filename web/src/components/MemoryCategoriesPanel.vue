@@ -253,8 +253,13 @@ function rowFromForm(): EntityTypeRow {
     aliases: parseAliases(form.aliases),
     stale_after_days: Math.max(0, Math.round(form.stale_after_days || 0)),
     // Adding is always enabled: a category the user just created and cannot
-    // see used would read as a broken save.
-    enabled: adding.value ? true : (previous?.enabled ?? true),
+    // see used would read as a broken save. An edit takes the flag from the
+    // DRAFT, never from the saved row: the drawer owns no enabled control, so
+    // reading the saved row would let a Save here undo a switch the user had
+    // just flipped off in the list.
+    enabled: adding.value
+      ? true
+      : (draft.value.find((row) => row.id === form.editing)?.enabled ?? previous?.enabled ?? true),
     builtin: form.builtin,
     note_count: previous?.note_count ?? 0,
   }
@@ -293,7 +298,12 @@ async function removeRow(row: EntityTypeRow | undefined) {
 
 async function saveDraft() {
   if (store.saving || !dirty.value) return
-  await store.save(workspace.value, draft.value)
+  // Branches on the answer like its siblings: a success adopts the server's
+  // list, so the draft is re-seeded from it and nothing is pending any more; a
+  // failure leaves the rows the user built alone and puts the server's sentence
+  // under these buttons, which is where a list-level error belongs.
+  const ok = await store.save(workspace.value, draft.value)
+  if (ok) store.clearError()
 }
 </script>
 
@@ -388,7 +398,14 @@ async function saveDraft() {
                   :aria-checked="row.enabled ? 'true' : 'false'"
                   :aria-label="`${row.enabled ? 'Disable' : 'Enable'} ${row.label}`"
                   @click.stop="setEnabled(row.id, !row.enabled)"
-                ><span class="cat-switch-dot" aria-hidden="true"></span></button>
+                >
+                  <!-- The button is the tap target and the track inside it is
+                       the visual, so a touch layout can have both: 44×44 to hit
+                       and the 40px pill to look at. -->
+                  <span class="cat-switch-track" aria-hidden="true">
+                    <span class="cat-switch-dot"></span>
+                  </span>
+                </button>
               </td>
             </tr>
           </tbody>
@@ -727,7 +744,21 @@ async function saveDraft() {
 }
 
 .cat-actions-col { width: 1%; white-space: nowrap; }
+/* The button is the target and the track inside it is the picture, so the two
+   can differ in size: a touch layout widens the button to the full 44px while
+   the pill stays the 40px it has always been. */
 .cat-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+.cat-switch-track {
   display: inline-flex;
   align-items: center;
   width: 40px;
@@ -736,10 +767,9 @@ async function saveDraft() {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-pill);
   background: var(--bg);
-  cursor: pointer;
   transition: background 120ms var(--ease), border-color 120ms var(--ease);
 }
-.cat-switch.on { background: var(--accent); border-color: var(--accent); }
+.cat-switch.on .cat-switch-track { background: var(--accent); border-color: var(--accent); }
 .cat-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .cat-switch-dot {
   width: 18px;
@@ -749,9 +779,13 @@ async function saveDraft() {
   transition: transform 120ms var(--ease);
 }
 .cat-switch.on .cat-switch-dot { background: var(--on-accent); transform: translateX(16px); }
-/* The hit area is the switch, and a touch layout needs the full 44px of it. */
+/* The hit area is the switch, and a touch layout needs the full 44px of it in
+   both directions — DESIGN.md's 44×44, which a 40px track cannot be on its own. */
 @media (pointer: coarse) {
-  .cat-switch { min-height: var(--touch); height: var(--touch); }
+  .cat-switch { min-width: var(--touch); min-height: var(--touch); height: var(--touch); }
+  /* A short label ("Idea") is less than 44px of text, so the row's own target
+     is widened to the same minimum the switch just claimed. */
+  .cat-name-btn { min-width: var(--touch); }
   .cat-btn { min-height: var(--touch); }
   .cat-link { min-height: var(--touch); }
 }

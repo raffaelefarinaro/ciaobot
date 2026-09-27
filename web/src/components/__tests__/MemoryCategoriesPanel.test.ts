@@ -6,8 +6,9 @@
  * What only a mount can decide: that a shipped row is shown with its Built-in
  * chip and the vault's own note count, that a change to one row sends the whole
  * list (the API is a whole-list `PATCH`, so a per-row save would be a lie), that
- * a builtin is offered no way to delete itself while a custom one is, and that
- * a refusal from the server reaches the person as the server's own sentence
+ * a switch flipped off in the list is still off after a save made in the drawer,
+ * that a builtin is offered no way to delete itself while a custom one is, and
+ * that a refusal from the server reaches the person as the server's own sentence
  * rather than as a silent no-op.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -152,6 +153,30 @@ describe('MemoryCategoriesPanel', () => {
     // Saved: the draft is the response, so nothing is pending any more.
     expect(rowsOf(wrapper)[0]!.find('.cat-flag').exists()).toBe(false)
     expect(wrapper.get('.cat-save').text()).toBe('Saved')
+    wrapper.unmount()
+  })
+
+  it('a drawer save keeps an enable toggle the list is still holding', async () => {
+    const wrapper = await mountPanel()
+    // The switch owns `enabled` and the drawer owns none of it, so a pending
+    // toggle has to survive an edit saved through the drawer: otherwise the
+    // whole-list PATCH quietly turns the category back on.
+    await rowsOf(wrapper)[0]!.get('.cat-switch').trigger('click')
+    await nextTick()
+    await rowsOf(wrapper)[0]!.get('.cat-name-btn').trigger('click')
+    await nextTick()
+
+    await drawerOf(wrapper).get('#cat-label').setValue('Human')
+    apiPatch.mockResolvedValue(body([row({ label: 'Human', enabled: false }), STOCK[1]!, STOCK[2]!]))
+    await drawerOf(wrapper).get('form').trigger('submit')
+    await flushPromises()
+    await nextTick()
+
+    expect((apiPatch.mock.calls[0]![1] as { types: Array<Record<string, unknown>> }).types[0])
+      .toMatchObject({ id: 'person', label: 'Human', enabled: false })
+    // And the row reads as off, because the list shows the response the store
+    // adopted rather than the submission.
+    expect(rowsOf(wrapper)[0]!.get('.cat-switch').attributes('aria-checked')).toBe('false')
     wrapper.unmount()
   })
 
