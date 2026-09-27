@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from pathlib import Path
@@ -112,28 +111,6 @@ def test_release_smoke_only_runs_with_a_published_version() -> None:
     assert "workflow_dispatch:" in workflow
     assert "pull_request:" not in workflow
     assert 'LaunchAgents/com.ciao.server.plist")' not in workflow
-
-
-def test_desktop_bundle_configuration_embeds_runtime_without_dmg() -> None:
-    config = json.loads(
-        (REPO_ROOT / "desktop" / "src-tauri" / "tauri.conf.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    bundle = config["bundle"]
-
-    assert "mainBinaryName" not in config
-    assert bundle["targets"] == ["app"]
-    assert bundle["resources"]["../runtime"] == "ciao-runtime"
-
-
-def test_installer_verifier_is_outside_the_tauri_package() -> None:
-    verifier = REPO_ROOT / "desktop" / "installer-verify"
-    tauri_bins = REPO_ROOT / "desktop" / "src-tauri" / "src" / "bin"
-
-    assert (verifier / "Cargo.toml").is_file()
-    assert (verifier / "src" / "main.rs").is_file()
-    assert not (tauri_bins / "ciaobot-installer-verify.rs").exists()
 
 
 def _shim_block() -> str:

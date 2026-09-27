@@ -3,8 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import re
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -122,7 +120,7 @@ def test_verify_accepts_pure_signature() -> None:
     assert verify_signature(b"manifest bytes", signature, public_key) == TRUSTED
 
 
-def test_verify_accepts_tauri_base64_wrapped_signature() -> None:
+def test_verify_accepts_base64_wrapped_signature() -> None:
     priv, public_key, key_id = _keypair()
     signature = _sign(b"manifest bytes", priv, key_id, wrap=True)
 
@@ -130,12 +128,12 @@ def test_verify_accepts_tauri_base64_wrapped_signature() -> None:
 
 
 # A real engine manifest, byte for byte what `release_manifest build` wrote,
-# and a real signature over it, both frozen from one run of
-# `npx @tauri-apps/cli@2.11.4 signer sign` (with a throwaway key that lives
-# only in this test). #653 moved release signing off
-# `cd desktop && npx tauri signer sign`, because the release became engine-only
-# and desktop/ is deleted next (#579b); the replacement runs the same pinned CLI
-# standalone, and it needs no Tauri project. If a later CLI changed the form it
+# and a real signature over it, both frozen from one run of the release
+# signer (`npx @tauri-apps/cli@2.11.4 signer sign`, with a throwaway key that
+# lives only in this test). #653 moved signing off the app tree, because the
+# release became engine-only; the replacement runs the same pinned CLI
+# standalone and needs no project of its own, which is why deleting that tree
+# (#656) did not break signing. If a later CLI changed the form it
 # emits, this fails here rather than as a `release_manifest verify` failure
 # during a release.
 TCLI_SIGNED_MANIFEST = b"""{
@@ -169,7 +167,7 @@ TCLI_SIGNED_SIG = (
 )
 
 
-def test_verify_accepts_a_standalone_tauri_cli_signature() -> None:
+def test_verify_accepts_a_standalone_signer_signature() -> None:
     # Exactly what the release now does: the standalone CLI signs, and the
     # .sig is read back as the whole file - base64-wrapped minisign included.
     trusted = verify_signature(TCLI_SIGNED_MANIFEST, TCLI_SIGNED_SIG, TCLI_SIGNED_KEY)
@@ -224,29 +222,14 @@ def test_verify_rejects_garbage() -> None:
         verify_signature(b"manifest bytes", "not a signature", RELEASE_PUBLIC_KEY)
 
 
-def test_embedded_release_key_matches_installer_verifier() -> None:
+def test_embedded_release_key_is_a_well_formed_minisign_key() -> None:
+    # The app and its native verifier are gone (#656), so this constant is the
+    # only copy of the release signing key left in the repo. A typo here is
+    # unrecoverable against a published release, so its shape is pinned even
+    # though there is no second file left to cross-check it against.
     key_id, key_bytes = parse_public_key(RELEASE_PUBLIC_KEY)
     assert len(key_id) == 8
     assert len(key_bytes) == 32
-
-    source = (
-        Path(__file__).parents[1] / "desktop" / "installer-verify" / "src" / "main.rs"
-    ).read_text(encoding="utf-8")
-    literal = re.search(r'const PUBLIC_KEY: &str = "(.*?)";', source)
-    assert literal, "desktop/installer-verify/src/main.rs no longer defines PUBLIC_KEY"
-    assert literal.group(1).rsplit("\\n", 1)[-1] == RELEASE_PUBLIC_KEY
-
-
-def test_embedded_release_key_matches_tauri_updater() -> None:
-    config = json.loads(
-        (
-            Path(__file__).parents[1] / "desktop" / "src-tauri" / "tauri.conf.json"
-        ).read_text(encoding="utf-8")
-    )
-    pubkey = config["plugins"]["updater"]["pubkey"]
-    decoded = base64.b64decode(pubkey, validate=True).decode("utf-8")
-
-    assert [line for line in decoded.splitlines() if line.strip()][-1] == RELEASE_PUBLIC_KEY
 
 
 def test_verify_manifest_round_trip_and_schema_checks() -> None:

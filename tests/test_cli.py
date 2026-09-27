@@ -568,7 +568,7 @@ def test_setup_uses_python_module_invocation_for_python_path(tmp_path: Path) -> 
 
 
 def _write_desktop_app(app_dir: Path) -> Path:
-    """Materialize the Tauri cask's ``Ciaobot.app``, bundle id and all."""
+    """Materialize a legacy ``Ciaobot.app``, bundle id and all."""
 
     app_root = app_dir / "Ciaobot.app"
     macos = app_root / "Contents" / "MacOS"
@@ -580,12 +580,12 @@ def _write_desktop_app(app_dir: Path) -> Path:
     return app_root
 
 
-def test_is_our_app_bundle_rejects_the_tauri_desktop_app(tmp_path: Path) -> None:
+def test_is_our_app_bundle_rejects_the_legacy_app_bundle(tmp_path: Path) -> None:
     # Same bundle id as our pre-rename launcher; only the executable differs.
     assert cli._is_our_app_bundle(_write_desktop_app(tmp_path)) is False
 
 
-def test_remove_legacy_app_shortcuts_keeps_the_tauri_desktop_app(tmp_path: Path) -> None:
+def test_remove_legacy_app_shortcuts_keeps_the_legacy_app_bundle(tmp_path: Path) -> None:
     app_root = _write_desktop_app(tmp_path)
 
     assert cli._remove_legacy_app_shortcuts(tmp_path) is False
@@ -812,7 +812,7 @@ def test_setup_keeps_browser_pwa_named_ciaobot_app(tmp_path: Path) -> None:
     assert not (apps / "Ciaobot Server.app").exists()
 
 
-def test_setup_skips_legacy_companion_when_tauri_app_is_installed(
+def test_setup_skips_legacy_companion_when_the_app_is_installed(
     tmp_path: Path,
 ) -> None:
     apps = tmp_path / "Applications"

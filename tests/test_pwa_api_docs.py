@@ -29,7 +29,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/admin/snapshot": "admin internal; deploy is the agent-callable wrapper",
     "/api/admin/drain": "update coordinator drain (loopback-only CLI)",
     "/api/admin/drain/cancel": "update coordinator drain (loopback-only CLI)",
-    "/api/package/update": "browser update action; production app updates through the signed Tauri updater",
+    "/api/package/update": "browser update action; production engine updates through the signed one-line installer",
     "/api/update/stage": "browser Settings update card; stages a release for an installer-managed engine in the background",
     "/api/update/apply": "browser Settings update card; applies the staged release (drain, detached swap, rollback) in the background",
     "/api/workspace-health/fix": "browser Settings health Fix button; creates missing scaffold files and re-links skills",

@@ -1,9 +1,10 @@
-"""Safe cleanup for app bundles installed by the release installer.
+"""Removal of the legacy Ciaobot.app bundle.
 
-Installation and updates are deliberately outside the Python package: the
-one-line installer downloads a signed release archive and the native Tauri
-updater handles in-app updates. Keeping only this cleanup command avoids
-maintaining a second archive downloader and signature implementation.
+The app itself is retired and its source is gone (#656); the release is the
+engine and the one-line installer installs it. This module stays for the
+compatibility window, so a machine that still has an old `Ciaobot.app` on disk
+can take it — and the launch agents and `ciao` shim pointing into it — away
+cleanly. Nothing here builds, installs or updates the bundle.
 """
 
 from __future__ import annotations
@@ -17,11 +18,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ciao import desktop_build
 from ciao.macos_service import default_launch_agents_dir
 
 
-APP_BUNDLE_NAME = desktop_build.APP_BUNDLE_NAME
+# The retired bundle's identity, kept here because nothing else in the package
+# knows it any more. The Mach-O inside the bundle was named after the app's
+# Cargo package, not after the product name that only labelled the .app wrapper,
+# so these two constants are not interchangeable.
+APP_BUNDLE_NAME = "Ciaobot.app"
+APP_EXECUTABLE_NAME = "ciaobot-desktop"
 
 
 class InstallError(Exception):
@@ -61,7 +66,7 @@ def _remove_installer_launch_agents(
         (
             "Ciaobot",
             "Ciaobot.plist",
-            destination / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME,
+            destination / "Contents" / "MacOS" / APP_EXECUTABLE_NAME,
         ),
         (
             "com.ciao.server",
@@ -197,11 +202,11 @@ def uninstall_desktop_app(
             missing["removed_shim"] = orphan_shim
         return missing
     if not (
-        destination / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME
+        destination / "Contents" / "MacOS" / APP_EXECUTABLE_NAME
     ).is_file():
         raise InstallError(
             f"{destination} is not the Ciaobot desktop app "
-            f"(no Contents/MacOS/{desktop_build.APP_EXECUTABLE_NAME}); leaving it alone"
+            f"(no Contents/MacOS/{APP_EXECUTABLE_NAME}); leaving it alone"
         )
     removed_agents = _remove_installer_launch_agents(
         destination=destination,
