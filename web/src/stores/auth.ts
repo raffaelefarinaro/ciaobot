@@ -1,20 +1,17 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '../lib/api'
-import { navigateToContent, replaceToContent } from '../lib/originNavigation'
 import type { ActionResult } from '../lib/types'
 
 export const useAuthStore = defineStore('auth', () => {
   const authenticated = ref(false)
 
   async function login(token: string) {
-    const result = await api.post<ActionResult>('/api/auth', { token })
-    if (window.location.hostname === '127.0.0.1' && typeof result.bridge_url !== 'string') {
-      throw new Error('The client session bridge was not issued.')
-    }
+    // One origin per browser: the session cookie this call sets is the whole
+    // result, so the app is a reload away from signed-in.
+    await api.post<ActionResult>('/api/auth', { token })
     authenticated.value = true
-    if (typeof result.bridge_url === 'string') replaceToContent(result.bridge_url)
-    else navigateToContent()
+    window.location.replace('/')
   }
 
   async function logout() {
@@ -24,13 +21,13 @@ export const useAuthStore = defineStore('auth', () => {
       /* still clear local auth state */
     }
     authenticated.value = false
-    navigateToContent('/login')
+    window.location.assign('/login')
   }
 
   async function check() {
     try {
-      // Use raw fetch so a 401 here never triggers api.ts's /login redirect
-      // (that reload looped while waiting for the host password).
+      // Use raw fetch so a 401 here never triggers api.ts's /login redirect,
+      // which would reload the tab this probe is trying to answer for.
       const res = await fetch('/api/auth/check', { credentials: 'same-origin', redirect: 'manual' })
       authenticated.value = res.ok
     } catch {

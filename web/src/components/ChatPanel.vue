@@ -401,33 +401,6 @@
       </template>
       </template>
 
-      <div
-        v-if="store.hostConnectionUnavailable && canUseDeviceControls"
-        class="host-connection-card"
-        role="alert"
-      >
-        <div class="host-connection-main">
-          <span class="host-connection-spinner" aria-hidden="true"></span>
-          <div>
-            <div class="host-connection-title">Can’t reach the host</div>
-            <div class="host-connection-meta">
-              Ciaobot is trying to reconnect. You can keep waiting, or make this device the host.
-            </div>
-            <div v-if="hostHandoverError" class="host-connection-error">
-              {{ hostHandoverError }}
-            </div>
-          </div>
-        </div>
-        <button
-          type="button"
-          class="btn-small host-connection-action"
-          :disabled="becomingHost"
-          @click="disconnectAndBecomeHost"
-        >
-          {{ becomingHost ? 'Becoming host…' : 'Disconnect and become host' }}
-        </button>
-      </div>
-
       <div v-if="chat.retry?.status === 'pending' && !store.isStreaming" class="retry-card">
         <div class="retry-card-main">
           <AppIcon class="retry-card-icon" name="clock" :size="18" />
@@ -1348,7 +1321,6 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
-import { isLoopbackPage, navigateToDevice } from '../lib/originNavigation'
 import { isApplePlatform } from '../lib/desktop'
 import {
   isPostprocessing,
@@ -1538,25 +1510,6 @@ const {
   removePendingImage,
 } = composer
 const isContinuing = ref(false)
-const becomingHost = ref(false)
-const canUseDeviceControls = isLoopbackPage()
-const hostHandoverError = ref('')
-
-async function disconnectAndBecomeHost() {
-  if (!canUseDeviceControls || becomingHost.value) return
-  const confirmed = await askConfirm(
-    'Disconnect from the unreachable host and make this device the host? Changes that exist only on the other host may not be synced.',
-    {
-      title: 'Become host on this device?',
-      confirmLabel: 'Disconnect and become host',
-    },
-  )
-  if (!confirmed) return
-
-  becomingHost.value = true
-  hostHandoverError.value = ''
-  navigateToDevice()
-}
 
 // Ticks once a second while streaming so the live elapsed-time label in the
 // "Working..." trace meta advances.
@@ -1906,13 +1859,6 @@ const dockRunningAgents = computed(() =>
 
 onMounted(() => {
   taskStore.fetchSchedules().catch(() => {})
-  // Tell the app-level client-mode banner that this panel is on screen, so it
-  // does not repeat the host-outage notice the card below already carries.
-  store.chatPanelsMounted += 1
-})
-
-onBeforeUnmount(() => {
-  store.chatPanelsMounted = Math.max(0, store.chatPanelsMounted - 1)
 })
 
 // Lightweight 30-second tick powering the "next in Xm" countdown in the
@@ -5369,72 +5315,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 .fix-btn { color: var(--accent); border-color: var(--accent); }
 .fix-btn:hover { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 
-.host-connection-card {
-  align-self: center;
-  width: min(680px, 90%);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-3);
-  background: rgba(255, 152, 0, 0.08);
-  border: 1px solid rgba(255, 152, 0, 0.34);
-  border-radius: var(--radius);
-  color: var(--fg);
-}
-
-.host-connection-main {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
-.host-connection-spinner {
-  width: 14px;
-  height: 14px;
-  margin-top: 2px;
-  flex: 0 0 auto;
-  border: 2px solid rgba(255, 152, 0, 0.28);
-  border-top-color: var(--warning);
-  border-radius: 50%;
-  animation: host-connection-spin 0.9s linear infinite;
-}
-
-@keyframes host-connection-spin {
-  to { transform: rotate(360deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .host-connection-spinner {
-    animation: none;
-    border-color: var(--warning);
-  }
-}
-
-.host-connection-title {
-  font-size: var(--text-sm);
-  font-weight: 700;
-}
-
-.host-connection-meta,
-.host-connection-error {
-  margin-top: 2px;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-}
-
-.host-connection-error {
-  color: var(--error);
-}
-
-.host-connection-action {
-  min-height: var(--touch);
-  flex: 0 0 auto;
-  color: var(--warning);
-  border-color: var(--warning);
-}
-
 .retry-card {
   align-self: center;
   width: min(680px, 90%);
@@ -5462,8 +5342,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 .retry-card-actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
 
 @media (max-width: 640px) {
-  .host-connection-card { align-items: stretch; flex-direction: column; }
-  .host-connection-action { align-self: stretch; }
   .retry-card { align-items: stretch; flex-direction: column; }
   .retry-card-actions { justify-content: flex-end; }
 }

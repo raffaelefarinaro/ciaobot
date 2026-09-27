@@ -27,8 +27,7 @@ web/
   src/
     main.ts               Vue bootstrap + iOS viewport / keyboard / zoom plumbing
     App.vue               root component, global CSS tokens (--bg, --fg, --accent), wordmark + caret, shared focus utilities
-    router.ts             routes: /login, /device, /, /chat/:id, /project/:id, /schedules, /memory, /settings, /settings/:tab
-                          (/device is device-scoped and unguarded: it must load when a client's host is down)
+    router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /memory, /settings, /settings/:tab
     components/           one Vue SFC per feature pane (including HomeIntake, HomeReviewSummary,
                            CommandPaletteModal, and FileViewerModal)
     components/settings/  panels split out of SettingsView.vue, plus the scoped CSS they share with it
@@ -170,9 +169,9 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   grouping, metadata merge, superseded live-tail pruning, tool icons),
   `lib/chatQuestions.ts` (AskUserQuestion and capability-question parsing plus
   the picker signature), `lib/chatWs.ts` (per-chat reconnect policy) and
-  `lib/safeList.ts`. The four names that used to be exported from
+  `lib/safeList.ts`. The three names that used to be exported from
   `stores/projects.ts` itself — `shouldReconnectActiveChatOnStreamingStarted`,
-  `chatWsReconnectDelayMs`, `isHostConnectionUnavailableMessage` and
+  `chatWsReconnectDelayMs` and
   `setListIndex` — are re-exported from there, so importers do not move.
   The store keeps chats, projects and workspaces, message history and its
   reconciliation, every socket (per-chat and `/ws/events`) with its event

@@ -18,7 +18,6 @@ it.each([true, false])('chooses the advertised restart action (restart_only=%s)'
   await router.push('/settings')
   await router.isReady()
   vi.spyOn(api, 'get').mockImplementation(async (path) => {
-    if (path === '/api/startup-status') return { node_role: 'host', state_valid: true } as never
     if (path === '/api/local/status') return { git_repo: true, branch: 'main', dirty: false, restart_only: restartOnly } as never
     throw new Error('Unrelated settings data unavailable in this test')
   })
@@ -47,7 +46,6 @@ it('installer mode shows re-run guidance and no update button', async () => {
   // An engine installed by the terminal installer has no in-app update: the
   // button would only ever return the 400 the guidance below describes.
   vi.spyOn(api, 'get').mockImplementation(async (path) => {
-    if (path === '/api/startup-status') return { node_role: 'host', state_valid: true } as never
     if (path === '/api/local/status') return { git_repo: true, branch: 'main', dirty: false, restart_only: true } as never
     if (path === '/api/package/status') return { current_version: '0.18.1', latest_version: '0.19.0', update_available: true, mode: 'installer' } as never
     throw new Error('Unrelated settings data unavailable in this test')
@@ -81,7 +79,7 @@ it('fails closed when the server type cannot be determined', async () => {
     await flushPromises()
     expect(confirm).not.toHaveBeenCalled()
     expect(post).not.toHaveBeenCalled()
-    expect(wrapper.text()).toContain('Connection role unavailable')
+    expect(wrapper.text()).toContain('Could not determine the server type')
   } finally {
     wrapper.unmount()
   }

@@ -46,11 +46,7 @@ export interface NewChatRuntime {
 }
 import {
   chatWsReconnectDelayMs,
-  isHostConnectionUnavailableMessage,
-  isHostPolicyMessage,
   isTerminalWsClose,
-  isWsAuthClose,
-  isWsPolicyClose,
   shouldReconnectActiveChatOnStreamingStarted,
 } from '../lib/chatWs'
 import {
@@ -79,11 +75,7 @@ import { createChatAnnotations, type PreparedMessage } from './chatAnnotations'
 // `lib/safeList.ts` the checked list write.
 export {
   chatWsReconnectDelayMs,
-  isHostConnectionUnavailableMessage,
-  isHostPolicyMessage,
   isTerminalWsClose,
-  isWsAuthClose,
-  isWsPolicyClose,
   shouldReconnectActiveChatOnStreamingStarted,
 }
 export { setListIndex } from '../lib/safeList'
@@ -226,18 +218,6 @@ export const useProjectStore = defineStore('projects', () => {
   // signal on the per-chat socket when a send is rejected mid-drain).
   const serverRestarting = ref(false)
   const serverRestartMessage = ref('')
-  // Ephemeral client-mode connection state. Host proxy failures must never
-  // enter chat history: reconnect attempts can repeat indefinitely and would
-  // otherwise create one error bubble (and one "Fix this error" action) each.
-  const hostConnectionUnavailable = ref(false)
-  const hostAuthRequired = ref(false)
-  const hostPolicyBlocked = ref(false)
-  // How many ChatPanels are on screen. ChatPanel renders its own
-  // host-connection-card from the flag above, so the global banner uses this
-  // to avoid announcing the same outage twice. A count, not a boolean: the
-  // layout declares ChatPanel twice (mobile and desktop branches) and a
-  // chat switch mounts the new panel before the old one unmounts.
-  const chatPanelsMounted = ref(0)
   type QueuedMessage = { id: string; text: string; images?: string[] }
   function makeQueuedId(): string {
     if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -1970,13 +1950,6 @@ export const useProjectStore = defineStore('projects', () => {
       // This keeps the every-15s refresh light instead of re-shipping the
       // whole registry to the client on each tick.
       const latestChats = await api.get<ChatInfo[]>('/api/chats?active_only=1')
-      // In client mode this request is proxied to the host, so a successful
-      // response proves the host is back. The banner was only cleared from a
-      // chat WebSocket frame, which never arrives if the socket stays down or
-      // no chat is open -- leaving "Can't reach the host" on screen over a
-      // working connection until the user reloaded. This poll is the
-      // connection-independent recovery signal.
-      hostConnectionUnavailable.value = false
       reconcileActiveChats(latestChats)
 
       const chatId = activeChatId.value
@@ -3454,8 +3427,6 @@ export const useProjectStore = defineStore('projects', () => {
     ws.onopen = () => {
       if (toRaw(sockets.value[chatId]) !== ws) return
       opened = true
-      hostAuthRequired.value = false
-      hostPolicyBlocked.value = false
       lastChatFrameAt[chatId] = nowMs()
       sendFocus(chatId)
       flushQueuedResponses(chatId)
@@ -3469,32 +3440,9 @@ export const useProjectStore = defineStore('projects', () => {
       // from a fast first retry again.
       chatReconnectAttempts[chatId] = 0
       const event: WsEvent = JSON.parse(ev.data)
-      if (event.type === 'keepalive') {
-        hostConnectionUnavailable.value = false
-        hostAuthRequired.value = false
-        hostPolicyBlocked.value = false
-        return
-      }
-      if (event.type === 'error' && isHostPolicyMessage(event.message)) {
-        hostAuthRequired.value = false
-        hostPolicyBlocked.value = true
-        hostConnectionUnavailable.value = false
-        return
-      }
-      if (event.type === 'auth_required') {
-        hostAuthRequired.value = true
-        hostPolicyBlocked.value = false
-        hostConnectionUnavailable.value = false
-        return
-      }
-      if (
-        event.type !== 'host_unreachable'
-        && !(event.type === 'error' && isHostConnectionUnavailableMessage(event.message))
-      ) {
-        hostConnectionUnavailable.value = false
-        hostAuthRequired.value = false
-        hostPolicyBlocked.value = false
-      }
+      // Liveness and an auth challenge are not chat events: neither may reach
+      // history, and the reconnect policy owns what happens after the second.
+      if (event.type === 'keepalive' || event.type === 'auth_required') return
       // First real frame after a drop/half-open recovery: drop the frozen
       // ephemeral timeline so broker replay rebuilds without duplicating it.
       if (pendingStreamResync.delete(chatId)) {
@@ -3527,18 +3475,9 @@ export const useProjectStore = defineStore('projects', () => {
       const wasIntentional = intentionalCloses.delete(ws)
       if (wasIntentional) return
       if (!isCurrent) return
-      if (isWsAuthClose(event?.code)) {
-        hostAuthRequired.value = true
-        hostPolicyBlocked.value = false
-        hostConnectionUnavailable.value = false
-        return
-      }
-      if (isWsPolicyClose(event?.code)) {
-        hostPolicyBlocked.value = true
-        hostAuthRequired.value = false
-        hostConnectionUnavailable.value = false
-        return
-      }
+      // The handshake was refused (no session, or an origin the server will not
+      // serve). Re-dialling it would spin forever against the same answer.
+      if (isTerminalWsClose(event?.code)) return
 
       // Auto-reconnect the chat the user is actually viewing when the socket
       // drops unexpectedly (server per-turn churn, transient network blip),
@@ -3745,7 +3684,6 @@ export const useProjectStore = defineStore('projects', () => {
   /** Reconnect every live socket immediately (engine just recovered); resets the backoff so nothing waits out a 64 s delay. */
   function reconnectNow(): void {
     eventsWsFailureStreak = 0
-    eventsHostRetryAttempts = 0
     const chatId = activeChatId.value
     if (chatId) {
       chatReconnectAttempts[chatId] = 0
@@ -3822,10 +3760,6 @@ export const useProjectStore = defineStore('projects', () => {
   // identically on every attempt, so a fixed 2s retry becomes a request
   // storm that fills the server log.
   let eventsWsFailureStreak = 0
-  // Separate from the handshake streak above: a client-mode proxy accepts
-  // the browser socket and only then discovers the host is down, so those
-  // retries must not feed the >=5 auth probe. Reset by the first real frame.
-  let eventsHostRetryAttempts = 0
 
   function connectEventsWs() {
     if (eventsSocket.value && eventsSocket.value.readyState <= WebSocket.OPEN) return
@@ -3834,18 +3768,10 @@ export const useProjectStore = defineStore('projects', () => {
     eventsSocket.value = ws
     lastEventsFrameAt = nowMs()
     let opened = false
-    // Set when the local proxy told us the host is down on THIS socket. The
-    // proxy accepts the browser's connection before it tries the host, so
-    // `opened` is true even for a dead host -- without this flag the close
-    // handler below would take the 50ms "healthy blip" path and reconnect
-    // twenty times a second for as long as the host stays away.
-    let hostUnreachable = false
 
     ws.onopen = () => {
       if (toRaw(eventsSocket.value) !== ws) return
       opened = true
-      hostAuthRequired.value = false
-      hostPolicyBlocked.value = false
       eventsWsFailureStreak = 0
       lastEventsFrameAt = nowMs()
     }
@@ -3856,30 +3782,9 @@ export const useProjectStore = defineStore('projects', () => {
       lastEventsFrameAt = nowMs()
       let msg: EventsWsMessage
       try { msg = JSON.parse(ev.data) } catch { return }
-      if (msg.type === 'host_unreachable') {
-        // In client mode this is the only connection-loss signal that exists
-        // outside a chat: the per-chat socket is open only while a chat is on
-        // screen, so the home screen used to look perfectly healthy while the
-        // host was unreachable.
-        hostUnreachable = true
-        hostConnectionUnavailable.value = true
-        hostAuthRequired.value = false
-        hostPolicyBlocked.value = false
-        return
-      }
-      if (msg.type === 'auth_required') {
-        hostAuthRequired.value = true
-        hostPolicyBlocked.value = false
-        hostConnectionUnavailable.value = false
-        return
-      }
-      // Any other frame -- the keepalive included -- travelled through the
-      // proxy from the host, which proves the host is back.
-      hostConnectionUnavailable.value = false
-      hostAuthRequired.value = false
-      hostPolicyBlocked.value = false
-      eventsHostRetryAttempts = 0
-      if (msg.type === 'keepalive') return
+      // An auth challenge is not an awareness event, and the keepalive is
+      // liveness only; neither is handed to the store's event switch.
+      if (msg.type === 'keepalive' || msg.type === 'auth_required') return
       handleEventsMessage(msg)
     }
 
@@ -3889,31 +3794,11 @@ export const useProjectStore = defineStore('projects', () => {
         eventsSocket.value = null
       }
       if (!isCurrent) return
-      if (isWsAuthClose(event?.code)) {
-        hostAuthRequired.value = true
-        hostPolicyBlocked.value = false
-        hostConnectionUnavailable.value = false
-        return
-      }
-      if (isWsPolicyClose(event?.code)) {
-        hostPolicyBlocked.value = true
-        hostAuthRequired.value = false
-        hostConnectionUnavailable.value = false
-        return
-      }
+      // The handshake was refused (no session, or an origin the server will
+      // not serve). Re-dialling it would spin forever against the same answer.
+      if (isTerminalWsClose(event?.code)) return
 
       if (opened) {
-        if (hostUnreachable) {
-          // Retry on the chat socket's backoff curve (50ms -> 2s cap) so a
-          // host that comes back is noticed within a couple of seconds
-          // without hammering it while it is down.
-          eventsHostRetryAttempts += 1
-          const hostDelay = chatWsReconnectDelayMs(eventsHostRetryAttempts)
-          setTimeout(() => {
-            if (!eventsSocket.value) connectEventsWs()
-          }, hostDelay)
-          return
-        }
         eventsWsFailureStreak = 0
         // A previously-live awareness socket should come back immediately so
         // chat_streaming_done / result_ready are not delayed after a blip.
@@ -5161,22 +5046,6 @@ export const useProjectStore = defineStore('projects', () => {
     return entries
   }
 
-  function beginHostReconnect(chatId: string, chatMessages: ChatMessage[]) {
-    hostConnectionUnavailable.value = true
-    _flushTimeline(chatId)
-    // Also clean repeated proxy errors already painted by an older frontend
-    // before this structured event arrived during a rolling deploy.
-    messages.value[chatId] = normalizeMessages([...chatMessages])
-    streaming.value[chatId] = false
-    streamingText.value[chatId] = ''
-    streamingThinking.value[chatId] = ''
-    delete streamingTextPhase.value[chatId]
-    delete liveUsage.value[chatId]
-    delete streamStartedAt.value[chatId]
-    persistStreamStartedAt()
-    delete pendingPermissions.value[chatId]
-  }
-
   function handleEvent(chatId: string, event: WsEvent) {
     const msgs = messages.value[chatId] || []
 
@@ -5739,12 +5608,6 @@ export const useProjectStore = defineStore('projects', () => {
           beginServerRestart(event.message)
           break
         }
-        // Rolling-upgrade compatibility: old client proxies emitted this as a
-        // generic error string. Treat it as the structured connection state.
-        if (isHostConnectionUnavailableMessage(event.message)) {
-          beginHostReconnect(chatId, msgs)
-          break
-        }
         _flushTimeline(chatId)
         msgs.push({
           role: 'system',
@@ -5760,11 +5623,6 @@ export const useProjectStore = defineStore('projects', () => {
         delete streamStartedAt.value[chatId]
         persistStreamStartedAt()
         persistMessages()
-        break
-      }
-
-      case 'host_unreachable': {
-        beginHostReconnect(chatId, msgs)
         break
       }
 
@@ -5885,7 +5743,7 @@ export const useProjectStore = defineStore('projects', () => {
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, backgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
-    serverRestarting, serverRestartMessage, hostConnectionUnavailable, hostAuthRequired, hostPolicyBlocked, chatPanelsMounted,
+    serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,

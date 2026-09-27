@@ -1,20 +1,10 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
-import { deviceHref, isLoopbackPage } from './lib/originNavigation'
 
 export const routes: RouteRecordRaw[] = [
   {
     path: '/login',
     name: 'login',
     component: () => import('./components/LoginView.vue'),
-  },
-  {
-    // This machine, not the host it mirrors: role, host connection, local
-    // install. Deliberately outside the auth guard and outside ChatLayout —
-    // it is the way out of client mode, so it must load when the host (and
-    // with it every proxied API call) is unreachable.
-    path: '/device',
-    name: 'device',
-    component: () => import('./components/DeviceView.vue'),
   },
   {
     path: '/',
@@ -100,14 +90,6 @@ export const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
-  if (to.path === '/device' || to.path.startsWith('/device/')) {
-    if (window.location.hostname !== '127.0.0.1') {
-      if (isLoopbackPage()) {
-        window.location.assign(deviceHref(to.fullPath))
-      }
-      return false
-    }
-  }
   if (to.meta.requiresAuth) {
     const { useAuthStore } = await import('./stores/auth')
     const auth = useAuthStore()

@@ -2,7 +2,6 @@ import { describe, expect, test } from 'vitest'
 import {
   chatWsReconnectDelayMs,
   isHostConnectionUnavailableMessage,
-  isHostPolicyMessage,
   isTerminalWsClose,
   isWsAuthClose,
   isWsPolicyClose,
@@ -49,14 +48,6 @@ describe('isHostConnectionUnavailableMessage', () => {
 
   test('does not match an ordinary error', () => {
     expect(isHostConnectionUnavailableMessage('Error: something else')).toBe(false)
-  })
-})
-
-describe('isHostPolicyMessage', () => {
-  test('recognizes proxy policy errors without classifying model errors', () => {
-    expect(isHostPolicyMessage('  Host WebSocket rejected the client connection  ')).toBe(true)
-    expect(isHostPolicyMessage('host redirect refused: location: https://evil.example')).toBe(true)
-    expect(isHostPolicyMessage('Error: provider failed')).toBe(false)
   })
 })
 

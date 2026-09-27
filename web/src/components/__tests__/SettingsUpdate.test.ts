@@ -50,7 +50,6 @@ async function mountCard(
   let reads = 0
   let packageReads = 0
   vi.spyOn(api, 'get').mockImplementation(async (path) => {
-    if (path === '/api/startup-status') return { node_role: 'host', state_valid: true } as never
     if (path === '/api/local/status') return { git_repo: true, branch: 'main', dirty: false, restart_only: true } as never
     if (path === '/api/update/status') {
       const answer = answers[Math.min(reads, answers.length - 1)]
