@@ -166,6 +166,7 @@ function openEntity(entity: ContextEntity): void {
 }
 .agent-context-track {
   flex: 1;
+  min-width: 0;
   height: 6px;
   border-radius: 999px;
   background: var(--bg3);
