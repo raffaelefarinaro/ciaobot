@@ -99,8 +99,8 @@ function actorLabel(via: string): string {
 }
 
 /** Status badge class + text. `outcome` overrides a plain accept/dismiss
- * label when the row was not a fresh write: already-known facts the
- * archive-time auto-promoter recognized, and rows an expiry sweep dropped.
+ * label when the row was not a fresh write: already-known facts the accept
+ * recognized, and rows an expiry sweep dropped.
  */
 function statusBadge(row: ProposalHistoryRow): { cls: string; text: string } {
   if (row.action === 'accepted') {

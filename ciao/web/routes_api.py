@@ -2575,11 +2575,10 @@ async def chat_archive(request: Request) -> JSONResponse:
 async def chat_retry_insights(request: Request) -> JSONResponse:
     """Resume unfinished post-archive stages for a single archived chat.
 
-    Re-runs whatever is still pending/failed on the archive's manifest —
-    insights extraction when it is missing, plus the project fold, trajectory
-    and memory proposals when a crash landed after insights. Returns the retry
-    status and the manifest view so the archived-chat panel can render partial
-    completion. A pipeline already running for the chat is left alone.
+    Re-runs whatever is still pending/failed on the archive's manifest — the
+    session trajectory is the only stage left. Returns the retry status and the
+    manifest view so the archived-chat panel can render partial completion. A
+    pipeline already running for the chat is left alone.
     """
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
@@ -4729,67 +4728,6 @@ async def list_automation(request: Request) -> JSONResponse:
     })
 
 
-async def trigger_backfill_insights(request: Request) -> JSONResponse:
-    """Run session insights over every archive that is missing them.
-
-    Accepts an optional ``model`` for a one-off run with a different model —
-    the recovery path when the configured insights model keeps failing (it
-    times out on slow local backends). The stored Settings → Models choice is
-    left alone.
-    """
-    from ciao.job_runs import track
-    from ciao.insights import backfill_insights_task, format_backfill_summary
-
-    config = request.app.state.config
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001 — empty body means "use the configured model"
-        body = {}
-    body = body if isinstance(body, dict) else {}
-    model = body.get("model")
-    model = model.strip() if isinstance(model, str) else ""
-    force = body.get("force") is True
-    if not getattr(config, "insights_enabled", True) and not force:
-        return JSONResponse(
-            {"error": "session insights are disabled in Settings"},
-            status_code=409,
-        )
-    coordinator = getattr(request.app.state, "backfill_coordinator", None)
-    if coordinator is None:
-        return JSONResponse({"error": "backfill coordinator unavailable"}, status_code=503)
-    chat_workspaces = request.app.state.project_chat_manager.chat_workspaces()
-
-    async def _run_backfill():
-        async with track(
-            "backfill_insights", "Insights backfill", category="system",
-            model=model,
-        ) as handle:
-            result = await backfill_insights_task(
-                config,
-                mode="both",
-                model_override=model,
-                manual=True,
-                force=force,
-                chat_workspaces=chat_workspaces,
-            )
-            handle.extra.update(result)
-            summary = format_backfill_summary(result)
-            handle.extra["summary"] = summary
-            if model:
-                handle.extra["model_override"] = model
-            if force:
-                handle.extra["forced"] = True
-            if result["errors"]:
-                handle.status = "error"
-                handle.error = summary
-
-    coordinator.submit(_run_backfill)
-    return JSONResponse(
-        {"status": "queued", "model": model, "forced": force},
-        status_code=202,
-    )
-
-
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
@@ -5143,7 +5081,7 @@ def _routines_payload(config, app_settings) -> dict:
             config.primary_workspace()
         )
 
-    # On Automatic the insights routine resolves per workspace
+    # On Automatic the memory pass resolves per workspace
     # (resolve_insights_model takes the chat's workspace), so the single
     # *_effective value above is only the primary-workspace answer. Reporting it
     # alone reads as a global choice and is wrong for every other workspace, so
@@ -6952,11 +6890,10 @@ async def proposals_history(request: Request) -> JSONResponse:
     Reads the same per-workspace decision sidecar :func:`record_dismissal`
     and :func:`record_promotion` write (``Memory-Proposals.dismissed.jsonl``),
     which now carries ``via`` (who decided: the operator through the PWA, the
-    curation agent, or the archive-time auto-promoter), a ``destination``, and
+    curation agent, or a prior automated promotion), a ``destination``, and
     an ``outcome`` qualifier alongside the original ``kind``/``text``. This is
     the read side of the review page's History tab: what was accepted or
-    dismissed, by whom, and what the overnight pipeline added or skipped on
-    its own.
+    dismissed, by whom, and what the memory pass recorded on its own.
     """
     from ciao.memory_proposals import history_row_id, read_decisions
 
@@ -8090,8 +8027,8 @@ async def proposal_action(request: Request) -> JSONResponse:
             elif accept.action == "edit_region":
                 # `?reconcile=1` re-runs the write-time reconcile against the
                 # region's current entries before writing, which is how a fact
-                # the archive-time pass deferred (timed-out call, stale index)
-                # gets resolved rather than appended beside what it supersedes.
+                # a previous pass deferred (timed-out call, stale index) gets
+                # resolved rather than appended beside what it supersedes.
                 # Opt-in: it is a model call, and the plain accept is one
                 # synchronous write.
                 reconcile = (

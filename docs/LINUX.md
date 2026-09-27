@@ -139,6 +139,6 @@ not just the previous code. Keep only one active host scheduler during migration
 
 Run `mypy ciao`, `pytest tests/`, and frontend tests/build from the checkout.
 On the live host verify authenticated HTTP, event/chat WebSockets, a provider
-turn and tool execution, archive/insights, schedule execution, Settings restart,
+turn and tool execution, archive/memory pass, schedule execution, Settings restart,
 and recovery after a reboot. Missing provider authentication prevents real chat
 verification even when the server, PWA, and automated tests are healthy.

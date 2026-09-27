@@ -238,7 +238,7 @@ const hasHomeActivity = computed(() => (
 ))
 const lanesEl = ref<HTMLElement | null>(null)
 const laneElements = ref<Record<string, HTMLElement>>({})
-// Chats whose insights retry is in flight, so the button shows a busy state.
+// Chats whose post-archive retry is in flight, so the button shows a busy state.
 const retryingChats = ref<Record<string, boolean>>({})
 
 async function retryInsightsFor(chatId: string): Promise<void> {
@@ -247,7 +247,7 @@ async function retryInsightsFor(chatId: string): Promise<void> {
   try {
     await store.retryInsights(chatId)
   } catch (e) {
-    store.pushErrorToast('Could not retry insights', errorMessage(e))
+    store.pushErrorToast('Could not retry the post-archive step', errorMessage(e))
   } finally {
     retryingChats.value[chatId] = false
   }
@@ -1208,7 +1208,7 @@ defineExpose({ onArrow })
   white-space: nowrap;
 }
 
-/* Live step of a post-archive pipeline ("extracting insights…"). Muted like
+/* Live step of a post-archive pipeline ("saving trajectory…"). Muted like
    the lane header's tidy fragment: this is background work, never a demand. */
 .home-chat-tidy-note {
   min-width: 0;
@@ -1248,7 +1248,7 @@ defineExpose({ onArrow })
   color: var(--warning);
 }
 
-/* The retry button on a failed-insights row. Small bordered control in the
+/* The retry button on a failed row. Small bordered control in the
    warn register: it is an action, but a secondary one for a routine recovery,
    not the single most important thing on screen. */
 .home-chat-retry {

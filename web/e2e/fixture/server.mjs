@@ -17,7 +17,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { acceptUpgrade } from './ws.mjs'
-import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, PROPOSALS, MEMORY_NODES, MEMORY_EDGES, snapshotFrame } from './data.mjs'
+import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, PROPOSALS, MEMORY_NODES, MEMORY_EDGES, MEMORY_CATEGORIES, snapshotFrame } from './data.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const STATIC_ROOT = path.resolve(here, '../../../ciao/web/static')
@@ -83,6 +83,7 @@ const GET_ROUTES = {
   '/api/proposals/history': () => ({ rows: [], total: 0, truncated: false, limit: 200, at_max: true }),
   '/api/vault/graph': () => ({ workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: MEMORY_NODES, edges: MEMORY_EDGES }),
   '/api/vault/review': () => ({ candidates: [], trashed: [], cleared: [] }),
+  '/api/memory/entity-types': () => ({ workspace: WORKSPACES[0].name, vault: '/fixture/vault', types: MEMORY_CATEGORIES }),
   '/api/models': () => ({
     models: ['synthetic-model'],
     default: 'synthetic-model',
@@ -133,6 +134,30 @@ const GET_PATTERNS = [
   [/^\/api\/chats\/[^/]+\/messages$/, () => []],
   [/^\/api\/chats\/[^/]+\/subagents$/, () => ({ subagents: [] })],
 ]
+
+/**
+ * Write routes the suite drives, keyed by path.
+ *
+ * The categories registry is the one write with a contract a stub has to keep:
+ * a `PATCH` is the whole desired list and answers with the list it stored, so a
+ * stub answering `{ok: true}` would empty the panel the moment anything saved.
+ * It reads the submission and hands it back with the count restored, which is
+ * what the server does.
+ */
+const WRITE_ROUTES = {
+  '/api/memory/entity-types': (body) => {
+    const submitted = Array.isArray(body?.types) ? body.types : []
+    return {
+      workspace: WORKSPACES[0].name,
+      vault: '/fixture/vault',
+      types: submitted.map((row) => ({
+        ...row,
+        // The count is the server's, and the client does not send it back.
+        note_count: MEMORY_CATEGORIES.find((c) => c.id === row?.id)?.note_count ?? 0,
+      })),
+    }
+  },
+}
 
 function sendJson(res, body, status = 200) {
   const raw = JSON.stringify(body)
@@ -212,8 +237,9 @@ const server = http.createServer(async (req, res) => {
         || GET_PATTERNS.find(([pattern]) => pattern.test(pathname))?.[1]
       return sendJson(res, handler ? handler() : {})
     }
-    await readBody(req)
-    return sendJson(res, { ok: true })
+    const body = await readBody(req)
+    const write = WRITE_ROUTES[pathname]
+    return sendJson(res, write ? write(body) : { ok: true })
   }
 
   if (pathname === '/sw.js') {

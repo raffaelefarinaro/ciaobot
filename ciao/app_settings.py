@@ -116,7 +116,7 @@ class AppSettings:
     # tray notification log. Off while Ciaobot.app's menu bar still shows
     # this machine's banners; the PWA-only engine turns it on (#562).
     push_all_devices: bool = False
-    # Model used by post-archive session-insights extraction.
+    # Model used by the post-archive memory pass.
     insights_model: str = ""
     # HTTPS origin other devices should use (e.g. Tailscale Serve); "" = none.
     trusted_url: str = ""
@@ -141,7 +141,7 @@ class AppSettings:
     # provider's own default ("auto").
     provider_default_thinking: dict[str, str] | None = None
 
-    # Per-provider session-insights model. Missing entry = the provider's
+    # Per-provider memory-pass model. Missing entry = the provider's
     # balanced default.
     provider_insights_models: dict[str, str] | None = None
 

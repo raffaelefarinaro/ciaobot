@@ -1,6 +1,6 @@
 """Recorder for memory-proposal resolution outcomes.
 
-Job runs say whether the extraction pipeline *ran*; this log says whether its
+Job runs say whether the memory pass *ran*; this log says whether its
 output was *useful*: every time a queued proposal leaves the review queue as a
 decision — promoted (accepted into its destination) or dismissed — one JSON
 line lands in ``.runtime/proposal_outcomes.jsonl``::
@@ -49,10 +49,11 @@ VIA_VALUES: tuple[str, ...] = ("pwa", "agent")
 MAX_BYTES = 2 * 1024 * 1024  # trim the log once it passes ~2 MB
 KEEP_LINES = 2000            # lines retained after a trim
 
-# Kinds this ledger counts. It measures the MEMORY extraction pipeline's
-# usefulness; other producers share the review surface but answer to different
-# questions: `[skill]` rows come from skill evolution, `[rehome]` rows are
-# note-move judgements queued by vault hygiene (`vault_rehome`).
+# Kinds this ledger counts. It measures the MEMORY pass's usefulness; other
+# producers share the review surface but answer to different questions:
+# `[skill]` rows come from skill evolution, `[rehome]` rows are note-move
+# judgements queued by vault hygiene (`vault_rehome`). The `EXTRACTION_` name is
+# kept: it is the field name shipped reports already read.
 EXTRACTION_KINDS: frozenset[str] = frozenset(
     {"memory", "profile", "user", "project", "people", "learnings", "review"}
 )
@@ -130,10 +131,9 @@ def record(
     before calling this, so these checks are defense-in-depth: a typo like
     "agents" must not silently fragment the by-surface split, and a
     non-extraction kind (``skill``, ``rehome``) must not sneak into a tally
-    that only measures the memory-extraction pipeline. The append and the
-    size-triggered rotation share an inter-process lock, so a rotation can
-    never rewrite away an event another process appended between its read and
-    its write.
+    that only measures the memory pass. The append and the size-triggered
+    rotation share an inter-process lock, so a rotation can never rewrite away
+    an event another process appended between its read and its write.
     """
     if action not in ACTIONS:
         logger.debug("Refusing to record proposal outcome with action %r", action)

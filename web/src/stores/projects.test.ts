@@ -3204,9 +3204,9 @@ describe('postprocessingChats (home tidying list)', () => {
   test('lists only chats whose pipeline is still running, newest archive first', () => {
     const store = useProjectStore()
     store.chats = [
-      { chat_id: 'c-done', project_id: 'p1', title: 'Settled', archived: true, postprocess: { state: 'done', step: 'insights', steps: {} } },
-      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'insights', expected: [], steps: {} } },
-      { chat_id: 'c-fresher', project_id: 'p1', title: 'Fresher', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'running', step: 'memory_proposals', expected: [], steps: {} } },
+      { chat_id: 'c-done', project_id: 'p1', title: 'Settled', archived: true, postprocess: { state: 'done', step: 'trajectory', steps: {} } },
+      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'trajectory', expected: [], steps: {} } },
+      { chat_id: 'c-fresher', project_id: 'p1', title: 'Fresher', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'running', step: 'memory_pass', expected: [], steps: {} } },
       { chat_id: 'c-plain', project_id: 'p1', title: 'No pipeline', archived: true },
     ] as unknown as typeof store.chats
     expect(store.postprocessingChats().map(c => c.chat_id)).toEqual(['c-fresher', 'c-running'])
@@ -3219,11 +3219,11 @@ describe('postprocessingChats (home tidying list)', () => {
       { project_id: 'p2', workspace: 'personal' },
     ] as unknown as typeof store.projects
     store.chats = [
-      { chat_id: 'c-failed', project_id: 'p1', title: 'Failed', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'error' } } } },
-      { chat_id: 'c-partial', project_id: 'p1', title: 'Partial', archived: true, last_activity_at: '2026-08-16T09:00:00Z', postprocess: { state: 'incomplete', job: { job_id: 'j', state: 'incomplete', unfinished: ['memory_proposals'] } } },
-      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'insights', expected: [], steps: {} } },
-      { chat_id: 'c-ok', project_id: 'p2', title: 'Ok', archived: true, last_activity_at: '2026-08-14T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'ok' } } } },
-      { chat_id: 'c-skipped', project_id: 'p2', title: 'Skipped', archived: true, last_activity_at: '2026-08-13T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'skipped' } } } },
+      { chat_id: 'c-failed', project_id: 'p1', title: 'Failed', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'blocked', blocked_reason: 'archive file is missing' } },
+      { chat_id: 'c-partial', project_id: 'p1', title: 'Partial', archived: true, last_activity_at: '2026-08-16T09:00:00Z', postprocess: { state: 'incomplete', job: { job_id: 'j', state: 'incomplete', unfinished: ['trajectory'] } } },
+      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'trajectory', expected: [], steps: {} } },
+      { chat_id: 'c-ok', project_id: 'p2', title: 'Ok', archived: true, last_activity_at: '2026-08-14T10:00:00Z', postprocess: { state: 'done', steps: { trajectory: { status: 'ok' } } } },
+      { chat_id: 'c-skipped', project_id: 'p2', title: 'Skipped', archived: true, last_activity_at: '2026-08-13T10:00:00Z', postprocess: { state: 'done', steps: { trajectory: { status: 'skipped' } } } },
       { chat_id: 'c-plain', project_id: 'p1', title: 'No pipeline', archived: true },
     ] as unknown as typeof store.chats
     expect(store.insightsFailedChats().map(c => c.chat_id)).toEqual(['c-failed', 'c-partial'])
@@ -3658,15 +3658,15 @@ describe('deep-link chat navigation', () => {
     expect(store.chats.map(chat => chat.archived)).toEqual([true, false])
   })
 
-  test('archive response keeps the background insights status visible', async () => {
+  test('archive response keeps the background pipeline status visible', async () => {
     const store = useProjectStore()
     store.chats = twoChats()
     apiPost.mockResolvedValue({
       ok: true,
       postprocess: {
         state: 'running',
-        step: 'insights',
-        expected: ['insights', 'trajectory'],
+        step: 'trajectory',
+        expected: ['trajectory'],
         steps: {},
       },
     })

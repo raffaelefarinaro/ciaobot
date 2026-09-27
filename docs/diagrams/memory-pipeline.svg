@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 740 190" role="img" aria-labelledby="title desc">
 <title id="title">Memory pipeline</title>
-<desc id="desc">Chat archived, insights extracted, routed, then auto-applied or queued, with daily curation, weekly hygiene and os-audit.</desc>
+<desc id="desc">Chat archived, a memory pass reads it and files what it is sure of, anything unsure waits in the proposals queue, with daily curation, weekly hygiene and os-audit.</desc>
 <style>
   .bg { fill: #f4f4fa; }
   .step { fill: #ffffff; stroke: #d2d4e3; stroke-width: 1.2; rx: 10; }
@@ -31,16 +31,16 @@
 
 <!-- Step 2 -->
 <rect x="144" y="18" width="132" height="72" rx="10" class="step"/>
-<text x="154" y="36" class="label label-bold">2 · Insights</text>
-<text x="154" y="50" class="label">Fast model extracts</text>
-<text x="154" y="64" class="mono">## Session insights</text>
+<text x="154" y="36" class="label label-bold">2 · Memory pass</text>
+<text x="154" y="50" class="label">The app&#39;s own chat</text>
+<text x="154" y="64" class="mono">reads the archive</text>
 <text x="154" y="76" class="mono">decisions · entities · todos</text>
 
 <line x1="276" y1="54" x2="300" y2="54" class="arrow"/>
 
 <!-- Step 3 -->
 <rect x="300" y="18" width="126" height="72" rx="10" class="step"/>
-<text x="310" y="36" class="label label-bold">3 · Route</text>
+<text x="310" y="36" class="label label-bold">3 · Destination</text>
 <text x="310" y="48" class="mono-dark">[memory] → ciao:memory</text>
 <text x="310" y="60" class="mono-dark">[project] → project doc</text>
 <text x="310" y="72" class="mono-dark">[learnings] → Learnings.md</text>
@@ -51,9 +51,9 @@
 <!-- Step 4 split -->
 <g>
   <rect x="450" y="12" width="140" height="44" rx="8" class="badge-auto"/>
-  <text x="460" y="28" class="label label-bold">Auto</text>
+  <text x="460" y="28" class="label label-bold">Attended</text>
   <text x="460" y="40" class="label">Confident → filed</text>
-  <text x="460" y="51" class="mono">— no review needed</text>
+  <text x="460" y="51" class="mono">guarded write + receipt</text>
 
   <rect x="450" y="60" width="140" height="44" rx="8" class="badge-ask"/>
   <text x="460" y="76" class="label label-bold">Asks you</text>
@@ -74,7 +74,7 @@
 <text x="624" y="98" class="mono">Needs review</text>
 
 <!-- Footer -->
-<text x="12" y="114" class="mono">Settings → Automation shows every run. Confident facts apply immediately; unsure ones wait for you. [review] items never auto-drop.</text>
+<text x="12" y="114" class="mono">Settings → Automation shows every run. The pass files what it is sure of; unsure ones wait for you. [review] items never auto-drop.</text>
 <text x="12" y="128" class="mono">Self-heal: [expires:] pruned before startup · audit/repair moves stale or event-shaped entries to Learnings.</text>
-<text x="12" y="178" class="mono-muted">Source: ciao/insights.py · ciao/memory_proposals.py · ciao/project_doc_update.py · ciao/memory_audit.py · ciao/execution_modes.py</text>
+<text x="12" y="178" class="mono-muted">Source: ciao/web/memory_pass.py · ciao/memory_proposals.py · ciao/project_doc_update.py · ciao/memory_audit.py · ciao/execution_modes.py</text>
 </svg>

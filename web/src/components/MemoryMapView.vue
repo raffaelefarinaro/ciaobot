@@ -4,7 +4,17 @@
          header only names where you are: no mode switch, no tab row. -->
     <PaneHeader :page-tag="`Memory · ${SECTION_LABELS[mm.section]}`" @open-sidebar="emit('open-sidebar')" />
 
-    <div v-if="mm.section !== 'map'" class="mm-review-wrap">
+    <!-- Categories is configuration, not a queue: no always-loaded budget rail
+         beside it, and one column for the whole list and its drawer. -->
+    <div v-if="mm.section === 'categories'" class="mm-review-wrap">
+      <div class="page-grid page-grid--single mm-review-grid">
+        <div class="page-main">
+          <MemoryCategoriesPanel />
+        </div>
+      </div>
+    </div>
+
+    <div v-else-if="mm.section !== 'map'" class="mm-review-wrap">
       <div class="page-grid mm-review-grid">
       <div class="page-main">
       <!-- Suggested and History are the proposal panel's two sections; it is
@@ -274,6 +284,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from 'vue'
 import PaneHeader from './PaneHeader.vue'
 import MemoryGuideBudget from './MemoryGuideBudget.vue'
+import MemoryCategoriesPanel from './MemoryCategoriesPanel.vue'
 import ProposalReviewPanel from './ProposalReviewPanel.vue'
 import VaultReviewPanel from './VaultReviewPanel.vue'
 import { useProposalsStore } from '../stores/proposals'
@@ -1228,6 +1239,7 @@ const SECTION_LABELS: Record<MemorySection, string> = {
   suggested: 'Suggested',
   revisit: 'To revisit',
   map: 'Map',
+  categories: 'Categories',
   retired: 'Retired',
   history: 'History',
 }

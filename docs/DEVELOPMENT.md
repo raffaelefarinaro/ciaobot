@@ -89,9 +89,65 @@ release minisign key embedded in the script, and the wheel's digest and size,
 before anything is installed; installs the verified wheel with `uv tool install`;
 writes the install receipt with absolute paths; then runs `ciao setup` and
 `ciao service start` and prints the one-time login URL to the terminal. It
-refuses to take over an engine that Ciaobot.app manages (migrating those
-installs is #576) and refuses to overwrite a `ciao` it did not install. The
-workflow attaches it as the `install-engine.sh` release asset.
+refuses to take over an engine that Ciaobot.app manages unless it is re-run with
+`--migrate`, and refuses to overwrite a `ciao` it did not install. `--migrate`
+is the desktop→terminal hand-over (#576): after the same manifest and digest
+verification, it classifies the Mac from the verified wheel, takes before-images
+of the two plists, the shim, the install receipt and any existing uv tool
+environment in `~/.local/state/ciaobot/migration/before/` (an absent file is
+recorded as absent, so a rollback removes only what the migration created, and
+the tool environment is copied only when one is already there — the common
+hand-over from Ciaobot.app has none), and refuses to touch anything if
+Ciaobot.app is still running 20 s after it was asked to quit. It then either
+repoints `com.ciao.server` at the new engine and, only once that engine answers
+with the version just installed, retires the app's own agent — restoring the
+plists, the shim, the receipt, the tool environment and the launchd job on any
+failure, including a launchctl that refuses to put them back, and loading and
+starting that agent again whenever the transaction had already booted it out
+(the two are tracked separately, because a plist that is still there is not the
+same fact as a job launchd still holds) — or, for a client,
+disables the local engine and installs no service at all, leaving the user to
+sign in at the remote host. A client failure undoes the same state and never
+claims an engine was restored, because there was none. `--as-host` /
+`--as-client URL` are required when the node state cannot be read or trusted;
+the URL is checked with the classifier's own rule (scheme, host name, no
+credentials or whitespace), so an override like `https://` is refused before a
+single label or file is touched rather than after this Mac has given up its own
+engine. The migration receipt in `~/.local/state/ciaobot/migration/` (`schema`,
+`phase`, `before` block, `version`, `retiring_desktop`, `started_at`) is what
+makes the whole thing
+resumable: a retry reuses those originals rather than snapshotting the tool the
+previous attempt installed, and only a receipt that parses, records all five
+before-images at the paths this installer writes them to, still has them on
+disk, and agrees with the installed service — its version, its entry point and
+tool environment, and for a host the `com.ciao.server.plist` program pointing
+at that entry point rather than inside `Ciaobot.app` — is treated as
+"already migrated"; a corrupt, wrong-schema, incomplete or stale one is refused
+with recovery instructions instead, and a stale settled receipt is re-run from
+the originals it kept, out loud. An interrupted run records `interrupted`
+rather than pretending to have finished, a retirement that launchctl refuses
+leaves the app's agent in place instead of reporting success, and a `retiring`
+receipt that was being taken to `migrated` when the process stopped is finished
+rather than treated as an ordinary installer-managed engine. Any receipt naming
+an unfinished host hand-over (`started`, `installed_no_start`, `interrupted`)
+is finished the same way: by the time those phases are on disk, `ciao setup` has
+usually already repointed `com.ciao.server` at the tool this script installed, and
+an engine outside a `.app` is exactly what the classifier calls an ordinary
+install — so the kind and the workspace come from the receipt, which is the only
+thing left that knows what the run was doing, and taking the host path from them
+is what stops the app's own agent from staying loaded next to the engine that
+replaced it. That path also settles the workspace before it takes any
+before-image or asks the app to quit, and only ever hands over the one the
+engine being replaced runs in: a `--workspace` naming a different directory, one
+that does not exist, or a directory with no `.env` in it is refused, no
+workspace is created during a hand-over, and an `--as-host` override on a state
+whose workspace could not be recovered has to name an existing one rather than
+get a fresh `~/Ciaobot`. Taking a different workspace would start a second engine
+with a fresh password and a fresh runtime root next to the real ones, retire the
+app's agent, and leave the original and every chat in it behind while the receipt
+still named the original. The ordinary, non-`--migrate` path is unchanged: there
+`--workspace` is how a workspace is named, and it is created. The workflow
+attaches it as the `install-engine.sh` release asset.
 
 ## Branching and releases
 
@@ -306,9 +362,9 @@ that schedule is not installed.
 
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
 
-For engine-update changes, `tests/test_engine_update.py` is the contract: launchd, uv, the service starter, the engine's HTTP surface, the clock and sleep are all doubles, so nothing in it may start a real service, move a real environment or open a socket. An update that a reboot or a killed job interrupted is picked up by a durable `com.ciao.recover` LaunchAgent that `apply_update` installs (from the staged interpreter, `StartInterval` 30) *before* the engine is stopped — the crash window where the live env is renamed aside leaves the engine unable to start, so a recovery reached from inside the engine is a recovery that cannot run. Its program is `run-recover --operation <id>`: `recover_apply` takes the lock without waiting, stands down for a tick when a swap holds it, never posts (it owns no drain) and never mutates a record it did not find stranded, retires its own job and plist when there is nothing left to recover or once the rollback has settled, and otherwise runs the same total `_rollback` the apply would have, using the retained `previous-env` as the evidence that the move happened. `recover_interrupted_apply` from `ciao/main.py` (macOS only) stays as the fast path for the cases where the engine does come back: it recognises the record and bootstraps the detached `com.ciao.updater` job in `run-recover` mode. The rollback is never the engine's own doing, because it cannot boot itself out and restore the env it is running out of. In the other direction, `run_apply` refuses an apply when the loaded `com.ciao.server` does not run the env the install receipt names. Do not run `ciao update apply`, `run-apply`, `run-recover` or real `launchctl` against your own install to check any of it.
+For engine-update changes, `tests/test_engine_update.py` is the contract: launchd, uv, the service starter, the engine's HTTP surface, the clock and sleep are all doubles, so nothing in it may start a real service, move a real environment or open a socket. An update that a reboot or a killed job interrupted is picked up by a durable `com.ciao.recover` LaunchAgent that `apply_update` installs (from the staged interpreter, `StartInterval` 30) *before* the engine is stopped, and that `run_apply` re-points at the retained `previous-env` the instant the live env is renamed aside — so the swap never consumes the directory the net runs from — the crash window where the live env is renamed aside leaves the engine unable to start, so a recovery reached from inside the engine is a recovery that cannot run. Its program is `run-recover --operation <id>`: `recover_apply` takes the lock without waiting, stands down for a tick when a swap holds it, never posts (it owns no drain) and never mutates a record it did not find stranded, retires its own job and plist when there is nothing left to recover or once the rollback has settled, and otherwise runs the same total `_rollback` the apply would have, using the retained `previous-env` as the evidence that the move happened. `recover_interrupted_apply` from `ciao/main.py` (macOS only) stays as the fast path for the cases where the engine does come back: it recognises the record and bootstraps the detached `com.ciao.updater` job in `run-recover` mode. The rollback is never the engine's own doing, because it cannot boot itself out and restore the env it is running out of. In the other direction, `run_apply` refuses an apply when the loaded `com.ciao.server` does not run the env the install receipt names. Staging resolves the release once, into a real `uv tool env` under `<stage>/tool/<dist>` with `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR` pinned to the stage dir, and records the resolved set as `Operation.env_freeze`; the apply then *moves* that env into the live env's place instead of installing the wheel again, re-pointing only what a move breaks (the `bin` shebangs and the `bin_dir` entry points), so the swap needs no network and cannot pick up a dependency released since staging. Do not run `ciao update apply`, `run-apply`, `run-recover` or real `launchctl` against your own install to check any of it.
 
-For post-archive pipeline changes, use `tests/test_archive_jobs.py`. It exercises the manifest in isolation and the resumable stage runner against a synthetic vault/guide, covering: a failure after each stage (including after insights already exist), no duplication on retry (region entries, proposal rows, learning recurrence, project updates), deletion tombstoning, and the blocked/recoverable states (changed archive content, missing archive, broken workspace owner, model unavailability). `tests/test_archive_postprocess_state.py` owns the chat-visible lifecycle and the retry route; `web/src/lib/postprocessView.test.ts` owns the settled/partial wording. The runner is the single implementation behind both `extract_and_append` (backfill/retry) and the manager's live archive path, so a change to stage ordering belongs in `ciao/insights.py:run_archive_pipeline`.
+For post-archive pipeline changes, use `tests/test_archive_jobs.py`. It exercises the manifest in isolation and the resumable stage runner, covering: the trajectory stage settling or skipping, a write failure staying retryable, deletion tombstoning, the blocked states (changed archive content, missing archive), and the legacy four-stage manifest settling on its own. `tests/test_archive_postprocess_state.py` owns the chat-visible lifecycle and the retry route; `web/src/lib/postprocessView.test.ts` owns the settled/partial wording. The runner is the single implementation behind the manager's live archive path, so a change to stage ordering belongs in `ciao/insights.py:run_archive_pipeline` and a change to the stage list itself in `ciao/archive_jobs.py:PIPELINE_STAGES`.
 For HTML artifact changes, keep the preview self-contained: inline scripts/styles and `data:` media are allowed, while external requests and `blob:` sources must remain blocked. Use the fixtures under `tests/fixtures/html_artifacts/` plus the focused workspace-HTML tests. The response body carries the injected comment bridge (`ciao/web/artifact_bridge.py`): keep it ES5, marker-tagged, and idempotent, never inject ahead of a doctype (a `<script>` before it renders the artifact in quirks mode), and keep `action: 'ready'` deferred to `DOMContentLoaded` — that message is the parent's only cue to push comment highlights, and anything pushed earlier reaches a frame that is still loading. `tests/test_workspace_html.py` asserts the injection and the header contract together; `web/src/lib/artifactBridgeScript.test.ts` runs the script itself in jsdom for anchoring and highlight behaviour.
 For workspace navigation changes, verify that unmodified `1`–`9` keys follow the visible sidebar workspace order, do not fire from text inputs, and keep working in the automations view. The sidebar key labels should remain visible and accessible at narrow widths. An open `AskUserQuestion` card takes those digits over for its own options while it is up (Design System rule S7) and hands them back when it closes, so check both states after touching either handler.
 On the home screen, also verify that it shows only the selected workspace's chats (switching workspaces swaps the content) and that arrow keys follow the rendered lane layout: up/down moves between stacked lanes, left/right moves within a lane.
@@ -390,7 +446,7 @@ replaced when it changes, or an **event**, a thing that happened which gets
 appended to a log and never edited. The regions are a state surface.
 
 The write policy for every path that can touch durable memory — attended
-remember, archive extraction, unattended curation, direct edit, and proposal
+remember, the memory pass, unattended curation, direct edit, and proposal
 acceptance — is stated once in `ciao/memory_policy.py` and described in
 `docs/ARCHITECTURE.md` under "Memory write policy matrix". Two rules matter for
 any change here: the region cap is **advisory** on every path (a write goes

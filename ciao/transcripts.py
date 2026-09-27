@@ -472,8 +472,8 @@ class TranscriptStore:
     def peek_turn_count(self, ctx: ChatContext, provider: str = "claude") -> int:
         """Number of recorded turns in the current (pre-archive) transcript.
 
-        Used by archive_chat to size-gate post-archive insights extraction
-        before archive_session consumes the in-memory transcript file.
+        Used by archive_chat to size-gate the post-archive memory pass before
+        archive_session consumes the in-memory transcript file.
         """
         transcript = self._load_current(ctx, provider)
         turns = transcript.get("turns") if isinstance(transcript, dict) else None
@@ -531,18 +531,18 @@ class TranscriptStore:
     def current_filtered_jsonl(
         self, ctx: ChatContext, provider: str = "claude"
     ) -> str:
-        """Return provider-neutral line JSON for insights and trajectories."""
+        """Return provider-neutral line JSON for the memory pass and trajectories."""
         transcript = self._load_current(ctx, provider)
         turns = transcript.get("turns") if isinstance(transcript, dict) else None
         if not isinstance(turns, list):
             return ""
         lines: list[str] = []
-        # 1-based to match `ciao.insights.filter_session_jsonl`: the extraction
-        # prompt tells the model "Indices start at 1; never cite `[idx=0]`", so
-        # a 0-based transcript shifted every citation by one turn. Harmless
-        # while citations were only decoration, but they are now checked — a
-        # correct `[idx=1]` citation resolved to the assistant turn here and
-        # the fact was queued as unsupported.
+        # 1-based to match `ciao.insights.filter_session_jsonl`: the memory pass
+        # tells the model "Indices start at 1; never cite `[idx=0]`", so a
+        # 0-based transcript shifted every citation by one turn. Harmless while
+        # citations were only decoration, but they are now checked — a correct
+        # `[idx=1]` citation resolved to the assistant turn here and the fact
+        # was queued as unsupported.
         index = 1
         for turn in turns:
             if not isinstance(turn, dict):

@@ -119,7 +119,7 @@ def test_system_schedules_load_from_stock_not_runtime(tmp_path: Path) -> None:
 def test_stock_memory_curation_schedule_invokes_the_skill(tmp_path: Path) -> None:
     """The schedule prompt dispatches to the memory-curation skill.
 
-    The procedure itself — canonical-doc folding, session-insights routing —
+    The procedure itself — canonical-doc folding, memory-pass routing —
     lives in the skill file, where test_stock_package asserts its contract.
     """
     from importlib import resources
@@ -134,7 +134,10 @@ def test_stock_memory_curation_schedule_invokes_the_skill(tmp_path: Path) -> Non
         .read_text(encoding="utf-8")
     )
     assert "canonical doc" in skill.lower()
-    assert "session-insights" in skill.lower()
+    # The post-archive writer is the memory pass; the one-shot insights stage
+    # this used to name was deleted in #627.
+    assert "memory pass" in skill.lower()
+    assert "session-insights" not in skill.lower()
 
 
 def test_system_schedule_state_persists_separately(tmp_path: Path) -> None:

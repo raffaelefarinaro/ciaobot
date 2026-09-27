@@ -8,7 +8,7 @@ argument-hint: <what to remember>
 Turn `$ARGUMENTS` into one durable, present-tense fact — never "User said X → assistant did Y" — and queue it for review instead of writing memory directly, so a person sees it before it becomes always-loaded context and the outcome is logged. The queue dedupes by exact text; it does **not** reconcile a fact against the entries already there, so accepting an updated preference appends it beside the superseded one. Say so when that is likely, but do not edit existing always-loaded memory before this proposal is approved unless the user explicitly asks for an immediate write.
 
 1. **Shape the fact.** One sentence, present tense, stating what IS true from now on. If it is only true from or until a date, append `[as-of: YYYY-MM-DD]` or `[expires: YYYY-MM-DD]`.
-2. **Pick the destination** the way the insights extractor tags bullets:
+2. **Pick the destination** the way the proposals queue tags bullets:
    - cross-project preference, environment fact, or lesson → `memory`
    - who the user is (identity, role, communication style) → `profile`
    - true only within the active project → `project` (needs the project's canonical doc path as payload)

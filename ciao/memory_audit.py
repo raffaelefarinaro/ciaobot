@@ -296,10 +296,10 @@ def find_superseded_state(
 #
 # Two stamps, two clocks. `[as-of: YYYY-MM-DD]` is world time: the fact was
 # true as of that date and may have silently changed since. The trailing
-# `[YYYY-MM-DD]` learned-at stamp is system time: when auto-promotion wrote
-# the entry. Both are read here as aging evidence for the curation routine to
-# re-verify — informational, like every age signal in this module, because
-# age alone is never a defect.
+# `[YYYY-MM-DD]` learned-at stamp is system time: when the fact was promoted
+# into the region. Both are read here as aging evidence for the curation
+# routine to re-verify — informational, like every age signal in this module,
+# because age alone is never a defect.
 
 _AS_OF_RE = re.compile(r"\[as-of:\s*(\d{4}-\d{2}-\d{2})\]")
 _LEARNED_STAMP_RE = re.compile(r"\s*\[(\d{4}-\d{2}-\d{2})\]\s*$")

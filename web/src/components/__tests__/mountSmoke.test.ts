@@ -183,18 +183,6 @@ vi.mock('../../lib/api', () => {
           avg_duration_ms: 300000,
           last_error: { error: 'TimeoutError', ts: '2026-08-03T20:06:14+00:00' },
         },
-        sub_jobs: [
-          {
-            job: 'backfill_insights',
-            label: 'Insights backfill',
-            category: 'system',
-            description: 'Runs session insights over every archive that is missing them.',
-            trigger: 'On server startup, and on demand from this page.',
-            last_run: null,
-            recent: [],
-            stats: { total_runs: 0, success_rate: null, avg_duration_ms: 0, last_error: null },
-          },
-        ],
       },
       {
         job: 'title',
@@ -554,38 +542,10 @@ describe('component mount smoke', () => {
     expect(failing).toHaveLength(1)
     expect(failing[0].text()).toContain('When a chat is archived.')
     expect(failing[0].text()).toContain('TimeoutError')
-    // The old separate "Insights backfill" row is gone; it is this row's action.
-    expect(wrapper.text()).not.toContain('Insights backfill —')
-    expect(failing[0].find('.btn-run').text()).toBe('Run for all sessions')
+    // The insights row has no manual trigger, so it carries no run button.
+    expect(failing[0].find('.btn-run').exists()).toBe(false)
     // A settled one-time migration is folded away, not presented as live work.
     expect(wrapper.find('.automation-settled').text()).toContain('Legacy memory migration')
-    wrapper.unmount()
-  })
-
-  it('SettingsView retries failing insights with a different model', async () => {
-    const router = makeRouter()
-    await router.push('/settings/automations')
-    await router.isReady()
-    const mod = await import('../SettingsView.vue')
-    const wrapper = mount(mod.default as never, {
-      global: { plugins: [router], stubs: { Teleport: true } },
-    })
-    await flushPromises()
-    await nextTick()
-
-    const failing = wrapper.find('.automation-row--error')
-    const select = failing.find('select')
-    expect(select.exists()).toBe(true)
-    // Default keeps the configured model; options are concrete model ids.
-    expect(select.findAll('option')[0].text()).toContain('Configured')
-    await select.setValue('opus')
-    await failing.find('.btn-run').trigger('click')
-    await flushPromises()
-
-    expect(api.post).toHaveBeenCalledWith(
-      '/api/automation/backfill-insights',
-      { model: 'opus' },
-    )
     wrapper.unmount()
   })
 

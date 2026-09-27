@@ -147,15 +147,31 @@ describe('ProjectSidebar review section', () => {
     expect(nav.findAll('.sidebar-list-label').map(h => h.text())).toEqual(['To decide', 'Explore', 'Records'])
     const items = nav.findAll('.memory-nav-item')
     expect(items.map(i => i.attributes('href'))).toEqual([
-      '/memory/suggested', '/memory/revisit', '/memory/map', '/memory/retired', '/memory/history',
+      '/memory/suggested', '/memory/revisit', '/memory/map', '/memory/categories',
+      '/memory/retired', '/memory/history',
     ])
+    // Explore holds the map, then the list of what the map is drawing.
+    expect(items[2].text()).toContain('Map')
+    expect(items[3].text()).toContain('Categories')
+    // The category list is configuration, not a queue: no count on it.
+    expect(items[3].find('.memory-nav-count').exists()).toBe(false)
     // Three proposals in `personal`, one note to revisit; the queues' counts
     // are the accent ones, and the accessible name carries the number.
     expect(items[0].get('.memory-nav-count').text()).toBe('3')
     expect(items[0].get('.memory-nav-count').classes()).toContain('memory-nav-count--due')
     expect(items[1].attributes('aria-label')).toBe('To revisit, 1 waiting')
     // Nothing retired: no zero badge.
-    expect(items[3].find('.memory-nav-count').exists()).toBe(false)
+    expect(items[4].find('.memory-nav-count').exists()).toBe(false)
+  })
+
+  it('offers a Manage link from the map\'s category chips to the category list', async () => {
+    // The chips filter the drawing; the list of kinds the vault keeps is a
+    // different thing, and it is editable.
+    useMemoryMapStore().setSection('map')
+    const wrapper = await mountSidebar()
+    const manage = wrapper.get('.mm-row-links a')
+    expect(manage.text()).toBe('Manage')
+    expect(manage.attributes('href')).toBe('/memory/categories')
   })
 
   it('shows no map count until the selected workspace\'s graph has loaded', async () => {

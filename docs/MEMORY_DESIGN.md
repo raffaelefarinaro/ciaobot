@@ -22,9 +22,8 @@ A personal assistant's memory must be, with **zero user configuration**:
    pollutes the store with its own paperwork.
 6. **Legible** — plain markdown the user can read, edit, and diff. User
    correction is the only reliable fix for extraction errors.
-7. **Private by choice** — automatic archive extraction and trajectory capture
-   are on by default, but Settings → Automations can stop each automatic
-   process; explicit one-time backfill remains available.
+7. **Private by choice** — the automatic memory pass and trajectory capture are
+   on by default, but Settings → Automations can stop each automatic process.
 
 ## Architecture: two layers, verbatim long tail
 
@@ -49,8 +48,8 @@ refused write does not shrink the region, it only hides the fact — bounding is
 the job of consolidation during memory curation. The same policy is stated
 once in `ciao/memory_policy.py` and pinned by tests.
 
-The long tail keeps **verbatim transcripts as the store of record**, with
-extracted insights as an index over them — never a replacement. The two
+The long tail keeps **verbatim transcripts as the store of record**, with what
+the memory pass derived from them as an index over them — never a replacement. The two
 strongest empirical results of 2025–26 both say lossy distillation is the
 enemy: verbatim conversation chunks beat LLM-extracted artifacts by 15–22
 points on LoCoMo/LongMemEval (arXiv:2601.00821), and goal-directed agentic
@@ -62,14 +61,14 @@ outperforms any pipeline that summarizes those sources away.
 
 | Principle | Source | Mechanism in Ciaobot |
 | --- | --- | --- |
-| Extract state, not events | consolidation surveys (arXiv:2603.07670); "user prefers X" is durable, "user said X on Tuesday" is not | Extraction demands a present-tense `Durable rule:` clause; `memory_audit.find_event_shaped` rejects event-shaped text at promotion and flags it as rot in regions |
-| Write-time dedup: ADD/UPDATE/NOOP against neighbors | Mem0 (arXiv:2504.19413); entity resolution at write beats query-time cleanup | `plan_region_reconcile`: one model call per region (a capped region fits whole in a prompt) decides add / covered / update-entry-N; fail-soft to plain append |
-| Bi-temporal stamps; invalidate, don't delete | Zep/Graphiti (arXiv:2501.13956); ChatGPT's per-insight date ranges | `[as-of:]`/`[expires:]` (world time) from extraction; trailing learned-at `[YYYY-MM-DD]` (system time) on every promotion; replaced entries go to the `Memory-Consolidations.md` undo log, so "current truth" and history both survive |
+| Extract state, not events | consolidation surveys (arXiv:2603.07670); "user prefers X" is durable, "user said X on Tuesday" is not | A bullet states the standing rule as a present-tense `Durable rule:` clause; `memory_audit.find_event_shaped` rejects event-shaped text at promotion and flags it as rot in regions |
+| Write-time dedup: ADD/UPDATE/NOOP against neighbors | Mem0 (arXiv:2504.19413); entity resolution at write beats query-time cleanup | `reconcile_region_fact`: one model call per region (a capped region fits whole in a prompt) decides add / covered / update-entry-N; fail-soft to plain append |
+| Bi-temporal stamps; invalidate, don't delete | Zep/Graphiti (arXiv:2501.13956); ChatGPT's per-insight date ranges | `[as-of:]`/`[expires:]` (world time) on a bounded fact; trailing learned-at `[YYYY-MM-DD]` (system time) on every promotion; replaced entries go to the `Memory-Consolidations.md` undo log, so "current truth" and history both survive |
 | Age is evidence, not a defect | Generative Agents' recency scoring (arXiv:2304.03442); MemoryBank decay | `memory-audit` reports aging (`as-of` ≥ 90d, learned ≥ 180d, per-type note horizons) as *informational* findings the nightly curator re-verifies — nothing expires automatically except explicit `[expires:]` |
 | Decay by disuse, reinforce by access | MemoryBank (Ebbinghaus + access reinforcement) | `ciao vault search` hits logged to `.runtime/vault_search_hits.jsonl`; "stale AND never retrieved in 90d" (`retrieved_recently: false`) is the strongest demotion signal — signal only, no auto-delete |
 | Consolidate episodes into cited rules | Generative Agents' reflection: derived memories cite their sources | Learnings entries carry `[key] [first → last] (xN) — sources: chat ids`; recurrence counting is mechanical, promotion at x3 cites its episodes; connections only among retrieved items |
-| Scope by default, promote explicitly | Anthropic's project-scoped memory; wrong scoping is a production failure | Per-workspace vaults, regions, and curation; `[project]` facts go to the project doc, never a region; archive time auto-applies NEW region facts only when they are confident and state-shaped, an attended "remember" is explicit, and the unattended curator never promotes a new region fact — it may only consolidate what is already there, under the undo-log rule |
-| The machinery must not remember itself | observed self-ingestion, 2026-08: the nightly curator's transcript re-extracted its own prompt rules into `ciao:memory` | System-schedule chats keep insights (audit trail) but skip the project-doc fold, and facts citing only automation turns are deferred to the queue; extraction prompts refuse machinery rules; bookkeeping files are `RESERVED_UNINDEXED_FILES` in FTS and `search: false` is a general opt-out |
+| Scope by default, promote explicitly | Anthropic's project-scoped memory; wrong scoping is a production failure | Per-workspace vaults, regions, and curation; `[project]` facts go to the project doc, never a region; promoting a NEW region fact always takes an explicit act — a REVIEWER action, whether that is a user or agent accepting a queued proposal or the attended memory pass writing one itself — and the unattended curator never promotes a new region fact: it may only consolidate what is already there, under the undo-log rule |
+| The machinery must not remember itself | observed self-ingestion, 2026-08: the nightly curator's transcript re-extracted its own prompt rules into `ciao:memory` | A turn the transcript marks as unattended is not the user's, so the memory pass is told never to record one and the unattended run defers instead; bookkeeping files are `RESERVED_UNINDEXED_FILES` in FTS and `search: false` is a general opt-out |
 | Recall must survive paraphrase | LongMemEval ablations (arXiv:2410.10813): key expansion + query rewriting | AND→OR fallback for zero-hit multi-word queries; system prompt mandates 2–3 reformulations before "not found"; curation maintains `aliases:` frontmatter ("brother-in-law", "hourly rate") |
 | Procedures are contracts, not prose | prompt drift: three near-copies of the curation contract had diverged | The nightly procedure is one stock skill (`memory-curation`); the schedule prompt only dispatches; tests pin the contract to the skill file |
 | A managed mutation must be safe and reversible | one read-merge-write per region, plus a queue bullet and a decision record, is not one transaction in plain markdown | `ciao/memory_receipts.py`: every managed region write, queue resolution and prune records a stable-id receipt (`Workspace/Memory-Receipts.jsonl`) with actor/source, revisions and before/after images; the guide lock is required (unavailable = retryable failure, never an unlocked write), preview/apply/undo compare revisions so an external edit is a conflict, startup recovery reconciles an interrupted receipt from its images, and undo refuses a changed destination. External direct edits are conflicts, not audited writes |
@@ -83,7 +82,8 @@ outperforms any pipeline that summarizes those sources away.
   supersession-only systems miss silent changes, which is what the disuse
   signal backstops.
 - **Event-shaped rot** — the single most common gap in production memories;
-  filtered at three layers (prompt, `_is_durable`, region audit).
+  filtered where a fact is promoted (`_promotable_text`, `memory_audit`) and
+  flagged in the regions afterwards.
 - **Wrong scoping** — a project fact saved globally leaks across contexts;
   routing is by scope, with `[review]` as the honest "unsure" bucket.
 - **Self-pollution** — the memory system's own queue/logs/rules competing
@@ -99,29 +99,30 @@ outperforms any pipeline that summarizes those sources away.
 - **Knowledge-graph store (Zep/Graphiti-style)** — takes the bi-temporal
   *idea* without the graph: a KG replaces the legible-markdown substrate the
   product is built on, and no production assistant ships one to end users.
-- **Doing ADD/UPDATE/NOOP inside the extraction call** — a separate small
+- **Doing ADD/UPDATE/NOOP inside the writing turn** — a separate small
   promotion-time call is testable, cheap (regions are tiny), and fail-soft;
-  the extractor never needs region contents.
-- **Agentic insight extraction (a full CLI session with tools instead of
-  the one-shot)** — considered and kept two-tier on purpose. The one-shot
-  extractor is deliberately *sandboxed*: transcript in, markdown out, no
-  tools. That buys three things at once. (1) **Injection safety**: an
-  archived transcript is untrusted content; an extraction agent with tools
-  and write access turns every archived chat into a prompt-injection vector
-  against memory, whereas the one-shot can only ever emit text that
-  deterministic, guarded code then routes (event-shape filter, caps, dedupe,
-  undo log). (2) **Cost and reach**: extraction runs on every archived chat
-  and works on a cheap model — a tool-using session needs a capable cloud
-  model and many calls per archive.
-  (3) **Testability**: parse/route/dedupe are pure functions with tests.
-  The judgment the agentic version would add already exists in the design,
-  split into two cheaper places: the write-time reconcile (one sandboxed
-  call that sees the region contents) and the nightly curation run, which
-  IS a full agent session with tools and memory that re-judges everything
-  queued. The middle path, if extraction ever needs more context, is
-  fact-augmented extraction: *code* retrieves the region and top-k
-  `ciao vault search` hits and puts them in the one-shot prompt — the model gets
-  the context without getting the tools.
+  the writer never needs to reason about region contents twice.
+- **A one-shot extractor (a single model call over the transcript instead of
+  a chat with tools)** — this is the alternative the design *rejected* and
+  then measured. Its case was real: an archived transcript is untrusted
+  content, so a sandboxed one-shot (transcript in, markdown out, no tools)
+  cannot turn every archived chat into a prompt-injection vector against
+  memory, it runs on a cheap model, and parse/route/dedupe stay pure
+  functions with tests. What it could not do was the judgment — deciding
+  what is already in a note, what a changed fact supersedes, whether a
+  person is genuinely new. The #594 experiment compared the two on 50 real
+  conversations and the agentic chat won, so the one-shot pipeline was
+  deleted outright (#627) rather than left as a mode. The memory pass is
+  that agentic chat: it reads the archive with tools, so the injection
+  surface it opens is answered by bounds instead of by a sandbox — it is a
+  `bypass` chat scoped to memory and the vault (no messages, no commits, no
+  external calls), it is visible and steerable like any other chat, and
+  anything it is unsure about is queued rather than written. The guarded
+  code the one-shot relied on is not gone either: it is the accept path, and
+  it is what every write goes through now (event-shape filter, reconcile,
+  provenance row, receipts, undo log). Fact-augmentation remains the right
+  answer if a future pass needs context *without* the tools: *code* retrieves
+  the region and top-k `ciao vault search` hits and puts them in the prompt.
 - **Automatic forgetting** — disuse and age are *signals to a curator with
   an undo log*, never triggers for deletion. A personal assistant that
   silently forgets is worse than one that asks.
