@@ -103,7 +103,7 @@ are reproducible and comparable:
 | `code_revision` | `git rev-parse --short=12 HEAD` |
 | `core_prompt_sha256` | `ciao/system_prompt.md` |
 | `guide_fixture_sha256` | the scenario's rendered synthetic regions |
-| `extraction_prompt_sha256` | the three prompts in `ciao/insights.py` / `ciao/memory_proposals.py` |
+| `extraction_prompt_sha256` | the prompts that shape what is written to the vault — after #627 that is the region reconcile in `ciao/memory_proposals.py` alone |
 | `scenario_set_sha256` | the packaged catalog bytes |
 | `provider` / `model` | the run arguments |
 | `tool_catalog_sha256` / `tool_count` | the shipped MCP catalog |

@@ -235,10 +235,7 @@ def test_a_restart_mid_pipeline_leaves_no_chat_pulsing(tmp_path: Path) -> None:
 
 
 def test_retry_insights_starts_a_resume_pipeline(tmp_path: Path, monkeypatch) -> None:
-    # One-shot retry is a no-op while memory passes own the archive path: the
-    # insights stage is filtered out, so the resume finds nothing to launch.
-    # This test is about the resume machinery, so it pins the flag Off.
-    monkeypatch.setattr(memory_pass, "MEMORY_PASS_CHATS", False)
+    """A pending trajectory is what a retry is for, and the archive is resolved."""
     manager = _make_manager(tmp_path)
     chat_id = _chat(manager)
     chat = manager.get_chat(chat_id)
@@ -247,16 +244,20 @@ def test_retry_insights_starts_a_resume_pipeline(tmp_path: Path, monkeypatch) ->
     archive = tmp_path / "archive.md"
     archive.write_text("# chat\n\nbody\n", encoding="utf-8")
     chat.archive_path = str(archive.relative_to(tmp_path))
+    manager._save()
+
+    inputs = manager._job_inputs(
+        chat,
+        manager._projects[chat.project_id],
+        session_id="sess-1",
+        filtered_jsonl="line",
+    )
+    manager._new_job_for_chat(chat, inputs)
 
     called: dict[str, object] = {}
 
-    async def fake_pipeline(job: object, inputs: dict, **kwargs: object) -> object:
-        called.update(inputs)
-        archive.write_text(
-            archive.read_text(encoding="utf-8")
-            + "\n\n<!-- ciao:session-insights -->\n## Session insights\n\n## Errors\n- x\n",
-            encoding="utf-8",
-        )
+    async def fake_pipeline(job: object, inputs_arg: dict, **kwargs: object) -> object:
+        called.update(inputs_arg)
         return job
 
     monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
@@ -301,9 +302,7 @@ def test_retry_insights_is_noop_when_pipeline_already_running(
 def test_retry_insights_reports_complete_when_only_insights_are_settled(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """Insights-settled is not "complete": the fold/proposals can still resume."""
-    # As above: the resume must have the one-shot stages to resume through.
-    monkeypatch.setattr(memory_pass, "MEMORY_PASS_CHATS", False)
+    """A settled trajectory is "complete": there is nothing left to resume."""
     manager = _make_manager(tmp_path)
     chat_id = _chat(manager)
     chat = manager.get_chat(chat_id)
@@ -329,20 +328,20 @@ def test_retry_insights_reports_complete_when_only_insights_are_settled(
 
     status = asyncio.run(run())
 
-    # The regression the ticket names: insights already exist, but the later
-    # stages do not, so the resume must still start.
-    assert status == "started"
-    assert started
+    # The archive carries no session payload, so the trajectory can never run:
+    # a retry has nothing to launch and says so instead of firing an empty task.
+    assert status == "complete"
+    assert not started
 
 
-def test_retry_resets_an_exhausted_insights_with_pending_dependents(
+def test_retry_resets_an_exhausted_trajectory(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """An exhausted insights must be reset even when a dependent is pending.
+    """An exhausted stage must be reset, or a user retry is a silent no-op.
 
-    `resumable()` is non-empty because the dependent stages are pending, so the
-    old guard skipped `reset_failed`; the launch then ran only work that
-    immediately waited for insights, making every user retry a silent no-op.
+    `resumable()` is empty once the automatic budget is spent, so an old guard
+    that reset only on a non-empty `resumable()` returned "complete" here and
+    the user could never retry the stage the budget gave up on.
     """
     from ciao import archive_jobs as aj
 
@@ -355,13 +354,17 @@ def test_retry_resets_an_exhausted_insights_with_pending_dependents(
     archive.write_text("# chat\n\nbody\n", encoding="utf-8")
     chat.archive_path = str(archive.relative_to(tmp_path))
 
-    inputs = manager._job_inputs(chat, manager._projects[chat.project_id])
+    inputs = manager._job_inputs(
+        chat,
+        manager._projects[chat.project_id],
+        session_id="sess-1",
+        filtered_jsonl="line",
+    )
     job = manager._new_job_for_chat(chat, inputs)
     for _ in range(aj.MAX_AUTO_ATTEMPTS):
-        job.mark("insights", aj.RUNNING)
-        job.mark("insights", aj.FAILED, "boom")
-    # An exhausted insights excludes its zero-attempt dependents from an
-    # *automatic* resume (they would immediately skip for lack of output).
+        job.mark("trajectory", aj.RUNNING)
+        job.mark("trajectory", aj.FAILED, "boom")
+    # An automatic resume leaves an exhausted stage alone.
     assert job.resumable() == []
     assert job.unfinished()
 
@@ -382,5 +385,5 @@ def test_retry_resets_an_exhausted_insights_with_pending_dependents(
     assert launched
     reloaded = aj.load_job(manager._runtime_root, job.job_id)
     assert reloaded is not None
-    assert reloaded.status_of("insights") == aj.PENDING
-    assert reloaded.stage("insights").attempts == 0
+    assert reloaded.status_of("trajectory") == aj.PENDING
+    assert reloaded.stage("trajectory").attempts == 0

@@ -477,12 +477,11 @@ class ChatInfo:
     # IDs have durably left the queue; discussion helpers always remain manual.
     helper: dict = field(default_factory=dict)
     # What the post-archive pipeline is doing, or did. Archiving a chat kicks
-    # off insights extraction, a project-doc fold, a trajectory and memory
-    # proposals (ciao/insights.py:extract_and_append), and until now none of
-    # that was visible anywhere in the app. Lives on the chat rather than in
-    # job_runs because it has to survive a restart and the run-log's own
-    # rotation: an archived chat opened next month should still be able to say
-    # what Ciaobot took from it.
+    # off the trajectory stage (ciao/insights.py:run_archive_pipeline) and enqueues
+    # a memory pass chat, and until now none of that was visible anywhere in the
+    # app. Lives on the chat rather than in job_runs because it has to survive a
+    # restart and the run-log's own rotation: an archived chat opened next month
+    # should still be able to say what Ciaobot took from it.
     #
     # {"state": "running"|"done", "step": "<job id>",
     #  "steps": {"<job id>": {"status": ..., "extra": {...}}},
@@ -536,9 +535,9 @@ class ChatInfo:
 class ArchiveOutcome:
     """Result of archiving a chat.
 
-    Carries enough metadata for the route handler to dispatch a
-    background insights extraction without re-loading the transcript or
-    re-reading the JSONL (the JSONL is deleted as part of archiving).
+    Carries enough metadata for the route handler to enqueue the post-archive
+    memory pass and run the trajectory stage without re-loading the transcript
+    or re-reading the JSONL (the JSONL is deleted as part of archiving).
     """
 
     path: Path
@@ -2119,8 +2118,8 @@ class ProjectChatManager:
                     # Already in our index — refresh the vault doc path so the
                     # Files section and canonical-doc link stay accurate even
                     # if the readme moved, and re-read the doc's description so
-                    # a context edited in the file (by hand, or by the archive
-                    # time insights fold) reaches the injected preamble. This
+                    # a context edited in the file (by hand, or by the accept-
+                    # time project-doc fold) reaches the injected preamble. This
                     # branch used to skip the readme entirely, which is how the
                     # two drifted apart with nothing to pull them back.
                     existing = next(
@@ -3357,7 +3356,7 @@ class ProjectChatManager:
                     chat.session_id,
                     agent_root=agent_root,
                 )
-            except Exception:  # noqa: BLE001 — never fail archive over insights prep
+            except Exception:  # noqa: BLE001 — never fail archive over transcript prep
                 logger.exception(
                     "Failed to pre-filter JSONL for chat %s", chat_id
                 )
@@ -3410,9 +3409,9 @@ class ProjectChatManager:
         transcript in the vault is the durable record.
 
         Returns the archive path plus a pre-filtered JSONL string captured
-        before blob deletion, so the caller can dispatch post-archive insights
-        extraction without racing against the disk reclaim. None means the chat
-        does not exist, or had nothing to write.
+        before blob deletion, so the caller can run the trajectory stage and
+        hand the transcript to the memory pass without racing against the disk
+        reclaim. None means the chat does not exist, or had nothing to write.
         """
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -3559,14 +3558,12 @@ class ProjectChatManager:
         *,
         filtered_jsonl: str = "",
         session_id: str = "",
-        text_mode: bool = False,
     ) -> dict[str, object]:
         return self._archive_pipeline_for()._job_inputs(
             chat,
             project,
             filtered_jsonl=filtered_jsonl,
             session_id=session_id,
-            text_mode=text_mode,
         )
 
     def _insights_model_for(self, chat: ChatInfo, workspace: str) -> str:
@@ -4318,9 +4315,9 @@ class ProjectChatManager:
         workspace — so an archive's path says which CHAT wrote it and nothing
         about where that chat ran. Anything filtering archives by workspace has
         to come back through the registry, which is here and not in
-        ``ciao.insights``; the backfill scanner compared the chat-id path
-        segment to a workspace name directly, which can never match, so a
-        workspace-scoped run silently found nothing.
+        ``ciao.insights``; the insights backfill that used to live there
+        compared the chat-id path segment to a workspace name directly, which
+        can never match, so a workspace-scoped run silently found nothing.
         """
         return {
             chat_id: getattr(self._projects.get(chat.project_id), "workspace", "") or ""
@@ -4386,10 +4383,10 @@ class ProjectChatManager:
     def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
         """Chats in *workspace* with a turn, subagent or archive job running.
 
-        An archive job (insights, memory proposals, the project-doc fold) keeps
-        writing into the workspace vault after the chat itself is archived, so
-        it counts too: finishing after the folder moved would recreate the
-        folder at its old path, outside the archive, and block the restore.
+        An archive job (the trajectory stage) keeps writing into the workspace
+        after the chat itself is archived, so it counts too: finishing after the
+        folder moved would recreate the folder at its old path, outside the
+        archive, and block the restore.
         """
         _project_ids, chat_ids = self.workspace_scope(workspace)
         busy = set(self.active_chat_ids())

@@ -6,8 +6,8 @@
         <button class="text-link" type="button" :disabled="!automationLoaded" @click="fetchAutomation">Refresh</button>
       </div>
       <p class="hint">
-        Work Ciaobot does on its own: naming chats, extracting insights when a chat is
-        archived, capturing trajectories when enabled, keeping the vault and skills in order.
+        Work Ciaobot does on its own: naming chats, capturing a session trajectory when a
+        chat is archived, keeping the vault and skills in order.
       </p>
     </div>
 
@@ -15,7 +15,7 @@
       <div class="insights-control-copy">
         <span class="insights-control-title">Session insights</span>
         <span class="hint">
-          Reads new and archived chats for durable learnings. Off stops model processing; the run action below remains an explicit one-time choice.
+          Reads the chat you just finished for durable learnings. Off stops the model pass.
         </span>
       </div>
       <button
@@ -95,10 +95,8 @@
               :expanded="!!expandedAutomations[item.job]"
               :busy="!!runningJobs[item.job]"
               :run-label="runLabel(item)"
-              :retry-model-options="retryModelOptions"
-              :configured-model="configuredInsightsModel"
               @toggle="toggle(item.job)"
-              @run="runJob(item, $event)"
+              @run="runJob(item)"
             />
           </div>
         </section>
@@ -113,10 +111,8 @@
               :expanded="!!expandedAutomations[item.job]"
               :busy="!!runningJobs[item.job]"
               :run-label="runLabel(item)"
-              :retry-model-options="retryModelOptions"
-              :configured-model="configuredInsightsModel"
               @toggle="toggle(item.job)"
-              @run="runJob(item, $event)"
+              @run="runJob(item)"
             />
           </div>
         </section>
@@ -134,10 +130,8 @@
               :expanded="!!expandedAutomations[item.job]"
               :busy="!!runningJobs[item.job]"
               :run-label="runLabel(item)"
-              :retry-model-options="retryModelOptions"
-              :configured-model="configuredInsightsModel"
               @toggle="toggle(item.job)"
-              @run="runJob(item, $event)"
+              @run="runJob(item)"
             />
           </div>
         </details>
@@ -148,13 +142,8 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { api } from '../../lib/api'
 import { errorMessage } from '../../lib/errorMessage'
-import {
-  automationHeadline,
-  groupAutomations,
-  retryModelOptions as buildRetryModelOptions,
-} from '../../lib/automationView'
+import { automationHeadline, groupAutomations } from '../../lib/automationView'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import type { AutomationProcess, ProposalOutcomes, RoutineSettings } from '../../lib/types'
@@ -181,9 +170,6 @@ const props = defineProps<{
   routines: RoutineSettings | null
   routinesSaving: boolean
   saveRoutines: (patch: Record<string, unknown>) => Promise<void>
-  // Per-provider model lists, from /api/models.
-  providerModels: Record<string, string[]> | undefined
-  providerLabels: Record<string, string>
 }>()
 
 const taskStore = useTaskStore()
@@ -214,12 +200,6 @@ const proposalsByWorkspace = computed(() =>
   })),
 )
 
-const retryModelOptions = computed(() =>
-  buildRetryModelOptions(props.providerModels, props.providerLabels),
-)
-const configuredInsightsModel = computed(
-  () => props.routines?.insights_model_effective || '',
-)
 const insightsEnabled = computed(() => props.routines?.insights_enabled === true)
 const trajectoriesEnabled = computed(
   () => props.routines?.trajectories_enabled === true,
@@ -267,38 +247,18 @@ function scheduleFor(item: AutomationProcess): string {
 
 /**
  * What the row's action button offers, or '' when the job has no manual
- * trigger. Session insights runs over every archive still missing them —
- * previously a separate "Insights backfill" row, which read as an unrelated
- * automation rather than as this one's catch-up pass.
+ * trigger.
  */
 function runLabel(item: AutomationProcess): string {
-  if (item.job === 'insights') return 'Run for all sessions'
   return scheduleFor(item) ? 'Run now' : ''
 }
 
-/**
- * One entry point for every row action. `model` is only meaningful for
- * Session insights, whose bulk run accepts a one-off model override.
- */
-async function runJob(item: AutomationProcess, model: string) {
+/** One entry point for every row action: run the row's schedule now. */
+async function runJob(item: AutomationProcess) {
+  const scheduleId = scheduleFor(item)
+  if (!scheduleId) return
   runningJobs.value[item.job] = true
   try {
-    if (item.job === 'insights') {
-      const body: { model?: string; force?: boolean } = {}
-      if (model) body.model = model
-      if (!insightsEnabled.value) body.force = true
-      await api.post('/api/automation/backfill-insights', body)
-      const modelText = model ? ` using ${model}` : ''
-      const forcedText = body.force ? ' once while automatic insights are off' : ''
-      props.notifySaved(
-        `Running session insights over every archive missing them${modelText}${forcedText}.`,
-        'Automations',
-      )
-      setTimeout(props.fetchAutomation, 2000)
-      return
-    }
-    const scheduleId = scheduleFor(item)
-    if (!scheduleId) return
     await taskStore.runScheduleNow(scheduleId)
     props.notifySaved(`Started "${item.label}" via the ${scheduleId} schedule.`, 'Automations')
     await props.fetchAutomation()

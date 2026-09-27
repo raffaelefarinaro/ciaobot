@@ -47,7 +47,6 @@ from ciao.providers.opencode import (
     mode_settings,
     opencode_collab_tree_counts,
     opencode_default_model,
-    readonly_agent_rules,
     resolve_opencode_binary,
     _session_handover_text,
     split_model,
@@ -270,42 +269,6 @@ def test_tools_can_be_disabled_for_one_shot_sessions():
     agent, rules = mode_settings("plan", tools_enabled=False)
     assert agent == "plan"
     assert rules == [{"action": "*", "resource": "*", "effect": "deny"}]
-
-
-# ── read-only memory agent ruleset ─────────────────────────────────────
-# The insights agent reads the vault and answers; it must not be able to
-# write, shell out, or search outside the root it was given.
-
-
-def test_readonly_agent_rules_scope(tmp_path: Path):
-    root = tmp_path / "vault"
-    rules = readonly_agent_rules([root])
-    base = str(root.resolve())
-
-    # Deny-all first: OpenCode resolves last-match-wins, so every carve-out
-    # has to follow the wildcard.
-    assert rules[0] == {"action": "*", "resource": "*", "effect": "deny"}
-    allowed = [
-        (r["action"], r["resource"])
-        for r in rules
-        if r["effect"] == "allow"
-    ]
-    assert allowed == [
-        ("read", base),
-        ("read", f"{base}/**"),
-        ("external_directory", base),
-        ("external_directory", f"{base}/**"),
-    ]
-    # V2 sends the search pattern, not the search root, so a search cannot be
-    # scoped at all: glob and grep stay denied.
-    for action in ("glob", "grep", "edit", "shell"):
-        assert not any(
-            r["action"] == action and r["effect"] == "allow" for r in rules
-        ), action
-    # The credential denies come last so nothing above can outrank them.
-    assert rules[len(rules) - len(opencode_credential_deny_rules()):] == (
-        opencode_credential_deny_rules()
-    )
 
 
 # ── memory-pass guardrails ──────────────────────────────────────────────

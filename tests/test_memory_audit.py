@@ -769,3 +769,67 @@ def test_find_stale_notes_uses_the_shared_predicate_for_aliased_exempt_types() -
     assert [f["path"] for f in report["stale_notes"]] == ["memory-vault/People/Mo.md"]
     assert report["stale_notes"][0]["threshold_days"] == 90
     assert report["notes_exempt"] == 1
+
+
+def test_a_vault_category_sets_its_own_staleness(tmp_path: Path) -> None:
+    """A category's `stale_after_days` is the horizon its notes age against,
+    reached through that category's aliases and dropped when it is disabled.
+
+    The alias-typed note is the load-bearing half: `client` claims no id of its
+    own, so without the registry's alias table it would age on its own spelling,
+    take the default horizon and sit unflagged at 20 days. Both notes sharing
+    the 10-day horizon is the assertion that it resolved.
+    """
+    from ciao import entity_types
+    from ciao.memory_audit import (
+        STALE_NOTE_DEFAULT_DAYS,
+        is_stale_exempt_type,
+        note_threshold_days,
+    )
+
+    today = datetime.date(2026, 8, 23)
+    vault = tmp_path / "memory-vault"
+    (vault / "Clients").mkdir(parents=True)
+    categories = vault / "entity-types.yaml"
+    customer = (
+        "- id: customer\n"
+        "  label: Customer\n"
+        "  kind: entity\n"
+        "  folder: Clients\n"
+        "  aliases: [client]\n"
+        "  stale_after_days: 10\n"
+    )
+    entries = [
+        _entry("memory-vault/Clients/Acme.md", "customer"),
+        _entry("memory-vault/Clients/Beta.md", "client"),
+        _entry("memory-vault/Journal/day.md", "journal"),
+    ]
+    mtimes = {str(e.path): _days_ago(20, today=today) for e in entries}
+
+    categories.write_text(customer, encoding="utf-8")
+    entity_types.clear_entity_types_cache()
+    report = find_stale_notes(entries, vault_root=vault, mtimes=mtimes, today=today)
+
+    assert {f["path"] for f in report["stale_notes"]} == {
+        "memory-vault/Clients/Acme.md",
+        "memory-vault/Clients/Beta.md",
+    }
+    assert {f["threshold_days"] for f in report["stale_notes"]} == {10}
+    assert report["notes_checked"] == 2
+    assert report["notes_exempt"] == 1, "the exempt set is this module's, not the file's"
+
+    # A caller holding the registry gets the same horizon with no vault in hand.
+    registry = entity_types.load_entity_types(vault)
+    assert note_threshold_days("customer", registry=registry) == 10
+    assert not is_stale_exempt_type("client", registry=registry)
+
+    # Disabled: no opinion, so the default — and 20 days is nowhere near it.
+    categories.write_text(customer + "  enabled: false\n", encoding="utf-8")
+    entity_types.clear_entity_types_cache()
+    disabled = find_stale_notes(entries, vault_root=vault, mtimes=mtimes, today=today)
+
+    assert disabled["stale_notes"] == []
+    assert disabled["notes_checked"] == 2
+    assert note_threshold_days(
+        "customer", registry=entity_types.load_entity_types(vault)
+    ) == STALE_NOTE_DEFAULT_DAYS

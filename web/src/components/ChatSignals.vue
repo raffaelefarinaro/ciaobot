@@ -123,8 +123,8 @@ const runsTitle = computed(() =>
 const retryPending = computed(() => store.chats.find(c => c.chat_id === props.chatId)?.retry?.status === 'pending')
 const unread = computed(() => store.chatUnread(props.chatId) > 0)
 
-// Post-archive tidy-up: insights extraction and friends, running after the
-// chat was archived. Deliberately the quietest thing this component can draw.
+// Post-archive tidy-up: the session trajectory, written after the chat was
+// archived. Deliberately the quietest thing this component can draw.
 const tidying = computed(() => store.chatIsPostprocessing(props.chatId))
 const tidyingLabel = computed(() => postprocessLabel(store.chatPostprocess(props.chatId)))
 const tidyingTitle = computed(() => `Ciaobot is ${tidyingLabel.value || 'tidying up'}`)

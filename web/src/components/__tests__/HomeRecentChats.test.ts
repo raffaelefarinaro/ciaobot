@@ -183,13 +183,13 @@ describe('HomeRecentChats lanes and tiers', () => {
         chat_id: 'tidy', project_id: 'work-project', title: 'Archived work chat',
         created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
         archived: true, local: true, archive_path: 'archive/tidy.md',
-        postprocess: { state: 'running', step: 'insights', expected: [], steps: {} },
+        postprocess: { state: 'running', step: 'trajectory', expected: [], steps: {} },
       },
       {
         chat_id: 'tidy-no-file', project_id: 'work-project', title: 'Archived without file',
         created_at: timestamp(600), last_activity_at: timestamp(600), last_read_at: timestamp(600),
         archived: true, local: true,
-        postprocess: { state: 'running', step: 'project_doc_update', expected: [], steps: {} },
+        postprocess: { state: 'running', step: 'memory_pass', expected: [], steps: {} },
       },
     ] as unknown as typeof store.chats
     const viewer = useFileViewerStore()
@@ -210,11 +210,12 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(tidyTitles).toContain('Archived without file')
 
     const withFileRow = tidyRows.find(row => row.find('.home-chat-title').text() === 'Archived work chat')!
-    expect(withFileRow.text()).toContain('extracting insights')
+    expect(withFileRow.text()).toContain('saving trajectory')
 
     // A tidying chat without an archive file has nothing to open.
     const noFileRow = tidyRows.find(row => row.find('.home-chat-title').text() === 'Archived without file')!
-    expect(noFileRow.text()).toContain('folding into project doc')
+    // An unknown step still says something rather than rendering blank.
+    expect(noFileRow.text()).toContain('tidying up')
     expect((noFileRow.element as HTMLButtonElement).disabled).toBe(true)
 
     // The other workspace's chats stay hidden until it is switched to.
@@ -241,7 +242,7 @@ describe('HomeRecentChats lanes and tiers', () => {
       chat_id: 'only-tidy', project_id: 'work-project', title: 'Archived work chat',
       created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
       archived: true, local: true, archive_path: 'archive/only-tidy.md',
-      postprocess: { state: 'running', step: 'insights', expected: [], steps: {} },
+      postprocess: { state: 'running', step: 'trajectory', expected: [], steps: {} },
     }] as unknown as typeof store.chats
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
@@ -251,11 +252,11 @@ describe('HomeRecentChats lanes and tiers', () => {
     const workLane = wrapper.find('[data-lane-key="work"]')
     expect(workLane.find('.home-tier--tidying').exists()).toBe(true)
     expect(workLane.find('.home-tier--tidying .home-chat-title').text()).toBe('Archived work chat')
-    expect(workLane.find('.home-chat-tidy-note').text()).toContain('extracting insights')
+    expect(workLane.find('.home-chat-tidy-note').text()).toContain('saving trajectory')
     wrapper.unmount()
   })
 
-  it('lists failed insights in their lane with a retry button and header count', async () => {
+  it('lists a failed trajectory in its lane with a retry button and header count', async () => {
     const store = seedChats()
     // The failed chat lives in the work workspace, so look at work.
     store.activeWorkspace = 'work'
@@ -265,13 +266,17 @@ describe('HomeRecentChats lanes and tiers', () => {
         chat_id: 'c-failed-work', project_id: 'work-project', title: 'Failed work chat',
         created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
         archived: true, local: true, archive_path: 'archive/failed.md',
-        postprocess: { state: 'done', steps: { insights: { status: 'error' } } },
+        postprocess: {
+          state: 'incomplete',
+          steps: { trajectory: { status: 'error' } },
+          job: { job_id: 'j', state: 'incomplete', unfinished: ['trajectory'] },
+        },
       },
       {
         chat_id: 'c-ok-personal', project_id: 'personal-project', title: 'Ok personal chat',
         created_at: timestamp(600), last_activity_at: timestamp(600), last_read_at: timestamp(600),
         archived: true, local: true,
-        postprocess: { state: 'done', steps: { insights: { status: 'ok' } } },
+        postprocess: { state: 'done', steps: { trajectory: { status: 'ok' } } },
       },
     ] as unknown as typeof store.chats
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
@@ -284,7 +289,7 @@ describe('HomeRecentChats lanes and tiers', () => {
     const failedRows = workLane.findAll('.home-tier--failed .home-chat-item')
     expect(failedRows).toHaveLength(1)
     expect(failedRows[0].find('.home-chat-title').text()).toBe('Failed work chat')
-    expect(failedRows[0].find('.home-chat-tidy-note').text()).toBe('insights failed')
+    expect(failedRows[0].find('.home-chat-tidy-note').text()).toBe('trajectory not finished')
     expect(failedRows[0].find('.home-chat-retry').exists()).toBe(true)
     // The header names the failure as a failure. Folding it into the tidying
     // count reported a stalled chat as still busy, and hid the one signal
@@ -295,14 +300,18 @@ describe('HomeRecentChats lanes and tiers', () => {
     wrapper.unmount()
   })
 
-  it('keeps the failed-insights section visible when no active chats remain', async () => {
+  it('keeps the failed section visible when no active chats remain', async () => {
     const store = seedChats(false)
     store.activeWorkspace = 'work'
     store.chats = [{
       chat_id: 'only-failed', project_id: 'work-project', title: 'Failed chat',
       created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
       archived: true, local: true, archive_path: 'archive/only-failed.md',
-      postprocess: { state: 'done', steps: { insights: { status: 'error' } } },
+      postprocess: {
+        state: 'incomplete',
+        steps: { trajectory: { status: 'error' } },
+        job: { job_id: 'j', state: 'incomplete', unfinished: ['trajectory'] },
+      },
     }] as unknown as typeof store.chats
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
@@ -321,7 +330,7 @@ describe('HomeRecentChats lanes and tiers', () => {
     wrapper.unmount()
   })
 
-  it('names the unfinished manifest stages on a partially-complete row', async () => {
+  it('names the unfinished manifest stage on a partially-complete row', async () => {
     const store = seedChats()
     store.activeWorkspace = 'work'
     store.chats = [
@@ -331,12 +340,10 @@ describe('HomeRecentChats lanes and tiers', () => {
         created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
         archived: true, local: true, archive_path: 'archive/partial.md',
         postprocess: {
-          state: 'incomplete',
-          steps: { insights: { status: 'ok' } },
-          job: {
-            job_id: 'j', state: 'incomplete',
-            unfinished: ['project_doc_update', 'memory_proposals'],
-          },
+          state: 'blocked',
+          blocked_reason: 'archive file is missing',
+          steps: {},
+          job: { job_id: 'j', state: 'blocked', unfinished: ['trajectory'] },
         },
       },
     ] as unknown as typeof store.chats
@@ -346,8 +353,7 @@ describe('HomeRecentChats lanes and tiers', () => {
 
     const workLane = wrapper.find('[data-lane-key="work"]')
     const row = workLane.find('.home-tier--failed .home-chat-item')
-    expect(row.find('.home-chat-tidy-note').text())
-      .toBe('project doc, memory proposals not finished')
+    expect(row.find('.home-chat-tidy-note').text()).toBe('trajectory not finished')
     expect(row.find('.home-chat-retry').exists()).toBe(true)
     wrapper.unmount()
   })
@@ -579,7 +585,7 @@ describe('the lane header line', () => {
         chat_id: 'tidy', project_id: 'personal-project', title: 'Archived chat',
         created_at: timestamp(300), last_activity_at: timestamp(300), last_read_at: timestamp(300),
         archived: true, local: true, archive_path: 'archive/tidy.md',
-        postprocess: { state: 'running', step: 'insights', expected: [], steps: {} },
+        postprocess: { state: 'running', step: 'trajectory', expected: [], steps: {} },
       },
     ] as unknown as typeof store.chats
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
