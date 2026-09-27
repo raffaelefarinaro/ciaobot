@@ -16,17 +16,9 @@ You are not tied to one CLI, model, or provider. Use Claude, opencode with a clo
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-Open `http://localhost:8443` and follow the setup wizard. It will help you choose or create your workspace, set a dashboard password, and connect the provider you want to use.
+Installs the engine with uv, starts it as a LaunchAgent, and prints a one-time link. Open `http://localhost:8443` and follow the setup wizard. It will help you choose or create your workspace, set a dashboard password, and connect the provider you want to use.
 
 During setup, choose the folder where Ciaobot should work. It can be a new folder or an existing one with notes and memories. Ciaobot creates or adopts the vault there and can help migrate existing memories when needed. The folder remains yours: you can keep it under version control, open it in Obsidian or a text editor, and reuse it with Claude Code, opencode, or another CLI.
-
-### Engine only (no desktop app)
-
-```bash
-curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install-engine.sh | sh
-```
-
-Installs the engine with uv, starts it as a LaunchAgent, and prints a one-time link to open the web app.
 
 ### Connect your agent
 
@@ -41,11 +33,13 @@ Contributors running from a git checkout can follow [docs/DEVELOPMENT.md](docs/D
 
 ### Uninstall
 
+The engine installer owns the engine and keeps your workspace folder and its notes. If you came from `Ciaobot.app` and moved the engine to this installer, the app itself is no longer used — remove it with:
+
 ```bash
 ciao desktop uninstall
 ```
 
-This removes `Ciaobot.app` (from `~/Applications`, or `/Applications` for older installs; pass `--app-dir` to point elsewhere), its LaunchAgents, and the `~/.local/bin/ciao` shim the installer wrote. Your workspace folder and its notes are kept.
+This removes `Ciaobot.app` (from `~/Applications`, or `/Applications` for older installs; pass `--app-dir` to point elsewhere) and its LaunchAgents. It only deletes a `~/.local/bin/ciao` shim that pointed inside that bundle, so an engine installed by the one-line installer is left alone.
 
 ## How it works
 
