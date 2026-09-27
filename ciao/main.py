@@ -15,6 +15,12 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from ciao.config import RESTART_EXIT_CODE, CiaoConfig
+from ciao.legacy_node_state import (
+    LegacyNodeState,
+    STATE_FILENAME as LEGACY_STATE_FILENAME,
+)
+from ciao.legacy_node_state import detect as detect_legacy_node_state
+from ciao.legacy_node_state import writers_armed
 from ciao.schedules import (
     ScheduleManager,
     ScheduleStore,
@@ -147,6 +153,47 @@ def _refresh_vault_index(
     except Exception:
         logger.warning("Vault index refresh failed", exc_info=True)
         return False
+
+
+# Fail-closed legacy node-state gate (#636). A Mac that was a client of
+# another host, or whose `node_state.json` cannot be understood, must not come
+# up as a local writer: node mode's own refusal is what kept two writers off
+# one runtime root, and #577 removes the proxy that used to carry the rest of
+# that behavior. The verdict comes from `ciao.legacy_node_state`, a leaf module
+# that reads the file raw and imports nothing from `ciao`, so it outlives
+# `NodeStateManager` — which is still constructed below for the `/api/node/*`
+# routes this child does not delete.
+def guard_legacy_writers(runtime_root: Path) -> tuple[LegacyNodeState, bool]:
+    """Classify `runtime_root` once and say whether the writers may arm.
+
+    Returns the classification (also published as `app.state.legacy_node_state`
+    so routes and tests can read the same verdict) and whether this boot is
+    allowed to run schedules and the backup push. Refusing is not failing: an
+    existing client Mac still starts and still serves, it just does not write,
+    which is exactly what client mode did before the proxy.
+    """
+    legacy = detect_legacy_node_state(runtime_root)
+    if writers_armed(legacy):
+        return legacy, True
+    if legacy.kind == "client":
+        logger.warning(
+            "Legacy node state: %s was a client of %s, so Ciaobot will not run "
+            "its writers (schedules, backup push) on this boot. Serve the PWA "
+            "from the host, or remove %s to make this Mac a host again.",
+            runtime_root,
+            legacy.host_url,
+            Path(runtime_root) / LEGACY_STATE_FILENAME,
+        )
+    else:
+        logger.warning(
+            "Legacy node state: %s is invalid — it could not be read as a host "
+            "or a client, so Ciaobot will not run its writers (schedules, backup "
+            "push) on this boot rather than guess. Fix or remove %s to arm "
+            "them again.",
+            runtime_root,
+            Path(runtime_root) / LEGACY_STATE_FILENAME,
+        )
+    return legacy, False
 
 
 # Web Push (RFC 8292) requires a VAPID "sub" contact URI, but the push
@@ -630,6 +677,16 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         mode = entry.mode or config.default_mode_for_provider(provider)
         return ("claude", model, mode, provider)
 
+    # Classified before the manager is built, because that manager *writes* a
+    # host state when the file is absent: reading through it would turn "no
+    # state yet" into "this Mac is a host" and answer the gate with its own
+    # write. Read once and keep the verdict for the whole boot — a client that
+    # is promoted mid-session is a route's decision, not a reason to re-arm
+    # writers underneath the scheduler.
+    legacy_node_state, legacy_writers_armed = guard_legacy_writers(
+        config.state_path.parent
+    )
+
     from ciao.node_state import NodeStateManager
     node_state_manager = NodeStateManager(config.state_path.parent)
 
@@ -653,7 +710,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         resolve_target=_resolve_schedule_target,
         dispatch_to_web=_dispatch_to_web,
         prepare_chat=_prepare_chat,
-        is_node_active=node_state_manager.is_active,
+        is_node_active=lambda: writers_armed(legacy_node_state),
         chat_busy=pcm.chat_stream_active,
         chat_dispatchable=_interval_target_dispatchable,
     )
@@ -707,6 +764,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app = create_app(config, app_settings=app_settings, mcp_service=mcp_service)
     app.state.startup_tracker = tracker
     app.state.node_state_manager = node_state_manager
+    # The startup gate's own verdict, so routes and tests read the same answer
+    # the writers were armed from instead of re-deriving it from the state file.
+    app.state.legacy_node_state = legacy_node_state
     # Stamp the target project's name on schedules that only recorded its id,
     # while those ids still resolve. After a fresh init they would not, and the
     # run would fall back to General with the user's choice lost.
@@ -1049,8 +1109,15 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                     "branch_backup", "Branch backup",
                     category="system", extra={"branch": branch},
                 ) as run:
-                    if not node_state_manager.is_active():
-                        run.skip("client mode — host owns backup push")
+                    if not legacy_writers_armed:
+                        # Named after the startup gate's kind, not "client
+                        # mode": an `invalid` state lands here too, and pushing
+                        # from a Mac that may already be a second writer on this
+                        # root is the failure the gate exists to prevent.
+                        run.skip(
+                            f"legacy node state is {legacy_node_state.kind} "
+                            "— the host owns backup push"
+                        )
                         continue
                     ok, detail = await push_branch(git_sync_root, branch=branch)
                     if ok:
