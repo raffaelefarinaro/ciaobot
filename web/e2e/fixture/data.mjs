@@ -158,6 +158,64 @@ export const MEMORY_EDGES = [
   { source: MEMORY_NODES[0].id, target: MEMORY_NODES[2].id },
 ]
 
+/**
+ * The vault's category list, in the shape `/api/memory/entity-types` serves it.
+ *
+ * One builtin, one disabled one and one custom, because those are the three
+ * things the Categories panel renders differently and a fixture holding only
+ * shipped-and-enabled rows would leave two of them unmeasured.
+ */
+export const MEMORY_CATEGORIES = [
+  {
+    id: 'person',
+    label: 'Person',
+    kind: 'entity',
+    folder: 'People',
+    description: 'A human the user knows or works with.',
+    aliases: [],
+    stale_after_days: 90,
+    enabled: true,
+    builtin: true,
+    note_count: 1,
+  },
+  {
+    id: 'project',
+    label: 'Project',
+    kind: 'entity',
+    folder: 'Projects',
+    description: 'Something with an outcome and a finish line.',
+    aliases: [],
+    stale_after_days: 30,
+    enabled: true,
+    builtin: true,
+    note_count: 1,
+  },
+  {
+    id: 'idea',
+    label: 'Idea',
+    kind: 'entity',
+    folder: 'Ideas',
+    description: 'A position worth testing, not yet a decision.',
+    aliases: [],
+    stale_after_days: 0,
+    enabled: false,
+    builtin: true,
+    note_count: 1,
+  },
+  {
+    id: 'customer',
+    label: 'Customer',
+    kind: 'entity',
+    folder: 'Customers',
+    description: 'A person or company the user does business with.',
+    aliases: ['client'],
+    stale_after_days: 0,
+    enabled: true,
+    builtin: false,
+    note_count: 0,
+  },
+]
+
 /** One pending row, so the review queue renders something to tab onto. */
 export const PROPOSALS = [
   {

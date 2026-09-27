@@ -101,7 +101,7 @@ function matchesSearch(n: MemoryGraphNode, term: string): boolean {
  * component triggered it.
  */
 /** The memory page's sections, in sidebar order. */
-export const MEMORY_SECTIONS = ['suggested', 'revisit', 'map', 'retired', 'history'] as const
+export const MEMORY_SECTIONS = ['suggested', 'revisit', 'map', 'categories', 'retired', 'history'] as const
 export type MemorySection = typeof MEMORY_SECTIONS[number]
 export function isMemorySection(value: unknown): value is MemorySection {
   return typeof value === 'string' && (MEMORY_SECTIONS as readonly string[]).includes(value)
@@ -160,7 +160,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
    */
   const retirementTab = ref<'candidates' | 'trash'>('candidates')
   /**
-   * Which of the memory page's five sections is on screen. The sidebar lists
+   * Which of the memory page's six sections is on screen. The sidebar lists
    * them the way it lists Settings' tabs, and each one is a route
    * (`/memory/<section>`), so back/forward and deep links land on the same
    * place. `view`, `reviewTab` and `retirementTab` stay as the panels' own

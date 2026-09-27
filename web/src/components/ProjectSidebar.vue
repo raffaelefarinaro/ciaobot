@@ -434,7 +434,13 @@
 
         <div class="mm-row-between">
           <h3>Categories</h3>
-          <button type="button" class="mm-link" @click="mm.resetCategories()">Reset</button>
+          <span class="mm-row-links">
+            <!-- These chips filter the drawing; they are not the list of kinds
+                 the vault keeps. That list is editable, and this is the way to
+                 it from the one surface that names the categories. -->
+            <router-link class="mm-link" :to="memorySectionPath('categories')">Manage</router-link>
+            <button type="button" class="mm-link" @click="mm.resetCategories()">Reset</button>
+          </span>
         </div>
         <div class="mm-chip-row">
           <div
@@ -900,7 +906,10 @@ const MEMORY_NAV: { label: string; items: MemoryNavItem[] }[] = [
     { section: 'suggested', label: 'Suggested', due: true },
     { section: 'revisit', label: 'To revisit', due: true },
   ] },
-  { label: 'Explore', items: [{ section: 'map', label: 'Map' }] },
+  { label: 'Explore', items: [
+    { section: 'map', label: 'Map' },
+    { section: 'categories', label: 'Categories' },
+  ] },
   { label: 'Records', items: [
     { section: 'retired', label: 'Retired' },
     { section: 'history', label: 'History' },
@@ -919,6 +928,10 @@ function memoryNavCount(section: MemorySection): number | null {
     case 'revisit': return retirementLoaded ? vaultReview.candidates.length || null : null
     case 'retired': return retirementLoaded ? vaultReview.trashed.length || null : null
     case 'map': return mm.loadedWorkspace === workspace ? mm.nodes.length || null : null
+    // The category list is configuration, not a queue: a number beside it would
+    // ask for attention no click can clear, and the map's own note count already
+    // says how much of the vault there is.
+    case 'categories': return null
     case 'history': return historyLoaded ? proposals.historyTotal || null : null
   }
 }
@@ -3108,7 +3121,9 @@ async function confirmDeleteChat(chatId: string) {
 .mm-row-between h3 { margin: 0; }
 .mm-row-between { padding-right: 8px; }
 .mm-row-between:first-child { margin-top: 0; }
+.mm-row-links { display: inline-flex; align-items: baseline; gap: var(--space-3); }
 .mm-link { background: none; border: none; color: var(--accent); font-size: var(--text-xs); cursor: pointer; padding: 0; }
+.mm-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 
 .mm-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
 .mm-stat-grid--3 { grid-template-columns: repeat(3, 1fr); }

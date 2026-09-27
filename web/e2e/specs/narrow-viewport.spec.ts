@@ -105,4 +105,42 @@ test.describe('narrow viewport', () => {
     await detail.getByRole('button', { name: 'Close note' }).click()
     await expect(detail).toBeHidden()
   })
+
+  test('the categories list and its drawer meet the 44px touch minimum', async ({ page }) => {
+    // Three controls sit in a row here — the label button, its Built-in/Custom
+    // chip and the switch — and the drawer adds the whole form on top, so this
+    // is where a narrow pane would quietly drop one below the touch minimum.
+    await boot(page, '/memory/categories', '.cat-table-wrap')
+
+    const small = async (selector: string) => {
+      const boxes = await page.locator(selector).evaluateAll((els) =>
+        els.map((el) => {
+          const r = el.getBoundingClientRect()
+          return {
+            name: (el.getAttribute('aria-label') || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+          }
+        }),
+      )
+      return boxes
+    }
+
+    const rows = await small('.cat-row .cat-name-btn:visible, .cat-row .cat-switch:visible')
+    expect(rows.length, 'no category row controls were measured').toBeGreaterThanOrEqual(4)
+    expect(rows.filter((b) => b.h < 44), `row controls below 44px: ${JSON.stringify(rows.filter((b) => b.h < 44))}`).toEqual([])
+
+    // And the list must not push the document sideways.
+    const { overflow, culprits } = await horizontalOverflow(page)
+    expect(overflow, `document scrolls ${overflow}px past the viewport; widest: ${JSON.stringify(culprits)}`).toBeLessThanOrEqual(0)
+
+    // The drawer is a bottom sheet at this width, so its own controls are the
+    // only thing between a tap and an edit.
+    await page.getByRole('button', { name: 'Add category' }).click()
+    const drawer = page.getByRole('dialog', { name: 'Add category' })
+    await expect(drawer).toBeVisible()
+    const fields = await small('.cat-drawer button:visible, .cat-drawer input:visible, .cat-drawer select:visible, .cat-drawer textarea:visible')
+    expect(fields.length, 'no drawer controls were measured').toBeGreaterThanOrEqual(6)
+    expect(fields.filter((b) => b.h < 44), `drawer controls below 44px: ${JSON.stringify(fields.filter((b) => b.h < 44))}`).toEqual([])
+  })
 })

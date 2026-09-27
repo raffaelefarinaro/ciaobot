@@ -58,7 +58,7 @@ export const routes: RouteRecordRaw[] = [
   {
     // One route per memory section, listed in the sidebar like Settings'
     // tabs. Bare /memory lands on the last section visited (MemoryMapView).
-    path: '/memory/:section(suggested|revisit|map|retired|history)?',
+    path: '/memory/:section(suggested|revisit|map|categories|retired|history)?',
     name: 'memory',
     component: () => import('./components/ChatLayout.vue'),
     meta: { requiresAuth: true },
