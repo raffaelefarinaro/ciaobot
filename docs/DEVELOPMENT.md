@@ -264,18 +264,7 @@ npm test             # 61 test files under web/src
 The Tauri 2 shell requires macOS 13+ on Apple Silicon (arm64), Node 22.x, and
 Rust 1.90.0 with the `aarch64-apple-darwin` target.
 
-CI and the publish workflow both select the newest Xcode installed on the
-runner and print `xcodebuild -version` so the aarch64 build targets a current
-SDK, with any toolchain skew visible in the log instead of looking like a code
-regression.
-
-`./scripts/check-desktop.sh` runs the whole gate — the same commands CI's
-`build-desktop` job does — and asserts the built aarch64 app bundle is signed
-and its shell binary is present. Run it after any change under `desktop/`;
-`--fast` skips the bundle build when you have not touched `tauri.conf.json`.
-`prepare-release` runs it too.
-
-The individual steps, if you need them separately:
+The individual steps, run them after any change under `desktop/`:
 
 ```bash
 cd desktop
@@ -288,6 +277,9 @@ cargo test
 cd ..
 npm run tauri build -- --target aarch64-apple-darwin
 ```
+
+CI no longer builds the app (`#655`): the release is the engine, so the macOS
+job cold-starts an engine wheel instead and the steps above are yours to run.
 
 The main webview loads the live localhost PWA and must never be added to a
 Tauri capability. While the engine is unreachable it loads the bundled

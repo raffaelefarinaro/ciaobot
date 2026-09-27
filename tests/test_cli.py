@@ -1325,11 +1325,11 @@ def test_cli_vault_search_never_returns_a_sibling_agent_roots_notes(
 def test_critique_is_reachable_through_the_ciao_entry_point(monkeypatch):
     """`/critique` must not depend on an external `python3`.
 
-    The bundled runtime puts only a `ciao` wrapper on PATH
-    (`scripts/build-bundled-runtime.sh` writes `$output/bin/ciao` and nothing
-    else), so `python3 -m ciao.critique` resolves whatever interpreter the
-    user's shell has — one with neither `ciao` nor its dependencies. The
-    command doc therefore names `ciao critique`, and this pins that it works.
+    An install puts only a `ciao` entry point on PATH and no bare `python3`
+    from the same tree, so `python3 -m ciao.critique` resolves whatever
+    interpreter the user's shell has — one with neither `ciao` nor its
+    dependencies. The command doc therefore names `ciao critique`, and this
+    pins that it works.
     """
     from ciao import cli
 

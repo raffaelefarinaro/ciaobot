@@ -14,42 +14,14 @@ permissions:
 # Two tiers. `linux-server` is the gate every PR waits on: the same blocking
 # steps a contributor runs locally (mypy, pytest, frontend tests, build), with
 # pytest parallelized. `test` is the full macOS job — coverage, browser tests,
-# the Rust shell and a cold-started app bundle — and takes
-# ~18 minutes, so it runs on pushes to develop, on PRs to main (release cuts),
-# and on any PR that touches the desktop shell, which nothing else compiles.
-# A macOS-only regression in a develop PR therefore surfaces on the post-merge
-# push run instead, before any release can ship it.
+# the launchd service, and an engine wheel built from this branch, installed
+# into a throwaway venv and cold-started. It is the only place the launchd,
+# installer, engine-update and migration machinery runs on the real platform,
+# and nothing here needs a diff to decide that: it runs on every push to
+# develop and on every PR to main (release cuts). A macOS-only regression in a
+# develop PR therefore surfaces on the post-merge push run instead, before any
+# release can ship it.
 jobs:
-  changes:
-    runs-on: ubuntu-24.04
-    outputs:
-      desktop: ${{ steps.diff.outputs.desktop }}
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    - name: Detect desktop changes
-      id: diff
-      shell: bash
-      run: |
-        if [ "${{ github.event_name }}" != "pull_request" ]; then
-          echo "desktop=true" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        base="${{ github.event.pull_request.base.sha }}"
-        # Capture first: piping straight into `grep -q` under the runner's
-        # `-o pipefail` turns an early match into SIGPIPE (141) on a large
-        # diff, which would read as "no desktop changes". A failed diff fails
-        # the step, and the test job treats a failed detection as desktop.
-        changed="$(git diff --name-only "$base"...HEAD)"
-        # The bundle job also builds the embedded runtime and cold-starts it,
-        # so the scripts and pins that feed that build count as desktop too.
-        if grep -qE '^(desktop/|pyproject\.toml$|scripts/(build-bundled-runtime\.sh|pinned-python-runtime\.env|check-desktop\.sh)|\.github/workflows/ci\.yml)' <<<"$changed"; then
-          echo "desktop=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "desktop=false" >> "$GITHUB_OUTPUT"
-        fi
-
   linux-server:
     runs-on: ubuntu-24.04
     steps:
@@ -82,15 +54,6 @@ jobs:
       run: ciao package-smoke --skip-frontend
 
   test:
-    needs: changes
-    # A skipped job reports success to a required check, so a failed
-    # detection must run the full job rather than skip it.
-    if: >-
-      !cancelled() && (
-      github.event_name != 'pull_request'
-      || github.base_ref == 'main'
-      || needs.changes.result != 'success'
-      || needs.changes.outputs.desktop == 'true')
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@v4
@@ -106,9 +69,7 @@ jobs:
       with:
         node-version: '22'
         cache: 'npm'
-        cache-dependency-path: |
-          web/package-lock.json
-          desktop/package-lock.json
+        cache-dependency-path: web/package-lock.json
 
     - name: Install dependencies
       run: |
@@ -186,130 +147,57 @@ jobs:
         retention-days: 7
         if-no-files-found: ignore
 
-    - name: Set up Rust
-      uses: dtolnay/rust-toolchain@1.90.0
-      with:
-        targets: aarch64-apple-darwin
-        components: rustfmt,clippy
-
-    # Pick the newest Xcode so the aarch64 build targets a current SDK.
-    - name: Select newest Xcode
-      run: |
-        newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
-        if [ -z "$newest" ]; then
-          echo "No Xcode found under /Applications" >&2
-          exit 1
-        fi
-        echo "Selecting $newest"
-        sudo xcode-select -s "$newest"
-        xcodebuild -version
-
     - name: Set up uv
       uses: astral-sh/setup-uv@v6
 
-    - name: Resolve pinned Python runtimes
-      id: python-runtime
-      shell: bash
+    # The release ships the engine wheel and nothing else (#653), so the
+    # macOS-only coverage is the engine too: build the wheel this branch would
+    # publish, install it the way a user gets it, and start the service.
+    - name: Build engine wheel
+      run: uv build --wheel --out-dir dist
+
+    - name: Cold-start the built engine and wait for it
       run: |
-        set -euo pipefail
-        . scripts/pinned-python-runtime.env
-        {
-          echo "arm64_url=$CIAO_PYTHON_ARM64_URL"
-          echo "arm64_sha256=$CIAO_PYTHON_ARM64_SHA256"
-        } >> "$GITHUB_OUTPUT"
-
-    - name: Build embedded Ciaobot runtime
-      env:
-        CIAO_PYTHON_ARM64_URL: ${{ steps.python-runtime.outputs.arm64_url }}
-        CIAO_PYTHON_ARM64_SHA256: ${{ steps.python-runtime.outputs.arm64_sha256 }}
-      run: ./scripts/build-bundled-runtime.sh desktop/runtime
-
-    - name: Install desktop dependencies
-      working-directory: desktop
-      run: npm ci
-
-    - name: Build desktop UI
-      working-directory: desktop
-      run: npm run build
-
-    - name: Check desktop Rust formatting
-      working-directory: desktop/src-tauri
-      run: cargo fmt --check
-
-    - name: Lint desktop Rust
-      working-directory: desktop/src-tauri
-      run: cargo clippy --all-targets -- -D warnings
-
-    - name: Test desktop Rust
-      working-directory: desktop/src-tauri
-      run: cargo test
-
-    - name: Build macOS app bundle
-      working-directory: desktop
-      run: >-
-        npm run tauri build --
-        --bundles app
-        --config '{"bundle":{"createUpdaterArtifacts":false}}'
-
-    # Exercise the cold-start path of the bundle built from this branch, using
-    # the same embedded runtime layout that the release workflow ships.
-    - name: Cold-start the built app and wait for the engine
-      run: |
-        app="desktop/src-tauri/target/release/bundle/macos/Ciaobot.app"
-        test -d "$app"
-        engine="$app/Contents/Resources/ciao-runtime/bin/ciao"
+        engine_venv="$RUNNER_TEMP/engine"
+        engine="$engine_venv/bin/ciao"
+        uv venv --python 3.12 "$engine_venv"
+        uv pip install --python "$engine_venv/bin/python" dist/ciaobot-*.whl
         test -x "$engine"
-        "$engine" setup --workspace "${RUNNER_TEMP}/ci-workspace" --app-dir "${RUNNER_TEMP}/ci-apps"
-        # Locally built bundles are not quarantined, but be explicit: a
-        # Gatekeeper wait on a quarantined bundle is what pinned the app in
-        # _dyld_start and kept release-smoke red across v0.6.3 and v0.6.4.
-        xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
-        open -g "$app" --args --background >"${RUNNER_TEMP}/ci-open.log" 2>&1 &
-        for _ in {1..30}; do
-          pgrep -x ciaobot-desktop >/dev/null && break
-          sleep 1
-        done
-        # pgrep only proves the process exists; the engine probe below is what
-        # proves the app actually ran.
-        pgrep -x ciaobot-desktop >/dev/null
+        mkdir -p "${RUNNER_TEMP}/ci-workspace"
+        # `--load-launchd` and `--python` are what scripts/install-engine.sh
+        # passes: the LaunchAgent has to name this venv's ciao, and launchd has
+        # to drop any job definition it already holds before service start.
+        "$engine" setup --workspace "${RUNNER_TEMP}/ci-workspace" --app-dir "${RUNNER_TEMP}/ci-apps" --python "$engine" --load-launchd
+        "$engine" service start --workspace "${RUNNER_TEMP}/ci-workspace"
+        port="$(awk -F= '/^PWA_PORT=/{print $2}' "${RUNNER_TEMP}/ci-workspace/.env" 2>/dev/null | tr -d '"' | tail -1)"
+        [ -n "$port" ] || port=8443
         for _ in {1..45}; do
-          curl -fsS http://localhost:8443/api/startup-status >/dev/null 2>&1 && break
+          curl -fsS "http://localhost:$port/api/startup-status" >/dev/null 2>&1 && break
           sleep 1
         done
-        curl -fsS http://localhost:8443/api/startup-status | jq -e '.desktop_api_version == 1'
+        curl -fsS "http://localhost:$port/api/startup-status" >/dev/null
 
     - name: Cold-start diagnostics
       if: failure()
       run: |
         workspace="${RUNNER_TEMP}/ci-workspace"
         echo "--- processes ---"
-        pgrep -lf 'ciaobot|ciao' || echo "(none)"
+        pgrep -lf 'ciao|uv' || echo "(none)"
         echo "--- listening TCP sockets ---"
         lsof -nP -iTCP -sTCP:LISTEN || true
         echo "--- launchd state ---"
         launchctl print "gui/$(id -u)/com.ciao.server" 2>&1 | head -30 || true
-        echo "--- app stack sample ---"
-        app_pid="$(pgrep -x ciaobot-desktop || true)"
-        if [ -n "$app_pid" ]; then
-          sample "$app_pid" 2 -file "${RUNNER_TEMP}/ci-sample.txt" >/dev/null 2>&1 || true
-          sed -n '1,80p' "${RUNNER_TEMP}/ci-sample.txt" 2>/dev/null || echo "(sample unavailable)"
-        else
-          echo "(app not running)"
-        fi
-        echo "--- desktop-service status ---"
-        ciao desktop-service status --json 2>&1 | head -20 || true
-        echo "--- app launch log ---"
-        cat "${RUNNER_TEMP}/ci-open.log" 2>/dev/null || echo "(absent)"
-        for log in ciao.stderr.log ciao.stdout.log desktop-tray.log; do
+        echo "--- workspace .env ---"
+        cat "${workspace}/.env" 2>/dev/null || echo "(absent)"
+        for log in ciao.stderr.log ciao.stdout.log; do
           echo "--- ${log} ---"
           tail -60 "${workspace}/.runtime/${log}" 2>/dev/null || echo "(absent)"
         done
 
-    - name: Stop the app and engine
+    - name: Stop the engine
       if: always()
       run: |
-        pkill -x ciaobot-desktop || true
-        ciao desktop-service stop --force >/dev/null 2>&1 || true
+        ciao service stop --force >/dev/null 2>&1 || true
 
     - name: Smoke-test package
       run: |

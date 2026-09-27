@@ -4257,9 +4257,8 @@ def build_parser() -> argparse.ArgumentParser:
     # same reason `gws` is intercepted — argparse eats `--`-prefixed args before
     # a subparser's REMAINDER can see them). Do not give it a `func`.
     #
-    # It needs a `ciao` entry point at all because the bundled runtime puts only
-    # a `ciao` wrapper on PATH (`scripts/build-bundled-runtime.sh`): on a
-    # packaged install `python3 -m ciao.critique` resolves some external
+    # It needs a `ciao` entry point at all because a packaged install puts only
+    # a `ciao` wrapper on PATH: `python3 -m ciao.critique` resolves some external
     # interpreter that has neither `ciao` nor its dependencies, so /critique
     # failed for every user who had not installed from source.
     subparsers.add_parser(
@@ -5213,10 +5212,10 @@ def _gws_auth_helper_command(args: argparse.Namespace) -> int:
 def _resolve_critique_paths(args: list[str]) -> list[str]:
     """Make a relative ``--input`` absolute against the caller's directory.
 
-    The bundled launcher `cd`s into the runtime root before exec'ing Python
-    (`scripts/build-bundled-runtime.sh`), so a relative path — including the
-    `memory-vault/...` form the command doc explicitly supports — would resolve
-    against the app bundle and be reported missing. The launcher records where
+    The bundled launcher `cd`s into the runtime root before exec'ing Python, so
+    a relative path — including the `memory-vault/...` form the command doc
+    explicitly supports — would resolve against the app bundle and be reported
+    missing. The launcher records where
     the caller actually stood in ``CIAO_INVOCATION_CWD``; from source there is
     no cd and the current directory is already right.
     """
