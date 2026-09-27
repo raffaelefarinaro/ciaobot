@@ -607,3 +607,105 @@ def test_update_engine_does_not_flag_already_current_on_real_failure(
 
     assert result.ok is False
     assert result.details["already_current"] is False
+
+
+def _desktop_host_agents(
+    tmp_path: Path, *, node_state: object | None = None
+) -> Path:
+    """A LaunchAgents dir whose `com.ciao.server` runs a live Ciaobot.app."""
+    agents = tmp_path / "home" / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    (workspace / ".runtime").mkdir(parents=True)
+    (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    program = tmp_path / "Ciaobot.app" / "Contents" / "Resources" / "bin" / "ciao"
+    program.parent.mkdir(parents=True)
+    program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (agents / "com.ciao.server.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "Label": "com.ciao.server",
+                "ProgramArguments": [str(program), "run"],
+                "EnvironmentVariables": {"CIAO_WORKSPACE": str(workspace)},
+                "WorkingDirectory": str(workspace),
+            }
+        )
+    )
+    if node_state is not None:
+        text = node_state if isinstance(node_state, str) else json.dumps(node_state)
+        (workspace / ".runtime" / "node_state.json").write_text(text, encoding="utf-8")
+    return agents
+
+
+def test_migration_classify_parser_contract() -> None:
+    from ciao.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["desktop-service", "migration-classify", "--json"]
+    )
+
+    assert args.service_action == "migration-classify"
+    assert args.deprecated_alias is True
+    assert args.as_json is True
+
+
+def test_migration_classify_reports_a_live_desktop_host(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # The app asks this before offering the hand-over, so a live host has to
+    # come back as `desktop_host` with the workspace the installer will keep.
+    from ciao import cli
+
+    agents = _desktop_host_agents(tmp_path)
+    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(agents))
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    rc = cli.main(["desktop-service", "migration-classify", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["ok"] is True
+    assert payload["action"] == "migration-classify"
+    assert payload["details"]["kind"] == "desktop_host"
+    assert payload["details"]["workspace"] == str(tmp_path / "workspace")
+    assert payload["details"]["port"] == 9555
+
+
+def test_migration_classify_refuses_to_guess_an_unreadable_state(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # A node_state.json that is not a dict is the case the app must ask about:
+    # the two guesses are both expensive, so the bridge reports `desktop_invalid`
+    # rather than letting the app infer a role.
+    from ciao import cli
+
+    agents = _desktop_host_agents(tmp_path, node_state={"role": "replica"})
+    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(agents))
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    rc = cli.main(["desktop-service", "migration-classify", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["details"]["kind"] == "desktop_invalid"
+    assert payload["details"]["node_role"] == "invalid"
+    assert payload["details"]["host_url"] == ""
+
+
+def test_migration_classify_names_a_mac_with_nothing_to_migrate(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # No plist at all: the app must show no offer, and the classifier is the
+    # only thing that can say so.
+    from ciao import cli
+
+    agents = tmp_path / "home" / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(agents))
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    rc = cli.main(["desktop-service", "migration-classify", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["details"]["kind"] == "none"
