@@ -137,12 +137,12 @@ Corollary: if a concurrent session is editing the tree, its unfinished work gets
 1. CI (`test`) on the PR must be green (`mergeStateStatus` CLEAN) before merging.
 2. Merge the PR into `main`. This runs `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag + GitHub release using `RELEASE_PAT` (a plain `GITHUB_TOKEN` release would **not** fire `release: published`).
 3. That fires `publish.yml`, which ships **the engine and desktop app from the same tag**:
-   - `build-desktop` (macos) — builds the PWA and the Apple Silicon embedded Python runtime, assembles the aarch64 `Ciaobot.app`, then attaches the versioned app archive, its signature, the native installer verifier, the generated installer, and `latest.json`.
-   - The app uses an ad-hoc signature and is **not** notarized. The installer verifies the release archive with the embedded public key before extraction, so users do not need Apple Developer credentials.
-   - `release-smoke` (macos) — installs from the release's one-line installer with a restricted PATH, verifies the bundled runtime and LaunchAgent, starts the app, checks the startup API, then reruns the installer as an update/recovery test.
+   - `build-desktop` (macos) — builds the PWA and the Apple Silicon embedded Python runtime, assembles the aarch64 `Ciaobot.app`, then attaches the versioned app archive, its signature and `latest.json` (the updater feed, so an installed app gets the notice), the engine wheel with its signed manifest, and the engine installer as both `install.sh` and `install-engine.sh` — the same bytes under both names, because the public one-liner keeps `install.sh` while the app's Move action fetches `install-engine.sh` (#651).
+   - The app uses an ad-hoc signature and is **not** notarized. Users do not need Apple Developer credentials to update it.
+   - `release-smoke` (macos) — installs the engine from the release's one-line installer with a restricted PATH, verifies the `ciao` entry point, the install receipt and the LaunchAgent, checks the startup API, then reruns the installer as an update/recovery test and checks the updater assets.
 4. A follow-up job merges `main` back into `develop`.
 
-No manual tag / `gh release create`, no tap push, and no separate desktop release — one merge ships the engine and the app together. End users install with the release URL:
+No manual tag / `gh release create`, no tap push, and no separate desktop release — one merge ships the engine and the app together. End users install the engine with the release URL, which is unchanged from the last release — the same one-liner now installs the engine:
 
 ```bash
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh

@@ -68,29 +68,37 @@ The supported macOS release path is the one-line installer:
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-The installer downloads the signed Apple Silicon (aarch64) app archive, verifies
-it with the published native verifier, and installs the bundled runtime into
-`Ciaobot.app`.
+The transition release (#651) splits the two ways a user can arrive at a
+release, without renaming the command. `latest.json` and the signed
+`Ciaobot_<version>_aarch64.app.tar.gz` are still published, so an
+already-installed `Ciaobot.app` gets the updater notice and the hand-over offer
+below; `install.sh` — the one-liner every README, site page and stale external
+link already names — is now the **engine** installer, so a first-time user gets
+the engine and nobody can install the app a second time. `install-engine.sh` is
+published as the same bytes under the name the transition app's Move action
+fetches (#604), and the app installer is no longer published under any name.
+
+`scripts/install.sh` is the retired app installer: it downloads the signed Apple
+Silicon (aarch64) app archive, verifies it with the published native verifier,
+and installs the bundled runtime into `Ciaobot.app`.
 When a configured workspace is already referenced by the LaunchAgent, it
 preserves that workspace and password; on a clean machine it leaves setup to
 the app's bootstrap onboarding rather than generating a hidden password. It
 does not require Python, Homebrew, or sudo. The installer prints milestone
 percentages, verification status, and a short multilingual Ciao greeting
 sequence; `--dry-run` shows the same terminal treatment without changing files.
-A DMG is intentionally not built or attached to releases.
+A DMG is intentionally not built or attached to releases. The script stays in the
+tree for now, but the release workflow no longer generates or attaches it (#579
+deletes it).
 
-The source template is `scripts/install.sh`. The release workflow substitutes
-the verifier checksum and attaches `install.sh`, the verifier, the signed app
-archive, its signature, and `latest.json`.
-
-`scripts/install-engine.sh` is the engine-only path, for users who want the web
-app without `Ciaobot.app`. It verifies the signed engine manifest with the
-release minisign key embedded in the script, and the wheel's digest and size,
-before anything is installed; installs the verified wheel with `uv tool install`;
-writes the install receipt with absolute paths; then runs `ciao setup` and
-`ciao service start` and prints the one-time login URL to the terminal. It
-refuses to take over an engine that Ciaobot.app manages unless it is re-run with
-`--migrate`, and refuses to overwrite a `ciao` it did not install. `--migrate`
+`scripts/install-engine.sh` is the installer the release serves: it verifies the
+signed engine manifest with the release minisign key embedded in the script, and
+the wheel's digest and size, before anything is installed; installs the verified
+wheel with `uv tool install`; writes the install receipt with absolute paths;
+then runs `ciao setup` and `ciao service start` and prints the one-time login URL
+to the terminal. It refuses to take over an engine that Ciaobot.app manages
+unless it is re-run with `--migrate`, and refuses to overwrite a `ciao` it did
+not install. `--migrate`
 is the desktop→terminal hand-over (#576): after the same manifest and digest
 verification, it classifies the Mac from the verified wheel, takes before-images
 of the two plists, the shim, the install receipt and any existing uv tool
@@ -147,7 +155,7 @@ with a fresh password and a fresh runtime root next to the real ones, retire the
 app's agent, and leave the original and every chat in it behind while the receipt
 still named the original. The ordinary, non-`--migrate` path is unchanged: there
 `--workspace` is how a workspace is named, and it is created. The workflow
-attaches it as the `install-engine.sh` release asset.
+attaches it as the `install-engine.sh` release asset, and again as `install.sh`.
 
 `Ciaobot.app` is the transition release for that same hand-over (#604): its
 updater installs a signed `.app.tar.gz`, which cannot run a shell script, so an
