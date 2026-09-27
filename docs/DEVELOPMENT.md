@@ -68,15 +68,16 @@ The supported macOS release path is the one-line installer:
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-The transition release (#651) splits the two ways a user can arrive at a
-release, without renaming the command. `latest.json` and the signed
-`Ciaobot_<version>_aarch64.app.tar.gz` are still published, so an
-already-installed `Ciaobot.app` gets the updater notice and the hand-over offer
-below; `install.sh` — the one-liner every README, site page and stale external
-link already names — is now the **engine** installer, so a first-time user gets
-the engine and nobody can install the app a second time. `install-engine.sh` is
-published as the same bytes under the name the transition app's Move action
-fetches (#604), and the app installer is no longer published under any name.
+The release publishes the **engine only** (#653). Its assets are the wheel, the
+signed engine manifest, and the installer — there is no app archive, no
+`latest.json` updater feed, no native verifier and no bundled runtime attached,
+so an already-installed `Ciaobot.app` has no update path left and is migrated
+with the terminal one-liner below. `install.sh` — the one-liner every README,
+site page and stale external link already names — is the **engine** installer,
+so a first-time user gets the engine and nobody can install the app.
+`install-engine.sh` is published as the same bytes under the name the
+already-merged transition app's Move action fetches (#604), and the app
+installer is not published under any name.
 
 `scripts/install.sh` is the retired app installer: it downloads the signed Apple
 Silicon (aarch64) app archive, verifies it with the published native verifier,
@@ -205,7 +206,7 @@ scripts/prepare-release --apply --create-pr --ready
   checks, and opens a PR into `main`. Use
   `--bump minor` or `--version X.Y.Z` when needed.
 
-- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA, the embedded aarch64 runtime, the aarch64 app, the native verifier, installer, and updater metadata, plus the engine wheel and a signed engine manifest (`ciaobot-engine-manifest.json` + `.sig`). It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
+- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA and the engine wheel, verifies the wheel in a clean environment, signs the engine manifest with the release minisign key (`ciaobot-engine-manifest.json` + `.sig`, gated by `ciao.release_manifest verify`) and attaches five engine assets: `install.sh`, `install-engine.sh`, the wheel, the manifest and its signature. Since #653 it publishes no app, no `latest.json` feed, no native verifier and no bundled runtime, and its signer is `@tauri-apps/cli` run standalone rather than the copy under `desktop/`, so deleting that tree does not break the release. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
 
 One-time GitHub setup for a fresh clone or repo admin:
 

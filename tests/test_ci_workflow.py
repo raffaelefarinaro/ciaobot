@@ -32,14 +32,17 @@ def test_release_on_main_workflow_publishes_from_main_merge() -> None:
 
 
 def test_runtime_resolution_uses_checked_in_pins() -> None:
-    root = Path(__file__).parents[1] / ".github" / "workflows"
-    for name in ("ci.yml", "publish.yml"):
-        workflow = (root / name).read_text(encoding="utf-8")
-        assert ". scripts/pinned-python-runtime.env" in workflow
-        assert "CIAO_PYTHON_ARM64_SHA256" in workflow
-        assert "CIAO_PYTHON_X86_64_SHA256" not in workflow
-        assert "aarch64-apple-darwin" in workflow
-        assert "x86_64-apple-darwin" not in workflow
+    # Only ci.yml builds the embedded aarch64 runtime any more: the release is
+    # engine-only (#653), so publish.yml has nothing to resolve a pin for.
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+
+    assert ". scripts/pinned-python-runtime.env" in workflow
+    assert "CIAO_PYTHON_ARM64_SHA256" in workflow
+    assert "CIAO_PYTHON_X86_64_SHA256" not in workflow
+    assert "aarch64-apple-darwin" in workflow
+    assert "x86_64-apple-darwin" not in workflow
 
 
 def test_publish_workflow_ships_signed_engine_manifest() -> None:
@@ -48,19 +51,17 @@ def test_publish_workflow_ships_signed_engine_manifest() -> None:
     ).read_text(encoding="utf-8")
 
     # The engine wheel is a release asset in its own right (#562), and the
-    # manifest beside it is signed with the same key the installer verifier
-    # trusts, so the future installer (#568) and updater (#569) can check it is
-    # authentic rather than merely intact. The desktop assets stay in the list.
+    # manifest beside it is signed with the same key the installer trusts, so
+    # the future installer (#568) and updater (#569) can check it is authentic
+    # rather than merely intact.
     for fragment in (
         "uv build --wheel --out-dir dist",
         "-m ciao.release_manifest check-static",
         "-m ciao.release_manifest build",
-        "npx tauri signer sign ../ciaobot-engine-manifest.json",
+        "npx --yes @tauri-apps/cli@2.11.4 signer sign ciaobot-engine-manifest.json",
         "-m ciao.release_manifest verify",
         "dist/ciaobot-*.whl",
         "ciaobot-engine-manifest.json.sig",
-        "latest.json",
-        "Ciaobot_*_aarch64.app.tar.gz",
     ):
         assert fragment in workflow, (
             f"publish.yml no longer publishes the engine manifest: {fragment!r}"
@@ -68,6 +69,40 @@ def test_publish_workflow_ships_signed_engine_manifest() -> None:
 
     # The wheel has to carry the PWA, so it is built after the frontend build.
     assert workflow.index("Build PWA assets") < workflow.index("Build engine wheel")
+
+    # #653: the release is engine-only. Everything the app needed is gone, so
+    # #579b can delete desktop/ as a pure removal instead of forking a release
+    # rewrite into the deletion. A fragment that reappears here fails the job.
+    # Comments are exempt, the way they are in the smoke test below: the steps
+    # say in prose which app assets are gone, and naming them is not building
+    # them.
+    commands = "\n".join(
+        line for line in workflow.splitlines() if not line.lstrip().startswith("#")
+    )
+    for gone in (
+        "build-desktop",
+        "tauri build",
+        "latest.json",
+        "Ciaobot_",
+        "ciaobot-installer-verify",
+        "build-bundled-runtime",
+        "pinned-python-runtime",
+    ):
+        assert gone not in commands, (
+            f"publish.yml still builds or attaches the app: {gone!r}"
+        )
+
+    # The signer has to be the one the installer already trusts - the same
+    # minisign key - and it must not be reached through the app's tree, which is
+    # the whole reason this line changed. `signer sign <path>` needs no Tauri
+    # project, so the CLI runs standalone at a pinned version.
+    sign = next(
+        line
+        for line in workflow.splitlines()
+        if "signer sign ciaobot-engine-manifest.json" in line
+    )
+    assert "desktop" not in sign, f"the manifest signer still runs under desktop/: {sign}"
+    assert "cd desktop" not in workflow
 
 
 def test_publish_uploads_engine_installer() -> None:
@@ -80,43 +115,36 @@ def test_publish_uploads_engine_installer() -> None:
     assert "scripts/install-engine.sh" in workflow
 
 
-def test_transition_release_keeps_the_app_updater_and_repoints_install_sh() -> None:
-    # The transition release (#651) keeps the updater feed and changes what the
-    # fresh-install path installs, without renaming it: an already-installed
-    # Ciaobot.app still has to hear about this release, or the hand-over offer
-    # never reaches anyone, while a first-time user must get the engine and must
-    # not be able to install the app a second time.
+def test_publish_attaches_only_the_five_engine_assets() -> None:
+    # #653: the release carries the engine and nothing else. Exactly five
+    # assets - the installer under both names, the wheel, and the manifest with
+    # its signature - each pinned here so a re-added app asset is a failing
+    # test rather than a surprise in a published release.
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
     ).read_text(encoding="utf-8")
 
-    # The updater half: latest.json and the signed app archive, signature
-    # included, are still release assets.
-    for fragment in (
-        "latest.json",
-        "Ciaobot_*_aarch64.app.tar.gz",
-        "Ciaobot_*_aarch64.app.tar.gz.sig",
-    ):
-        assert fragment in workflow, (
-            f"publish.yml no longer offers the app its update: {fragment!r}"
-        )
+    attached = """
+          gh release upload "$TAG" \\
+            install.sh \\
+            scripts/install-engine.sh \\
+            dist/ciaobot-*.whl \\
+            ciaobot-engine-manifest.json \\
+            ciaobot-engine-manifest.json.sig \\
+            --clobber
+"""
+    assert attached in workflow, (
+        "publish.yml no longer attaches exactly the five engine assets"
+    )
 
-    # The install half: install.sh is a copy of the engine installer, so every
-    # name the docs and any stale external link already point at installs the
-    # engine, and the app installer is never generated. Byte-identity of the two
-    # release assets is the smoke test's job - there is no local release build
-    # here to compare.
+    # Both names are attached, from the one script, and both are proven present
+    # on the release where the tag is still known - a missing asset would
+    # otherwise only surface as a failed install on a user's machine.
     assert "cp scripts/install-engine.sh install.sh" in workflow
     assert "s/__VERIFIER_SHA256__/" not in workflow
     assert "verifier_name" not in workflow
-
-    # Both names are attached, from the one script, and the verifier - which only
-    # the retired app installer used - is not: its build stays for #579, but
-    # nothing downloads it.
-    upload = workflow[workflow.index("gh release upload") :]
-    for asset in ("install.sh", "scripts/install-engine.sh"):
-        assert asset in upload, f"publish.yml no longer attaches {asset}"
-    assert "ciaobot-installer-verify_aarch64" not in upload
+    assert "grep -qx install.sh" in workflow
+    assert "grep -qx install-engine.sh" in workflow
 
 
 def test_release_smoke_installs_the_engine_instead_of_the_app() -> None:
@@ -150,20 +178,23 @@ def test_release_smoke_installs_the_engine_instead_of_the_app() -> None:
         "ciaobot-desktop",
         "ciao-runtime",
         "Ciaobot.plist",
+        # #653: the release publishes no app, so the smoke test must not
+        # download or assert on any of it.
+        "latest.json",
+        "app.tar.gz",
+        "ciaobot-installer-verify",
     ):
         assert gone not in commands, (
-            f"release-smoke.yml still expects install.sh to install the app: {gone!r}"
+            f"release-smoke.yml still expects the app release: {gone!r}"
         )
 
-    # The updater notice is the part that has to keep working, and the two
-    # installer assets have to be the same bytes: the app's Move action fetches
-    # install-engine.sh (#604) and would be stranded by a release where the
-    # public install.sh and that alias drift apart.
-    assert '.platforms["darwin-aarch64"].url' in workflow
-    assert "Ciaobot_${VERSION}_aarch64.app.tar.gz" in workflow
+    # The two installer assets have to be the same bytes: the app's Move action
+    # fetches install-engine.sh (#604) and would be stranded by a release where
+    # the public install.sh and that alias drift apart.
     assert "grep -q -- '--migrate' install.sh" in workflow
     assert "shasum -a 256 install.sh" in workflow
     assert "shasum -a 256 install-engine.sh" in workflow
+    assert "--pattern install.sh --pattern install-engine.sh" in workflow
 
 
 def test_first_party_install_command_stays_install_sh() -> None:

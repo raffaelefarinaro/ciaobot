@@ -129,6 +129,65 @@ def test_verify_accepts_tauri_base64_wrapped_signature() -> None:
     assert verify_signature(b"manifest bytes", signature, public_key) == TRUSTED
 
 
+# A real engine manifest, byte for byte what `release_manifest build` wrote,
+# and a real signature over it, both frozen from one run of
+# `npx @tauri-apps/cli@2.11.4 signer sign` (with a throwaway key that lives
+# only in this test). #653 moved release signing off
+# `cd desktop && npx tauri signer sign`, because the release became engine-only
+# and desktop/ is deleted next (#579b); the replacement runs the same pinned CLI
+# standalone, and it needs no Tauri project. If a later CLI changed the form it
+# emits, this fails here rather than as a `release_manifest verify` failure
+# during a release.
+TCLI_SIGNED_MANIFEST = b"""{
+  "artifacts": [
+    {
+      "arch": "any",
+      "filename": "ciaobot-1.2.3-py3-none-any.whl",
+      "kind": "wheel",
+      "platform": "any",
+      "sha256": "94f73d20d44763804bf582c495d46737981eb2a5f88c77e4c7b7456c12509f14",
+      "size": 25
+    }
+  ],
+  "created": "2026-09-27T22:20:26+00:00",
+  "schema": 1,
+  "tag": "v1.2.3",
+  "version": "1.2.3"
+}
+"""
+TCLI_SIGNED_KEY = (
+    "untrusted comment: minisign public key: EBFBA27FB1EBCCF7\n"
+    "RWT3zOuxf6L761L+DxU0Jhi262aZY/pvKP2LKyBrqpiIFPs5KPKv3wT3\n"
+)
+TCLI_SIGNED_SIG = (
+    "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVU"
+    "M3pPdXhmNkw3NjN2QW45emFNRnVXSXRnOVJXbTdtZ1BvY3owZ0Z3bzFpcTdLbFRhbHUxOSts"
+    "YUFHNTA3RUpzUEJDQ1pjSVBPeW12M0hJYkg2K2RxaXdjTlpQVGxaNHdZPQp0cnVzdGVkIGNv"
+    "bW1lbnQ6IHRpbWVzdGFtcDoxNzkwNTQ3NjI3CWZpbGU6Y2lhb2JvdC1lbmdpbmUtbWFuaWZl"
+    "c3QuanNvbgpZNmtKWlgxNjRucmZGMklzZnVNdml5L3d1dFQwM1NWQnArWDd1MWk4cUMvVU"
+    "FVVHZheStzRC8xMWhVK3RwSis4bkJVSEtHOXJsajk3MkVvTnk3S0xEdz09Cg==\n"
+)
+
+
+def test_verify_accepts_a_standalone_tauri_cli_signature() -> None:
+    # Exactly what the release now does: the standalone CLI signs, and the
+    # .sig is read back as the whole file - base64-wrapped minisign included.
+    trusted = verify_signature(TCLI_SIGNED_MANIFEST, TCLI_SIGNED_SIG, TCLI_SIGNED_KEY)
+
+    assert trusted == "timestamp:1790547627\tfile:ciaobot-engine-manifest.json"
+    assert (
+        verify_manifest(TCLI_SIGNED_MANIFEST, TCLI_SIGNED_SIG, TCLI_SIGNED_KEY)[
+            "version"
+        ]
+        == "1.2.3"
+    )
+
+    with pytest.raises(SignatureError):
+        verify_signature(
+            TCLI_SIGNED_MANIFEST + b" ", TCLI_SIGNED_SIG, TCLI_SIGNED_KEY
+        )
+
+
 def test_verify_rejects_tampered_data() -> None:
     priv, public_key, key_id = _keypair()
     signature = _sign(b"a", priv, key_id)
