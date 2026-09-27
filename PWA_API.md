@@ -11,12 +11,11 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 - `GET /?setup=<token>` is the local first-launch shortcut path. It is accepted only on `localhost`, `127.0.0.1`, or `::1`; when the token matches `.runtime/setup-token`, the server sets the same signed `ciao_session` cookie, deletes the token file, and redirects to `/`.
 - Production cookies are `Secure`, `SameSite=Lax`, and host-only (scoped to the exact host that served them).
 - `POST /api/auth/logout` clears the same host-only cookie.
-- All `/api/*` routes except `POST /api/auth`, `GET /api/auth/bridge`, `GET /api/auth/check`, `GET /api/startup-status`, `GET /api/active-chats`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. (`GET /api/setup/inspect-folder` is not middleware-exempt, but it only answers in bootstrap mode, where protection is off anyway.) All `/ws/*` routes require the signed session cookie.
-- In client mode, control-origin login/connect responses may include a one-time `/api/auth/bridge` URL. It is bound to the current host session, consumed once, answered only on the content origin, and redirects to a clean `/`; the host password/session never appears in the URL or browser response. `GET /device/return` issues the same bridge for a control-origin back navigation.
+- All `/api/*` routes except `POST /api/auth`, `GET /api/auth/check`, `GET /api/startup-status`, `GET /api/active-chats`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. (`GET /api/setup/inspect-folder` is not middleware-exempt, but it only answers in bootstrap mode, where protection is off anyway.) All `/ws/*` routes require the signed session cookie.
+- Node mode is gone: there is one engine per install and a browser either talks to it directly or not at all. There is no second origin, no local-control capability header, and no session bridge between origins. `docs/REMOTE_BOUNDARY.md` records what replaced the old model.
 - `POST /api/setup/finish` is only accepted in bootstrap mode from localhost with a matching browser origin/referer (off-localhost requests get a 403 pointing at `http://localhost:<port>`). Body: `workspace` (required — the root folder holding the vault plus app data), `vault_root` (optional, default `<workspace>/memory-vault`; absolute or `~` paths are honored for an existing notes folder elsewhere), `password` (required — the dashboard password, at least 4 characters; setup always enables protection), plus optional `vault_mode`, `workspace_name`, `push_contact`, `port`, `python`, `launch_agents_dir`, `app_dir`, and `restart`. It writes the real workspace config, ensures workspace and vault are (in) git repos, creates local launch artifacts, and asks the supervisor to restart into the configured workspace. When the chosen folder already contains nested workspace directories (`memory-vault/<name>/` with a `MEMORY.md` inside), those are adopted as the workspace registry and `workspace_name` is ignored.
 - `GET /api/setup/list-dirs`, `POST /api/setup/mkdir`, and `GET /api/setup/inspect-folder` back the setup wizard. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost). The folder picker (`list-dirs`, `mkdir`) lists directories only and never reads file contents. `inspect-folder?path=<dir>` returns `{mode: "scratch"|"existing", vault_root, existing_workspaces, has_env}` so the wizard can hide the "First Workspace" text field when nested workspaces are already present.
 - State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host. Missing headers are accepted for non-browser clients.
-- In client mode, remote content is served from `localhost`; local `/api/node/*`, `/api/device/*`, `/api/desktop-drop`, and `/device` controls are accepted only from a loopback peer at `127.0.0.1` with `X-Ciao-Local-Control: 1` on API requests. Cross-origin requests fail closed.
 - HTTP responses include baseline security headers, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
 - `POST /agent/v1/{op}` is the agent CLI's loopback transport (`ciao <noun> <verb>` inside a managed provider shell, see `docs/ARCHITECTURE.md` → `agent_surface.py` and `docs/AGENT_CLI.md`). It takes a scoped bearer capability (`CIAO_AGENT_TOKEN`) in an `Authorization: Bearer` header, runs the registered control-plane operation, and returns the same JSON envelope; it is not a browser or curl API and does not accept the session cookie.
 
@@ -27,8 +26,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/auth` | Login with `PWA_AUTH_TOKEN` |
 | POST | `/api/auth/logout` | Clear session cookie |
 | GET | `/api/auth/check` | Verify current session |
-| GET | `/api/auth/bridge` | Redeem a one-time control-to-content session bridge |
-| GET | `/device/return` | Issue a control-to-content session bridge and return to the app |
 | GET, POST | `/api/auth/settings` | Read protection state, or set/change the PWA password (cannot disable protection) |
 | GET | `/api/projects` | List projects |
 | POST | `/api/projects` | Create project |
@@ -39,10 +36,10 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/projects/completed/restore` | Restore a completed project to active |
 | GET, POST | `/api/projects/{project_id}/chats` | List or create project chats |
 | GET, POST | `/api/projects/{project_id}/files` | List or upload project files |
-| POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant; returns bounded opaque file references (local node/device origin only) |
+| POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant; returns bounded opaque file references |
 | GET | `/api/chats` | List all chats |
 | GET | `/api/menubar-chats` | Compact chat list for the `Ciaobot.app` tray |
-| GET | `/api/menubar-notifications` | Notification feed for the `Ciaobot.app` tray (`?after=<epoch>`, inclusive; includes read-clear controls and is proxied to the host in client mode) |
+| GET | `/api/menubar-notifications` | Notification feed for the `Ciaobot.app` tray (`?after=<epoch>`, inclusive; includes read-clear controls) |
 | POST | `/api/chats/read-all` | Mark all chats read |
 | PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
@@ -60,7 +57,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and report whether a live event subscriber received the navigation |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
 | GET | `/api/chats/{chat_id}/messages/part` | Fetch one full history row by absolute index (lazy expansion) |
-| GET | `/api/native/sessions` | List locally-running Claude Code CLI sessions for a workspace (handover warning) |
 | GET | `/api/chats/{chat_id}/subagents` | Load subagent transcripts. `?agent_id=` narrows to one agent (bare or `agent-`-prefixed) and skips reading the siblings — what the read-only subagent view polls |
 | GET | `/api/subagents/running` | Live subagents per working chat (metadata only), for the sidebar's subagent rows |
 | POST | `/api/chats/{chat_id}/images` | Upload chat images |
@@ -116,9 +112,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/package/status` | Read installed package version and best-effort latest GitHub release version |
 | GET | `/api/package/changelog` | List commits between the installed and latest release for the update prompt |
 | POST | `/api/package/update` | Return app-owned update guidance; production updates replace the signed Ciaobot.app bundle and restart |
-| GET | `/api/device/package-status` | Same as `/api/package/status`, but never proxied: in client mode this reports *this* machine's install while `/api/package/status` reports the host's |
-| GET | `/api/device/changelog` | Commits between this machine's installed version and the latest release (never proxied) |
-| POST | `/api/device/update` | Return app-owned update guidance for *this* machine, not the host it mirrors (never proxied) |
 | GET | `/api/update/status` | Installed-engine update job: install mode, whether it can update, and the persisted operation record; `error` carries a stage/apply that was refused before it could record one (unreachable latest release, already on that version), or a record that could not be read |
 | POST | `/api/update/stage` | Start staging a release for an installer-managed engine (background; poll status) |
 | POST | `/api/update/apply` | Apply the staged release: drain, detached swap, restart, rollback (background; poll status) |
@@ -159,13 +152,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/local/resync` | Merge `origin/<branch>` back into the checkout |
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
 | GET | `/api/addresses` | Where other devices can open this engine: the configured trusted HTTPS URL first (`kind: trusted`, `secure: true`), then LAN/Bonjour HTTP URLs (`kind: lan`), then localhost (`kind: loopback`). Session-protected; URLs never carry a password or token |
-| GET | `/api/node/addresses` | URLs this engine is reachable at (localhost, Bonjour `.local`, each LAN/VPN IPv4), each flagged `loopback` so the PWA can mark the ones a phone cannot use. Session-protected, unlike the loopback-public tray endpoints, because it enumerates LAN interfaces |
-| GET | `/api/node/status` | Read multi-device node failover status and role |
-| GET | `/api/node/connected-clients` | Live remote WebSocket clients connected to this host (excludes loopback) |
-| POST | `/api/node/connect` | Connect this node as a client tunnel to a remote host |
-| POST | `/api/node/demote` | Demote active node to standby |
-| POST | `/api/node/handover` | Handover active role to another node |
-| POST | `/api/node/peers` | Register or update node peer links |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
 | POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend (plus the desktop app in dev mode), and restart with latest code |
 | POST | `/api/admin/restart` | Drain active chat work and restart the installed engine without pulling or rebuilding code (authenticated) |

@@ -1340,12 +1340,10 @@ def apply_update(
             advance("draining")
             post(f"{base}/api/admin/drain")
             # Polled by re-POSTing the drain, not by reading
-            # `/api/active-chats`: on a client-mode node that path is mirrored
-            # to the host, so a GET would drain *this* machine and then wait on
-            # the host's chats. The drain POST is local (see
-            # `EXCLUDED_LOCAL_PATHS`), and `begin_restart_drain` is
-            # idempotent, so asking again is free and answers the same
-            # question.
+            # `/api/active-chats`: the drain POST is loopback-only, so it always
+            # answers for this machine, and `begin_restart_drain` is idempotent,
+            # so asking again is free. Reading the active-chat list instead would
+            # be a second source of truth for the same question.
             # Three consecutive empty readings rather than one: a chat can look
             # idle between two of its own phases, and stopping the engine then
             # would cut a turn short.

@@ -24,7 +24,6 @@ INTERNAL_VARS: dict[str, str] = {
     "CIAO_CONTEXT_END": "subprocess IPC delimiter wrapping injected context",
     "CIAO_RUNTIME_ROOT": "test-only override for the runtime/ directory",
     "CIAO_BACKGROUND_RUN_ID": "subprocess IPC marker naming the background run a command belongs to",
-    "CIAO_NODE_ID": "internal multi-device node identification marker",
     "CIAO_BOOTSTRAP_LAUNCHD_HANDOFF": "internal marker for desktop-owned bootstrap handoff to launchd",
     "CIAO_LAUNCH_AGENTS_DIR": "test-only override keeping the suite out of the real ~/Library/LaunchAgents",
     "CIAO_QUEUE_LOCK_DIR": "test-only override for where proposal-queue lock files live (kept out of the vault so it stays byte-identical)",

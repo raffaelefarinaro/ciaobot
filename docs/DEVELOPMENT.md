@@ -393,24 +393,24 @@ For HTML artifact changes, keep the preview self-contained: inline scripts/style
 For workspace navigation changes, verify that unmodified `1`–`9` keys follow the visible sidebar workspace order, do not fire from text inputs, and keep working in the automations view. The sidebar key labels should remain visible and accessible at narrow widths. An open `AskUserQuestion` card takes those digits over for its own options while it is up (Design System rule S7) and hands them back when it closes, so check both states after touching either handler.
 On the home screen, also verify that it shows only the selected workspace's chats (switching workspaces swaps the content) and that arrow keys follow the rendered lane layout: up/down moves between stacked lanes, left/right moves within a lane.
 For Work details changes, verify the rail and the narrow-pane drawer together: both render `AgentContextSection.vue` and the running-subagent list, and the ⓘ toggle moves focus between the rail heading and the chat-body tab.
-For composer drag-and-drop changes, test both local host and remote client roles. Document drops preserve host sources and add Markdown companions; remote supported documents persist only Markdown through the dedicated chat endpoint:
-host and client file drops return bounded opaque file references rather than
-absolute paths; the server expands a reference only when building the provider
-prompt. Client files upload into the active project on the host before the
-reference is returned. The
-generic ProjectView upload remains unchanged.
+For composer drag-and-drop changes, test the desktop-drop grant path end to
+end. Drops preserve the source file and add Markdown companions, and return
+bounded opaque file references rather than absolute paths; the server expands a
+reference only when building the provider prompt. The generic ProjectView
+upload remains unchanged.
 
-For client-mode security changes, keep the two origins separate: proxied host
-content is served at `localhost`, while local node/device/drop controls are
-accepted only from a loopback peer at `127.0.0.1` with the
-`X-Ciao-Local-Control: 1` header. Do not add a local control route to a
-remote-content capability or
-follow a relay redirect. The focused boundary tests live in
-`tests/test_remote_boundary.py`; hostile artifact coverage is in
-`tests/test_workspace_html.py`. The split intentionally does not yet replace
-the host password/raw session protocol, confine broad file endpoints, isolate
-browser storage/service workers, or negotiate a versioned engine identity;
-those remain follow-up work for #546.
+For security changes, the boundary is one origin and one session: every
+`/api/*` route needs the signed cookie (minus the small public allowlist in
+`ciao/web/auth.py`), every `/ws/*` handshake is checked for same-origin before
+the session, and every state-changing `/api/*` request must present a matching
+`Origin`/`Referer`. The loopback-only set (`_LOOPBACK_ONLY_API`, the update
+drain and the tray feeds) is gated on the TCP peer address, never the `Host`
+header. Do not add a capability or an origin exception for a page the model or
+a remote browser can influence. Auth/origin coverage is in
+`tests/test_auth_security.py`; hostile artifact coverage is in
+`tests/test_workspace_html.py`. This does not yet confine broad file endpoints,
+isolate browser storage/service workers, or replace the host password protocol
+with revocable per-device credentials; those remain follow-up work for #546.
 
 ## Quality gates
 
@@ -579,7 +579,7 @@ Some packaged schedules are multi-step workflows (load state, gate, model call, 
 
 Canonical example: `ciao/skill_evolution.py:_process_skill_dag`. Use a DAG when there are 3+ sequential steps with branching and you want per-step timing on the Automation page.
 
-`ScheduleManager.catch_up()` runs once at server startup on the host; like `tick()`, it returns an empty list without touching anything when the node is in client mode. It dispatches only the latest missed occurrence for each enabled schedule, leaves the prompt unchanged, and records the missed occurrence's local date so a later slot on the startup day can still fire normally. Cover changes to this behavior in `tests/test_schedules.py`. Packaged system routines are excluded when the startup falls inside the post-setup grace window (`ciao/setup_marker.py`, 24h from a first-time setup): a brand-new install is greeted by its onboarding chat, and the routines fire at their next regular tick instead of all replaying missed runs in parallel. Cover that in `tests/test_setup_catch_up_grace.py`.
+`ScheduleManager.catch_up()` runs once at server startup on the host; like `tick()`, it returns an empty list without touching anything when the legacy node-state startup gate says this machine is not the host (the one boot verdict from `ciao.legacy_node_state`, which is the whole gate now that no route can rewrite the role under a running server). It dispatches only the latest missed occurrence for each enabled schedule, leaves the prompt unchanged, and records the missed occurrence's local date so a later slot on the startup day can still fire normally. Cover changes to this behavior in `tests/test_schedules.py`. Packaged system routines are excluded when the startup falls inside the post-setup grace window (`ciao/setup_marker.py`, 24h from a first-time setup): a brand-new install is greeted by its onboarding chat, and the routines fire at their next regular tick instead of all replaying missed runs in parallel. Cover that in `tests/test_setup_catch_up_grace.py`.
 
 The Work details *Subagents running* list (rail and drawer Activity tab; the left sidebar no longer lists them) is fed by `GET /api/subagents/running` (dispatch metadata only, active chats only) and the store's poll, which replaces the whole map so a finished agent's row disappears. Only agents the parent session can name get a row — background dispatches, plus opencode children; a foreground Task is recorded in the parent JSONL by its own completion, so it is never running by the time it is nameable. Their read-only view is `SubagentChatView.vue` on `/chat/:chatId/subagent/:agentId`, fed by `GET /api/chats/{id}/subagents`. Claude agent ids arrive bare from the parent JSONL and `agent-`-prefixed from the local transcript fallback, so both surfaces normalise before comparing or routing. Cover changes in `tests/test_running_subagents.py` and the ChatPanel Work details tests.
 

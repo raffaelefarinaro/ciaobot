@@ -1,8 +1,8 @@
 """Classify a Mac for the Ciaobot.app → terminal-engine migration (#562 Phase 3, #576).
 
 Run from the *verified* wheel by scripts/install-engine.sh before anything is
-installed. Reads state raw and never writes: NodeStateManager would create a
-host state when node_state.json is absent.
+installed. Reads state raw and never writes: the removed NodeStateManager
+would have created a host state when node_state.json is absent.
 
 The one rule every decision here obeys is *fail closed*. A Mac nobody can
 account for is reported as `desktop_invalid` so the installer stops and asks,

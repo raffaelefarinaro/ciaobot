@@ -22,7 +22,7 @@ Project shape:
 - PWA code lives in `web/`.
 - Generic package assets live in `ciao/stock/`.
 - User vaults and runtime data belong in a separate workspace, not in the public app repo.
-- Client-mode remote content is not a local-control origin: keep `/api/node/*`, `/api/device/*`, `/api/desktop-drop`, `/api/native/sessions`, and `/device` on the loopback device origin/capability path, and keep remote PWA content out of Tauri capabilities. The boundary audit is in `docs/REMOTE_BOUNDARY.md`.
+- There is no client/host split any more: one engine, one origin, one session. Keep `/api/*` behind the signed session cookie, keep every `/ws/*` handshake same-origin-gated, keep the loopback-only set (`_LOOPBACK_ONLY_API` in `ciao/web/auth.py`) gated on the TCP peer, and keep remote content out of Tauri capabilities. The boundary audit is in `docs/REMOTE_BOUNDARY.md`.
 
 Verification:
 - Run focused tests for the changed behavior.

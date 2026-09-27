@@ -93,7 +93,6 @@ def test_endpoint_exposes_the_hint_alongside_the_fields_the_tray_needs() -> None
     body = _client(hint=("0.6.1", True)).get("/api/startup-status").json()
     assert body["latest_version"] == "0.6.1"
     assert body["update_available"] is True
-    assert body["node_role"] == "host"
     assert "overall_ready" in body
 
 
@@ -101,4 +100,3 @@ def test_endpoint_serves_without_any_update_plumbing_configured() -> None:
     body = _client().get("/api/startup-status").json()
     assert body["update_available"] is False
     assert body["latest_version"] == ""
-    assert body["node_role"] == "host"

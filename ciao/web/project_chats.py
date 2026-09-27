@@ -423,8 +423,7 @@ class ChatInfo:
     # Naming note: "handover" here is PROVIDER-session context carry-over — set
     # by provider switches, forks/continues, and by the workspace re-rooting
     # (`workspace_reroot.flag_stranded_sessions`) for chats whose old session
-    # was stranded by the move. It has nothing to do with the multi-device
-    # host/client role handover in `ciao/node_state.py`; only the word collides.
+    # was stranded by the move.
     # The key is persisted in `.runtime/web_projects.json`, so it cannot be
     # renamed without breaking existing installs.
     handover_context_pending: bool = False

@@ -12,7 +12,6 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.responses import FileResponse, Response
 
-from ciao.node_proxy import StandbyProxyMiddleware
 from ciao.package_version import make_cached_package_status
 from ciao.web.routes_agent import agent_dispatch_endpoint, agent_status_endpoint
 from ciao.web.routes_mcp import (
@@ -38,8 +37,6 @@ from ciao.web.agent_assets import (
 )
 from ciao.web.commands import list_commands_endpoint, rate_limits_endpoint
 from ciao.web.routes_auth import (
-    auth_bridge,
-    auth_bridge_issue,
     auth_check,
     auth_login,
     auth_logout,
@@ -92,7 +89,6 @@ from ciao.web.routes_api import (
     local_preflight,
     local_resync,
     local_status,
-    native_sessions,
     list_all_chats,
     list_models,
     archive_workspace_setting,
@@ -164,13 +160,6 @@ from ciao.web.routes_api import (
 )
 from ciao.web.routes_chat import ws_chat, ws_events
 from ciao.web.routes_node import (
-    node_addresses_endpoint,
-    node_connected_clients_endpoint,
-    node_connect_endpoint,
-    node_demote_endpoint,
-    node_handover_endpoint,
-    node_peers_endpoint,
-    node_status_endpoint,
     package_changelog_endpoint,
     package_status_endpoint,
     package_update_endpoint,
@@ -235,8 +224,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     routes = [
         # Auth
         Route("/api/auth", auth_login, methods=["POST"]),
-        Route("/api/auth/bridge", auth_bridge, methods=["GET"]),
-        Route("/device/return", auth_bridge_issue, methods=["GET"]),
         Route("/api/auth/logout", auth_logout, methods=["POST"]),
         Route("/api/auth/check", auth_check, methods=["GET"]),
         Route("/api/auth/settings", auth_settings_get, methods=["GET"]),
@@ -288,7 +275,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats/{chat_id}/prompt", chat_prompt, methods=["POST"]),
         Route("/api/chats/{chat_id}/messages", chat_messages, methods=["GET"]),
         Route("/api/chats/{chat_id}/messages/part", chat_message_part, methods=["GET"]),
-        Route("/api/native/sessions", native_sessions, methods=["GET"]),
         Route("/api/chats/{chat_id}/subagents", chat_subagents, methods=["GET"]),
         Route("/api/subagents/running", running_subagents, methods=["GET"]),
         Route("/api/chats/{chat_id}/images", chat_images, methods=["POST"]),
@@ -377,33 +363,18 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/menubar-chats", menubar_chats_endpoint, methods=["GET"]),
         Route("/api/open-chat/{chat_id}", open_chat_endpoint, methods=["GET"]),
         Route("/api/setup-status", setup_status_endpoint, methods=["GET"]),
-        Route("/api/node/addresses", node_addresses_endpoint, methods=["GET"]),
         Route("/api/addresses", addresses_endpoint, methods=["GET"]),
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
         Route("/api/package/changelog", package_changelog_endpoint, methods=["GET"]),
         Route("/api/package/update", package_update_endpoint, methods=["POST"]),
-        # Device-scoped copies of the package routes. In client mode /api/package/*
-        # is tunneled (it reports and updates the host), so the Device panel needs
-        # its own never-proxied path to see and update *this* machine's install.
-        Route("/api/device/package-status", package_status_endpoint, methods=["GET"]),
-        Route("/api/device/changelog", package_changelog_endpoint, methods=["GET"]),
-        Route("/api/device/update", package_update_endpoint, methods=["POST"]),
         # The Settings update card driving the installer-only engine update job.
-        # Host-scoped like /api/package/* (in client mode it reports and updates
-        # the host), and session-protected rather than loopback-only: a logged-in
-        # operator may start an update from a browser, exactly as they may
+        # Session-protected rather than loopback-only: a logged-in operator may
+        # start an update from a browser, exactly as they may
         # POST /api/admin/restart. Both halves run in the background; the card
         # polls the status route.
         Route("/api/update/status", update_status_endpoint, methods=["GET"]),
         Route("/api/update/stage", update_stage_endpoint, methods=["POST"]),
         Route("/api/update/apply", update_apply_endpoint, methods=["POST"]),
-        # Node & Handover (Multi-device Active-Standby)
-        Route("/api/node/status", node_status_endpoint, methods=["GET"]),
-        Route("/api/node/connect", node_connect_endpoint, methods=["POST"]),
-        Route("/api/node/handover", node_handover_endpoint, methods=["POST"]),
-        Route("/api/node/demote", node_demote_endpoint, methods=["POST"]),
-        Route("/api/node/peers", node_peers_endpoint, methods=["POST"]),
-        Route("/api/node/connected-clients", node_connected_clients_endpoint, methods=["GET"]),
         Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"]),
         Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
         Route("/api/setup/inspect-folder", setup_inspect_folder_endpoint, methods=["GET"]),
@@ -462,12 +433,10 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     middleware = [
         Middleware(SecurityHeadersMiddleware),
         Middleware(AuthMiddleware, serializer=serializer, auth_required=config.pwa_auth_required),
-        Middleware(StandbyProxyMiddleware),
     ]
 
     @asynccontextmanager
     async def _lifespan(_app):
-        from ciao.node_proxy import close_shared_client
         from ciao.setup_status import warm_claude_discovery_cache
 
         # `claude mcp list` health-checks every connector and can take ~12s;
@@ -483,18 +452,14 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
             # subprocesses and background runs are not leaked across an
             # abnormal restart.
             for callback in getattr(_app.state, "shutdown_callbacks", ()):
-                # One failing callback must not skip the ones after it, nor the
-                # client pool below. Shutdown is the last chance to terminate
-                # provider subprocesses and background runs; leaking them
-                # because an earlier hook raised is how a restart ends up with
-                # orphan processes.
+                # One failing callback must not skip the ones after it. Shutdown
+                # is the last chance to terminate provider subprocesses and
+                # background runs; leaking them because an earlier hook raised is
+                # how a restart ends up with orphan processes.
                 try:
                     await callback()
                 except Exception:
                     logger.exception("Shutdown callback failed")
-            # Release the client-mode keep-alive pool. A no-op on a host node,
-            # which never opens it.
-            await close_shared_client()
 
     lifespan = _lifespan
 
