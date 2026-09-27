@@ -72,27 +72,22 @@ jobs:
           test -x "$HOME/.local/bin/ciao"
           jq -e --arg version "$VERSION" '.version == $version' \
             "$HOME/.local/state/ciaobot/install-receipt.json"
-      - name: Verify updater metadata and installer assets
+      - name: Verify the engine installer assets
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.resolve.outputs.version }}
         run: |
           set -euo pipefail
+          # This release publishes the engine and nothing else (#653): no app
+          # archive, no latest.json feed, no native verifier, no bundled
+          # runtime. What it has to carry is the installer, under both names.
           gh release download "v${VERSION}" --repo raffaelefarinaro/ciaobot \
-            --pattern latest.json --pattern install.sh --pattern install-engine.sh \
-            --pattern "Ciaobot_${VERSION}_aarch64.app.tar.gz" \
-            --pattern "Ciaobot_${VERSION}_aarch64.app.tar.gz.sig"
-          # The updater notice has to survive the transition: an already
-          # installed Ciaobot.app hears about this release through exactly
-          # these two assets and nothing else.
-          jq -e '.platforms["darwin-aarch64"].url and .platforms["darwin-aarch64"].signature' latest.json
-          test -s "Ciaobot_${VERSION}_aarch64.app.tar.gz"
-          test -s "Ciaobot_${VERSION}_aarch64.app.tar.gz.sig"
+            --pattern install.sh --pattern install-engine.sh
           # install.sh is the engine installer (#651). The placeholder belongs to
           # the app installer, so its absence is what says the retired script is
-          # no longer what a new user downloads - and install-engine.sh, the
-          # name the app's Move action fetches (#604), has to be the same bytes,
-          # or that hand-over is stranded at the moment a user accepts it.
+          # not what a new user downloads - and install-engine.sh, the name the
+          # app's Move action fetches (#604), has to be the same bytes, or that
+          # hand-over is stranded at the moment a user accepts it.
           grep -q -- '--migrate' install.sh
           if grep -q '__VERIFIER_SHA256__' install.sh; then
             echo "install.sh on the release is still the app installer" >&2
