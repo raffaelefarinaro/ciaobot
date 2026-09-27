@@ -227,15 +227,23 @@ After round 5 without `APPROVE`: stop. Leave the PR as draft, comment on the iss
 
 ## 8. Merge
 
+**Merging is the orchestrator's call.** You own the go/no-go for every merge — the same way you own the plan, the gates, and the GitHub writes. Do **not** ask the user to approve a merge issue by issue; that choice is yours to make from the evidence (review verdict, your own re-run of the gates, CI, and the risk of the diff). Report merges as they happen (`§8.7`); do not gate them on a reply.
+
+Judge the risk yourself:
+
+- **Routine merge** (feature/fix, tests green, reviewer approved, CI green): merge it. This is the default and it needs no one's permission.
+- **Escalate to the user only when the action is genuinely irreversible or touches their live machine or credentials** — for example running a real installer/service/`launchctl` on the operator's host, force-pushing a shared branch, deleting data, changing release plumbing or secrets, or merging something the orchestrator cannot evaluate (an unexplained failing check, an auth/boundary change it does not understand). State the specific risk and the decision you need; do not escalate merely because a change is large or in a sensitive directory.
+- When the diff touches auth/secrets/remote boundary (`docs/REMOTE_BOUNDARY.md`), `desktop/`, or release plumbing, run the extra gate it needs (`security-review`, `./scripts/check-desktop.sh`) **yourself**; if that gate is green and you understand the change, merge it. Escalate only if the gate is red or the change is outside what you can verify.
+
+Merge procedure:
+
 1. Rebase check: `git -C <wt> fetch origin && git -C <wt> merge-base --is-ancestor origin/develop HEAD`. If develop moved, `git merge origin/develop`, resolve, re-run §5 gates, push. A conflicted merge is re-reviewed (one more review round, within the cap).
-2. `gh pr ready <PR>` then `gh pr checks <PR> --watch --fail-fast`. Red CI → treat as a fix round.
+2. `gh pr ready <PR>` then `gh pr checks <PR> --watch --fail-fast`. Red CI → treat as a fix round. A required check that never reports is an escalation, not a merge.
 3. `gh pr merge <PR> --repo raffaelefarinaro/ciaobot --merge --delete-branch` (the repo uses merge commits).
 4. `gh issue close <N> --repo raffaelefarinaro/ciaobot --comment "Merged into develop via #<PR> (<merge sha link>). Ships in the next release."` — needed because develop isn't the default branch. Tick the child on the parent's checklist comment if there is one.
 5. `orca worktree set --worktree id:<wt> --workspace-status completed --comment "merged #<PR>" --json`, then `orca worktree rm --worktree id:<wt> --force --json` (the branch is merged; nothing is lost).
 6. Update the records: set `plans/issue-<N>/record.md` to `merged #<PR>` with the merge sha and the final shipped shape (§0.1), and mark the issue merged in `plans/loop-state.md`.
 7. Report to the user: issue, PR, merge commit, rounds used, model, anything deferred into follow-up issues.
-
-Stop and ask the user instead of merging if the diff touches auth/secrets/remote boundary (`docs/REMOTE_BOUNDARY.md`), `desktop/`, or release plumbing — those need `security-review` or `./scripts/check-desktop.sh`, and a human look.
 
 ## Traps
 
