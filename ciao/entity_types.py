@@ -67,13 +67,22 @@ predates this file and must not change. They are stock-only and documented at
 their definitions: :data:`_LEGACY_DIR_TYPE_MAP`, :data:`_ORPHAN_EXTRA_DIRS` and
 :data:`_CATEGORY_PART_FOLDERS`.
 
-``config._WORKSPACE_EVIDENCE_DIRS`` is deliberately not derived here, even
-though it is one of the six hardcoded lists: it is a *containment* test (a
-directory that holds one of these is a workspace, which is how
-``memory-vault/personal/People/`` makes ``personal`` a workspace) rather than a
-type mapping, and it spans a workspace's own folder plus the lower-case
-``projects``. Deriving it would be a fourth compatibility table with no consumer
-to justify it yet, so it stays in ``config`` until one does.
+``config._WORKSPACE_EVIDENCE_DIRS`` is the one consumer that asks for the
+**stock** registry rather than a vault's, and that is structural rather than a
+preference. It is a *containment* test — a directory that holds one of these is a
+workspace, which is how ``memory-vault/personal/People/`` makes ``personal`` a
+workspace — and it is built inside ``CiaoConfig.__post_init__``, while the
+workspace registry is still being discovered. The
+``<vault>/entity-types.yaml`` that could answer a better question therefore lives
+inside one of the directories that scan has not found yet, and reading one there
+is the chicken-and-egg the bootstrap exists to avoid.
+
+What it does take from the registry is the entity categories' own folders
+(:func:`stock_entity_type_registry`). The three names an entry's single folder
+cannot express — the agent's own ``Workspace``, the ``journal`` folder and the
+lower-case ``projects`` — are spelled out in ``config``, because a containment
+test is not a type mapping: ``Documents/`` is a category folder too, and is
+deliberately not evidence of a workspace.
 
 Loads are cached per vault against the vault file's mtime, so a caller in a hot
 path can ask on every read; :func:`clear_entity_types_cache` is the test hook,
@@ -476,6 +485,7 @@ def _apply(stock_entry: EntityType, stated: _Stated) -> EntityType:
 # file.
 _CACHE: dict[Path, tuple[int | None, EntityTypeRegistry]] = {}
 _STOCK: list[EntityType] | None = None
+_STOCK_REGISTRY: EntityTypeRegistry | None = None
 
 
 def _stock() -> list[EntityType]:
@@ -525,6 +535,28 @@ def load_entity_types(vault: Path) -> EntityTypeRegistry:
     return registry
 
 
+def stock_entity_type_registry() -> EntityTypeRegistry:
+    """The shipped categories as a registry, with no vault file involved.
+
+    For the consumer that cannot reach a vault: ``config._WORKSPACE_EVIDENCE_DIRS``
+    is a module constant built while ``CiaoConfig`` is still discovering which
+    directories are workspaces, and the per-vault ``entity-types.yaml`` lives
+    inside one of those directories. ``load_entity_types`` would have to be given
+    a path to be honest about which vault it read, and there is no such path yet,
+    so this is the whole of what that consumer can know.
+
+    Built from the same cached stock list :func:`load_entity_types` merges, and
+    dropped by :func:`clear_entity_types_cache` along with it, so it cannot
+    disagree with a registry loaded from a vault that has no file: the two are
+    the same entries over the same views. Not a "current registry" — it is the
+    shipped defaults, the one list every install starts from.
+    """
+    global _STOCK_REGISTRY
+    if _STOCK_REGISTRY is None:
+        _STOCK_REGISTRY = EntityTypeRegistry(_stock())
+    return _STOCK_REGISTRY
+
+
 def _mtime_ns(path: Path) -> int | None:
     """The file's mtime in nanoseconds, or ``None`` when it cannot be read.
 
@@ -562,8 +594,9 @@ def clear_entity_types_cache() -> None:
     to the next read, and the way a long-lived process picks up a stock file
     replaced under it (an upgrade, an editable checkout).
     """
-    global _STOCK
+    global _STOCK, _STOCK_REGISTRY
     _STOCK = None
+    _STOCK_REGISTRY = None
     _CACHE.clear()
 
 

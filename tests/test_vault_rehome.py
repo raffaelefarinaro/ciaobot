@@ -13,9 +13,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ciao import entity_types
+from ciao.vault_index import DIR_TYPE_MAP
 from ciao.vault_rehome import (
     detect_misfiled_people,
+    dir_type_map,
     peek_receipt,
+    people_dirs,
     plan_rehome,
     read_receipt,
     receipt_path,
@@ -218,6 +222,65 @@ def test_note_type_folders_are_not_mistaken_for_workspaces(tmp_path: Path) -> No
 
     assert vault_workspaces(vault) == []
     assert detect_misfiled_people(vault) == []
+
+
+# ---- the category registry --------------------------------------------------
+#
+# `PEOPLE_DIRS` was a frozenset built at import, which is fine for a constant and
+# impossible for a per-vault one: the folder map is the vault's own category list
+# now (`ciao.entity_types`), so the two are `people_dirs()` / `dir_type_map()` and
+# a caller with a registry hands it over. The half that must not move is the first
+# test: with no `<vault>/entity-types.yaml` both are exactly the shipped map, so
+# every behaviour above this line still holds.
+
+
+def test_the_person_folder_is_the_shipped_map_without_a_vault_file() -> None:
+    """`PEOPLE_DIRS` was `frozenset({"People"})`; that is what an unconfigured
+    vault still gets, and it is now a call rather than an import-time value."""
+    assert people_dirs() == frozenset({"People"})
+    assert dir_type_map() == DIR_TYPE_MAP
+
+
+def test_a_registry_decides_which_folder_holds_people(tmp_path: Path) -> None:
+    """A vault that calls its person notes `Humans/` re-homes on that name.
+
+    Three answers move together and all three come from one registry: the folder
+    a candidate must sit in (`people_dirs`), the folder a workspace scan must not
+    claim as a workspace name (the same map's keys), and the answer with no
+    registry at all — which is what an install that has configured nothing gets.
+    """
+    vault = tmp_path / "memory-vault"
+    _note(vault, "Humans/Mo.md", _person("[person, colleague]"))
+    _note(vault, "personal/Humans/Mo.md", _person("[person, colleague]"))
+    _note(vault, "work/alpha.md", "---\ntype: project\n---\n# Alpha\n")
+    (vault / "entity-types.yaml").write_text(
+        "- id: person\n"
+        "  label: Person\n"
+        "  kind: entity\n"
+        "  folder: Humans\n",
+        encoding="utf-8",
+    )
+    stock = entity_types.stock_entity_type_registry()
+    registry = entity_types.load_entity_types(vault)
+
+    assert people_dirs(registry) == frozenset({"Humans"}), "the renamed folder wins"
+    assert people_dirs() == frozenset({"People"}), "the shipped map is untouched"
+
+    # The workspace scan, both ways: a note-type folder is not a workspace, and
+    # under the shipped map the very same directory *is* one, because nothing in
+    # it claims the name.
+    assert vault_workspaces(vault) == ["personal", "work"]
+    assert vault_workspaces(vault, registry=stock) == ["Humans", "personal", "work"]
+
+    # And the note itself: only a registry that knows the folder sees a
+    # misfiled person note there. `detect_misfiled_people` loads one from this
+    # root when it is handed none, so the plain call is the vault's own answer.
+    assert detect_misfiled_people(vault, registry=stock) == []
+    candidates = {c.path: c for c in detect_misfiled_people(vault, registry=registry)}
+    assert candidates["personal/Humans/Mo.md"].destination == "work/Humans/Mo.md"
+    assert [
+        (c.path, c.bucket) for c in detect_misfiled_people(vault)
+    ] == [("personal/Humans/Mo.md", "mechanical")]
 
 
 # ---- the move and its edges ------------------------------------------------

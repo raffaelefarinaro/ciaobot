@@ -149,6 +149,30 @@ still named the original. The ordinary, non-`--migrate` path is unchanged: there
 `--workspace` is how a workspace is named, and it is created. The workflow
 attaches it as the `install-engine.sh` release asset.
 
+`Ciaobot.app` is the transition release for that same hand-over (#604): its
+updater installs a signed `.app.tar.gz`, which cannot run a shell script, so an
+app user never re-runs the one-liner on their own. The app therefore asks the
+classifier (`ciao service migration-classify`, a read-only bridge to
+`ciao.engine_migration`) what this Mac is at every launch, and offers to hand the
+engine over when the answer is a live `desktop_host`, `desktop_client` or
+`desktop_invalid` — `engine`, `none` and `desktop_stale` are offered nothing. The
+offer appears once, guarded by its own `engine_migration_notice_shown` setting
+field, and the menu bar keeps a **Move Engine to the Terminal Installer…** item
+directly under Update for a user who dismissed it. Choosing it
+downloads the `install-engine.sh` asset for the app's own version — never
+`latest`, which could move mid-install — from the pinned
+`releases/download/v<version>` URL, runs it detached with `--migrate` and
+`nohup` in its own process group, and quits so the installer's 20 s
+`quit_desktop_app` wait and the launchd hand-over can proceed. A
+`desktop_invalid` Mac is asked whether it is the host (`--as-host`) or a client
+of an address (`--as-client URL`); neither is ever guessed, and the installer
+re-validates the URL from the verified wheel before it touches anything. The
+migration runs in the runtime root, not the app bundle — the app is quitting and
+the bundle may be replaced underneath it — and its transcript is at
+`<runtime root>/engine-migration.log`, which is where the one-time sign-in link
+the installer prints at the end lands, since it only opens that link itself from
+a terminal.
+
 ## Branching and releases
 
 - **`develop`** is the integration branch. Feature and fix PRs target `develop`.

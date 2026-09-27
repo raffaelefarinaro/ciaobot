@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from ciao.entity_types import EntityTypeRegistry, load_entity_types
 from ciao.vault_index import markdown_destination
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,14 @@ _SKIP_FILENAMES = {"log", "index"}
 # unwrapping (see `vault_index.markdown_destination`).
 _BULLET_RE = re.compile(r"^- \[(?P<path>[^\]\n]+)\]\([^)\n]*\)(?P<rest>.*)$")
 _ALIASES_RE = re.compile(r"aliases:\s*([^)]+)")
+# The default, and the same view `entity_types.EntityTypeRegistry.category_parts`
+# returns: this module maps `INDEX.md` bullets, whose folder set is fixed by what
+# the indexer wrote, so the folders are a wire format rather than a list of the
+# vault's categories. That is why a category the owner adds does NOT join the
+# tagger when a registry is passed — see `_category_for_path`. The constant stays
+# because it is what a caller with no vault in hand resolves against, and the
+# registry is what a caller with one resolves against; with no vault file the two
+# are the same fourteen entries.
 _CATEGORY_PARTS = {
     "People": "People",
     "people": "People",
@@ -76,14 +85,20 @@ class VaultEntity:
 class _Index:
     """Parsed INDEX.md held in memory with mtime-based invalidation."""
 
-    __slots__ = ("_path", "_mtime", "_entities", "_match_terms")
+    __slots__ = ("_path", "_mtime", "_entities", "_match_terms", "_category_parts")
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, registry: EntityTypeRegistry | None = None) -> None:
         self._path = path
         self._mtime: float = 0.0
         self._entities: list[VaultEntity] = []
         # One compiled regex per distinct matchable term, keyed by lowercase.
         self._match_terms: list[tuple[re.Pattern[str], VaultEntity]] = []
+        # The folder->category view, resolved once with the index because both
+        # are derived from the same vault: a second INDEX.md re-parse must not
+        # silently resolve a bullet against a different list than the first.
+        self._category_parts: dict[str, str] = (
+            _CATEGORY_PARTS if registry is None else registry.category_parts()
+        )
 
     def _refresh_if_stale(self) -> None:
         try:
@@ -95,7 +110,7 @@ class _Index:
         if stat.st_mtime == self._mtime:
             return
         self._mtime = stat.st_mtime
-        self._entities = list(_parse_index(self._path))
+        self._entities = list(_parse_index(self._path, self._category_parts))
         self._match_terms = list(_compile_terms(self._entities))
         logger.debug(
             "vault entity index refreshed: %d entities, %d match terms",
@@ -135,7 +150,17 @@ class _Index:
         return hits
 
 
-def _parse_index(path: Path) -> list[VaultEntity]:
+def _parse_index(path: Path, category_parts: dict[str, str] | None = None) -> list[VaultEntity]:
+    """Every entity one INDEX.md names, in the order it lists them.
+
+    *category_parts* is the folder -> category view, from
+    :meth:`ciao.entity_types.EntityTypeRegistry.category_parts` where a caller
+    had a registry to pass and the module constant otherwise. It is a parameter
+    rather than a second registry lookup because a parse is a pure read of one
+    file: the caller that resolved the view is the one that knows which vault it
+    came from.
+    """
+    parts_map = _CATEGORY_PARTS if category_parts is None else category_parts
     entities: list[VaultEntity] = []
     try:
         raw = path.read_text(encoding="utf-8")
@@ -150,7 +175,7 @@ def _parse_index(path: Path) -> list[VaultEntity]:
         parts = rel_path.split("/")
         if len(parts) < 2:
             continue
-        category = _category_for_path(parts)
+        category = _category_for_path(parts, parts_map)
         name = parts[-1]
         lname = name.lower()
         if lname in _SKIP_FILENAMES:
@@ -175,9 +200,23 @@ def _parse_index(path: Path) -> list[VaultEntity]:
     return entities
 
 
-def _category_for_path(parts: list[str]) -> str:
+def _category_for_path(parts: list[str], category_parts: dict[str, str]) -> str:
+    """The category the path's first known folder names, else its first segment.
+
+    A bullet's label is the vault-relative path the indexer wrote, and the folder
+    it starts with is the category — `People/Alba` is a person, and a path whose
+    first segment is a workspace name falls back to that name.
+
+    *category_parts* is the view, and it is deliberately NOT widened to the
+    vault's own categories. This maps a fixed wire format: the indexer writes
+    these folder names and nothing else, so a custom category's folder never
+    appears in an INDEX.md bullet and joining the set would only make a
+    differently-spelled path resolve differently for no gain. That is the
+    documented decision behind `entity_types._CATEGORY_PART_FOLDERS`; a category
+    joins this set when the indexer can write it, not before.
+    """
     for part in parts:
-        category = _CATEGORY_PARTS.get(part)
+        category = category_parts.get(part)
         if category:
             return category
     return parts[0]
@@ -263,15 +302,30 @@ _index_cache: dict[Path, _Index] = {}
 _INDEX_CACHE_LIMIT = 8
 
 
-def get_index(vault_root: Path) -> _Index:
-    """Return the process-wide entity index for a given vault root."""
+def get_index(vault_root: Path, registry: EntityTypeRegistry | None = None) -> _Index:
+    """Return the process-wide entity index for a given vault root.
+
+    The vault's category list is loaded here — the root is the agent vault root
+    that owns this ``INDEX.md``, which is where ``entity-types.yaml`` lives — so
+    the folder -> category view comes from the registry rather than from a second
+    copy of it. Omitted, the view is the shipped one, and with no vault file the
+    two are identical (``tests/test_entity_types.py``).
+
+    A cached index keeps the view it was built with. It is keyed by path, and it
+    is the same file either way, so honouring a later call's registry would mean
+    re-parsing one INDEX.md against two lists and letting two chats see different
+    categories for one vault. Since the view is a fixed wire format anyway (see
+    :func:`_category_for_path`), nothing observable depends on that here.
+    """
     index_path = vault_root / "INDEX.md"
     cached = _index_cache.get(index_path)
     if cached is not None:
         return cached
     if len(_index_cache) >= _INDEX_CACHE_LIMIT:
         _index_cache.clear()
-    index = _Index(index_path)
+    if registry is None:
+        registry = load_entity_types(Path(vault_root).resolve())
+    index = _Index(index_path, registry)
     _index_cache[index_path] = index
     return index
 

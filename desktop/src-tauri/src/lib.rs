@@ -28,7 +28,9 @@ use tauri::{
     tray::TrayIconBuilder, webview::NewWindowResponse,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartExt};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
 use tauri_plugin_updater::UpdaterExt;
 
 struct DesktopModel {
@@ -41,6 +43,12 @@ struct DesktopModel {
     // Rows for chats that are working, retained so the animation thread can
     // swap their pulsing-dot icon without rebuilding the whole menu.
     working_items: Mutex<Vec<tray::WorkingRow>>,
+    // What the engine classifier read on this Mac at start-up, when it read
+    // something the transition release has to act on. Read once: the tray
+    // rebuilds every couple of seconds and the classifier is a process launch,
+    // not a lookup. Cleared while a hand-over is running so the item cannot be
+    // started twice.
+    engine_migration: Mutex<Option<EngineMigration>>,
 }
 
 // Only hand schemes to /usr/bin/open that a link in a chat can legitimately
@@ -402,6 +410,314 @@ fn maybe_show_browser_pwa_notice(app: &AppHandle, migration: &service::ServiceRe
         )
         .title("Ciaobot desktop migration")
         .show(|_| {});
+}
+
+/// What the classifier read on this Mac, when it read something this release
+/// has to act on (#604).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EngineMigration {
+    /// The classifier's own spelling, kept for the log and the dialog copy:
+    /// `desktop_host`, `desktop_client` or `desktop_invalid`.
+    kind: String,
+    /// True only for `desktop_invalid`. The installer then needs the user to
+    /// say whether this Mac is the host or a client of a URL.
+    explicit_choice: bool,
+}
+
+/// The kinds of classified Mac this transition build acts on.
+///
+/// `engine` and `none` are a Mac that already runs the terminal engine, or that
+/// never ran an engine at all, and `desktop_stale` is a plist whose Ciaobot.app
+/// is gone - the installer replaces that like any other leftover, so there is
+/// nothing to offer. Only the three live kinds are a hand-over.
+fn engine_migration_for(kind: &str) -> Option<EngineMigration> {
+    match kind {
+        "desktop_host" | "desktop_client" => Some(EngineMigration {
+            kind: kind.to_string(),
+            explicit_choice: false,
+        }),
+        "desktop_invalid" => Some(EngineMigration {
+            kind: kind.to_string(),
+            explicit_choice: true,
+        }),
+        _ => None,
+    }
+}
+
+/// The transition decision, from one classifier run against the bundled engine.
+///
+/// `None` covers "nothing to migrate" and "could not ask" alike: a classifier
+/// the app could not run, or one that answered without a `kind`, is a Mac it has
+/// no opinion about, and it must not fall back to offering a hand-over it cannot
+/// justify. The classifier itself never raises and never writes - it is the
+/// verified wheel's own module, reached through the same `desktop-service`
+/// bridge every other engine action uses.
+fn engine_migration_needed(binary: &std::path::Path) -> Option<EngineMigration> {
+    let result = service::invoke(binary, "migration-classify", &[]).ok()?;
+    if !result.ok {
+        return None;
+    }
+    let kind = result.details.get("kind")?.as_str()?;
+    engine_migration_for(kind)
+}
+
+/// Whether the start-up offer may still be shown.
+///
+/// A Mac with nothing to migrate never gets one, and a user who has already
+/// been offered it never gets it again: a notice that comes back on every
+/// launch is a nag, and the tray item is where a user who decided either way
+/// goes. The flag is its own, not the browser-PWA notice's, because that notice
+/// goes to a different Mac and setting it would silently suppress this one.
+fn should_offer_engine_migration(migration: Option<&EngineMigration>, notice_shown: bool) -> bool {
+    migration.is_some() && !notice_shown
+}
+
+/// Where the downloaded installer and the migration transcript are kept.
+///
+/// The runtime root, not the app bundle: the app quits the moment the installer
+/// is started, and the bundle may be replaced or removed by the very migration
+/// this is starting. The transcript matters because the one-time sign-in link
+/// the installer prints at the end is a credential for the person at this
+/// keyboard, and it goes to its output - which here is this file.
+const ENGINE_MIGRATION_DIR: &str = "engine-migration";
+const ENGINE_MIGRATION_LOG: &str = "engine-migration.log";
+
+fn engine_migration_paths(app: &AppHandle) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let runtime_root = app
+        .state::<DesktopModel>()
+        .runtime
+        .read()
+        .ok()
+        .map(|runtime| runtime.runtime_root.clone())?;
+    Some((
+        runtime_root.join(ENGINE_MIGRATION_DIR),
+        runtime_root.join(ENGINE_MIGRATION_LOG),
+    ))
+}
+
+/// Classify this Mac once, publish the verdict to the tray, and offer the move.
+///
+/// Off the main thread and after the model is managed: the classifier is a
+/// process launch, and a slow engine must not hold the first window. A Mac the
+/// classifier reads as `engine`, `none` or `desktop_stale` gets nothing at all.
+fn start_engine_migration_check(app: AppHandle) {
+    thread::spawn(move || {
+        let Some(binary) = service::resolve_ciao(env::var("PATH").ok().as_deref()) else {
+            return;
+        };
+        let Some(migration) = engine_migration_needed(&binary) else {
+            return;
+        };
+        tray_log(
+            &app,
+            &format!(
+                "engine migration: this Mac classifies as {}",
+                migration.kind
+            ),
+        );
+        if let Ok(mut current) = app.state::<DesktopModel>().engine_migration.lock() {
+            *current = Some(migration.clone());
+        }
+        let _ = refresh_tray(&app);
+        let model = app.state::<DesktopModel>();
+        // A poisoned lock is treated as already-offered: showing the offer twice
+        // is recoverable, and a second offer over a broken settings lock cannot
+        // be recorded at all.
+        let already_offered = model
+            .settings
+            .lock()
+            .map(|settings| settings.engine_migration_notice_shown)
+            .unwrap_or(true);
+        if !should_offer_engine_migration(Some(&migration), already_offered) {
+            return;
+        }
+        if let Ok(mut settings) = model.settings.lock() {
+            settings.engine_migration_notice_shown = true;
+            let _ = model.store.save(&settings);
+        }
+        confirm_engine_migration(&app, migration);
+    });
+}
+
+/// The confirmation both entry points share, then the choice only a Mac the
+/// classifier could not read needs.
+fn confirm_engine_migration(app: &AppHandle, migration: EngineMigration) {
+    let app_for_dialog = app.clone();
+    app.dialog()
+        .message(
+            "Ciaobot.app will quit and hand the engine to the terminal installer. \
+             The workspace, its .env and every chat stay exactly where they are; \
+             the engine itself moves, and this app is no longer needed afterwards.",
+        )
+        .title("Move the engine to the terminal installer?")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Move Engine".into(),
+            "Cancel".into(),
+        ))
+        .show(move |confirmed| {
+            if !confirmed {
+                return;
+            }
+            if migration.explicit_choice {
+                prompt_explicit_migration_choice(app_for_dialog);
+            } else {
+                begin_engine_migration(app_for_dialog, Vec::new());
+            }
+        });
+}
+
+/// The `--as-host` / `--as-client URL` question, asked rather than answered.
+///
+/// `desktop_invalid` is a Mac nobody can account for, and both available guesses
+/// are expensive: "host" puts a second writer on a runtime root that may already
+/// have one, and "client" strands a user with no engine anywhere. So the choice
+/// is the user's, and cancelling is a real answer rather than a dead end.
+fn prompt_explicit_migration_choice(app: AppHandle) {
+    app.dialog()
+        .message(
+            "Ciaobot could not tell whether this Mac is the host or a client of one, \
+             so it will not guess. If this Mac is the host, its local engine keeps \
+             running. If it is a client, its local engine is disabled and you sign in \
+             at the host instead.",
+        )
+        .title("Is this Mac the host?")
+        .buttons(MessageDialogButtons::YesNoCancelCustom(
+            "This Mac is the Host".into(),
+            "Use a Host Address".into(),
+            "Cancel".into(),
+        ))
+        .show_with_result(move |choice| match choice {
+            MessageDialogResult::Yes => {
+                begin_engine_migration(app.clone(), vec!["--as-host".to_string()]);
+            }
+            MessageDialogResult::No => {
+                let app_for_url = app.clone();
+                thread::spawn(move || {
+                    let Some(url) = prompt_for_host_url() else {
+                        return;
+                    };
+                    begin_engine_migration(app_for_url, vec!["--as-client".to_string(), url]);
+                });
+            }
+            _ => {}
+        });
+}
+
+/// A free-text answer, which the message dialog has no field for.
+///
+/// `text returned of` rather than the bare `display dialog`, so what comes back
+/// is the answer and not the whole `{text returned:…, button returned:…}` record
+/// osascript prints for the dialog itself. Cancelling raises inside AppleScript,
+/// so it is a non-zero exit and no answer at all.
+fn prompt_for_host_url() -> Option<String> {
+    let prompt = concat!(
+        "text returned of (display dialog ",
+        "\"The address of the host this Mac should sign in at, ",
+        "for example https://ciao.example:8443\" default answer \"\" ",
+        "with title \"Ciaobot host address\" buttons {\"Cancel\", \"Move Engine\"} ",
+        "default button \"Move Engine\" with icon note)"
+    );
+    let output = Command::new("/usr/bin/osascript")
+        .args(["-e", prompt])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    host_url_from_answer(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The answer as an address, or `None` when there is nothing to hand over.
+///
+/// Trimmed and non-empty, and nothing more: the installer applies the
+/// classifier's own rule to the value from the verified wheel before it touches a
+/// single label or file, so a URL that is not an address stops there with an
+/// explanation, instead of here with a guess at why.
+fn host_url_from_answer(answer: &str) -> Option<String> {
+    let url = answer.trim();
+    (!url.is_empty()).then(|| url.to_string())
+}
+
+/// Download the pinned installer for this app's own version, start it detached
+/// with `--migrate`, and quit so the hand-over can proceed.
+///
+/// The same version is passed to the run, so the installer installs the release
+/// its own script came from instead of resolving `latest` a second time while
+/// the app is already on its way out.
+///
+/// `install-engine.sh` owns the sequencing, the before-images and the rollback,
+/// so this does not migrate anything itself: it asks the app to stop being the
+/// engine's owner, which is the one thing the installer cannot do for itself
+/// (it waits 20s for this process to be gone and refuses everything if it is
+/// not). The tray item is cleared for the duration and put back if any of this
+/// fails, so a failed download or spawn is a retry rather than a dead end.
+fn begin_engine_migration(app: AppHandle, extra: Vec<String>) {
+    let previous = app
+        .state::<DesktopModel>()
+        .engine_migration
+        .lock()
+        .ok()
+        .and_then(|mut current| current.take());
+    let _ = refresh_tray(&app);
+    thread::spawn(move || {
+        let restore = |app: &AppHandle| {
+            if let (Some(previous), Ok(mut current)) = (
+                previous.clone(),
+                app.state::<DesktopModel>().engine_migration.lock(),
+            ) {
+                *current = Some(previous);
+            }
+            let _ = refresh_tray(app);
+        };
+        let Some((installer_dir, log)) = engine_migration_paths(&app) else {
+            restore(&app);
+            return;
+        };
+        let version = app.package_info().version.to_string();
+        let script = match service::download_engine_installer(&version, &installer_dir) {
+            Ok(script) => script,
+            Err(error) => {
+                tray_log(&app, &format!("engine migration FAILED: {error}"));
+                show_error(&app, "Could not move the engine", error);
+                restore(&app);
+                return;
+            }
+        };
+        tray_log(
+            &app,
+            &format!(
+                "engine migration: {} --migrate --version {} {} → transcript {}",
+                script.display(),
+                version,
+                extra.join(" "),
+                log.display()
+            ),
+        );
+        if let Err(error) = service::spawn_engine_migration(&script, &version, &extra, &log) {
+            tray_log(&app, &format!("engine migration FAILED: {error}"));
+            show_error(&app, "Could not move the engine", error);
+            restore(&app);
+            return;
+        }
+        // The installer's last act is to print a one-time sign-in link, and it
+        // only opens it itself from a terminal. Opened here instead, so the
+        // hand-over ends with the link in front of the user rather than in a
+        // log file they do not know exists.
+        let _ = Command::new("open").arg(&log).spawn();
+        // Blocking: `app.exit` tears the process down before a `.show()`
+        // callback could paint, so the user would never see this.
+        app.dialog()
+            .message(format!(
+                "Ciaobot.app is quitting now. The installer keeps running without it, \
+                 and writes its progress to:\n\n{}\n\nIt ends with a one-time sign-in \
+                 link, which is already open in TextEdit.",
+                log.display()
+            ))
+            .title("Moving the engine to the terminal installer")
+            .kind(MessageDialogKind::Info)
+            .blocking_show();
+        app.exit(0);
+    });
 }
 
 // `update-engine` reports ok=false when the upgrade was a no-op so the PWA's
@@ -1442,6 +1758,11 @@ fn refresh_tray(app: &AppHandle) -> Result<(), String> {
         let settings = model.settings.lock().map_err(|error| error.to_string())?;
         (settings.notifications_enabled, settings.hide_dock_icon)
     };
+    let engine_migration = model
+        .engine_migration
+        .lock()
+        .map(|current| current.is_some())
+        .unwrap_or(false);
     let login = app.autolaunch().is_enabled().unwrap_or(false);
     let built = tray::build_menu(
         app,
@@ -1450,6 +1771,7 @@ fn refresh_tray(app: &AppHandle) -> Result<(), String> {
         notification_permission_state().contains("denied"),
         login,
         hide_dock_icon,
+        engine_migration,
     )
     .map_err(|e| e.to_string())?;
     let working_rows = built.working_items.len();
@@ -1487,6 +1809,14 @@ fn refresh_tray(app: &AppHandle) -> Result<(), String> {
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let settings = app.state::<DesktopModel>().settings.lock().unwrap().clone();
+    // Nothing is classified yet at first build: `start_engine_migration_check`
+    // reads it and refreshes the menu once it has.
+    let engine_migration = app
+        .state::<DesktopModel>()
+        .engine_migration
+        .lock()
+        .map(|current| current.is_some())
+        .unwrap_or(false);
     let menu = tray::build_menu(
         app,
         &TraySnapshot::default(),
@@ -1494,6 +1824,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         notification_permission_state().contains("denied"),
         app.autolaunch().is_enabled().unwrap_or(false),
         settings.hide_dock_icon,
+        engine_migration,
     )?
     .menu;
     let icon = Image::from_bytes(include_bytes!(
@@ -1515,6 +1846,20 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 "start" => invoke_service_action(app.clone(), "start", false, false),
                 "restart" => invoke_service_action(app.clone(), "restart", false, false),
                 "update" => confirm_and_run_full_update(app),
+                "move-engine" => {
+                    // Only present when the classifier said this Mac has
+                    // something to hand over, and the read is what decides
+                    // whether the user is also asked to say host or client.
+                    let migration = app
+                        .state::<DesktopModel>()
+                        .engine_migration
+                        .lock()
+                        .ok()
+                        .and_then(|current| current.clone());
+                    if let Some(migration) = migration {
+                        confirm_engine_migration(app, migration);
+                    }
+                }
                 "notifications" => {
                     let model = app.state::<DesktopModel>();
                     let mut enabled = false;
@@ -1910,6 +2255,7 @@ pub fn run() {
                 tray_snapshot: RwLock::new(TraySnapshot::default()),
                 main_url,
                 working_items: Mutex::new(Vec::new()),
+                engine_migration: Mutex::new(None),
             });
             install_action_listener({
                 let app = app.handle().clone();
@@ -1919,6 +2265,11 @@ pub fn run() {
             start_tray_watcher(app.handle().clone());
             start_tray_icon_animation(app.handle().clone());
             start_engine_if_needed(app.handle().clone(), runtime.clone());
+            // The transition release's own behaviour: offer the hand-over to a
+            // Mac the classifier reads as a live desktop host or client. Additive
+            // to the legacy-companion notice below, and on its own thread so a
+            // slow engine cannot hold the first window.
+            start_engine_migration_check(app.handle().clone());
             maybe_request_notification_permission(app.handle(), settings.notifications_enabled);
             let migration =
                 service::resolve_ciao(env::var("PATH").ok().as_deref()).and_then(|binary| {
@@ -1962,9 +2313,10 @@ mod tests {
     use super::{
         DROP_MAX_FILES, DROP_MAX_NAME_BYTES, append_log, browser_event_script,
         create_desktop_drop_grant, download_percent, engine_already_current, engine_launch_action,
-        flags_are_dataless, is_external_link, is_trusted_main_navigation, needs_drop_staging,
-        requires_confirmation, safe_native_drop_error, should_show_main_window, should_stage,
-        update_relaunch_script,
+        engine_migration_for, engine_migration_needed, flags_are_dataless, host_url_from_answer,
+        is_external_link, is_trusted_main_navigation, needs_drop_staging, requires_confirmation,
+        safe_native_drop_error, should_offer_engine_migration, should_show_main_window,
+        should_stage, update_relaunch_script,
     };
     use crate::service::ServiceResult;
 
@@ -1998,6 +2350,163 @@ mod tests {
             "after the cap\n",
             "an oversized log should be dropped, not appended to forever"
         );
+    }
+
+    // The whole transition decision, in one table: a live host or client is
+    // offered the move unattended, an undecidable Mac is offered the explicit
+    // choice, and everything else is not offered anything.
+    #[test]
+    fn only_live_desktop_kinds_are_offered_the_engine_move() {
+        for kind in ["desktop_host", "desktop_client"] {
+            let migration = engine_migration_for(kind)
+                .unwrap_or_else(|| panic!("{kind} should be a hand-over"));
+            assert_eq!(migration.kind, kind);
+            assert!(
+                !migration.explicit_choice,
+                "{kind} is decided by the installer's own read, so nothing is asked"
+            );
+        }
+        let undecidable = engine_migration_for("desktop_invalid").expect("an invalid Mac is asked");
+        assert_eq!(undecidable.kind, "desktop_invalid");
+        assert!(
+            undecidable.explicit_choice,
+            "an unreadable state must never be turned into an --as-host or --as-client guess"
+        );
+
+        // An engine this script already placed, a Mac that never ran the app, a
+        // plist whose app is gone, and anything the app does not recognise.
+        for kind in [
+            "engine",
+            "none",
+            "desktop_stale",
+            "",
+            "desktop",
+            "DESKTOP_HOST",
+        ] {
+            assert!(
+                engine_migration_for(kind).is_none(),
+                "{kind:?} must not be offered a hand-over"
+            );
+        }
+    }
+
+    #[test]
+    fn the_engine_move_is_offered_once_and_only_when_there_is_something_to_move() {
+        let live = engine_migration_for("desktop_host").unwrap();
+        let undecidable = engine_migration_for("desktop_invalid").unwrap();
+
+        assert!(should_offer_engine_migration(Some(&live), false));
+        assert!(should_offer_engine_migration(Some(&undecidable), false));
+        // Already offered: a notice that comes back on every launch is a nag, and
+        // the tray item is where a user who decided either way goes.
+        assert!(!should_offer_engine_migration(Some(&live), true));
+        assert!(!should_offer_engine_migration(Some(&undecidable), true));
+        // Nothing classified, nothing to say - and the flag must not matter.
+        assert!(!should_offer_engine_migration(None, false));
+        assert!(!should_offer_engine_migration(None, true));
+    }
+
+    /// A stand-in for the engine: answers the one action with `body` and
+    /// records the argv it was called with, so the bridge is tested end to end
+    /// without a real engine.
+    fn classifier_binary(
+        root: &std::path::Path,
+        body: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let binary = root.join("ciao");
+        let argv_log = root.join("argv");
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$*\" > {argv}\ncat <<'BODY'\n{body}\nBODY\n",
+                argv = argv_log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (binary, argv_log)
+    }
+
+    fn classification(kind: &str) -> String {
+        format!(
+            r#"{{"ok": true, "action": "migration-classify", "message": "this Mac classifies as {kind}", "details": {{"kind": "{kind}"}}}}"#
+        )
+    }
+
+    #[test]
+    fn the_transition_decision_asks_the_engine_through_the_service_bridge() {
+        let temp = tempfile::tempdir().unwrap();
+        let (binary, argv_log) = classifier_binary(temp.path(), &classification("desktop_host"));
+
+        let needed = engine_migration_needed(&binary).expect("a live host is a hand-over");
+
+        assert_eq!(needed.kind, "desktop_host");
+        assert!(!needed.explicit_choice);
+        // The action is the bridge, not a second interpreter: the classifier is
+        // the engine's own module and is reached the same way every other
+        // desktop-service action is.
+        assert_eq!(
+            std::fs::read_to_string(&argv_log).unwrap(),
+            "desktop-service migration-classify --json"
+        );
+    }
+
+    #[test]
+    fn an_undecidable_mac_is_never_read_as_an_ordinary_hand_over() {
+        let temp = tempfile::tempdir().unwrap();
+        let (binary, _) = classifier_binary(temp.path(), &classification("desktop_invalid"));
+
+        let needed = engine_migration_needed(&binary).expect("an invalid Mac is still asked");
+
+        assert!(needed.explicit_choice);
+    }
+
+    #[test]
+    fn nothing_to_migrate_is_no_verdict_through_the_bridge() {
+        for kind in ["engine", "none", "desktop_stale"] {
+            let temp = tempfile::tempdir().unwrap();
+            let (binary, _) = classifier_binary(temp.path(), &classification(kind));
+            assert!(
+                engine_migration_needed(&binary).is_none(),
+                "{kind} must not produce an offer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_classifier_that_fails_answers_with_no_offer() {
+        // An action that reported a failure, one that answered without a `kind`,
+        // and one that could not be parsed at all. None of them is evidence that
+        // this Mac needs migrating, and the app must not offer on any of them.
+        let temp = tempfile::tempdir().unwrap();
+        let (refused, _) = classifier_binary(
+            temp.path(),
+            r#"{"ok": false, "action": "migration-classify", "message": "no", "details": {"kind": "desktop_host"}}"#,
+        );
+        assert!(engine_migration_needed(&refused).is_none());
+
+        let (nameless, _) = classifier_binary(
+            temp.path(),
+            r#"{"ok": true, "action": "migration-classify", "message": "?", "details": {}}"#,
+        );
+        assert!(engine_migration_needed(&nameless).is_none());
+
+        let (garbage, _) = classifier_binary(temp.path(), "not json at all");
+        assert!(engine_migration_needed(&garbage).is_none());
+    }
+
+    #[test]
+    fn an_empty_host_answer_is_no_client_and_a_typed_one_is_the_url_verbatim() {
+        // osascript prints the answer with its own newline, and a user types
+        // with spaces; the value handed to --as-client is the trimmed text
+        // itself, never a re-quoted or re-spelled version of it.
+        assert_eq!(
+            host_url_from_answer("  https://ciao.example:8443\n").as_deref(),
+            Some("https://ciao.example:8443")
+        );
+        assert_eq!(host_url_from_answer("\n \t\n"), None);
+        assert_eq!(host_url_from_answer(""), None);
     }
 
     #[test]
