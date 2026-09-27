@@ -782,8 +782,8 @@ def _queued_category_ids(vault_root: Path) -> set[str]:
 def generate_category_proposals(
     vault_root: Path,
     *,
+    registry: EntityTypeRegistry,
     threshold: int = CATEGORY_CLUSTER_THRESHOLD,
-    registry: EntityTypeRegistry | None = None,
 ) -> list[dict[str, Any]]:
     """Queue a ``[category …]`` bullet per unlisted ``type:`` with a cluster.
 
@@ -796,20 +796,23 @@ def generate_category_proposals(
     bullet is litter the next pass overwrites; a bullet with no sidecar is a row
     whose accept refuses and keeps, which is the direction that fails safe.
 
-    ``registry`` is the vault's category list and is loaded from *vault_root*
-    when omitted, which is where the registry file lives on a per-workspace
-    layout. A caller that reached the notes through some other route (a shared
-    vault whose categories file is one level up) passes the registry it means.
+    ``registry`` is required, and it is NOT ``load_entity_types(vault_root)``:
+    *vault_root* is where this workspace's NOTES live, while
+    ``entity-types.yaml`` belongs to the AGENT vault root (``agent_vault_root``)
+    — the same file the accept appends to and ``GET``/``PATCH
+    /api/memory/entity-types`` reads and writes. On an install that has not
+    re-rooted those are different directories, and reading the notes root left
+    detection blind to every category the owner had just accepted: the id stayed
+    unlisted, so it was queued again, and accepting that row 400'd on a duplicate
+    it could never resolve. The caller resolves the root
+    (``ciao/curation_run.py`` threads the one the CLI resolved) and this function
+    never guesses it.
     """
     from ciao.memory_proposals import MemoryProposal, append_proposals
 
     root = Path(vault_root)
     if not root.is_dir():
         return []
-    if registry is None:
-        from ciao.entity_types import load_entity_types
-
-        registry = load_entity_types(root)
     candidates = category_candidates(
         vault_index.scan_vault(root, registry=registry),
         threshold=threshold,

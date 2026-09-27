@@ -696,6 +696,13 @@ def _applied_category(tmp_path):
     whole frontmatter is the type line, and one with other keys around it — and
     none of them may end up byte-identical, so a restore that silently did
     nothing cannot pass.
+
+    The note rows carry the after image the accept reads back off disk, because
+    the undo refuses any note whose current bytes differ from it. That is the
+    row the real accept builds, and
+    ``test_web_proposals.py::test_undoing_an_accepted_category_restores_the_yaml_and_every_note``
+    is what pins the accept to it: a fixture that guessed the row would have
+    passed here while every real accept recorded none.
     """
     from ciao.memory_proposals import set_note_type
 

@@ -45,6 +45,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
+from ciao.entity_types import EntityTypeRegistry
+
 logger = logging.getLogger(__name__)
 
 
@@ -393,7 +395,9 @@ def _learning_items(vault_root: Path, *, today: date) -> list[WorklistItem]:
     ]
 
 
-def _category_cluster_items(vault_root: Path) -> list[WorklistItem]:
+def _category_cluster_items(
+    vault_root: Path, *, registry: EntityTypeRegistry
+) -> list[WorklistItem]:
     """File a ``[category]`` proposal per unlisted ``type:`` with a cluster.
 
     The one pass here that WRITES rather than reads, and that is the point: the
@@ -405,6 +409,14 @@ def _category_cluster_items(vault_root: Path) -> list[WorklistItem]:
     Keys are the category ids, so a cluster that resolves the same way two
     nights running is one item rather than a new one each time, and a cluster
     the owner resolves makes its item disappear from the next worklist.
+
+    ``registry`` is the AGENT vault root's category list, not one loaded from
+    *vault_root*: on an install that has not re-rooted, ``entity-types.yaml`` is
+    a different directory from the notes, and reading the notes root left every
+    category the owner had just accepted looking unlisted — queued again the next
+    night, then refused as a duplicate on accept. It arrives from
+    :func:`build_worklist` rather than being loaded here for the same reason the
+    accept resolves its root through the config.
     """
     from ciao.vocabulary_proposals import (
         CATEGORY_CLUSTER_THRESHOLD,
@@ -413,7 +425,7 @@ def _category_cluster_items(vault_root: Path) -> list[WorklistItem]:
 
     root = Path(vault_root)
     try:
-        queued = generate_category_proposals(root)
+        queued = generate_category_proposals(root, registry=registry)
     except Exception:  # noqa: BLE001 — an advisory pass must not fail the plan
         logger.warning("curation: category cluster scan failed", exc_info=True)
         return []
@@ -517,6 +529,7 @@ def build_worklist(
     *,
     vault_root: Path,
     guide_path: Path,
+    category_registry: EntityTypeRegistry,
     workspace_dir: Path | None = None,
     today: date | None = None,
     done_keys: frozenset[str] | set[str] | None = None,
@@ -524,6 +537,13 @@ def build_worklist(
     user_char_limit: int | None = None,
 ) -> Worklist:
     """Compute tonight's work from files alone.
+
+    ``category_registry`` is the category list the cluster pass measures the
+    notes against, and it is required rather than loaded from ``vault_root``
+    because the two are not the same directory: the registry belongs to the
+    agent vault root, the notes to this workspace's root. The caller resolves it
+    through the config (the CLI does) so a category the owner accepted cannot be
+    re-proposed as unlisted.
 
     ``done_keys`` are the keys an earlier run of the same night already
     finished; they are removed here rather than at plan time so a pass whose
@@ -551,7 +571,7 @@ def build_worklist(
     # files have to be on disk before `_proposal_items` reads the queue, or the
     # run that proposes a category would not count the row it just proposed. The
     # order the worklist is PRESENTED in is :data:`PASS_ORDER` either way.
-    collected.extend(_category_cluster_items(vault_root))
+    collected.extend(_category_cluster_items(vault_root, registry=category_registry))
     collected.extend(_proposal_items(vault_root))
     collected.extend(
         _region_items(

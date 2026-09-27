@@ -45,7 +45,7 @@ from ciao import desktop_build
 from ciao import entity_types
 from ciao import provider_registry
 from ciao.jsonio import write_private_text
-from ciao.memory_receipts import QueueReceiptUnavailable
+from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.web.document_conversion import is_anydoc_document
 from ciao.native_sessions import live_sessions_for_workspace
 from ciao.config import (
@@ -4036,6 +4036,28 @@ def _scan_entity_types(
     return entries, dict(counts)
 
 
+def _write_entity_types_under_lock(
+    vault: Path, entries: list[entity_types.EntityType]
+) -> None:
+    """Write the whole category list under the lock the accept also takes.
+
+    ``write_vault_file`` is atomic but not locked, and the ``[category]`` accept
+    reads the registry, appends to it and writes it as one transaction under
+    this same lock — so a PATCH that wrote outside it could land between that
+    read and that write, and the accepted category would be dropped with no
+    error on either side. A PATCH is a full replacement rather than a diff, so
+    serialization is all it needs: whichever of the two arrives second wins,
+    which is the contract it already had.
+
+    Raises :class:`QueueLockError` rather than writing unlocked, like every
+    other managed writer of a file behind this lock.
+    """
+    from ciao.memory_receipts import queue_lock
+
+    with queue_lock(vault / entity_types.VAULT_FILENAME):
+        entity_types.write_vault_file(vault, entries)
+
+
 def _regenerate_vocabulary(
     vault: Path, workspace: str
 ) -> tuple[dict[str, int], entity_types.EntityTypeRegistry]:
@@ -4147,7 +4169,12 @@ async def memory_entity_types(request: Request) -> JSONResponse:
 
     try:
         await asyncio.to_thread(
-            functools.partial(entity_types.write_vault_file, vault, entries)
+            functools.partial(_write_entity_types_under_lock, vault, entries)
+        )
+    except QueueLockError as exc:
+        return JSONResponse(
+            {"error": f"the categories file is busy; nothing was written: {exc}"},
+            status_code=503,
         )
     except OSError as exc:
         return JSONResponse(

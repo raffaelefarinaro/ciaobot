@@ -1173,18 +1173,20 @@ def _accept_category_row(config, row: dict[str, Any]) -> AcceptOutcome:
     ``<vault>/entity-types.yaml`` and set ``type:`` on the notes the proposal
     was filed with. The unticked notes keep whatever they carry.
 
-    The order is validate, then pre-flight, then write. The registry is
-    validated (a folder already claimed by another category is the one refusal
-    an owner can act on immediately) and every note's current type is read
-    BEFORE the first byte is written, because a note retyped by hand since the
-    proposal means the cluster the operator read is not the cluster on disk —
-    and a half-applied category, with notes pointing at an entry that was never
-    added, is the outcome the write-then-dismiss rule exists to prevent.
+    The order is pre-flight, then read-append-write under the registry lock. Every
+    note's current type is read BEFORE the first byte is written, because a note
+    retyped by hand since the proposal means the cluster the operator read is not
+    the cluster on disk — and a half-applied category, with notes pointing at an
+    entry that was never added, is the outcome the write-then-dismiss rule exists
+    to prevent. The registry is then loaded, appended to and validated INSIDE that
+    same lock: two accepts that both read the list before either wrote append from
+    one snapshot, and the second write silently drops the first category.
 
     Raises :class:`ciao.entity_types.EntityTypeFileError` for a registry the
-    validator refuses. That is a 400, not a 409: the proposal is fine, the
-    category it would add is not, and the owner can edit the id or folder and
-    retry. Everything else is an outcome the caller maps to 409.
+    validator refuses (a folder already claimed by another category, a duplicate
+    id). That is a 400, not a 409: the proposal is fine, the category it would add
+    is not, and the owner can edit the id or folder and retry. Everything else is
+    an outcome the caller maps to 409.
     """
     from ciao import entity_types
     from ciao.memory_receipts import journal_path, queue_lock, record_category_apply
@@ -1230,12 +1232,6 @@ def _accept_category_row(config, row: dict[str, Any]) -> AcceptOutcome:
         description=sidecar["description"],
         builtin=False,
     )
-    registry = entity_types.load_entity_types(registry_root)
-    entries = [*registry.entries(), entry]
-    # Raises on a folder another category already claims, a duplicate id and a
-    # malformed id: the accept's 400, and the reason the bullet stays queued.
-    entity_types.validate_entries(entries)
-
     source_type = sidecar["source_type"]
     planned: list[tuple[Path, str]] = []
     drifted: list[str] = []
@@ -1269,6 +1265,16 @@ def _accept_category_row(config, row: dict[str, Any]) -> AcceptOutcome:
 
     registry_path = registry_root / entity_types.VAULT_FILENAME
     with queue_lock(registry_path):
+        # Loaded, appended to and validated under the lock that writes it, so the
+        # read-append-write is one transaction. Loading before it meant two
+        # accepts that both read the list before either wrote appended from the
+        # same snapshot, and the second write dropped the first category with no
+        # error anywhere. Raises on a folder another category already claims, a
+        # duplicate id and a malformed id: the accept's 400, and the reason the
+        # bullet stays queued.
+        registry = entity_types.load_entity_types(registry_root)
+        entries = [*registry.entries(), entry]
+        entity_types.validate_entries(entries)
         registry_existed = registry_path.exists()
         try:
             before_yaml = (
@@ -1299,7 +1305,23 @@ def _accept_category_row(config, row: dict[str, Any]) -> AcceptOutcome:
                         "leave the vault consistent"
                     ),
                 )
-            retyped.append({"path": str(path), "before": image})
+            # The after image is READ BACK rather than assumed from the rewrite:
+            # the undo compares each note's current bytes with it and refuses the
+            # whole operation on a mismatch, so a row without one is a receipt
+            # that can never reverse a real accept.
+            try:
+                after = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                return AcceptOutcome(
+                    ok=False,
+                    error=(
+                        f"added {category_id} to the category list but could not "
+                        f"re-read {path.name} to record it ({exc}), and no receipt "
+                        f"was recorded; remove the {category_id} entry from "
+                        f"{registry_path} by hand to leave the vault consistent"
+                    ),
+                )
+            retyped.append({"path": str(path), "before": image, "after": after})
         try:
             after_yaml = registry_path.read_text(encoding="utf-8")
         except OSError as exc:

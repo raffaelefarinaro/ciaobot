@@ -1900,6 +1900,247 @@ def test_batch_accept_covers_a_category_row(tmp_path: Path) -> None:
     assert _CATEGORY_ID in _registry_ids(config)
 
 
+def _undo_client(config: CiaoConfig) -> TestClient:
+    """A client that also serves the undo the History card calls.
+
+    The accept and the undo are two routes on the same decision, so a test that
+    drove one over HTTP and the other as a function would not prove the pair
+    works: the receipt is the only thing between them.
+    """
+    from ciao.web.routes_api import memory_receipt_undo
+
+    app = Starlette(
+        routes=[
+            Route("/api/proposals", list_proposals, methods=["GET"]),
+            Route("/api/proposals/{id}/{action}", proposal_action, methods=["POST"]),
+            Route(
+                "/api/memory/receipts/{id}/undo", memory_receipt_undo, methods=["POST"]
+            ),
+        ]
+    )
+    app.state.config = config
+    return TestClient(app)
+
+
+def test_undoing_an_accepted_category_restores_the_yaml_and_every_note(
+    tmp_path: Path,
+) -> None:
+    """Acceptance: the receipt undoes the registry entry AND every retyped note.
+
+    Driven through the two routes, over the real cluster: the notes carry
+    ``type: Recipe Book`` and the id derived from it is ``recipe-book``, so each
+    retype is a real change of bytes and the restore is observed rather than
+    asserted against files that never moved. A receipt that recorded no image of
+    what the retype left behind could not tell an unrelated later edit from its
+    own work, and would refuse the undo of every category it had just applied.
+    """
+    from ciao.memory_receipts import journal_path, read_receipts
+
+    config = _category_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    journals = vault / "Journals"
+    registry = config.agent_vault_root("personal") / "entity-types.yaml"
+    before = {note.name: note.read_text(encoding="utf-8") for note in journals.iterdir()}
+    assert not registry.exists(), "the fixture must start with no category file"
+    client = _undo_client(config)
+    row = _accept_kind_row(client, "category")
+
+    accepted = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert accepted.status_code == 200, accepted.json()
+    assert registry.exists()
+    receipt = [
+        r
+        for r in read_receipts(journal_path(vault, None))
+        if r["kind"] == "category_apply"
+    ][-1]
+    # Every note really changed, and every note's after-image says so.
+    images = {
+        entry["path"]: entry["after"] for entry in receipt["category_notes"]
+    }
+    assert set(images) == {str(note) for note in journals.iterdir()}
+    for note in journals.iterdir():
+        assert note.read_text(encoding="utf-8") != before[note.name]
+        assert images[str(note)] == note.read_text(encoding="utf-8")
+
+    undo = client.post(
+        f"/api/memory/receipts/{receipt['id']}/undo", params={"workspace": "personal"}
+    )
+
+    assert undo.status_code == 200, undo.json()
+    # The vault had no category file before, so the undo leaves none behind.
+    assert not registry.exists()
+    for name, text in before.items():
+        assert (journals / name).read_text(encoding="utf-8") == text
+
+
+def test_an_accepted_category_is_not_offered_again(tmp_path: Path) -> None:
+    """The accepted id is canonical, so the cluster it came from is not drift.
+
+    The accept writes ``entity-types.yaml`` at the AGENT vault root — the same
+    file ``GET``/``PATCH /api/memory/entity-types`` reads, and a different
+    directory from the notes on an install that has not re-rooted. A pass that
+    measured the notes against the registry under the notes root would keep
+    seeing drift: the bullet comes back, and accepting it 400s on a duplicate id
+    and a duplicate folder that no owner edit can resolve.
+    """
+    from ciao import entity_types
+    from ciao import curation_run as cr
+    from ciao.memory_tool import ensure_regions
+
+    config = _category_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+    # A fourth note, already carrying the accepted id: the cluster is intact and
+    # every note in it is canonical.
+    (vault / "Journals" / "Four.md").write_text(
+        f"---\ntype: {_CATEGORY_ID}\n---\n# Four\n", encoding="utf-8"
+    )
+    guide = config.agent_root("personal") / "CLAUDE.md"
+    guide.parent.mkdir(parents=True, exist_ok=True)
+    ensure_regions(guide)
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=entity_types.load_entity_types(
+            config.agent_vault_root("personal")
+        ),
+        workspace_dir=config.workspace_root,
+    )
+
+    assert cr.PASS_CATEGORIES not in {item.pass_id for item in worklist.items}
+    queue = (vault / "Workspace" / "Memory-Proposals.md").read_text(encoding="utf-8")
+    assert "[category" not in queue
+
+
+def _append_category_row(
+    config: CiaoConfig,
+    *,
+    category_id: str,
+    raw_type: str,
+    folder: str,
+    names: tuple[str, str, str],
+) -> None:
+    """A second ``[category]`` row over its own cluster, in the same queue."""
+    from ciao.memory_proposals import MemoryProposal, append_proposals
+    from ciao.vocabulary_proposals import write_category_sidecar
+
+    vault = config.workspace_vault_root("personal")
+    journals = vault / "Journals"
+    for name in names:
+        (journals / name).write_text(
+            f"---\ntype: {raw_type}\n---\n# {Path(name).stem}\n", encoding="utf-8"
+        )
+    write_category_sidecar(
+        vault,
+        {
+            "id": category_id,
+            "label": category_id.replace("-", " ").title(),
+            "folder": folder,
+            "description": f"Proposed from {len(names)} notes already typed {raw_type}.",
+            "source_type": raw_type,
+            "paths": [f"memory-vault/Journals/{name}" for name in names],
+            "declined": False,
+        },
+    )
+    append_proposals(
+        [
+            MemoryProposal(
+                target="category",
+                payload=category_id,
+                text=(
+                    f"{category_id.replace('-', ' ').title()} → {folder}: "
+                    f"Proposed from {len(names)} notes already typed {raw_type}."
+                ),
+                source_section=f"{len(names)} notes typed {raw_type}",
+            )
+        ],
+        vault,
+    )
+
+
+def test_two_category_accepts_both_persist(tmp_path: Path) -> None:
+    """Two clusters accepted one after the other: both categories are on disk.
+
+    Each accept appends to the same registry file, so this is the case where a
+    second write built from a stale snapshot drops the first entry — silently,
+    with the second accept still reporting success.
+    """
+    config = _category_vault(tmp_path)
+    _append_category_row(
+        config,
+        category_id="cook-book",
+        raw_type="Cook Book",
+        folder="Cook Books",
+        names=("Four.md", "Five.md", "Six.md"),
+    )
+    client = _client(config)
+    first = _accept_kind_row(client, "category")
+    assert client.post(f"/api/proposals/{first['id']}/accept").status_code == 200
+    second = _accept_kind_row(client, "category")
+    assert client.post(f"/api/proposals/{second['id']}/accept").status_code == 200
+
+    ids = _registry_ids(config)
+    assert _CATEGORY_ID in ids
+    assert "cook-book" in ids
+    assert client.get("/api/proposals").json()["rows"] == []
+
+
+def test_the_registry_is_read_inside_the_lock_that_writes_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The read, the append and the write are one transaction.
+
+    Loaded before the lock was taken, two accepts could both read the list before
+    either wrote, append to the same snapshot, and the second write would replace
+    the first — one category lost with no error anywhere. The lock is the whole
+    fix, so the test holds it from here and watches the accept refuse to read
+    until it is released. The ``started`` event is what makes that a claim about
+    the ordering rather than about how fast the thread happened to start.
+    """
+    from ciao import entity_types
+    from ciao.memory_receipts import queue_lock
+
+    config = _category_vault(tmp_path)
+    registry = config.agent_vault_root("personal") / "entity-types.yaml"
+    first, second = _client(config), _client(config)
+    row = _accept_kind_row(first, "category")
+    started, read_registry = threading.Event(), threading.Event()
+    real_accept = proposal_service._accept_category_row
+    real_load = entity_types.load_entity_types
+
+    def announce(cfg, accepted_row):
+        started.set()
+        return real_accept(cfg, accepted_row)
+
+    def watched_load(vault):
+        read_registry.set()
+        return real_load(vault)
+
+    monkeypatch.setattr(proposal_service, "_accept_category_row", announce)
+    monkeypatch.setattr(entity_types, "load_entity_types", watched_load)
+    accepted: dict[str, Any] = {}
+
+    def accept() -> None:
+        accepted["resp"] = second.post(f"/api/proposals/{row['id']}/accept")
+
+    thread = threading.Thread(target=accept)
+    with queue_lock(registry):
+        thread.start()
+        assert started.wait(10), "the accept never reached its category handler"
+        # The lock is held here, so the accept is parked before it reads the
+        # list it is about to append to.
+        assert not read_registry.wait(2), "the registry was read outside the lock"
+    thread.join(20)
+
+    assert read_registry.is_set()
+    assert accepted["resp"].status_code == 200, accepted["resp"].json()
+    assert _CATEGORY_ID in _registry_ids(config)
+
+
 def test_batch_accept_does_not_promote_before_the_receipt_can_be_written(
     tmp_path: Path,
 ) -> None:
