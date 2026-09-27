@@ -176,16 +176,15 @@ describe('ChatPanel context bar', () => {
 
   // The banner blocks were each a v-for, so a chat with all of them opened
   // with its first message below the fold. Collapsed is now one line.
-  it('collapses every relation into counted chips, detail hidden', async () => {
+  it('keeps schedule details behind a neutral controls disclosure', async () => {
     const { wrapper } = await mountPanel(undefined, [
       makeIntervalSchedule('schedule-1'),
       makeIntervalSchedule('schedule-2'),
     ])
 
     expect(wrapper.find('.ctx-bar').exists()).toBe(true)
-    // Chip text carries a leading glyph, so match on substring.
-    const labels = wrapper.findAll('.ctx-chip').map(c => c.text())
-    expect(labels.some(l => l.includes('2 interval runs'))).toBe(true)
+    expect(wrapper.get('.ctx-summary').text()).toContain('Automation controls')
+    expect(wrapper.find('.ctx-chip').exists()).toBe(false)
     // Detail rows stay behind the disclosure.
     expect(wrapper.find('.ctx-detail').exists()).toBe(false)
     expect(wrapper.findAll('.loop-banner-row')).toHaveLength(0)

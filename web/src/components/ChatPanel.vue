@@ -100,7 +100,7 @@
          actions. -->
     <!-- Only when the Work details rail is hidden: with the rail shown, the
          chat's automations live there instead of above the transcript. -->
-    <div v-if="contextRelations.length && !railShown" class="ctx-bar" :class="{ 'ctx-bar--open': contextExpanded }">
+    <div v-if="contextRelations.length && !railShown && !inspectorOpen" class="ctx-bar" :class="{ 'ctx-bar--open': contextExpanded }">
       <button
         type="button"
         class="ctx-summary"
@@ -108,16 +108,8 @@
         @click="contextExpanded = !contextExpanded"
       >
         <span class="ctx-chevron" aria-hidden="true">{{ contextExpanded ? '▾' : '▸' }}</span>
-        <span
-          v-for="rel in contextRelations"
-          :key="rel.key"
-          class="ctx-chip"
-        >
-          <span v-if="rel.glyph" class="ctx-chip-glyph" :class="{ live: rel.live }" aria-hidden="true">{{ rel.glyph }}</span>
-          {{ rel.label }}
-        </span>
+        <span>Automation controls</span>
       </button>
-
       <div v-if="contextExpanded" class="ctx-detail">
         <div v-for="s in chatSchedules" :key="s.schedule_id" class="loop-banner-row">
           <!-- Interval entries keep the cycle glyph loops used; everything else
