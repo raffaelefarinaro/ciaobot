@@ -101,7 +101,7 @@ jobs:
           # update and can reinstall through the arm64 installer.
           jq -n \
             --arg version "$version" \
-            --arg notes "Ciaobot v${version}" \
+            --arg notes "Ciaobot v${version}. If Ciaobot.app is still the thing managing your engine, open Ciaobot and choose Move Engine to the Terminal Installer, or re-run the one-line engine installer with --migrate." \
             --arg pub_date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             --arg url "$download" \
             --arg signature "$signature_value" \
@@ -136,6 +136,12 @@ jobs:
             ciaobot-engine-manifest.json \
             ciaobot-engine-manifest.json.sig \
             --clobber
+          # The transition release hands the engine over by downloading this
+          # asset at its own tag (#604), so a release that ships the app without
+          # it strands every Ciaobot.app user, silently and only at the moment
+          # they accept the move. Checked here, where the tag is still known.
+          gh release view "$TAG" --json assets --jq '.assets[].name' \
+            | grep -qx install-engine.sh
 
   release-smoke:
     needs: build-desktop

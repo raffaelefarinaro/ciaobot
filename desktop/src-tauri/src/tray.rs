@@ -128,6 +128,7 @@ pub fn build_menu(
     notifications_denied: bool,
     start_at_login: bool,
     hide_dock_icon: bool,
+    engine_migration: bool,
 ) -> tauri::Result<TrayMenu> {
     let menu = Menu::new(app)?;
     let mut working_items = Vec::new();
@@ -231,6 +232,19 @@ pub fn build_menu(
 
     append_separator(&menu, app)?;
     append_item(&menu, app, "update", &update_label(snapshot))?;
+    // The transition release's own item, and a sibling of Update because it is
+    // the same kind of thing: the next step for this install. Only present when
+    // the classifier found a live desktop host or client to hand over - there is
+    // no disabled greyed-out row, because a Mac with nothing to migrate should
+    // not be reminded of a move it cannot make.
+    if engine_migration {
+        append_item(
+            &menu,
+            app,
+            "move-engine",
+            "Move Engine to the Terminal Installer…",
+        )?;
+    }
     append_item(
         &menu,
         app,
