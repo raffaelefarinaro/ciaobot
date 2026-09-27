@@ -540,8 +540,8 @@ class CiaoConfig:
     # Empty = automatic routing: the workspace's sonnet-tier model.
     insights_model_override: str = ""
     # Trajectory capture: when a chat is archived, also write a structured
-    # JSON record of skills loaded, tools used, errors, decisions, and the
-    # outcome to ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``. The
+    # JSON record of skills loaded, tools used, errors, and the outcome to
+    # ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``. The
     # weekly ``ciao.skill_evolution`` pass mines this directory. The operator
     # setting is persisted by AppSettingsStore and migrated from the retired
     # CIAO_TRAJECTORIES_DISABLED value.

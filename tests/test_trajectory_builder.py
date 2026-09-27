@@ -181,45 +181,12 @@ def test_parse_command_name_tag_handles_namespaced_skills() -> None:
     assert data.skills_loaded == ["frontend-design:frontend-design"]
 
 
-# ── insights parsing helpers ─────────────────────────────────────────────
-
-
-_INSIGHTS = """\
-## Errors
-- Web fetch returned 403 -> unresolved [idx=4]
-- Ollama binary missing -> installed via apt [idx=5]
-
-## Decisions
-- Chose OpenRouter over Anthropic because lower cost [idx=2]
-- Use sqlite-vec for vectors [idx=7]
-
-## User corrections
-- User said: "no, use defuddle" -> assistant switched [idx=3]
-"""
-
-
-def test_extract_decisions_parses_what_why() -> None:
-    decisions = tb.extract_decisions(_INSIGHTS)
-    assert decisions[0] == {"what": "Chose OpenRouter over Anthropic", "why": "lower cost"}
-    assert decisions[1] == {"what": "Use sqlite-vec for vectors", "why": ""}
-
-
-def test_extract_errors_marks_resolution() -> None:
-    errs = tb.extract_insight_errors(_INSIGHTS)
-    assert errs[0]["resolved"] is False
-    assert errs[1]["resolved"] is True
-
-
-def test_count_section_items_counts_bullets() -> None:
-    assert tb.count_section_items(_INSIGHTS, "## User corrections") == 1
-    assert tb.count_section_items(_INSIGHTS, "## Decisions") == 2
-    assert tb.count_section_items(_INSIGHTS, "## Nothing") == 0
+# ── infer_outcome ────────────────────────────────────────────────────────
 
 
 def test_infer_outcome_clean_vs_dirty() -> None:
-    assert tb.infer_outcome(errors=0, user_corrections=0) == "success"
-    assert tb.infer_outcome(errors=1, user_corrections=0) == "needs_review"
-    assert tb.infer_outcome(errors=0, user_corrections=2) == "needs_review"
+    assert tb.infer_outcome(errors=0) == "success"
+    assert tb.infer_outcome(errors=1) == "needs_review"
 
 
 # ── build_trajectory ─────────────────────────────────────────────────────
@@ -238,14 +205,17 @@ def test_build_trajectory_composes_full_record(tmp_path: Path) -> None:
         turns=3,
         tool_counts={"Read": 5, "Bash": 1},
         skills_loaded=["web-research"],
-        error_count=0,
+        error_count=2,
+        error_samples=[
+            {"tool_use_id": "tu_e1", "snippet": "403 from the web fetch"},
+            {"tool_use_id": "tu_e2", "snippet": "ollama binary missing"},
+        ],
     )
     ts = datetime(2026, 5, 23, 10, 0, tzinfo=UTC)
     record = tb.build_trajectory(
         session_id="sess-1",
         session_data=session_data,
         archive_path=archive,
-        insights_text=_INSIGHTS,
         context="Some chat",
         project_id="proj-1",
         chat_id="chat-1",
@@ -265,11 +235,10 @@ def test_build_trajectory_composes_full_record(tmp_path: Path) -> None:
     assert record["tools_used"][0] == {"name": "Read", "count": 5}
     assert record["tools_used"][1] == {"name": "Bash", "count": 1}
     assert record["turns"] == 3
-    assert record["user_corrections"] == 1
-    assert record["outcome"] == "needs_review"  # one error + one correction
+    assert record["outcome"] == "needs_review"  # two errored tool results
     assert record["archive_path"].startswith("memory-vault/Logs/Chats/")
-    assert len(record["decisions"]) == 2
     assert len(record["errors"]) == 2
+    assert record["errors"][0]["snippet"] == "403 from the web fetch"
 
 
 def test_build_trajectory_outcome_success_when_clean(tmp_path: Path) -> None:
@@ -279,11 +248,9 @@ def test_build_trajectory_outcome_success_when_clean(tmp_path: Path) -> None:
         session_id="ok",
         session_data=tb.SessionData(turns=1),
         archive_path=archive,
-        insights_text="",  # no errors, no corrections
     )
     assert record["outcome"] == "success"
     assert record["errors"] == []
-    assert record["decisions"] == []
 
 
 # ── persistence ──────────────────────────────────────────────────────────
@@ -380,6 +347,18 @@ def test_build_and_persist_trajectory_end_to_end(
                      "input": {"skill": "web-research"}},
                 ],
             },
+            {
+                "idx": 3,
+                "type": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu_1",
+                        "is_error": True,
+                        "content": "No such file or directory",
+                    }
+                ],
+            },
         ]
     )
     ts = datetime(2026, 5, 23, 12, 0, tzinfo=UTC)
@@ -387,7 +366,6 @@ def test_build_and_persist_trajectory_end_to_end(
         session_id="sess-end2end",
         filtered_jsonl=filtered,
         archive_path=archive,
-        insights_text=_INSIGHTS,
         context="C",
         project_id="P",
         chat_id="chat-X",
@@ -401,8 +379,8 @@ def test_build_and_persist_trajectory_end_to_end(
     assert rec["session_id"] == "sess-end2end"
     assert rec["skills_loaded"] == ["web-research"]
     assert any(t["name"] == "Read" for t in rec["tools_used"])
-    assert rec["outcome"] == "needs_review"
-    assert rec["user_corrections"] == 1
+    assert rec["outcome"] == "needs_review"  # the errored tool result
+    assert [e["tool_use_id"] for e in rec["errors"]] == ["tu_1"]
 
 
 def test_build_and_persist_returns_none_for_empty_input(tmp_path: Path) -> None:
