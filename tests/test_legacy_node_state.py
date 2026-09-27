@@ -162,6 +162,37 @@ def test_invalid_when_the_file_cannot_be_read(tmp_path: Path) -> None:
     assert writers_armed(result) is False
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # A stray byte where a string used to be — the shape an aborted write
+        # or a botched edit leaves. `read_text` raises `UnicodeDecodeError`
+        # here, which is a `ValueError` and *not* an `OSError`, so an
+        # `OSError`-only guard let it out of a function whose contract is
+        # "never raises", straight into the boot.
+        b'{"role": "host"}\xff',
+        # A latin-1 `é` written as one byte: still a valid JSON document to
+        # anything that decodes it as latin-1, and undecodable as UTF-8.
+        b'{"role": "host", "node_id": "mac\xe9"}',
+        # UTF-16: the BOM plus the NUL bytes every ASCII character costs there.
+        b'\xff\xfe{\x00"\x00r\x00o\x00l\x00e\x00"\x00:\x00 \x00h\x00o\x00s\x00t\x00"\x00',
+    ],
+)
+def test_invalid_when_the_file_is_not_utf8(tmp_path: Path, raw: bytes) -> None:
+    # "Unreadable" is not only an unreadable file: a state the process cannot
+    # decode is exactly as unaccountable, and it is the case a fail-closed gate
+    # has to survive. Every byte string here starts with a role that would arm
+    # the writers if it were read, so a guess here is not a harmless default.
+    (tmp_path / "node_state.json").write_bytes(raw)
+
+    result = detect(tmp_path)
+
+    assert result.kind == "invalid"
+    assert result.role == "invalid"
+    assert result.host_url == ""
+    assert writers_armed(result) is False
+
+
 def test_detect_never_writes(tmp_path: Path) -> None:
     """The whole point: reading a state must never produce one.
 

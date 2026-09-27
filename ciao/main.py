@@ -196,6 +196,34 @@ def guard_legacy_writers(runtime_root: Path) -> tuple[LegacyNodeState, bool]:
     return legacy, False
 
 
+# The other half of the gate, kept apart from the verdict because the two answer
+# different questions. `guard_legacy_writers` answers "may this boot write?" once,
+# from the file as it was before anything wrote; this answers "may this Mac
+# write right now?".
+def legacy_writers_active(
+    legacy_armed: bool, is_active: Callable[[], bool]
+) -> bool:
+    """Whether the writers may run *now*: the boot verdict and the live role.
+
+    The verdict alone is a snapshot, and node mode is still here in this child,
+    so it is not enough: `/api/node/connect` and `/api/node/handover` still
+    rewrite the role mid-session and neither asks for a restart. A host that
+    connects as a client would keep dispatching slots and pushing a branch
+    against the very host it just tunneled to — a second writer, the failure
+    #636 exists to prevent. `is_active` is `NodeStateManager.is_active`, which
+    re-reads the file on every call; that is the check `develop` had before the
+    gate existed, and a client boot promoted to host gets its automations back
+    without a restart either.
+
+    Both, and the verdict first. The manager is never the deciding input on its
+    own: it answers `host` for a state this boot called `client` or `invalid`
+    whenever the file has been rewritten since, and that answer is the one
+    #577B leaves behind when it deletes the manager and `/api/node/*`. `and`
+    short-circuits, so a refused boot does not even re-read the file.
+    """
+    return legacy_armed and is_active()
+
+
 # Web Push (RFC 8292) requires a VAPID "sub" contact URI, but the push
 # service never verifies or contacts it, so a fixed placeholder is enough.
 DEFAULT_PUSH_SUBJECT = "mailto:ciaobot@localhost"
@@ -680,15 +708,26 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # Classified before the manager is built, because that manager *writes* a
     # host state when the file is absent: reading through it would turn "no
     # state yet" into "this Mac is a host" and answer the gate with its own
-    # write. Read once and keep the verdict for the whole boot — a client that
-    # is promoted mid-session is a route's decision, not a reason to re-arm
-    # writers underneath the scheduler.
+    # write. The verdict it produces is the boot's answer and stays fixed — it
+    # is what survives #577 — but it is not the only input while the manager is
+    # still here, hence the closure below rather than this value on its own.
     legacy_node_state, legacy_writers_armed = guard_legacy_writers(
         config.state_path.parent
     )
 
     from ciao.node_state import NodeStateManager
     node_state_manager = NodeStateManager(config.state_path.parent)
+
+    # What both writer sites ask instead of the frozen verdict. Node mode's
+    # role can change under a running server (`/api/node/connect`,
+    # `/api/node/handover`; neither requests a restart), so a host that
+    # connects as a client has to stop being a writer at once rather than after
+    # the next launch. #577B deletes the routes, the manager and this
+    # conjunction, and leaves the verdict on its own.
+    def _writers_active() -> bool:
+        return legacy_writers_active(
+            legacy_writers_armed, node_state_manager.is_active
+        )
 
     # An interval schedule bound to an existing chat can only dispatch into a
     # live, non-archived one. Treat an archived (or deleted) target as
@@ -710,7 +749,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         resolve_target=_resolve_schedule_target,
         dispatch_to_web=_dispatch_to_web,
         prepare_chat=_prepare_chat,
-        is_node_active=lambda: writers_armed(legacy_node_state),
+        is_node_active=_writers_active,
         chat_busy=pcm.chat_stream_active,
         chat_dispatchable=_interval_target_dispatchable,
     )
@@ -1109,14 +1148,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                     "branch_backup", "Branch backup",
                     category="system", extra={"branch": branch},
                 ) as run:
-                    if not legacy_writers_armed:
-                        # Named after the startup gate's kind, not "client
-                        # mode": an `invalid` state lands here too, and pushing
-                        # from a Mac that may already be a second writer on this
-                        # root is the failure the gate exists to prevent.
+                    if not _writers_active():
+                        # The same predicate the scheduler asks, and for the
+                        # same reason: an `invalid` state lands here as surely
+                        # as a client does, and so does a host that connected as
+                        # a client since boot. Pushing from a Mac that may
+                        # already be a second writer on this root is the failure
+                        # the gate exists to prevent, so the kind is named and
+                        # the skip says plainly who does push instead.
                         run.skip(
-                            f"legacy node state is {legacy_node_state.kind} "
-                            "— the host owns backup push"
+                            "this Mac is not the host (legacy node state: "
+                            f"{legacy_node_state.kind}) — the host owns backup "
+                            "push"
                         )
                         continue
                     ok, detail = await push_branch(git_sync_root, branch=branch)

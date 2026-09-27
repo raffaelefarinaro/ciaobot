@@ -116,7 +116,13 @@ def detect(runtime_root: Path) -> LegacyNodeState:
         if not state_file.exists():
             return LegacyNodeState(kind="none")
         raw = state_file.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # `UnicodeDecodeError` is a `ValueError`, not an `OSError`, so an
+        # `OSError`-only guard lets it out — and this function is called from
+        # the startup path with nothing between it and the boot. A half-written
+        # or foreign-encoded state is unreadable in exactly the sense the kinds
+        # above mean, and a truncated file is the case a fail-closed gate most
+        # has to survive: an aborted write, not a host that chose this.
         return LegacyNodeState(kind="invalid", role="invalid")
 
     try:
