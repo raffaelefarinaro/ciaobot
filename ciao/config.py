@@ -519,7 +519,7 @@ class CiaoConfig:
     # Per-provider default thinking level for new chats, set from the PWA
     # Settings → Models tab. A missing entry uses the provider's own default.
     provider_default_thinking: dict[str, str] = field(default_factory=dict)
-    # Per-provider session-insights model, set from the PWA Settings → Models
+    # Per-provider memory-pass model, set from the PWA Settings → Models
     # tab. A missing entry uses the provider's balanced default.
     provider_insights_models: dict[str, str] = field(default_factory=dict)
     pwa_port: int = 8443
@@ -531,18 +531,17 @@ class CiaoConfig:
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab. Empty means the provider's own default applies.
     opencode: OpencodeSettings = field(default_factory=OpencodeSettings)
-    # Fallback when session insights run without workspace context (e.g.
-    # ``scripts/backfill_insights.py``). Live archives use
-    # :func:`ciao.insights.resolve_insights_model` instead.
+    # Fallback when the memory pass runs without workspace context. Live
+    # archives use :func:`ciao.insights.resolve_insights_model` instead.
     insights_model: str = "sonnet"
     insights_enabled: bool = True
-    # Operator override for the insights model, set from the PWA Settings →
+    # Operator override for the memory-pass model, set from the PWA Settings →
     # Models tab (runtime settings store).
     # Empty = automatic routing: the workspace's sonnet-tier model.
     insights_model_override: str = ""
     # Trajectory capture: when a chat is archived, also write a structured
-    # JSON record of skills loaded, tools used, errors, decisions, and the
-    # outcome to ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``. The
+    # JSON record of skills loaded, tools used, errors, and the outcome to
+    # ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``. The
     # weekly ``ciao.skill_evolution`` pass mines this directory. The operator
     # setting is persisted by AppSettingsStore and migrated from the retired
     # CIAO_TRAJECTORIES_DISABLED value.

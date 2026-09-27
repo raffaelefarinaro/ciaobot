@@ -1,23 +1,23 @@
 """Session trajectory capture.
 
 A trajectory is a structured JSON record of one Claude Code session: which
-skills were loaded, which tools were used, how many turns, errors and user
-corrections, and the eventual outcome. It is the raw dataset that powers
+skills were loaded, which tools were used, how many turns, errors, and the
+eventual outcome. It is the raw dataset that powers
 ``ciao.skill_evolution``: by mining trajectories where a skill was active
-but the session went sideways (errors, corrections, low success), we can
-propose edits to the skill prompt.
+but the session went sideways (errors, low success), we can propose edits to
+the skill prompt.
 
 Storage layout::
 
     ~/.ciao/trajectories/YYYY-MM/<session-id>.json
 
-The data sources are the same JSONL the insights pipeline already
+The data sources are the same JSONL the memory pass already
 consumes. We reuse ``ciao.insights.filter_session_jsonl``'s line-oriented
 output rather than re-reading the raw blob, because the raw blob is
 deleted at archive time but the filtered string sticks around inside the
 ``ArchiveOutcome`` long enough for the post-archive task to consume it.
-That keeps the two outputs (insights + trajectory) consistent and avoids
-a second filesystem read.
+That keeps the trajectory consistent with what the pass read and avoids a
+second filesystem read.
 """
 
 from __future__ import annotations
@@ -174,81 +174,19 @@ def _short(value: Any, limit: int = 240) -> str:
     return value[:limit] + "…"
 
 
-# ── Insights parsing ─────────────────────────────────────────────────────
+# ── Trajectory assembly ──────────────────────────────────────────────────
 
 
-_IDX_SUFFIX = re.compile(r"\s*\[idx=\d+\]\s*$")
-_REASON_SPLIT = re.compile(r"\s+because\s+", re.IGNORECASE)
-
-
-def _section_body(text: str, header: str) -> str:
-    """Return the body of ``## Header`` in an insights block."""
-    if not text or header not in text:
-        return ""
-    start = text.index(header) + len(header)
-    rest = text[start:]
-    m = re.search(r"\n##\s", rest)
-    return rest[: m.start()] if m else rest
-
-
-def extract_decisions(insights_text: str) -> list[dict[str, str]]:
-    """Pull the ``## Decisions`` bullets out of an insights block."""
-    out: list[dict[str, str]] = []
-    for raw in _section_body(insights_text, "## Decisions").splitlines():
-        line = raw.strip()
-        if not line.startswith("- "):
-            continue
-        body = _IDX_SUFFIX.sub("", line[2:].strip())
-        if not body:
-            continue
-        parts = _REASON_SPLIT.split(body, maxsplit=1)
-        if len(parts) == 2:
-            out.append({
-                "what": parts[0].rstrip(",. "),
-                "why": parts[1].rstrip("."),
-            })
-        else:
-            out.append({"what": body, "why": ""})
-    return out
-
-
-def extract_insight_errors(insights_text: str) -> list[dict[str, Any]]:
-    """Pull the ``## Errors`` bullets and mark resolution status."""
-    out: list[dict[str, Any]] = []
-    for raw in _section_body(insights_text, "## Errors").splitlines():
-        line = raw.strip()
-        if not line.startswith("- "):
-            continue
-        body = _IDX_SUFFIX.sub("", line[2:].strip())
-        if not body:
-            continue
-        resolved = "unresolved" not in body.lower()
-        out.append({"summary": body, "resolved": resolved})
-    return out
-
-
-def count_section_items(insights_text: str, header: str) -> int:
-    return sum(
-        1
-        for line in _section_body(insights_text, header).splitlines()
-        if line.strip().startswith("- ")
-    )
-
-
-def infer_outcome(*, errors: int, user_corrections: int) -> str:
+def infer_outcome(*, errors: int) -> str:
     """Heuristic outcome label.
 
-    ``success`` = clean run, no errors and no pushback.
-    ``needs_review`` = at least one error or user correction. Subjective,
-    refined later via LLM-as-judge; the gate today is just a flag for the
-    weekly evolution pass to look at.
+    ``success`` = clean run, no errors. ``needs_review`` = at least one
+    error. Subjective, refined later via LLM-as-judge; the gate today is
+    just a flag for the weekly evolution pass to look at.
     """
-    if errors > 0 or user_corrections > 0:
+    if errors > 0:
         return "needs_review"
     return "success"
-
-
-# ── Trajectory assembly ──────────────────────────────────────────────────
 
 
 def build_trajectory(
@@ -256,7 +194,6 @@ def build_trajectory(
     session_id: str,
     session_data: SessionData,
     archive_path: Path,
-    insights_text: str = "",
     context: str = "",
     project_id: str = "",
     chat_id: str = "",
@@ -271,9 +208,6 @@ def build_trajectory(
     when possible so trajectories survive workspace moves.
     """
     ts = (timestamp or datetime.now(UTC)).replace(microsecond=0)
-    decisions = extract_decisions(insights_text)
-    user_corrections = count_section_items(insights_text, "## User corrections")
-    insight_errors = extract_insight_errors(insights_text)
 
     if workspace_root is not None:
         try:
@@ -291,25 +225,14 @@ def build_trajectory(
         )
     ]
 
-    # If insights extracted errors, prefer those (semantic). Otherwise
-    # fall back to raw tool_result error samples.
-    errors_field: list[dict[str, Any]] = (
-        insight_errors
-        if insight_errors
-        else [
-            {
-                "tool_use_id": e["tool_use_id"],
-                "snippet": e["snippet"],
-                "resolved": False,
-            }
-            for e in session_data.error_samples
-        ]
-    )
-
-    outcome = infer_outcome(
-        errors=len(insight_errors) + session_data.error_count,
-        user_corrections=user_corrections,
-    )
+    errors_field: list[dict[str, Any]] = [
+        {
+            "tool_use_id": e["tool_use_id"],
+            "snippet": e["snippet"],
+            "resolved": False,
+        }
+        for e in session_data.error_samples
+    ]
 
     return {
         "session_id": session_id,
@@ -321,10 +244,8 @@ def build_trajectory(
         "task_summary": task_summary,
         "skills_loaded": session_data.skills_loaded,
         "tools_used": tools_used,
-        "decisions": decisions,
-        "user_corrections": user_corrections,
         "errors": errors_field,
-        "outcome": outcome,
+        "outcome": infer_outcome(errors=session_data.error_count),
         "turns": session_data.turns,
         "archive_path": archive_str,
         "insights_path": archive_str,
@@ -367,7 +288,6 @@ def build_and_persist_trajectory(
     session_id: str,
     filtered_jsonl: str,
     archive_path: Path,
-    insights_text: str = "",
     context: str = "",
     project_id: str = "",
     chat_id: str = "",
@@ -380,8 +300,8 @@ def build_and_persist_trajectory(
     """One-shot orchestrator used by the post-archive task.
 
     Parses the filtered JSONL into a ``SessionData``, assembles a
-    trajectory record (folding in insights text when available), and
-    writes it to ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``.
+    trajectory record and writes it to
+    ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``.
     Returns the written path, or ``None`` when the input is empty or writing
     failed. ``error_out``, when given, records a reason for the failure case so
     the resumable pipeline can settle the stage as failed instead of succeeded.
@@ -394,7 +314,6 @@ def build_and_persist_trajectory(
             session_id=session_id,
             session_data=session_data,
             archive_path=archive_path,
-            insights_text=insights_text,
             context=context,
             project_id=project_id,
             chat_id=chat_id,

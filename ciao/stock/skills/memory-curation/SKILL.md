@@ -26,7 +26,7 @@ ciao curation-begin --json
 
 It does three jobs, and each replaces work you would otherwise do by hand:
 
-1. **It serializes the run.** One curation run per vault at a time, and archive-time auto-apply stands down while the lease is held — so a chat being archived cannot append to a region you are halfway through rewriting. **Exit 75 means another run holds the lease: stop immediately and say nothing happened.** Do not curate anyway.
+1. **It serializes the run.** One curation run per vault at a time, so a second pass cannot rewrite a region you are halfway through consolidating. **Exit 75 means another run holds the lease: stop immediately and say nothing happened.** Do not curate anyway.
 2. **It computes the worklist.** Pending proposals, region usage, aging entries, learnings, the weekly marker, log sizes and skill proposals are all mechanical checks; code has already run them. **`"empty": true` means there is genuinely nothing to do — reply with the one-line no-op and stop.** The lease is already released in that case. Do not open a single file to double-check.
 3. **It applies the run budget.** Work only the passes under `planned`, and only the `keys` listed there. Anything under `deferred` is next run's work, not yours — it is already recorded and will not be lost.
 
@@ -52,7 +52,7 @@ ciao curation-end --holder <lease.holder> --status ok|failed --planned <n> --com
 
 ## 1. Process the proposals queue
 
-Start from the recent archived chats: prefer their existing session-insights sections, and sweep any archive since the last run that has none (its extraction failed or predates insights) — those are exactly the chats whose facts never entered the queue. Archive time already auto-applies confidently-tagged facts, so what remains queued is unsure or failed. List pending items with `ciao memory-proposals` and route each by its bracketed kind:
+Start from the pending queue: list pending items with `ciao memory-proposals` and route each by its bracketed kind:
 
 - `[memory]` / `[profile]` name bounded regions and **stay queued** for the user.
 - `[project <doc-path>]` folds into that canonical doc.
@@ -64,7 +64,7 @@ File a fact into its destination first, then dismiss with `ciao memory-proposal-
 
 Pass the text via `--text-file`, not as an argument: a proposal is arbitrary user prose, and one containing `$(...)`, backticks or quotes would be run or mangled by the shell on its way to the command. A positional substring is still accepted for a value you have read and know is plain.
 
-When you discover a bounded-region fact yourself — e.g. reading a transcript whose chat never grew a session-insights section — write the fact verbatim to a scratch file and file it with `ciao memory-proposal-add --kind memory --source <chat id> --text-file <fact-file>`. The source is the chat's plain identifier, never its quoted title, and the fact never travels as a shell argument: `$()`, backticks, or quotes in either would run or mangle in a shell. When no chat id is at hand, omit `--source`. A fact that exists only as report prose has no review path and gets re-derived every night; re-filing a fact an earlier run already queued is a harmless no-op because the queue dedupes by text.
+When you discover a bounded-region fact yourself — e.g. reading a transcript whose chat never got a memory pass, or one the pass left short — write the fact verbatim to a scratch file and file it with `ciao memory-proposal-add --kind memory --source <chat id> --text-file <fact-file>`. The source is the chat's plain identifier, never its quoted title, and the fact never travels as a shell argument: `$()`, backticks, or quotes in either would run or mangle in a shell. When no chat id is at hand, omit `--source`. A fact that exists only as report prose has no review path and gets re-derived every night; re-filing a fact an earlier run already queued is a harmless no-op because the queue dedupes by text.
 
 ## 2. Consolidate bounded regions
 

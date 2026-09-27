@@ -1,48 +1,33 @@
 // Phrasing for the post-archive pipeline.
 //
-// Archiving a chat starts one background task that extracts insights, folds the
-// project doc, saves a trajectory and files memory proposals. None of that used
-// to be visible anywhere in the app. These helpers turn the raw per-step
-// telemetry into the two sentences a user actually wants:
+// Archiving a chat starts one background task that saves the session trajectory.
+// None of that used to be visible anywhere in the app. These helpers turn the
+// raw per-step telemetry into the two sentences a user actually wants:
 //
-//   while it runs   → "extracting insights…"
-//   once it settles → "insights added · project doc updated · 3 memory proposals"
+//   while it runs   → "saving trajectory…"
+//   once it settles → "trajectory saved"
 //
 // The settled line is the important half: it stays on the archived chat as the
 // permanent record of what Ciaobot took from that conversation.
 
-import type { ChatPostprocess, ChatPostprocessStep } from './types'
+import type { ChatPostprocess } from './types'
 
-/** Execution order, matching REGISTRY order in ciao/job_runs.py. */
-const POSTPROCESS_STEPS = [
-  'insights',
-  'project_doc_update',
-  'trajectory',
-  'memory_proposals',
-] as const
+/** Execution order, matching PIPELINE_STAGES in ciao/archive_jobs.py. */
+const POSTPROCESS_STEPS = ['trajectory'] as const
 
 /** Present tense, for the step currently running. */
 const RUNNING_LABEL: Record<string, string> = {
-  insights: 'extracting insights',
-  project_doc_update: 'folding into project doc',
   trajectory: 'saving trajectory',
-  memory_proposals: 'proposing memories',
 }
 
 /** What to call a step that failed. Named by its subject, not its verb. */
 const FAILED_LABEL: Record<string, string> = {
-  insights: 'insights failed',
-  project_doc_update: 'project doc failed',
   trajectory: 'trajectory failed',
-  memory_proposals: 'memory proposals failed',
 }
 
 /** Short noun for a still-unfinished step in the settled summary line. */
 const STEP_NOUN: Record<string, string> = {
-  insights: 'insights',
-  project_doc_update: 'project doc',
   trajectory: 'trajectory',
-  memory_proposals: 'memory proposals',
 }
 
 /** Human-readable noun for a pipeline stage id, for "X not finished" lines. */
@@ -89,16 +74,11 @@ export function postprocessErroredSteps(
 /**
  * Whether this chat's pipeline should offer a retry. A settled pipeline with
  * unfinished or failed stages is the retriggerable case; a pipeline still
- * running is not (a retry would be rejected), and one that never ran insights
- * is nothing a retry would fix.
+ * running is not (a retry would be rejected).
  */
 export function postprocessNeedsRetry(pp: ChatPostprocess | null | undefined): boolean {
   if (!pp || isPostprocessing(pp)) return false
-  if (pp.state === 'incomplete') return true
-  if (pp.state === 'blocked') return true
-  // Back-compat: a legacy record with an errored insights step.
-  const step = pp.steps?.['insights']
-  return pp.state === 'done' && step?.status === 'error'
+  return pp.state === 'incomplete' || pp.state === 'blocked'
 }
 
 /**
@@ -109,14 +89,6 @@ export function postprocessLabel(pp: ChatPostprocess | null | undefined): string
   if (!isPostprocessing(pp)) return ''
   const step = pp?.step || ''
   return RUNNING_LABEL[step] || 'tidying up'
-}
-
-function stepExtra(step: ChatPostprocessStep | undefined): Record<string, unknown> {
-  return (step?.extra || {}) as Record<string, unknown>
-}
-
-function countOf(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
 }
 
 /**
@@ -137,30 +109,7 @@ export function postprocessOutcomes(pp: ChatPostprocess | null | undefined): str
       continue
     }
     if (step.status === 'skipped') continue
-    const extra = stepExtra(step)
-    switch (job) {
-      case 'insights':
-        out.push('insights added')
-        break
-      case 'project_doc_update':
-        // `wrote: false` means the model found no material change worth folding.
-        if (extra.wrote) out.push('project doc updated')
-        break
-      case 'trajectory':
-        out.push('trajectory saved')
-        break
-      case 'memory_proposals': {
-        const proposed = countOf(extra.proposals)
-        const promoted = countOf(extra.promoted)
-        if (proposed) {
-          out.push(`${proposed} memory proposal${proposed === 1 ? '' : 's'}`)
-        }
-        if (promoted) {
-          out.push(`${promoted} memory saved`)
-        }
-        break
-      }
-    }
+    if (job === 'trajectory') out.push('trajectory saved')
   }
   return out
 }

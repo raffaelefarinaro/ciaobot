@@ -53,8 +53,10 @@ def test_architecture_doc_indexes_every_ciao_module() -> None:
 # the schedules section and ciao/stock/schedules.json's own prompt. Readers
 # reach for the bounded-memory section first, so pin the corrected contract
 # and the guardrails that make the unattended write safe. AI-01 later made the
-# promotion rule explicit: archive time auto-applies confident state-shaped
-# facts, while the unattended curator never promotes a NEW region fact.
+# promotion rule explicit: the post-archive memory pass can promote a
+# confident state-shaped fact, while the unattended curator never promotes a
+# NEW region fact. (#627 deleted the archive-time auto-apply that used to be
+# the other half of that contrast.)
 def test_architecture_doc_states_the_consolidation_contract() -> None:
     repo = Path(__file__).resolve().parents[1]
     doc = (repo / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")

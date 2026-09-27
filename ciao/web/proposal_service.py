@@ -792,7 +792,7 @@ async def _plan_accept_reconcile(
 ) -> tuple[ReconcileDecision | None, ReconcileDecision | None]:
     """Reconcile one queued fact against the region as it stands right now.
 
-    The retry half of the archive-time deferral. A fact queued because the
+    The retry half of the deferral. A fact queued because the
     reconcile timed out, replied unusably, or named an entry that had moved
     under it is otherwise stuck: accepting it took the plain append path, which
     is the very thing the deferral exists to prevent — the obsolete entry and
@@ -879,8 +879,8 @@ async def _promote_region_row(
     the two steps. So this returns a failure and the caller keeps the bullet.
 
     Goes through ``accept_region_fact`` rather than ``update_region`` directly,
-    so a click gets what an archive-time promotion gets: the event-shape guard,
-    the stamp-stripped duplicate check, the learned-at stamp the aging audit
+    so a click gets the full guarded write: the event-shape guard, the
+    stamp-stripped duplicate check, the learned-at stamp the aging audit
     reads, and the consolidations undo log. It takes the same guide lock
     ``update_region`` did.
 
@@ -894,8 +894,8 @@ async def _promote_region_row(
 
     ``reconcile`` runs one fresh reconcile call against the region's current
     entries first (:func:`_plan_accept_reconcile`) and applies its decision, so
-    a fact the archive-time reconcile deferred can be resolved on a retry
-    instead of being appended beside whatever it supersedes. It is off by
+    a fact an earlier reconcile deferred can be resolved on a retry instead
+    of being appended beside whatever it supersedes. It is off by
     default: the plain accept is one synchronous write, and a model call on
     every click would cost the batch endpoint one timeout per row.
     """
@@ -1105,8 +1105,8 @@ def _accept_learnings_row(config, row: dict[str, Any]) -> AcceptOutcome:
 async def _accept_project_row(config, row: dict[str, Any]) -> AcceptOutcome:
     """Fold an accepted `[project]` bullet into its canonical doc.
 
-    Reuses the archive-time fold (guards, NO_CHANGES sentinel, per-doc lock)
-    with just this bullet as input. ``False`` back means the model judged the
+    Reuses the fold's guards, NO_CHANGES sentinel and per-doc lock with just
+    this bullet as input. ``False`` back means the model judged the
     doc already covers the fact or a guard rejected the rewrite — ambiguous
     enough that dropping the row silently would be wrong, so the caller keeps
     it queued and the operator decides.
@@ -1118,7 +1118,7 @@ async def _accept_project_row(config, row: dict[str, Any]) -> AcceptOutcome:
         return AcceptOutcome(ok=False, error="the bullet names no project doc")
     doc = Path(doc_raw)
     if not doc.is_absolute():
-        # Same resolution the archive-time fold uses: workspace-root-relative.
+        # Workspace-root-relative, as the fold has always resolved a bare name.
         doc = Path(config.workspace_root) / doc
     if not doc.is_file():
         return AcceptOutcome(ok=False, error=f"project doc not found: {doc_raw}")

@@ -196,7 +196,7 @@ part of the signal spec.
 A transient *working* mark where the work originates, and a persistent
 *needs you* count where its output waits. One without the other either hides
 that anything happened, or hides that something is now pending. Worked
-example — the insights/memory-proposal pipeline: post-archive work shows a
+example — the memory pass and the proposals queue: post-archive work shows a
 transient `tidying` working signal (ChatSignals + `chatIsPostprocessing` in
 the store), and the persistent waiting count is the memory rail badge
 (proposals store counts rendered in `ProjectSidebar.vue`).

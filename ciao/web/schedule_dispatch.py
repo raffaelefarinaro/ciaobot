@@ -5,7 +5,7 @@ persistence.  This collaborator owns the part of a schedule run that turns one
 stored :class:`~ciao.schedules.ScheduleEntry` into a stream, waits for any
 background work, grades the run, and decides whether the resulting chat can be
 auto-archived.  Target-chat preparation and the attention classifier live here
-too because they are part of the same dispatch transaction; archive extraction
+too because they are part of the same dispatch transaction; the memory pass
 and the rest of the archive pipeline deliberately remain manager concerns.
 
 The manager keeps delegating methods under their old names.  Calls back into
@@ -312,9 +312,9 @@ class ScheduleDispatcher:
                 from ciao.providers.oneshot import run_oneshot
                 from ciao.insights import _DEFAULT_TIMEOUT_S, is_context_overflow
 
-                # Same env-tunable budget as the insights job: a slow local
-                # model can take minutes on a successful call, so a hard 60s
-                # window turned tail latency into a guaranteed TimeoutError
+                # Same env-tunable budget as the other one-shot jobs: a slow
+                # local model can take minutes on a successful call, so a hard
+                # 60s window turned tail latency into a guaranteed TimeoutError
                 # and the classifier ran 6/6 in error.
                 text = await run_oneshot(
                     user_prompt,

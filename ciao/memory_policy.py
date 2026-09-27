@@ -2,18 +2,25 @@
 
 The memory system has more than one way to write durable memory, and they do
 not all have the same approval rule. Before this module the copies drifted:
-the architecture said new memory needs review while archive extraction called
-``auto_promote_memory=True``; the memory agent said the typed path enforces the
-cap while ``update_region`` documents and implements an advisory one; and the
-unattended capsule said "do not ask" without saying what to do with work that
-*requires* approval.
+the architecture said new memory needs review while archive-time extraction
+called ``auto_promote_memory=True``; the memory agent said the typed path
+enforces the cap while ``update_region`` documents and implements an advisory
+one; and the unattended capsule said "do not ask" without saying what to do with
+work that *requires* approval.
+
+That archive-time auto-apply is itself gone: it was the one-shot extraction
+pipeline, deleted in #627, and the memory pass (an attended chat, row
+``memory_pass`` below) is the post-archive writer now. No context in this matrix
+promotes a new region fact with no reviewer present; the rows that write one
+live are attended turns a person can steer.
 
 This module is the single machine-readable statement of that policy. The prose
 lives in the stock assets (``ciao/stock/agents/memory.md``,
 ``ciao/stock/commands/remember.md``, ``ciao/stock/skills/memory-curation``) and
 in ``docs/ARCHITECTURE.md``; tests pin every copy here so they cannot drift
-apart again. It is deliberately behavior-free: the pipeline in
-``ciao/memory_proposals.py`` and the curation skill remain the implementation.
+apart again. It is deliberately behavior-free: the accept path in
+``ciao/memory_proposals.py``, the memory-pass chat in
+``ciao/web/memory_pass.py`` and the curation skill remain the implementation.
 
 Two rules the matrix encodes and the whole surface must respect:
 
@@ -42,16 +49,19 @@ MEMORY_DESTINATIONS: tuple[str, ...] = (
     "learnings",
     "review",
 )
-"""Destination vocabulary shared with the extraction prompts and the queue.
+"""Destination vocabulary shared with the queue and the stock memory assets.
 
 ``memory`` and ``profile`` are the bounded regions; ``review`` is the honest
 "unsure" bucket and always waits in ``Workspace/Memory-Proposals.md``.
 """
 
 
-# How a context treats NEW region facts. ``archive`` auto-applies only
-# confident, state-shaped facts; ``reviewed`` queues them.
-PROMOTE_AUTO = "auto"
+# How a context treats NEW region facts. ``reviewed`` means the fact is filed as
+# a proposal and only a human or a curator settles it; ``attended`` means the
+# write happens in a turn a person is present for and can steer — an attended
+# chat, which includes the post-archive memory pass. There is deliberately no
+# ``auto``: the archive-time auto-apply was deleted with the one-shot pipeline
+# (#627), and no unattended run promotes a new region fact.
 PROMOTE_REVIEWED = "reviewed"
 PROMOTE_ATTENDED = "attended"
 
@@ -62,9 +72,9 @@ class MemoryWritePolicy:
 
     ``writes_regions`` covers the two bounded regions only. ``writes_vault``
     covers the durable-markdown destinations (project docs, people notes,
-    learnings). ``promotes_new_region_facts`` is ``auto`` (confident,
-    state-shaped facts at archive time), ``reviewed`` (queued for a human or
-    curator), or ``attended`` (a human action in the current turn).
+    learnings). ``promotes_new_region_facts`` is ``reviewed`` (filed as a
+    proposal for a human or a curator) or ``attended`` (written inside a turn a
+    person is present for); nothing here promotes one with no reviewer.
     """
 
     key: str
@@ -76,7 +86,7 @@ class MemoryWritePolicy:
     consolidates_regions: str  # "never" | "at_threshold"
     cap_semantics: str
     undo_log_required: bool
-    approval: str  # "attended" | "unattended" | "archive"
+    approval: str  # "attended" | "unattended"
 
 
 CONTEXT_POLICIES: tuple[MemoryWritePolicy, ...] = (
@@ -97,22 +107,26 @@ CONTEXT_POLICIES: tuple[MemoryWritePolicy, ...] = (
         approval="attended",
     ),
     MemoryWritePolicy(
-        key="archive_extraction",
+        key="memory_pass",
         summary=(
-            "A chat is archived and its Session insights are routed. Confident, "
-            "state-shaped facts are auto-applied (regions, people stubs, "
-            "learnings); project facts are owned by the doc fold; event-shaped, "
-            "unsure, and failed facts wait in the proposals queue. Unattended "
-            "turns in the transcript are never lifted as facts."
+            "A chat is archived and an attended memory-pass chat is enqueued for "
+            "it. The pass reads the archived transcript and the vault, then does "
+            "the vault work with its own tools: it updates the note an entity "
+            "already has, promotes a confident state-shaped fact to a region "
+            "directly, folds Decisions into the project doc, creates a note only "
+            "for a genuinely new entity, and queues whatever it is unsure of — "
+            "including anything with no decided destination — in "
+            "Workspace/Memory-Proposals.md. A turn the transcript marks as "
+            "automated is not the user's, and is never lifted as a fact."
         ),
         writes_regions=True,
         writes_vault=True,
-        promotes_new_region_facts=PROMOTE_AUTO,
+        promotes_new_region_facts=PROMOTE_ATTENDED,
         queues_uncertain=True,
         consolidates_regions="never",
         cap_semantics=CAP_SEMANTICS_ADVISORY,
         undo_log_required=True,
-        approval="archive",
+        approval="attended",
     ),
     MemoryWritePolicy(
         key="unattended_curation",
@@ -152,7 +166,7 @@ CONTEXT_POLICIES: tuple[MemoryWritePolicy, ...] = (
         key="proposal_acceptance",
         summary=(
             "A reviewer accepts or dismisses a queued proposal from the PWA or the "
-            "CLI. Region facts go through the same guarded write as archive time "
+            "CLI. Region facts go through the guarded write every promotion uses "
             "(event-shape check, stamp-stripped dedupe, learned-at stamp, undo log "
             "on replacement); people notes merge rather than overwrite."
         ),

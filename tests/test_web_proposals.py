@@ -507,11 +507,10 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
 def _region_entries(config, workspace: str, region: str) -> list[str]:
     """A region's entries with their learned-at stamps removed.
 
-    Accepting a fact goes through the same guarded write as an archive-time
-    promotion, which appends `[YYYY-MM-DD]` — the stamp the aging audit reads to
-    surface facts that have not been re-verified. Stripping it here is the same
-    normalisation the production dedupe does, and keeps these assertions from
-    depending on today's date.
+    Accepting a fact appends a learned-at `[YYYY-MM-DD]` stamp — the stamp the
+    aging audit reads to surface facts that have not been re-verified.
+    Stripping it here is the same normalisation the production dedupe does, and
+    keeps these assertions from depending on today's date.
     """
     from ciao.memory_audit import strip_learned_stamp
     from ciao.memory_tool import read_region
