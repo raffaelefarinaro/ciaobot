@@ -148,7 +148,8 @@ async def update_project_doc(
                 "Current canonical doc:\n\n"
                 f"{current}\n\n"
                 "---\n\n"
-                "Session insights from the just-archived chat:\n\n"
+                "Decisions to fold in (the accepted facts addressed to this "
+                "doc):\n\n"
                 f"{insights_md}"
             )
             kwargs: dict = {

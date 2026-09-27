@@ -1,7 +1,7 @@
 """Unified recorder for background-job runs.
 
-Every background automation (title generation, insights extraction,
-schedule dispatch, startup tasks, ...) wraps its work in :func:`track`
+Every background automation (title generation, the memory pass, schedule
+dispatch, startup tasks, ...) wraps its work in :func:`track`
 (async) or :func:`track_sync` (sync) so the Automation page can show, per
 job: last run, duration, model/provider, and the error text on failure.
 

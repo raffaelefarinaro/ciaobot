@@ -382,9 +382,8 @@ class ArchivePipeline:
         poll brought the chat back — with the same ``chat_id`` and
         ``archive_path``, hence the same `new_job_id`, which `_cancel_archive_job`
         had just tombstoned for good. The resurrected chat could therefore never
-        run insights, the project-doc fold, trajectories or memory proposals
-        again, and `retry_insights` reported "complete" for a pipeline that had
-        never run.
+        run its trajectory stage again, and `retry_insights` reported "complete"
+        for a pipeline that had never run.
 
         Scoped to this chat's own directory under the derived transcript
         archive: that tree is Ciaobot-generated, one directory per chat, and the
@@ -646,8 +645,7 @@ class ArchivePipeline:
         )
         # Retained so a delete can cancel an in-flight stage. The tombstone alone
         # is not enough: a stage already awaiting a model call would otherwise
-        # resume and write derived state (append insights, fold the doc) after
-        # the chat was deleted.
+        # resume and write a derived trajectory after the chat was deleted.
         self._tasks[chat_id] = task
 
         def _drop_finished(
@@ -736,7 +734,7 @@ class ArchivePipeline:
         steps = dict(state.get("steps") or {})
         # Only terminal outcomes become step entries. Pending/running/blocked
         # stages are named by the manifest's `unfinished` list instead; folding
-        # them in would make a blocked insights stage read as "insights added".
+        # them in would make a blocked stage read as the step having succeeded.
         terminal = {"ok": "ok", "skipped": "skipped", "error": "error"}
         for name, status in (view.get("steps") or {}).items():
             manifest_status = status.get("status")
@@ -929,9 +927,9 @@ class ArchivePipeline:
                 task.add_done_callback(_drop_archive)
 
             # With the pass in charge, this archive's memory work happens in a
-            # chat instead of here. Gated on the same conditions that used to
-            # mean "run insights", so an empty archive or an unresolved vault
-            # does not queue a pass with nothing to read.
+            # chat instead of here. Gated on the same conditions, so an empty
+            # archive or an unresolved vault does not queue a pass with nothing
+            # to read.
             if (
                 memory_pass.MEMORY_PASS_CHATS
                 and not is_pass

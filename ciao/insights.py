@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 def resolve_insights_model(
     config: CiaoConfig, workspace: str | None = None, provider: str | None = None
 ) -> str:
-    """Pick the model for session-insights extraction.
+    """Pick the model for the post-archive memory pass.
 
     When the operator has not set an explicit override (Settings → Models →
     Session insights = Automatic), use the workspace/provider default model.

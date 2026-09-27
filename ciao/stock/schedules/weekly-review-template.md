@@ -1,6 +1,6 @@
 # Weekly Self-Improvement Review
 
-Review the past 7 days (archived chat insights under the vault's `Logs/Chats/` and recent schedule runs) for concrete setup improvements.
+Review the past 7 days (archived chat transcripts under the vault's `Logs/Chats/` and the memory-pass changes they produced, plus recent schedule runs) for concrete setup improvements.
 
 Use the **memory** subagent for item 3; handle item 4 (prompt hygiene) directly — no dedicated subagent ships for it.
 

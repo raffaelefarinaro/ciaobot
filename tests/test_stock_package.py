@@ -108,13 +108,13 @@ def test_stock_curation_skill_consolidation_contract() -> None:
 def test_stock_curation_skill_files_discovered_bounded_facts() -> None:
     """A bounded-region fact found by reading transcripts must enter the queue.
 
-    Chats without a session-insights section never ran archive-time routing,
-    so the curator is the first to see their facts. Naming them only in the
-    nightly reply left them with no review path: nothing to promote or
-    dismiss, re-derived from scratch every run. The command example must
-    keep both hazard sources out of the shell: the fact travels by file,
-    and the source label is a plain chat id — $(), backticks, and quotes
-    interpolate even inside double quotes.
+    Chats the memory pass never reached (it was off, or the pass failed) have
+    no vault work behind them, so the curator is the first to see their facts.
+    Naming them only in the nightly reply left them with no review path:
+    nothing to promote or dismiss, re-derived from scratch every run. The
+    command example must keep both hazard sources out of the shell: the fact
+    travels by file, and the source label is a plain chat id — $(), backticks,
+    and quotes interpolate even inside double quotes.
     """
     skill = _curation_skill_text()
 

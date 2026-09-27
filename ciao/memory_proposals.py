@@ -150,12 +150,13 @@ DESTINATIONS: tuple[str, ...] = (
     "learnings",
     "review",
 )
-"""Destination vocabulary shared with the extraction prompts. A bullet tagged
-outside this set is treated as untagged and falls back to section defaults."""
+"""Destination vocabulary shared with the proposals queue and the stock memory
+assets. A bullet tagged outside this set is treated as untagged and falls back
+to section defaults."""
 
 # Matches a trailing destination tag: ``[memory]``, ``[project]``,
-# ``[people: Mo Salah]``. The colon-payload form is what the extraction
-# prompts ask for; the queue-file form uses a space (``[people Mo Salah]``),
+# ``[people: Mo Salah]``. The colon-payload form is what the queue and the
+# memory pass ask for; the queue-file form uses a space (``[people Mo Salah]``),
 # which :mod:`ciao.proposal_kinds` owns.
 
 

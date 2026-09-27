@@ -52,35 +52,36 @@ describe('automationHealth', () => {
   })
 })
 
+// A row's nested `sub_jobs` are its bulk variants. No registry entry declares
+// a parent any more (the last one, `backfill_insights`, went with the one-shot
+// pipeline in #627), so there is no real bulk variant to point at: this pins the
+// generic aggregation `nested`/`overallHealth`/`attentionSource` still read,
+// which `AutomationRow.vue` renders, rather than a job that ships.
+function variant(over: Partial<AutomationProcess> = {}): AutomationProcess {
+  return job({ job: 'parent_variant', label: 'Parent variant', ...over })
+}
+
 describe('overallHealth', () => {
   it('reports a failing bulk variant as the parent failing', () => {
-    const insights = job({
-      sub_jobs: [
-        job({ job: 'insights_sweep', label: 'Insights sweep', last_run: run({ status: 'error' }) }),
-      ],
-    })
+    const insights = job({ sub_jobs: [variant({ last_run: run({ status: 'error' }) })] })
 
     expect(automationHealth(insights)).toBe('ok')
     expect(overallHealth(insights)).toBe('error')
-    expect(attentionSource(insights).job).toBe('insights_sweep')
+    expect(attentionSource(insights).job).toBe('parent_variant')
   })
 
   it('names the failing variant so the row is not misread', () => {
-    const insights = job({
-      sub_jobs: [
-        job({ job: 'insights_sweep', label: 'Insights sweep', last_run: run({ status: 'error' }) }),
-      ],
-    })
+    const insights = job({ sub_jobs: [variant({ last_run: run({ status: 'error' }) })] })
 
     expect(lastRunSentence(insights, () => '2 days ago')).toBe(
-      'Insights sweep: failed 2 days ago',
+      'Parent variant: failed 2 days ago',
     )
   })
 
   it('prefers the job’s own failure over a variant’s', () => {
     const insights = job({
       last_run: run({ status: 'error' }),
-      sub_jobs: [job({ job: 'insights_sweep', last_run: run({ status: 'error' }) })],
+      sub_jobs: [variant({ last_run: run({ status: 'error' }) })],
     })
 
     expect(attentionSource(insights).job).toBe('insights')

@@ -11,13 +11,13 @@ Storage layout::
 
     ~/.ciao/trajectories/YYYY-MM/<session-id>.json
 
-The data sources are the same JSONL the insights pipeline already
+The data sources are the same JSONL the memory pass already
 consumes. We reuse ``ciao.insights.filter_session_jsonl``'s line-oriented
 output rather than re-reading the raw blob, because the raw blob is
 deleted at archive time but the filtered string sticks around inside the
 ``ArchiveOutcome`` long enough for the post-archive task to consume it.
-That keeps the two outputs (insights + trajectory) consistent and avoids
-a second filesystem read.
+That keeps the trajectory consistent with what the pass read and avoids a
+second filesystem read.
 """
 
 from __future__ import annotations
@@ -291,8 +291,9 @@ def build_trajectory(
         )
     ]
 
-    # If insights extracted errors, prefer those (semantic). Otherwise
-    # fall back to raw tool_result error samples.
+    # If a caller supplied an insights block, its errors are semantic and
+    # win; the archive pipeline produces none any more, so the shipped path
+    # always falls back to the raw tool_result error samples.
     errors_field: list[dict[str, Any]] = (
         insight_errors
         if insight_errors
@@ -380,7 +381,8 @@ def build_and_persist_trajectory(
     """One-shot orchestrator used by the post-archive task.
 
     Parses the filtered JSONL into a ``SessionData``, assembles a
-    trajectory record (folding in insights text when available), and
+    trajectory record (folding in an ``insights_text`` block when a caller
+    supplies one; the archive pipeline stopped producing one in #627), and
     writes it to ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``.
     Returns the written path, or ``None`` when the input is empty or writing
     failed. ``error_out``, when given, records a reason for the failure case so

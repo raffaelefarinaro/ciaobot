@@ -20,9 +20,9 @@ every existing test stays green. This module closes that gap in two halves:
   each synthetic scenario to one provider/model and asks for a structured
   behavior record (tools, writes, answer, deferrals). It is bounded by a
   declared call and cost ceiling (``EvalBudget``) and records the sha256 of the
-  core prompt, guide fixture, extraction prompts, provider, model, and tool
-  catalog with every report, so a baseline and a candidate are comparable and
-  reproducible.
+  core prompt, guide fixture, memory region-reconcile prompt, provider, model,
+  and tool catalog with every report, so a baseline and a candidate are
+  comparable and reproducible.
 
 Everything here is synthetic. There is no ``--vault-root`` and no path that
 reads a live vault: the scenarios in ``ciao/stock/evals/scenarios.json`` are
@@ -542,12 +542,14 @@ def code_revision(repo_root: Path | None = None) -> str:
 
 
 def extraction_prompt_sha256() -> str:
-    """Hash of the shipped extraction prompts, or ``""`` when unavailable.
+    """Hash of the shipped memory region-reconcile prompt, or ``""`` when unavailable.
 
     One value over every prompt that shapes what gets written to the vault, so
     any of them changing moves the provenance. The two one-shot extraction
     prompts (JSONL insights, rendered text) were deleted in #627 with the
-    one-shot pipeline itself; the region reconcile is what remains.
+    one-shot pipeline itself; ``memory_proposals._RECONCILE_SYSTEM_PROMPT`` is
+    what remains, and the field keeps its old name on purpose so existing
+    reports stay comparable.
     """
     try:
         from ciao import memory_proposals

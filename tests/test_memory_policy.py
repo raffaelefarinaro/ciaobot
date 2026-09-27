@@ -50,16 +50,17 @@ def test_the_matrix_covers_the_reviewed_contexts() -> None:
     }
 
 
-def test_the_memory_pass_is_not_an_auto_apply_path_and_curation_is_narrower() -> None:
-    """The archive-time auto-apply is gone; nothing promotes a new fact on its own.
+def test_the_memory_pass_writes_live_and_curation_is_narrower() -> None:
+    """The archive-time auto-apply is gone; the attended pass replaced it.
 
-    The post-archive writer is the memory pass, a chat: it proposes and a
-    reviewer or an accept promotes. Curation still runs with no reviewer at
-    all, so it may only consolidate what a region already holds.
+    The post-archive writer is the memory pass, a chat a person is present for:
+    it promotes a confident fact itself and queues what it is unsure of. Curation
+    still runs with no reviewer at all, so it may only consolidate what a region
+    already holds and file every new fact as a proposal.
     """
     memory_pass = mp.context_policy("memory_pass")
     curation = mp.unattended_policy()
-    assert memory_pass.promotes_new_region_facts == mp.PROMOTE_REVIEWED
+    assert memory_pass.promotes_new_region_facts == mp.PROMOTE_ATTENDED
     assert memory_pass.queues_uncertain is True
     assert curation.promotes_new_region_facts == mp.PROMOTE_REVIEWED
     assert curation.consolidates_regions == "at_threshold"
@@ -69,6 +70,20 @@ def test_the_memory_pass_is_not_an_auto_apply_path_and_curation_is_narrower() ->
     assert curation.writes_vault is True
     assert memory_pass.approval == "attended"
     assert memory_pass.approval != curation.approval
+
+
+def test_only_attended_contexts_promote_a_new_region_fact() -> None:
+    """No unattended row may write one, and every attended row is attended-marked.
+
+    This is the machine-readable half of the ARCHITECTURE table row: the memory
+    pass promotes live, the nightly curator never does.
+    """
+    for key in mp.CONTEXT_KEYS:
+        policy = mp.context_policy(key)
+        if policy.promotes_new_region_facts == mp.PROMOTE_ATTENDED:
+            assert policy.approval == "attended", key
+        else:
+            assert policy.approval == "unattended", key
 
 
 def test_the_review_destination_is_always_the_unsure_bucket() -> None:

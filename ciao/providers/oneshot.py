@@ -133,7 +133,7 @@ async def _run_claude_oneshot(
     env: dict[str, str] | None,
     max_turns: int = 2,
 ) -> str:
-    # Titles / insights / critique never need agent tooling. Leaving
+    # Titles / doc folds / critique never need agent tooling. Leaving
     # ``tools`` unset keeps the CLI's default Claude Code tool schemas in
     # the prompt (Bash/Read/Edit/…), which burns tokens for no benefit.
     # ``tools=[]`` maps to ``--tools ""``; ``strict_mcp_config`` with the

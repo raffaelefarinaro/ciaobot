@@ -2575,11 +2575,10 @@ async def chat_archive(request: Request) -> JSONResponse:
 async def chat_retry_insights(request: Request) -> JSONResponse:
     """Resume unfinished post-archive stages for a single archived chat.
 
-    Re-runs whatever is still pending/failed on the archive's manifest —
-    insights extraction when it is missing, plus the project fold, trajectory
-    and memory proposals when a crash landed after insights. Returns the retry
-    status and the manifest view so the archived-chat panel can render partial
-    completion. A pipeline already running for the chat is left alone.
+    Re-runs whatever is still pending/failed on the archive's manifest — the
+    session trajectory is the only stage left. Returns the retry status and the
+    manifest view so the archived-chat panel can render partial completion. A
+    pipeline already running for the chat is left alone.
     """
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
@@ -5082,7 +5081,7 @@ def _routines_payload(config, app_settings) -> dict:
             config.primary_workspace()
         )
 
-    # On Automatic the insights routine resolves per workspace
+    # On Automatic the memory pass resolves per workspace
     # (resolve_insights_model takes the chat's workspace), so the single
     # *_effective value above is only the primary-workspace answer. Reporting it
     # alone reads as a global choice and is wrong for every other workspace, so

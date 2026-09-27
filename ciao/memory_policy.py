@@ -11,7 +11,8 @@ work that *requires* approval.
 That archive-time auto-apply is itself gone: it was the one-shot extraction
 pipeline, deleted in #627, and the memory pass (an attended chat, row
 ``memory_pass`` below) is the post-archive writer now. No context in this matrix
-auto-applies a new region fact any more.
+promotes a new region fact with no reviewer present; the rows that write one
+live are attended turns a person can steer.
 
 This module is the single machine-readable statement of that policy. The prose
 lives in the stock assets (``ciao/stock/agents/memory.md``,
@@ -56,9 +57,11 @@ MEMORY_DESTINATIONS: tuple[str, ...] = (
 
 
 # How a context treats NEW region facts. ``reviewed`` means the fact is filed as
-# a proposal and only a human or a curator settles it; ``attended`` means a human
-# action in the current turn writes it. There is deliberately no ``auto``: the
-# archive-time auto-apply was deleted with the one-shot pipeline (#627).
+# a proposal and only a human or a curator settles it; ``attended`` means the
+# write happens in a turn a person is present for and can steer — an attended
+# chat, which includes the post-archive memory pass. There is deliberately no
+# ``auto``: the archive-time auto-apply was deleted with the one-shot pipeline
+# (#627), and no unattended run promotes a new region fact.
 PROMOTE_REVIEWED = "reviewed"
 PROMOTE_ATTENDED = "attended"
 
@@ -70,8 +73,8 @@ class MemoryWritePolicy:
     ``writes_regions`` covers the two bounded regions only. ``writes_vault``
     covers the durable-markdown destinations (project docs, people notes,
     learnings). ``promotes_new_region_facts`` is ``reviewed`` (filed as a
-    proposal for a human or a curator) or ``attended`` (a human action in the
-    current turn); nothing here auto-applies one.
+    proposal for a human or a curator) or ``attended`` (written inside a turn a
+    person is present for); nothing here promotes one with no reviewer.
     """
 
     key: str
@@ -107,17 +110,18 @@ CONTEXT_POLICIES: tuple[MemoryWritePolicy, ...] = (
         key="memory_pass",
         summary=(
             "A chat is archived and an attended memory-pass chat is enqueued for "
-            "it. The pass reads the archived transcript and the vault, then writes "
-            "through the normal proposal/evidence path: it updates the note an "
-            "entity already has, files a proposal for whatever it is unsure of, and "
-            "queues anything with no decided destination. There is no archive-time "
-            "auto-apply any more; a fact reaches a region the way every other one "
-            "does, through the ordinary review/accept path. A turn the transcript "
-            "marks as automated is not the user's, and is never lifted as a fact."
+            "it. The pass reads the archived transcript and the vault, then does "
+            "the vault work with its own tools: it updates the note an entity "
+            "already has, promotes a confident state-shaped fact to a region "
+            "directly, folds Decisions into the project doc, creates a note only "
+            "for a genuinely new entity, and queues whatever it is unsure of — "
+            "including anything with no decided destination — in "
+            "Workspace/Memory-Proposals.md. A turn the transcript marks as "
+            "automated is not the user's, and is never lifted as a fact."
         ),
         writes_regions=True,
         writes_vault=True,
-        promotes_new_region_facts=PROMOTE_REVIEWED,
+        promotes_new_region_facts=PROMOTE_ATTENDED,
         queues_uncertain=True,
         consolidates_regions="never",
         cap_semantics=CAP_SEMANTICS_ADVISORY,
