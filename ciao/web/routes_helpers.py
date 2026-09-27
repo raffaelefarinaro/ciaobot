@@ -22,23 +22,6 @@ def api_error(msg: str, status: int) -> JSONResponse:
     return JSONResponse({"error": msg}, status_code=status)
 
 
-def _parse_set_cookie_session(set_cookie_headers: list[str]) -> str | None:
-    from ciao.web.auth import SESSION_COOKIE
-
-    for raw in set_cookie_headers:
-        # httpx may join multiple Set-Cookie; handle one header value.
-        parts = raw.split(";")
-        if not parts:
-            continue
-        name_val = parts[0].strip()
-        if "=" not in name_val:
-            continue
-        name, value = name_val.split("=", 1)
-        if name.strip() == SESSION_COOKIE and value.strip():
-            return value.strip()
-    return None
-
-
 _LINE_SUFFIX_RE = re.compile(r":\d+$")
 
 

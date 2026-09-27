@@ -2,13 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-from starlette.applications import Starlette
-from starlette.routing import Route
-from starlette.testclient import TestClient
-
 from ciao.web.connection_tracker import ConnectionTracker, _is_loopback_host
-from ciao.web.routes_node import node_connected_clients_endpoint
 
 
 def _make_ws(*, host: str = "192.168.0.10", port: int = 54321, user_agent: str = "", forwarded: str = "") -> SimpleNamespace:
@@ -89,23 +83,6 @@ def test_a_real_loopback_peer_is_still_local_behind_a_forwarded_header() -> None
     assert tracker.list_clients(remote_only=True) == []
 
 
-def test_connected_clients_endpoint_returns_remote_only() -> None:
-    app = Starlette(routes=[Route("/api/node/connected-clients", node_connected_clients_endpoint)])
-    tracker = ConnectionTracker()
-    app.state.connection_tracker = tracker
-
-    tracker.register(_make_ws(host="10.0.0.5"), "events")
-    tracker.register(_make_ws(host="127.0.0.1"), "chat", chat_id="chat-1")
-
-    client = TestClient(app)
-    res = client.get("/api/node/connected-clients")
-    assert res.status_code == 200
-    payload = res.json()
-    assert payload["ok"] is True
-    assert len(payload["clients"]) == 1
-    assert payload["clients"][0]["client_host"] == "10.0.0.5"
-
-
 def test_chat_client_count_filters_by_chat_and_kind() -> None:
     """`file_surface` relies on this being scoped to exactly one chat_id and
     to `kind == "chat"` sockets, so a different chat's clients, or the
@@ -129,11 +106,3 @@ def test_chat_client_count_filters_by_chat_and_kind() -> None:
     tracker.unregister(events)
     assert tracker.chat_client_count("chat-1") == 0
     assert tracker.chat_client_count("chat-2") == 0
-
-
-def test_connected_clients_endpoint_no_tracker() -> None:
-    app = Starlette(routes=[Route("/api/node/connected-clients", node_connected_clients_endpoint)])
-    client = TestClient(app)
-    res = client.get("/api/node/connected-clients")
-    assert res.status_code == 200
-    assert res.json() == {"ok": True, "clients": []}

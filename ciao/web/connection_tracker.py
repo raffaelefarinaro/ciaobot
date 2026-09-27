@@ -1,11 +1,9 @@
-"""Track live WebSocket client connections for the host/client page.
+"""Track live WebSocket client connections for the host.
 
 The engine is intentionally stateless about browser sessions, but for the
 Settings page we want to answer: "is another device currently connected to
 this host?". We record every accepted `/ws/chat/{id}` and `/ws/events` socket,
-together with the peer address and a connection kind. Only the local node
-serves this data; the proxy middleware forwards remote sockets to the host, so
-the host sees the real client address.
+together with the peer address and a connection kind.
 """
 
 from __future__ import annotations

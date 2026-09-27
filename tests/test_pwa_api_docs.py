@@ -30,7 +30,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/admin/drain": "update coordinator drain (loopback-only CLI)",
     "/api/admin/drain/cancel": "update coordinator drain (loopback-only CLI)",
     "/api/package/update": "browser update action; production app updates through the signed Tauri updater",
-    "/api/device/update": "browser Device panel; production app updates through the signed Tauri updater",
     "/api/update/stage": "browser Settings update card; stages a release for an installer-managed engine in the background",
     "/api/update/apply": "browser Settings update card; applies the staged release (drain, detached swap, rollback) in the background",
     "/api/workspace-health/fix": "browser Settings health Fix button; creates missing scaffold files and re-links skills",
@@ -46,10 +45,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/integrations/gws/disconnect": "browser GWS integration disconnect/removal",
     "/api/integrations/gws/profiles/add": "browser Settings action; registers a Google account for linking",
     "/api/integrations/gws/profiles/remove": "browser Settings action; deletes a Google account and its local credentials",
-    "/api/node/connect": "browser Settings host/client connect; tunnels this node to a remote host",
-    "/api/node/demote": "node state management endpoint; demotes active node to standby",
-    "/api/node/handover": "node state management endpoint; hands over active role to peer",
-    "/api/node/peers": "node state management endpoint; registers or updates peer nodes",
 }
 
 

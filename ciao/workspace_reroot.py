@@ -1283,10 +1283,9 @@ def flag_stranded_sessions(runtime_root: Path) -> dict[str, Any]:
     than let the next turn silently forget: ``handover_context_pending`` is
     exactly the flag the fork and provider-switch paths already use for this.
 
-    "Handover" here is provider-SESSION context carry-over, not the multi-device
-    host/client role handover in ``ciao/node_state.py`` — the flag predates the
-    role rename and is persisted, so only the wording can be clarified, not the
-    key renamed.
+    "Handover" here is provider-SESSION context carry-over — the flag predates
+    it and is persisted, so only the wording can be clarified, not the key
+    renamed.
 
     Considered and rejected: symlinking the old ``~/.claude/projects/<slug>`` to
     the new one. It is an undocumented SDK layout outside the workspace, it would
