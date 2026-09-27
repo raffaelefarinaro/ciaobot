@@ -260,8 +260,8 @@ def check_available_updates(workspace_root: Path) -> list[AvailableUpdate]:
 # its own reasons and the dependency edit rides along inside the same file.
 # ``uv.lock`` carries no version string, so nothing staged it, and a release
 # committed the new pin in ``pyproject.toml`` with the old lock beside it —
-# which fails every ``uv --frozen`` step, including the bundled-runtime build
-# that only runs after the tag exists.
+# which fails every ``uv --frozen`` step, including publish.yml's engine wheel
+# build that only runs after the tag exists.
 AUTO_UPDATE_RELATIVE_PATHS: tuple[str, ...] = (
     "pyproject.toml",
     "web/package.json",

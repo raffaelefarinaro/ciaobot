@@ -233,7 +233,7 @@ Judge the risk yourself:
 
 - **Routine merge** (feature/fix, tests green, reviewer approved, CI green): merge it. This is the default and it needs no one's permission.
 - **Escalate to the user only when the action is genuinely irreversible or touches their live machine or credentials** — for example running a real installer/service/`launchctl` on the operator's host, force-pushing a shared branch, deleting data, changing release plumbing or secrets, or merging something the orchestrator cannot evaluate (an unexplained failing check, an auth/boundary change it does not understand). State the specific risk and the decision you need; do not escalate merely because a change is large or in a sensitive directory.
-- When the diff touches auth/secrets/remote boundary (`docs/REMOTE_BOUNDARY.md`), `desktop/`, or release plumbing, run the extra gate it needs (`security-review`, `./scripts/check-desktop.sh`) **yourself**; if that gate is green and you understand the change, merge it. Escalate only if the gate is red or the change is outside what you can verify.
+- When the diff touches auth/secrets/remote boundary (`docs/REMOTE_BOUNDARY.md`), `desktop/`, or release plumbing, run the extra gate it needs (`security-review`, the `desktop/src-tauri` commands in `docs/DEVELOPMENT.md`) **yourself**; if that gate is green and you understand the change, merge it. Escalate only if the gate is red or the change is outside what you can verify.
 
 Merge procedure:
 

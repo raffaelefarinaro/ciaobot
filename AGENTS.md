@@ -42,15 +42,14 @@ Verification:
      `npx vitest` on an older Node silently skips component files while
      printing green.
   4. `cd web && npm run build` after frontend changes.
-  PRs into `develop` only run these on Linux; the macOS job (browser tests,
-  desktop, app bundle) runs after merge unless the PR touches `desktop/`, so
-  a PR going green is not proof the macOS job will.
+  PRs into `develop` only run these on Linux; the macOS job (browser tests and
+  an engine cold-start) runs after merge, so a PR going green is not proof the
+  macOS job will.
   `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
   Lint is still worth running — it just will not fail the build for you.
-- Run `./scripts/check-desktop.sh` after changes under `desktop/` — nothing else
-  compiles the Rust shell or assembles `Ciaobot.app`, so those break in CI
-  rather than locally. Use `--fast` to skip the bundle step when you have not
-  touched `tauri.conf.json`. It needs Rust
+- Changes under `desktop/` are no longer gated anywhere: the release is the
+  engine, so CI builds no app. Run the `desktop/src-tauri` steps in
+  `docs/DEVELOPMENT.md` yourself. It needs Rust
   (`brew install rustup && rustup default 1.90.0`).
 - For UI changes, verify keyboard focus, browser zoom, and mobile touch targets.
 - Workspace shortcuts map unmodified `1`–`9` to the visible sidebar order and

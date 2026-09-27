@@ -53,7 +53,9 @@ this one. There is nothing to unpair and no session to bridge.
 - `PYTHONPATH=$PWD python -m pytest -n auto tests/`
 - `mypy ciao`
 - `cd web && npm test` and `cd web && npm run build`
-- `./scripts/check-desktop.sh --fast` for the Rust shell's own gates
+- The `desktop/src-tauri` gates (`cargo fmt --check`, `cargo clippy
+  --all-targets -- -D warnings`, `cargo test`) for the Rust shell's own code.
+  CI does not run them any more: the release is the engine (`#655`).
 
 ## Remaining work (not claimed resolved)
 

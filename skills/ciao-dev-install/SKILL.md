@@ -58,20 +58,14 @@ Re-check right before the swap in step 5 too: a chat started during the long bui
 cd web && npm ci && npm run build
 ```
 
-Output goes to `ciao/web/static/`, which the runtime build pip-installs as package data. **The PWA build must finish before the runtime build.** If the PWA build fails, stop — a broken static bundle would ship into the installed app.
+Output goes to `ciao/web/static/`, which the app build bundles as package data. **The PWA build must finish before the app build.** If the PWA build fails, stop — a broken static bundle would ship into the installed app.
 
 ### 3. Build the embedded runtime
 
-```bash
-set -a                # export the pinned vars; the env file does not export them itself
-. scripts/pinned-python-runtime.env
-set +a
-./scripts/build-bundled-runtime.sh desktop/runtime
-```
-
-The env file only *sets* variables, it doesn't export them, and the build script runs as a child process — without `set -a` (or explicit exports) it dies at the `CIAO_PYTHON_ARM64_URL is required` guard. (CI avoids this by passing the values via job `env:` instead.)
-
-This downloads both python-build-standalone archives, verifies their SHA-256 against the pinned env, and pip-installs the current repo (backend + PWA assets) into both arch runtimes under `desktop/runtime/`. It is the expensive step; it is also the step that makes the install test the **current** `ciao/` code. It is only skippable when the change being tested touches `desktop/` alone — ask the user before skipping, because a backend or PWA change will not reach the installed app without it.
+The runtime build scripts were deleted with the app they built (`#655`), so
+there is no runtime step to run here. `desktop/runtime/` is populated by the
+Tauri build in the next step from whatever `desktop/` already contains, and the
+app bundles that tree as it stands.
 
 ### 4. Build the desktop app
 

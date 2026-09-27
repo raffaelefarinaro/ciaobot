@@ -31,18 +31,41 @@ def test_release_on_main_workflow_publishes_from_main_merge() -> None:
     assert "CHANGELOG.md" in workflow
 
 
-def test_runtime_resolution_uses_checked_in_pins() -> None:
-    # Only ci.yml builds the embedded aarch64 runtime any more: the release is
-    # engine-only (#653), so publish.yml has nothing to resolve a pin for.
+def test_ci_builds_and_cold_starts_the_engine_not_the_app() -> None:
+    # #655: the release is the engine, so CI builds no app and pins no
+    # embedded runtime for one. A step that reappears here fails the job
+    # rather than quietly rebuilding what a release no longer ships.
+    # Comments are exempt, the way they are in the publish smoke test below:
+    # naming what is gone is not building it.
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
     ).read_text(encoding="utf-8")
+    commands = "\n".join(
+        line for line in workflow.splitlines() if not line.lstrip().startswith("#")
+    )
+    for gone in (
+        "desktop/",
+        "tauri",
+        "check-desktop",
+        "build-bundled-runtime",
+        "pinned-python-runtime",
+        "CIAO_PYTHON_ARM64_SHA256",
+        "ciaobot-desktop",
+        "desktop-service",
+        "desktop-tray.log",
+        "dtolnay/rust-toolchain",
+    ):
+        assert gone not in commands, f"ci.yml still builds the app: {gone!r}"
 
-    assert ". scripts/pinned-python-runtime.env" in workflow
-    assert "CIAO_PYTHON_ARM64_SHA256" in workflow
-    assert "CIAO_PYTHON_X86_64_SHA256" not in workflow
-    assert "aarch64-apple-darwin" in workflow
-    assert "x86_64-apple-darwin" not in workflow
+    # The macOS job keeps what is still real on that platform: the wheel this
+    # branch would publish, installed into a throwaway venv, and the engine
+    # answering for itself. Dropping this would leave the launchd, installer
+    # and update machinery with no macOS coverage at all.
+    assert "uv build --wheel --out-dir dist" in workflow
+    assert 'uv pip install --python "$engine_venv/bin/python" dist/ciaobot-*.whl' in workflow
+    assert '"$engine" setup --workspace' in workflow
+    assert '"$engine" service start' in workflow
+    assert "/api/startup-status" in workflow
 
 
 def test_publish_workflow_ships_signed_engine_manifest() -> None:
@@ -222,10 +245,23 @@ def test_first_party_install_command_stays_install_sh() -> None:
         )
 
 
-def test_cold_start_uses_the_embedded_engine_for_launchagent_setup() -> None:
-    workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml").read_text(
-        encoding="utf-8"
-    )
+def test_ci_has_no_path_filter_job_and_still_runs_the_macos_job() -> None:
+    # The `changes` job existed to decide whether a desktop change needed the
+    # macOS runner. Nothing builds the app any more, so the decision it made
+    # has no meaning, and the macOS job runs on develop pushes and PRs to main
+    # regardless - which is the coverage that matters.
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
 
-    assert 'engine="$app/Contents/Resources/ciao-runtime/bin/ciao"' in workflow
-    assert '"$engine" setup --workspace' in workflow
+    assert "  changes:" not in workflow
+    assert "needs: changes" not in workflow
+    assert "needs.changes" not in workflow
+    assert "runs-on: macos-latest" in workflow
+    # #655: dropping the `changes` job also dropped the `if:` it fed, and
+    # without a gate the macOS job would run on every develop PR. The gate is
+    # exactly develop pushes and PRs into main.
+    assert (
+        "if: github.event_name != 'pull_request' || github.base_ref == 'main'"
+        in workflow
+    )
