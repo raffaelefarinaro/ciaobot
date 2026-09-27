@@ -78,6 +78,7 @@ SHIPPED_STOCK_COMMAND_DIGESTS: dict[str, frozenset[str]] = {
         "887906f04ac45fde5666fd68c5dfdfd3f6c0b145c6bdd6cf49b9eab97013cd7f",
     }),
     "interrogation.md": frozenset({
+        "11d35c9c49bffe7b37a01b7097a2b59f13ffa9c55cbd3911303a19ba063ecbfb",
         "17600a45d0fd58b5f79a6f865c57243f4bda134aeb31f2f89078223c2449ef71",
         "d21a3788354ffa84ef7178e5e3ff9dd5b159bda518eb210cb4ba2fe6e2e4faa9",
         "efcc5d781e3d4fb04657ba6505b833c56bb07851bac28d7d34f634a745fe7408",
@@ -93,6 +94,7 @@ SHIPPED_STOCK_COMMAND_DIGESTS: dict[str, frozenset[str]] = {
         "acdfae91dc5d3ba91803b0c2c854e0ab7a615c2800ecb79310a8b9690fd0868d",
         "d7d8eb94dd11a6f84b9bb329c4f7ed6c5050d79a6fd2fa20fd1e7369c361ce6c",
         "e89dbfdda0580280fdced71cabf50fad529c9824fb275104f60969b000ebb012",
+        "f0124b04d973b243b87f63cea957132deefd3022c1018637b71ca702208b1e2e",
     }),
 }
 CODEX_WRAPPER_MARKER = ".ciao-codex-wrapper"

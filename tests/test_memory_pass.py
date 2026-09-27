@@ -205,6 +205,41 @@ def _no_model_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("ciao.insights.run_archive_pipeline", no_pipeline)
 
 
+# ── The prompt ────────────────────────────────────────────────────────────
+
+
+def test_prompt_routes_categories_to_the_vocabulary_block() -> None:
+    """The pass writes the notes, so the pass prompt owns the category rules.
+
+    A category the owner added is only usable if the pass reads the block that
+    lists it, files the note in the folder that block names, and asks rather
+    than invents a `type:` when nothing fits.
+    """
+    prompt = memory_pass.MEMORY_PASS_PROMPT
+    assert "**Categories** section of the vault's `VOCABULARY.md`" in prompt
+    assert "the `type:` it lists, in the folder it names" in prompt
+    assert "queue a new-category question" in prompt
+    assert "instead of inventing a type" in prompt
+
+
+def test_prompt_still_formats_every_placeholder() -> None:
+    """A brace in the added sentence would raise on the next chat's first turn."""
+    rendered = memory_pass.MEMORY_PASS_PROMPT.format(
+        title="Pricing rework",
+        archive="logs/Chats/abc/transcript.md",
+        project="Shipped",
+        doc="docs/pricing.md",
+    )
+    for filled in (
+        '"Pricing rework"',
+        "logs/Chats/abc/transcript.md",
+        "Shipped",
+        "docs/pricing.md",
+    ):
+        assert filled in rendered
+    assert "{" not in rendered and "}" not in rendered
+
+
 # ── Helper normalisation ──────────────────────────────────────────────────
 
 
