@@ -54,6 +54,10 @@ jobs:
       run: ciao package-smoke --skip-frontend
 
   test:
+    # Engine-only coverage that only the real platform can give: a develop PR
+    # waits on `linux-server` alone, and this job runs on the post-merge push
+    # to develop and on release cuts into main.
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@v4

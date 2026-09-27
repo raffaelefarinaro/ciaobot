@@ -258,3 +258,10 @@ def test_ci_has_no_path_filter_job_and_still_runs_the_macos_job() -> None:
     assert "needs: changes" not in workflow
     assert "needs.changes" not in workflow
     assert "runs-on: macos-latest" in workflow
+    # #655: dropping the `changes` job also dropped the `if:` it fed, and
+    # without a gate the macOS job would run on every develop PR. The gate is
+    # exactly develop pushes and PRs into main.
+    assert (
+        "if: github.event_name != 'pull_request' || github.base_ref == 'main'"
+        in workflow
+    )

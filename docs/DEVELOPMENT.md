@@ -189,12 +189,14 @@ a terminal.
 - **CI** (`.github/workflows/ci.yml`) runs on pushes to `develop` and on pull requests into `develop` or `main`.
   Every PR runs the `linux-server` job: `mypy ciao`, `pytest -n auto tests/`,
   `npm test`, `npm run build` and a package smoke test, in about 5 minutes. The
-  full macOS `test` job (coverage, browser tests, desktop Rust,
-  and a cold-started app bundle, about 18 minutes) runs on pushes to
-  `develop`, on PRs into `main`, and on PRs that touch `desktop/`, the embedded
-  runtime build scripts, `pyproject.toml`, or the CI workflow itself. When it is skipped on a PR
-  it still reports as passing, so a required `test` check does not block.
-  A macOS-only regression in a `develop` PR shows up on the post-merge push run.
+  full macOS `test` job (coverage, browser tests, and the engine wheel this
+  branch would publish, installed into a throwaway venv and cold-started — the
+  launchd, installer, engine-update and migration coverage — about 18 minutes)
+  is gated by `if: github.event_name != 'pull_request' || github.base_ref ==
+  'main'`, so it runs on pushes (including to `develop`) and on PRs into `main`,
+  but not on a PR into `develop`. Nothing builds the app any more, so there is
+  no diff for it to react to; a macOS-only regression in a `develop` PR shows up
+  on the post-merge push run instead.
 - **Release prep:** from a clean checkout, run:
 
 ```bash
