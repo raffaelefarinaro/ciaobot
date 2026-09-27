@@ -68,6 +68,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --target aarch64-apple-darwin
       - name: Build aarch64 installer verifier
+        # The verifier exists only to authenticate the app installer, which this
+        # release no longer publishes (#651), so the binary it produces is not
+        # attached any more. The build stays: its source lives in
+        # desktop/installer-verify, which #579 deletes, and dropping it here
+        # would fork that deletion into a release.
         working-directory: desktop/installer-verify
         run: |
           cargo build --release --target aarch64-apple-darwin
@@ -82,16 +87,21 @@ jobs:
           bundle="desktop/src-tauri/target/aarch64-apple-darwin/release/bundle"
           updater="$(find "$bundle" -name '*.app.tar.gz' -type f -print -quit)"
           signature="${updater}.sig"
-          verifier="desktop/installer-verify/target/ciaobot-installer-verify_aarch64"
-          test -n "$updater" -a -f "$signature" -a -x "$verifier"
+          test -n "$updater" -a -f "$signature"
           updater_name="Ciaobot_${version}_aarch64.app.tar.gz"
-          verifier_name="ciaobot-installer-verify_aarch64"
           cp "$updater" "$updater_name"
           cp "$signature" "${updater_name}.sig"
-          cp "$verifier" "$verifier_name"
-          chmod 755 "$verifier_name"
-          verifier_sha256="$(shasum -a 256 "$verifier_name" | awk '{print $1}')"
-          sed "s/__VERIFIER_SHA256__/${verifier_sha256}/g" scripts/install.sh > install.sh
+          # install.sh is the engine installer, and the public install command
+          # keeps that name (#651): every README, site page and stale external
+          # link already points at it, so a new user gets the engine without any
+          # link having to change, and nobody can install the app a second time.
+          # install-engine.sh is the same file under a second name, because the
+          # already-merged transition app (#604) fetches that exact asset for its
+          # Move action and would otherwise be stranded. That asset is
+          # scripts/install-engine.sh itself, uploaded verbatim below, so the two
+          # names are the same bytes and the app installer is not published under
+          # any name.
+          cp scripts/install-engine.sh install.sh
           chmod 755 install.sh
           signature_value="$(cat "${updater_name}.sig")"
           download="https://github.com/raffaelefarinaro/ciaobot/releases/download/v${version}/${updater_name}"
@@ -125,10 +135,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
+          # install.sh above is the engine installer, and the install-engine.sh
+          # asset is the very same script under the name the app's Move action
+          # fetches (#604); the app installer is not published under any name.
           gh release upload "$TAG" \
             install.sh \
             scripts/install-engine.sh \
-            ciaobot-installer-verify_aarch64 \
             Ciaobot_*_aarch64.app.tar.gz \
             Ciaobot_*_aarch64.app.tar.gz.sig \
             latest.json \
