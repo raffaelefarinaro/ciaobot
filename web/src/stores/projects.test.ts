@@ -6,7 +6,6 @@ import type { ProjectInfo, ChatInfo } from '../lib/types'
 import {
   shouldReconnectActiveChatOnStreamingStarted,
   chatWsReconnectDelayMs,
-  isHostConnectionUnavailableMessage,
   setListIndex,
   useProjectStore,
 } from './projects'
@@ -59,7 +58,7 @@ class FakeWebSocket {
 
   readyState = FakeWebSocket.OPEN
   onmessage: ((event: { data: string }) => void) | null = null
-  onclose: (() => void) | null = null
+  onclose: ((event: CloseEvent) => void) | null = null
   onerror: (() => void) | null = null
 
   // The store distinguishes a socket that completed its handshake from one
@@ -80,9 +79,11 @@ class FakeWebSocket {
 
   send = vi.fn()
 
-  close() {
+  // `code` is the close code the server sent: 4001/4400 (no session) and 4003
+  // (origin refused) are refusals the store must not re-dial.
+  close(code?: number) {
     this.readyState = FakeWebSocket.CLOSED
-    this.onclose?.()
+    this.onclose?.({ code } as CloseEvent)
   }
 }
 
@@ -477,6 +478,43 @@ describe('per-chat WS auto-reconnect', () => {
     }
 
     expect(fakeSockets.length).toBe(1) // background chat's socket stays closed
+  })
+
+  test.each([4001, 4400, 4003])('does not re-dial a socket the server refused (%i)', async (code) => {
+    // A refused handshake answers the same way forever, so retrying it spins
+    // against an answer that cannot change. The login flow owns the way back in.
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = `c-refused-${code}`
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close(code)
+      await vi.advanceTimersByTimeAsync(64000)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(fakeSockets.length).toBe(1)
+  })
+
+  test('does not re-dial the awareness socket the server refused', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.connectEventsWs()
+    expect(fakeSockets.length).toBe(1)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close(4001)
+      await vi.advanceTimersByTimeAsync(64000)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(fakeSockets.length).toBe(1)
   })
 })
 
@@ -1099,64 +1137,7 @@ describe('stopped turns', () => {
   })
 })
 
-describe('client host connection failures', () => {
-  test('recognizes the legacy proxy error', () => {
-    expect(isHostConnectionUnavailableMessage(
-      "Host WS unreachable: [Errno 61] Connect call failed ('10.0.0.5', 8443)",
-    )).toBe(true)
-  })
-
-  test('shows one ephemeral reconnecting state without adding chat errors', () => {
-    const store = useProjectStore()
-    const chatId = 'c-client-offline'
-    store.activeChatId = chatId
-    store.messages[chatId] = [
-      { role: 'system', content: 'Error: Host WS unreachable: old attempt 1', timestamp: '' },
-      { role: 'system', content: 'Error: Host WS unreachable: old attempt 2', timestamp: '' },
-      { role: 'user', content: 'keep this', timestamp: '' },
-    ]
-    store.connectWs(chatId)
-
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({ type: 'host_unreachable' }),
-    })
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({ type: 'host_unreachable' }),
-    })
-
-    expect(store.hostConnectionUnavailable).toBe(true)
-    expect(store.messages[chatId]).toEqual([
-      { role: 'user', content: 'keep this', timestamp: '' },
-    ])
-
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({ type: 'keepalive' }),
-    })
-    expect(store.hostConnectionUnavailable).toBe(false)
-  })
-
-  test('a successful poll clears the host-unreachable banner', async () => {
-    // The banner was only cleared from a chat WebSocket frame. If the socket
-    // stayed down (or no chat was open) after the host came back, "Can't reach
-    // the host" sat on screen over a working connection until a page reload.
-    // syncLatest is proxied to the host, so a 200 is proof it is reachable.
-    const store = useProjectStore()
-    const chatId = 'c-recovers'
-    store.activeChatId = chatId
-    store.messages[chatId] = []
-    store.connectWs(chatId)
-
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({ type: 'host_unreachable' }),
-    })
-    expect(store.hostConnectionUnavailable).toBe(true)
-
-    apiGet.mockResolvedValueOnce([])   // /api/chats answered by the host
-    await store.syncLatest()
-
-    expect(store.hostConnectionUnavailable).toBe(false)
-  })
-
+describe('result frames and unread state', () => {
   test('a stopped turn renders its partial text without badging the chat', () => {
     // Every connected client gets this frame, so a backgrounded tab or a second
     // device would otherwise show an unread marker for the half sentence the
@@ -1202,71 +1183,6 @@ describe('client host connection failures', () => {
     })
 
     expect(store.unread[chatId]).toBe(1)
-  })
-
-  test('the awareness socket raises the banner with no chat open', () => {
-    // The per-chat socket only exists while a chat is on screen, so on the
-    // home screen nothing used to notice the host was gone -- the app looked
-    // perfectly healthy. /ws/events is proxied too and carries the same frame.
-    const store = useProjectStore()
-    store.connectEventsWs()
-    const events = fakeSockets[fakeSockets.length - 1]
-    expect(events.url).toContain('/ws/events')
-
-    events.onmessage?.({ data: JSON.stringify({ type: 'host_unreachable' }) })
-    expect(store.hostConnectionUnavailable).toBe(true)
-
-    // A keepalive forwarded from the host proves it is back.
-    events.onmessage?.({ data: JSON.stringify({ type: 'keepalive' }) })
-    expect(store.hostConnectionUnavailable).toBe(false)
-  })
-
-  test('a host-unreachable awareness socket backs off instead of respinning', async () => {
-    // The proxy accepts the browser socket before it tries the host, so the
-    // close looks like a healthy blip and took the 50ms path -- twenty
-    // reconnects a second for as long as the host stayed away.
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.connectEventsWs()
-      const events = fakeSockets[fakeSockets.length - 1]
-      const countBefore = fakeSockets.length
-
-      events.onmessage?.({ data: JSON.stringify({ type: 'host_unreachable' }) })
-      events.close()
-
-      // First retry is still prompt, then the delay grows.
-      await vi.advanceTimersByTimeAsync(60)
-      expect(fakeSockets.length).toBe(countBefore + 1)
-
-      const retry = fakeSockets[fakeSockets.length - 1]
-      retry.onmessage?.({ data: JSON.stringify({ type: 'host_unreachable' }) })
-      retry.close()
-      await vi.advanceTimersByTimeAsync(60)
-      expect(fakeSockets.length).toBe(countBefore + 1)
-      await vi.advanceTimersByTimeAsync(100)
-      expect(fakeSockets.length).toBe(countBefore + 2)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('treats the legacy generic event as the same single connection state', () => {
-    const store = useProjectStore()
-    const chatId = 'c-client-legacy'
-    store.activeChatId = chatId
-    store.messages[chatId] = []
-    store.connectWs(chatId)
-
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({
-        type: 'error',
-        message: 'Host WS unreachable: host offline',
-      }),
-    })
-
-    expect(store.hostConnectionUnavailable).toBe(true)
-    expect(store.messages[chatId]).toEqual([])
   })
 })
 

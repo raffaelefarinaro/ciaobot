@@ -480,10 +480,6 @@ export type WsEvent =
   | { type: 'queued'; id?: string; text: string; images?: string[] }
   | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[] }> }
   | { type: 'error'; message: string }
-  // The local client proxy could not open the remote host socket. This is a
-  // connection state, not a chat/model failure, so the PWA renders one
-  // reconnecting card instead of appending an error to conversation history.
-  | { type: 'host_unreachable' }
   | { type: 'auth_required'; message?: string }
   // Server is draining for restart; client should show RestartNotice, not
   // treat this as a chat failure.
@@ -526,10 +522,6 @@ export type EventsWsMessage =
   | { type: 'server_restarting'; message?: string }
   | { type: 'server_restart_cancelled' }
   | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
-  // Client mode only: the local node proxy could not reach the host, so it
-  // emits this on the proxied socket and closes. Delivered on /ws/events too,
-  // which is the only socket open when no chat is on screen.
-  | { type: 'host_unreachable' }
   | { type: 'auth_required'; message?: string }
 
 export interface InAppToast {
@@ -988,47 +980,10 @@ export interface AutomationProcess {
   stats: AutomationStats
 }
 
-// ── Multi-device (host / client) ───────────────────────────────────────────
-export interface NodePeer {
-  node_id: string
-  url: string
-  last_seen: string
-  is_active: boolean
-}
-
-export interface NodeStatus {
-  node_id: string
-  role: 'host' | 'client' | 'active' | 'standby' | 'invalid'
-  mode?: 'host' | 'client' | 'invalid'
-  state_valid?: boolean
-  active_since: string | null
-  last_handover: string | null
-  host_url?: string | null
-  active_peer_url?: string | null
-  host_reachable?: boolean | null
-  active_peer_reachable?: boolean | null
-  // Name and version of the machine a client is mirroring. Only present when
-  // the host answered the reachability ping.
-  host_node_id?: string
-  host_version?: string
-  has_host_session?: boolean
-  peers: NodePeer[]
-  // From LocalSessionManager.status() on the host (ciao/local_session.py).
-  git?: LocalGitStatus
-}
-
-/** Workspace git state, as `/api/node/status` reports it under `git`. */
-export interface LocalGitStatus {
-  git_repo?: boolean
-  branch?: string
-  dirty?: boolean
-  dev_mode?: boolean
-}
-
 /**
- * What the small action endpoints answer with: `/api/device/update`,
- * `/api/node/connect`, `/api/node/handover`. Callers only branch on `ok` and
- * show `error`; the rest of the body is diagnostic, hence the index signature.
+ * What the small action endpoints answer with: `/api/package/update`.
+ * Callers only branch on `ok` and show `error`; the rest of the body is
+ * diagnostic, hence the index signature.
  */
 export interface ActionResult {
   ok?: boolean
@@ -1039,8 +994,8 @@ export interface ActionResult {
 /**
  * `POST /api/chats/{id}/archive`.
  *
- * The fields are optional so a client talking to an older host (or through the
- * node proxy) degrades to "the chat I asked for" instead of breaking.
+ * The fields are optional so a client talking to an older engine degrades to
+ * "the chat I asked for" instead of breaking.
  */
 export interface ArchiveChatResponse {
   ok?: boolean
@@ -1054,7 +1009,7 @@ export interface ChangelogCommit {
   subject: string
 }
 
-/** `/api/package/changelog` and `/api/device/changelog`. */
+/** `/api/package/changelog`. */
 export interface PackageChangelog {
   commits: ChangelogCommit[]
   compare_url: string
@@ -1065,7 +1020,7 @@ export interface PackageChangelog {
   update_available?: boolean
 }
 
-/** `/api/package/update` and `/api/device/update`. */
+/** `/api/package/update`. */
 export interface PackageUpdateResult {
   ok?: boolean
   mode?: string

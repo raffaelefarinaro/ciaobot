@@ -317,7 +317,7 @@ describe('useChatComposer attachments', () => {
   })
 
   it('reports an upload the project has no folder for', async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse({ node_role: 'client' })) as unknown as typeof fetch
+    const fetchImpl = vi.fn(async () => jsonResponse({ file_refs: [] })) as unknown as typeof fetch
     const { composer, store } = makeComposer({ fetchImpl, vaultFolder: undefined })
     attachTextarea(composer, '')
 

@@ -1,5 +1,4 @@
 /** The JSON body an error response may carry. Every field is best-effort. */
-import { navigateToContent } from './originNavigation'
 
 interface ApiErrorBody {
   error?: string
@@ -23,11 +22,8 @@ function onLoginPage(): boolean {
   return window.location.pathname === '/login' || window.location.pathname.startsWith('/login/')
 }
 
-function onDevicePage(): boolean {
-  // /device is the escape hatch out of client mode. Bouncing it to a login
-  // screen — which authenticates against the very host the user is trying to
-  // leave — would strand a client whose host is gone.
-  return window.location.pathname === '/device' || window.location.pathname.startsWith('/device/')
+function toLogin(): void {
+  window.location.assign('/login')
 }
 
 // Paths handed to the api wrapper are built from server state (chat ids, file
@@ -41,9 +37,6 @@ async function requestForm<T>(method: string, path: string, form: FormData): Pro
     throw new ApiError(`Blocked non-same-origin API path: ${path}`)
   }
   const headers: Record<string, string> = {}
-  if (window.location.hostname === '127.0.0.1') {
-    headers['X-Ciao-Local-Control'] = '1'
-  }
   const opts: RequestInit = {
     method,
     credentials: 'same-origin',
@@ -54,8 +47,8 @@ async function requestForm<T>(method: string, path: string, form: FormData): Pro
   const res = await fetch(`${target.pathname}${target.search}${target.hash}`, opts)
   if (res.status === 401) {
     const isAuthProbe = path === '/api/auth/check' || path === '/api/auth'
-    if (!onLoginPage() && !onDevicePage() && !isAuthProbe) {
-      navigateToContent('/login')
+    if (!onLoginPage() && !isAuthProbe) {
+      toLogin()
     }
     const payload = await res.json().catch(() => ({}))
     throw new ApiError(
@@ -110,9 +103,6 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     throw new ApiError(`Blocked non-same-origin API path: ${path}`)
   }
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (window.location.hostname === '127.0.0.1') {
-    headers['X-Ciao-Local-Control'] = '1'
-  }
   const opts: RequestInit = {
     method,
     headers,
@@ -124,11 +114,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
   const res = await fetch(`${target.pathname}${target.search}${target.hash}`, opts)
   if (res.status === 401) {
-    // Never hard-reload while already on /login — that caused a refresh loop
-    // when client mode's /api/auth/check returns 401 (host password needed).
+    // Never hard-reload while already on /login: that turns a 401 into a
+    // refresh loop instead of the login form the user can act on.
     const isAuthProbe = path === '/api/auth/check' || path === '/api/auth'
-    if (!onLoginPage() && !onDevicePage() && !isAuthProbe) {
-      navigateToContent('/login')
+    if (!onLoginPage() && !isAuthProbe) {
+      toLogin()
     }
     const payload = await res.json().catch(() => ({}))
     throw new ApiError(
