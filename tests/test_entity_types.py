@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from ciao import entity_types, memory_audit, vault_index, vault_lint
+from ciao import config, entity_types, memory_audit, vault_index, vault_lint, vault_rehome
 from ciao.context import entity_tagger
 
 
@@ -238,3 +238,77 @@ def test_disabling_a_category_removes_it_from_the_effective_views(tmp_path: Path
     assert [entry.id for entry in registry.entries()] == [
         entry.id for entry in stock.entries()
     ], "disabling never removes a builtin; a user can switch it back on"
+
+
+def test_no_vault_file_is_identical_for_every_wired_consumer(tmp_path: Path) -> None:
+    """No `<vault>/entity-types.yaml`: bootstrap, the tagger and re-home all read
+    the shipped list.
+
+    These are the three consumers #635 put the registry in front of, and each is
+    checked against the constant it replaced. The two that CAN be handed a
+    registry are also checked against the same answer that way, because a caller
+    that passes one has to get what the consumer would have loaded for itself or
+    the two forms of the same call drift; that plumbing is pinned in
+    `tests/test_entity_tagger.py` and `tests/test_vault_rehome.py`.
+
+    The bootstrap is the exception, and cannot be handed a registry at all: it runs
+    inside `CiaoConfig.__post_init__`, before any workspace is known, so its
+    evidence folders are stock-derived by construction and a vault file cannot
+    widen them. That is asserted here as the derived view it is; the literal it
+    replaced, and a vault naming a new entity folder that still does not claim
+    one, are pinned in `tests/test_config_role.py`.
+
+    A2a-1 (#626) wires the read path — the indexer, the linter, staleness — and
+    asserts the same "identical with no vault file" for those four consumers in
+    this same file. The two bodies are one test split across the two changes.
+    """
+    vault = tmp_path / "memory-vault"
+    (vault / "personal" / "People").mkdir(parents=True)
+    (vault / "work").mkdir(parents=True)
+    (vault / "personal" / "People" / "Alba.md").write_text(
+        "---\ntype: person\ntags: [colleague]\n---\n# Alba\n", encoding="utf-8"
+    )
+    (vault / "work" / "alpha.md").write_text(
+        "---\ntype: project\n---\n# Alpha\n", encoding="utf-8"
+    )
+    (vault / "INDEX.md").write_text(
+        "# Vault Index\n\n"
+        "- [personal/People/Alba](./personal/People/Alba.md) (tags: person; aliases: Alba)\n"
+        "- [work/alpha](./work/alpha.md) (tags: project; aliases: Alpha)\n",
+        encoding="utf-8",
+    )
+
+    registry = entity_types.load_entity_types(vault)
+
+    # Workspace bootstrap: a containment test, so it takes the entity categories'
+    # folders and adds the three names an entry's single folder cannot express.
+    assert config._WORKSPACE_EVIDENCE_DIRS == frozenset(
+        {"People", "Projects", "Places", "Ideas", "Resources", "Workspace", "journal", "projects"}
+    )
+    assert config._WORKSPACE_EVIDENCE_DIRS == (
+        frozenset(registry.entity_folders()) | config._WORKSPACE_EVIDENCE_EXTRA_DIRS
+    )
+    assert list(config._bootstrap_registry(vault)) == ["personal"], (
+        "one workspace per vault directory holding an evidence folder"
+    )
+
+    # The tagger: the folder -> category view is the shipped wire set, and the
+    # index resolves against it whether it was handed the registry or loaded it.
+    assert registry.category_parts() == entity_tagger._CATEGORY_PARTS
+    assert {e.category for e in entity_tagger.get_index(vault).find("Alba and Alpha")} == {
+        "People",
+        "work",
+    }
+
+    # Re-home: the person folder, and the folder map whose keys are not workspace
+    # names. Both are the shipped ones, and the misfiled note is still found.
+    assert vault_rehome.people_dirs(registry) == vault_rehome.people_dirs() == frozenset(
+        {"People"}
+    )
+    assert vault_rehome.dir_type_map(registry) == vault_rehome.dir_type_map()
+    assert vault_rehome.dir_type_map() == vault_index.DIR_TYPE_MAP
+    candidates = {c.path: c for c in vault_rehome.detect_misfiled_people(vault)}
+    assert [
+        (path, candidate.bucket, candidate.destination)
+        for path, candidate in candidates.items()
+    ] == [("personal/People/Alba.md", "mechanical", "work/People/Alba.md")]

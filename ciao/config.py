@@ -12,6 +12,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+# The one direction the dependency runs: `entity_types` imports no `ciao` module,
+# so the stock workspace-evidence set below can be derived from it (see
+# `_WORKSPACE_EVIDENCE_DIRS`) without a cycle.
+from ciao.entity_types import stock_entity_type_registry
 from ciao.execution_modes import HARNESS_DISABLED_SKILLS, credential_path_deny_rules
 from ciao.models import BridgeMode
 from ciao.providers.opencode import OpencodeSettings
@@ -343,8 +347,28 @@ def _parse_workspaces_json(raw: str) -> dict[str, WorkspaceConfig]:
 # one. `memory-vault/personal/People/` makes `personal` a workspace;
 # `memory-vault/People/` is a note folder in a single-workspace vault and must
 # not become a workspace called "People". The nesting is what separates them.
-_WORKSPACE_EVIDENCE_DIRS: frozenset[str] = frozenset(
-    {"People", "Projects", "Places", "Ideas", "Resources", "Workspace", "journal", "projects"}
+#
+# The entity categories' own folders come from the shipped registry
+# (`entity_types.stock_entity_type_registry()`), so a category is added here the
+# same way it is added to the indexer and the linter. The three extras are the
+# names a containment test needs that a category's single folder cannot express:
+# the agent's own `Workspace/`, the `journal/` folder, and the lower-case
+# `projects` (the historical name of `Projects/`). A containment test is not a
+# type mapping, which is also why the rest of the folders are absent —
+# `Documents/` is a category folder that is deliberately not evidence of a
+# workspace, and no entry could say otherwise.
+#
+# Stock-ONLY, and by construction: this runs in `CiaoConfig.__post_init__` while
+# the workspace registry is still being bootstrapped, so the
+# `<vault>/entity-types.yaml` that could answer a better question is itself
+# inside a directory this scan has not found yet. Reading one here would be the
+# chicken-and-egg the bootstrap exists to avoid, so an install that configured
+# nothing gets exactly the set it always got, and one that did is discovered by
+# the registry it already has rather than by this.
+_WORKSPACE_EVIDENCE_EXTRA_DIRS: frozenset[str] = frozenset({"Workspace", "journal", "projects"})
+
+_WORKSPACE_EVIDENCE_DIRS: frozenset[str] = (
+    frozenset(stock_entity_type_registry().entity_folders()) | _WORKSPACE_EVIDENCE_EXTRA_DIRS
 )
 
 
