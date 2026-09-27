@@ -535,6 +535,86 @@ def test_accept_writes_the_fact_into_the_region(tmp_path: Path) -> None:
     assert row["id"] not in {r["id"] for r in client.get("/api/proposals").json()["rows"]}
 
 
+def test_accepting_a_people_row_writes_a_typed_note(tmp_path: Path) -> None:
+    """A `[people]` accept files the note the category registry names, typed.
+
+    The writer used to emit `tags: [person]` and no `type:` at all, so the note
+    it created was one `ciao vault-lint` reports as untyped. Destination and
+    content both come from the registry now, and this pins the whole accept:
+    the row leaves the queue and a note with `type: person` is in `People/`.
+    """
+    config = _default_vault(tmp_path)
+    _write_queue(
+        config,
+        "personal",
+        "## 2026-08-19 curation pass (this pass)\n\n"
+        "- [people Mo] Leads the pilot.  _(from: Decisions)_\n",
+    )
+    client = _client(config)
+    row = _accept_kind_row(client, "people")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+    assert resp.status_code == 200
+    result = resp.json()["result"]
+    assert result["action"] == "write_people_note"
+    assert result["destination"] == "People/Mo.md"
+
+    note = config.workspace_vault_root(row["workspace"]) / "People" / "Mo.md"
+    text = note.read_text(encoding="utf-8")
+    assert "type: person" in text
+    assert "tags: [person]" in text
+    assert re.search(r"^updated: \d{4}-\d{2}-\d{2}$", text, re.MULTILINE), text
+    assert row["text"] in text
+    assert row["id"] not in {r["id"] for r in client.get("/api/proposals").json()["rows"]}
+
+
+def test_accepting_a_people_row_honours_an_edited_category_folder(
+    tmp_path: Path,
+) -> None:
+    """The accept files the note in the folder the owner's edit names.
+
+    The registry is read at the agent vault root — the one holding
+    `entity-types.yaml` beside `VOCABULARY.md`, the file
+    `PATCH /api/memory/entity-types` writes — while the note is written under
+    the workspace's notes root. Reading the category from the notes root instead
+    is what made an owner's `person.folder: Humans` invisible here: the accept
+    went on writing `People/Mo.md` beside the very file that renamed it, on the
+    default pre-re-rooting install where those two roots differ. This is that
+    install: `agent_vault_root` is the shared vault, `workspace_vault_root` the
+    `personal` subtree under it.
+    """
+    config = _default_vault(tmp_path)
+    agent_root = config.agent_vault_root("personal")
+    assert agent_root != config.workspace_vault_root("personal")
+    (agent_root / "entity-types.yaml").write_text(
+        "- id: person\n  folder: Humans\n", encoding="utf-8"
+    )
+    _write_queue(
+        config,
+        "personal",
+        "## 2026-08-19 curation pass (this pass)\n\n"
+        "- [people Mo] Leads the pilot.  _(from: Decisions)_\n",
+    )
+    client = _client(config)
+    row = _accept_kind_row(client, "people")
+
+    # The review card resolves the same destination, or the card would show a
+    # folder the accept does not write to.
+    preview = proposal_service._people_preview(config, row, str(row.get("text") or ""))
+    assert preview["destination"] == "Humans/Mo.md", preview
+    assert preview["can_accept"] is True, preview
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+    assert resp.status_code == 200
+    result = resp.json()["result"]
+    assert result["action"] == "write_people_note"
+    assert result["destination"] == "Humans/Mo.md", result
+
+    notes_root = config.workspace_vault_root(row["workspace"])
+    assert (notes_root / "Humans" / "Mo.md").is_file()
+    assert not (notes_root / "People").exists(), "the stock folder, not the owner's"
+
+
 def test_accept_persists_the_text_against_refiling(tmp_path: Path) -> None:
     """An accept must land in the same decision history a dismissal does.
 
