@@ -1342,7 +1342,10 @@ export interface ProposalPreview {
   text: string
   source: string
   action?: string
-  operation: 'add' | 'update' | 'move' | 'none' | ''
+  /** What the accept does to one destination. `add_category` is its own value
+   * because it writes no file body: it appends a category to the registry and
+   * retypes the notes the proposal was filed with, moving nothing. */
+  operation: 'add' | 'update' | 'move' | 'add_category' | 'none' | ''
   destination: string
   destination_path: string
   revision: string
@@ -1358,6 +1361,15 @@ export interface ProposalPreview {
   written?: string
   added?: string[]
   leak_warning?: boolean
+  /** Only on a `[category]` preview: the entry the accept would add and the
+   * notes it would retype, so the card can name both without a second call. */
+  category?: {
+    id: string
+    label: string
+    folder: string
+    description: string
+    notes: string[]
+  }
 }
 
 export interface ProposalPreviewResponse {

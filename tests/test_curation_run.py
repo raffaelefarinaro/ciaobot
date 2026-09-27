@@ -134,6 +134,89 @@ def test_every_mechanical_signal_lands_in_the_worklist(tmp_path: Path) -> None:
     ]
 
 
+def _cluster_vault(vault: Path, type_: str, count: int) -> None:
+    notes = vault / "Journals"
+    notes.mkdir(parents=True, exist_ok=True)
+    for index in range(count):
+        (notes / f"Note{index}.md").write_text(
+            f"---\ntype: {type_}\n---\n# Note{index}\n", encoding="utf-8"
+        )
+
+
+def test_a_three_note_cluster_becomes_a_category_item(tmp_path: Path) -> None:
+    """The pass files the bullet itself and reports the work.
+
+    It is the one pass here that writes, and deliberately so: the trigger is a
+    count over the notes on disk, so nothing about it needs a model and the
+    decision belongs in the queue, not in a chat.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _cluster_vault(vault, "recipe-book", 3)
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    by_pass = {item.pass_id: item for item in worklist.items}
+    assert cr.PASS_CATEGORIES in by_pass
+    assert by_pass[cr.PASS_CATEGORIES].keys == (
+        cr.item_key(cr.PASS_CATEGORIES, "recipe-book"),
+    )
+    queue = (vault / cr.PROPOSALS_RELATIVE).read_text(encoding="utf-8")
+    assert "- [category recipe-book]" in queue
+    # It is a real queue row, so the review pass sees it as work to route too.
+    assert cr.PASS_PROPOSALS in by_pass
+
+
+def test_a_declined_category_is_not_work_twice(tmp_path: Path) -> None:
+    """The refusal is keyed by id, so the cluster it described never comes back
+    and the pass has nothing to report."""
+    from ciao.vocabulary_proposals import decline_category, read_category_sidecar
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _cluster_vault(vault, "recipe-book", 3)
+
+    first = cr.build_worklist(
+        vault_root=vault, guide_path=guide, workspace_dir=tmp_path, today=date(2026, 9, 19)
+    )
+    assert cr.PASS_CATEGORIES in {item.pass_id for item in first.items}
+    decline_category(vault, "recipe-book")
+    assert read_category_sidecar(vault, "recipe-book")["declined"] is True
+    # The bullet is gone, as it would be after the owner rejected it.
+    (vault / cr.PROPOSALS_RELATIVE).unlink()
+
+    second = cr.build_worklist(
+        vault_root=vault, guide_path=guide, workspace_dir=tmp_path, today=date(2026, 9, 19)
+    )
+
+    assert cr.PASS_CATEGORIES not in {item.pass_id for item in second.items}
+    assert not (vault / cr.PROPOSALS_RELATIVE).exists()
+
+
+def test_a_two_note_cluster_is_not_category_work(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _cluster_vault(vault, "recipe-book", 2)
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    assert worklist.empty
+    assert not (vault / cr.PROPOSALS_RELATIVE).exists()
+
+
 def test_guide_review_is_weekly_but_not_a_required_hygiene_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

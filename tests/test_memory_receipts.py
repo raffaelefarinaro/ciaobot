@@ -686,6 +686,128 @@ def test_queue_receipt_refuses_undo_when_the_queue_moved(tmp_path):
     assert "A later unrelated trait." in queue.read_text(encoding="utf-8")
 
 
+# ── Category apply receipt (issue #647) ─────────────────────────────────────
+
+
+def _applied_category(tmp_path):
+    """A recorded `category_apply`: a registry file and three retyped notes.
+
+    The three notes cover the two shapes the undo has to get right — a note whose
+    whole frontmatter is the type line, and one with other keys around it — and
+    none of them may end up byte-identical, so a restore that silently did
+    nothing cannot pass.
+    """
+    from ciao.memory_proposals import set_note_type
+
+    registry = tmp_path / "entity-types.yaml"
+    before_yaml = "# This vault's categories.\n- id: person\n  label: Person\n"
+    registry.write_text(before_yaml, encoding="utf-8")
+    after_yaml = before_yaml + "- id: recipe\n  label: Recipe\n"
+    registry.write_text(after_yaml, encoding="utf-8")
+
+    seeds = [
+        "# Keeps the soup warm\n",
+        "---\ntitle: Bread\ntype: recipe-book\n---\n\n# Bread\n",
+        "# Bread\n",
+    ]
+    notes = []
+    for index, seed in enumerate(seeds):
+        note = tmp_path / f"Note{index}.md"
+        note.write_text(seed, encoding="utf-8")
+        before = note.read_text(encoding="utf-8")
+        assert set_note_type(note, "recipe") is True
+        notes.append(
+            {"path": str(note), "before": before, "after": note.read_text(encoding="utf-8")}
+        )
+    receipt = mr.record_category_apply(
+        mr.journal_path(tmp_path, None),
+        registry_path=registry,
+        registry_existed=True,
+        before_text=before_yaml,
+        after_text=after_yaml,
+        notes=notes,
+        actor="operator",
+        source="pwa",
+        vault_root=tmp_path,
+    )
+    return receipt, registry, before_yaml, notes
+
+
+def test_a_category_receipt_undoes_the_registry_and_every_note(tmp_path):
+    """One row covers N files, and the undo puts all N back.
+
+    Undoing the registry alone would leave notes pointing at a category that no
+    longer exists; undoing the notes alone would leave them pointing at nothing.
+    """
+    receipt, registry, before_yaml, notes = _applied_category(tmp_path)
+    assert receipt["kind"] == "category_apply"
+    assert mr.is_undoable(receipt)
+    # Every note really was retyped, so the restore is observed rather than
+    # asserted against a file that never changed.
+    assert all(note["before"] != note["after"] for note in notes)
+
+    mr.undo_receipt(receipt["id"], vault_root=tmp_path)
+
+    assert registry.read_text(encoding="utf-8") == before_yaml
+    for note in notes:
+        # Byte-for-byte: a note with no frontmatter before the accept has to get
+        # its absent block back, not a block with an empty type line.
+        assert Path(note["path"]).read_text(encoding="utf-8") == note["before"]
+    journal = mr.journal_path(tmp_path, None)
+    assert any(
+        r["kind"] == "category_apply" and r["status"] == mr.UNDONE
+        for r in mr.read_receipts(journal)
+    )
+
+
+def test_a_category_undo_removes_a_registry_file_it_created(tmp_path):
+    """A vault with no `entity-types.yaml` before the accept must not be left
+    with an override file the owner never wrote."""
+    from ciao import entity_types
+    from ciao.entity_types import EntityType
+
+    registry = tmp_path / "entity-types.yaml"
+    receipt = mr.record_category_apply(
+        mr.journal_path(tmp_path, None),
+        registry_path=registry,
+        registry_existed=False,
+        before_text="",
+        after_text=entity_types.render_yaml([EntityType(id="recipe", label="Recipe")]),
+        notes=[],
+        actor="operator",
+        source="pwa",
+        vault_root=tmp_path,
+    )
+    registry.write_text(receipt["after_text"], encoding="utf-8")
+
+    mr.undo_receipt(receipt["id"], vault_root=tmp_path)
+
+    assert not registry.exists()
+
+
+def test_a_category_undo_refuses_when_a_note_moved(tmp_path):
+    """A note edited after the accept is somebody else's work, and replacing it
+    with the before image would delete it. The whole undo is refused: half of a
+    category is not a state to leave the vault in."""
+    from ciao.memory_receipts import RevisionConflict
+
+    receipt, registry, _before_yaml, notes = _applied_category(tmp_path)
+    moved = notes[1]
+    Path(moved["path"]).write_text(
+        "---\ntitle: Bread\ntype: recipe\n---\n\n# Bread, and an edit since\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RevisionConflict):
+        mr.undo_receipt(receipt["id"], vault_root=tmp_path)
+
+    # Refused before anything was written, so the registry and the other notes
+    # are exactly as the accept left them.
+    assert registry.read_text(encoding="utf-8") == receipt["after_text"]
+    assert "an edit since" in Path(moved["path"]).read_text(encoding="utf-8")
+    assert Path(notes[0]["path"]).read_text(encoding="utf-8") == notes[0]["after"]
+
+
 # ── Queue lock ────────────────────────────────────────────────────────────
 
 

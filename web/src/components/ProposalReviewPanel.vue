@@ -163,6 +163,9 @@ function previewPrimaryLabel(row: ProposalRow): string {
   if (!preview) return 'Save'
   if (preview.operation === 'none') return 'Clear this row'
   if (preview.operation === 'move') return `Move to ${preview.destination || 'destination'}`
+  if (preview.operation === 'add_category') {
+    return `Add the ${preview.destination || 'new'} category`
+  }
   return `Save to ${preview.destination || 'memory'}`
 }
 
@@ -170,6 +173,7 @@ const OPERATION_LABELS: Record<string, string> = {
   add: 'Add',
   update: 'Update',
   move: 'Move',
+  add_category: 'Add category',
   none: 'No change',
 }
 

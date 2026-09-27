@@ -71,6 +71,7 @@ LEARNING_PRUNE_DAYS = 30
 PASS_PROPOSALS = "proposals"
 PASS_REGIONS = "regions"
 PASS_AUDIT = "audit"
+PASS_CATEGORIES = "categories"
 PASS_LEARNINGS = "learnings"
 PASS_HYGIENE = "hygiene"
 PASS_GUIDE = "guide"
@@ -81,6 +82,7 @@ PASS_ORDER: tuple[str, ...] = (
     PASS_PROPOSALS,
     PASS_REGIONS,
     PASS_AUDIT,
+    PASS_CATEGORIES,
     PASS_LEARNINGS,
     PASS_HYGIENE,
     PASS_GUIDE,
@@ -391,6 +393,48 @@ def _learning_items(vault_root: Path, *, today: date) -> list[WorklistItem]:
     ]
 
 
+def _category_cluster_items(vault_root: Path) -> list[WorklistItem]:
+    """File a ``[category]`` proposal per unlisted ``type:`` with a cluster.
+
+    The one pass here that WRITES rather than reads, and that is the point: the
+    trigger is a count over the notes on disk, so nothing about it needs a model
+    and the queue is where the decision belongs. The skill's "do not touch
+    vocabulary proposals" clause therefore stays true for the agent — this is
+    the vault asking, not the agent noticing.
+
+    Keys are the category ids, so a cluster that resolves the same way two
+    nights running is one item rather than a new one each time, and a cluster
+    the owner resolves makes its item disappear from the next worklist.
+    """
+    from ciao.vocabulary_proposals import (
+        CATEGORY_CLUSTER_THRESHOLD,
+        generate_category_proposals,
+    )
+
+    root = Path(vault_root)
+    try:
+        queued = generate_category_proposals(root)
+    except Exception:  # noqa: BLE001 — an advisory pass must not fail the plan
+        logger.warning("curation: category cluster scan failed", exc_info=True)
+        return []
+    if not queued:
+        return []
+    return [
+        WorklistItem(
+            pass_id=PASS_CATEGORIES,
+            label="Propose categories for the note clusters the vault is using",
+            reason=(
+                f"{len(queued)} unlisted type(s) used by "
+                f"{CATEGORY_CLUSTER_THRESHOLD} or more notes"
+            ),
+            keys=tuple(
+                item_key(PASS_CATEGORIES, candidate["type_id_suggestion"])
+                for candidate in queued
+            ),
+        )
+    ]
+
+
 def _hygiene_items(*, weekly_due: bool) -> list[WorklistItem]:
     if not weekly_due:
         return []
@@ -503,6 +547,11 @@ def build_worklist(
         notes.append("no usable last_full_pass marker; the weekly pass counts as due")
 
     collected: list[WorklistItem] = []
+    # Collected FIRST because it is the one pass that writes: the bullets it
+    # files have to be on disk before `_proposal_items` reads the queue, or the
+    # run that proposes a category would not count the row it just proposed. The
+    # order the worklist is PRESENTED in is :data:`PASS_ORDER` either way.
+    collected.extend(_category_cluster_items(vault_root))
     collected.extend(_proposal_items(vault_root))
     collected.extend(
         _region_items(

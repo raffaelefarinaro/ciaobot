@@ -28,6 +28,7 @@ from ciao.web.routes_api import (
     dismiss_older_than,
     list_proposals,
     proposal_action,
+    proposal_preview,
     proposals_batch,
     proposals_history,
 )
@@ -70,6 +71,7 @@ def _client(config: CiaoConfig) -> TestClient:
         routes=[
             Route("/api/proposals", list_proposals, methods=["GET"]),
             Route("/api/proposals/history", proposals_history, methods=["GET"]),
+            Route("/api/proposals/{id}/preview", proposal_preview, methods=["POST"]),
             Route("/api/proposals/{id}/{action}", proposal_action, methods=["POST"]),
             Route("/api/proposals/batch", proposals_batch, methods=["POST"]),
             Route("/api/proposals/dismiss-older-than", dismiss_older_than, methods=["POST"]),
@@ -1539,6 +1541,283 @@ def _learnings_count(config: CiaoConfig) -> int:
         return 0
     match = re.search(r"\(x(\d+)\)", path.read_text(encoding="utf-8"))
     return int(match.group(1)) if match else 0
+
+
+# ---- Category proposals (issue #647) ----------------------------------------
+#
+# The notes carry the RAW spelling the cluster was detected under and the sidecar
+# carries the id derived from it, so a retype is a real change of bytes rather
+# than a rewrite of a value to itself.
+
+_RAW_TYPE = "Recipe Book"
+_CATEGORY_ID = "recipe-book"
+
+
+def _category_vault(
+    tmp_path: Path,
+    *,
+    folder: str = "Recipes",
+    ticked: tuple[str, ...] = ("One.md", "Two.md", "Three.md"),
+    declared: str | None = _RAW_TYPE,
+) -> CiaoConfig:
+    """A workspace whose queue holds one `[category]` row over a note cluster.
+
+    ``ticked`` is the note list the sidecar carries — the rows the owner ticked
+    in the drawer — and ``declared`` is what each of those notes currently says.
+    A test for drift passes a different type, and one for a frontmatter-less
+    note passes ``None``.
+
+    The sidecar's paths are rendered ``Entry.path`` values: a vault directory
+    name followed by the note's path inside the vault that was scanned, which is
+    what ``vault_migration`` strips the same way when it retypes a note.
+    """
+    from ciao.memory_proposals import MemoryProposal, append_proposals
+    from ciao.vocabulary_proposals import write_category_sidecar
+
+    config = _config(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    notes = vault / "Journals"
+    notes.mkdir(parents=True, exist_ok=True)
+    for name in ticked:
+        frontmatter = f"type: {declared}\n" if declared else ""
+        (notes / name).write_text(
+            f"---\n{frontmatter}---\n# {Path(name).stem}\n", encoding="utf-8"
+        )
+    write_category_sidecar(
+        vault,
+        {
+            "id": _CATEGORY_ID,
+            "label": "Recipe book",
+            "folder": folder,
+            "description": f"Proposed from {len(ticked)} notes already typed {_RAW_TYPE}.",
+            "source_type": _RAW_TYPE,
+            "paths": [f"memory-vault/Journals/{name}" for name in ticked],
+            "declined": False,
+        },
+    )
+    append_proposals(
+        [
+            MemoryProposal(
+                target="category",
+                payload=_CATEGORY_ID,
+                text=(
+                    f"Recipe book → {folder}: Proposed from {len(ticked)} notes "
+                    f"already typed {_RAW_TYPE}."
+                ),
+                source_section=f"{len(ticked)} notes typed {_RAW_TYPE}",
+            )
+        ],
+        vault,
+    )
+    return config
+
+
+def _registry_ids(config: CiaoConfig) -> list[str]:
+    from ciao import entity_types
+
+    registry = entity_types.load_entity_types(config.agent_vault_root("personal"))
+    return [entry.id for entry in registry.entries()]
+
+
+def test_accepting_a_category_adds_it_and_retypes_the_ticked_notes(
+    tmp_path: Path,
+) -> None:
+    """Nothing is moved: every note stays in the same file and only its
+    frontmatter ``type:`` changes."""
+    config = _category_vault(tmp_path)
+    journals = config.workspace_vault_root("personal") / "Journals"
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 200, resp.json()
+    result = resp.json()["result"]
+    assert result["action"] == "add_category"
+    assert result["promoted"] is True
+    assert result["destination"] == "Recipes"
+    assert _CATEGORY_ID in _registry_ids(config)
+    assert sorted(p.name for p in journals.iterdir()) == ["One.md", "Three.md", "Two.md"]
+    for note in journals.iterdir():
+        # The body and the file are untouched; only the type line moved.
+        assert note.read_text(encoding="utf-8") == (
+            f"---\ntype: {_CATEGORY_ID}\n---\n# {note.stem}\n"
+        )
+    # The row is gone, and the registry file names the new category.
+    assert client.get("/api/proposals").json()["rows"] == []
+    yaml = (config.agent_vault_root("personal") / "entity-types.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert f"id: {_CATEGORY_ID}" in yaml
+    assert "folder: Recipes" in yaml
+
+
+def test_accepting_a_category_leaves_an_unticked_note_alone(tmp_path: Path) -> None:
+    """The sidecar is the note list, so a note the owner left unticked keeps
+    the type it had."""
+    config = _category_vault(tmp_path, ticked=("One.md", "Two.md"))
+    journals = config.workspace_vault_root("personal") / "Journals"
+    (journals / "Three.md").write_text(
+        f"---\ntype: {_RAW_TYPE}\n---\n# Three\n", encoding="utf-8"
+    )
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+
+    assert (journals / "One.md").read_text(encoding="utf-8") == (
+        f"---\ntype: {_CATEGORY_ID}\n---\n# One\n"
+    )
+    assert (journals / "Three.md").read_text(encoding="utf-8") == (
+        f"---\ntype: {_RAW_TYPE}\n---\n# Three\n"
+    )
+
+
+def test_accepting_a_category_retypes_a_note_with_no_frontmatter(
+    tmp_path: Path,
+) -> None:
+    """A note that never said what it was has no type anybody could have
+    changed, so it is retyped rather than reported as drifted."""
+    config = _category_vault(tmp_path, ticked=("One.md",), declared=None)
+    journals = config.workspace_vault_root("personal") / "Journals"
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+
+    assert (journals / "One.md").read_text(encoding="utf-8") == (
+        f"---\ntype: {_CATEGORY_ID}\n---\n# One\n"
+    )
+
+
+def test_a_category_whose_folder_is_taken_keeps_the_bullet(tmp_path: Path) -> None:
+    """`Recipes` is not a collision, `People` is. The registry's own validator
+    refuses it, the row survives, and the refusal is a 400 the owner can act on
+    rather than a retry of the same request."""
+    config = _category_vault(tmp_path, folder="People")
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 400, resp.json()
+    assert "People" in resp.json()["error"]
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+    assert _CATEGORY_ID not in _registry_ids(config)
+
+
+def test_a_note_retyped_since_the_proposal_keeps_the_bullet(tmp_path: Path) -> None:
+    """The cluster the operator read is not the cluster on disk, so nothing is
+    written — not the registry, and not the notes that were fine."""
+    config = _category_vault(tmp_path)
+    journals = config.workspace_vault_root("personal") / "Journals"
+    (journals / "Two.md").write_text("---\ntype: document\n---\n# Two\n", encoding="utf-8")
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409, resp.json()
+    assert "Two.md" in resp.json()["error"]
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+    assert _CATEGORY_ID not in _registry_ids(config)
+    assert (journals / "One.md").read_text(encoding="utf-8") == (
+        f"---\ntype: {_RAW_TYPE}\n---\n# One\n"
+    )
+
+
+def test_dismissing_a_category_records_the_refusal_by_id(tmp_path: Path) -> None:
+    """The queue bullet is gone but the cluster it described is still in the
+    vault. A text-keyed decision has nothing left to match once the row is
+    removed, so the id is what stops the same category coming back."""
+    from ciao.vocabulary_proposals import declined_category_ids, read_category_sidecar
+
+    config = _category_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    assert client.post(f"/api/proposals/{row['id']}/dismiss").status_code == 200
+
+    assert client.get("/api/proposals").json()["rows"] == []
+    assert declined_category_ids(vault) == {_CATEGORY_ID}
+    # The rest of the sidecar survives: a refusal is not a deletion.
+    assert read_category_sidecar(vault, _CATEGORY_ID)["paths"]
+
+
+def test_a_batch_dismiss_records_the_refusal_too(tmp_path: Path) -> None:
+    """The batch path records the id before the rewrite too, or a bulk "reject
+    these" would bring the whole cluster back the next night."""
+    from ciao.vocabulary_proposals import declined_category_ids
+
+    config = _category_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(
+        "/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]}
+    )
+
+    assert resp.status_code == 200, resp.json()
+    assert client.get("/api/proposals").json()["rows"] == []
+    assert declined_category_ids(vault) == {_CATEGORY_ID}
+
+
+def test_a_category_refusal_that_cannot_be_recorded_keeps_the_bullet(
+    tmp_path: Path,
+) -> None:
+    """The sidecar is the only record of the note list, so a dismiss without one
+    has nothing to refuse: the row survives rather than being resolved into a
+    decision that was not made."""
+    from ciao.vocabulary_proposals import category_sidecar_path
+
+    config = _category_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    category_sidecar_path(vault, _CATEGORY_ID).unlink()
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(f"/api/proposals/{row['id']}/dismiss")
+
+    assert resp.status_code == 409, resp.json()
+    assert _CATEGORY_ID in resp.json()["error"]
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+
+
+def test_a_category_preview_names_the_notes_it_would_retype(tmp_path: Path) -> None:
+    """The card must not fall through to the review row's "no destination yet"
+    wording: a category has a destination and the whole list of notes it moves
+    onto, and both are known before the click."""
+    config = _category_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(f"/api/proposals/{row['id']}/preview")
+
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()["preview"]
+    assert body["action"] == "add_category"
+    assert body["can_accept"] is True
+    assert body["exact"] is True
+    assert body["category"]["id"] == _CATEGORY_ID
+    assert body["category"]["folder"] == "Recipes"
+    assert len(body["category"]["notes"]) == 3
+
+
+def test_batch_accept_covers_a_category_row(tmp_path: Path) -> None:
+    config = _category_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(
+        "/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]}
+    )
+
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["results"][0]["promoted"] is True
+    assert _CATEGORY_ID in _registry_ids(config)
 
 
 def test_batch_accept_does_not_promote_before_the_receipt_can_be_written(

@@ -42,9 +42,23 @@ describe('descriptorFor', () => {
   })
 
   it('resolves every kind the server can send', () => {
-    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'review', 'rehome', 'skill']) {
+    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'review', 'rehome', 'skill', 'category']) {
       expect(descriptorFor(row({ kind }))).not.toBe(GENERIC)
     }
+  })
+
+  it('names a category row by the id its accept would add', () => {
+    // The id is the bullet's payload, and it is also the registry id the accept
+    // appends — so the destination is the category itself, not a path.
+    const r = row({ kind: 'category', target: 'recipe-book' })
+    expect(PROPOSAL_KINDS.category.label).toBe('category')
+    expect(descriptorFor(r).destination(r)).toBe('recipe-book')
+    expect(descriptorFor(row({ kind: 'category' })).destination(row({ kind: 'category' })))
+      .toBe('no category named')
+    expect(PROPOSAL_KINDS.category.canAccept(r)).toBe(true)
+    // There is no prose to reconcile: the decision is which notes get retyped,
+    // so there is no merge chat to fall back to.
+    expect(PROPOSAL_KINDS.category.fallback).toBeNull()
   })
 })
 
@@ -121,7 +135,7 @@ describe('canAccept', () => {
   })
 
   it('allows the destination and region kinds', () => {
-    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings']) {
+    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'category']) {
       const r = row({ kind })
       expect(descriptorFor(r).canAccept(r)).toBe(true)
     }
@@ -188,7 +202,6 @@ describe('accept fallback', () => {
     }
     expect(GENERIC.fallback).toBeNull()
   })
-
   it('titles the merge chat and toast per kind', () => {
     const people = row({ kind: 'people', target: 'Mo' })
     expect(PROPOSAL_KINDS.people.fallback!.chatTitle(people)).toBe('Merge Mo fact')
@@ -269,7 +282,7 @@ describe('consequence', () => {
   }
 
   it('answers for every kind the server can send, naming no file', () => {
-    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'review', 'rehome', 'skill']) {
+    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'review', 'rehome', 'skill', 'category']) {
       const text = consequenceFor({ kind, target: 'Mo', path: 'skills/x.md' })
       expect(text, kind).toBeTruthy()
       expect(text, kind).not.toMatch(/\.md\b/)

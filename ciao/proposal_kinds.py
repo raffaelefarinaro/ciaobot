@@ -19,9 +19,17 @@ by the proposal-routing work follow the same rule: ``[project <doc-path>]``,
 "the model was not sure" bucket — deliberately accepts only by manual routing,
 so no one-click action can guess a destination for it.
 
+``[category <id>]`` is the seventh: the owner added categories by hand until
+issue #647 made the vault propose them, and accepting one appends an entry to
+the category registry and retypes the notes that were already typed that way.
+The id is the bullet's payload, the way ``[people]``'s name is; the label,
+folder, description and the note list itself live in a sidecar beside the
+queue, because a queue bullet is one line and a list of paths is not.
+
 Kinds may carry a payload inside the brackets (``[people Mo]``,
-``[project ./projects/x/doc.md]``). The payload is exposed as
-:attr:`ProposalBullet.target`; legacy bullets without one parse unchanged.
+``[project ./projects/x/doc.md]``, ``[category recipe-book]``). The payload is
+exposed as :attr:`ProposalBullet.target`; legacy bullets without one parse
+unchanged.
 """
 
 from __future__ import annotations
@@ -39,6 +47,7 @@ KINDS: tuple[str, ...] = (
     "people",
     "learnings",
     "review",
+    "category",
 )
 """Ordered registry of proposal kinds. Adding a kind here is the only edit a
 new producer needs; the regex below derives from this table."""
@@ -174,7 +183,39 @@ class ReviewAccept:
     action: Literal["route_manually"] = "route_manually"
 
 
-_ACCEPT: dict[str, RegionAccept | RehomeAccept | DocFoldAccept | PeopleAccept | LearningsAccept | ReviewAccept] = {
+@dataclass(frozen=True, slots=True)
+class CategoryAccept:
+    """Accept a `[category]` proposal by adding it to the category registry.
+
+    The fields declare the SHAPE of what this accept acts on, and their values
+    are resolved at accept time from the row and the sidecar, exactly as
+    ``DocFoldAccept.doc_path`` comes from the bullet and ``PeopleAccept.name``
+    from its payload. What a category adds is not one file: it is a registry
+    entry plus a list of notes to retype, which is why the whole set is named
+    here even though the queue bullet carries only the id. Naming them is what
+    keeps a caller branching on the descriptor from reaching for a file it does
+    not have.
+    """
+
+    action: Literal["add_category"] = "add_category"
+    category_id: str = ""
+    label: str = ""
+    folder: str = ""
+    description: str = ""
+    paths: tuple[str, ...] = ()
+
+
+AcceptDescriptor = (
+    RegionAccept
+    | RehomeAccept
+    | DocFoldAccept
+    | PeopleAccept
+    | LearningsAccept
+    | ReviewAccept
+    | CategoryAccept
+)
+
+_ACCEPT: dict[str, AcceptDescriptor] = {
     "memory": RegionAccept(region="memory"),
     "profile": RegionAccept(region="profile"),
     # "user" is the legacy queue label for the ciao:profile region. Its accept
@@ -187,12 +228,11 @@ _ACCEPT: dict[str, RegionAccept | RehomeAccept | DocFoldAccept | PeopleAccept | 
     "people": PeopleAccept(),
     "learnings": LearningsAccept(),
     "review": ReviewAccept(),
+    "category": CategoryAccept(),
 }
 
 
-def accept_for(kind: str) -> (
-    RegionAccept | RehomeAccept | DocFoldAccept | PeopleAccept | LearningsAccept | ReviewAccept
-):
+def accept_for(kind: str) -> AcceptDescriptor:
     """The accept descriptor for a kind.
 
     Raises :class:`UnknownKindError` for an unregistered kind. A silent zero

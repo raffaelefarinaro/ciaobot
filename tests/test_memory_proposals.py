@@ -1078,6 +1078,74 @@ def test_the_learned_date_still_reads_the_most_recent_stamp() -> None:
     assert match.group(1) == "2026-09-02"
 
 
+# ---- Note retyping (issue #647) ---------------------------------------------
+#
+# `set_note_type` is the public half of what `vault_migration._retype_frontmatter`
+# keeps private, and it is deliberately not the same function: the migration
+# refuses a note it did not plan for, because a mismatch there means the vault
+# moved under the pass. A category accept has already checked the baseline in
+# its own caller, so what is left is "give this note this type", and a note with
+# no frontmatter at all is a legitimate member of a cluster.
+
+
+def test_set_note_type_rewrites_only_the_type_line(tmp_path: Path) -> None:
+    note = tmp_path / "N.md"
+    note.write_text(
+        "---\ntitle: Keeps the soup warm\ntype: recipe-book\ntags: [food]\n---\n\n# Keeps the soup warm\n\nBody.\n",
+        encoding="utf-8",
+    )
+
+    assert mp.set_note_type(note, "recipe") is True
+
+    assert note.read_text(encoding="utf-8") == (
+        "---\ntitle: Keeps the soup warm\ntype: recipe\ntags: [food]\n---\n\n"
+        "# Keeps the soup warm\n\nBody.\n"
+    )
+    assert mp.read_note_type(note) == "recipe"
+
+
+def test_set_note_type_creates_the_block_for_a_note_with_no_frontmatter(
+    tmp_path: Path,
+) -> None:
+    note = tmp_path / "N.md"
+    note.write_text("# Keeps the soup warm\n\nBody.\n", encoding="utf-8")
+
+    assert mp.read_note_type(note) == ""
+    assert mp.set_note_type(note, "recipe") is True
+    assert note.read_text(encoding="utf-8") == (
+        "---\ntype: recipe\n---\n\n# Keeps the soup warm\n\nBody.\n"
+    )
+    assert mp.read_note_type(note) == "recipe"
+
+
+def test_set_note_type_adds_the_line_when_the_block_has_none(tmp_path: Path) -> None:
+    note = tmp_path / "N.md"
+    note.write_text("---\ntags: [food]\n---\n\n# Keeps the soup warm\n", encoding="utf-8")
+
+    assert mp.set_note_type(note, "recipe") is True
+    assert note.read_text(encoding="utf-8") == (
+        "---\ntype: recipe\ntags: [food]\n---\n\n# Keeps the soup warm\n"
+    )
+
+
+def test_set_note_type_is_a_no_op_on_a_note_already_typed_that(tmp_path: Path) -> None:
+    """An accept retried against a half-finished cluster has to converge rather
+    than fail, so an unchanged note reports success."""
+    note = tmp_path / "N.md"
+    original = "---\ntype: recipe\n---\n\n# Keeps the soup warm\n"
+    note.write_text(original, encoding="utf-8")
+
+    assert mp.set_note_type(note, "recipe") is True
+    assert note.read_text(encoding="utf-8") == original
+
+
+def test_set_note_type_reports_a_note_it_cannot_write(tmp_path: Path) -> None:
+    """False means the file could not be read or written — never that the write
+    was skipped for a judgement reason, so a caller can tell the two apart."""
+    assert mp.set_note_type(tmp_path / "missing.md", "recipe") is False
+    assert mp.set_note_type(tmp_path / "N.md", "") is False
+
+
 # ---- Source-evidence gate -------------------------------------------------
 #
 # Region promotion used to check a fact's *shape* only. These cover the second

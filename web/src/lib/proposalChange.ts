@@ -16,6 +16,7 @@
  *   update     exact (a learning's recurrence bump)      update   Update a line
  *   update     not exact (a model folds it in on accept) merge    Merge into a note
  *   move       —                                         move     Move a note
+ *   add_category a new category for a note cluster       category New category
  *   none       can_accept                                none     Already saved
  *   none / ''  cannot be accepted as it stands           blocked  Cannot save yet
  *
@@ -28,7 +29,7 @@
 import type { ProposalPreview, ProposalRow } from './types'
 
 export type ProposalChangeType =
-  | 'new' | 'add' | 'update' | 'merge' | 'move' | 'none' | 'blocked'
+  | 'new' | 'add' | 'update' | 'merge' | 'move' | 'category' | 'none' | 'blocked'
   | 'skill' | 'decide' | 'pending'
 
 export interface ProposalChange {
@@ -51,6 +52,7 @@ export const CHANGE_FILTERS: { type: ProposalChangeType; label: string }[] = [
   { type: 'merge', label: 'Merge' },
   { type: 'update', label: 'Update a line' },
   { type: 'move', label: 'Move' },
+  { type: 'category', label: 'New category' },
   { type: 'none', label: 'Already saved' },
   { type: 'blocked', label: 'Cannot save yet' },
   { type: 'skill', label: 'Skill' },
@@ -145,6 +147,20 @@ export function changeFor(
       verb: to ? `Move to ${to}` : 'Move',
       destination: row.rehome?.note || preview.destination,
       qualifier: to ? `to the ${to} workspace` : '',
+    }
+  }
+  if (op === 'add_category') {
+    // A new category for a cluster of notes: nothing is moved, so the
+    // destination is the id the accept would add to the registry and the
+    // qualifier is the half of the change the id does not say. The verb is
+    // what puts the row's own accept button on it — without one the row read as
+    // "cannot be saved" even though the accept works.
+    return {
+      type: 'category',
+      label: 'New category',
+      verb: 'Add category',
+      destination,
+      qualifier: 'retypes the notes it came from',
     }
   }
   if (op === 'none') {
