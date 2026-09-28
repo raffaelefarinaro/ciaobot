@@ -220,11 +220,13 @@ function toggle(job: string) {
 
 const runningJobs = ref<Record<string, boolean>>({})
 
-// Schedules for servers older than the API that reports `schedule_id`.
+// Schedules for servers older than the API that reports `schedule_id`. The
+// retired weekly skill-evolution producer (#697) is deliberately absent: its
+// `system-skill-evolution` schedule no longer ships, so mapping the row would
+// only offer a "Run now" that 404s.
 const legacyJobSchedules: Record<string, string> = {
   memory_proposals: 'system-memory-curation',
   vault_index: 'system-memory-curation',
-  skill_evolution: 'system-skill-evolution',
 }
 
 /**

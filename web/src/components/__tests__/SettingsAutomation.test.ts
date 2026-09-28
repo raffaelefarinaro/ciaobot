@@ -3,8 +3,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { mount, type VueWrapper } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import SettingsAutomation from '../settings/SettingsAutomation.vue'
-import type { AutomationProcess, ProposalOutcomes, RoutineSettings } from '../../lib/types'
+import { useTaskStore } from '../../stores/tasks'
+import type { AutomationProcess, ProposalOutcomes, RoutineSettings, Schedule } from '../../lib/types'
 
 function item(overrides: Partial<AutomationProcess> = {}): AutomationProcess {
   return {
@@ -27,6 +29,35 @@ function outcomes(overrides: Partial<ProposalOutcomes> = {}): ProposalOutcomes {
     recent_30d: { promoted: 1, dismissed: 1 },
     ...overrides,
   }
+}
+
+function schedule(overrides: Partial<Schedule> = {}): Schedule {
+  return {
+    schedule_id: 'system-memory-curation@personal',
+    daily_time_utc: '03:00',
+    prompt: 'Tend the workspace.',
+    chat_id: 0,
+    created_at: '2026-01-01T00:00:00Z',
+    timezone_name: 'Europe/Zurich',
+    last_triggered_on: '2026-09-27',
+    days_of_week: null,
+    thread_id: null,
+    context_label: 'Workspace care',
+    frequency: 'daily',
+    interval_minutes: 0,
+    day_of_month: null,
+    run_at_date: null,
+    web_chat_id: null,
+    web_project_id: 'proj-1',
+    workspace: 'personal',
+    model: 'sonnet',
+    next_run: '2026-09-29T03:00:00Z',
+    last_expected_run: null,
+    missed: false,
+    enabled: true,
+    archive_policy: 'auto',
+    ...overrides,
+  } as Schedule
 }
 
 const baseProps = {
@@ -116,6 +147,43 @@ describe('SettingsAutomation proposal outcomes line', () => {
     delete partial.recent_30d
     const view = mountPanel({ proposalOutcomes: partial as ProposalOutcomes })
     expect(view.find('.automation-proposals').text()).toContain('3 promoted')
+  })
+})
+
+describe('SettingsAutomation legacy schedule mapping', () => {
+  it('does not offer a retired skill-evolution schedule while keeping live legacy mapping', async () => {
+    const view = mountPanel({
+      automationItems: [
+        // No `schedule_id`: the row predates the API that reports one.
+        item({ job: 'skill_evolution', label: 'Skill reflection' }),
+        item({ job: 'memory_proposals', label: 'Memory proposals' }),
+      ],
+    })
+
+    // An install upgraded from a build that still ran the weekly
+    // skill-evolution producer keeps reporting its row, and the persisted
+    // `system-skill-evolution@<workspace>` schedule may still be in the store.
+    // Neither may put a "Run now" on a row whose schedule no longer ships; the
+    // legacy mappings that do resolve keep their action. Read the store after
+    // the mount so this is the pinia the panel actually renders from.
+    const tasks = useTaskStore()
+    tasks.schedules = [
+      schedule({ schedule_id: 'system-skill-evolution@personal' }),
+      schedule({ schedule_id: 'system-memory-curation@personal' }),
+    ]
+    await nextTick()
+
+    const row = (label: string) => {
+      const found = view.findAll('.automation-row').find(
+        r => r.find('.job-title').text().includes(label),
+      )
+      if (!found) throw new Error(`no "${label}" row rendered`)
+      return found
+    }
+
+    expect(row('Skill reflection').find('.btn-run').exists()).toBe(false)
+    expect(row('Memory proposals').find('.btn-run').text()).toBe('Run now')
+    expect(view.findAll('.btn-run')).toHaveLength(1)
   })
 })
 

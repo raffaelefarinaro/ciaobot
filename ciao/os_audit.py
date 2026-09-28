@@ -34,6 +34,9 @@ from ciao.memory_tool import (
 # Proposal kinds and bullet shape are owned by ciao.proposal_kinds; re-export
 # here so this counter stays in sync with the control plane and the web layer.
 from ciao.proposal_kinds import BULLET_RE
+# The 15 KiB SKILL.md budget is owned by ciao.skills_inventory, the module that
+# owns skills; the audit reports the owner's threshold rather than a second copy.
+from ciao.skills_inventory import MAX_SKILL_BYTES
 from ciao.vault_lint import (
     _markdown_source_paths,
     run_validation as run_vault_validation,
@@ -42,8 +45,6 @@ from ciao.workspace_guide import GUIDE_NAME
 from ciao.workspace_guide import guide_path as workspace_guide_path
 
 logger = logging.getLogger(__name__)
-
-SKILL_MAX_BYTES = 15 * 1024
 
 _RULE_BULLET_RE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
 _RULE_NEGATION_RE = re.compile(
@@ -201,17 +202,17 @@ def audit_skills(workspace_dir: Path) -> dict[str, Any]:
                 )
             )
             continue
-        if size > SKILL_MAX_BYTES:
+        if size > MAX_SKILL_BYTES:
             issues.append(
                 {
                     "type": "skill_over_budget",
                     "skill": name,
                     "path": str(skill_md),
                     "size_bytes": size,
-                    "max_bytes": SKILL_MAX_BYTES,
+                    "max_bytes": MAX_SKILL_BYTES,
                     "message": (
                         f"Skill '{name}' exceeds budget: "
-                        f"{size:,} bytes > {SKILL_MAX_BYTES:,} bytes"
+                        f"{size:,} bytes > {MAX_SKILL_BYTES:,} bytes"
                     ),
                 }
             )
