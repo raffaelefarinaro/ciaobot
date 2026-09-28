@@ -73,15 +73,24 @@ async def _reap(proc: asyncio.subprocess.Process) -> None:
                 )
 
 
-def run_git_sync(workspace: Path, *args: str) -> tuple[int, str, str]:
+def run_git_sync(
+    workspace: Path, *args: str, stdin: str | None = None
+) -> tuple[int, str, str]:
     """Run ``git *args`` in ``workspace`` synchronously; (rc, stdout, stderr).
 
     The read-only counterpart of :func:`run_git`, for the quick questions
     ("which branch is this checkout on?", "is this inside a repo?", "where is
-    the index lock?") that must be answerable from a synchronous context —
-    property accessors, and the off-loop thread that resolves a canonical
-    repository before taking a mutation lock. Output is decoded but not
-    trimmed; callers apply their own whitespace convention.
+    the index lock?", "which of these paths is git ignoring?") that must be
+    answerable from a synchronous context — property accessors, and the off-loop
+    thread that resolves a canonical repository before taking a mutation lock.
+    Output is decoded but not trimmed; callers apply their own whitespace
+    convention.
+
+    ``stdin`` is written to the child when given, for the commands that read
+    their arguments from it rather than argv (``git check-ignore -z --stdin``
+    only accepts ``-z`` in that form, and a path list is exactly the payload too
+    large to trust to ``ARG_MAX``). Left unset, the child inherits this
+    process's stdin, which is what every read-only question wants.
 
     A spawn failure (no ``git`` on PATH, unusable cwd) is reported as
     ``(1, "", str(exc))`` rather than raised: every caller of this helper asks
@@ -93,6 +102,7 @@ def run_git_sync(workspace: Path, *args: str) -> tuple[int, str, str]:
             cwd=str(workspace),
             capture_output=True,
             text=True,
+            input=stdin,
         )
     except OSError as exc:
         return 1, "", str(exc)

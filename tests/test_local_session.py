@@ -1091,6 +1091,67 @@ async def test_commit_scoped_refuses_a_pathspec_that_escapes_the_tree(
     assert _git(local, "log", "--oneline").count("\n") == 0  # only the seed commit
 
 
+async def test_commit_scoped_drops_a_gitignored_pathspec_from_the_batch(
+    tmp_path: Path,
+) -> None:
+    """A Finder ``.DS_Store`` in a new notes folder is ignored by the vault's own
+    ``.gitignore``, and ``git add`` refuses the *whole* batch when any single
+    pathspec is ignored. Status never reports an ignored file, but an untracked
+    directory entry (``?? notes/``) expands into one, so without this filter an
+    unattended commit fails on an ordinary file it was never going to commit —
+    and names that file in the error, so the failure reads like a scope bug.
+    """
+    local = _make_data_repo(tmp_path)
+    config = _install_config(local)
+    _write(local / ".gitignore", ".DS_Store\n")
+    _write(local / "memory-vault" / "x" / "note.md", "a note\n")
+    _write(local / "memory-vault" / "x" / ".DS_Store", "finder junk\n")
+
+    preflight = await preflight_scoped(config, local)
+    committed = await commit_scoped(
+        local, branch="main", relpaths=preflight["eligible"], message="backup"
+    )
+
+    # The planned sequence: preflight hands the commit its eligible set, so the
+    # ignored path has to be gone from the report as well as from the batch.
+    assert preflight["eligible"] == ["memory-vault/x/note.md"]
+    assert "memory-vault/x/.DS_Store" in preflight["excluded"]
+    assert committed is True
+    assert _git(local, "show", "--name-only", "--format=", "HEAD").split() == [
+        "memory-vault/x/note.md"
+    ]
+    # Nothing was force-added: the file is still ignored, it is just never
+    # asked about.
+    assert _git(local, "status", "--porcelain", "--ignored").splitlines() == [
+        "?? .gitignore",
+        "!! memory-vault/x/.DS_Store",
+    ]
+
+
+async def test_commit_scoped_still_commits_a_tracked_file_git_ignores(
+    tmp_path: Path,
+) -> None:
+    """The filter asks git what it *would* ignore, which is not the same as what
+    it ignores: a file that is already tracked keeps a later ``.gitignore`` line
+    from meaning anything. Dropping it here would silently stop backing up
+    exactly the note a person (or a sync tool) added to ``.gitignore`` first.
+    """
+    local = _make_data_repo(tmp_path)
+    _write(local / ".gitignore", "note.md\n")
+    _git(local, "add", "-f", ".gitignore", "memory-vault/note.md")
+    _git(local, "commit", "-q", "-m", "track the note anyway")
+    _write(local / "memory-vault" / "note.md", "an edit\n")
+
+    committed = await commit_scoped(
+        local, branch="main", relpaths=["memory-vault/note.md"], message="backup"
+    )
+
+    assert committed is True
+    assert _git(local, "show", "--name-only", "--format=", "HEAD").split() == [
+        "memory-vault/note.md"
+    ]
+
+
 async def test_preflight_scoped_reports_a_tracked_env_as_a_blocker(
     tmp_path: Path,
 ) -> None:

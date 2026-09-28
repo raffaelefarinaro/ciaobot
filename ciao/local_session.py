@@ -490,6 +490,43 @@ def _clean_relpath(raw: str) -> str | None:
     return text if text and text != "." else None
 
 
+async def _ignored_paths(workspace: Path, relpaths: Sequence[str]) -> set[str]:
+    """Which of ``relpaths`` git would refuse to stage, spelled as given.
+
+    ``git add`` rejects the *whole* batch when any single pathspec is ignored
+    ("The following paths are ignored by one of your .gitignore files"), so one
+    ordinary file is enough to fail a scoped commit over a batch of notes: the
+    scaffolded vault ``.gitignore`` ignores ``.DS_Store``, ``git status`` never
+    reports an ignored file, but ``_expand_status_paths`` walks an untracked
+    directory entry (``?? notes/``) and enumerates the ignored files inside it
+    (#685).
+
+    Keyed on the printed set, never on the returncode: ``check-ignore`` exits 0
+    when it printed something, 1 when it printed nothing, and 128 when it could
+    not answer at all, and which of those means what has varied across git
+    versions. A git that fails outright prints nothing, which leaves the
+    caller's list untouched and leaves ``add`` free to refuse it exactly as it
+    did before.
+
+    Tracked-but-ignored paths are *not* printed (git omits them without
+    ``--no-index``) and so stay in the batch, which is the point: a file added
+    before a ``.gitignore`` line is still tracked, and asking for it stages it.
+    """
+    if not relpaths:
+        return set()
+    rc, out, err = await asyncio.to_thread(
+        run_git_sync,
+        Path(workspace),
+        "check-ignore",
+        "-z",
+        "--stdin",
+        stdin="\0".join(relpaths) + "\0",
+    )
+    if rc not in (0, 1):
+        logger.info("git check-ignore failed in %s: %s", workspace, err.strip() or rc)
+    return {rel for rel in out.split("\0") if rel}
+
+
 async def _known_paths(workspace: Path, relpaths: Sequence[str]) -> list[str]:
     """The subset of ``relpaths`` git can be asked about, deduplicated.
 
@@ -497,20 +534,23 @@ async def _known_paths(workspace: Path, relpaths: Sequence[str]) -> list[str]:
     fail outright ("pathspec did not match any files"), so a caller whose list
     came from a status that has since moved on would get an error where the
     honest answer is "nothing to do". One ``ls-files`` answers the tracked
-    half; the filesystem answers the rest, off the event loop.
+    half; the filesystem answers the rest, off the event loop. Gitignored
+    pathspecs are then dropped, because ``add`` refuses a whole batch that
+    contains one — see :func:`_ignored_paths`.
     """
     cleaned = [
         rel for raw in dict.fromkeys(relpaths) if (rel := _clean_relpath(str(raw)))
     ]
     if not cleaned:
         return []
+    root = Path(workspace)
     rc, out, _err = await asyncio.to_thread(
-        run_git_sync, Path(workspace), "ls-files", "-z", "--", *cleaned
+        run_git_sync, root, "ls-files", "-z", "--", *cleaned
     )
     tracked = set(out.split("\0")) if rc == 0 else set()
-    return [
-        rel for rel in cleaned if rel in tracked or (Path(workspace) / rel).exists()
-    ]
+    known = [rel for rel in cleaned if rel in tracked or (root / rel).exists()]
+    ignored = await _ignored_paths(root, known)
+    return [rel for rel in known if rel not in ignored]
 
 
 async def _commit_scoped(workspace: Path, *, relpaths: Sequence[str], message: str) -> bool:
@@ -814,6 +854,12 @@ async def preflight_scoped(config, workspace: Path) -> dict:
     ``ok`` is false whenever there is anything to raise: a failing
     ``git status``, a credential in an eligible file, or a tracked file outside
     the scope.
+
+    ``eligible`` is what a :func:`commit_scoped` call can really stage, so it
+    has already been narrowed by git's own ignore rules
+    (:func:`_ignored_paths`); the paths that narrowing removed are reported in
+    ``excluded`` rather than dropped, and ``excluded`` is therefore every
+    pending path this run will not commit.
     """
     root = backup_scope.data_root(config)
     rc, out, err = await _git(Path(workspace), "status", "--porcelain")
@@ -825,6 +871,16 @@ async def preflight_scoped(config, workspace: Path) -> dict:
         changed = _expand_status_paths(Path(workspace), out)
 
     eligible, excluded = backup_scope.classify(changed, config)
+    # The scope says where a path may go; git says whether it can be staged at
+    # all, and a path it ignores can never be committed however eligible it is.
+    # Reporting one as eligible that the commit would then refuse is how a
+    # preflight hands its caller a failure, so it is reported as excluded
+    # instead — a file the owner can see on disk and will not find in a backup
+    # is exactly the coverage gap this report exists to surface.
+    ignored = await _ignored_paths(Path(workspace), eligible)
+    if ignored:
+        excluded.extend(rel for rel in eligible if rel in ignored)
+        eligible = [rel for rel in eligible if rel not in ignored]
     warnings: list[str] = []
     for rel in eligible:
         # The test-fixture exemption is keyed on a repo-relative path, so it

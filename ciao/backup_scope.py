@@ -406,6 +406,24 @@ def _is_durable(remainder: str, kind: str) -> bool:
     if kind == _VAULT:
         # The vault is the user's notes by construction — its own layout is
         # the app's canonical structure, and its folder name is theirs.
+        #
+        # Which install shapes this covers: the vault is a scope base in its
+        # own right, which happens when the data root *is* the vault root. A
+        # repository holding nothing but notes is the plain case; the
+        # documented existing-folder install with `CIAO_VAULT_ROOT=.` is the
+        # one that widens it, because there the scope base is the checkout
+        # itself and the provenance rule therefore admits the application
+        # source beside the notes.
+        #
+        # That is deliberate rather than a hole: such an install put its
+        # durable data where its code is, and the manual sync path already
+        # stages that same whole tree from the same root, so the unattended
+        # path commits what the owner can back up by hand today and loses
+        # nothing. Narrowing the scope instead would refuse most of a
+        # repository the owner named as their vault, and would report all of
+        # it through `tracked_excluded` as a blocker. The remedy for an
+        # install that wants a narrow scope is a vault in a repository of its
+        # own, which is the first shape.
         return True
     if kind == _ARCHIVE:
         # One archived agent root per child, so the durable trees sit one
