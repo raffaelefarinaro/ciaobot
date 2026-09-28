@@ -4,6 +4,14 @@ import { api } from '../lib/api'
 import { formatAgeDays } from '../lib/relativeTime'
 import { useProjectStore } from './projects'
 
+/** Starting position for a new node, derived from its id so the same notes
+ * settle into the same layout on every load. */
+function seededOffset(id: string, axis: string): number {
+  let h = 2166136261
+  for (const ch of `${axis}:${id}`) h = Math.imul(h ^ ch.charCodeAt(0), 16777619)
+  return (((h >>> 0) / 4294967296) - 0.5) * 800
+}
+
 export interface MemoryGraphNode {
   id: string
   title: string
@@ -362,8 +370,8 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
         stale: n.stale === true,
         ageDays: typeof n.age_days === 'number' ? n.age_days : null,
         thresholdDays: typeof n.threshold_days === 'number' ? n.threshold_days : null,
-        x: (Math.random() - 0.5) * 800,
-        y: (Math.random() - 0.5) * 800,
+        x: seededOffset(n.id, 'x'),
+        y: seededOffset(n.id, 'y'),
         vx: 0,
         vy: 0,
       }))

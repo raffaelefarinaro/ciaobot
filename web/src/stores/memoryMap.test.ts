@@ -223,6 +223,18 @@ describe('graph snapshots', () => {
     expect(api.get).toHaveBeenCalledTimes(2)
   })
 
+  test('the same notes start at the same positions on every load', async () => {
+    vi.mocked(api.get).mockResolvedValue(payload(['a', 'b']))
+    const first = useMemoryMapStore()
+    await first.loadGraph('work')
+    const before = first.nodes.map(n => [n.x, n.y])
+    setActivePinia(createPinia())
+    const second = useMemoryMapStore()
+    await second.loadGraph('work')
+    expect(second.nodes.map(n => [n.x, n.y])).toEqual(before)
+    expect(before[0]).not.toEqual(before[1])
+  })
+
   test('a changed vault replaces the graph but keeps the positions it can', async () => {
     vi.mocked(api.get).mockResolvedValue(payload(['a', 'b']))
     const mm = useMemoryMapStore()
