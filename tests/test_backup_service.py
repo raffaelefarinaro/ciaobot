@@ -31,6 +31,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from ciao import backup_service, local_session
 from ciao.app_settings import AppSettingsStore
 from ciao.backup_service import (
@@ -199,6 +201,13 @@ async def _drive(
     service.run_backup = recording_run  # type: ignore[method-assign]
     await service.backup_loop(stop=stop, sleep=fake_sleep)
     return requested, statuses
+
+
+#: How many runs the refused-tick test lets a loop make before it stops it. A
+#: loop that backs off makes this many runs and this many waits; a loop that
+#: spins makes them back to back with no wait between, which the assertions turn
+#: into a failure instead of a hung suite.
+_SPIN_RUN_BUDGET = 3
 
 
 # ── a fault on demand ────────────────────────────────────────────────────────
@@ -617,6 +626,142 @@ async def test_the_loop_stops_when_asked(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "gate",
+    [{"enabled": False}, {"paused": True}, {"kind": "client"}],
+    ids=["turned-off", "paused", "not-the-host"],
+)
+async def test_a_refused_tick_waits_a_full_interval_instead_of_spinning(
+    tmp_path: Path, gate: dict
+) -> None:
+    """A boot that will not back up has to idle at the cadence, not spin.
+
+    All three gate shapes answer the same way — a ``paused`` status with no
+    attempt stamped — so they are driven as one. The stamp is what
+    ``_next_delay`` derives the wait from, so a refused tick leaves nothing to
+    wait against and the delay comes back zero; since a refused tick stays
+    refused, zero would repeat forever with nothing yielded between the calls.
+    That is worse than idling: every one of those iterations costs a blocking
+    ``_scope_summary`` read that forks git. The loop therefore owes a refused
+    tick a whole interval of its own.
+    """
+    world = _world(tmp_path)
+    clock = _Clock()
+    service = _service(world, clock=clock, kind=gate.get("kind", "host"))
+    if "enabled" in gate:
+        service.set_flags(enabled=bool(gate["enabled"]))
+    if "paused" in gate:
+        service.set_flags(paused=bool(gate["paused"]))
+    world.note("day-2.md", "day two\n")
+
+    stop = asyncio.Event()
+    requested: list[float] = []
+    statuses: list[backup_service.BackupStatus] = []
+    real_run = service.run_backup
+
+    async def recording_run(*, source: str = "manual") -> backup_service.BackupStatus:
+        status = await real_run(source=source)
+        statuses.append(status)
+        # The spin guard, and the reason the budget is on runs as well as on
+        # waits: a loop that does not back off never calls sleep, so a
+        # wait-bounded driver would let it run until the suite is killed. One
+        # run past the budget is what a healthy loop makes too — the budget is
+        # reached on a wait, not on a run — so the assertion, not this, is what
+        # tells a backing-off loop from a spinning one.
+        if len(statuses) > _SPIN_RUN_BUDGET:
+            stop.set()
+        return status
+
+    async def fake_sleep(delay: float) -> None:
+        requested.append(delay)
+        clock.advance(delay)
+        if len(requested) >= _SPIN_RUN_BUDGET:
+            stop.set()
+        await asyncio.sleep(0)
+
+    service.run_backup = recording_run  # type: ignore[method-assign]
+    await asyncio.wait_for(
+        service.backup_loop(stop=stop, sleep=fake_sleep), timeout=60
+    )
+
+    assert [s.state for s in statuses] == (
+        [backup_service.STATE_PAUSED] * _SPIN_RUN_BUDGET
+    )
+    # One wait per tick and every one of them a whole interval: no tick is
+    # answered faster than the loop slept, so the loop cannot be spinning.
+    assert requested == [float(BACKUP_INTERVAL_S)] * _SPIN_RUN_BUDGET
+    # Refused, not attempted — which is what keeps the loop honest, and what the
+    # next test pins the consequence of.
+    assert [s.last_attempt_at for s in statuses] == [""] * _SPIN_RUN_BUDGET
+    # And nothing reached the repository while the loop idled.
+    assert _git(world.workspace, "status", "--porcelain") != ""
+    assert world.head() == world.remote_head()
+
+
+async def test_a_pause_lifted_while_the_loop_waits_runs_at_once(
+    tmp_path: Path,
+) -> None:
+    """The refused tick's full interval must not become a delay for the first
+    real run after the lift — the reason it stamps no attempt, and the trap a
+    fix that simply stamped one would fall into."""
+    world = _world(tmp_path)
+    clock = _Clock()
+    service = _service(world, clock=clock)
+    world.note("day-2.md", "day two\n")
+    service.set_flags(paused=True)
+
+    delays: list[float] = []
+    real_run = service.run_backup
+
+    async def recording_run(*, source: str = "manual"):
+        delays.append(service._next_delay())  # noqa: SLF001 — the cadence under test
+        return await real_run(source=source)
+
+    service.run_backup = recording_run  # type: ignore[method-assign]
+    requested, statuses = await asyncio.wait_for(
+        _drive(
+            service,
+            clock,
+            ticks=2,
+            # The owner lifts the pause between the first tick and the second.
+            before_tick=lambda _tick: service.set_flags(paused=False),
+        ),
+        timeout=15,
+    )
+
+    assert [s.state for s in statuses] == [
+        backup_service.STATE_PAUSED,
+        backup_service.STATE_READY,
+    ]
+    # Nothing was left of the interval to serve, so the first tick after the lift
+    # ran at once instead of waiting out the refused tick's interval as well.
+    assert delays == [0.0, 0.0]
+    assert requested == [float(BACKUP_INTERVAL_S)] * 2
+    # The note was committed and pushed on that tick, not on a later one.
+    assert world.commit_paths() == ["memory-vault/Notes/day-2.md"]
+    assert world.head() == world.remote_head()
+
+
+@pytest.mark.parametrize(
+    "stamp", ["not a timestamp", "2026-09-28T11:00:00"], ids=["garbage", "no-offset"]
+)
+def test_an_attempt_stamp_that_cannot_be_read_runs_now_rather_than_raising(
+    tmp_path: Path, stamp: str
+) -> None:
+    """A stamp with no timezone parses fine and is what makes the subtraction
+    raise — in ``_next_delay``, outside anything that could report it and inside
+    the loop, so one hand-edited file would kill the cadence. An unreadable
+    stamp means "no record", and no record means run now."""
+    world = _world(tmp_path)
+    clock = _Clock()
+    store = AppSettingsStore(world.config.state_path.parent / "app_settings.json")
+    store.update({"backup_last_attempt_at": stamp})
+    service = _service(world, clock=clock, store=store)
+
+    assert service._elapsed_since_attempt() is None  # noqa: SLF001
+    assert service._next_delay() == 0.0  # noqa: SLF001
+
+
 # ── one serialized path ──────────────────────────────────────────────────────
 
 
@@ -747,3 +892,30 @@ async def test_the_persisted_record_survives_a_new_store(tmp_path: Path) -> None
     assert status.last_success_commit == _git(
         world.workspace, "rev-parse", "--short=12", "HEAD"
     )
+
+
+async def test_the_status_says_where_the_last_run_pushed_to(tmp_path: Path) -> None:
+    """``backup_remote`` is the record of where the notes went, and it is the
+    only one that survives the remote going away: the live ``remote`` is read
+    fresh each call and is empty on every boot that refuses or an install with
+    no origin, which is when the owner most wants to know the destination."""
+    world = _world(tmp_path)
+    service = _service(world)
+    world.note("day-2.md", "day two\n")
+
+    landed = await service.run_backup()
+    assert landed.last_remote == sanitize_remote(str(world.remote))
+    assert landed.last_remote == landed.remote
+
+    _git(world.workspace, "remote", "remove", "origin")
+    unconfigured = await service.status()
+    assert unconfigured.state == backup_service.STATE_NOT_CONFIGURED
+    assert unconfigured.remote == ""
+    assert unconfigured.last_remote == sanitize_remote(str(world.remote))
+
+    # A record a user edited by hand is sanitized on the way out as well: no
+    # credential reaches a payload just because it survived in the file.
+    store = AppSettingsStore(world.config.state_path.parent / "app_settings.json")
+    store.update({"backup_remote": "https://ghp_TOKEN1234567890@github.com/o/r.git"})
+    edited = await _service(world, store=store).status()
+    assert edited.last_remote == "https://github.com/o/r.git"

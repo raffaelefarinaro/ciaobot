@@ -150,7 +150,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/local/preflight` | Git preflight check for dirty files, categories, blockers/warnings |
 | POST | `/api/local/handback` | Commit pending work, pull from origin, push the current branch |
 | POST | `/api/local/resync` | Merge `origin/<branch>` back into the checkout |
-| GET | `/api/local/backup` | Memory-backup status: `state`, `scope`, `branch`, sanitized `remote`, `enabled`, `interval_s`, last attempt/success, `pending_changes`, `pending_commits`, `reason` (read-only) |
+| GET | `/api/local/backup` | Memory-backup status: `state`, `scope`, `branch`, sanitized `remote` and `last_remote`, `enabled`, `interval_s`, last attempt/success, `pending_changes`, `pending_commits`, `reason` (read-only) |
 | PATCH | `/api/local/backup` | Turn the memory backup off/on (`enabled`) or pause/resume it (`paused`); persists across a restart |
 | POST | `/api/local/backup/run` | Back up now, through the same serialized path the five-minute loop uses |
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
@@ -712,14 +712,18 @@ a failure of the endpoint. `state` is one of:
 `last_success_commit` is a commit known to exist on the remote: it is written only by a push
 that landed, never by a local commit. A failed push keeps the local commit untouched — no
 reset, no force-push — and the remote URL is always reported with any credential removed.
-`POST /api/local/backup/run` is the manual trigger; it takes the same lock as the scheduled
-tick, so the two can never interleave. 200 when the run left the repository in a state that
-needs nothing from you, 400 when it could not do its job (no repository, no remote, refused
-credentials, unreachable remote) — the body is the same status object either way.
+`remote` is read fresh on every call and is empty whenever this boot is paused or the
+repository is unconfigured; `last_remote` is the record of where the last run pushed, so it
+is still the answer when `remote` is not. `POST /api/local/backup/run` is the manual trigger;
+it takes the same lock as the scheduled tick, so the two can never interleave. 200 when the
+run left the repository in a state that needs nothing from you, 400 when it could not do its
+job (no repository, no remote, refused credentials, unreachable remote) — the body is the
+same status object either way.
 
 ```bash
-# What the backup service knows: {state, scope, branch, remote, enabled, interval_s,
-# last_attempt_at, last_success_at, last_success_commit, pending_changes, pending_commits, reason}.
+# What the backup service knows: {state, scope, branch, remote, last_remote, enabled,
+# interval_s, last_attempt_at, last_success_at, last_success_commit, pending_changes,
+# pending_commits, reason}.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/local/backup"
 
 # Pause backups, or turn them off entirely. Both survive a restart.

@@ -145,11 +145,17 @@ class BackupStatus:
     """What the backup service knows about itself, in one serializable value.
 
     The persisted half (``enabled``, ``interval_s``, ``last_attempt_at``,
-    ``last_success_at``, ``last_success_commit``) survives a restart; the rest
-    is read from the repository on every call. ``last_success_at`` and
-    ``last_success_commit`` are only ever written by a push that landed, so
+    ``last_success_at``, ``last_success_commit``, ``last_remote``) survives a
+    restart; the rest is read from the repository on every call.
+    ``last_attempt_at`` is never written by a paused or not-the-host tick, so a
+    tick that was refused leaves the cadence where it was. ``last_success_at``
+    and ``last_success_commit`` are only ever written by a push that landed, so
     together they are evidence that a named commit exists on the remote — the
-    one claim a user cannot check without leaving the app.
+    one claim a user cannot check without leaving the app. ``last_remote`` is
+    the sanitized ``origin`` the last run pushed to: the live ``remote`` is read
+    fresh every tick and is empty whenever this boot refuses or the repository
+    is unconfigured, which is exactly when the owner most wants to know where
+    the data was going.
     """
 
     state: str
@@ -158,6 +164,9 @@ class BackupStatus:
     branch: str = ""
     #: The ``origin`` URL with any credentials removed. Never the raw string.
     remote: str = ""
+    #: The ``origin`` URL of the last run, from the durable record — also
+    #: credential-free, and still the answer when ``remote`` is empty.
+    last_remote: str = ""
     enabled: bool = True
     interval_s: int = BACKUP_INTERVAL_S
     #: When the service last *tried* (never updated by a paused or not-the-host
@@ -692,6 +701,12 @@ class BackupService:
         - **It re-evaluates every tick.** Readiness, the pause flag and the host
           verdict are all re-read per tick, so a repository configured later
           becomes ready, and a pause takes and lifts, without a restart.
+        - **It never spins on a boot that will not back up.** A tick refused by
+          the gate (off, paused, or not the host) is deliberately not an attempt,
+          so it leaves no stamp and the delay derived from that stamp is zero —
+          which is exactly what makes the first tick after the gate lifts run at
+          once. Zero is not a cadence, so a refused tick waits a full interval of
+          its own rather than calling straight back in.
 
         ``sleep`` is a parameter so a test can drive the cadence on a controlled
         clock; production passes ``asyncio.sleep``.
@@ -703,11 +718,22 @@ class BackupService:
             if stop.is_set():
                 return
             try:
-                await self.run_backup(source="scheduled")
+                status = await self.run_backup(source="scheduled")
             except asyncio.CancelledError:
                 break
             # No other exception can reach here — ``run_backup`` converts one
             # into a status — so the loop cannot die of a fault in its own work.
+            if status.state == STATE_PAUSED:
+                # A gate-refused run is not an attempt and stamps nothing, so the
+                # delay above was zero and nothing else here would yield: the loop
+                # would re-enter immediately, forever, and every iteration costs a
+                # `_scope_summary` read that forks git. A full interval is the
+                # right cadence for "this boot will not back up" — it is a
+                # condition that only the owner or a restart changes, and it does
+                # not delay the run that follows an unpause, because the stamp is
+                # still absent and the delay is still zero then.
+                if not await self._wait(stop, BACKUP_INTERVAL_S, sleep):
+                    return
 
     def _next_delay(self) -> float:
         """Seconds until the next attempt: what is left of the interval.
@@ -717,6 +743,10 @@ class BackupService:
         (the overdue resume). With a backoff in force the whole interval is
         multiplied, so the overdue case waits an hour rather than firing every
         five minutes against a remote that is not answering.
+
+        Never the whole cadence for a boot that will not back up: that case has
+        no stamp at all, and ``backup_loop`` gives it its own interval rather
+        than turning a missing stamp into a zero wait.
         """
         elapsed = self._elapsed_since_attempt()
         interval = BACKUP_INTERVAL_S * (
@@ -729,16 +759,19 @@ class BackupService:
     def _elapsed_since_attempt(self) -> float | None:
         """Seconds since the last attempt, or None when there is none to read.
 
-        A stamp that cannot be parsed (hand-edited, written by a build whose
+        A stamp that cannot be read (hand-edited, written by a build whose
         format differs) is treated as no stamp: running one tick early is
-        harmless, and refusing to run at all would be not.
+        harmless, and refusing to run at all would be not. Both ways of failing
+        to read are caught, because ``datetime.fromisoformat`` happily parses a
+        stamp with no offset and the subtraction that follows is what then
+        raises — in ``_next_delay``, outside anything that could report it.
         """
         raw = self._store.settings.backup_last_attempt_at
         if not raw:
             return None
         try:
             return max(0.0, (self._now() - datetime.fromisoformat(raw)).total_seconds())
-        except ValueError:
+        except (TypeError, ValueError):
             logger.info("Unreadable backup attempt stamp %r; backing up now", raw)
             return None
 
@@ -825,13 +858,19 @@ class BackupService:
         pending_changes: int = 0,
         pending_commits: int = 0,
     ) -> BackupStatus:
-        """Build a status from the live state and the persisted record."""
+        """Build a status from the live state and the persisted record.
+
+        ``last_remote`` is sanitized on the way out as well as on the way in:
+        it is a string in a file a user can edit, and the guarantee that no
+        credential reaches a status payload is worth more than the redundancy.
+        """
         settings = self._store.settings
         return BackupStatus(
             state=state,
             scope=_scope_summary(self._config),
             branch=branch,
             remote=remote,
+            last_remote=sanitize_remote(settings.backup_remote),
             enabled=bool(settings.backup_enabled),
             interval_s=BACKUP_INTERVAL_S,
             last_attempt_at=settings.backup_last_attempt_at,
