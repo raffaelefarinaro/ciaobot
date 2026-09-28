@@ -45,7 +45,6 @@ describe('HomeIntake', () => {
     expect(create).toHaveBeenCalledWith(
       'launch',
       'Turn the research notes into a decision brief',
-      'Turn the research notes into a decision brief',
     )
     expect(send).toHaveBeenCalledWith('new-chat', 'Turn the research notes into a decision brief')
     expect(wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').element.value).toBe('')
@@ -132,7 +131,7 @@ describe('HomeIntake', () => {
     await wrapper.get('form').trigger('submit')
     await flushPromises()
 
-    expect(create).toHaveBeenCalledWith('launch', 'Ship it', 'Ship it')
+    expect(create).toHaveBeenCalledWith('launch', 'Ship it')
     wrapper.unmount()
   })
 
@@ -161,7 +160,6 @@ describe('HomeIntake', () => {
     expect(openPicker).toHaveBeenCalledWith({ workspace: 'work', projectId: 'work-general' })
     expect(store.newChatInProject).toHaveBeenCalledWith(
       'work-general',
-      'Work planning brief',
       'Work planning brief',
     )
 
@@ -208,7 +206,7 @@ describe('HomeIntake', () => {
     await input.trigger('keydown', { key: 'Enter', ctrlKey: true })
     await flushPromises()
     expect(openPicker).toHaveBeenCalledTimes(1)
-    expect(store.newChatInProject).toHaveBeenCalledWith('general', 'Draft the plan', 'Draft the plan')
+    expect(store.newChatInProject).toHaveBeenCalledWith('general', 'Draft the plan')
     wrapper.unmount()
   })
 
@@ -253,7 +251,7 @@ describe('HomeIntake', () => {
     await wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').setValue('Plan the week')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
-    expect(create).toHaveBeenCalledWith('general', 'Plan the week', 'Plan the week', { model: 'sonnet', provider: 'claude' })
+    expect(create).toHaveBeenCalledWith('general', 'Plan the week', undefined, { model: 'sonnet', provider: 'claude' })
 
     // A workspace switch drops the override: the other workspace has its
     // own default.
@@ -297,4 +295,3 @@ describe('HomeIntake', () => {
     wrapper.unmount()
   })
 })
-

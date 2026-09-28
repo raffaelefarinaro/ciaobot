@@ -353,11 +353,6 @@ async function attachStaged(chatId: string, projectId: string, items: StagedItem
   return refs
 }
 
-function titleFromPrompt(value: string): string {
-  const firstLine = value.split('\n')[0]?.trim() || 'New work'
-  return firstLine.length > 72 ? `${firstLine.slice(0, 69)}…` : firstLine
-}
-
 function onSubmit(): void {
   void startWork()
 }
@@ -398,10 +393,9 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
     const items = staged.value.slice()
     if (message || items.length) {
       const runtime = selectedModel.value ?? undefined
-      const title = titleFromPrompt(message || items.map(item => item.name).join(', '))
       const chat = runtime
-        ? await store.newChatInProject(projectId, message, title, runtime)
-        : await store.newChatInProject(projectId, message, title)
+        ? await store.newChatInProject(projectId, message, undefined, runtime)
+        : await store.newChatInProject(projectId, message)
       if (!chat) return
       // Attachments belong to a chat, so they upload now that it exists and
       // go out with the first message: images staged on the chat, files as
