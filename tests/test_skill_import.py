@@ -10,11 +10,11 @@ import pytest
 
 from ciao.skill_import import (
     MAX_SKILL_ASSET_BYTES,
-    MAX_SKILL_BYTES,
     MAX_SKILL_TOTAL_BYTES,
     extract_skill_zip,
     validate_skill_zip,
 )
+from ciao.skills_inventory import MAX_SKILL_BYTES
 
 
 def _zip_bytes(entries: dict[str, bytes]) -> bytes:
@@ -45,6 +45,17 @@ def _oversized_skill_zip(name: str = "demo") -> bytes:
             ).encode()
         }
     )
+
+
+def test_the_context_budget_is_still_fifteen_kibibytes() -> None:
+    """The value moved house with the producer's retirement, not in meaning.
+
+    It used to be defined by the weekly skill-evolution pass, which is gone;
+    `skills_inventory` owns it now because it owns skills. The import gate and
+    the number the owner is told about must stay the same 15 KiB, or an
+    import that warned yesterday would pass silently today.
+    """
+    assert MAX_SKILL_BYTES == 15 * 1024
 
 
 def test_oversized_skill_md_warns_instead_of_failing() -> None:

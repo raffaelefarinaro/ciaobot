@@ -22,25 +22,6 @@ DEFAULT_MAX_FAILED_JOBS = 20
 DEFAULT_MAX_FAILURE_AGE_DAYS = 7
 
 
-def _is_legacy_no_proposal_failure(run: dict) -> bool:
-    """Recognize pre-fix skill-evolution no-proposal rows.
-
-    Older DAG runs recorded the intentional ``has_proposal`` false branch as
-    an error. Keep those historical rows out of the issue report too, but
-    require the exact DAG/node/error shape so genuine skill-evolution errors
-    remain visible.
-    """
-    extra = run.get("extra")
-    dag_label = extra.get("dag") if isinstance(extra, dict) else None
-    return (
-        isinstance(extra, dict)
-        and isinstance(dag_label, str)
-        and dag_label.startswith("skillevo:")
-        and extra.get("node_id") == "has_proposal"
-        and run.get("error") == "no-proposal"
-    )
-
-
 def _parse_run_ts(raw: object) -> datetime | None:
     """Parse a recorded ISO timestamp, treating a naive one as UTC."""
     if not isinstance(raw, str) or not raw:
@@ -88,8 +69,6 @@ def recent_job_failures(
     for job, info in job_runs.load_runs(limit_per_job=10).items():
         for run in info.get("recent") or []:
             if run.get("status") != "error":
-                continue
-            if _is_legacy_no_proposal_failure(run):
                 continue
             extra = run.get("extra")
             if isinstance(extra, dict) and extra.get("schedule_id") in excluded:

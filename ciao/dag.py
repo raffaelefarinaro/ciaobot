@@ -1,12 +1,15 @@
 """Tiny DAG runner for deterministic schedule pipelines.
 
-A few Ciaobot schedules are shaped like a small workflow: load some state, flag
-items, call a model, run a gate, write output. Today those are hand-rolled
-``async def`` functions (see ``ciao/skill_evolution.py`` for the canonical
-example). This module lifts the workflow into data so future schedules
-(``sched-skillevo`` rewrite, ``sched-depcheck`` follow-ups, etc.) can
-express the same pipelines as a list of nodes + edges without a 300-line
-``async def`` each.
+A Ciaobot schedule is sometimes shaped like a small workflow: load some state,
+flag items, call a model, run a gate, write output. Those are otherwise
+hand-rolled ``async def`` functions. This module lifts the workflow into data
+so a schedule can express the same pipeline as a list of nodes + edges without
+a 300-line ``async def`` each.
+
+No shipped producer runs a DAG today — the weekly skill-evolution pass, which
+was the canonical example, was retired in #697 — so the node kinds and the
+worked edge shapes are pinned by ``tests/test_dag.py`` and
+``tests/test_dag_resumption.py`` instead of by a caller.
 
 Design constraints (intentionally small):
 
@@ -18,15 +21,15 @@ Design constraints (intentionally small):
   compose by chaining nodes, not by a single fork node.
 * **Per-node timing via ``job_runs.track_sync``.** Every node's run is
   recorded in ``.runtime/job_runs.jsonl`` with model, duration, status.
-  That's the gap today: the outer schedule run is recorded, but the inner
-  model call is not.
+  That's the gap this closes: the outer schedule run is recorded, but the
+  inner model call is not.
 * **Failures bubble up.** A node's exception marks the run as failed,
   short-circuits the ``ok`` branch, and re-raises. Caller decides whether
   to swallow.
 
-This is the Python port of the Archon YAML-DAG pattern, scoped to the 2-3
-Ciaobot schedules that actually benefit. See ``Resources/Archon.md`` for the
-rationale (decision: do-not-adopt; pattern: steal).
+This is the Python port of the Archon YAML-DAG pattern, kept for the schedules
+that benefit. See ``Resources/Archon.md`` for the rationale (decision:
+do-not-adopt; pattern: steal).
 """
 
 from __future__ import annotations

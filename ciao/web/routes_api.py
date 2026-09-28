@@ -7745,8 +7745,8 @@ async def proposal_action(request: Request) -> JSONResponse:
         # before flipping the record, keyed by the proposal's own
         # `skill:<name>` text, so the History tab shows it and the pass that must
         # honour it can read it back. Deliberately NOT in the outcomes tally:
-        # that ledger measures the MEMORY extraction pipeline, and skill
-        # proposals come from the separate skill-evolution pipeline.
+        # that ledger measures the MEMORY extraction pipeline, and a skill
+        # proposal is filed by the same pass but settled, not promoted.
         return JSONResponse(
             proposal_actions.ProposalActionResult(
                 id=pid, action="dismiss", dismissed=True

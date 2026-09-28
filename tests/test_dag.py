@@ -675,7 +675,7 @@ def test_per_node_rows_have_model_and_provider(tmp_path) -> None:
         Node(id="b", kind="bash", payload={"cmd": "true", "model": "kimi-k2.7-code:cloud"}),
     ]
     edges = [Edge(src="a", dst="b")]
-    run(dag, edges, job="skillevo", label="int")
+    run(dag, edges, job="unit", label="int")
     rows = _job_runs(tmp_path)
     assert len(rows) == 2
     for r in rows:

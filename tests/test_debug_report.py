@@ -84,7 +84,7 @@ def test_stale_failures_are_dropped(tmp_path: Path) -> None:
     boot past the 12h cooldown.
     """
     job_runs.record_run(JobRun(
-        job="skill_evolution", label="Skill reflection",
+        job="vault_index", label="Vault index refresh",
         started_at=_ago(days=19), ended_at=_ago(days=19),
         status="error", error="OneShotError: Model not found",
     ))
@@ -181,9 +181,17 @@ def test_triage_own_run_excluded_when_requested(tmp_path: Path) -> None:
     assert all("Triage Summary" not in e for e in errors)
 
 
-def test_legacy_skill_evolution_no_proposal_is_not_a_runtime_issue(
+def test_a_retired_job_is_not_re_triaged_from_its_old_runs(
     tmp_path: Path,
 ) -> None:
+    """Retiring a job is what stops its history from resurfacing.
+
+    `job_runs.jsonl` is append-only, so an install that ran the weekly
+    skill-evolution pass still holds its failure rows. Once the job is retired
+    they are not collected, and the report never opens a triage chat about a
+    producer that no longer exists — which is also why the pre-fix
+    `no-proposal` recognizer could be deleted along with it.
+    """
     job_runs.record_run(JobRun(
         job="skill_evolution", label="skillevo:small-skill:has_proposal",
         started_at=_ago(hours=3),
@@ -196,22 +204,17 @@ def test_legacy_skill_evolution_no_proposal_is_not_a_runtime_issue(
         },
     ))
     job_runs.record_run(JobRun(
-        job="skill_evolution", label="skillevo:small-skill:semantic",
+        job="trajectory", label="trajectory:write",
         started_at=_ago(hours=2),
         ended_at=_ago(hours=2),
-        status="error", error="model returned drifted",
-        extra={
-            "dag": "skillevo:small-skill",
-            "node_id": "semantic",
-            "kind": "gate",
-        },
+        status="error", error="could not write",
     ))
 
     failures = recent_job_failures()
 
-    assert [failure["error"] for failure in failures] == [
-        "model returned drifted",
-    ]
+    assert [failure["error"] for failure in failures] == ["could not write"]
+    # The rows are still on disk; only the reporting changed.
+    assert "skill_evolution" in job_runs.load_runs(keep_retired=True)
 
 
 def test_format_report_only_errors_no_jobs(tmp_path: Path) -> None:

@@ -1,16 +1,16 @@
 """The skill-proposal queue, its identity, and the one writer that owns it.
 
 A skill improvement suggestion used to be a loose Markdown file under
-``<workspace vault>/Workspace/Skill-Proposals/``, written by
-:mod:`ciao.skill_evolution` and listed by the review API as a bare filename.
+``<workspace vault>/Workspace/Skill-Proposals/``, written by the retired
+weekly skill-evolution pass and listed by the review API as a bare filename.
 Nothing in that shape could answer the three questions a review queue exists to
 answer. There was no stable identity — the filename *was* the id, so a dated
 proposal and today's were different rows for one finding. There was no record of
-which sessions justified the change, so a re-run of the weekly pass overwrote
-the previous run's findings with its own. And there was no durable resolution
-distinct from file deletion: unlinking was the only way to say "decided", which
-meant the next pass re-derived the same suggestion as a new file, and a deleted
-proposal left no trace that anyone had looked at it.
+which sessions justified the change, so a re-run overwrote the previous run's
+findings with its own. And there was no durable resolution distinct from file
+deletion: unlinking was the only way to say "decided", which meant the next
+pass re-derived the same suggestion as a new file, and a deleted proposal left
+no trace that anyone had looked at it.
 
 This module is the transport-neutral owner of the queue:
 
@@ -48,13 +48,14 @@ The file shape
 
 ``render_proposal`` is a pure function of the record, so the same record always
 renders the same bytes and a merge that changed nothing writes nothing.
-``parse_proposal`` reads both shapes, mapping the headings the evolution prompt
-asks the model for (``What I noticed`` → problem, ``Suggested improvement`` and
-``Proposed edit`` → change, ``Why this should help`` → rationale) and the
-``Source sessions`` list into evidence. A heading this schema does not name, and
-the prose before the first one, is appended to the rationale rather than
-dropped: a legacy file's words are the finding, and the acceptance test for a
-readable legacy record is that re-writing it loses none of them. That includes
+``parse_proposal`` reads both shapes, mapping the headings the retired evolution
+prompt asked the model for (``What I noticed`` → problem, ``Suggested
+improvement`` and ``Proposed edit`` → change, ``Why this should help`` →
+rationale) and the ``Source sessions`` list into evidence. A heading this schema
+does not name, and the prose before the first one, is appended to the rationale
+rather than dropped: a legacy file's words are the finding, and the acceptance
+test for a readable legacy record is that re-writing it loses none of them. That
+includes
 the file's own self-description ("This is a reviewable suggestion based on
 repeated recent use"), which is prose this schema does not name and therefore
 rides along in the rationale. Only the first level-1 heading becomes ``title``.

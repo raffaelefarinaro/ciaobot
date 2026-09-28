@@ -3420,8 +3420,8 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     unique substring of it.
 
     Settled, not deleted: this used to unlink the file, which left no record that
-    anyone had decided anything, so the next evolution pass that saw the same
-    evidence filed the same proposal again. ``ciao.skill_proposals`` records the
+    anyone had decided anything, so the next pass that saw the same evidence
+    filed the same proposal again. ``ciao.skill_proposals`` records the
     decision in the workspace's sidecar and flips the record's lifecycle; the
     proposal stays readable and keeps accumulating evidence, and stays settled.
     """
@@ -3446,8 +3446,8 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     config = CiaoConfig.from_env(config_source)
 
     # Which workspace the proposal lives in: the active one, falling back to the
-    # primary, matching skill_evolution's routing so evidence and queue stay
-    # aligned per workspace.
+    # primary, so the decision lands in the same queue the proposal was filed
+    # into.
     name = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
     if config.workspace(name) is None:
         name = config.primary_workspace()
