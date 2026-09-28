@@ -13,7 +13,10 @@ individual steps that must fail are replaced. ``subprocess.run`` is patched
 through ``routes_api`` and passes everything it is not asked to fail straight
 to the real one, which matters: ``repository_mutation`` resolves its lock key
 with ``git rev-parse --show-toplevel``, and a recorder that swallowed that
-would key the lock on nothing.
+would key the lock on nothing. The cancellation case pauses its commit inside
+the route's own thread rather than replacing it — the claim there is about
+ordering between a git child that is still running and a released lock, not
+about any command's exit code.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -134,6 +138,16 @@ def _verbs(calls: list[tuple[str, ...]]) -> list[str]:
     named constant is clearer than repeating the filter at each call site.
     """
     return [args[0] for args in calls if args[0] not in _LOCK_READS]
+
+
+async def _wait_thread_event(event: threading.Event, message: str) -> None:
+    """Wait for an event the route's own git thread sets, without blocking it.
+
+    The route runs git in a worker thread, so a step that pauses there has to
+    be released from this side too; the bounded wait is what turns "the test
+    hung" into a named failure.
+    """
+    assert await asyncio.to_thread(event.wait, 30), message
 
 
 @pytest.fixture(autouse=True)
@@ -276,3 +290,93 @@ async def test_snapshot_refuses_foreign_git_lock(
     assert marker.read_text(encoding="utf-8") == ""
     assert not {"add", "commit", "push"} & set(_verbs(calls))
     assert _head(repo) == before
+
+
+# ── cancellation is not a shorter transaction ─────────────────────────────
+
+
+async def test_snapshot_cancellation_waits_for_git_before_unlock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled snapshot still owns the repository until git has exited.
+
+    ``asyncio.to_thread`` cannot be recalled once its worker thread is running,
+    so cancelling the route used to unwind it at once: ``repository_mutation``
+    released, the backup or a manual sync took the checkout, and the abandoned
+    commit carried on writing the index next to it. The commit here is paused
+    inside the route's own thread, which is the window a real slow commit
+    opens; the test cancels the route inside that window, starts a second
+    writer, and requires it to stay locked out until the commit is released.
+    """
+    repo = _repo(tmp_path / "repo", origin=_bare_origin(tmp_path / "origin.git"))
+    (repo / "note.md").write_text("work\n", encoding="utf-8")
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[tuple[str, ...]] = []
+    real_run = subprocess.run
+
+    def pausing_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git":
+            calls.append(tuple(cmd[1:]))
+            if cmd[1] == "commit":
+                # Bounded, so a failing assertion cannot leave this thread
+                # parked after the test has given up on it.
+                entered.set()
+                release.wait(30)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(routes_api.subprocess, "run", pausing_run)
+    attempting = asyncio.Event()
+    acquired = asyncio.Event()
+
+    async def other_writer() -> None:
+        attempting.set()
+        async with repository_mutation(repo):
+            acquired.set()
+
+    snapshot = asyncio.create_task(admin_snapshot(_Request(repo)))
+    await _wait_thread_event(entered, "the snapshot never reached its commit")
+
+    writer = asyncio.create_task(other_writer())
+    snapshot.cancel()
+    await asyncio.wait_for(attempting.wait(), timeout=10)
+    # Wall clock, not a scheduler yield: the writer has to get as far as the
+    # lock before "still locked out" means anything. A second is generous for
+    # the ``git rev-parse`` it resolves its key with, and the loop stops early
+    # if the lock is handed over early — which is the failure.
+    for _ in range(20):
+        if acquired.is_set():
+            break
+        await asyncio.sleep(0.05)
+    assert _verbs(calls) == ["add", "status", "commit"]
+    assert not acquired.is_set(), (
+        "another writer took the repository while the cancelled snapshot's git was running"
+    )
+    assert not snapshot.done(), "the route returned before its git step exited"
+
+    # A second cancel, landing in the route's cleanup wait instead of in the
+    # original await. It must not detach the thread either, or the wait it is
+    # doing is exactly what gets skipped. The pause before it is delivery
+    # latency for the first cancel — the route is a few statements into its
+    # cleanup by then, and git is still parked.
+    await asyncio.sleep(0.05)
+    snapshot.cancel()
+    for _ in range(20):
+        if acquired.is_set():
+            break
+        await asyncio.sleep(0.05)
+    assert not acquired.is_set(), (
+        "a repeated cancellation released the repository while git was still running"
+    )
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(snapshot, timeout=30)
+    # The lock comes free only now, and only for a writer already queued on it.
+    await asyncio.wait_for(writer, timeout=30)
+    assert acquired.is_set()
+    verbs = _verbs(calls)
+    assert verbs == ["add", "status", "commit"], "a snapshot step ran after cancellation"
+    assert "push" not in verbs
+    assert _git(tmp_path / "origin.git", "log", "--format=%s").splitlines() == ["seed"]
