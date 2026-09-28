@@ -9,8 +9,8 @@ per timeout and never releases them (issue #470). ``asyncio.wait_for`` cancels
 grandchild ``ssh`` that inherits the stdout/stderr pipe write ends. SIGKILL to
 git alone leaves that grandchild alive holding the write ends, so the parent's
 read ends never close and the transport is never torn down. Against an
-unreachable remote the 30s backup loop exhausted a 256-fd launchd limit in
-about an hour, after which every subprocess spawn failed with EMFILE.
+unreachable remote the then-30s backup loop exhausted a 256-fd launchd limit
+in about an hour, after which every subprocess spawn failed with EMFILE.
 
 The fix is to put git in its own process group (``start_new_session``) so the
 group kill takes the grandchild with it, then await the child and close the

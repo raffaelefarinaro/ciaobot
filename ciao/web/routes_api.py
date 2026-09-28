@@ -39,6 +39,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import proposal_actions
 from ciao import proposal_kinds
+from ciao import backup_service
 from ciao import proposal_outcomes
 from ciao import subagent_tracking
 from ciao import entity_types
@@ -6359,6 +6360,95 @@ async def local_resync(request: Request) -> JSONResponse:
         )
     result = await mgr.resync()
     return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+# ── Unattended memory backup (ciao/backup_service) ──
+#
+# Three routes over ONE service instance — the same object the five-minute loop
+# holds, so a manual run and a scheduled tick cannot overlap and cannot report
+# differently. Each is session-protected like every other /api route; the
+# service itself refuses to run on a Mac that is not the host, and says so in
+# the status rather than backing up where the host already does.
+
+
+def _backup_service(request: Request):
+    return getattr(request.app.state, "backup_service", None)
+
+
+async def local_backup_status(request: Request) -> JSONResponse:
+    """What the backup service knows: state, scope, and the last success.
+
+    Always 200 — a data root with no remote is a state this endpoint reports,
+    not a failure of the endpoint. Read-only: it never stages, commits or
+    pushes.
+    """
+    service = _backup_service(request)
+    if service is None:
+        return JSONResponse(
+            {"error": "backup service not initialised"}, status_code=500
+        )
+    return JSONResponse((await service.status()).as_dict())
+
+
+async def local_backup_settings(request: Request) -> JSONResponse:
+    """Turn the backup off/on, or pause/resume it. Persists across a restart.
+
+    Body: ``{"enabled": bool}``, ``{"paused": bool}``, or both. An empty body is
+    a 400 rather than a silent no-op, so a caller that meant to pause cannot
+    read "200" as "paused".
+    """
+    service = _backup_service(request)
+    if service is None:
+        return JSONResponse(
+            {"error": "backup service not initialised"}, status_code=500
+        )
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        body = None
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"error": "send a JSON object with 'enabled' and/or 'paused'"},
+            status_code=400,
+        )
+    unknown = sorted(set(body) - {"enabled", "paused"})
+    if unknown or not body:
+        return JSONResponse(
+            {"error": f"expected 'enabled' and/or 'paused'; got {unknown or 'nothing'}"},
+            status_code=400,
+        )
+    if any(not isinstance(value, bool) for value in body.values()):
+        return JSONResponse(
+            {"error": "'enabled' and 'paused' must be booleans"}, status_code=400
+        )
+    service.set_flags(
+        enabled=body.get("enabled"),
+        paused=body.get("paused"),
+    )
+    return JSONResponse((await service.status()).as_dict())
+
+
+async def local_backup_run(request: Request) -> JSONResponse:
+    """Back up now, through the same serialized path the five-minute loop uses.
+
+    200 when the run left the repository in a state that needs nothing from the
+    caller (``ready``, ``pending``, ``paused``), and 400 when it could not do
+    its job — no repository, no remote, a refused credential, an unreachable
+    remote. The body is the same status object either way, so the reason is in
+    the response rather than only in a log line.
+    """
+    service = _backup_service(request)
+    if service is None:
+        return JSONResponse(
+            {"error": "backup service not initialised"}, status_code=500
+        )
+    status = await service.run_backup(source="manual")
+    settled = status.state in {
+        backup_service.STATE_READY,
+        backup_service.STATE_PENDING,
+        backup_service.STATE_PAUSED,
+    }
+    return JSONResponse(status.as_dict(), status_code=200 if settled else 400)
 
 
 async def handover_merge(request: Request) -> JSONResponse:
