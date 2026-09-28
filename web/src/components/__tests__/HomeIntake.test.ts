@@ -10,16 +10,63 @@ import { useTaskStore } from '../../stores/tasks'
 import type { ChatInfo } from '../../lib/types'
 
 const openPicker = vi.hoisted(() => vi.fn())
+const shared = vi.hoisted(() => ({ read: vi.fn(), remove: vi.fn() }))
 
 vi.mock('../../lib/newChat', () => ({
   openNewChatPicker: openPicker,
+}))
+vi.mock('../../lib/sharedContent', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../lib/sharedContent')>(),
+  readSharedContent: shared.read,
+  removeSharedContent: shared.remove,
 }))
 
 describe('HomeIntake', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     openPicker.mockReset()
+    shared.read.mockReset()
+    shared.remove.mockReset().mockResolvedValue(undefined)
     vi.restoreAllMocks()
+    window.history.replaceState({}, '', '/')
+  })
+
+  it('stages an OS-shared file and text only after the user accepts, without sending', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'personal'
+    store.projects = [{ project_id: 'general', name: 'General', workspace: 'personal', order: 0 }] as typeof store.projects
+    window.history.replaceState({}, '', '/?shared=share-1')
+    const file = new File(['notes'], 'notes.txt', { type: 'text/plain' })
+    shared.read.mockResolvedValue({ id: 'share-1', title: 'Notes', text: 'Read this', url: 'https://example.org', files: [file] })
+    const send = vi.spyOn(store, 'sendMessage')
+    const wrapper = mount(HomeIntake)
+    await flushPromises()
+    expect(wrapper.get('.home-intake-share').text()).toContain('1 file')
+    expect(send).not.toHaveBeenCalled()
+    expect(wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').element.value).toBe('')
+
+    await wrapper.get('.home-intake-share button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').element.value).toBe('Notes\n\nRead this\n\nhttps://example.org')
+    expect(wrapper.get('.home-intake-attachment-name').text()).toBe('notes.txt')
+    expect(shared.remove).toHaveBeenCalledWith('share-1')
+    expect(window.location.search).toBe('')
+    expect(send).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('discards an OS-shared item without changing an existing draft', async () => {
+    window.history.replaceState({}, '', '/?shared=share-2')
+    shared.read.mockResolvedValue({ id: 'share-2', title: '', text: 'Secret', url: '', files: [] })
+    const wrapper = mount(HomeIntake)
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').setValue('Existing work')
+    await wrapper.findAll('.home-intake-share button')[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').element.value).toBe('Existing work')
+    expect(shared.remove).toHaveBeenCalledWith('share-2')
+    expect(wrapper.find('.home-intake-share').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('opens the shared project picker and starts work in the selected project', async () => {

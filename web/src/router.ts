@@ -97,7 +97,7 @@ router.beforeEach(async (to) => {
       await auth.check()
     }
     if (!auth.authenticated) {
-      return { name: 'login' }
+      return { name: 'login', query: to.query.shared ? { shared: to.query.shared } : {} }
     }
   }
 })

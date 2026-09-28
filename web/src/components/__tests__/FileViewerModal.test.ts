@@ -84,6 +84,24 @@ describe('FileViewerModal', () => {
     expect(document.activeElement).toBe(dialog.element)
   })
 
+  it('offers a user-triggered native share of the opened text file', async () => {
+    const share = vi.fn(async (_data: ShareData) => {})
+    vi.stubGlobal('navigator', Object.assign(Object.create(navigator), { share, canShare: () => true }))
+    openViewer()
+    await settle()
+    await wrapper!.get('button[aria-label="More file actions"]').trigger('click')
+    await settle()
+    const item = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent === 'Share file…')
+    expect(item).toBeTruthy()
+    item!.click()
+    await flushPromises()
+    expect(share).toHaveBeenCalledTimes(1)
+    const file = share.mock.calls[0]![0].files![0]!
+    expect(file.name).toBe('today.md')
+    expect(await file.text()).toBe('Hello')
+  })
+
   it('keeps Tab focus inside the viewer in both directions', async () => {
     openViewer()
     await settle()
@@ -348,4 +366,3 @@ describe('FileViewerModal', () => {
     for (const popover of popovers) expect(popover.props('inline')).toBe(true)
   })
 })
-

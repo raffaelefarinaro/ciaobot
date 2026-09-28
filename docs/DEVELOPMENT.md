@@ -274,6 +274,14 @@ Restart requests made through the running server enter a drain phase: existing c
 
 ## Local PWA dev
 
+The installed-app share target is a service-worker-intercepted multipart POST
+to `/share-target`, not an API endpoint. The worker stores the received payload
+in browser IndexedDB; Home reviews it before adding it to a draft. Keep that
+request off the authenticated `/api/*` surface and do not auto-send it. Browser
+support for OS share targets varies; test the incoming path in a real installed
+Chromium PWA and check the unsupported-browser attachment path as well.
+
+
 ```bash
 ciao dev
 ```

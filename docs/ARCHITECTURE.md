@@ -458,6 +458,14 @@ Ciaobot runs the vendors' CLIs but hides the harness surfaces the PWA already ow
 
 ## Frontend
 
+The installed PWA manifest offers app-icon shortcuts and an optional OS share
+target. A multipart POST to `/share-target` is intercepted by the service
+worker, which stages the text and files locally in IndexedDB; only an explicit
+Home action adds them to a draft, and the engine never receives a share
+automatically. Logout clears pending shares. The file viewer offers outbound
+native Share where supported alongside Download. The worker caches only the
+public same-origin app shell and static assets, never `/api/*` responses.
+
 `web/` is a Vue 3 + Vite + Pinia + TypeScript PWA. The hierarchy is workspace → project → chat. Configured logical workspaces live in `CiaoConfig.workspaces` (loaded from `.runtime/workspaces.json`, the only source of the list, which Settings owns; a fresh install bootstraps it from the vault) and are exposed through `GET /api/workspaces`. Each workspace may set an optional `color` accent preset (`pink` default, plus `cyan` / `amber` / `emerald` / `violet`); the PWA applies it as accents only when that workspace is active. The Pinia project store loads that endpoint; the sidebar workspace switcher and empty-state General chat buttons render from the configured workspace list. Backend project discovery, completion, restore, schedule routing, spawned-agent `GWS_PROFILE`, and `CIAO_ACTIVE_WORKSPACE` also read from the workspace registry. The model picker has one section per provider: Anthropic (via Claude Code) and OpenCode.
 
 The shell presents the same durable model everywhere: **request → run → output → durable knowledge**. Home uses the Workbench composition: `HomeIntake.vue` starts an ordinary project chat while keeping unsent text scoped to its workspace, and `HomeReviewSummary.vue` surfaces active-workspace proposals/upkeep/automation state and labels checking, stale, empty, and failed snapshots, sitting in a side rail beside the request column on wide panes and stacking below it under 980px; chat keeps reasoning in the transcript while a conditional Context / Activity / Output inspector exposes existing run and file state. Project remains the context envelope; Memory's Suggested and To revisit sections are the durable-knowledge inbox and its Map (Graph/List) is the exploration mode. These are frontend compositions over existing stores and APIs, not new persisted object types. Shared schedule and retirement load contracts keep a pending or failed fetch from rendering as a successful empty list.

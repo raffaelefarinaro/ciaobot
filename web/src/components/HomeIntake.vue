@@ -3,6 +3,12 @@
     <!-- The composer is the page's subject, so it carries no visible headline;
          the heading stays for the document outline and screen readers. -->
     <h1 id="home-intake-title" class="sr-only">Start new work</h1>
+    <div v-if="incoming" class="home-intake-share" role="status">
+      <span>Shared from another app · {{ incoming.files.length ? `${incoming.files.length} file(s)` : 'text or link' }}</span>
+      <button type="button" class="btn-small" @click="addSharedContent">Add to draft</button>
+      <button type="button" class="btn-small" @click="discardSharedContent">Discard</button>
+    </div>
+    <p v-if="shareError" role="alert" class="hint">{{ shareError }}</p>
 
     <form
       class="home-intake-form"
@@ -125,6 +131,7 @@ import { isMemoryProject } from '../lib/memoryPass'
 import { providerForModelSection, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import ModelSelector from './ModelSelector.vue'
 import { importDesktopDrop, uploadChatAttachments } from '../lib/chatAttachments'
+import { readSharedContent, removeSharedContent, sharedPrompt, type SharedContent } from '../lib/sharedContent'
 
 // Sentinel row for "no override": ModelSelector lists models, so the
 // workspace default is offered as its own one-model section.
@@ -132,6 +139,8 @@ const DEFAULT_KEY = '__workspace-default__'
 
 const store = useProjectStore()
 const prompt = ref('')
+const incoming = ref<SharedContent | null>(null)
+const shareError = ref('')
 const starting = ref(false)
 const preferredProjectId = ref('')
 const draftsByWorkspace = new Map<string, string>()
@@ -308,7 +317,56 @@ onMounted(() => {
   window.addEventListener('ciao:native-file-drag-enter', onNativeDragEnter)
   window.addEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
   window.addEventListener('ciao:native-file-drop', onNativeDrop)
+  const params = new URLSearchParams(window.location.search)
+  const id = params.get('shared')
+  if (id) {
+    void readSharedContent(id).then(content => {
+      if (content) incoming.value = content
+      else shareError.value = 'The shared item could not be found. Share it again.'
+    }).catch(() => { shareError.value = 'Could not open the shared item. Share it again.' })
+  }
+  if (params.get('new') === '1') void nextTick(() => document.getElementById('home-intake-prompt')?.focus())
+  if (params.get('share-error')) shareError.value = params.get('share-error') === 'size'
+    ? 'The shared file is too large (20 MB limit).'
+    : 'Could not save the shared item. Share it again.'
 })
+
+function clearShareQuery(): void {
+  const url = new URL(window.location.href)
+  url.searchParams.delete('shared')
+  url.searchParams.delete('share-error')
+  window.history.replaceState(window.history.state, '', url)
+}
+
+async function addSharedContent(): Promise<void> {
+  if (!incoming.value) return
+  const content = incoming.value
+  try {
+    await removeSharedContent(content.id)
+  } catch {
+    shareError.value = 'Could not clear the shared item. Try again.'
+    return
+  }
+  const addition = sharedPrompt(content)
+  if (addition) prompt.value = [prompt.value, addition].filter(Boolean).join('\n\n')
+  stageFiles(content.files)
+  incoming.value = null
+  clearShareQuery()
+  await nextTick()
+  document.getElementById('home-intake-prompt')?.focus()
+}
+
+async function discardSharedContent(): Promise<void> {
+  if (!incoming.value) return
+  try {
+    await removeSharedContent(incoming.value.id)
+  } catch {
+    shareError.value = 'Could not discard the shared item. Try again.'
+    return
+  }
+  incoming.value = null
+  clearShareQuery()
+}
 onBeforeUnmount(() => {
   window.removeEventListener('ciao:native-file-drag-enter', onNativeDragEnter)
   window.removeEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
@@ -425,6 +483,22 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
 </script>
 
 <style scoped>
+.home-intake-share {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg2);
+}
+.home-intake-share > span { flex: 1 1 180px; }
+.home-intake-share button { min-height: var(--touch); }
+@media (max-width: 600px) {
+  .home-intake-share > span { flex-basis: 100%; }
+}
 .home-intake {
   width: min(100%, 920px);
   margin: 0 auto;
