@@ -656,7 +656,14 @@ pushes the branch: a clean pull is pushed directly (response: `{merged:true,
 deploy_needed:false, pushed}`); a conflicting pull is left in the tree and opens an interactive
 chat (`{merged:false, conflict:true, merge:{chat_id,...}}`) that resolves it, asking you
 (push-notified) when ambiguous. After that chat lands the branch, resync merges
-`origin/<branch>` back into the checkout. Non-git workspaces (or detached HEAD) get
+`origin/<branch>` back into the checkout. A failing step returns `{ok:false, step, error}` with
+status 400, where `step` names the stage that failed: `branch` (no branch / detached HEAD),
+`preflight` (a git operation you started outside Ciaobot still holds this repository — a
+preexisting `.git/index.lock` or an in-progress merge/rebase, which is left untouched for you
+to finish or abort), `add`, `status`, `commit`, `fetch` (nothing is pulled or pushed after a
+failed commit or fetch), or `push`. Resync reports the same failures as `{ok:false, detail}`.
+One sync is one serialized mutation, so a concurrent Ciaobot mutation of the same repository
+waits rather than interleaving. Non-git workspaces (or detached HEAD) get
 `{ok:false, error}` with status 400. Workspace sync never deploys app code; app updates happen
 through the package install/upgrade path.
 
