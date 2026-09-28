@@ -13,6 +13,26 @@ Remote" in Settings, Ciaobot commits pending work, pulls from origin
 Workspaces that are not git repositories (or have no ``origin`` remote) skip
 all of this gracefully. The git helpers here are unit-tested; the conflict
 resolution runs as a normal PWA chat dispatched from the route layer.
+
+Every public mutation below — ``commit_pending``, ``push_branch``,
+``push_backup_ref``, ``sync_branch``, ``resync_branch``, and the manager
+methods that drive them — runs inside ``ciao.git_mutation.repository_mutation``,
+so two Ciaobot operations never interleave git commands in one checkout (#674).
+Two consequences run through the code below:
+
+- No stage/status/commit/fetch failure is reported as success. The old
+  ``commit_pending`` ignored every return code and returned True, so a failed
+  commit read as a committed session and sync carried on to push; it now raises
+  :class:`GitOperationError` and the flows that call it convert that into the
+  envelope they already return.
+- A preexisting ``index.lock`` or an in-progress merge/rebase is refused up
+  front (``ensure_mutable``) instead of raced, and never deleted — that file
+  may belong to a real git operation elsewhere on a shared volume. The refusal
+  is an ordinary failure result in each flow's own shape, never an exception
+  escaping to a route.
+
+An operation that *this* code started may leave its own merge state alone:
+the preflight is checked at the outer entry, before the body runs.
 """
 
 from __future__ import annotations
@@ -22,7 +42,8 @@ import os
 import re
 from pathlib import Path
 
-from ciao.git_proc import GIT_TIMEOUT_DETAIL, run_git
+from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
+from ciao.git_proc import GIT_TIMEOUT_DETAIL, run_git, run_git_sync
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +65,35 @@ _USER_DATA_ROOTS = (_VAULT_ROOT, _SECRETS_ROOT)
 # `test_config.json` is far more likely to be a real config someone named badly
 # than a fixture, so it stays in scope for the scanner.
 _TEST_SOURCE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".vue"}
+
+#: ``step`` reported when the repository is not ours to mutate — a preexisting
+#: ``index.lock`` or an in-progress merge/rebase. Distinct from a failing git
+#: step so a caller can tell "someone else is working here" from "our command
+#: failed".
+PREFLIGHT_STEP = "preflight"
+
+
+class GitOperationError(RuntimeError):
+    """A git step a caller was entitled to expect to succeed did not.
+
+    ``step`` is the failing step (``add``, ``status``, ``commit``,
+    ``preflight``) and ``detail`` is git's own stderr, so a caller can report
+    which step failed without re-running anything. Raised by
+    :func:`commit_pending` — the one public mutation whose contract is "return
+    whether a commit was created", which leaves a bool with nowhere to put a
+    failure. Every other public mutation keeps its existing return shape and
+    converts this into it.
+    """
+
+    def __init__(self, step: str, detail: str) -> None:
+        super().__init__(f"{step}: {detail}")
+        self.step = step
+        self.detail = detail
+
+
+def _busy_envelope(exc: RepositoryBusyError) -> dict:
+    """A preflight refusal in the shape ``sync_branch`` always returned."""
+    return {"ok": False, "step": PREFLIGHT_STEP, "error": exc.detail}
 
 
 def _is_test_fixture(rel_path: str) -> bool:
@@ -135,15 +185,8 @@ def backoff_reason(detail: str) -> str | None:
 
 def _git_sync(workspace: Path, *args: str) -> tuple[int, str]:
     """Synchronous git for the quick read helpers (branch name, etc.)."""
-    import subprocess
-
-    try:
-        r = subprocess.run(
-            ["git", *args], cwd=str(workspace), capture_output=True, text=True
-        )
-    except OSError as exc:
-        return 1, str(exc)
-    return r.returncode, (r.stdout.strip() or r.stderr.strip())
+    rc, out, err = run_git_sync(Path(workspace), *args)
+    return rc, (out.strip() or err.strip())
 
 
 def is_git_repo(workspace: Path) -> bool:
@@ -226,7 +269,7 @@ def backup_ref_name(branch: str, short_sha: str) -> str:
     return f"backup/{branch}-{short_sha}"
 
 
-async def push_backup_ref(workspace: Path, *, branch: str) -> tuple[bool, str]:
+async def _push_backup_ref(workspace: Path, *, branch: str) -> tuple[bool, str]:
     """Push the current HEAD commit to a per-commit backup ref on origin.
 
     Writes ``backup/<branch>-<short_sha>`` pointing at the current HEAD,
@@ -256,8 +299,22 @@ async def push_backup_ref(workspace: Path, *, branch: str) -> tuple[bool, str]:
     return True, f"backed up to origin/{ref}"
 
 
-async def push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
-    """Push the working branch for backup (sets upstream).
+async def push_backup_ref(workspace: Path, *, branch: str) -> tuple[bool, str]:
+    """Serialized entry to the per-commit backup-ref push.
+
+    Same behaviour as :func:`_push_backup_ref`, with the repository mutation
+    lock held and a foreign git operation refused rather than raced.
+    """
+    async with repository_mutation(workspace):
+        try:
+            ensure_mutable(workspace)
+        except RepositoryBusyError as exc:
+            return False, exc.detail
+        return await _push_backup_ref(workspace, branch=branch)
+
+
+async def _push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
+    """Body of :func:`push_branch`; assumes the mutation lock is held.
 
     On a non-fast-forward rejection, fetches and merges ``origin/<branch>``
     then retries. When that merge hits a real conflict, aborts it — verifying
@@ -303,7 +360,7 @@ async def push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
                         f"merge --abort also failed ({err_abort or out_abort}) "
                         f"— working tree may still be mid-merge",
                     )
-                bok, bdetail = await push_backup_ref(workspace, branch=branch)
+                bok, bdetail = await _push_backup_ref(workspace, branch=branch)
                 if bok:
                     logger.warning(
                         "Branch '%s' diverged from origin/%s with a real merge "
@@ -332,34 +389,81 @@ async def push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
     return True, out or "pushed"
 
 
+async def push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
+    """Push the working branch for backup, serialized against other mutations.
 
-async def commit_pending(workspace: Path, *, branch: str) -> bool:
-    """Stage and commit any dirty working-tree state. Returns True if it
-    created a commit, False if the tree was already clean."""
-    await _git(workspace, "add", "-A")
-    _, status, _ = await _git(workspace, "status", "--porcelain")
-    if not status.strip():
+    Takes this repository's mutation lock, so a manual sync, a resync, and the
+    background backup loop can never interleave git operations in one checkout.
+    A foreign git operation (preexisting ``index.lock``, an in-progress
+    merge/rebase) is refused here rather than raced.
+    """
+    async with repository_mutation(workspace):
+        try:
+            ensure_mutable(workspace)
+        except RepositoryBusyError as exc:
+            return False, exc.detail
+        return await _push_branch(workspace, branch=branch)
+
+
+async def _commit_pending(workspace: Path, *, branch: str) -> bool:
+    """Body of :func:`commit_pending`; assumes the mutation lock is held.
+
+    Staging is still ``git add -A`` (the manual-sync semantics this function
+    has always had). Whether anything is pending is decided by
+    ``git diff --cached --quiet`` rather than by ``git status --porcelain``:
+    after ``add -A`` the index is the authority, and an ignored or untracked
+    file that staging refused to pick up must not read as pending work and
+    trigger an empty commit.
+    """
+    rc, out, err = await _git(workspace, "add", "-A")
+    if rc != 0:
+        raise GitOperationError("add", err or out)
+    rc_diff, _out_diff, err_diff = await _git(workspace, "diff", "--cached", "--quiet")
+    if rc_diff == 0:
         return False
+    if rc_diff > 1:
+        raise GitOperationError("status", err_diff or _out_diff)
     from datetime import UTC, datetime
 
     ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%SZ")
-    await _git(workspace, "commit", "-m", f"{branch} session commit {ts}")
+    rc, out, err = await _git(workspace, "commit", "-m", f"{branch} session commit {ts}")
+    if rc != 0:
+        raise GitOperationError("commit", err or out)
     return True
 
 
-async def sync_branch(workspace: Path, *, branch: str) -> dict:
-    """Commit pending work, pull from origin, and push the current branch.
+async def commit_pending(workspace: Path, *, branch: str) -> bool:
+    """Stage and commit any dirty working-tree state. Returns True if it
+    created a commit, False if the tree was already clean.
 
-    Never creates or switches branches. Returns one of:
-      {"ok": True, "merged": True, "deploy_needed": False, "pushed": True, "detail": str}
-      {"ok": True, "merged": False, "conflict": True, "branch": branch}
-      {"ok": False, "step": str, "error": str}
-
-    A conflicting pull is left in place (conflict markers in the tree) so the
-    conflict chat dispatched by the route layer can resolve it.
+    Raises :class:`GitOperationError` when ``add``/``status``/``commit`` fails.
+    This is the one public mutation whose return value cannot carry a failure —
+    a bool has nowhere to put one — so it raises instead of reporting a commit
+    that never happened. Every other public operation keeps its existing
+    envelope and converts this into it.
     """
-    await commit_pending(workspace, branch=branch)
-    await _git(workspace, "fetch", "origin", timeout=GIT_NETWORK_TIMEOUT)
+    async with repository_mutation(workspace):
+        try:
+            ensure_mutable(workspace)
+        except RepositoryBusyError as exc:
+            raise GitOperationError(PREFLIGHT_STEP, exc.detail) from exc
+        return await _commit_pending(workspace, branch=branch)
+
+
+async def _sync_branch(workspace: Path, *, branch: str) -> dict:
+    """Body of :func:`sync_branch`; assumes the mutation lock is held."""
+    try:
+        await _commit_pending(workspace, branch=branch)
+    except GitOperationError as exc:
+        return {"ok": False, "step": exc.step, "error": exc.detail}
+    rc_fetch, out_fetch, err_fetch = await _git(
+        workspace, "fetch", "origin", timeout=GIT_NETWORK_TIMEOUT
+    )
+    if rc_fetch != 0:
+        # Never pull against a fetch that did not land: the pull below would
+        # merge a stale origin ref and the push would then be rejected as
+        # non-fast-forward, reporting a divergence that does not exist.
+        return {"ok": False, "step": "fetch", "error": err_fetch or out_fetch}
     # Pull only when the branch already exists on origin; a fresh branch has
     # nothing to merge and a bare pull would fail on missing upstream.
     rc_ref, _, _ = await _git(workspace, "rev-parse", "--verify", f"origin/{branch}")
@@ -369,7 +473,7 @@ async def sync_branch(workspace: Path, *, branch: str) -> dict:
         )
         if rc_pull != 0:
             return {"ok": True, "merged": False, "conflict": True, "branch": branch}
-    ok, detail = await push_branch(workspace, branch=branch)
+    ok, detail = await _push_branch(workspace, branch=branch)
     if not ok:
         return {"ok": False, "step": "push", "error": detail}
     return {
@@ -381,18 +485,39 @@ async def sync_branch(workspace: Path, *, branch: str) -> dict:
     }
 
 
-async def resync_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
-    """Bring the current branch up to its origin counterpart without losing work.
+async def sync_branch(workspace: Path, *, branch: str) -> dict:
+    """Commit pending work, pull from origin, and push the current branch.
 
-    Used after the conflict-resolution chat has pushed the branch, and by the
-    Settings sync flow. Commits pending work first (the live PWA workspace is
-    almost always dirty), then *merges* ``origin/<branch>`` rather than
-    resetting, so local commits are never discarded.
+    Never creates or switches branches. The whole sequence is one serialized
+    mutation: nothing another Ciaobot operation (or a foreign git operation)
+    can do to this checkout in between the commit and the push. Returns one of:
+      {"ok": True, "merged": True, "deploy_needed": False, "pushed": True, "detail": str}
+      {"ok": True, "merged": False, "conflict": True, "branch": branch}
+      {"ok": False, "step": str, "error": str}
+
+    A conflicting pull is left in place (conflict markers in the tree) so the
+    conflict chat dispatched by the route layer can resolve it.
     """
+    async with repository_mutation(workspace):
+        try:
+            ensure_mutable(workspace)
+        except RepositoryBusyError as exc:
+            return _busy_envelope(exc)
+        return await _sync_branch(workspace, branch=branch)
+
+
+async def _resync_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
+    """Body of :func:`resync_branch`; assumes the mutation lock is held."""
     rc, _, err = await _git(workspace, "fetch", "origin", timeout=GIT_NETWORK_TIMEOUT)
     if rc != 0:
         return False, f"fetch failed: {err}"
-    await commit_pending(workspace, branch=branch)
+    try:
+        await _commit_pending(workspace, branch=branch)
+    except GitOperationError as exc:
+        # Merging origin on top of an uncommitted tree is not what the caller
+        # asked for, and the merge below would report a conflict the commit
+        # failure caused.
+        return False, f"{exc.step} failed: {exc.detail}"
     rc_ref, _, _ = await _git(workspace, "rev-parse", "--verify", f"origin/{branch}")
     if rc_ref != 0:
         return True, "no remote branch to sync from"
@@ -401,6 +526,24 @@ async def resync_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
         await _git(workspace, "merge", "--abort")
         return False, f"resync hit conflict on {branch}: {err or out}"
     return True, "resynced"
+
+
+async def resync_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
+    """Bring the current branch up to its origin counterpart without losing work.
+
+    Used after the conflict-resolution chat has pushed the branch, and by the
+    Settings sync flow. Commits pending work first (the live PWA workspace is
+    almost always dirty), then *merges* ``origin/<branch>`` rather than
+    resetting, so local commits are never discarded. One serialized mutation:
+    the fetch, the commit, and the merge cannot be interleaved with another
+    Ciaobot operation on this checkout.
+    """
+    async with repository_mutation(workspace):
+        try:
+            ensure_mutable(workspace)
+        except RepositoryBusyError as exc:
+            return False, exc.detail
+        return await _resync_branch(workspace, branch=branch)
 
 
 # ── manager ──────────────────────────────────────────────────────────────────
@@ -437,25 +580,40 @@ class LocalSessionManager:
         }
 
     async def commit_and_sync(self) -> dict:
-        """Commit the session and sync the current branch with origin."""
-        branch = workspace_branch(self.workspace)
-        if branch is None:
-            return {
-                "ok": False,
-                "step": "branch",
-                "error": "workspace is not a git repository (or is on a detached HEAD)",
-            }
-        return await sync_branch(self.workspace, branch=branch)
+        """Commit the session and sync the current branch with origin.
+
+        Branch detection runs *inside* the mutation lock: another local
+        operation switching or creating a branch between detection and the
+        commit would sync the wrong branch under the right branch's name.
+        """
+        async with repository_mutation(self.workspace):
+            branch = workspace_branch(self.workspace)
+            if branch is None:
+                return {
+                    "ok": False,
+                    "step": "branch",
+                    "error": "workspace is not a git repository (or is on a detached HEAD)",
+                }
+            try:
+                ensure_mutable(self.workspace)
+            except RepositoryBusyError as exc:
+                return _busy_envelope(exc)
+            return await _sync_branch(self.workspace, branch=branch)
 
     async def resync(self) -> dict:
-        branch = workspace_branch(self.workspace)
-        if branch is None:
-            return {
-                "ok": False,
-                "detail": "workspace is not a git repository (or is on a detached HEAD)",
-            }
-        ok, detail = await resync_branch(self.workspace, branch=branch)
-        return {"ok": ok, "detail": detail}
+        async with repository_mutation(self.workspace):
+            branch = workspace_branch(self.workspace)
+            if branch is None:
+                return {
+                    "ok": False,
+                    "detail": "workspace is not a git repository (or is on a detached HEAD)",
+                }
+            try:
+                ensure_mutable(self.workspace)
+            except RepositoryBusyError as exc:
+                return {"ok": False, "detail": exc.detail}
+            ok, detail = await _resync_branch(self.workspace, branch=branch)
+            return {"ok": ok, "detail": detail}
 
     async def preflight(self) -> dict:
         """Run a git preflight check for dirty changes, file categories, and secrets."""
