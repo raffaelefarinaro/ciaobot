@@ -2528,10 +2528,13 @@ async function confirmDeleteChat(chatId: string) {
   cursor: grabbing;
 }
 
+/* The selected row is the fill and the brighter label. It used to also carry a
+   2px accent bar down its left edge, which said the same thing twice: next to a
+   filled row the bar read as decoration, and it was the only place in the rail
+   where the workspace accent bled into a list it did not belong to. */
 .chat-item.active {
   background: var(--bg3);
   color: var(--fg);
-  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .chat-title {
@@ -3019,10 +3022,10 @@ async function confirmDeleteChat(chatId: string) {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
+/* Same row language as a selected chat: fill and label, no accent bar. */
 .schedule-item.active {
   background: var(--bg3);
   color: var(--fg);
-  box-shadow: inset 2px 0 0 var(--accent);
 }
 .schedule-item .schedule-label {
   flex: 1;
