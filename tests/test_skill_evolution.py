@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,14 +12,37 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from ciao import skill_evolution as se
+from ciao import skill_proposals
 from ciao import trajectory_builder as tb
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.debug_report import recent_job_failures
 
 
-def test_default_proposals_dir_uses_the_active_workspace_registry(
+def _config(tmp_path: Path, name: str = "client") -> CiaoConfig:
+    """A throwaway registry whose one workspace vault lives under tmp_path.
+
+    The pass is handed a config rather than a directory, because the queue's
+    location is derived from the registry by ``ciao.skill_proposals`` — one
+    derivation, so a pass and the review surface cannot name different folders.
+    """
+    return CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        vault_root=tmp_path / "memory-vault",
+        workspaces={name: WorkspaceConfig(name=name, vault_root=f"memory-vault/{name}")},
+    )
+
+
+def test_the_pass_queue_follows_the_active_workspace_registry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The queue is the registry's, named by workspace. Resolved per call, not at
+    import: an import-time constant that depended on vault layout relocated the
+    queue whenever the layout changed, orphaning proposals already written to
+    the old location."""
     runtime = tmp_path / ".runtime"
     runtime.mkdir()
     (runtime / "workspaces.json").write_text(
@@ -36,7 +60,10 @@ def test_default_proposals_dir_uses_the_active_workspace_registry(
     monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "client")
     monkeypatch.setenv("CIAO_OLLAMA_LOCAL_DISCOVERY", "0")
 
-    assert se._resolve_proposals_dir() == (
+    config = CiaoConfig.from_env()
+
+    assert se._resolve_queue_workspace(config, None) == "client"
+    assert skill_proposals.queue_dir(config, "client") == (
         tmp_path / "memory-vault" / "client" / "Workspace" / "Skill-Proposals"
     )
 
@@ -170,49 +197,139 @@ def test_propose_skill_edit_returns_text_when_model_proposes(
 # ── write_proposal ──────────────────────────────────────────────────────
 
 
-def test_write_proposal_upserts_one_readable_file_per_skill(tmp_path: Path) -> None:
+_PROPOSAL_TEXT = (
+    "## What I noticed\nRepeated fetch failures.\n\n"
+    "## Suggested improvement\nAdd a defuddle fallback.\n\n"
+    "## Why this should help\nIt handles blocked pages.\n\n"
+    "## Proposed edit\n```diff\n+fallback\n```\nconfidence: 0.8"
+)
+
+
+def test_write_proposal_records_one_readable_file_per_skill(tmp_path: Path) -> None:
+    """The pass's output is a record, not a rendered file it owns: the finding
+    lands in named sections and the sessions behind it are addressable."""
+    config = _config(tmp_path)
     skill_path = tmp_path / "skills" / "web-research" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
     skill_path.write_text("# Skill\n")
-    output_dir = tmp_path / "Skill-Proposals"
     ts = datetime(2026, 5, 23, tzinfo=UTC)
     path = se.write_proposal(
         skill_name="web-research",
         skill_path=skill_path,
         trajectories=[_t("web-research", corrections=1)],
-        proposal_text=(
-            "## What I noticed\nRepeated fetch failures.\n\n"
-            "## Suggested improvement\nAdd a defuddle fallback.\n\n"
-            "## Why this should help\nIt handles blocked pages.\n\n"
-            "## Proposed edit\n```diff\n+fallback\n```\nconfidence: 0.8"
-        ),
-        output_dir=output_dir,
+        proposal_text=_PROPOSAL_TEXT,
+        config=config,
+        workspace="client",
         now=ts,
     )
-    assert path.name == "web-research.md"
-    text = path.read_text()
+    assert path == skill_proposals.queue_dir(config, "client") / "web-research.md"
+    text = path.read_text(encoding="utf-8")
     assert "type: skill-proposal" in text
     assert "skill: web-research" in text
-    assert "## What I noticed" in text
-    assert "## Suggested improvement" in text
-    assert "## Technical details" in text
-    assert text.index("## Suggested improvement") < text.index("## Technical details")
-    assert "trajectories: 1" in text
+    assert "lifecycle: pending" in text
 
-    legacy = output_dir / "2026-05-20-web-research.md"
+    record = skill_proposals.parse_proposal(path, "client")
+    assert record is not None
+    assert record.title == "Skill reflection: web-research"
+    assert record.problem == "Repeated fetch failures."
+    # The prompt asks for the improvement and the diff separately; both are the
+    # change, so both arrive in the record's one change field.
+    assert record.change.startswith("Add a defuddle fallback.")
+    assert "+fallback" in record.change
+    assert record.rationale == "It handles blocked pages."
+    assert [item.chat_id for item in record.sources] == ["sess-web-research"]
+    assert record.sources[0].excerpt == (
+        "outcome=success corrections=1 errors=0 turns=3"
+    )
+    assert record.reviewed_revision == hashlib.sha256(
+        skill_path.read_bytes()
+    ).hexdigest()
+
+
+def test_rerunning_the_writer_merges_rather_than_overwrites(tmp_path: Path) -> None:
+    """The weekly pass re-reads the same skill every run, and each run saw a
+    different set of sessions. The old writer rendered Markdown and wrote it
+    over the last run's, so the queue could not say which sessions had now been
+    seen and one run's findings simply vanished."""
+    config = _config(tmp_path)
+    skill_path = tmp_path / "skills" / "web-research" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text("# Skill\n")
+    queue = skill_proposals.queue_dir(config, "client")
+    queue.mkdir(parents=True)
+    legacy = queue / "2026-05-20-web-research.md"
     legacy.write_text("legacy", encoding="utf-8")
+
+    first = se.write_proposal(
+        skill_name="web-research",
+        skill_path=skill_path,
+        trajectories=[_t("web-research", corrections=1)],
+        proposal_text=_PROPOSAL_TEXT,
+        config=config,
+        workspace="client",
+        now=datetime(2026, 5, 23, tzinfo=UTC),
+    )
+
     updated = se.write_proposal(
         skill_name="web-research",
         skill_path=skill_path,
-        trajectories=[_t("web-research", corrections=2)],
+        trajectories=[
+            _t("web-research", corrections=2) | {"session_id": "sess-second"},
+        ],
         proposal_text="## What I noticed\nUpdated evidence.",
-        output_dir=output_dir,
+        config=config,
+        workspace="client",
         now=datetime(2026, 5, 24, tzinfo=UTC),
     )
-    assert updated == path
-    assert "Updated evidence" in path.read_text(encoding="utf-8")
-    assert not legacy.exists()
-    assert [item.name for item in output_dir.glob("*.md")] == ["web-research.md"]
+    assert updated == first
+    assert [item.name for item in queue.glob("*.md")] == ["web-research.md"]
+
+    merged = skill_proposals.parse_proposal(updated, "client")
+    before = skill_proposals.parse_proposal(first, "client")
+    assert before is not None and merged is not None
+    # One record, so one identity: the run did not fork a second row.
+    assert merged.id == before.id
+    assert merged.problem == "Updated evidence."
+    assert [item.chat_id for item in merged.sources] == [
+        "sess-web-research",
+        "sess-second",
+    ]
+
+
+def test_reprocessing_the_same_evidence_writes_nothing(tmp_path: Path) -> None:
+    """A pass that saw exactly what the last one saw must leave the file
+    untouched — including its timestamp, or every weekly run would rewrite the
+    queue and a diff could never tell a real change from a re-run."""
+    config = _config(tmp_path)
+    skill_path = tmp_path / "skills" / "web-research" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text("# Skill\n")
+    ts = datetime(2026, 5, 23, tzinfo=UTC)
+    written = se.write_proposal(
+        skill_name="web-research",
+        skill_path=skill_path,
+        trajectories=[_t("web-research", corrections=1)],
+        proposal_text=_PROPOSAL_TEXT,
+        config=config,
+        workspace="client",
+        now=ts,
+    )
+    before = written.read_bytes()
+    stamp = written.stat().st_mtime_ns
+
+    again = se.write_proposal(
+        skill_name="web-research",
+        skill_path=skill_path,
+        trajectories=[_t("web-research", corrections=1)],
+        proposal_text=_PROPOSAL_TEXT,
+        config=config,
+        workspace="client",
+        now=ts + timedelta(days=7),
+    )
+
+    assert again == written
+    assert written.read_bytes() == before
+    assert written.stat().st_mtime_ns == stamp
 
 
 # ── run_evolution_pass end-to-end ───────────────────────────────────────
@@ -242,7 +359,7 @@ def test_run_evolution_pass_writes_proposals(
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("# Skill\n\noriginal\n")
 
-    output_dir = tmp_path / "Skill-Proposals"
+    config = _config(tmp_path)
 
     # First call = proposal, second call = semantic check verdict
     pi_mock = _mock_pi_returning(
@@ -255,7 +372,7 @@ def test_run_evolution_pass_writes_proposals(
         se.run_evolution_pass(
             since_days=7,
             skills_root=skills_root,
-            output_dir=output_dir,
+            config=config,
             model="kimi-k2.7-code:cloud",
             min_sessions=1,
             enable_test_gate=False,
@@ -264,9 +381,18 @@ def test_run_evolution_pass_writes_proposals(
         )
     )
     assert len(paths) == 1
-    text = paths[0].read_text()
-    assert "Suggested edit" in text
-    assert "semantic_check: PRESERVED" in text
+    # The path is the queue's own, derived from the registry.
+    assert paths[0] == skill_proposals.queue_dir(config, "client") / "web-research.md"
+    record = skill_proposals.parse_proposal(paths[0], "client")
+    assert record is not None
+    # This answer ignored the prompt's headings, so it has no field of its own
+    # and is carried verbatim rather than dropped or guessed at.
+    assert "Suggested edit" in record.rationale
+    assert record.problem == ""
+    assert [item.chat_id for item in record.sources] == ["sess-web-research"]
+    # The drift gate is a DAG node, so its verdict is a job_runs row; the record
+    # is the finding, not the gate log.
+    assert "semantic_check" not in paths[0].read_text(encoding="utf-8")
 
 
 def test_run_evolution_pass_returns_empty_when_no_flagged(
@@ -281,7 +407,7 @@ def test_run_evolution_pass_returns_empty_when_no_flagged(
         se.run_evolution_pass(
             since_days=7,
             skills_root=tmp_path / "skills",
-            output_dir=tmp_path / "out",
+            config=_config(tmp_path),
             retention_months=None,
         )
     )
@@ -308,7 +434,7 @@ def test_run_evolution_pass_writes_trim_proposal_for_oversized_skill(
         se.run_evolution_pass(
             since_days=7,
             skills_root=skills_root,
-            output_dir=tmp_path / "out",
+            config=_config(tmp_path),
             retention_months=None,
         )
     )
@@ -344,11 +470,12 @@ def test_run_evolution_pass_does_not_write_stub_for_undercap_no_proposal(
     pi_mock = AsyncMock(return_value="No clear improvement found.")
     monkeypatch.setattr("ciao.skill_evolution.run_oneshot", pi_mock)
 
+    config = _config(tmp_path)
     paths = asyncio.run(
         se.run_evolution_pass(
             since_days=7,
             skills_root=skills_root,
-            output_dir=tmp_path / "out",
+            config=config,
             retention_months=None,
         )
     )
@@ -358,7 +485,8 @@ def test_run_evolution_pass_does_not_write_stub_for_undercap_no_proposal(
     assert "trim" not in system_prompt.lower()
     # No stub file should be written for under-cap no-improvement.
     assert len(paths) == 0
-    assert list((tmp_path / "out").glob("*.md")) == []
+    queue = skill_proposals.queue_dir(config, "client")
+    assert not queue.is_dir() or list(queue.glob("*.md")) == []
     # The has_proposal=no-proposal branch must not create a runtime failure.
     runs = recent_job_failures()
     assert runs == []
@@ -467,7 +595,7 @@ def test_run_evolution_pass_drops_drifted_proposal(
         se.run_evolution_pass(
             since_days=7,
             skills_root=skills_root,
-            output_dir=tmp_path / "out",
+            config=_config(tmp_path),
             now=now,
             retention_months=None,
         )
@@ -493,7 +621,7 @@ def test_run_evolution_pass_prunes_old_trajectories(
         se.run_evolution_pass(
             since_days=7,
             skills_root=tmp_path / "skills",
-            output_dir=tmp_path / "out",
+            config=_config(tmp_path),
             now=now,
             retention_months=6,
         )

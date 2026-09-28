@@ -705,13 +705,25 @@ nothing. Batch accept applies the same rule per row and reports `promoted` and
 `dismissed` for each, keeping the bullets it could not write.
 
 ```bash
-# List every queued proposal across all workspaces, plus skill-proposal files.
-# Each row: {id, kind, text, source, workspace, path, line}. `id` is a stable,
-# content-derived hash (survives other rows being dismissed). Rehome rows carry
-# `rehome: {destination, candidates[], justified, reason}` so a UI never
+# List every queued proposal across all workspaces, plus open skill-proposal
+# records. Each row: {id, kind, text, source, workspace, path, line}. `id` is a
+# stable, content-derived hash (survives other rows being dismissed). Rehome rows
+# carry `rehome: {destination, candidates[], justified, reason}` so a UI never
 # pre-accepts a destination no tag backs; region rows carry `region` and
 # `leak_warning` (true when accepting would write a foreign workspace's fact
 # into the primary workspace's injected region).
+#
+# A `kind: "skill"` row is one skill's improvement proposal, parsed by
+# `ciao/skill_proposals.py` from `Workspace/Skill-Proposals/<skill>.md`. It
+# carries the record rather than the filename: `skill`, `title`, `problem`,
+# `change`, `rationale`, `lifecycle`, and `sources[]` ({chat_id, archive, turn,
+# excerpt}) naming the sessions it came from. `text` stays the skill name, which
+# is what two runs of the same skill share. `id` is derived from (workspace,
+# skill), so a later pass that merges more evidence into the same skill keeps the
+# same id. Dismissing one records the decision and flips its `lifecycle` to
+# `dismissed`: the file stays on disk, readable and still accumulating evidence,
+# and the row leaves the listing. There is nothing to accept — a skill change is
+# implemented by hand or in a chat.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
 
 # What accepting one row would write, WITHOUT writing it. Returns

@@ -3412,12 +3412,18 @@ def _curation_end_command(args: argparse.Namespace) -> int:
 
 
 def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
-    """Delete a resolved skill proposal from a workspace's review queue.
+    """Settle a resolved skill proposal in a workspace's review queue.
 
     The curation schedule reviews ``Workspace/Skill-Proposals/``; once a
-    proposal's decision is made (implemented, or decided against) it is removed
-    here so the queue stops re-asking. NAME matches the file's stem or a unique
-    substring of it.
+    proposal's decision is made (implemented, or decided against) it is settled
+    here so the queue stops re-asking. NAME matches the record's skill or a
+    unique substring of it.
+
+    Settled, not deleted: this used to unlink the file, which left no record that
+    anyone had decided anything, so the next evolution pass that saw the same
+    evidence filed the same proposal again. ``ciao.skill_proposals`` records the
+    decision in the workspace's sidecar and flips the record's lifecycle; the
+    proposal stays readable and keeps accumulating evidence, and stays settled.
     """
     from ciao.config import CiaoConfig
 
@@ -3445,42 +3451,52 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     name = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
     if config.workspace(name) is None:
         name = config.primary_workspace()
-    queue = config.workspace_vault_root(name) / "Workspace" / "Skill-Proposals"
 
     needle = args.name.strip()
     if not needle:
         print("a skill proposal name or substring is required", file=sys.stderr)
         return 2
 
-    if not queue.is_dir():
+    from ciao import skill_proposals
+
+    if not skill_proposals.queue_dir(config, name).is_dir():
         print("No skill proposals are queued.", file=sys.stderr)
         return 1
 
-    candidates = sorted(p for p in queue.iterdir() if p.is_file() and p.suffix == ".md")
-    matches = [p for p in candidates if needle.casefold() in p.stem.casefold()]
+    queued = skill_proposals.read_queue(config, name)
+    matches = [p for p in queued if needle.casefold() in p.skill.casefold()]
     if not matches:
         print(f"No skill proposal matched {needle!r}.", file=sys.stderr)
         return 1
     if len(matches) > 1:
         print(
             f"The name matched more than one skill proposal; use a longer substring: "
-            + ", ".join(p.stem for p in matches),
+            + ", ".join(p.skill for p in matches),
             file=sys.stderr,
         )
         return 1
 
     target = matches[0]
     try:
-        target.unlink()
-    except OSError as exc:
-        print(f"could not delete {target.name}: {exc}", file=sys.stderr)
+        settled = skill_proposals.settle_proposal(
+            config, target.id, skill_proposals.DISMISSED, via="cli"
+        )
+    except (OSError, ValueError) as exc:
+        print(f"could not settle {target.skill}: {exc}", file=sys.stderr)
+        return 1
+    if settled is None:
+        print(f"{target.skill} is no longer queued.", file=sys.stderr)
         return 1
 
     if args.json:
-        json.dump({"removed": True, "name": target.stem, "workspace": name}, sys.stdout, indent=2)
+        json.dump(
+            {"settled": True, "name": target.skill, "workspace": name},
+            sys.stdout,
+            indent=2,
+        )
         sys.stdout.write("\n")
     else:
-        print(f"Removed skill proposal {target.stem} from {name}.")
+        print(f"Settled skill proposal {target.skill} in {name}.")
     return 0
 
 
@@ -4890,16 +4906,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     skill_proposal_parser = subparsers.add_parser(
         "skill-proposal-remove",
-        help="Remove a resolved skill proposal from the review queue.",
+        help="Settle a resolved skill proposal in the review queue.",
         description=(
-            "Deletes one file from a workspace's Workspace/Skill-Proposals/ "
-            "after its decision is made (implemented, or decided against). "
-            "NAME matches the proposal file's stem or a unique substring of it."
+            "Records the decision for one proposal in a workspace's "
+            "Workspace/Skill-Proposals/ and takes it out of the queue, after its "
+            "decision is made (implemented, or decided against). The record stays "
+            "on disk and readable. NAME matches the proposal's skill or a unique "
+            "substring of it."
         ),
     )
     skill_proposal_parser.add_argument(
         "name",
-        help="Skill proposal file stem or unique substring to remove.",
+        help="Skill name or unique substring of the queued proposal to settle.",
     )
     skill_proposal_parser.add_argument(
         "--workspace",

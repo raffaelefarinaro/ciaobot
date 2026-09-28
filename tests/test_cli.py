@@ -1172,9 +1172,15 @@ def _skill_proposal_workspace(root: Path, name: str = "2026-08-09-defuddle") -> 
     return source
 
 
-def test_cli_skill_proposal_remove_deletes_the_file(
+def test_cli_skill_proposal_remove_settles_the_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The agent-driven path the curation schedule uses. It used to unlink the
+    file, which left no record that a decision had been made: the next evolution
+    pass that saw the same evidence filed the same proposal again as a new file,
+    with no way to know anyone had already answered it."""
+    from ciao import skill_proposals
+
     workspace = tmp_path / "workspace"
     source = _skill_proposal_workspace(workspace)
     monkeypatch.chdir(tmp_path)
@@ -1183,8 +1189,34 @@ def test_cli_skill_proposal_remove_deletes_the_file(
 
     assert cli.main(["skill-proposal-remove", "defuddle"]) == 0
 
-    assert not source.exists()
-    assert "Removed skill proposal 2026-08-09-defuddle" in capsys.readouterr().out
+    assert source.is_file()
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.DISMISSED
+    assert "Settled skill proposal 2026-08-09-defuddle" in capsys.readouterr().out
+
+
+def test_cli_skill_proposal_remove_records_the_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Settled through the CLI is still a decision on record, keyed the same way
+    the PWA's is, so the queue and the pass agree on what was answered."""
+    from ciao.memory_proposals import read_decisions
+
+    workspace = tmp_path / "workspace"
+    _skill_proposal_workspace(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "defuddle"]) == 0
+
+    rows = read_decisions(
+        workspace / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    )
+    assert [row["text"] for row in rows] == ["skill:2026-08-09-defuddle"]
+    assert rows[0]["via"] == "cli"
+    assert rows[0]["action"] == "dismissed"
 
 
 def test_cli_skill_proposal_remove_json_output(
@@ -1198,9 +1230,9 @@ def test_cli_skill_proposal_remove_json_output(
 
     assert cli.main(["skill-proposal-remove", "2026-08-09-defuddle", "--json"]) == 0
 
-    assert not source.exists()
+    assert source.is_file()
     result = json.loads(capsys.readouterr().out)
-    assert result == {"removed": True, "name": "2026-08-09-defuddle", "workspace": "personal"}
+    assert result == {"settled": True, "name": "2026-08-09-defuddle", "workspace": "personal"}
 
 
 def test_cli_skill_proposal_remove_refuses_ambiguous_match(
@@ -1217,7 +1249,7 @@ def test_cli_skill_proposal_remove_refuses_ambiguous_match(
 
     err = capsys.readouterr().err
     assert "more than one" in err
-    # Nothing was deleted.
+    # Nothing was settled.
     queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
     assert len(list(queue.glob("*.md"))) == 2
 

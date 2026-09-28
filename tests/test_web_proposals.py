@@ -20,6 +20,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from ciao import skill_proposals
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web import proposal_service
 from ciao.web import routes_api
@@ -50,9 +51,14 @@ def _config(tmp_path: Path) -> CiaoConfig:
 
 
 def _write_queue(config: CiaoConfig, workspace: str, content: str) -> None:
+    _queue_text(config, workspace).write_text(content, encoding="utf-8")
+
+
+def _queue_text(config: CiaoConfig, workspace: str) -> Path:
+    """The workspace's memory proposal queue, the file a bullet lives in."""
     path = config.workspace_vault_root(workspace) / "Workspace" / "Memory-Proposals.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    return path
 
 
 def _write_people_note(config: CiaoConfig, path: str, tags: list[str]) -> None:
@@ -724,14 +730,82 @@ def test_dismiss_still_writes_nothing(tmp_path: Path) -> None:
 # -- a skill proposal is a row you can actually act on -------------------------
 
 
-def _write_skill_proposal(config: CiaoConfig, workspace: str, name: str) -> Path:
+def _write_skill_proposal(
+    config: CiaoConfig,
+    workspace: str,
+    name: str,
+    *,
+    problem: str = "Repeated fetch failures.",
+    change: str = "Add a defuddle fallback.",
+) -> Path:
+    """A versioned record, as the evolution pass writes it."""
+    stored = skill_proposals.upsert_proposal(
+        config,
+        skill_proposals.SkillProposal(
+            id=skill_proposals.proposal_id(workspace, name),
+            workspace=workspace,
+            skill=name,
+            canonical_path=f"/agent/skills/{name}/SKILL.md",
+            reviewed_revision="a" * 64,
+            title=f"Skill reflection: {name}",
+            problem=problem,
+            change=change,
+            rationale="It handles blocked pages.",
+            sources=(
+                skill_proposals.SkillEvidence(
+                    chat_id="sess-a1",
+                    archive="2026-08-09T10:00:00Z",
+                    turn="",
+                    excerpt="outcome=needs_review corrections=1 errors=0 turns=3",
+                ),
+            ),
+            lifecycle=skill_proposals.PENDING,
+            chat_id="",
+            updated_at="2026-08-09T10:00:00Z",
+        ),
+    )
+    return skill_proposals.proposal_path(config, workspace, stored.skill)
+
+
+def test_a_skill_row_carries_the_record_not_the_filename(tmp_path: Path) -> None:
+    """The listing used to hand the UI a bare stem, so a review card could say
+    nothing about the proposal it was asking about: not what was noticed, not
+    what was proposed, not which sessions it came from."""
+    config = _config(tmp_path)
+    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+
+    rows, by_id = _scan_proposal_rows(config)
+
+    skill = [r for r in rows if r["kind"] == "skill"]
+    assert len(skill) == 1
+    assert skill[0]["id"] in by_id
+    assert skill[0]["skill"] == "2026-08-09-defuddle"
+    assert skill[0]["title"] == "Skill reflection: 2026-08-09-defuddle"
+    assert skill[0]["problem"] == "Repeated fetch failures."
+    assert skill[0]["change"] == "Add a defuddle fallback."
+    assert skill[0]["rationale"] == "It handles blocked pages."
+    assert [item["chat_id"] for item in skill[0]["sources"]] == ["sess-a1"]
+    assert skill[0]["lifecycle"] == skill_proposals.PENDING
+
+
+def test_a_legacy_skill_proposal_file_is_still_listed(tmp_path: Path) -> None:
+    """The pre-#683 loose files have no versioned frontmatter. They must keep
+    listing — a proposal a user already has is not something an upgrade gets to
+    hide from the queue it was filed in."""
+    config = _config(tmp_path)
     path = (
-        config.workspace_vault_root(workspace)
-        / "Workspace" / "Skill-Proposals" / f"{name}.md"
+        config.workspace_vault_root("personal")
+        / "Workspace" / "Skill-Proposals" / "2026-05-20-defuddle.md"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"# {name}\n\nA proposed skill.\n", encoding="utf-8")
-    return path
+    path.write_text("# Skill reflection: defuddle\n\nA loose proposal.\n", encoding="utf-8")
+
+    rows, _by_id = _scan_proposal_rows(config)
+
+    skill = [r for r in rows if r["kind"] == "skill"]
+    assert len(skill) == 1
+    assert skill[0]["text"] == "2026-05-20-defuddle"
+    assert skill[0]["title"] == "Skill reflection: defuddle"
 
 
 def test_a_skill_row_is_resolvable_by_id(tmp_path: Path) -> None:
@@ -748,10 +822,14 @@ def test_a_skill_row_is_resolvable_by_id(tmp_path: Path) -> None:
     assert skill[0]["id"] in by_id
 
 
-def test_dismissing_a_skill_row_deletes_the_file(tmp_path: Path) -> None:
-    """A reviewed proposal is a resolved decision — implemented or disregarded —
-    so dismissing it deletes the file rather than moving it aside; re-reviewing
-    the same suggestion should not re-ask it."""
+def test_dismissing_a_skill_row_records_a_decision_and_leaves_the_queue(
+    tmp_path: Path,
+) -> None:
+    """A reviewed proposal is a resolved decision — implemented or disregarded.
+    It used to be resolved by deleting the file, which destroyed the only record
+    that anyone had looked at it, so the next pass that saw the same evidence
+    filed the same suggestion again as a new file. Now the decision is recorded
+    and the record stays."""
     config = _config(tmp_path)
     source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
     client = _client(config)
@@ -760,9 +838,69 @@ def test_dismissing_a_skill_row_deletes_the_file(tmp_path: Path) -> None:
     response = client.post(f"/api/proposals/{row['id']}/dismiss")
 
     assert response.status_code == 200, response.json()
-    assert not source.exists()
-    assert not source.parent.exists() or not list(source.parent.glob("dismissed/**/*"))
     assert [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill"] == []
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.DISMISSED
+    assert record.problem == "Repeated fetch failures."
+
+
+def test_a_dismissed_skill_proposal_is_a_decision_the_history_shows(
+    tmp_path: Path,
+) -> None:
+    """The decision is keyed by a synthetic ``skill:<name>`` text so a skill row
+    can never be read as a memory fact that happens to share its wording, and so
+    the pass that must honour it can find it after the file is gone."""
+    config = _config(tmp_path)
+    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    client = _client(config)
+    row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill")
+
+    client.post(f"/api/proposals/{row['id']}/dismiss")
+
+    history = client.get("/api/proposals/history").json()["rows"]
+    assert [item["text"] for item in history] == ["skill:2026-08-09-defuddle"]
+    assert history[0]["kind"] == "skill"
+    assert history[0]["action"] == "dismissed"
+    assert history[0]["via"] == "pwa"
+
+
+def test_the_same_evidence_does_not_reappear_after_a_dismissal(tmp_path: Path) -> None:
+    """The whole point of recording the decision. The pass merges into the
+    settled record and it stays settled, so the queue does not re-ask a question
+    the operator already answered — and the record still holds the evidence that
+    was gathered."""
+    config = _config(tmp_path)
+    source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    client = _client(config)
+    row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill")
+    assert client.post(f"/api/proposals/{row['id']}/dismiss").status_code == 200
+
+    # A later pass sees the same session again, from a file that is gone.
+    source.unlink()
+    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.DISMISSED
+    assert [
+        r for r in _client(config).get("/api/proposals").json()["rows"]
+        if r["kind"] == "skill"
+    ] == []
+
+
+def test_dismissing_a_skill_row_twice_is_not_an_error(tmp_path: Path) -> None:
+    """Two tabs racing on one row, or a retry after a dropped response. The
+    second has nothing left to decide, which is not a failure."""
+    config = _config(tmp_path)
+    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    client = _client(config)
+    row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill")
+
+    assert client.post(f"/api/proposals/{row['id']}/dismiss").status_code == 200
+    # The row is gone from the listing, so a retry is an unknown id — the same
+    # answer every other settled row gives, and the reason settlement is
+    # recorded rather than the row being kept around to be dismissed again.
+    assert client.post(f"/api/proposals/{row['id']}/dismiss").status_code == 404
 
 
 def test_accepting_a_skill_row_is_refused_with_a_reason(tmp_path: Path) -> None:
@@ -793,7 +931,14 @@ def test_a_batch_dismiss_covers_skill_rows_and_bullets_together(tmp_path: Path) 
 
     assert response.status_code == 200, response.json()
     assert all(r["dismissed"] for r in response.json()["results"]), response.json()
-    assert not source.exists()
+    # Both rows are settled: the bullet leaves the queue file, the skill record
+    # flips its lifecycle. Neither is deleted.
+    assert "Remember the thing" not in _queue_text(config, "personal").read_text(
+        encoding="utf-8"
+    )
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.DISMISSED
     assert client.get("/api/proposals").json()["rows"] == []
 
 
@@ -821,19 +966,27 @@ def test_skill_dismissals_stay_out_of_the_memory_outcome_tally(tmp_path: Path) -
     assert tally["by_workspace"]["personal"]["dismissed"] == 1
 
 
-def test_dismissing_the_same_skill_twice_deletes_both(tmp_path: Path) -> None:
-    """Two proposals can share a name across runs; each dismiss deletes its own
-    file, so dismissing the second run's copy is unaffected by the first."""
+def test_two_runs_of_one_skill_are_one_row_and_one_decision(tmp_path: Path) -> None:
+    """Two dated proposals for the same skill used to be two files and two
+    dismissals — the same finding, answered twice, with the second run's file
+    left to be discovered and re-decided. Keyed by the skill, it is one record,
+    so the second run merges into the first and one dismiss settles both."""
     config = _config(tmp_path)
     client = _client(config)
-    for _ in range(2):
-        _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
-        row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill")
-        assert client.post(f"/api/proposals/{row['id']}/dismiss").status_code == 200
+    first = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    # A later run writes to the same record: the same skill, new evidence.
+    second = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
 
-    queue = config.workspace_vault_root("personal") / "Workspace" / "Skill-Proposals"
-    assert not queue.is_dir() or list(queue.glob("*.md")) == []
-    assert not (queue / "dismissed").is_dir()
+    assert first == second
+    rows = [r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill"]
+    assert len(rows) == 1
+
+    assert client.post(f"/api/proposals/{rows[0]['id']}/dismiss").status_code == 200
+    assert [
+        r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill"
+    ] == []
+    history = client.get("/api/proposals/history").json()["rows"]
+    assert [item["text"] for item in history] == ["skill:2026-08-09-defuddle"]
 
 
 # -- the leak warning is about a SHARED guide, not about a workspace ----------
@@ -1127,7 +1280,7 @@ def test_dismissing_a_skill_row_records_no_outcome(tmp_path: Path) -> None:
     response = client.post(f"/api/proposals/{row['id']}/dismiss")
 
     assert response.status_code == 200
-    assert not source.exists()
+    assert source.is_file()
     assert _outcome_events(tmp_path) == []
 
 
