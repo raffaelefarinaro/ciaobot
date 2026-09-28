@@ -3457,6 +3457,136 @@ describe('deep-link chat navigation', () => {
     expect(store.activeChatId).toBeNull()
   })
 
+  // ── #619: an archived chat is viewable, just inert ─────────────────────
+  // The deep link kept the URL and rendered nothing, because the only
+  // predicate guarding activation was the liveness one. These cover the split:
+  // `canOpenChat` (may this be opened at all) accepts an archived chat,
+  // `chatExistsInList` (may this be re-attached) still does not.
+  describe('archived chat selection', () => {
+    const ARCHIVED: ChatInfo = {
+      chat_id: 'c-archived',
+      project_id: 'p1',
+      title: 'Archived',
+      model: '',
+      provider: 'claude',
+      mode: '',
+      session_id: '',
+      created_at: '',
+      archived: true,
+      archive_path: 'archive/c-archived.jsonl',
+    }
+    const LIVE: ChatInfo = {
+      chat_id: 'c-live',
+      project_id: 'p1',
+      title: 'Live',
+      model: '',
+      provider: 'claude',
+      mode: '',
+      session_id: '',
+      created_at: '',
+      archived: false,
+    }
+
+    function chatSockets(): FakeWebSocket[] {
+      return fakeSockets.filter(s => s.url.includes('/ws/chat/'))
+    }
+
+    function fetchedPaths(): string[] {
+      return apiGet.mock.calls.map(([path]) => String(path))
+    }
+
+    let store: ReturnType<typeof useProjectStore>
+
+    beforeEach(() => {
+      store = useProjectStore()
+      store.projects = [
+        { project_id: 'p1', name: 'Proj', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+      ]
+      store.chats = [LIVE, ARCHIVED]
+      store.activeWorkspace = 'personal'
+    })
+
+    test('openChatFromDeepLink selects an archived chat without going live', async () => {
+      await store.openChatFromDeepLink(ARCHIVED.chat_id)
+
+      // Selected, and `activeChat` resolves — that is all ChatLayout's
+      // `v-else-if` needed to mount the panel and its archived branch.
+      expect(store.activeChatId).toBe(ARCHIVED.chat_id)
+      expect(store.activeChat?.archived).toBe(true)
+      expect(routerPush).toHaveBeenCalledWith('/chat/c-archived')
+      // Inert: no socket, no history, no subagents. The provider reclaimed the
+      // session, so every one of those is a request that cannot change anything.
+      expect(chatSockets()).toEqual([])
+      expect(fetchedPaths().some(p => p.includes('/messages'))).toBe(false)
+      expect(fetchedPaths().some(p => p.includes('/subagents'))).toBe(false)
+      // Marking it read is the one request an open still makes.
+      expect(apiPost.mock.calls.some(([path]) => path === '/api/chats/c-archived/read')).toBe(true)
+    })
+
+    // The liveness predicate is deliberately *not* widened. It gates
+    // reloadAndReconnectChat, the funnel behind resume-from-background, the
+    // watchdog, reconnectNow and re-opening the already-active chat — so an
+    // archived chat must not be re-attached from any of them.
+    test('re-opening the already-active archived chat does not re-attach a socket', async () => {
+      await store.openChatFromDeepLink(ARCHIVED.chat_id)
+      const before = chatSockets().length
+
+      store.reconnectNow()
+
+      expect(chatSockets()).toHaveLength(before)
+      expect(fetchedPaths().some(p => p.includes('/messages'))).toBe(false)
+    })
+
+    test('the same path still re-attaches a live chat', async () => {
+      await store.openChatFromDeepLink(LIVE.chat_id)
+      apiGet.mockClear()
+      const before = chatSockets().length
+
+      store.reconnectNow()
+
+      expect(chatSockets().length).toBeGreaterThan(before)
+      expect(fetchedPaths().some(p => p.includes('/messages'))).toBe(true)
+    })
+
+    test('archiving the open chat still clears the selection', async () => {
+      // The inverse of this fix, and the one that must not have regressed: you
+      // archived the chat you had open, so the pane closes.
+      await store.openChatFromDeepLink(LIVE.chat_id)
+      expect(store.activeChatId).toBe(LIVE.chat_id)
+      apiPost.mockResolvedValue({ ok: true })
+
+      await store.archiveChat(LIVE.chat_id)
+
+      expect(store.activeChatId).toBeNull()
+      expect(store.chats.find(c => c.chat_id === LIVE.chat_id)?.archived).toBe(true)
+    })
+
+    test('the boot URL restore selects an archived chat without going live', async () => {
+      window.history.replaceState({}, '', '/chat/c-archived')
+      Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+      apiGet.mockImplementation((path: string) => {
+        if (path === '/api/workspaces') {
+          return Promise.resolve({ workspaces: [], active: 'home', provider_options: [] })
+        }
+        if (path === '/api/projects') {
+          return Promise.resolve([
+            { project_id: 'p1', name: 'General', workspace: 'home', context: '', created_at: '', order: 0, vault_folder: 'general' },
+          ])
+        }
+        if (path === '/api/chats') return Promise.resolve([LIVE, ARCHIVED])
+        return Promise.resolve([])
+      })
+
+      await store.fetchAll()
+
+      expect(store.activeChatId).toBe(ARCHIVED.chat_id)
+      expect(store.activeChat?.archived).toBe(true)
+      expect(fetchedPaths().some(p => p.includes('/messages'))).toBe(false)
+      expect(chatSockets()).toEqual([])
+      window.history.replaceState({}, '', '/')
+    })
+  })
+
   function workspaceFixture(store: ReturnType<typeof useProjectStore>) {
     store.projects = [
       { project_id: 'p-personal', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },

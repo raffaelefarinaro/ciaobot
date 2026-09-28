@@ -1734,7 +1734,7 @@ export const useProjectStore = defineStore('projects', () => {
         || (typeof window !== 'undefined'
           ? window.location.pathname.match(/^\/chat\/([^/]+)/)?.[1]
           : undefined)
-      if (urlChatId && chatExistsInList(urlChatId, c)) {
+      if (urlChatId && canOpenChat(urlChatId, c)) {
         await ensureWorkspaceForChat(urlChatId)
         activeChatId.value = urlChatId
       } else if (!bootstrapped.value) {
@@ -1764,11 +1764,18 @@ export const useProjectStore = defineStore('projects', () => {
         // The two calls stay ordered inside: connecting the socket before the
         // fetch resolves would let an incoming message be clobbered by the
         // fetch result overwriting messages[chatId].
+        //
+        // A deep link to an archived chat stops before this: the panel renders
+        // read-only from whatever transcript is held locally, exactly as
+        // `switchChat` leaves it, so booting must not dial a socket or fetch a
+        // history the archive is not served from.
         const bootChatId = activeChatId.value
-        void (async () => {
-          await loadMessages(bootChatId, { waitForSettledReply: true })
-          connectWs(bootChatId)
-        })()
+        if (!isArchivedChat(bootChatId)) {
+          void (async () => {
+            await loadMessages(bootChatId, { waitForSettledReply: true })
+            connectWs(bootChatId)
+          })()
+        }
       }
       // Open the cross-chat awareness socket once per app session.
       connectEventsWs()
@@ -3292,8 +3299,40 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Chat switching ──────────────────────────────────────────────────
 
+  /**
+   * "Can this be the *live* active chat?" The liveness predicate, asked by
+   * reloadAndReconnectChat — the funnel behind resume-from-background, the
+   * liveness watchdog, reconnectNow and re-opening the already-active chat from
+   * a notification. An archived chat must answer no there: the provider already
+   * reclaimed its session, so treating it as live would re-dial a socket that
+   * can never deliver and hammer a `/messages` round-trip that cannot change.
+   *
+   * `canOpenChat` is the deliberately wider question (may this be *opened*?),
+   * and `isArchivedChat` the narrow one asked where the chat is known to be in
+   * the list.
+   */
   function chatExistsInList(chatId: string, list: ChatInfo[] = chats.value): boolean {
     return list.some(ch => ch.chat_id === chatId && !ch.archived)
+  }
+
+  /**
+   * "Can this be *opened* at all?" Deliberately wider than `chatExistsInList`:
+   * an archived chat is viewable, just inert. ChatPanel already has an archived
+   * branch, so the only thing that used to stand between a deep link and that
+   * branch was the liveness predicate rejecting the id (#619).
+   */
+  function canOpenChat(chatId: string, list: ChatInfo[] = chats.value): boolean {
+    return list.some(ch => ch.chat_id === chatId)
+  }
+
+  /**
+   * An archived chat is viewable but inert: no socket, no history refetch, no
+   * subagent load. The provider already reclaimed its session, so there is
+   * nothing to stream and nothing to reconcile; "Continue in new chat" is how
+   * you pick the conversation back up.
+   */
+  function isArchivedChat(chatId: string): boolean {
+    return chats.value.some(ch => ch.chat_id === chatId && ch.archived)
   }
 
   async function ensureWorkspaceForChat(chatId: string) {
@@ -3306,7 +3345,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   /** Deep-link / tray / notification navigation into a specific chat. */
   async function openChatFromDeepLink(chatId: string) {
-    if (!chatExistsInList(chatId)) return
+    if (!canOpenChat(chatId)) return
     await ensureWorkspaceForChat(chatId)
     if (activeChatId.value === chatId) {
       // switchChat's "already active" fast path only marks read — fine for
@@ -3320,6 +3359,9 @@ export const useProjectStore = defineStore('projects', () => {
         router.push(`/chat/${chatId}`)
       }
       void markRead(chatId)
+      // For an archived chat this reconcile is a no-op by design: there is no
+      // socket to re-attach and no live history to re-pull. See the liveness
+      // gate in reloadAndReconnectChat below, which is what stops it.
       await reloadAndReconnectChat(chatId)
       return
     }
@@ -3374,6 +3416,12 @@ export const useProjectStore = defineStore('projects', () => {
     persistState()
     // Fire-and-forget: clears overlay + SW cache + hits /read for cross-device sync.
     void markRead(chatId)
+    // An archived chat stops here. ChatPanel renders it from the stored
+    // transcript with no composer, and the provider has already reclaimed the
+    // session, so the three calls below would buy nothing: a socket that can
+    // only stay silent, a `/messages` fetch the archive is not served from,
+    // and subagent rows for agents that are gone.
+    if (isArchivedChat(chatId)) return
     if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
     void loadSubagents(chatId)
     connectWs(chatId)
@@ -3537,6 +3585,19 @@ export const useProjectStore = defineStore('projects', () => {
   // miss events the broker already flushed, so loadMessages first, then let
   // connectWs replay whatever the broker still buffers on top.
   async function reloadAndReconnectChat(chatId: string) {
+    // The liveness gate, and what `chatExistsInList` is for. An archived chat
+    // is viewable but inert: the provider already reclaimed its session, so a
+    // re-dialed socket can only stay silent and the `/messages` fetch has
+    // nothing new to report. Resume-from-background, the watchdog, reconnectNow
+    // and re-opening the already-active chat all land here, so this is the one
+    // place that must know — otherwise backgrounding a tab on an archived chat
+    // quietly re-attaches the very socket the open was supposed to avoid.
+    //
+    // Only the list's word counts. An id the chat list has not caught up with
+    // is left alone: the store only holds ids it selected itself, so refusing
+    // those would change watchdog/resume behaviour this fix never set out to
+    // change.
+    if (chats.value.some(c => c.chat_id === chatId) && !chatExistsInList(chatId)) return
     pendingStreamResync.add(chatId)
     disconnectWs(chatId)
     // Re-attach immediately so an in-flight broker stream can replay while

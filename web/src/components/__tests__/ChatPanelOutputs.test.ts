@@ -277,6 +277,24 @@ describe('ChatPanel Outputs section', () => {
     expect(wrapper.find('.archive-memory-pass-btn').exists()).toBe(false)
   })
 
+  it('renders the archived notice and no composer for an archived chat', async () => {
+    // #619: the panel already had an archived branch, but nothing could ever
+    // reach it — a deep link to an archived chat resolved to no active chat, so
+    // ChatLayout mounted no panel at all and this footer was unreachable. Now
+    // that the store can select one, what renders here is the whole contract:
+    // read-only, with a way forward and no way to type.
+    const { wrapper, store } = await mountPanel()
+    store.chats[0].archived = true
+    store.chats[0].archive_path = 'archive/chat-1.jsonl'
+    await flushPromises()
+
+    const notice = wrapper.find('.archived-notice')
+    expect(notice.exists()).toBe(true)
+    expect(notice.text()).toContain('This chat is archived.')
+    expect(notice.find('.continue-chat-btn').text()).toBe('Continue in new chat')
+    expect(wrapper.find('textarea.chat-input').exists()).toBe(false)
+  })
+
   it('deduplicates repeated action/path pairs in the Work inspector', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [
