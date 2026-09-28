@@ -41,8 +41,8 @@ describe('HomeIntake', () => {
     await flushPromises()
 
     expect(openPicker).not.toHaveBeenCalled()
-    // Title only: the prompt is sent, never seeded as the new chat's draft.
-    expect(create).toHaveBeenCalledWith('general', 'Turn the research notes into a decision brief', undefined)
+    // Default title leaves the sent prompt eligible for auto-titling.
+    expect(create).toHaveBeenCalledWith('general')
     expect(send).toHaveBeenCalledWith('new-chat', 'Turn the research notes into a decision brief')
     expect(wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').element.value).toBe('')
     wrapper.unmount()
@@ -129,7 +129,7 @@ describe('HomeIntake', () => {
     await flushPromises()
 
     expect(openPicker).toHaveBeenCalledTimes(1)
-    expect(create).toHaveBeenCalledWith('launch', 'Ship it', undefined)
+    expect(create).toHaveBeenCalledWith('launch')
     wrapper.unmount()
   })
 
@@ -155,7 +155,7 @@ describe('HomeIntake', () => {
     await wrapper.get('form').trigger('submit')
     await flushPromises()
     expect(openPicker).not.toHaveBeenCalled()
-    expect(store.newChatInProject).toHaveBeenCalledWith('work-general', 'Work planning brief', undefined)
+    expect(store.newChatInProject).toHaveBeenCalledWith('work-general')
 
     store.activeWorkspace = 'personal'
     await nextTick()
@@ -197,7 +197,7 @@ describe('HomeIntake', () => {
 
     await input.trigger('keydown', { key: 'Enter', ctrlKey: true })
     await flushPromises()
-    expect(store.newChatInProject).toHaveBeenCalledWith('general', 'Draft the plan', undefined)
+    expect(store.newChatInProject).toHaveBeenCalledWith('general')
     wrapper.unmount()
   })
 
@@ -241,7 +241,7 @@ describe('HomeIntake', () => {
     await wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').setValue('Plan the week')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
-    expect(create).toHaveBeenCalledWith('general', 'Plan the week', { model: 'sonnet', provider: 'claude' })
+    expect(create).toHaveBeenCalledWith('general', undefined, { model: 'sonnet', provider: 'claude' })
 
     // A workspace switch drops the override: the other workspace has its
     // own default.

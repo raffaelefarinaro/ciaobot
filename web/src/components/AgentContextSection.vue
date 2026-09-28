@@ -38,23 +38,27 @@
         </span>
         <small>Could not be read just now: {{ guide.error }}</small>
       </div>
-      <div v-if="project" class="rail-item agent-context-row agent-context-brief">
+      <!-- General with no description or doc sends no brief at all. -->
+      <div v-if="project && briefLines.length" class="rail-item agent-context-row agent-context-brief">
         <span class="agent-context-row-top">
           <router-link :to="`/project/${project.project_id}`" class="agent-context-name agent-context-project">{{ project.name }}</router-link>
           <span class="agent-context-meta">{{ formatTokens(briefTokens) }} tokens</span>
         </span>
-        <small>
-          Project brief: a short description<template v-if="project.vault_doc_path"> and a link to
-            <button type="button" class="agent-context-link" :title="`Open ${project.vault_doc_path}`" @click="emit('open-file', project.vault_doc_path)">{{ docName }}</button>,
-            which the agent opens when it needs it</template>. Sent at the start and when it changes.
-        </small>
-        <small v-if="project.context" class="agent-context-quote">“{{ project.context }}”</small>
+        <small>Project brief, sent at the start and when it changes:</small>
+        <pre class="agent-context-brief-text"><template v-for="line in briefLines" :key="line.key">{{ line.prefix }}<button
+          v-if="line.path"
+          type="button"
+          class="agent-context-link"
+          :title="`Open ${line.path}`"
+          @click="emit('open-file', line.path)"
+        >{{ line.value }}</button><template v-else>{{ line.value }}</template>
+</template></pre>
       </div>
     </div>
   </section>
-  <section class="rail-section" aria-labelledby="agent-context-notes-label">
+  <section v-if="entities.length" class="rail-section" aria-labelledby="agent-context-notes-label">
     <p id="agent-context-notes-label" class="rail-label">Notes matched in your last message</p>
-    <div v-if="entities.length" class="rail-list">
+    <div class="rail-list">
       <button
         v-for="entity in entities"
         :key="entity.path"
@@ -70,7 +74,6 @@
         </span>
       </button>
     </div>
-    <p v-else class="rail-note agent-context-empty">{{ hasUserMessage ? 'None.' : 'Send a message to see which notes it matches.' }}</p>
     <p class="rail-note">Sent as links only. The agent opens a note when it needs it.</p>
   </section>
 </template>
@@ -108,20 +111,22 @@ watch(() => props.project?.workspace, loadGuide, { immediate: true })
 const guideName = computed(() => guide.value.path.split('/').pop() || 'AGENTS.md')
 const guideTokens = computed(() => tokensFor(guide.value.content.length))
 
-// The brief is the capsule's stable project lines (ciao/context/capsule.py):
-// the name (General is implicit), the description and the canonical doc's
-// path. Not the doc itself.
-const briefTokens = computed(() => {
+// The brief is the capsule's stable project lines (ciao/context/capsule.py),
+// rendered as sent: the name (General is implicit), the description and the
+// canonical doc's path. Not the doc itself. `field` mirrors capsule._field.
+function field(value: string, limit = 1200): string {
+  return value.split(/\s+/).filter(Boolean).join(' ').slice(0, limit)
+}
+const briefLines = computed(() => {
   const p = props.project
-  if (!p) return 0
-  const lines = [
-    p.name && p.name !== 'General' ? `project="${p.name}"` : '',
-    p.context ? `project_context=${p.context}` : '',
-    p.vault_doc_path ? `canonical_doc=${p.vault_doc_path}` : '',
-  ].filter(Boolean)
-  return tokensFor(lines.join('\n').length)
+  if (!p) return []
+  const lines: { key: string; prefix: string; value: string; path?: string }[] = []
+  if (p.name && p.name !== 'General') lines.push({ key: 'project', prefix: 'project=', value: `"${field(p.name, 180)}"` })
+  if (p.context) lines.push({ key: 'project_context', prefix: 'project_context=', value: field(p.context) })
+  if (p.vault_doc_path) lines.push({ key: 'canonical_doc', prefix: 'canonical_doc=', value: field(p.vault_doc_path, 300), path: p.vault_doc_path })
+  return lines
 })
-const docName = computed(() => props.project?.vault_doc_path?.split('/').pop() || '')
+const briefTokens = computed(() => tokensFor(briefLines.value.map((l) => l.prefix + l.value).join('\n').length))
 
 const contextPctLabel = computed(() => {
   const pct = props.contextPct
@@ -129,7 +134,6 @@ const contextPctLabel = computed(() => {
   return `${pct < 10 ? Math.round(pct * 10) / 10 : Math.round(pct)}%`
 })
 
-const hasUserMessage = computed(() => props.entities !== undefined)
 const entities = computed(() => props.entities ?? [])
 
 // Hints are vault-root-relative; the viewer wants workspace-relative paths.
@@ -204,12 +208,17 @@ function openEntity(entity: ContextEntity): void {
 .agent-context-row small { line-height: 1.4; }
 .agent-context-brief { cursor: default; }
 .agent-context-brief:hover { color: var(--fg); }
-.agent-context-quote {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  overflow: hidden;
-  margin-top: 2px;
+.agent-context-brief-text {
+  margin: 4px 0 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--fg2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .agent-context-link {
   padding: 0;
@@ -222,6 +231,11 @@ function openEntity(entity: ContextEntity): void {
   text-underline-offset: 2px;
   cursor: pointer;
 }
+.agent-context-brief-text .agent-context-link {
+  display: inline;
+  text-align: left;
+  color: inherit;
+}
 .agent-context-link:hover,
 .agent-context-project:hover { text-decoration-color: currentColor; }
 .agent-context-project {
@@ -232,5 +246,4 @@ function openEntity(entity: ContextEntity): void {
 }
 .agent-context-row:disabled { cursor: default; color: var(--fg2); }
 .agent-context-row:disabled:hover { color: var(--fg2); }
-.agent-context-empty { margin-top: 0; }
 </style>

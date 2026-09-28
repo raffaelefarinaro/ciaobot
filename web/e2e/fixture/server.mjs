@@ -152,6 +152,24 @@ const GET_ROUTES = {
     update_available: false,
     mode: 'dev',
   }),
+  // Settings → Memory backup. The `{}` catch-all would read as a configured
+  // install in an unknown state, so the section is served the shape the real
+  // route always sends.
+  '/api/local/backup': () => ({
+    state: 'ready',
+    scope: 'memory-vault, skills, subagents, commands',
+    branch: 'main',
+    remote: 'https://github.com/person/memory.git',
+    last_remote: 'https://github.com/person/memory.git',
+    enabled: true,
+    interval_s: 300,
+    last_attempt_at: '2026-01-01T09:05:00Z',
+    last_success_at: '2026-01-01T09:05:03Z',
+    last_success_commit: 'abc1234',
+    pending_changes: 0,
+    pending_commits: 0,
+    reason: 'up to date',
+  }),
 }
 
 /** Path patterns, for the routes that carry an id. */

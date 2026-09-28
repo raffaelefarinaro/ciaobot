@@ -5,25 +5,13 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import SettingsNotifications from '../settings/SettingsNotifications.vue'
 import { api } from '../../lib/api'
 
-vi.mock('../../lib/push', async () => {
-  // The card now calls the shared helper instead of doing the POST itself, so
-  // the mock has to keep making it: these tests watch the request, not the call.
-  const { api } = await import('../../lib/api')
-  const currentSubscription = async () => ({ endpoint: 'https://push.example/1' })
-  return {
-    pushSupported: () => true,
-    isPushEnabled: async () => true,
-    currentSubscription,
-    enablePush: vi.fn(),
-    disablePush: vi.fn(),
-    sendTestNotification: async () => {
-      const sub = await currentSubscription()
-      if (!sub) return false
-      await api.post('/api/push/test', { endpoint: sub.endpoint })
-      return true
-    },
-  }
-})
+vi.mock('../../lib/push', () => ({
+  pushSupported: () => true,
+  isPushEnabled: async () => true,
+  currentSubscription: async () => ({ endpoint: 'https://push.example/1' }),
+  enablePush: vi.fn(),
+  disablePush: vi.fn(),
+}))
 
 vi.mock('../../lib/api', () => ({
   api: {
@@ -64,17 +52,6 @@ afterEach(() => {
 })
 
 describe('SettingsNotifications push controls', () => {
-  it('sends a test notification to this device', async () => {
-    const view = await mountCard()
-
-    await button(view, 'Send test notification').trigger('click')
-    await flushPromises()
-
-    expect(api.post).toHaveBeenCalledWith('/api/push/test', { endpoint: 'https://push.example/1' })
-    // Accepted by the push service is not proof of display; say so.
-    expect(view.text()).toContain('Sent.')
-  })
-
   it('toggles delivery to every device', async () => {
     const view = await mountCard()
     expect(view.text()).toContain('Other devices only')

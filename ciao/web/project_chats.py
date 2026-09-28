@@ -6946,14 +6946,10 @@ class ProjectChatManager:
 
     # ── Auto-title generation ────────────────────────────────────────────
 
-    # A provider writes its session title asynchronously, *after* the turn it
-    # was derived from: opencode's `title` agent runs once the first exchange
-    # lands, and Claude Code writes `aiTitle` after the turn is persisted. A
-    # single read at turn end
-    # therefore almost always finds nothing, which left every chat stuck on
-    # "New Chat". Poll instead, with a bounded backoff, and fall back to a
-    # deterministic truncation so the sidebar never stays on "New Chat".
-    # Total budget ~120s covers long Opus turns (e.g. 2m33s in the Wild).
+    # OpenCode writes its native title after the first exchange, so allow its
+    # title agent time to finish. Claude Code commonly does not generate one
+    # for our context-prefixed prompts; do not hold its one-shot titler behind
+    # this entire poll window.
     _TITLE_POLL_DELAYS: tuple[float, ...] = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0, 60.0)
 
     async def auto_title_if_default(
@@ -6964,19 +6960,16 @@ class ProjectChatManager:
         Three tiers, in order:
 
         1. The provider's native session title (opencode's ``title`` agent or
-           Claude Code's ``aiTitle``) — free when it works, so it is polled
-           first via ``_TITLE_POLL_DELAYS``. Every wait re-checks the chat, so
-           a manual rename or a delete during the poll stops it instead of
-           overwriting the user.
+           Claude Code's ``aiTitle``). Poll OpenCode via ``_TITLE_POLL_DELAYS``;
+           check Claude once, since context-prefixed Ciaobot prompts commonly
+           suppress its native titler. Every wait re-checks the chat, so a
+           manual rename or a delete stops titling.
         2. A one-shot model call (``_llm_chat_title``) when the native title
-           never lands. The native path is not dependable: Claude Code
-           ≥ 2.1.246 skips its own title generation for prompts that open
-           with our injected ``[CIAO_CONTEXT_BEGIN]`` capsule — i.e. every
-           Ciaobot chat — so without this tier new chats sat on tier 3.
+           is absent. For Claude this runs immediately, not after the full
+           OpenCode poll window.
         3. The deterministic ``chat_service._fallback_title`` (first 6 words of the
-           prompt) so the sidebar never stays stuck on "New Chat". The
-           late-turn poll can still upgrade it with a native title when one
-           finally lands.
+           prompt) so the sidebar never stays stuck on "New Chat". An end-of-turn
+           pass can still upgrade it when a title becomes available.
         """
         fallback = chat_service._fallback_title(user_text)
 
@@ -6986,7 +6979,10 @@ class ProjectChatManager:
             # title once the provider finally publishes one.
             return title == "New Chat" or (fallback is not None and title == fallback)
 
-        for delay in self._TITLE_POLL_DELAYS:
+        chat = self._chats.get(chat_id)
+        provider = getattr(chat, "provider", "claude") if chat else "claude"
+        delays = (0.0,) if provider == "claude" else self._TITLE_POLL_DELAYS
+        for delay in delays:
             if delay:
                 await asyncio.sleep(delay)
             chat = self._chats.get(chat_id)
@@ -7010,13 +7006,8 @@ class ProjectChatManager:
             chat.title = title
             self._save()
             return title
-        # Native title never arrived within the window. Try the one-shot
-        # titler next: for Claude chats the native title is commonly absent
-        # (the CLI skips its own titler for capsule-prefixed prompts), and a
-        # model-generated label beats the raw 6-word prompt snippet. The
-        # late-turn poll (fired from _drive's finally) will still attempt to
-        # upgrade the deterministic fallback with a native title when one
-        # lands later.
+        # Native title was absent. A model-generated label beats the raw
+        # prompt snippet; the end-of-turn pass can retry a failed early call.
         chat = self._chats.get(chat_id)
         if chat is not None and _is_titling_target(chat.title):
             llm_title = await self._llm_chat_title(chat, user_text, assistant_text)

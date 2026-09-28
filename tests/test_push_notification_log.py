@@ -51,7 +51,7 @@ def test_local_notification_always_uses_native_banner(tmp_path: Path, monkeypatc
         "webpush",
         lambda **kwargs: endpoints.append(kwargs["subscription_info"]["endpoint"]),
     )
-    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@users.noreply.github.com")
     manager.add({"endpoint": "https://push.example/local"}, local=True)
 
     manager.send({"title": "t", "body": "hi", "chat_id": "c1"})
@@ -71,7 +71,7 @@ def test_remote_subscription_is_pushed_and_local_still_logs(tmp_path: Path, monk
         "webpush",
         lambda **kwargs: endpoints.append(kwargs["subscription_info"]["endpoint"]),
     )
-    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@users.noreply.github.com")
     manager.add({"endpoint": "https://push.example/phone"}, local=False)
 
     manager.send({"title": "t", "body": "hi", "chat_id": "c1"})
@@ -91,7 +91,7 @@ def test_clear_chat_logs_control_and_pushes_to_every_subscription(
         "webpush",
         lambda **kwargs: endpoints.append(kwargs["subscription_info"]["endpoint"]),
     )
-    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@users.noreply.github.com")
     manager.add({"endpoint": "https://push.example/local"}, local=True)
     manager.add({"endpoint": "https://push.example/phone"}, local=False)
 
@@ -115,7 +115,7 @@ def test_remote_push_failure_does_not_lose_local_notification(tmp_path: Path, mo
         raise RuntimeError("transient push failure")
 
     monkeypatch.setattr(pywebpush, "webpush", boom)
-    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@users.noreply.github.com")
     manager.add({"endpoint": "https://push.example/phone"}, local=False)
 
     manager.send({"title": "t", "body": "hi", "chat_id": "c1"})
@@ -188,7 +188,7 @@ def test_push_all_devices_pushes_local_subscriptions_and_skips_tray_log(
     subscription is the only channel and the tray log must stay empty (a
     still-running tray would show the same notification twice)."""
     calls = _pushed(monkeypatch)
-    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost", push_all=lambda: True)
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@users.noreply.github.com", push_all=lambda: True)
     manager.add({"endpoint": "https://push.example/local"}, local=True)
     manager.add({"endpoint": "https://push.example/phone"}, local=False)
 
@@ -203,7 +203,7 @@ def test_push_all_devices_pushes_local_subscriptions_and_skips_tray_log(
 
 def test_push_all_devices_off_keeps_tray_split(tmp_path: Path, monkeypatch) -> None:
     calls = _pushed(monkeypatch)
-    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost", push_all=lambda: False)
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@users.noreply.github.com", push_all=lambda: False)
     manager.add({"endpoint": "https://push.example/local"}, local=True)
     manager.add({"endpoint": "https://push.example/phone"}, local=False)
 
@@ -218,7 +218,7 @@ def test_push_all_devices_lookup_error_falls_back_to_tray_split(tmp_path: Path, 
         raise RuntimeError("settings store unavailable")
 
     calls = _pushed(monkeypatch)
-    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost", push_all=boom)
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@users.noreply.github.com", push_all=boom)
     manager.add({"endpoint": "https://push.example/local"}, local=True)
     manager.add({"endpoint": "https://push.example/phone"}, local=False)
 
@@ -226,17 +226,3 @@ def test_push_all_devices_lookup_error_falls_back_to_tray_split(tmp_path: Path, 
 
     assert [call["endpoint"] for call in calls] == ["https://push.example/phone"]
     assert len(manager.read_log()) == 1
-
-
-def test_send_test_targets_only_that_endpoint_and_skips_log(tmp_path: Path, monkeypatch) -> None:
-    calls = _pushed(monkeypatch)
-    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
-    manager.add({"endpoint": "https://push.example/one"}, local=True)
-    manager.add({"endpoint": "https://push.example/two"}, local=False)
-
-    assert manager.send_test("https://push.example/one") == 1
-
-    assert [call["endpoint"] for call in calls] == ["https://push.example/one"]
-    assert calls[0]["payload"]["kind"] == "test"
-    assert manager.read_log() == []
-    assert manager.send_test("https://push.example/unknown") == 0
