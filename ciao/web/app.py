@@ -140,6 +140,7 @@ from ciao.web.routes_api import (
     memory_receipts,
     memory_entity_types,
     proposal_action,
+    proposal_implement,
     proposal_preview,
     proposals_batch,
     proposals_history,
@@ -322,6 +323,10 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/proposals/history", proposals_history, methods=["GET"]),
         Route("/api/proposals/batch", proposals_batch, methods=["POST"]),
         Route("/api/proposals/{id}/preview", proposal_preview, methods=["GET"]),
+        # Before the `{action}` route: Starlette matches in order, and
+        # `/api/proposals/{id}/implement` would otherwise be read as an `accept`
+        # or `dismiss` action and refused.
+        Route("/api/proposals/{id}/implement", proposal_implement, methods=["POST"]),
         Route("/api/proposals/dismiss-older-than", dismiss_older_than, methods=["POST"]),
         Route("/api/proposals/{id}/{action}", proposal_action, methods=["POST"]),
         Route("/api/memory/receipts", memory_receipts, methods=["GET"]),

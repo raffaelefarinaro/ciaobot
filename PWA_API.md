@@ -780,6 +780,7 @@ themselves, and a pause taken *during* a setup is the one that counts.
 
 Routes: `GET /api/proposals`, `GET /api/proposals/history`,
 `GET /api/proposals/{id}/preview`,
+`POST /api/proposals/{id}/implement`,
 `POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
 `POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`.
 
@@ -820,10 +821,11 @@ nothing. Batch accept applies the same rule per row and reports `promoted` and
 # `skills_inventory.resolve_owned_skill`, so a stock copy, a provider mirror, a
 # shared source and an unknown name are refused there, and the record's
 # `canonical_path`/`reviewed_revision` are the resolved source's own answers.
-# Dismissing one records the decision and flips its `lifecycle` to
+# The row also carries the record's `chat_id` and `lifecycle`: the server's own
+# statement of which chat is implementing it, which is the source of truth for
+# "Open chat". Dismissing one records the decision and flips its `lifecycle` to
 # `dismissed`: the file stays on disk, readable and still accumulating evidence,
-# and the row leaves the listing. There is nothing to accept — a skill change is
-# implemented by hand or in a chat.
+# and the row leaves the listing.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
 
 # What accepting one row would write, WITHOUT writing it. Returns
@@ -839,6 +841,35 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
 # destination. `revision` is the destination digest this preview was computed
 # against; hand it back on the accept below.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/preview"
+
+# Accept a SKILL proposal into an implementation chat. A skill row is the one
+# kind that cannot be accepted by writing: what it asks for is a change to a
+# `skills/<name>/SKILL.md` that already exists, so accepting it means opening
+# the chat that will do that work. Replies {ok, chat_id, project_id, created}.
+#
+# IDEMPOTENT, and that is the point: the association is read from the record, so
+# a double tap, a retry after a dropped response, and a second device all get the
+# SAME chat back (`created: false`) rather than each starting its own. The chat
+# is opened in the proposal's OWN workspace, because a proposal filed in `work`
+# is about work's `skills/` catalog.
+#
+# The prompt is the server's, not the client's: it names the existing
+# `skills/<name>/SKILL.md`, the proposal id, the evidence and the reviewed
+# revision, and instructs the chat to read the skill first, apply a focused
+# change only if the finding still holds, verify, run `ciao sync-skills`, and
+# record the resolution with `ciao skill-proposal-remove NAME --applied`
+# (`--not-applicable` if the finding no longer holds, `--interrupted` if it stops
+# part-way, which leaves the proposal queued).
+#
+# The row stays in the listing with `lifecycle: "implementing"` and the chat id
+# on it. Completion is never inferred from the chat ending: the record only
+# becomes `applied` when the work records that outcome.
+#
+# `created: false` in the reply means this accept was handed the chat that was
+# already running, not that one was started. A 500 means the chat was opened and
+# bound but its turn could not be dispatched; the reply carries that `chat_id`, and
+# a retry returns the same chat.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/implement"
 
 # Accept one row. Dispatches through the kind's own accept descriptor: memory/
 # profile/user are region edits (returns {action: edit_region, region,

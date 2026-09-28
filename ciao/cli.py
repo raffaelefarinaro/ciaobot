@@ -3424,6 +3424,18 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     filed the same proposal again. ``ciao.skill_proposals`` records the
     decision in the workspace's sidecar and flips the record's lifecycle; the
     proposal stays readable and keeps accumulating evidence, and stays settled.
+
+    ``--applied`` records the other outcome — the change landed and was checked.
+    It is not a decoration: ``applied`` is recorded as a promotion and everything
+    else as a dismissal, so the History tab can tell "we improved this" from
+    "we decided against this". ``--not-applicable`` records the third, which is
+    why it exists: a finding the implementation chat re-read the skill and found
+    no longer holds is not the same as one a person rejected — and the prompt the
+    accept route seeds tells the chat to say so, so the command has to exist.
+    ``--interrupted`` records that the work stopped part-way, which is none of
+    those: the record stays QUEUED and its chat stays bound to it, because an
+    unfinished edit is not an answer and must not archive an open question as
+    though a person had rejected it.
     """
     from ciao.config import CiaoConfig
 
@@ -3477,9 +3489,41 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
         return 1
 
     target = matches[0]
+    # A chat records the outcome of the work it did, so a proposal that was
+    # never accepted has nothing to interrupt. Accepting is the route's job.
+    if args.interrupted and not target.chat_id:
+        print(
+            f"{target.skill} has no implementing chat, so there is no work to "
+            "record as interrupted; accept it first.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.applied and args.interrupted:
+        print("--applied and --interrupted are opposite outcomes; pass one.", file=sys.stderr)
+        return 2
+    if args.not_applicable and (args.applied or args.interrupted):
+        print(
+            "--not-applicable is a third outcome, not a modifier on the other "
+            "two; pass it on its own.",
+            file=sys.stderr,
+        )
+        return 2
+    lifecycle = (
+        skill_proposals.INTERRUPTED
+        if args.interrupted
+        else skill_proposals.APPLIED
+        if args.applied
+        else skill_proposals.NOT_APPLICABLE
+        if args.not_applicable
+        else skill_proposals.DISMISSED
+    )
     try:
-        settled = skill_proposals.settle_proposal(
-            config, target.id, skill_proposals.DISMISSED, via="cli"
+        settled = skill_proposals.mark_outcome(
+            config,
+            target.id,
+            lifecycle,
+            args.reason.strip(),
+            via="cli",
         )
     except (OSError, ValueError) as exc:
         print(f"could not settle {target.skill}: {exc}", file=sys.stderr)
@@ -3490,13 +3534,26 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
 
     if args.json:
         json.dump(
-            {"settled": True, "name": target.skill, "workspace": name},
+            {
+                "settled": True,
+                "name": target.skill,
+                "workspace": name,
+                # Which outcome this was, because the command now records three
+                # and only one of them closes the question: `--interrupted`
+                # leaves the proposal queued.
+                "lifecycle": settled.lifecycle,
+            },
             sys.stdout,
             indent=2,
         )
         sys.stdout.write("\n")
+    elif settled.lifecycle == skill_proposals.INTERRUPTED:
+        print(
+            f"Recorded {settled.skill} in {name} as interrupted; it stays queued "
+            "so the work can be picked up again."
+        )
     else:
-        print(f"Settled skill proposal {target.skill} in {name}.")
+        print(f"Settled skill proposal {settled.skill} in {name}.")
     return 0
 
 
@@ -5153,6 +5210,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Emit the structured result as JSON instead of text.",
+    )
+    skill_proposal_parser.add_argument(
+        "--applied",
+        action="store_true",
+        help=(
+            "Record that the change landed and was verified. Recorded as a "
+            "promotion, so History reads it as an accept rather than a refusal."
+        ),
+    )
+    skill_proposal_parser.add_argument(
+        "--not-applicable",
+        action="store_true",
+        help=(
+            "Record that the finding no longer holds against the current skill, "
+            "so the chat implementing it settled it without an edit. A decision, "
+            "recorded as a dismissal."
+        ),
+    )
+    skill_proposal_parser.add_argument(
+        "--interrupted",
+        action="store_true",
+        help=(
+            "Record that the implementation stopped part-way. Not a decision: the "
+            "proposal stays queued with its chat bound to it, so the work is "
+            "recoverable. Needs an accepted proposal."
+        ),
+    )
+    skill_proposal_parser.add_argument(
+        "--reason",
+        default="",
+        help="Free-text note recorded with the outcome (the History 'outcome' field).",
     )
     skill_proposal_parser.set_defaults(func=_skill_proposal_remove_command)
 

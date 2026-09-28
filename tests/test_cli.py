@@ -1233,7 +1233,12 @@ def test_cli_skill_proposal_remove_json_output(
 
     assert source.is_file()
     result = json.loads(capsys.readouterr().out)
-    assert result == {"settled": True, "name": "2026-08-09-defuddle", "workspace": "personal"}
+    assert result == {
+        "settled": True,
+        "name": "2026-08-09-defuddle",
+        "workspace": "personal",
+        "lifecycle": "dismissed",
+    }
 
 
 def test_cli_skill_proposal_remove_refuses_ambiguous_match(
@@ -1253,6 +1258,191 @@ def test_cli_skill_proposal_remove_refuses_ambiguous_match(
     # Nothing was settled.
     queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
     assert len(list(queue.glob("*.md"))) == 2
+
+
+def _accepted_skill_proposal(
+    root: Path, name: str = "2026-08-09-defuddle"
+) -> Path:
+    """A proposal a chat has been given, which is what an outcome records."""
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig
+
+    source = _skill_proposal_workspace(root, name)
+    config = CiaoConfig.from_env({
+        "CIAO_WORKSPACE": str(root),
+        "CIAO_VAULT_ROOT": "memory-vault",
+        "PWA_AUTH_TOKEN": "test",
+    })
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    skill_proposals.mark_implementing(config, record.id, "chat-1")
+    return source
+
+
+def test_cli_skill_proposal_remove_applied_records_a_promotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`applied` and `dismissed` are the same shape to a reader and opposite
+    facts: one says the change landed, the other that it will not. Only the
+    caller that checked the skill may assert the first."""
+    from ciao import skill_proposals
+    from ciao.memory_proposals import read_decisions
+
+    workspace = tmp_path / "workspace"
+    source = _accepted_skill_proposal(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(
+        ["skill-proposal-remove", "defuddle", "--applied", "--reason", "verified"]
+    ) == 0
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.APPLIED
+    assert record.chat_id == "chat-1"
+    rows = read_decisions(
+        workspace / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    )
+    assert [row["action"] for row in rows] == ["accepted"]
+    assert rows[0]["outcome"] == "verified"
+
+
+def test_cli_skill_proposal_remove_interrupted_leaves_the_proposal_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An implementation that stopped is not an answer. Recording it as a
+    dismissal would archive unfinished work as though a person had rejected it,
+    and the queue would never ask again."""
+    from ciao import skill_proposals
+    from ciao.memory_proposals import read_decisions
+
+    workspace = tmp_path / "workspace"
+    source = _accepted_skill_proposal(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "defuddle", "--interrupted"]) == 0
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.INTERRUPTED
+    assert record.chat_id == "chat-1"
+    assert read_decisions(
+        workspace / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    ) == []
+    assert "stays queued" in capsys.readouterr().out
+
+
+def test_cli_skill_proposal_remove_refuses_interrupting_work_that_never_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """There is no implementation to interrupt, so the flag would be a no-op
+    dressed as a record. Say so instead."""
+    workspace = tmp_path / "workspace"
+    source = _skill_proposal_workspace(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "defuddle", "--interrupted"]) == 1
+
+    assert "no implementing chat" in capsys.readouterr().err
+    from ciao import skill_proposals
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.PENDING
+
+
+def test_cli_skill_proposal_remove_refuses_two_opposite_outcomes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = _accepted_skill_proposal(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(
+        ["skill-proposal-remove", "defuddle", "--applied", "--interrupted"]
+    ) == 2
+
+    assert "opposite outcomes" in capsys.readouterr().err
+    from ciao import skill_proposals
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.IMPLEMENTING
+
+
+def test_cli_skill_proposal_remove_not_applicable_is_a_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finding that no longer holds is a decision, and the chat implementing it
+    has to be able to record one.
+
+    `render_improvement_prompt` tells the implementation chat to settle the
+    proposal that way when the skill no longer reads the way the reviewer saw it.
+    Without a flag for it the prompt asked for a resolution the command could not
+    express, and the branch where a chat concludes an edit is unwarranted had no
+    way to answer for itself — so the queue kept asking.
+    """
+    from ciao import skill_proposals
+    from ciao.memory_proposals import read_decisions
+
+    workspace = tmp_path / "workspace"
+    source = _accepted_skill_proposal(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(
+        [
+            "skill-proposal-remove",
+            "defuddle",
+            "--not-applicable",
+            "--reason",
+            "the fallback landed already",
+            "--json",
+        ]
+    ) == 0
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.NOT_APPLICABLE
+    assert record.chat_id == "chat-1"
+    rows = read_decisions(
+        workspace / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    )
+    # A dismissal, not a promotion: nothing improved the skill.
+    assert [row["action"] for row in rows] == ["dismissed"]
+    assert rows[0]["outcome"] == "the fallback landed already"
+
+
+def test_cli_skill_proposal_remove_refuses_not_applicable_with_another_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It is a third outcome, not a modifier. `--not-applicable --applied` would
+    otherwise be a contradiction resolved by flag order rather than refused."""
+    workspace = tmp_path / "workspace"
+    source = _accepted_skill_proposal(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(
+        ["skill-proposal-remove", "defuddle", "--not-applicable", "--applied"]
+    ) == 2
+
+    assert "third outcome" in capsys.readouterr().err
+    from ciao import skill_proposals
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.IMPLEMENTING
 
 
 # -- skill-proposal-add ------------------------------------------------------

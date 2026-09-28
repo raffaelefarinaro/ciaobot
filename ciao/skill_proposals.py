@@ -23,10 +23,13 @@ This module is the transport-neutral owner of the queue:
   cannot drift apart.
 * :func:`parse_proposal` / :func:`render_proposal` — one file shape, with the
   pre-#683 loose files still readable.
-* :func:`read_queue` / :func:`upsert_proposal` / :func:`settle_proposal` /
-  :func:`enumerate_proposal_ids` — the listing, the merging writer, the
-  settlement, and the one enumeration the API listing and the helper-chat
-  archive check share so their ids cannot drift.
+* :func:`read_queue` / :func:`upsert_proposal` / :func:`mark_implementing` /
+  :func:`mark_outcome` / :func:`enumerate_proposal_ids` — the listing, the
+  merging writer, the accept-into-chat lifecycle the server owns, and the one
+  enumeration the API listing and the helper-chat archive check share so their
+  ids cannot drift.
+* :func:`render_implementation_prompt` — the prompt that chat is seeded with, so
+  the scope of the work is the server's statement rather than the browser's.
 * :func:`open_queue_names` — the same "still awaiting a decision" question
   asked by file name from a vault root, for the nightly curation worklist,
   which builds itself from files alone and holds no registry to name a
@@ -103,14 +106,22 @@ _DECISION_PREFIX = "skill:"
 
 # A record that has been decided. ``implementing`` is deliberately open: it is a
 # proposal a chat is working on, so the review surface still shows it and a
-# resolution helper must not archive itself until it lands.
+# resolution helper must not archive itself until it lands. ``interrupted`` is
+# open for the same reason and one more: an implementation that stopped is
+# unfinished work, not an answer, so it stays queued and stays re-openable.
 IMPLEMENTING = "implementing"
 APPLIED = "applied"
 DISMISSED = "dismissed"
 NOT_APPLICABLE = "not_applicable"
 INTERRUPTED = "interrupted"
 LIFECYCLES = ("pending", IMPLEMENTING, APPLIED, DISMISSED, NOT_APPLICABLE, INTERRUPTED)
-SETTLED_LIFECYCLES = frozenset({APPLIED, DISMISSED, NOT_APPLICABLE, INTERRUPTED})
+SETTLED_LIFECYCLES = frozenset({APPLIED, DISMISSED, NOT_APPLICABLE})
+
+#: Every lifecycle an implementation can END in, settled or recoverable. The
+#: chat that was working a proposal records one of these when it finishes, and
+#: an interrupted run is refused ``applied`` by name — a chat that ended is not
+#: evidence that a skill changed.
+OUTCOME_LIFECYCLES = frozenset(SETTLED_LIFECYCLES | {INTERRUPTED})
 
 #: The lifecycle a record waits in for a decision.
 PENDING = "pending"
@@ -409,7 +420,8 @@ def upsert_proposal(config: CiaoConfig, proposal: SkillProposal) -> SkillProposa
       re-processing the same session changes nothing and a new one is appended
       rather than replacing what the last pass found;
     * identity, lifecycle and the recorded chat are never taken from an incoming
-      record — a settle is a decision, and a re-run must not undo it;
+      record — a settle is a decision, and a re-run must not undo it, nor drop a
+      record a chat is mid-way through implementing back to pending;
     * a field the incoming record leaves empty does not blank the stored one, so
       a stub write cannot erase a good finding;
     * ``updated_at`` moves only when something else did, which is what makes an
@@ -516,6 +528,235 @@ def _settle(
     return settled
 
 
+def find_proposal(config: CiaoConfig, proposal_id: str) -> SkillProposal | None:
+    """The open proposal with this id, across every registered workspace.
+
+    ``None`` when nothing open has it — a settled record, a deleted file, or an
+    id from another install. One walk, so the accept route and the outcome
+    writer ask the same question of the same queue and cannot disagree about
+    which row an id names.
+    """
+    for workspace in config.workspace_names():
+        for proposal in read_queue(config, workspace):
+            if proposal.id == proposal_id:
+                return proposal
+    return None
+
+
+def mark_implementing(
+    config: CiaoConfig, proposal_id: str, chat_id: str, *, supersedes: str = ""
+) -> SkillProposal | None:
+    """Bind a chat to an open proposal and flip it to ``implementing``.
+
+    This is what makes acceptance server-owned. The association lives on the
+    record rather than in the browser, so a reload, a second device, or the CLI
+    all read the same chat instead of each opening their own; the row stays in
+    :func:`read_queue` because ``implementing`` is open, so the review surface
+    keeps showing the work and a resolution helper cannot archive itself while
+    it is in flight.
+
+    Idempotent by chat: a record already bound to ``chat_id`` is returned as it
+    stands, and a record bound to a DIFFERENT chat keeps that one. A second
+    accept of the same row is not a reason to start a second implementation.
+
+    ``supersedes`` is the one exception, and it is deliberately narrow. It names
+    a chat the caller has already established is not live — archived, or gone —
+    and this binding replaces exactly that one. Without it a re-accept after the
+    chat died would create a fresh chat and then be refused by its own
+    idempotency rule, leaving the record pointing at a chat the operator can no
+    longer open while the new one is never recorded. A *different* stored chat
+    is still left alone: this function has no way to know whether that one is
+    live, and a caller that does must say so by name.
+
+    Raises ``ValueError`` for an empty ``chat_id`` — a proposal with no chat to
+    point at is not being implemented by anything, and writing the lifecycle
+    anyway would show a row as "in progress" that no one is working on.
+    """
+    if not chat_id.strip():
+        raise ValueError("a skill proposal can only be marked implementing with a chat")
+    proposal = find_proposal(config, proposal_id)
+    if proposal is None:
+        return None
+
+    def _taken(current: str) -> bool:
+        """Whether ``current`` blocks this binding.
+
+        True for any chat that is not the one being bound and not the dead one
+        the caller has named. Decided per read, because the file under the lock
+        may not say what the walk above did.
+        """
+        return bool(current) and current not in (chat_id, supersedes)
+
+    if _taken(proposal.chat_id):
+        # Someone else is already implementing this. Their chat is the live one.
+        return proposal
+    if proposal.lifecycle == IMPLEMENTING and proposal.chat_id == chat_id:
+        return proposal
+    path = proposal_path(config, proposal.workspace, proposal.skill)
+    with queue_lock(path):
+        stored = parse_proposal(path, proposal.workspace) or proposal
+        if _taken(stored.chat_id):
+            return stored
+        implementing = replace(
+            stored, lifecycle=IMPLEMENTING, chat_id=chat_id, updated_at=_now()
+        )
+        write_queue_atomically(path, render_proposal(implementing))
+    logger.info("Skill proposal %s is implementing in chat %s", proposal.id, chat_id)
+    return implementing
+
+
+def mark_outcome(
+    config: CiaoConfig,
+    proposal_id: str,
+    lifecycle: str,
+    reason: str = "",
+    *,
+    chat_id: str = "",
+    via: str = "pwa",
+) -> SkillProposal | None:
+    """Record how an implementation actually ended.
+
+    The same settlement :func:`settle_proposal` performs, plus the one rule the
+    queue could not express before: a run that did not finish is ``interrupted``,
+    never ``applied``. Chat completion is not verification — a stream that ended
+    cleanly, an agent that ran out of context and a provider that dropped the
+    turn all look identical from here — so ``applied`` is only ever what a
+    caller asserts after checking the skill itself, and ``interrupted`` leaves
+    the record OPEN and queued so the work is still recoverable.
+
+    ``applied`` is a promotion, everything else a dismissal, so the decision
+    sidecar says the same thing it always did and the History tab keeps reading
+    one of two outcomes.
+    """
+    if lifecycle not in OUTCOME_LIFECYCLES:
+        raise ValueError(
+            f"{lifecycle!r} is not an outcome: expected one of "
+            f"{', '.join(sorted(OUTCOME_LIFECYCLES))}"
+        )
+    proposal = find_proposal(config, proposal_id)
+    if proposal is None:
+        return None
+    if lifecycle == INTERRUPTED:
+        return _interrupt(config, proposal, chat_id=chat_id, reason=reason, via=via)
+    return _settle(
+        config, proposal, lifecycle, chat_id=chat_id, reason=reason, via=via
+    )
+
+
+def _interrupt(
+    config: CiaoConfig,
+    proposal: SkillProposal,
+    *,
+    chat_id: str,
+    reason: str,
+    via: str,
+) -> SkillProposal:
+    """Flip an in-flight record to ``interrupted``, writing no decision.
+
+    Deliberately not a settlement. The sidecar is what stops the next pass from
+    re-asking a question, and this one has not been answered — writing a
+    dismissal here would archive an unfinished edit as though a person had
+    rejected it. So the record keeps its evidence, keeps its chat, goes back in
+    the queue, and the operator can accept it again.
+    """
+    if reason:
+        logger.info("Skill proposal %s interrupted (%s): %s", proposal.id, via, reason)
+    if proposal.lifecycle == INTERRUPTED and not chat_id:
+        return proposal
+    stopped = replace(
+        proposal,
+        lifecycle=INTERRUPTED,
+        chat_id=chat_id or proposal.chat_id,
+        updated_at=_now(),
+    )
+    path = proposal_path(config, proposal.workspace, proposal.skill)
+    with queue_lock(path):
+        write_queue_atomically(path, render_proposal(stopped))
+    return stopped
+
+
+def render_improvement_prompt(proposal: SkillProposal) -> str:
+    """The prompt the implementation chat is seeded with.
+
+    Server-side on purpose. The prompt IS the acceptance: it says which skill to
+    improve, what the finding was, and what counts as done, so it cannot be a
+    per-client string that drifts from what the record actually says. The
+    browser used to send its own, and it said *create a skill* — the finding was
+    about a skill that already exists, so the chat was asked to build a second
+    one under a new name and the queue never got what it asked for.
+
+    Three things this has to carry, and did not before:
+
+    * the canonical ``skills/<name>/SKILL.md`` by name, with the instruction to
+      read it first — an edit to a skill nobody re-read is a guess;
+    * the proposal id and the reviewed revision, so the chat can tell whether
+      the skill still reads the way the reviewer saw it, and so the resolution
+      it records names the proposal rather than the skill alone;
+    * the resolution itself, through the CLI that owns the settlement. A chat
+      that decided something had to be told how to say so, or the queue keeps
+      re-asking a question the work already answered.
+    """
+    skill = proposal.skill
+    canonical = proposal.canonical_path or f"skills/{skill}/SKILL.md"
+    lines = [
+        f"Improve the existing `{skill}` skill in the {proposal.workspace} workspace.",
+        f"Work in this chat only; do not delegate this helper task.",
+        "",
+        f"The skill already exists at `{canonical}`. This is an improvement to "
+        f"the skill as it stands, not a new skill: do not create a directory, do "
+        f"not write a `SKILL.md` somewhere else, and do not rename it.",
+        "",
+        f"Proposal {proposal.id} (`{proposal_rel_path(proposal.workspace, skill)}`):",
+    ]
+    if proposal.title:
+        lines += ["", proposal.title]
+    for heading, field in _RENDERED_HEADINGS:
+        value = getattr(proposal, field)
+        if value:
+            lines += ["", f"## {heading}", "", value]
+    if proposal.sources:
+        lines += ["", f"## {_EVIDENCE_HEADING}", "", _render_evidence(proposal.sources)]
+    lines += [
+        "",
+        "Read the current skill first and tell me whether the finding still holds "
+        "against what it says now."
+        + (
+            f" It was reviewed at revision `{proposal.reviewed_revision[:12]}`."
+            if proposal.reviewed_revision
+            else ""
+        ),
+        "If it does not, say so and why, and record the finding as no longer "
+        "applying rather than editing on the strength of one that has expired:",
+        "",
+        f"    ciao skill-proposal-remove {skill} --workspace . --not-applicable",
+        "",
+        "If it does, make the smallest focused change that addresses the problem "
+        "— not a rewrite, and not changes the proposal did not ask for.",
+        "",
+        "Then verify the change (read the file back, and run whatever the skill "
+        "itself tells a reader to run) and record the resolution so the queue "
+        "stops asking:",
+        "",
+        f"    ciao skill-proposal-remove {skill} --workspace . --applied",
+        "",
+        f"Use `--applied` only once the change is really in `{canonical}` and you "
+        "have verified it. Add `--reason \"...\"` to either command to say in your "
+        "own words what you found. If you stop part-way, say that instead:",
+        "",
+        f"    ciao skill-proposal-remove {skill} --workspace . --interrupted",
+        "",
+        "That one is not a decision — it leaves the proposal queued and "
+        "recoverable, which is what an unfinished edit should do. Never pass the "
+        "proposal text as a shell argument.",
+        "",
+        "Before you finish, run `ciao sync-skills` so the providers see the "
+        "updated skill. No `--workspace` argument: this chat's working directory "
+        "is already this workspace's root, and `sync-skills` takes a path there, "
+        "not a workspace name.",
+    ]
+    return "\n".join(lines)
+
+
 def _merge(
     config: CiaoConfig, existing: SkillProposal | None, incoming: SkillProposal
 ) -> SkillProposal:
@@ -558,11 +799,24 @@ def _merged_lifecycle(
     reopens a settled one, because nothing in the queue's vocabulary can say a
     decision was wrong — reopening is a change to that vocabulary, not a value
     this writer invents.
+
+    Work in flight is protected the same way. A pass that re-derives the same
+    finding while a chat is implementing it arrives as ``pending``, and taking
+    that would drop the record out of ``implementing``/``interrupted`` under a
+    live chat: the review row would stop offering "Open chat" and the queue
+    would re-ask a question that is already being answered. A pass files
+    findings; only the accept path and the resolution move this record on.
     """
     recorded = _recorded_lifecycle(config, incoming.workspace, incoming.skill)
     if recorded:
         return recorded
     if existing is not None and existing.lifecycle in SETTLED_LIFECYCLES:
+        return existing.lifecycle
+    if (
+        existing is not None
+        and existing.lifecycle in {IMPLEMENTING, INTERRUPTED}
+        and incoming.lifecycle == PENDING
+    ):
         return existing.lifecycle
     return incoming.lifecycle
 
