@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import HomeSetupCard from '../HomeSetupCard.vue'
-import { enablePush, sendTestNotification } from '../../lib/push'
+import { enablePush } from '../../lib/push'
 import { SETUP_CARD_DISMISSED_KEY } from '../../lib/pwaPlatform'
 import {
   _resetInstallPromptForTests,
@@ -19,7 +19,6 @@ vi.mock('../../lib/push', () => ({
   pushSupported: () => state.pushSupported,
   isPushEnabled: async () => state.pushEnabled,
   enablePush: vi.fn(),
-  sendTestNotification: vi.fn(async () => true),
 }))
 
 const IPHONE_UA =
@@ -98,23 +97,16 @@ describe('HomeSetupCard', () => {
     expect(view.text()).toContain('Installed')
   })
 
-  it('enables notifications and then sends a test', async () => {
+  it('enables notifications', async () => {
     const view = await mountCard()
 
     await button(view, 'Enable').trigger('click')
     await flushPromises()
     expect(enablePush).toHaveBeenCalled()
-
-    const send = button(view, 'Send test')
-    expect(send.attributes('disabled')).toBeUndefined()
-    await send.trigger('click')
-    await flushPromises()
-
-    expect(sendTestNotification).toHaveBeenCalled()
-    expect(view.text()).toContain('Sent.')
+    expect(view.text()).toContain('On for this device')
   })
 
-  it('stays visible after enabling in the installed app so the test can be sent', async () => {
+  it('stays visible after enabling in the installed app so the confirmation shows', async () => {
     Object.defineProperty(window, 'matchMedia', {
       configurable: true,
       value: (query: string) => ({
@@ -129,20 +121,10 @@ describe('HomeSetupCard', () => {
     await button(view, 'Enable').trigger('click')
     await flushPromises()
 
-    // Enabling is what completes the card, so unmounting here would take the
-    // test step away in the installed app and on the iOS Home Screen.
+    // Enabling is what completes the card, so unmounting here would pull it
+    // out from under the click in the installed app and on the iOS Home Screen.
     expect(view.find('.home-setup').exists()).toBe(true)
-    const send = button(view, 'Send test')
-    expect(send.attributes('disabled')).toBeUndefined()
-    await send.trigger('click')
-    await flushPromises()
-
-    expect(view.text()).toContain('Sent.')
-  })
-
-  it('keeps Send test disabled until notifications are on', async () => {
-    const view = await mountCard()
-    expect(button(view, 'Send test').attributes('disabled')).toBeDefined()
+    expect(view.text()).toContain('On for this device')
   })
 
   it('explains a blocked permission instead of offering Enable', async () => {

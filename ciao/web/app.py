@@ -178,7 +178,6 @@ from ciao.web.routes_push import (
     push_status,
     push_subscribe,
     push_subscription_check,
-    push_test,
     push_unsubscribe,
 )
 from ciao.web.security import SecurityHeadersMiddleware
@@ -398,7 +397,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/push/unsubscribe", push_unsubscribe, methods=["POST"]),
         Route("/api/push/status", push_status, methods=["GET"]),
         Route("/api/push/subscription", push_subscription_check, methods=["GET"]),
-        Route("/api/push/test", push_test, methods=["POST"]),
         Route("/api/menubar-notifications", push_notification_feed, methods=["GET"]),
         # Per-device working-branch flow: commit-to-main + agent-merged handover
         Route("/api/local/status", local_status, methods=["GET"]),

@@ -6,6 +6,9 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 
+const page = vi.hoisted(() => ({ loopback: true }))
+vi.mock('../../lib/loopback', () => ({ isLoopbackPage: () => page.loopback }))
+
 const FILE_CONTENT = '# Title\n\nbody text'
 
 /** How many times the panel has fetched the file (i.e. loaded or reloaded). */
@@ -24,6 +27,7 @@ describe('PinnedFilePanel', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals()
+    page.loopback = true
   })
 
   async function mountPanel(options: { attach?: boolean; filePath?: string; content?: string } = {}): Promise<VueWrapper> {
@@ -339,6 +343,17 @@ describe('PinnedFilePanel', () => {
     await flushPromises()
     const items = Array.from(document.querySelectorAll('.pfp-actions-menu button')).map(b => b.textContent?.trim())
     expect(items).toEqual(['Refresh', 'Copy path', 'Download', 'Open in default app', 'Open in memory map'])
+    wrapper.unmount()
+  })
+
+  it('hides Open in default app away from the engine machine', async () => {
+    page.loopback = false
+    const wrapper = await mountPanel({ attach: true })
+
+    await wrapper.get('button[aria-label="More file actions"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    const items = Array.from(document.querySelectorAll('.pfp-actions-menu button')).map(b => b.textContent?.trim())
+    expect(items).not.toContain('Open in default app')
     wrapper.unmount()
   })
 

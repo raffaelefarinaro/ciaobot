@@ -46,6 +46,7 @@ from ciao import entity_types
 from ciao import provider_registry
 from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
+from ciao.web.auth import is_loopback_client
 from ciao.web.document_conversion import is_anydoc_document
 from ciao.config import (
     CLAUDE_MODELS,
@@ -4190,9 +4191,15 @@ async def workspace_open(request: Request) -> Response:
 
     Body: ``{"path": str}``. Uses the same path resolver as the workspace
     viewers (relative paths anchor to workspace_root; fuzzy basename lookup
-    is allowed). The open happens server-side, so this only works when the
-    PWA is talking to a local Ciao instance.
+    is allowed). The open happens on the engine's machine, so a remote caller
+    (a phone, another Mac over Tailscale) would pop the file up on a screen
+    nobody is looking at: refused, and the PWA hides the action there.
     """
+    if not is_loopback_client(request):
+        return JSONResponse(
+            {"error": "Opening files is only available on the computer running Ciaobot."},
+            status_code=403,
+        )
     try:
         body = await request.json()
     except ValueError:
