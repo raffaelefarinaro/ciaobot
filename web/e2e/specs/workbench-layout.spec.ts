@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { boot, isolate } from '../support/app'
+import { boot, COMPOSER, isolate } from '../support/app'
 
 /**
  * Prototype A at a desktop width: layout facts jsdom cannot see. The review
@@ -47,5 +47,19 @@ test.describe('workbench layout', () => {
     for (const label of ['Home', 'Automations', 'Memory', 'Settings']) {
       await expect(page.locator('.nav-links .nav-item-label', { hasText: label })).toBeVisible()
     }
+  })
+
+  test('the Work details rail reopens without scrolling sideways', async ({ page }) => {
+    // The hide button overhung the rail's right edge, so the rail was wider
+    // than itself; focusing the button on reopen scrolled it sideways and cut
+    // off the rail's left edge.
+    await boot(page, '/chat/alpha-chat-2', COMPOSER)
+    const rail = page.locator('.chat-rail')
+    await page.locator('.chat-rail-hide').click()
+    await expect(rail).toHaveCount(0)
+    await page.locator('[aria-controls="chat-work-rail"]').first().click()
+    await expect(rail).toBeVisible()
+    const box = await rail.evaluate(r => ({ left: r.scrollLeft, over: r.scrollWidth - r.clientWidth }))
+    expect(box).toEqual({ left: 0, over: 0 })
   })
 })
