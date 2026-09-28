@@ -257,6 +257,9 @@ describe('SettingsMemoryBackup with a repository connected', () => {
     await button(view, 'Pause').trigger('click')
     await flushPromises()
     expect(apiPatch).toHaveBeenCalledWith('/api/local/backup', { paused: true })
+    expect(view.find('[role="status"]').text()).toContain(
+      'Automatic backups are off. The copy on this computer is unaffected.',
+    )
 
     // A paused status offers Resume, not Pause again.
     apiGet.mockResolvedValue(status({ state: 'paused', remote: 'https://github.com/p/m.git', reason: 'backup is paused' }))
@@ -264,6 +267,7 @@ describe('SettingsMemoryBackup with a repository connected', () => {
     await button(paused, 'Resume').trigger('click')
     await flushPromises()
     expect(apiPatch).toHaveBeenCalledWith('/api/local/backup', { paused: false })
+    expect(paused.find('[role="status"]').text()).toContain('Automatic backups are running again.')
   })
 
   it('turns a disabled backup back on', async () => {
@@ -272,6 +276,9 @@ describe('SettingsMemoryBackup with a repository connected', () => {
     await button(view, 'Turn on').trigger('click')
     await flushPromises()
     expect(apiPatch).toHaveBeenCalledWith('/api/local/backup', { enabled: true })
+    // Turning them on must not announce that they are off: this is the
+    // recovery path, and the sentence is read out by a screen reader.
+    expect(view.find('[role="status"]').text()).toContain('Automatic backups are running again')
   })
 })
 

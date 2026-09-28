@@ -520,9 +520,12 @@ async function toggleFlag(): Promise<void> {
   try {
     const res = await api.patch<BackupStatus>('/api/local/backup', control.body)
     status.value = res
-    actionResult.value = control.body.paused === false
-      ? 'Automatic backups are running again.'
-      : 'Automatic backups are off. The copy on this computer is unaffected.'
+    // Only pausing sets `paused`; "Turn on" sends { enabled: true } and "Resume"
+    // sends { paused: false }, so anything other than an explicit pause leaves
+    // the backups running.
+    actionResult.value = control.body.paused === true
+      ? 'Automatic backups are off. The copy on this computer is unaffected.'
+      : 'Automatic backups are running again.'
   } catch (err) {
     error.value = apiErrorMessage(err, 'Could not change the backup setting.')
   } finally {
