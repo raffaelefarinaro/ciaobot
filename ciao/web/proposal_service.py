@@ -752,8 +752,12 @@ def _dismiss_skill_proposal(ctx: dict[str, Any]) -> dict[str, Any]:
     is not an error either.
 
     A decision that could not be recorded leaves the proposal open rather than
-    reporting a settlement nobody can see.
+    reporting a settlement nobody can see. That includes a lock it could not
+    take: a refusal to write unlocked is a refusal to decide, and the handler's
+    contract is a structured ``ok: false`` rather than a 500.
     """
+    from ciao.memory_receipts import QueueLockError
+
     config = ctx.get("config")
     if config is None:
         return {"ok": False, "error": "this skill row carries no workspace registry"}
@@ -762,7 +766,7 @@ def _dismiss_skill_proposal(ctx: dict[str, Any]) -> dict[str, Any]:
         settled = skill_proposals.settle_proposal(
             config, str(row["id"]), skill_proposals.DISMISSED
         )
-    except OSError as exc:
+    except (OSError, QueueLockError) as exc:
         return {
             "ok": False,
             "error": f"could not record the decision for {row['text']}: {exc}",

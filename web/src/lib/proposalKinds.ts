@@ -326,10 +326,13 @@ export const PROPOSAL_KINDS: Record<string, ProposalKindDescriptor> = {
   // The path, not the words "a skill proposal file": the row's whole content is
   // in that file, and naming it is what makes "view" obviously the first thing
   // to press.
+  // "Dismissing" settles rather than deletes: the record stays on disk with a
+  // `dismissed` lifecycle and a decision recorded in the workspace sidecar, so
+  // the next pass cannot re-ask a question that was already answered.
   skill: {
     label: 'skill',
     destination: (row) => row.path || 'a skill proposal file',
-    consequence: () => 'A suggested skill — building it opens a chat, dismissing deletes the file',
+    consequence: () => 'A suggested skill — building it opens a chat, dismissing settles the proposal',
     canAccept: () => false,
     fallback: null,
     discussLabel: () => 'a `skill` proposal',

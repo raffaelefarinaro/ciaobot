@@ -27,6 +27,10 @@ This module is the transport-neutral owner of the queue:
   :func:`enumerate_proposal_ids` — the listing, the merging writer, the
   settlement, and the one enumeration the API listing and the helper-chat
   archive check share so their ids cannot drift.
+* :func:`open_queue_names` — the same "still awaiting a decision" question
+  asked by file name from a vault root, for the nightly curation worklist,
+  which builds itself from files alone and holds no registry to name a
+  workspace with.
 
 There is no database and no second queue location. The files stay exactly where
 they were, the write goes through the existing
@@ -50,10 +54,10 @@ asks the model for (``What I noticed`` → problem, ``Suggested improvement`` an
 ``Source sessions`` list into evidence. A heading this schema does not name, and
 the prose before the first one, is appended to the rationale rather than
 dropped: a legacy file's words are the finding, and the acceptance test for a
-readable legacy record is that re-writing it loses none of them. The one piece
-of legacy prose not carried is the file's own self-description ("This is a
-reviewable suggestion based on repeated recent use"), which described the old
-format rather than the finding.
+readable legacy record is that re-writing it loses none of them. That includes
+the file's own self-description ("This is a reviewable suggestion based on
+repeated recent use"), which is prose this schema does not name and therefore
+rides along in the rationale. Only the first level-1 heading becomes ``title``.
 """
 
 from __future__ import annotations
@@ -249,23 +253,14 @@ def parse_proposal(path: Path, workspace: str) -> SkillProposal | None:
     ``None`` rather than raising: a queue you cannot show is worse than one row
     short, and the writer that finds this will write a fresh record.
     """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    read = _read_record(path)
+    if read is None:
         return None
-    if not text.strip():
-        return None
-    front, body = _split_frontmatter(text)
+    front, body = read
     skill = path.stem
     if not skill:
         return None
     fields = _parse_body(body)
-    lifecycle = str(front.get("lifecycle", "")).strip()
-    if lifecycle not in LIFECYCLES:
-        # A lifecycle this schema does not name is reported as still open: the
-        # queue's job is to put in front of a human anything it cannot read, and
-        # an unread value is not evidence of a decision.
-        lifecycle = PENDING
     return SkillProposal(
         id=proposal_id(workspace, skill),
         workspace=workspace,
@@ -277,7 +272,7 @@ def parse_proposal(path: Path, workspace: str) -> SkillProposal | None:
         change=fields["change"],
         rationale=fields["rationale"],
         sources=tuple(fields["sources"]),
-        lifecycle=lifecycle,
+        lifecycle=_front_lifecycle(front),
         chat_id=str(front.get("chat_id", "")),
         updated_at=str(front.get("updated_at", "")),
     )
@@ -358,6 +353,34 @@ def read_queue(config: CiaoConfig, workspace: str) -> list[SkillProposal]:
         found.append(proposal)
     found.sort(key=lambda item: item.skill)
     return found
+
+
+def open_queue_names(vault_root: Path) -> list[str]:
+    """The queue file names in ``vault_root`` that are still awaiting a decision.
+
+    The vault-root form of :func:`read_queue`, for the caller that holds a root
+    and no registry: the nightly curation worklist computes itself from files
+    alone, so it cannot name a workspace and cannot ask for ids. What it wants
+    is per-file — "is this record still open" — so the answer is names, and the
+    lifecycle is read through the same parser the listing uses.
+
+    A settled record stays on disk, because the decision is worth keeping. So
+    this is the difference between a worklist that asks a question once and one
+    that re-asks an answered question every night: a settled file is absent
+    rather than reported, and a file this cannot read is absent too, matching
+    what the review listing will show.
+    """
+    directory = Path(vault_root).joinpath(*QUEUE_REL)
+    if not directory.is_dir():
+        return []
+    names: list[str] = []
+    for path in sorted(directory.glob("*.md")):
+        read = _read_record(path)
+        if read is None:
+            continue
+        if _front_lifecycle(read[0]) not in SETTLED_LIFECYCLES:
+            names.append(path.name)
+    return names
 
 
 def enumerate_proposal_ids(config: CiaoConfig) -> set[str]:
@@ -676,6 +699,34 @@ def _legacy_session_rows(lines: list[str]) -> list[SkillEvidence]:
             )
         )
     return found
+
+
+def _read_record(path: Path) -> tuple[dict[str, str], str] | None:
+    """One queue file's frontmatter and body, or ``None`` when it holds no record.
+
+    The one place a queue file is read, so :func:`parse_proposal` and
+    :func:`open_queue_names` cannot disagree about what counts as a record
+    there. A file this cannot speak for at all — unreadable, or empty — is
+    ``None`` rather than a raise, the same call :func:`parse_proposal` makes.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text.strip():
+        return None
+    return _split_frontmatter(text)
+
+
+def _front_lifecycle(front: dict[str, str]) -> str:
+    """The lifecycle a record's frontmatter claims, or that it is still open.
+
+    A value this schema does not name reads as :data:`PENDING`: the queue's
+    job is to put in front of a human anything it cannot read, and an unread
+    value is not evidence of a decision.
+    """
+    lifecycle = str(front.get("lifecycle", "")).strip()
+    return lifecycle if lifecycle in LIFECYCLES else PENDING
 
 
 def _parse_body(body: str) -> dict[str, Any]:
