@@ -5,8 +5,8 @@ This document is for agents and operators working inside an installed Ciaobot wo
 ## Where to Look First
 
 - `CIAO_CUSTOMIZATION.md`: this guide.
-- `.env`: server config, provider keys, model lists, OAuth-related paths, push contact, and runtime paths.
-- `.runtime/workspaces.json`: logical workspaces when `CIAO_WORKSPACES` is not set in `.env`.
+- `.env`: server config (auth, host/port) and runtime paths.
+- `.runtime/workspaces.json`: logical workspaces, managed from Settings → Workspaces.
 - `.claude/agents/`: project agents available to Claude-backed chats.
 - `.claude/commands/`: slash commands available to Claude-backed chats.
 - `.claude/skills/`: skills available to Claude-backed chats.
@@ -23,7 +23,7 @@ Ciaobot has two workspace concepts:
 - `CIAO_WORKSPACE`: the filesystem root for this local Ciaobot instance. It contains `.env`, `.runtime/`, `.claude/`, and usually `memory-vault/`.
 - Logical workspaces: named chat spaces such as `default`, `personal`, `work`, or `client-a`. These appear in the PWA sidebar and route projects, chats, vault roots, model defaults, and integration profiles.
 
-Logical workspaces are configured with `CIAO_WORKSPACES` in `.env` or `.runtime/workspaces.json`.
+Logical workspaces are managed from Settings → Workspaces and stored in `.runtime/workspaces.json`, the only source of the workspace list. `.env` does not configure them: the retired `CIAO_WORKSPACES` variable is ignored (a server start imports it into the registry once, then warns until it is removed from `.env`).
 
 Example `.runtime/workspaces.json`:
 
@@ -59,17 +59,9 @@ Ciaobot supports two chat providers, each authenticating through its own CLI:
 - `claude`: Claude Code / Claude Agent SDK, against Anthropic.
 - `opencode`: the open-source agent CLI, bring-your-own model provider. This is how you reach anything else — Ollama, OpenRouter, or any OpenAI-compatible endpoint. Configure it in opencode and its models appear in Ciaobot's pickers automatically; Ciaobot lists whatever opencode reports as connected.
 
-Useful `.env` settings:
-
-- `CLAUDE_MODELS`: Anthropic model aliases shown in the picker. Default:
-  `opus,sonnet,haiku,fable`. Leave it unset unless you want to expose full
-  Anthropic model ids or change the default tier (the first entry): pinning
-  it freezes the picker, so a tier added in a later release stays hidden.
-- `CIAO_WORKSPACES`: preferred multi-workspace registry. Use `default_provider` per workspace.
-
-Each provider has its own default model and thinking level for new chats, set in
-Settings → Models, and its own default permission mode, set in
-Settings → Providers. A Claude model alias
+Each provider has its own default model, thinking level, and permission mode
+for new chats, all set on the chat providers card in Settings → Models &
+providers. A Claude model alias
 (`haiku`, `sonnet`, `opus`, `fable`) is a real Claude model id; opencode resolves its
 own defaults from the signed-in account's catalog. The permission mode chooses
 how much a chat may do without asking: manual (ask for every action), auto
@@ -81,9 +73,8 @@ Provider keys live in `.env` or the provider's own OAuth store. Do not put keys 
 
 Common keys:
 
-- Claude Code authentication is owned by the Claude CLI; use Settings → Providers to connect or verify it.
-- Voice transcription and read-aloud use the host Mac's on-device Apple frameworks; no voice API key is required.
-- Provider authentication is owned by the provider CLIs; use `ciao auth <provider>` or Settings → Providers. There are no model API keys to set.
+- Claude Code authentication is owned by the Claude CLI; use Settings → Models & providers to connect or verify it.
+- Provider authentication is owned by the provider CLIs; use `ciao auth <provider>` or Settings → Models & providers. Claude Code also accepts `ANTHROPIC_API_KEY` from the process environment; Ciaobot has no API-key fields and never returns the value.
 
 Agents may check whether a key is set, but must not print the value.
 
@@ -134,7 +125,7 @@ Use `ciao vault-index` after larger vault edits. Use `ciao vault-search` to sear
 
 Runtime schedules live in `.runtime/schedules.json`.
 
-System schedules are seeded by the package and are normally read-only in the UI. User schedules can run normal chat prompts against a target workspace/project/chat and can inherit that target's provider and model.
+System schedules are seeded by the package and are normally read-only in the UI. User schedules can run normal chat prompts against a target workspace/project/chat and can inherit that target's provider and model. Settings → Automations also owns the **Automatic session insights** and **Automatic trajectory capture** privacy switches; turning them off stops their respective model processing or structured records for new and archived chats while leaving explicit one-time actions available.
 
 Important fields:
 
@@ -150,13 +141,9 @@ Safe workspace-level changes:
 - Add or edit `.runtime/workspaces.json`.
 - Add project docs, vault references, and memory pages.
 - Add or update canonical `skills/`, `subagents/`, and `commands/` assets, then run `ciao sync-skills`.
-- Change model lists and provider keys in `.env` without printing secrets.
 
 Changes that usually need restart:
 
-- Provider keys.
-- `CIAO_WORKSPACES`.
-- Model list env vars.
 - `CIAO_WORKSPACE`, `CIAO_VAULT_ROOT`, and runtime path changes.
 
 Changes that should be made through the app or package update flow:

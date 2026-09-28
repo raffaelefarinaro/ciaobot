@@ -1003,17 +1003,10 @@ def _main(argv: list[str] | None = None) -> int:
     with job_runs.track_sync(
         "skill_evolution", "Skill reflection", model=args.model
     ) as run:
-        from ciao import native_sidecar
         from ciao.config import CiaoConfig
         cfg = CiaoConfig.from_env()
         if args.model is None:
             args.model = os.environ.get("CIAO_MODEL") or cfg.claude_default_model or "sonnet"
-        args.model, note = native_sidecar.resolve_model_or_fallback(
-            args.model, default_model=cfg.claude_default_model
-        )
-        if note:
-            run.extra["fallback"] = note
-            logger.info("Skill reflection %s", note)
         workspace = args.workspace or os.environ.get("CIAO_ACTIVE_WORKSPACE", "")
         if workspace and cfg.workspace(workspace) is None:
             parser.error(f"unknown workspace: {workspace}")

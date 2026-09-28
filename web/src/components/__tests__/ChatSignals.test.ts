@@ -147,6 +147,63 @@ describe('ChatSignals', () => {
     expect(wrapper.find('.chat-signal--needs').classes()).toContain('chat-signal--needs')
   })
 
+  it('shows the memory-pass needs-you chip', () => {
+    // A pass that ended unclean is the one background job whose unfinished
+    // state is the owner's problem, so it needs a signal of its own — and a
+    // label, since a glyph is never the whole explanation.
+    const { store } = seed()
+    store.chats[0].helper = {
+      kind: 'memory_pass',
+      source_chat_id: 'chat-0',
+      archive_path: 'chats/chat-0.md',
+      doc_path: 'projects/general.md',
+      source_title: 'Chat',
+      source_project: 'General',
+      state: 'attention',
+      archive_policy: 'when_clean',
+    } as unknown as NonNullable<typeof store.chats[0]['helper']>
+    const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
+    expect(wrapper.find('.chat-signal--memory').exists()).toBe(true)
+    expect(wrapper.find('.chat-signal--memory').attributes('aria-label')).toBe('Memory pass needs you')
+    expect(wrapper.find('.chat-signal--memory').attributes('title')).toBe('Memory pass needs you')
+  })
+
+  it('leaves the memory chip off a pass that is still running or done', () => {
+    const { store } = seed()
+    for (const state of ['queued', 'running', 'done'] as const) {
+      store.chats[0].helper = {
+        kind: 'memory_pass',
+        source_chat_id: 'chat-0',
+        archive_path: 'chats/chat-0.md',
+        doc_path: 'projects/general.md',
+        source_title: 'Chat',
+        source_project: 'General',
+        state,
+        archive_policy: 'when_clean',
+      } as unknown as NonNullable<typeof store.chats[0]['helper']>
+      const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1' } })
+      expect(wrapper.find('.chat-signal--memory').exists()).toBe(false)
+    }
+  })
+
+  it('keeps needs-you ranked above the memory chip', () => {
+    const { store } = seed()
+    store.chats[0].pending_question = JSON.stringify({ questions: [{ question: 'Answer me' }] })
+    store.chats[0].helper = {
+      kind: 'memory_pass',
+      source_chat_id: 'chat-0',
+      archive_path: 'chats/chat-0.md',
+      doc_path: 'projects/general.md',
+      source_title: 'Chat',
+      source_project: 'General',
+      state: 'attention',
+      archive_policy: 'when_clean',
+    } as unknown as NonNullable<typeof store.chats[0]['helper']>
+    const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(wrapper.find('.chat-signal--needs').exists()).toBe(true)
+    expect(wrapper.find('.chat-signal--memory').exists()).toBe(false)
+  })
+
   it('exposes a reduced-motion hook on the pulse', () => {
     const { store } = seed()
     store.projectStreaming = { 'chat-1': true }

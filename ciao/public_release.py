@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
-import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -96,11 +95,6 @@ def load_private_patterns(path: Path | str) -> tuple[str, ...]:
         for line in lines
         if line.strip() and not line.lstrip().startswith("#")
     )
-
-
-def _env_private_patterns() -> tuple[str, ...]:
-    raw = os.environ.get("CIAO_PUBLIC_PRIVATE_PATTERNS", "")
-    return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
 def _normalize_rel(path: str | Path) -> str:
@@ -202,7 +196,7 @@ def scan_public_export(
 ) -> PublicReleaseReport:
     root_path = Path(root).expanduser().resolve()
     report = PublicReleaseReport(root=root_path)
-    patterns = tuple(private_patterns) if private_patterns is not None else _env_private_patterns()
+    patterns = tuple(private_patterns) if private_patterns is not None else ()
     for path in _iter_files(root_path):
         rel = path.relative_to(root_path).as_posix()
         forbidden = _forbidden_path_detail(rel)

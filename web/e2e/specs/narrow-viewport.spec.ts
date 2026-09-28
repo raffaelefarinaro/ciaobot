@@ -28,6 +28,20 @@ test.describe('narrow viewport', () => {
       overflow,
       `document scrolls ${overflow}px past the viewport; widest unclipped: ${JSON.stringify(culprits)}`,
     ).toBeLessThanOrEqual(0)
+
+    // The workbench command canvas must keep its controls inside the surface at
+    // phone width: the project chip and the New action are the two that can
+    // push past the shell.
+    const form = await page.locator('.home-intake-form').boundingBox()
+    expect(form).not.toBeNull()
+    // The file input is hidden (the paperclip button opens it), so it has no box.
+    const controls = page.locator('.home-intake-form input:not([type=file]), .home-intake-form textarea, .home-intake-form select, .home-intake-form button')
+    for (const control of await controls.all()) {
+      const box = await control.boundingBox()
+      expect(box).not.toBeNull()
+      expect(box!.x).toBeGreaterThanOrEqual(form!.x - 1)
+      expect(box!.x + box!.width).toBeLessThanOrEqual(form!.x + form!.width + 1)
+    }
   })
 
   test('an open chat does not scroll sideways at 390px', async ({ page }) => {
@@ -60,5 +74,75 @@ test.describe('narrow viewport', () => {
 
     const small = boxes.filter((box) => box.w < 44 || box.h < 44)
     expect(small, `controls below the 44px touch minimum: ${JSON.stringify(small)}`).toEqual([])
+  })
+
+  test('the home composer controls meet the 44px touch minimum at phone width', async ({ page }) => {
+    await boot(page)
+
+    const boxes = await page.locator('.home-intake-form button:visible, .home-intake-form textarea:visible').evaluateAll((els) =>
+      els.map((el) => {
+        const r = el.getBoundingClientRect()
+        return {
+          name: (el.getAttribute('aria-label') || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+        }
+      }),
+    )
+    expect(boxes.length, 'no home composer controls were measured').toBeGreaterThanOrEqual(2)
+    const small = boxes.filter((box) => box.h < 44)
+    expect(small, `home composer controls below the 44px touch minimum: ${JSON.stringify(small)}`).toEqual([])
+  })
+
+  test('a selected memory note opens an actionable sheet on a phone', async ({ page }) => {
+    await boot(page, '/memory/map', '.mm-toolbar')
+    await page.getByRole('button', { name: 'List', exact: true }).click()
+    await page.getByRole('button', { name: 'Open Launch decision' }).click()
+
+    const detail = page.getByRole('dialog', { name: 'Details for Launch decision' })
+    await expect(detail).toBeVisible()
+    await expect(detail.getByRole('button', { name: 'Close note' })).toBeVisible()
+    await detail.getByRole('button', { name: 'Close note' }).click()
+    await expect(detail).toBeHidden()
+  })
+
+  test('the categories list and its drawer meet the 44px touch minimum', async ({ page }) => {
+    // Three controls sit in a row here — the label button, its Built-in/Custom
+    // chip and the switch — and the drawer adds the whole form on top, so this
+    // is where a narrow pane would quietly drop one below the touch minimum.
+    await boot(page, '/memory/categories', '.cat-table-wrap')
+
+    const small = async (selector: string) => {
+      const boxes = await page.locator(selector).evaluateAll((els) =>
+        els.map((el) => {
+          const r = el.getBoundingClientRect()
+          return {
+            name: (el.getAttribute('aria-label') || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+          }
+        }),
+      )
+      return boxes
+    }
+
+    const rows = await small('.cat-row .cat-name-btn:visible, .cat-row .cat-switch:visible')
+    expect(rows.length, 'no category row controls were measured').toBeGreaterThanOrEqual(4)
+    // Both directions: a 44px-tall 40px-wide switch is under the minimum, so
+    // height alone would call it a pass.
+    expect(rows.filter((b) => b.w < 44 || b.h < 44), `row controls below 44px: ${JSON.stringify(rows.filter((b) => b.w < 44 || b.h < 44))}`).toEqual([])
+
+    // And the list must not push the document sideways.
+    const { overflow, culprits } = await horizontalOverflow(page)
+    expect(overflow, `document scrolls ${overflow}px past the viewport; widest: ${JSON.stringify(culprits)}`).toBeLessThanOrEqual(0)
+
+    // The drawer is a bottom sheet at this width, so its own controls are the
+    // only thing between a tap and an edit.
+    await page.getByRole('button', { name: 'Add category' }).click()
+    const drawer = page.getByRole('dialog', { name: 'Add category' })
+    await expect(drawer).toBeVisible()
+    const fields = await small('.cat-drawer button:visible, .cat-drawer input:visible, .cat-drawer select:visible, .cat-drawer textarea:visible')
+    expect(fields.length, 'no drawer controls were measured').toBeGreaterThanOrEqual(6)
+    expect(fields.filter((b) => b.h < 44), `drawer controls below 44px: ${JSON.stringify(fields.filter((b) => b.h < 44))}`).toEqual([])
   })
 })

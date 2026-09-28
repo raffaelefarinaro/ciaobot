@@ -13,8 +13,11 @@ import {
 import { errorMessage } from '../lib/errorMessage'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft } from '../lib/chatDrafts'
 import { isPostprocessing, postprocessNeedsRetry } from '../lib/postprocessView'
+import { isMemoryProject, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
 import type {
   ArchiveChatResponse,
+  ArchivedWorkspace,
+  ArchivedWorkspacesResponse,
   ArchiveJobView,
   ProjectInfo,
   ChatInfo,
@@ -25,7 +28,6 @@ import type {
   SubagentTranscript,
   WsEvent,
   EventsWsMessage,
-  VoiceResult,
   InAppToast,
   PackageStatus,
   PendingPermission,
@@ -36,9 +38,15 @@ import type {
   WorkspacesResponse,
 } from '../lib/types'
 import { bareAgentId, sameAgent } from '../lib/subagentIds'
+
+/** Model/provider a new chat should start on instead of the workspace default. */
+export interface NewChatRuntime {
+  model: string
+  provider: RuntimeProvider
+}
 import {
   chatWsReconnectDelayMs,
-  isHostConnectionUnavailableMessage,
+  isTerminalWsClose,
   shouldReconnectActiveChatOnStreamingStarted,
 } from '../lib/chatWs'
 import {
@@ -67,7 +75,7 @@ import { createChatAnnotations, type PreparedMessage } from './chatAnnotations'
 // `lib/safeList.ts` the checked list write.
 export {
   chatWsReconnectDelayMs,
-  isHostConnectionUnavailableMessage,
+  isTerminalWsClose,
   shouldReconnectActiveChatOnStreamingStarted,
 }
 export { setListIndex } from '../lib/safeList'
@@ -210,16 +218,6 @@ export const useProjectStore = defineStore('projects', () => {
   // signal on the per-chat socket when a send is rejected mid-drain).
   const serverRestarting = ref(false)
   const serverRestartMessage = ref('')
-  // Ephemeral client-mode connection state. Host proxy failures must never
-  // enter chat history: reconnect attempts can repeat indefinitely and would
-  // otherwise create one error bubble (and one "Fix this error" action) each.
-  const hostConnectionUnavailable = ref(false)
-  // How many ChatPanels are on screen. ChatPanel renders its own
-  // host-connection-card from the flag above, so the global banner uses this
-  // to avoid announcing the same outage twice. A count, not a boolean: the
-  // layout declares ChatPanel twice (mobile and desktop branches) and a
-  // chat switch mounts the new panel before the old one unmounts.
-  const chatPanelsMounted = ref(0)
   type QueuedMessage = { id: string; text: string; images?: string[] }
   function makeQueuedId(): string {
     if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -233,8 +231,25 @@ export const useProjectStore = defineStore('projects', () => {
   const queuedMessages = ref<Record<string, QueuedMessage[]>>({})
   // Pending Auto-mode permission prompts keyed by chat_id. The chat bubble
   // renders Approve/Deny buttons for each entry; clicking sends a
-  // `permission_response` on the per-chat WS and pops the entry optimistically.
+  // `permission_response` on the per-chat WS and waits for the provider ack.
   const pendingPermissions = ref<Record<string, PendingPermission[]>>({})
+  type PermissionResponse = {
+    requestId: string
+    sessionId: string
+    approved: boolean
+    reason: string
+  }
+  type PermissionSubmission = PermissionResponse & {
+    pending: boolean
+    queued: boolean
+    error: string
+    retryable: boolean
+  }
+  const permissionSubmissions = ref<Record<string, PermissionSubmission>>({})
+  // Responses can be acknowledged after their socket disappears. Keep their
+  // complete frames in memory only, keyed by chat + request, and flush them
+  // when that chat reconnects. Never persist answers, reasons, or verdicts.
+  const queuedPermissionResponses = new Map<string, PermissionResponse>()
   // Per-project "new chat is being created" flag so UI can disable buttons
   // and prevent double-clicks while the POST is in flight.
   const creatingChatProjectIds = ref<Record<string, boolean>>({})
@@ -266,29 +281,291 @@ export const useProjectStore = defineStore('projects', () => {
   // existence right as the panel switched to it. Keying the pending promise
   // by project makes a second call join the first instead of double-posting.
   const pendingChatCreations: Record<string, Promise<ChatInfo>> = {}
-  // the tool call with empty answers, so the PWA renders its own picker above
-  // the composer. Cleared the next time the user sends a message (their reply
-  // implicitly answers, regardless of whether they clicked an option).
+  // AskUserQuestion arrives from headless providers with empty answers, so the
+  // PWA renders its own picker above the composer. Native V2 forms remain
+  // active until an acknowledged reply/cancel; legacy cards without a request
+  // id are cleared by the next ordinary message.
   const activeQuestions = ref<Record<string, ActiveQuestion[]>>({})
+  type QuestionResponse = {
+    requestId: string
+    sessionId: string
+    action: 'reply' | 'cancel'
+    answers: Record<string, string[]>
+  }
+  type QuestionSubmission = QuestionResponse & {
+    pending: boolean
+    queued: boolean
+    error: string
+    retryable: boolean
+  }
+  const questionSubmissions = ref<Record<string, QuestionSubmission>>({})
+  // A native form blocks the turn until the server acknowledges its response.
+  // Keep the complete frame outside reactive card state so a reconnect can
+  // flush it without persisting potentially sensitive answers to localStorage.
+  const queuedQuestionResponses = new Map<string, QuestionResponse>()
+  const questionSubmissionTimers: Record<string, ReturnType<typeof setTimeout>> = {}
+  const permissionSubmissionTimers: Record<string, ReturnType<typeof setTimeout>> = {}
+  const RESPONSE_ACK_TIMEOUT_MS = 15_000
+
+  function responseKey(
+    chatId: string,
+    requestId: string,
+    sessionId = '',
+  ) {
+    return `${chatId}\u0000${sessionId}\u0000${requestId}`
+  }
+
+  function clearResponseTimer(
+    timers: Record<string, ReturnType<typeof setTimeout>>,
+    chatId: string,
+    requestId: string,
+    sessionId = '',
+  ) {
+    const key = responseKey(chatId, requestId, sessionId)
+    const timer = timers[key]
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      delete timers[key]
+    }
+  }
+
+  function armResponseTimer(
+    timers: Record<string, ReturnType<typeof setTimeout>>,
+    chatId: string,
+    requestId: string,
+    sessionId: string,
+    onTimeout: () => void,
+  ) {
+    clearResponseTimer(timers, chatId, requestId, sessionId)
+    const key = responseKey(chatId, requestId, sessionId)
+    timers[key] = setTimeout(() => {
+      delete timers[key]
+      onTimeout()
+    }, RESPONSE_ACK_TIMEOUT_MS)
+  }
+
+  function clearQuestionSubmissionTimer(
+    chatId: string,
+    requestId: string,
+    sessionId = '',
+  ) {
+    clearResponseTimer(
+      questionSubmissionTimers,
+      chatId,
+      requestId,
+      sessionId,
+    )
+  }
+
+  function armQuestionSubmissionTimer(
+    chatId: string,
+    requestId: string,
+    sessionId: string,
+  ) {
+    armResponseTimer(
+      questionSubmissionTimers,
+      chatId,
+      requestId,
+      sessionId,
+      () => {
+        const current = questionSubmissions.value[chatId]
+        if (
+          !current
+          || current.requestId !== requestId
+          || (sessionId && current.sessionId !== sessionId)
+          || !current.pending
+        ) return
+        queuedQuestionResponses.set(
+          responseKey(chatId, requestId, current.sessionId),
+          {
+            requestId: current.requestId,
+            sessionId: current.sessionId,
+            action: current.action,
+            answers: current.answers,
+          },
+        )
+        questionSubmissions.value[chatId] = {
+          ...current,
+          pending: false,
+          // Keep the in-memory frame queued. A reconnect after this timeout must
+          // still deliver it; timeout only makes the card explicitly retryable.
+          queued: true,
+          error: 'No acknowledgement arrived; try again.',
+        }
+      },
+    )
+  }
 
   // Signatures of AskUserQuestion pickers the user has already answered or
-  // dismissed this session, keyed by chat. Clearing `activeQuestions` on send
-  // is only client-side and optimistic; the server clears the persisted
-  // `pending_question` a beat later (native accept, or the next turn). Any
-  // `/api/chats` poll or WS reconnect in that window (`reconcileChatList`
-  // overwrites `chats.value` with the server snapshot, then `loadMessages` runs
-  // `rebuildPendingQuestion`) would otherwise resurrect the answered picker —
-  // and because `rebuildPendingQuestion` bails when a picker is already live, a
-  // later clean snapshot never removes it, so the card sticks. Remembering the
-  // resolved signature lets `rebuildPendingQuestion` refuse the stale rebuild.
+  // dismissed this session, keyed by chat. Native cards remain visible until
+  // the server acknowledges reply/cancel; the signature prevents a reconnect
+  // snapshot from resurrecting a card after that acknowledgement. Legacy
+  // provider cards without a request id are still cleared optimistically on
+  // the next ordinary message.
   const resolvedQuestions = ref<Record<string, Set<string>>>({})
 
   // Record the currently-active picker for `chatId` as resolved. Reads the live
   // `activeQuestions` entry, so it must run before that entry is deleted.
-  function markResolvedQuestion(chatId: string) {
-    const sig = questionsSignature(activeQuestions.value[chatId])
+  function markResolvedQuestion(
+    chatId: string,
+    requestId = '',
+    sessionId = '',
+  ) {
+    const questions = activeQuestions.value[chatId]
+    const scoped = requestId && questions
+      ? questions.filter(question => (
+        question.requestId === requestId
+        && (!sessionId || !question.sessionId || question.sessionId === sessionId)
+      ))
+      : questions
+    const sig = questionsSignature(scoped)
     if (!sig) return
     ;(resolvedQuestions.value[chatId] ||= new Set<string>()).add(sig)
+  }
+
+  function clearPermission(
+    chatId: string,
+    requestId: string,
+    sessionId = '',
+  ) {
+    const submission = permissionSubmissions.value[chatId]
+    const list = pendingPermissions.value[chatId]
+    const matching = list?.find(permission => (
+      permission.request_id === requestId
+      && (!sessionId || !permission.session_id || permission.session_id === sessionId)
+    ))
+    const conflicting = list?.some(permission => (
+      permission.request_id === requestId
+      && Boolean(sessionId)
+      && Boolean(permission.session_id)
+      && permission.session_id !== sessionId
+    ))
+    if (
+      conflicting
+      || (submission && (
+        submission.requestId !== requestId
+        || (sessionId && submission.sessionId && submission.sessionId !== sessionId)
+      ))
+    ) return
+
+    if (list) {
+      const next = list.filter(permission => !(
+        permission.request_id === requestId
+        && (!sessionId || !permission.session_id || permission.session_id === sessionId)
+      ))
+      if (next.length) pendingPermissions.value[chatId] = next
+      else delete pendingPermissions.value[chatId]
+    }
+    if (!submission || submission.requestId === requestId) {
+      delete permissionSubmissions.value[chatId]
+    }
+    const effectiveSession = sessionId
+      || matching?.session_id
+      || submission?.sessionId
+      || ''
+    clearResponseTimer(
+      permissionSubmissionTimers,
+      chatId,
+      requestId,
+      effectiveSession,
+    )
+    queuedPermissionResponses.delete(
+      responseKey(chatId, requestId, effectiveSession),
+    )
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (chat?.pending_permission) {
+      try {
+        const stored = JSON.parse(chat.pending_permission) as {
+          request_id?: string
+          session_id?: string
+        }
+        if (
+          (!stored.request_id || stored.request_id === requestId)
+          && (
+            !effectiveSession
+            || !stored.session_id
+            || stored.session_id === effectiveSession
+          )
+        ) chat.pending_permission = ''
+      } catch {
+        // A malformed persisted card has no request identity to match. Keep
+        // it for a fresh server snapshot instead of claiming it was resolved.
+      }
+    }
+  }
+
+  function clearQuestion(
+    chatId: string,
+    requestId = '',
+    sessionId = '',
+  ) {
+    const questions = activeQuestions.value[chatId]
+    const submission = questionSubmissions.value[chatId]
+    const matching = questions?.find(question => (
+      question.requestId === requestId
+      && (!sessionId || !question.sessionId || question.sessionId === sessionId)
+    ))
+    const conflicting = questions?.some(question => (
+      question.requestId === requestId
+      && Boolean(sessionId)
+      && Boolean(question.sessionId)
+      && question.sessionId !== sessionId
+    ))
+    if (
+      conflicting
+      || (requestId && submission && (
+        submission.requestId !== requestId
+        || (sessionId && submission.sessionId && submission.sessionId !== sessionId)
+      ))
+    ) return
+
+    markResolvedQuestion(chatId, requestId, sessionId)
+    delete activeQuestions.value[chatId]
+    if (!requestId || !submission || submission.requestId === requestId) {
+      delete questionSubmissions.value[chatId]
+    }
+    const effectiveSession = sessionId
+      || matching?.sessionId
+      || submission?.sessionId
+      || ''
+    if (requestId) {
+      clearQuestionSubmissionTimer(chatId, requestId, effectiveSession)
+      queuedQuestionResponses.delete(
+        responseKey(chatId, requestId, effectiveSession),
+      )
+    } else {
+      for (const question of questions || []) {
+        clearQuestionSubmissionTimer(
+          chatId,
+          question.requestId,
+          question.sessionId || '',
+        )
+        queuedQuestionResponses.delete(
+          responseKey(chatId, question.requestId, question.sessionId || ''),
+        )
+      }
+    }
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (chat?.pending_question) {
+      try {
+        const stored = JSON.parse(chat.pending_question) as {
+          request_id?: string
+          session_id?: string
+        }
+        if (
+          (!requestId || !stored.request_id || stored.request_id === requestId)
+          && (
+            !effectiveSession
+            || !stored.session_id
+            || stored.session_id === effectiveSession
+          )
+        ) {
+          chat.pending_question = ''
+        }
+      } catch {
+        if (!requestId) chat.pending_question = ''
+      }
+    }
   }
 
   // ── Image-capability questions ────────────────────────────────────────
@@ -300,13 +577,29 @@ export const useProjectStore = defineStore('projects', () => {
   // persists the unanswered question on the chat, so we rebuild from there on
   // chat open. Never clobbers a picker already populated by the live stream.
   function rebuildPendingQuestion(chatId: string) {
-    if (activeQuestions.value[chatId]?.length) return
     const chat = chats.value.find(c => c.chat_id === chatId)
-    const qs = parseQuestions(chat?.pending_question)
-    if (!qs.length) return
+    const qs = parseQuestions(
+      chat?.pending_question,
+      '',
+      chat?.session_id || '',
+    )
+    if (!qs.length) {
+      // The persisted chat is authoritative. A disconnected tab can miss the
+      // ephemeral resolution frame; do not leave a settled blocking card up.
+      // A partial client-side test/boot object may not carry the field yet;
+      // wait for a real chat snapshot before treating that as settlement.
+      if (
+        chat
+        && Object.prototype.hasOwnProperty.call(chat, 'pending_question')
+        && activeQuestions.value[chatId]?.length
+      ) clearQuestion(chatId)
+      return
+    }
     // Don't resurrect a picker the user already answered/dismissed from a
     // server snapshot that hasn't caught up yet.
     if (resolvedQuestions.value[chatId]?.has(questionsSignature(qs))) return
+    const current = activeQuestions.value[chatId]
+    if (current && questionsSignature(current) === questionsSignature(qs)) return
     activeQuestions.value[chatId] = qs
   }
 
@@ -318,8 +611,17 @@ export const useProjectStore = defineStore('projects', () => {
   function rebuildPendingPermission(chatId: string) {
     const chat = chats.value.find(c => c.chat_id === chatId)
     const raw = chat?.pending_permission
-    if (!raw) return
-    let parsed: { request_id?: string; tool_name?: string; message?: string; tool_input?: string }
+    if (!raw) {
+      if (
+        chat
+        && Object.prototype.hasOwnProperty.call(chat, 'pending_permission')
+        && pendingPermissions.value[chatId]?.length
+      ) {
+        delete pendingPermissions.value[chatId]
+      }
+      return
+    }
+    let parsed: { request_id?: string; session_id?: string; tool_name?: string; message?: string; tool_input?: string }
     try {
       parsed = JSON.parse(raw)
     } catch {
@@ -329,9 +631,10 @@ export const useProjectStore = defineStore('projects', () => {
     const list = pendingPermissions.value[chatId] || []
     if (list.some(p => p.request_id === parsed.request_id)) return
     pendingPermissions.value[chatId] = [
-      ...list,
+      ...list.filter(p => p.request_id !== parsed.request_id),
       {
         request_id: parsed.request_id,
+        session_id: parsed.session_id || undefined,
         tool_name: parsed.tool_name || '',
         tool_input: parsed.tool_input || '',
         message: parsed.message || '',
@@ -494,6 +797,10 @@ export const useProjectStore = defineStore('projects', () => {
   const workspaceProjects = computed(() =>
     projects.value
       .filter(p => p.workspace === activeWorkspace.value)
+      // The Memory project is app-owned (memory passes run in it) and hidden
+      // here, the one point every list agrees: sidebar, move-to menu, reorder,
+      // selectFirstChat and the Home "new chat" fallback all read this.
+      .filter(p => !isMemoryProject(p))
       .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
   )
 
@@ -641,6 +948,8 @@ export const useProjectStore = defineStore('projects', () => {
       subagentPollTimer = null
     }
     stopRunningSubagentPoll()
+    for (const timer of Object.values(questionSubmissionTimers)) clearTimeout(timer)
+    for (const timer of Object.values(permissionSubmissionTimers)) clearTimeout(timer)
     for (const undo of teardowns.splice(0)) {
       try { undo() } catch { /* a disposed store must not throw */ }
     }
@@ -783,10 +1092,10 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   // ── Post-archive pipeline ────────────────────────────────────────────────
-  // Archiving a chat starts insights extraction, a project-doc fold, a
-  // trajectory and memory proposals. The state lives on the chat itself (so an
-  // archived chat can still report what was learned from it after a reload);
-  // these are the read paths every surface shares.
+  // Archiving a chat writes the session trajectory; the vault work went to the
+  // memory pass, a chat of the app's own, in #627. The state lives on the chat
+  // itself (so an archived chat can still report what was taken from it after a
+  // reload); these are the read paths every surface shares.
 
   function chatPostprocess(chatId: string): ChatPostprocess | null {
     return chats.value.find(c => c.chat_id === chatId)?.postprocess || null
@@ -794,6 +1103,35 @@ export const useProjectStore = defineStore('projects', () => {
 
   function chatIsPostprocessing(chatId: string): boolean {
     return isPostprocessing(chatPostprocess(chatId))
+  }
+
+  // ── Memory pass ───────────────────────────────────────────────────────
+  // A memory pass is an ordinary chat in the workspace's app-owned Memory
+  // project, which `workspaceProjects` hides. It queues behind the other passes
+  // in that workspace, auto-archives when it ends cleanly, and lands in
+  // `attention` when it does not — the one state that needs the owner.
+
+  /** True when this chat is a memory pass that ended unclean. */
+  function memoryPassNeedsAttention(chatId: string): boolean {
+    return memoryPassNeedsAttentionFor(chats.value.find(c => c.chat_id === chatId))
+  }
+
+  /**
+   * The newest pass still open in *workspace*, or null when none is. A clean
+   * pass is archived by the time the owner could want it, so "archived" is the
+   * answer for every pass that finished well — only a queued, running or
+   * attention pass is reachable, and those are exactly the ones worth linking.
+   */
+  function latestMemoryPassChat(workspace: WorkspaceName = activeWorkspace.value): ChatInfo | null {
+    const memory = memoryProjectFor(workspace)
+    if (!memory) return null
+    return (
+      chats.value
+        .filter(c => c.project_id === memory.project_id && !c.archived)
+        .sort((a, b) =>
+          (b.last_activity_at || b.created_at).localeCompare(a.last_activity_at || a.created_at),
+        )[0] || null
+    )
   }
 
   // Archived chats matching a predicate, newest archive first. Shared by
@@ -989,6 +1327,15 @@ export const useProjectStore = defineStore('projects', () => {
     )
   }
 
+  // The app-owned project memory passes run in. Never shown to the user (it is
+  // filtered out of `workspaceProjects`), so it is looked up directly rather
+  // than through the visible lists.
+  function memoryProjectFor(workspace: WorkspaceName = activeWorkspace.value): ProjectInfo | null {
+    return (
+      projects.value.find(p => p.workspace === workspace && isMemoryProject(p)) ?? null
+    )
+  }
+
   async function fixError(opts: {
     errorText: string
     context?: string
@@ -1021,7 +1368,12 @@ export const useProjectStore = defineStore('projects', () => {
   // Cmd+T picker: open a fresh, empty chat in the chosen project, switching to
   // its workspace first if needed. Returns the created chat, or undefined when
   // the project could not be found.
-  async function newChatInProject(projectId: string): Promise<ChatInfo | undefined> {
+  async function newChatInProject(
+    projectId: string,
+    initialText = '',
+    title = DEFAULT_CHAT_TITLE,
+    runtime?: NewChatRuntime,
+  ): Promise<ChatInfo | undefined> {
     const project = projects.value.find(p => p.project_id === projectId)
     if (!project) {
       pushErrorToast('Cannot open a new chat', 'No project found to create the chat in.')
@@ -1036,7 +1388,10 @@ export const useProjectStore = defineStore('projects', () => {
     activeWorkspace.value = project.workspace
     persistState()
     try {
-      return await createChat(project.project_id)
+      if (runtime) return await createChat(project.project_id, title, initialText || undefined, runtime)
+      return initialText
+        ? await createChat(project.project_id, title, initialText)
+        : await createChat(project.project_id)
     } catch (err) {
       // The switch is committed before the POST, so a rejected creation used
       // to leave the app scoped to the new workspace while still showing (and
@@ -1379,7 +1734,7 @@ export const useProjectStore = defineStore('projects', () => {
         || (typeof window !== 'undefined'
           ? window.location.pathname.match(/^\/chat\/([^/]+)/)?.[1]
           : undefined)
-      if (urlChatId && chatExistsInList(urlChatId, c)) {
+      if (urlChatId && canOpenChat(urlChatId, c)) {
         await ensureWorkspaceForChat(urlChatId)
         activeChatId.value = urlChatId
       } else if (!bootstrapped.value) {
@@ -1409,11 +1764,18 @@ export const useProjectStore = defineStore('projects', () => {
         // The two calls stay ordered inside: connecting the socket before the
         // fetch resolves would let an incoming message be clobbered by the
         // fetch result overwriting messages[chatId].
+        //
+        // A deep link to an archived chat stops before this: the panel renders
+        // read-only from whatever transcript is held locally, exactly as
+        // `switchChat` leaves it, so booting must not dial a socket or fetch a
+        // history the archive is not served from.
         const bootChatId = activeChatId.value
-        void (async () => {
-          await loadMessages(bootChatId, { waitForSettledReply: true })
-          connectWs(bootChatId)
-        })()
+        if (!isArchivedChat(bootChatId)) {
+          void (async () => {
+            await loadMessages(bootChatId, { waitForSettledReply: true })
+            connectWs(bootChatId)
+          })()
+        }
       }
       // Open the cross-chat awareness socket once per app session.
       connectEventsWs()
@@ -1595,13 +1957,6 @@ export const useProjectStore = defineStore('projects', () => {
       // This keeps the every-15s refresh light instead of re-shipping the
       // whole registry to the client on each tick.
       const latestChats = await api.get<ChatInfo[]>('/api/chats?active_only=1')
-      // In client mode this request is proxied to the host, so a successful
-      // response proves the host is back. The banner was only cleared from a
-      // chat WebSocket frame, which never arrives if the socket stays down or
-      // no chat is open -- leaving "Can't reach the host" on screen over a
-      // working connection until the user reloaded. This poll is the
-      // connection-independent recovery signal.
-      hostConnectionUnavailable.value = false
       reconcileActiveChats(latestChats)
 
       const chatId = activeChatId.value
@@ -1756,8 +2111,22 @@ export const useProjectStore = defineStore('projects', () => {
     return res
   }
 
-  async function deleteWorkspace(name: WorkspaceName) {
-    const res = await api.del<WorkspacesResponse>(`/api/workspaces/${encodeURIComponent(name)}`)
+  // Archive, never delete: the server unregisters the workspace, archives its
+  // chats and moves its folder intact into `.archived-workspaces/`. Its
+  // projects leave through `project_deleted` events; they and their chats are
+  // also dropped here so a missed frame cannot leave them in the sidebar.
+  async function archiveWorkspace(name: WorkspaceName) {
+    // Captured before the request: the `project_deleted` frames can land
+    // while it is in flight and remove the projects and chats this needs.
+    const projectIds = new Set(
+      projects.value.filter(p => p.workspace === name).map(p => p.project_id),
+    )
+    const selectedChatId = activeChatId.value
+    const selected = activeChat.value
+    const selectedInWorkspace = !!selected && projectIds.has(selected.project_id)
+    const res = await api.post<WorkspacesResponse & { archived?: { path: string } }>(
+      `/api/workspaces/${encodeURIComponent(name)}/archive`,
+    )
     workspaces.value = res.workspaces || []
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
@@ -1765,6 +2134,37 @@ export const useProjectStore = defineStore('projects', () => {
     if (activeWorkspace.value === name) {
       activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
     }
+    projects.value.forEach(p => { if (p.workspace === name) projectIds.add(p.project_id) })
+    projects.value = projects.value.filter(p => !projectIds.has(p.project_id))
+    projectIds.forEach(clearDraftsForProject)
+    chats.value = chats.value.filter(c => !projectIds.has(c.project_id))
+    if (selectedInWorkspace && selectedChatId) {
+      disconnectWs(selectedChatId)
+      if (activeChatId.value === selectedChatId) activeChatId.value = null
+      persistState()
+      // Leave Settings where it is; only a view of the archived chat itself
+      // has to move somewhere valid.
+      const { router } = await import('../router')
+      if (router.currentRoute.value.params.chatId === selectedChatId) {
+        await transitionToFirstChat()
+      }
+    }
+    return res
+  }
+
+  async function fetchArchivedWorkspaces(): Promise<ArchivedWorkspace[]> {
+    const res = await api.get<ArchivedWorkspacesResponse>('/api/workspaces/archived')
+    return res.archived || []
+  }
+
+  async function restoreArchivedWorkspace(id: string) {
+    const res = await api.post<WorkspacesResponse & {
+      restored?: { schedules_paused?: number; schedules_dropped?: number }
+    }>('/api/workspaces/archived/restore', { id })
+    workspaces.value = res.workspaces || []
+    workspaceProviderOptions.value = res.provider_options?.length
+      ? res.provider_options
+      : [{ value: 'claude', label: 'Claude' }]
     return res
   }
 
@@ -1861,7 +2261,12 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Chat actions ────────────────────────────────────────────────────
 
-  async function createChat(projectId: string, title = DEFAULT_CHAT_TITLE, seedDraft?: string) {
+  async function createChat(
+    projectId: string,
+    title = DEFAULT_CHAT_TITLE,
+    seedDraft?: string,
+    runtime?: NewChatRuntime,
+  ) {
     // Join an already-in-flight creation for this project instead of firing
     // a second POST: see the comment on pendingChatCreations above.
     const pending = pendingChatCreations[projectId]
@@ -1870,7 +2275,12 @@ export const useProjectStore = defineStore('projects', () => {
     const promise = (async () => {
       creatingChatProjectIds.value[projectId] = true
       try {
-        const c = await api.post<ChatInfo>(`/api/projects/${projectId}/chats`, { title })
+        // A runtime override (home's model picker) rides the create call; the
+        // server otherwise starts the chat on the workspace default.
+        const c = await api.post<ChatInfo>(
+          `/api/projects/${projectId}/chats`,
+          runtime ? { title, model: runtime.model, provider: runtime.provider } : { title },
+        )
         // The server also broadcasts chat_created for this same chat. The
         // broadcast can arrive before the POST response, so reconcile through
         // the ID-aware helper instead of pushing a possible duplicate.
@@ -2889,8 +3299,40 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Chat switching ──────────────────────────────────────────────────
 
+  /**
+   * "Can this be the *live* active chat?" The liveness predicate, asked by
+   * reloadAndReconnectChat — the funnel behind resume-from-background, the
+   * liveness watchdog, reconnectNow and re-opening the already-active chat from
+   * a notification. An archived chat must answer no there: the provider already
+   * reclaimed its session, so treating it as live would re-dial a socket that
+   * can never deliver and hammer a `/messages` round-trip that cannot change.
+   *
+   * `canOpenChat` is the deliberately wider question (may this be *opened*?),
+   * and `isArchivedChat` the narrow one asked where the chat is known to be in
+   * the list.
+   */
   function chatExistsInList(chatId: string, list: ChatInfo[] = chats.value): boolean {
     return list.some(ch => ch.chat_id === chatId && !ch.archived)
+  }
+
+  /**
+   * "Can this be *opened* at all?" Deliberately wider than `chatExistsInList`:
+   * an archived chat is viewable, just inert. ChatPanel already has an archived
+   * branch, so the only thing that used to stand between a deep link and that
+   * branch was the liveness predicate rejecting the id (#619).
+   */
+  function canOpenChat(chatId: string, list: ChatInfo[] = chats.value): boolean {
+    return list.some(ch => ch.chat_id === chatId)
+  }
+
+  /**
+   * An archived chat is viewable but inert: no socket, no history refetch, no
+   * subagent load. The provider already reclaimed its session, so there is
+   * nothing to stream and nothing to reconcile; "Continue in new chat" is how
+   * you pick the conversation back up.
+   */
+  function isArchivedChat(chatId: string): boolean {
+    return chats.value.some(ch => ch.chat_id === chatId && ch.archived)
   }
 
   async function ensureWorkspaceForChat(chatId: string) {
@@ -2903,7 +3345,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   /** Deep-link / tray / notification navigation into a specific chat. */
   async function openChatFromDeepLink(chatId: string) {
-    if (!chatExistsInList(chatId)) return
+    if (!canOpenChat(chatId)) return
     await ensureWorkspaceForChat(chatId)
     if (activeChatId.value === chatId) {
       // switchChat's "already active" fast path only marks read — fine for
@@ -2917,6 +3359,9 @@ export const useProjectStore = defineStore('projects', () => {
         router.push(`/chat/${chatId}`)
       }
       void markRead(chatId)
+      // For an archived chat this reconcile is a no-op by design: there is no
+      // socket to re-attach and no live history to re-pull. See the liveness
+      // gate in reloadAndReconnectChat below, which is what stops it.
       await reloadAndReconnectChat(chatId)
       return
     }
@@ -2971,6 +3416,12 @@ export const useProjectStore = defineStore('projects', () => {
     persistState()
     // Fire-and-forget: clears overlay + SW cache + hits /read for cross-device sync.
     void markRead(chatId)
+    // An archived chat stops here. ChatPanel renders it from the stored
+    // transcript with no composer, and the provider has already reclaimed the
+    // session, so the three calls below would buy nothing: a socket that can
+    // only stay silent, a `/messages` fetch the archive is not served from,
+    // and subagent rows for agents that are gone.
+    if (isArchivedChat(chatId)) return
     if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
     void loadSubagents(chatId)
     connectWs(chatId)
@@ -3026,6 +3477,7 @@ export const useProjectStore = defineStore('projects', () => {
       opened = true
       lastChatFrameAt[chatId] = nowMs()
       sendFocus(chatId)
+      flushQueuedResponses(chatId)
     }
 
     ws.onmessage = (ev) => {
@@ -3036,16 +3488,9 @@ export const useProjectStore = defineStore('projects', () => {
       // from a fast first retry again.
       chatReconnectAttempts[chatId] = 0
       const event: WsEvent = JSON.parse(ev.data)
-      if (event.type === 'keepalive') {
-        hostConnectionUnavailable.value = false
-        return
-      }
-      if (
-        event.type !== 'host_unreachable'
-        && !(event.type === 'error' && isHostConnectionUnavailableMessage(event.message))
-      ) {
-        hostConnectionUnavailable.value = false
-      }
+      // Liveness and an auth challenge are not chat events: neither may reach
+      // history, and the reconnect policy owns what happens after the second.
+      if (event.type === 'keepalive' || event.type === 'auth_required') return
       // First real frame after a drop/half-open recovery: drop the frozen
       // ephemeral timeline so broker replay rebuilds without duplicating it.
       if (pendingStreamResync.delete(chatId)) {
@@ -3057,16 +3502,30 @@ export const useProjectStore = defineStore('projects', () => {
       handleEvent(chatId, event)
     }
 
-    ws.onclose = () => {
+    ws.onclose = (event: CloseEvent) => {
       const isCurrent = toRaw(sockets.value[chatId]) === ws
       if (isCurrent) {
         delete sockets.value[chatId]
         delete lastChatFrameAt[chatId]
+        // The answer may have reached the server just before the socket died.
+        // Keep the complete frame so onopen can retry it instead of silently
+        // losing a response that blocks the native V2 form.
+        const submission = questionSubmissions.value[chatId]
+        if (submission?.pending && !submission.queued) {
+          queueQuestionResponse(chatId, submission)
+        }
+        const permission = permissionSubmissions.value[chatId]
+        if (permission?.pending && !permission.queued) {
+          queuePermissionResponse(chatId, permission)
+        }
       }
 
       const wasIntentional = intentionalCloses.delete(ws)
       if (wasIntentional) return
       if (!isCurrent) return
+      // The handshake was refused (no session, or an origin the server will not
+      // serve). Re-dialling it would spin forever against the same answer.
+      if (isTerminalWsClose(event?.code)) return
 
       // Auto-reconnect the chat the user is actually viewing when the socket
       // drops unexpectedly (server per-turn churn, transient network blip),
@@ -3126,6 +3585,19 @@ export const useProjectStore = defineStore('projects', () => {
   // miss events the broker already flushed, so loadMessages first, then let
   // connectWs replay whatever the broker still buffers on top.
   async function reloadAndReconnectChat(chatId: string) {
+    // The liveness gate, and what `chatExistsInList` is for. An archived chat
+    // is viewable but inert: the provider already reclaimed its session, so a
+    // re-dialed socket can only stay silent and the `/messages` fetch has
+    // nothing new to report. Resume-from-background, the watchdog, reconnectNow
+    // and re-opening the already-active chat all land here, so this is the one
+    // place that must know — otherwise backgrounding a tab on an archived chat
+    // quietly re-attaches the very socket the open was supposed to avoid.
+    //
+    // Only the list's word counts. An id the chat list has not caught up with
+    // is left alone: the store only holds ids it selected itself, so refusing
+    // those would change watchdog/resume behaviour this fix never set out to
+    // change.
+    if (chats.value.some(c => c.chat_id === chatId) && !chatExistsInList(chatId)) return
     pendingStreamResync.add(chatId)
     disconnectWs(chatId)
     // Re-attach immediately so an in-flight broker stream can replay while
@@ -3270,6 +3742,19 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  /** Reconnect every live socket immediately (engine just recovered); resets the backoff so nothing waits out a 64 s delay. */
+  function reconnectNow(): void {
+    eventsWsFailureStreak = 0
+    const chatId = activeChatId.value
+    if (chatId) {
+      chatReconnectAttempts[chatId] = 0
+      void reloadAndReconnectChat(chatId)
+    }
+    const socket = eventsSocket.value
+    if (socket && socket.readyState === WebSocket.OPEN) socket.close()   // onclose reconnects after 50 ms
+    else if (!socket || socket.readyState > WebSocket.OPEN) connectEventsWs()
+  }
+
   function disconnectWs(chatId: string) {
     // Cancel any pending auto-reconnect and mark this as an intentional close
     // so onclose does not schedule a new one.
@@ -3287,11 +3772,27 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Global events WS (cross-chat awareness) ─────────────────────────
 
+  // The reload loop of the drain in progress, so a cancel can stop it: an
+  // update drain that gives up leaves a healthy engine running, and a loop
+  // left behind would hard-reload every tab at the end of its timeout.
+  let restartReloadAbort: AbortController | null = null
+
   function beginServerRestart(message?: string) {
     if (serverRestarting.value) return
     serverRestarting.value = true
     serverRestartMessage.value = restartMessageForDisplay(message)
-    void reloadWhenServerReady()
+    // A drain that never went up (or a fresh one replacing an abandoned loop)
+    // must not leave the previous loop's reload pending.
+    restartReloadAbort?.abort()
+    restartReloadAbort = new AbortController()
+    void reloadWhenServerReady(undefined, restartReloadAbort.signal)
+  }
+
+  function cancelServerRestart() {
+    serverRestarting.value = false
+    serverRestartMessage.value = ''
+    restartReloadAbort?.abort()
+    restartReloadAbort = null
   }
 
   function undoOptimisticSend(chatId: string) {
@@ -3320,10 +3821,6 @@ export const useProjectStore = defineStore('projects', () => {
   // identically on every attempt, so a fixed 2s retry becomes a request
   // storm that fills the server log.
   let eventsWsFailureStreak = 0
-  // Separate from the handshake streak above: a client-mode proxy accepts
-  // the browser socket and only then discovers the host is down, so those
-  // retries must not feed the >=5 auth probe. Reset by the first real frame.
-  let eventsHostRetryAttempts = 0
 
   function connectEventsWs() {
     if (eventsSocket.value && eventsSocket.value.readyState <= WebSocket.OPEN) return
@@ -3332,12 +3829,6 @@ export const useProjectStore = defineStore('projects', () => {
     eventsSocket.value = ws
     lastEventsFrameAt = nowMs()
     let opened = false
-    // Set when the local proxy told us the host is down on THIS socket. The
-    // proxy accepts the browser's connection before it tries the host, so
-    // `opened` is true even for a dead host -- without this flag the close
-    // handler below would take the 50ms "healthy blip" path and reconnect
-    // twenty times a second for as long as the host stays away.
-    let hostUnreachable = false
 
     ws.onopen = () => {
       if (toRaw(eventsSocket.value) !== ws) return
@@ -3352,42 +3843,23 @@ export const useProjectStore = defineStore('projects', () => {
       lastEventsFrameAt = nowMs()
       let msg: EventsWsMessage
       try { msg = JSON.parse(ev.data) } catch { return }
-      if (msg.type === 'host_unreachable') {
-        // In client mode this is the only connection-loss signal that exists
-        // outside a chat: the per-chat socket is open only while a chat is on
-        // screen, so the home screen used to look perfectly healthy while the
-        // host was unreachable.
-        hostUnreachable = true
-        hostConnectionUnavailable.value = true
-        return
-      }
-      // Any other frame -- the keepalive included -- travelled through the
-      // proxy from the host, which proves the host is back.
-      hostConnectionUnavailable.value = false
-      eventsHostRetryAttempts = 0
-      if (msg.type === 'keepalive') return
+      // An auth challenge is not an awareness event, and the keepalive is
+      // liveness only; neither is handed to the store's event switch.
+      if (msg.type === 'keepalive' || msg.type === 'auth_required') return
       handleEventsMessage(msg)
     }
 
-    ws.onclose = () => {
+    ws.onclose = (event: CloseEvent) => {
       const isCurrent = toRaw(eventsSocket.value) === ws
       if (isCurrent) {
         eventsSocket.value = null
       }
       if (!isCurrent) return
+      // The handshake was refused (no session, or an origin the server will
+      // not serve). Re-dialling it would spin forever against the same answer.
+      if (isTerminalWsClose(event?.code)) return
 
       if (opened) {
-        if (hostUnreachable) {
-          // Retry on the chat socket's backoff curve (50ms -> 2s cap) so a
-          // host that comes back is noticed within a couple of seconds
-          // without hammering it while it is down.
-          eventsHostRetryAttempts += 1
-          const hostDelay = chatWsReconnectDelayMs(eventsHostRetryAttempts)
-          setTimeout(() => {
-            if (!eventsSocket.value) connectEventsWs()
-          }, hostDelay)
-          return
-        }
         eventsWsFailureStreak = 0
         // A previously-live awareness socket should come back immediately so
         // chat_streaming_done / result_ready are not delayed after a blip.
@@ -3432,6 +3904,43 @@ export const useProjectStore = defineStore('projects', () => {
     }, 150)
   }
 
+  // Bumped when another tab or device archived or restored a workspace, so
+  // views holding their own copy of the registry (Settings) refetch it too.
+  const workspaceRegistryRevision = ref(0)
+  let workspacesRefetchTimer: ReturnType<typeof setTimeout> | null = null
+  function scheduleWorkspacesRefetch(): void {
+    if (workspacesRefetchTimer !== null) return
+    workspacesRefetchTimer = setTimeout(() => {
+      workspacesRefetchTimer = null
+      void refreshWorkspaceRegistry().catch(() => {})
+    }, 150)
+  }
+
+  // The workspace list and the projects in it, from the server. An archived
+  // workspace's projects are gone from /api/projects; a restored one's
+  // General project appears there.
+  async function refreshWorkspaceRegistry(): Promise<void> {
+    const [, fresh] = await Promise.all([
+      fetchWorkspaces(),
+      api.get<ProjectInfo[]>('/api/projects'),
+    ])
+    const known = new Set(fresh.map(p => p.project_id))
+    const dropped = projects.value.filter(p => !known.has(p.project_id)).map(p => p.project_id)
+    projects.value = fresh
+    if (dropped.length) {
+      const gone = new Set(dropped)
+      dropped.forEach(clearDraftsForProject)
+      const selected = activeChat.value
+      chats.value = chats.value.filter(c => !gone.has(c.project_id))
+      if (selected && gone.has(selected.project_id) && activeChatId.value === selected.chat_id) {
+        disconnectWs(selected.chat_id)
+        activeChatId.value = null
+        persistState()
+      }
+    }
+    workspaceRegistryRevision.value++
+  }
+
   function handleEventsMessage(msg: EventsWsMessage) {
     switch (msg.type) {
       case 'snapshot': {
@@ -3472,6 +3981,11 @@ export const useProjectStore = defineStore('projects', () => {
       }
       case 'server_restarting':
         beginServerRestart(msg.message)
+        break
+      // The engine reopened admission: an update drain that timed out. The
+      // overlay would otherwise stick and block a perfectly working engine.
+      case 'server_restart_cancelled':
+        cancelServerRestart()
         break
       case 'chat_streaming_started':
         projectStreaming.value[msg.chat_id] = true
@@ -3735,10 +4249,17 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
       case 'project_deleted': {
+        // Read before the chats are filtered: afterwards `activeChat` no
+        // longer finds the chat and the selection would never be cleared.
+        const selectedChatId = activeChat.value?.project_id === msg.project_id
+          ? activeChatId.value
+          : null
         projects.value = projects.value.filter(p => p.project_id !== msg.project_id)
         chats.value = chats.value.filter(c => c.project_id !== msg.project_id)
-        if (activeChat.value && activeChat.value.project_id === msg.project_id) {
+        if (selectedChatId) {
+          disconnectWs(selectedChatId)
           activeChatId.value = null
+          persistState()
         }
         break
       }
@@ -3754,6 +4275,13 @@ export const useProjectStore = defineStore('projects', () => {
         })
         break
       }
+      case 'workspaces_changed': {
+        // A workspace was archived or restored in another tab or device.
+        // Refetch the registry so the sidebar and pickers stop offering it
+        // (or show it again) without a reload.
+        scheduleWorkspacesRefetch()
+        break
+      }
       case 'schedules_changed': {
         // An automation was created/edited/paused/resumed/deleted elsewhere
         // (the model mid-turn, the Automations page, another tab). Refetch so
@@ -3767,7 +4295,7 @@ export const useProjectStore = defineStore('projects', () => {
         // server debounces to one event per breakage; surface it as a
         // persistent error toast. The fix is re-authentication in
         // Settings → Workspaces, so the Fix action navigates there rather
-        // than seeding a chat. The PWA push/menu-bar banner is the other
+        // than seeding a chat. The PWA push banner is the other
         // channel (see push.py); this is the live in-app signal.
         pushErrorToast(msg.title || 'Google Workspace login needs attention', msg.body || '', {
           fixRoute: '/settings/workspaces',
@@ -3889,14 +4417,21 @@ export const useProjectStore = defineStore('projects', () => {
     onSent?: () => void,
     _deferredAttempt = 0,
   ): boolean {
-    // Any send implicitly answers (or dismisses) a pending AskUserQuestion
-    // picker — the model already got an empty tool result and is reading
-    // this turn for the actual answer. Clear the local chat's persisted
-    // pending_question too, so a loadMessages racing this send (WS reconnect,
-    // reconciliation) doesn't rebuild the picker from a now-stale value.
+    // A native V2 form owns the turn until its reply/cancel is acknowledged.
+    // Do not silently dismiss it by sending an unrelated composer message.
+    if (activeQuestions.value[chatId]?.some(q => q.requestId)) {
+      pushToast({
+        chat_id: chatId,
+        title: 'Answer the open question first',
+        body: 'The model is waiting for the highlighted question before it can continue.',
+        variant: 'error',
+      })
+      return false
+    }
+    // Claude's legacy picker has no request id and is intentionally dismissed
+    // by the next ordinary message.
     if (activeQuestions.value[chatId]) {
-      markResolvedQuestion(chatId)
-      delete activeQuestions.value[chatId]
+      clearQuestion(chatId)
     }
     // A send also implicitly dismisses any open image-capability question:
     // the user is re-sending through the normal path (e.g. after opening the
@@ -4115,40 +4650,239 @@ export const useProjectStore = defineStore('projects', () => {
     void api.post(`/api/chats/${chatId}/stop`, {})
   }
 
+  function armPermissionSubmissionTimer(
+    chatId: string,
+    requestId: string,
+    sessionId: string,
+  ) {
+    armResponseTimer(
+      permissionSubmissionTimers,
+      chatId,
+      requestId,
+      sessionId,
+      () => {
+        const current = permissionSubmissions.value[chatId]
+        if (
+          !current
+          || current.requestId !== requestId
+          || (sessionId && current.sessionId !== sessionId)
+          || !current.pending
+        ) return
+        queuedPermissionResponses.set(
+          responseKey(chatId, requestId, current.sessionId),
+          {
+            requestId: current.requestId,
+            sessionId: current.sessionId,
+            approved: current.approved,
+            reason: current.reason,
+          },
+        )
+        permissionSubmissions.value[chatId] = {
+          ...current,
+          pending: false,
+          queued: true,
+          error: 'No acknowledgement arrived; try again.',
+        }
+      },
+    )
+  }
+
+  function queuePermissionResponse(chatId: string, response: PermissionResponse) {
+    queuedPermissionResponses.set(
+      responseKey(chatId, response.requestId, response.sessionId),
+      response,
+    )
+    const current = permissionSubmissions.value[chatId]
+    if (
+      !current
+      || (
+        current.requestId === response.requestId
+        && (!response.sessionId
+          || !current.sessionId
+          || current.sessionId === response.sessionId)
+      )
+    ) {
+      permissionSubmissions.value[chatId] = {
+        ...response,
+        pending: true,
+        queued: true,
+        error: '',
+        retryable: true,
+      }
+    }
+    armPermissionSubmissionTimer(
+      chatId,
+      response.requestId,
+      response.sessionId,
+    )
+  }
+
+  function sendPermissionResponse(chatId: string, response: PermissionResponse) {
+    const ws = sockets.value[chatId]
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      queuePermissionResponse(chatId, response)
+      return false
+    }
+    try {
+      const payload: Record<string, unknown> = {
+        type: 'permission_response',
+        request_id: response.requestId,
+        approved: response.approved,
+        reason: response.reason,
+      }
+      if (response.sessionId) payload.session_id = response.sessionId
+      ws.send(JSON.stringify(payload))
+      queuedPermissionResponses.delete(
+        responseKey(chatId, response.requestId, response.sessionId),
+      )
+      const current = permissionSubmissions.value[chatId]
+      if (
+        !current
+        || (
+          current.requestId === response.requestId
+          && (!response.sessionId
+            || !current.sessionId
+            || current.sessionId === response.sessionId)
+        )
+      ) {
+        permissionSubmissions.value[chatId] = {
+          ...response,
+          pending: true,
+          queued: false,
+          error: '',
+          retryable: true,
+        }
+      }
+      armPermissionSubmissionTimer(
+        chatId,
+        response.requestId,
+        response.sessionId,
+      )
+      return true
+    } catch {
+      queuePermissionResponse(chatId, response)
+      return false
+    }
+  }
+
   function respondPermission(
     chatId: string,
     requestId: string,
     approved: boolean,
     reason = '',
+    sessionId = '',
   ) {
-    // Pop the bubble optimistically so rapid-tapping the same button
-    // doesn't double-send. If the WS is dead, the server resolves its
-    // pending future on disconnect via `cancel_all`.
-    const list = pendingPermissions.value[chatId]
-    if (list) {
-      const next = list.filter(p => p.request_id !== requestId)
-      if (next.length) {
-        pendingPermissions.value[chatId] = next
-      } else {
-        delete pendingPermissions.value[chatId]
-        delete activeQuestions.value[chatId]
+    const request = pendingPermissions.value[chatId]?.find(permission => (
+      permission.request_id === requestId
+      && (!sessionId || !permission.session_id || permission.session_id === sessionId)
+    ))
+    if (!request) return false
+    const current = permissionSubmissions.value[chatId]
+    if (
+      current?.requestId === requestId
+      && (!sessionId || !current.sessionId || current.sessionId === sessionId)
+      && current.pending
+    ) return true
+    return sendPermissionResponse(chatId, {
+      requestId,
+      sessionId: request.session_id || '',
+      approved,
+      reason,
+    })
+  }
+
+  function queueQuestionResponse(chatId: string, response: QuestionResponse) {
+    queuedQuestionResponses.set(
+      responseKey(chatId, response.requestId, response.sessionId),
+      response,
+    )
+    const current = questionSubmissions.value[chatId]
+    if (
+      !current
+      || (
+        current.requestId === response.requestId
+        && (!response.sessionId
+          || !current.sessionId
+          || current.sessionId === response.sessionId)
+      )
+    ) {
+      questionSubmissions.value[chatId] = {
+        ...response,
+        pending: true,
+        queued: true,
+        error: '',
+        retryable: true,
       }
     }
-    // Clear the persisted attention flag optimistically too, so a
-    // GET /api/chats refresh that lands before the server's own clear
-    // round-trips doesn't resurrect the card via rebuildPendingPermission.
-    const chat = chats.value.find(c => c.chat_id === chatId)
-    if (chat?.pending_permission) chat.pending_permission = ''
+    armQuestionSubmissionTimer(
+      chatId,
+      response.requestId,
+      response.sessionId,
+    )
+  }
+
+  function sendQuestionResponse(chatId: string, response: QuestionResponse) {
     const ws = sockets.value[chatId]
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(
-        JSON.stringify({
-          type: 'permission_response',
-          request_id: requestId,
-          approved,
-          reason,
-        }),
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      queueQuestionResponse(chatId, response)
+      return false
+    }
+    try {
+      const payload: Record<string, unknown> = {
+        type: 'question_response',
+        request_id: response.requestId,
+        action: response.action,
+        answers: response.action === 'cancel' ? {} : response.answers,
+      }
+      if (response.sessionId) payload.session_id = response.sessionId
+      ws.send(JSON.stringify(payload))
+      queuedQuestionResponses.delete(
+        responseKey(chatId, response.requestId, response.sessionId),
       )
+      const current = questionSubmissions.value[chatId]
+      if (
+        !current
+        || (
+          current.requestId === response.requestId
+          && (!response.sessionId
+            || !current.sessionId
+            || current.sessionId === response.sessionId)
+        )
+      ) {
+        questionSubmissions.value[chatId] = {
+          ...response,
+          answers: response.action === 'cancel' ? {} : response.answers,
+          pending: true,
+          queued: false,
+          error: '',
+          retryable: true,
+        }
+      }
+      armQuestionSubmissionTimer(
+        chatId,
+        response.requestId,
+        response.sessionId,
+      )
+      return true
+    } catch {
+      queueQuestionResponse(chatId, response)
+      return false
+    }
+  }
+
+  function flushQueuedResponses(chatId: string) {
+    const prefix = `${chatId}\u0000`
+    const questions = [...queuedQuestionResponses.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+    for (const [key, response] of questions) {
+      queuedQuestionResponses.delete(key)
+      sendQuestionResponse(chatId, response)
+    }
+    const permissions = [...queuedPermissionResponses.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+    for (const [key, response] of permissions) {
+      queuedPermissionResponses.delete(key)
+      sendPermissionResponse(chatId, response)
     }
   }
 
@@ -4156,19 +4890,26 @@ export const useProjectStore = defineStore('projects', () => {
     chatId: string,
     requestId: string,
     answers: Record<string, string[]>,
+    action: 'reply' | 'cancel' = 'reply',
+    sessionId = '',
   ) {
-    markResolvedQuestion(chatId)
-    delete activeQuestions.value[chatId]
-    const chat = chats.value.find(c => c.chat_id === chatId)
-    if (chat?.pending_question) chat.pending_question = ''
-    const ws = sockets.value[chatId]
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'question_response',
-        request_id: requestId,
-        answers,
-      }))
-    }
+    const question = activeQuestions.value[chatId]?.find(candidate => (
+      candidate.requestId === requestId
+      && (!sessionId || !candidate.sessionId || candidate.sessionId === sessionId)
+    ))
+    if (!question) return false
+    const current = questionSubmissions.value[chatId]
+    if (
+      current?.requestId === requestId
+      && (!sessionId || !current.sessionId || current.sessionId === sessionId)
+      && current.pending
+    ) return true
+    return sendQuestionResponse(chatId, {
+      requestId,
+      sessionId: question.sessionId || '',
+      action,
+      answers,
+    })
   }
 
   function respondCapability(
@@ -4197,45 +4938,6 @@ export const useProjectStore = defineStore('projects', () => {
         model_id: modelId,
       }))
     }
-  }
-
-  // ── Voice ───────────────────────────────────────────────────────────
-
-  async function transcribeVoice(chatId: string, audioBlob: Blob): Promise<string> {
-    const form = new FormData()
-    // Name the part after what the blob actually is: the server derives the
-    // saved file's extension from it, and on-device dictation can only read
-    // the containers CoreAudio understands (wav, m4a), not WebM.
-    const ext = audioBlob.type.includes('wav') ? 'wav'
-      : audioBlob.type.includes('mp4') || audioBlob.type.includes('m4a') ? 'm4a'
-        : audioBlob.type.includes('ogg') ? 'ogg'
-          : 'webm'
-    form.append('audio', audioBlob, `voice.${ext}`)
-    const res = await fetch(`/api/chats/${chatId}/voice`, {
-      method: 'POST',
-      body: form,
-      credentials: 'same-origin',
-    })
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: res.statusText }))
-      throw new Error(err.error || `Voice failed: ${res.status}`)
-    }
-    const data: VoiceResult = await res.json()
-    return data.text
-  }
-
-  async function speakMessage(chatId: string, text: string): Promise<Blob> {
-    const res = await fetch(`/api/chats/${chatId}/speak`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-      credentials: 'same-origin',
-    })
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: res.statusText }))
-      throw new Error(err.error || `Speech failed: ${res.status}`)
-    }
-    return res.blob()
   }
 
   // ── Images ──────────────────────────────────────────────────────────
@@ -4403,22 +5105,6 @@ export const useProjectStore = defineStore('projects', () => {
     const entries = streamingTimeline.value[chatId] || []
     streamingTimeline.value[chatId] = []
     return entries
-  }
-
-  function beginHostReconnect(chatId: string, chatMessages: ChatMessage[]) {
-    hostConnectionUnavailable.value = true
-    _flushTimeline(chatId)
-    // Also clean repeated proxy errors already painted by an older frontend
-    // before this structured event arrived during a rolling deploy.
-    messages.value[chatId] = normalizeMessages([...chatMessages])
-    streaming.value[chatId] = false
-    streamingText.value[chatId] = ''
-    streamingThinking.value[chatId] = ''
-    delete streamingTextPhase.value[chatId]
-    delete liveUsage.value[chatId]
-    delete streamStartedAt.value[chatId]
-    persistStreamStartedAt()
-    delete pendingPermissions.value[chatId]
   }
 
   function handleEvent(chatId: string, event: WsEvent) {
@@ -4607,12 +5293,35 @@ export const useProjectStore = defineStore('projects', () => {
         // generic path on parse failure so the call still shows up in the
         // trace as a regular tool entry.
         if (event.tool_name === 'AskUserQuestion' && event.tool_input) {
-          const qs = parseQuestions(event.tool_input, event.request_id || '')
+          const qs = parseQuestions(
+            event.tool_input,
+            event.request_id || '',
+            event.session_id || '',
+          )
           if (qs.length) {
-            // A fresh live question supersedes any earlier resolved-picker
-            // memory for this chat (keeps the set from growing and avoids a
-            // reused native request id being wrongly suppressed).
+            const signature = questionsSignature(qs)
+            const currentQuestions = activeQuestions.value[chatId]
+            const sameRequest = Boolean(
+              event.request_id
+              && currentQuestions?.some(
+                question => question.requestId === event.request_id
+                && (!event.session_id || !question.sessionId || question.sessionId === event.session_id),
+              ),
+            )
+            const sameLegacyQuestion = !event.request_id
+              && questionsSignature(currentQuestions) === signature
+            // Broker replay is common after reconnect. Replacing the array for
+            // the same request makes the component watcher erase in-progress
+            // answers and can cancel the retry state while its frame is queued.
+            if (
+              sameRequest
+              || sameLegacyQuestion
+              || resolvedQuestions.value[chatId]?.has(signature)
+            ) break
+
             delete resolvedQuestions.value[chatId]
+            const submission = questionSubmissions.value[chatId]
+            if (!submission?.pending) delete questionSubmissions.value[chatId]
             activeQuestions.value[chatId] = qs
             // Nudge the user when the tab is backgrounded so they don't
             // miss a question that the model needs answered.
@@ -4686,6 +5395,45 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
 
+      case 'question_response_result': {
+        const submission = questionSubmissions.value[chatId]
+        const matches = submission?.requestId === event.request_id
+          && (!event.session_id || !submission.sessionId || submission.sessionId === event.session_id)
+        if (!matches || !submission) break
+        const responseSession = event.session_id || submission.sessionId
+        queuedQuestionResponses.delete(
+          responseKey(chatId, event.request_id, responseSession),
+        )
+        clearQuestionSubmissionTimer(
+          chatId,
+          event.request_id,
+          responseSession,
+        )
+        if (event.ok) {
+          clearQuestion(chatId, event.request_id, responseSession)
+        } else {
+          questionSubmissions.value[chatId] = {
+            ...submission,
+            pending: false,
+            queued: false,
+            error: event.error || 'OpenCode rejected the answer; retry the form.',
+            retryable: event.retryable !== false,
+          }
+        }
+        break
+      }
+
+      case 'question_resolved': {
+        const question = activeQuestions.value[chatId]?.find(
+          candidate => candidate.requestId === event.request_id
+            && (!event.session_id || !candidate.sessionId || candidate.sessionId === event.session_id),
+        )
+        if (question) {
+          clearQuestion(chatId, event.request_id, question.sessionId || '')
+        }
+        break
+      }
+
       case 'thinking':
         // Thinking deltas fired from inside a Task subagent arrive with
         // parent_tool_use_id set. The subagent's transcript is rendered in its
@@ -4735,6 +5483,15 @@ export const useProjectStore = defineStore('projects', () => {
           messages.value[chatId] = normalizeMessages([...msgs])
           persistMessages()
         }
+        break
+      }
+
+      case 'context_entities': {
+        // The user bubble is already there (user_echo precedes the turn).
+        const target = event.turn_index != null
+          ? msgs.find(m => m.role === 'user' && m.turn_index === event.turn_index)
+          : [...msgs].reverse().find(m => m.role === 'user')
+        if (target) target.context_entities = Array.isArray(event.entities) ? event.entities : []
         break
       }
 
@@ -4880,10 +5637,9 @@ export const useProjectStore = defineStore('projects', () => {
         delete liveUsage.value[chatId]
         delete streamStartedAt.value[chatId]
         persistStreamStartedAt()
-        // Turn ended: the server has already resolved any still-pending gate
-        // futures as deny via cancel_all(). Drop the bubbles on our side too
-        // so a late click can't race a brand-new turn.
-        delete pendingPermissions.value[chatId]
+        // A terminal SSE frame is not proof that an OpenCode permission was
+        // delivered. Keep the card until its response result or authoritative
+        // resolution event arrives.
         persistMessages()
         // Reconcile with the authoritative SDK session. Handles the reconnect
         // case where /messages already had this turn (dedups) and the race
@@ -4913,12 +5669,6 @@ export const useProjectStore = defineStore('projects', () => {
           beginServerRestart(event.message)
           break
         }
-        // Rolling-upgrade compatibility: old client proxies emitted this as a
-        // generic error string. Treat it as the structured connection state.
-        if (isHostConnectionUnavailableMessage(event.message)) {
-          beginHostReconnect(chatId, msgs)
-          break
-        }
         _flushTimeline(chatId)
         msgs.push({
           role: 'system',
@@ -4933,13 +5683,7 @@ export const useProjectStore = defineStore('projects', () => {
         delete liveUsage.value[chatId]
         delete streamStartedAt.value[chatId]
         persistStreamStartedAt()
-        delete pendingPermissions.value[chatId]
         persistMessages()
-        break
-      }
-
-      case 'host_unreachable': {
-        beginHostReconnect(chatId, msgs)
         break
       }
 
@@ -4949,26 +5693,73 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
 
+      case 'permission_response_result': {
+        const submission = permissionSubmissions.value[chatId]
+        const matches = submission?.requestId === event.request_id
+          && (!event.session_id || !submission.sessionId || submission.sessionId === event.session_id)
+        if (!matches || !submission) break
+        const responseSession = event.session_id || submission.sessionId
+        queuedPermissionResponses.delete(
+          responseKey(chatId, event.request_id, responseSession),
+        )
+        clearResponseTimer(
+          permissionSubmissionTimers,
+          chatId,
+          event.request_id,
+          responseSession,
+        )
+        if (event.ok) {
+          clearPermission(chatId, event.request_id, responseSession)
+        } else {
+          permissionSubmissions.value[chatId] = {
+            ...submission,
+            pending: false,
+            queued: false,
+            error: event.error || 'The permission reply failed; retry the request.',
+            retryable: event.retryable !== false,
+          }
+        }
+        break
+      }
+
+      case 'permission_resolved': {
+        const request = pendingPermissions.value[chatId]?.find(
+          permission => permission.request_id === event.request_id
+            && (!event.session_id || !permission.session_id || permission.session_id === event.session_id),
+        )
+        if (request) {
+          clearPermission(
+            chatId,
+            event.request_id,
+            request.session_id || event.session_id || '',
+          )
+        }
+        break
+      }
+
       case 'permission_request': {
+        const list = pendingPermissions.value[chatId] || []
+        const existing = list.find(permission =>
+          permission.request_id === event.request_id
+          && (!event.session_id || !permission.session_id || permission.session_id === event.session_id),
+        )
+        if (existing) break
         // Auto mode classifier escalated: model wants to run a tool, pop the
         // Approve/Deny bubble. Keep a visible timeline line too so the user
         // sees the context even if they dismiss the buttons by scrolling.
         _commitStreamingTextToTimeline(chatId)
         _pushToolLine(chatId, `\u{1F6A7} Permission: ${event.tool_name} - ${event.message}`)
-        const list = pendingPermissions.value[chatId] || []
-        // Dedup by request_id in case the server replays it on reconnect.
-        if (!list.some(p => p.request_id === event.request_id)) {
-          pendingPermissions.value[chatId] = [
-            ...list,
-            {
-              request_id: event.request_id,
-              tool_name: event.tool_name,
-              tool_input: event.tool_input || '',
-              message: event.message,
-              received_at: Date.now(),
-            },
-          ]
-        }
+        pendingPermissions.value[chatId] = [
+          ...list,
+          {
+            request_id: event.request_id,
+            session_id: event.session_id,
+            tool_name: event.tool_name,
+            tool_input: event.tool_input || '',
+            message: event.message,
+            received_at: Date.now(),
+          },
+        ]
         // If the window is backgrounded, nudge the user via an in-app toast.
         // The server ships a push notification too (routed separately through
         // the service-worker); this toast covers the tab-visible case.
@@ -5012,18 +5803,21 @@ export const useProjectStore = defineStore('projects', () => {
     // State
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
-    projectStreaming, backgroundAgents, backgroundRuns, runningSubagents, toasts, pendingPermissions, activeQuestions, activeCapabilityQuestions, creatingChatProjectIds,
-    serverRestarting, serverRestartMessage, hostConnectionUnavailable, chatPanelsMounted,
+    projectStreaming, backgroundAgents, backgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
+    serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatPendingQuestion, chatLastSnippet, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
+    memoryPassNeedsAttention, latestMemoryPassChat, memoryProjectFor,
     insightsFailedChats, workspaceInsightsFailedCount,
     archivingChats, isArchiving, archivingChatsList, workspaceArchivingCount, projectArchivingCount,
     // Actions
-    fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
+    fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace,
+    archiveWorkspace, fetchArchivedWorkspaces, restoreArchivedWorkspace,
+    workspaceRegistryRevision, refreshWorkspaceRegistry,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     generalProject,
@@ -5031,7 +5825,7 @@ export const useProjectStore = defineStore('projects', () => {
     setChatRetry, stopChatRetry, tryChatRetryNow, retryInsights,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
-    sendMessage, stopChat, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
+    sendMessage, stopChat, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,
@@ -5041,7 +5835,7 @@ export const useProjectStore = defineStore('projects', () => {
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
     loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
     canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,
-    connectWs, disconnectWs, connectEventsWs,
+    connectWs, disconnectWs, connectEventsWs, reconnectNow,
     beginServerRestart, restoreState,
     pushToast, pushErrorToast, dismissToast, fixError, restoreDraft,
     packageStatus, checkPackageStatus,

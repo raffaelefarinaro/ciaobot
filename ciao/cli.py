@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from dataclasses import asdict
 from importlib import resources
 from pathlib import Path
 from typing import Any, cast
@@ -37,23 +38,6 @@ def _workspace_name_arg(value: str) -> str:
     return name
 
 
-def _restart_exit_code() -> int:
-    """The exit code the server uses to request a restart (config default 75).
-
-    Read from the environment after the server ran: ``CiaoConfig.from_env``
-    loads the workspace ``.env`` into ``os.environ``, so an override set there
-    is visible here too.
-    """
-    raw = (
-        os.environ.get("CIAO_RESTART_EXIT_CODE", "").strip()
-        or "75"
-    )
-    try:
-        return int(raw)
-    except ValueError:
-        return 75
-
-
 def _relaunch_argv() -> list[str]:
     """argv for re-execing the CLI: a fresh interpreter picks up new code
     after a package update."""
@@ -61,6 +45,7 @@ def _relaunch_argv() -> list[str]:
 
 
 def _run_server() -> int:
+    from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
 
     try:
@@ -69,13 +54,20 @@ def _run_server() -> int:
         code = exc.code if isinstance(exc.code, int) else 0
     else:
         code = 0
-    if code == _restart_exit_code():
+    if code == RESTART_EXIT_CODE:
         # The setup wizard and package updates request a restart by exiting
         # with this code. Under launchd KeepAlive relaunches us anyway, but a
         # foreground `ciao run` would just die and leave the site unreachable.
         # Re-exec (rather than loop) so the relaunch picks up new code.
         print("Restart requested — relaunching Ciaobot…", file=sys.stderr)
         sys.stderr.flush()
+        # The exec inherits os.environ, and load_dotenv never overrides a key
+        # that is already set, so without this a value edited in the workspace
+        # .env would be shadowed by the stale copy the old process exported.
+        # Only keys the .env added are dropped; the fresh process reloads them.
+        from ciao.config import reset_exported_dotenv
+
+        reset_exported_dotenv()
         os.execv(sys.executable, _relaunch_argv())
     return code
 
@@ -109,6 +101,26 @@ def _copy_tree_if_missing(src, dest: Path) -> list[Path]:
     return written
 
 
+def _import_legacy_workspaces_for_setup(root: Path, existing_env: dict[str, str]) -> None:
+    """Run the one-time ``CIAO_WORKSPACES`` import against ``root``'s ``.env``.
+
+    Built from the install's own ``.env`` (not the ambient environment) so the
+    import targets the same runtime root the server will use.
+    """
+    from ciao.config import CiaoConfig
+
+    runtime = Path(existing_env.get("CIAO_RUNTIME_ROOT", "").strip() or ".runtime").expanduser()
+    if not runtime.is_absolute():
+        runtime = root / runtime
+    source = {
+        **existing_env,
+        "CIAO_WORKSPACE": str(root),
+        "CIAO_RUNTIME_ROOT": str(runtime.resolve()),
+        "PWA_AUTH_TOKEN": existing_env.get("PWA_AUTH_TOKEN") or "setup",
+    }
+    CiaoConfig.from_env(source).import_legacy_workspaces_env()
+
+
 def _write_if_missing(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
@@ -128,16 +140,6 @@ def _launchd_program_arguments(executable: str) -> str:
         f"        <string>{html.escape(argument, quote=False)}</string>"
         for argument in arguments
     )
-
-
-def _bundled_sidecar_path(executable: str) -> str:
-    """Return the sidecar beside a bundled engine, when one is identifiable."""
-
-    executable_path = Path(executable).expanduser()
-    for ancestor in (executable_path, *executable_path.parents):
-        if ancestor.suffix == ".app":
-            return str(ancestor / "Contents" / "MacOS" / "ciaobot-native")
-    return ""
 
 
 def _render_launchd_plist(
@@ -164,9 +166,6 @@ def _render_launchd_plist(
         ),
         "{{CIAO_EXECUTABLE}}": html.escape(executable, quote=False),
         "{{LAUNCHD_PROGRAM_ARGUMENTS}}": _launchd_program_arguments(executable),
-        "{{CIAO_NATIVE_SIDECAR}}": html.escape(
-            _bundled_sidecar_path(executable), quote=False
-        ),
         "{{CIAO_PORT}}": html.escape(str(port), quote=False),
         "{{CIAO_PATH}}": html.escape(resolved_path, quote=False),
     }
@@ -334,29 +333,29 @@ def _default_app_dir() -> Path:
 
 
 _OUR_BUNDLE_IDS = ("local.ciao.app", "local.ciaobot.app")
-# Launcher bundles previous versions wrote. Nothing creates these any more —
-# Ciaobot.app is the menu bar — but installs upgrading from an older version
-# still have one on disk, so setup removes them. "Ciaobot.app" is in the list
-# because the pre-rename launcher used that name; _is_our_app_bundle keeps the
-# Tauri app of the same name safe by checking the executable inside.
+# Launcher bundles previous versions wrote. Nothing creates these any more, but
+# installs upgrading from an older version still have one on disk, so setup
+# removes them. "Ciaobot.app" is in the list because both the pre-rename
+# launcher and the retired app used that name; _is_our_app_bundle keeps the app
+# bundle of the same name safe by checking the executable inside.
 _LEGACY_APP_BUNDLE_NAMES = (
     "Ciao.app",
     "Ciaobot.app",
     "Ciaobot Menu Bar.app",
     "Ciaobot Server.app",
 )
-# Executable inside the Tauri desktop app.
+# Executable inside the retired Ciaobot.app bundle.
 _DESKTOP_EXECUTABLE_NAME = "ciaobot-desktop"
 
 
 def _is_our_app_bundle(app_root: Path) -> bool:
     """Whether ``app_root`` is a launcher bundle created by Ciaobot.
 
-    The Tauri desktop app ships as ``Ciaobot.app`` under the same
+    The retired app shipped as ``Ciaobot.app`` under the same
     ``local.ciaobot.app`` identifier our pre-rename launcher used, so the
     bundle id cannot tell them apart. Misidentifying it is destructive rather
     than merely wasteful: the launcher we write is named ``Ciaobot Server.app``,
-    so ``_remove_legacy_app_shortcuts`` must never delete the native app and
+    so ``_remove_legacy_app_shortcuts`` must never delete the app bundle and
     anything back in its place, leaving a running process on a bundle that no
     longer exists on disk. The executable name is the discriminator.
     """
@@ -451,10 +450,23 @@ def _disable_legacy_menubar_agent(launch_agents_dir: Path | None = None) -> bool
     return True
 
 
-# Shared with the startup-sync repair path so a workspace created here and a
-# workspace repaired there ignore exactly the same paths (see git_sync).
-from ciao.git_sync import WORKSPACE_GITIGNORE_ENTRIES as _WORKSPACE_GITIGNORE_ENTRIES
 from ciao.workspace_guide import guide_path
+
+# Paths a workspace snapshot must never pick up. No `.codex/` entry: codex is
+# retired (`sync_skills` only prunes what older versions left behind, it never
+# writes there), so ignoring it would be dead config.
+_WORKSPACE_GITIGNORE_ENTRIES = (
+    ".env",
+    ".envrc",
+    ".direnv/",
+    "secrets/",
+    ".runtime/",
+    ".claude/",
+    ".agents/",
+    ".opencode/",
+    "opencode.json",
+    "*.log",
+)
 
 
 def _ensure_workspace_gitignore(root: Path) -> None:
@@ -675,7 +687,6 @@ def setup_workspace(
     *,
     auth_token: str | None = None,
     auth_required: bool = True,
-    push_contact: str | None = None,
     vault_root: Path | str | None = None,
     vault_mode: str = "scratch",
     workspace_name: str | None = None,
@@ -765,6 +776,16 @@ def setup_workspace(
     else:
         vault_path = root / vault_path
     workspaces_registry = root / ".runtime" / "workspaces.json"
+    if existing_env.get("CIAO_WORKSPACES", "").strip() and not workspaces_registry.exists():
+        # An install that still configures workspaces through the retired
+        # variable usually has no registry file (the server never persisted
+        # one while the variable was set). The upgrade installer reruns setup
+        # before the new server first starts, so writing a synthetic
+        # single-workspace registry here would make the server's one-time
+        # import keep that synthetic entry and drop the variable's real
+        # vault_root / disallowed_tools / allowlist for the same name. Import
+        # the variable first so the registry setup sees is the real one.
+        _import_legacy_workspaces_for_setup(root, existing_env)
     registered_vaults = _setup_registry_vaults(
         workspaces_registry,
         workspace_root=root,
@@ -773,9 +794,6 @@ def setup_workspace(
     name = requested_name or "personal"
 
     token = auth_token or secrets.token_urlsafe(32)
-    # Empty contact = Web Push disabled until configured in Settings;
-    # never invent a fake default.
-    contact = (push_contact or "").strip()
     # Always pin PWA_AUTH_REQUIRED: an unset value is read as "protect when a
     # token exists" (see CiaoConfig.from_env), and a setup that deliberately
     # opted out must survive that default.
@@ -784,7 +802,6 @@ def setup_workspace(
         ("PWA_AUTH_REQUIRED", "true" if auth_required else "false"),
     ]
     desired_env.extend([
-        ("CIAO_PUSH_CONTACT", contact),
         ("CIAO_WORKSPACE", "."),
         ("CIAO_VAULT_ROOT", vault_value),
         ("CIAO_VAULT_MODE", vault_mode),
@@ -1062,7 +1079,7 @@ def setup_workspace(
         or sys.executable
     )
     # The one-time login token for the PWA. Written unconditionally: the setup
-    # summary prints it as a login URL, and the Tauri app redeems it on first
+    # summary prints it as a login URL, and the first client redeems it on first
     # launch. It used to be created as a side effect of writing the launcher
     # bundle, which no longer exists.
     _ensure_setup_token(root)
@@ -1186,7 +1203,6 @@ def _setup_command(args: argparse.Namespace) -> int:
             args.workspace,
             auth_token=args.auth_token,
             auth_required=auth_required,
-            push_contact=args.push_contact,
             workspace_name=args.workspace_name,
             python_path=args.python,
             port=args.port,
@@ -2207,22 +2223,13 @@ def _vault_relocate_command(args: argparse.Namespace) -> int:
         "PWA_AUTH_TOKEN": os.environ.get("PWA_AUTH_TOKEN") or "vault-relocate",
     }
     config = CiaoConfig.from_env(effective_source)
-    # Whether workspaces.json is what `config` actually sourced its workspaces
-    # from, per CiaoConfig.from_env's own precedence — read off the SAME
-    # merged environment that built `config` (target .env, then ambient env
-    # only when --workspace was not explicit), not the raw process
-    # environment, which can disagree with it when CIAO_WORKSPACES is set
-    # only in the target install's .env.
-    registry_authoritative = not effective_source.get("CIAO_WORKSPACES", "").strip()
 
     if args.name not in set(config.workspace_names()):
         print(f"No registered workspace named '{args.name}'.", file=sys.stderr)
         return 1
 
     if args.undo:
-        result = vault_relocate.undo(
-            config, args.name, runtime, registry_authoritative=registry_authoritative
-        )
+        result = vault_relocate.undo(config, args.name, runtime)
         print(json.dumps(result, indent=2))
         return 0 if result["status"] in {"undone", "nothing_to_undo"} else 1
 
@@ -2234,7 +2241,6 @@ def _vault_relocate_command(args: argparse.Namespace) -> int:
             args.name,
             runtime,
             plan_result=plan_result,
-            registry_authoritative=registry_authoritative,
         )
         if args.json:
             print(json.dumps(result, indent=2))
@@ -2435,6 +2441,7 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
     number that hides which workspace is over budget.
     """
     from ciao.config import CiaoConfig
+    from ciao.memory_tool import DEFAULT_MEMORY_CHAR_LIMIT, DEFAULT_USER_CHAR_LIMIT
     from ciao.os_audit import (
         _aggregate_memory_guides,
         _memory_guide_specs,
@@ -2468,7 +2475,10 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
             workspace=name,
             workspace_dir=workspace,
             current=datetime.date.today(),
-            region_limits={"memory": config.memory_char_limit, "profile": config.user_char_limit},
+            region_limits={
+                "memory": DEFAULT_MEMORY_CHAR_LIMIT,
+                "profile": DEFAULT_USER_CHAR_LIMIT,
+            },
         )
         for name, guide in specs
     ]
@@ -2584,9 +2594,7 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
             print(
                 "  Fix: open a chat in that workspace and ask the agent to "
                 'consolidate the region (e.g. "consolidate my ciao:memory '
-                'region under its cap"), or raise CIAO_MEMORY_CHAR_LIMIT / '
-                "CIAO_USER_CHAR_LIMIT in .env and restart Ciaobot if every "
-                "entry is high-signal."
+                'region under its cap").'
             )
         print(f"Event-shaped entries: {len(report['event_shaped_entries'])}")
         for finding in report["event_shaped_entries"]:
@@ -2632,7 +2640,13 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
 
 
 def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
-    """Shared workspace/vault resolution for the memory-proposal commands.
+    """Shared workspace/vault resolution for the memory-proposal commands."""
+    workspace, vault, _registry_root = _resolve_workspace_and_vaults(args)
+    return workspace, vault
+
+
+def _resolve_workspace_and_vaults(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    """``(workspace, notes vault, agent vault root)`` for one CLI invocation.
 
     A scheduled run exports ``CIAO_ACTIVE_WORKSPACE`` (the logical workspace
     name) next to a ``CIAO_VAULT_ROOT`` that points at the install-wide
@@ -2642,6 +2656,14 @@ def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
     through the workspace registry instead — the same authority the PWA's
     ``workspace_vault_root`` reads with. Explicit arguments still win for
     manual invocations.
+
+    The third value is where ``entity-types.yaml`` and ``VOCABULARY.md`` live:
+    the agent vault root, which is NOT the notes root before the re-rooting. A
+    registry read from the notes root is the stock list on every such install,
+    so a caller that measures notes against it (the category-cluster pass) sees
+    every category the owner already added as unlisted. In the explicit-argument
+    path there is no per-workspace split to resolve, so the vault the caller
+    named is both.
     """
     active = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
     if not getattr(args, "vault_root", None) and not getattr(args, "workspace", None):
@@ -2656,7 +2678,11 @@ def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
                 env_source.setdefault("PWA_AUTH_TOKEN", "memory-proposals")
                 config = CiaoConfig.from_env(env_source)
                 if config.workspace(active) is not None:
-                    return config.workspace_root, Path(config.workspace_vault_root(active))
+                    return (
+                        config.workspace_root,
+                        Path(config.workspace_vault_root(active)),
+                        Path(config.agent_vault_root(active)),
+                    )
             except Exception:  # noqa: BLE001 — fall through to the legacy path
                 pass
     workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
@@ -2665,7 +2691,8 @@ def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
     vault = Path(vault_raw).expanduser()
     if not vault.is_absolute():
         vault = workspace / vault
-    return workspace, vault.resolve()
+    resolved = vault.resolve()
+    return workspace, resolved, resolved
 
 
 def _memory_proposals_command(args: argparse.Namespace) -> int:
@@ -2697,12 +2724,11 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     """File a fact into a workspace's memory-proposal review queue.
 
     The nightly curator discovers durable facts by reading archived chats that
-    never grew a ``## Session insights`` section, so archive-time routing never
-    saw them. Filing here puts the fact in the machine queue (``ciao
-    memory-proposals``, the PWA review panel) where it can be promoted or
-    dismissed like any queued item, instead of surviving only as prose in one
-    nightly report. Re-filing an identical fact is a no-op; the queue dedupes
-    by text.
+    the memory pass never got to, so nothing routed them. Filing here puts the
+    fact in the machine queue (``ciao memory-proposals``, the PWA review panel)
+    where it can be promoted or dismissed like any queued item, instead of
+    surviving only as prose in one nightly report. Re-filing an identical fact
+    is a no-op; the queue dedupes by text.
     """
     from ciao.memory_proposals import (
         DESTINATIONS,
@@ -3198,29 +3224,31 @@ def _add_curation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
 
 
-def _curation_context(args: argparse.Namespace) -> tuple[Path, Path, Path, Any]:
+def _curation_context(args: argparse.Namespace) -> tuple[Path, Path, Path, Any, Path]:
     from ciao.curation_run import RunBudget
 
-    workspace, vault = _resolve_workspace_and_vault(args)
+    workspace, vault, registry_root = _resolve_workspace_and_vaults(args)
     guide = Path(args.guide).expanduser().resolve() if args.guide else guide_path(workspace)
     defaults = RunBudget()
     budget = RunBudget(
         max_items=args.max_items if args.max_items is not None else defaults.max_items,
         max_seconds=args.max_seconds if args.max_seconds is not None else defaults.max_seconds,
     )
-    return workspace, vault, guide, budget
+    return workspace, vault, guide, budget, registry_root
 
 
 def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
     from ciao.curation_run import build_worklist, load_state, plan_run
+    from ciao.entity_types import load_entity_types
 
-    workspace, vault, guide, budget = _curation_context(args)
+    workspace, vault, guide, budget, registry_root = _curation_context(args)
     state = load_state(vault)
     worklist = build_worklist(
         vault_root=vault,
         guide_path=guide,
         workspace_dir=workspace,
         done_keys=frozenset(state.done_keys),
+        category_registry=load_entity_types(registry_root),
     )
     plan = plan_run(worklist, budget)
     payload: dict[str, Any] = {
@@ -3265,11 +3293,11 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     """Take the lease and print this run's plan.
 
     An empty worklist releases the lease again before returning: a quiet night
-    must not leave archive-time auto-apply standing down until the TTL expires.
+    must not hold the lease until the TTL expires.
     """
     from ciao.curation_run import CurationBusy, begin_run, end_run
 
-    _workspace, vault, _guide, budget = _curation_context(args)
+    _workspace, vault, _guide, budget, _registry_root = _curation_context(args)
     try:
         lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds)
     except CurationBusy as exc:
@@ -3308,7 +3336,7 @@ def _curation_progress_command(args: argparse.Namespace) -> int:
     """Record finished worklist keys and renew the lease."""
     from ciao.curation_run import CurationBusy, record_done, renew_run
 
-    _workspace, vault, _guide, budget = _curation_context(args)
+    _workspace, vault, _guide, budget, _registry_root = _curation_context(args)
     holder = _curation_holder(args)
     if not holder:
         return 2
@@ -3342,7 +3370,7 @@ def _curation_end_command(args: argparse.Namespace) -> int:
     """
     from ciao.curation_run import CurationBusy, end_run
 
-    _workspace, vault, _guide, _budget = _curation_context(args)
+    _workspace, vault, _guide, _budget, _registry_root = _curation_context(args)
     holder = _curation_holder(args)
     if not holder:
         return 2
@@ -3658,14 +3686,91 @@ def _create_chat_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _desktop_service_command(args: argparse.Namespace) -> int:
+def _register_launchd_service(workspace: Path) -> Path:
+    """Write the server LaunchAgent for an already set-up workspace."""
     from ciao import macos_service
 
-    action = args.desktop_service_action
+    root = workspace.expanduser().resolve()
+    if not (root / ".env").is_file():
+        raise RuntimeError(
+            f"{root} is not a Ciaobot workspace (no .env). Run `ciao setup --workspace {root}` first."
+        )
+    if _looks_like_source_checkout(root):
+        raise RuntimeError(
+            f"{root} looks like the Ciaobot source checkout, not a workspace. "
+            "Pass your workspace folder to --workspace."
+        )
+    from ciao.setup_status import tcc_protected_location
+
+    protected = tcc_protected_location(root)
+    if protected:
+        raise RuntimeError(
+            f"{root} is inside ~/{protected}, which launchd cannot read. "
+            "Move the workspace out of Desktop/Documents/Downloads first."
+        )
+
+    from dotenv import dotenv_values
+
+    runtime_value = (dotenv_values(root / ".env").get("CIAO_RUNTIME_ROOT") or "").strip() or ".runtime"
+    runtime_root = Path(runtime_value).expanduser()
+    if not runtime_root.is_absolute():
+        runtime_root = root / runtime_root
+    return _write_launchd_plist(
+        workspace=root,
+        launch_agents_dir=default_launch_agents_dir(),
+        engine_path=os.environ.get("CIAO_ENGINE_PATH", "").strip() or sys.executable,
+        runtime_root=runtime_root,
+        port=_pwa_port_from_env(root, macos_service.DEFAULT_PORT),
+        path=os.environ.get("PATH", ""),
+    )
+
+
+def _service_command(args: argparse.Namespace) -> int:
+    from ciao import macos_service
+
+    action = args.service_action
+    as_json = bool(args.as_json)
+    if getattr(args, "deprecated_alias", False) and not as_json:
+        print("`ciao desktop-service` is deprecated; use `ciao service`.", file=sys.stderr)
+    if sys.platform != "darwin":
+        return macos_service.print_result(
+            macos_service.ServiceResult(
+                False,
+                str(action),
+                "`ciao service` manages the macOS LaunchAgent. On Linux use `ciao linux-service` and systemctl.",
+                {},
+            ),
+            as_json=as_json,
+        )
     if action == "status":
         result = macos_service.service_status()
     elif action == "start":
-        result = macos_service.start_service()
+        runtime = macos_service.discover_runtime()
+        workspace = getattr(args, "workspace", None)
+        if workspace is not None and Path(runtime.server_plist).is_file():
+            installed = _plist_workspace(default_launch_agents_dir())
+            requested = Path(workspace).expanduser().resolve()
+            if installed is not None and installed != requested:
+                return macos_service.print_result(
+                    macos_service.ServiceResult(
+                        False,
+                        "start",
+                        f"The installed LaunchAgent serves {installed}, not {requested}. "
+                        f"Run `ciao setup --workspace {requested} --load-launchd --yes` to repoint it.",
+                        {"installed_workspace": str(installed), "requested_workspace": str(requested)},
+                    ),
+                    as_json=as_json,
+                )
+        if workspace is not None and not Path(runtime.server_plist).is_file():
+            try:
+                _register_launchd_service(Path(workspace))
+            except (RuntimeError, OSError) as exc:
+                return macos_service.print_result(
+                    macos_service.ServiceResult(False, "start", str(exc), {"setup_required": True}),
+                    as_json=as_json,
+                )
+            runtime = macos_service.discover_runtime()
+        result = macos_service.start_service(runtime=runtime)
     elif action == "restart":
         result = macos_service.restart_service(force=bool(args.force))
     elif action == "stop":
@@ -3676,17 +3781,35 @@ def _desktop_service_command(args: argparse.Namespace) -> int:
         result = macos_service.update_engine(force=bool(args.force))
     elif action == "migrate":
         result = macos_service.migrate_legacy_companion(running_app=args.app_bundle)
+    elif action == "migration-classify":
+        # The bridge Ciaobot.app needs to decide whether to hand this Mac's
+        # engine over to the terminal installer (#604). The classifier is a
+        # module of its own, not a desktop-service action, and it already runs
+        # from the verified wheel inside install-engine.sh; importing it here
+        # rather than shelling out to `python -I -m ciao.engine_migration` is
+        # the smaller change, and it keeps the app off a second interpreter.
+        # It reads and never writes, so a Mac the app cannot interpret comes
+        # back as `desktop_invalid` and the app asks instead of guessing.
+        from ciao.engine_migration import classify
+
+        classification = classify()
+        result = macos_service.ServiceResult(
+            True,
+            "migration-classify",
+            f"this Mac classifies as {classification.kind}",
+            asdict(classification),
+        )
     elif action == "rollback":
         result = macos_service.rollback_legacy_companion()
     else:  # pragma: no cover - argparse constrains the action.
         parser_error = macos_service.ServiceResult(
             False,
             str(action),
-            "Unknown desktop service action.",
+            "Unknown service action.",
             {},
         )
-        return macos_service.print_result(parser_error, as_json=bool(args.as_json))
-    return macos_service.print_result(result, as_json=bool(args.as_json))
+        return macos_service.print_result(parser_error, as_json=as_json)
+    return macos_service.print_result(result, as_json=as_json)
 
 
 def _linux_service_command(args: argparse.Namespace) -> int:
@@ -3759,39 +3882,73 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Run the Ciaobot server.")
     run_parser.set_defaults(func=lambda _args: _run_server())
 
-    desktop_service_parser = subparsers.add_parser(
-        "desktop-service",
-        help="Control the launchd-managed engine for Ciaobot.app.",
-    )
-    desktop_service_sub = desktop_service_parser.add_subparsers(
-        dest="desktop_service_action",
-        required=True,
-    )
-    for action in ("status", "start", "restart", "stop", "update-engine", "migrate", "rollback"):
-        action_parser = desktop_service_sub.add_parser(action)
-        action_parser.add_argument("--json", action="store_true", dest="as_json")
-        if action in {"restart", "stop", "update-engine"}:
-            action_parser.add_argument(
-                "--force",
-                action="store_true",
-                help="Proceed even when chats are active (after UI confirmation).",
+    def add_service_parser(
+        name: str,
+        help_text: str,
+        *,
+        deprecated: bool,
+    ) -> None:
+        service_parser = subparsers.add_parser(name, help=help_text)
+        service_sub = service_parser.add_subparsers(dest="service_action", required=True)
+        for action in (
+            "status",
+            "start",
+            "restart",
+            "stop",
+            "update-engine",
+            "migrate",
+            "migration-classify",
+            "rollback",
+        ):
+            action_parser = service_sub.add_parser(action)
+            action_parser.add_argument("--json", action="store_true", dest="as_json")
+            if action in {"restart", "stop", "update-engine"}:
+                action_parser.add_argument(
+                    "--force",
+                    action="store_true",
+                    help="Proceed even when chats are active (after UI confirmation).",
+                )
+            if action == "migrate":
+                action_parser.add_argument(
+                    "--app-bundle",
+                    type=Path,
+                    required=True,
+                    help="Installed Ciaobot.app bundle requesting migration.",
+                )
+            if action == "start":
+                action_parser.add_argument(
+                    "--workspace",
+                    type=Path,
+                    default=None,
+                    help="Register the LaunchAgent for this workspace first if it is not installed.",
+                )
+            action_parser.set_defaults(
+                func=_service_command,
+                deprecated_alias=deprecated,
             )
-        if action == "migrate":
-            action_parser.add_argument(
-                "--app-bundle",
-                type=Path,
-                required=True,
-                help="Installed Ciaobot.app bundle requesting migration.",
-            )
-        action_parser.set_defaults(func=_desktop_service_command)
-    login_parser = desktop_service_sub.add_parser("login")
-    login_parser.add_argument("login_action", choices=("enable", "disable"))
-    login_parser.add_argument("--json", action="store_true", dest="as_json")
-    login_parser.set_defaults(func=_desktop_service_command)
+        login_parser = service_sub.add_parser("login")
+        login_parser.add_argument("login_action", choices=("enable", "disable"))
+        login_parser.add_argument("--json", action="store_true", dest="as_json")
+        login_parser.set_defaults(
+            func=_service_command,
+            deprecated_alias=deprecated,
+        )
 
-    # Separate from `desktop-service`, which controls the launchd engine. This
-    # group only manages removal of an old app bundle. Installation and updates
-    # are owned by scripts/install.sh and the signed Tauri updater.
+    add_service_parser(
+        "service",
+        "Start, stop and inspect the launchd-managed Ciaobot engine (macOS).",
+        deprecated=False,
+    )
+    add_service_parser(
+        "desktop-service",
+        "Deprecated alias of `ciao service` (used by Ciaobot.app).",
+        deprecated=True,
+    )
+
+    # Separate from `service`, which controls the launchd engine. This group
+    # only removes an old app bundle, for the compatibility window: the app
+    # itself is retired, and installation and updates are owned by
+    # scripts/install-engine.sh.
     desktop_parser = subparsers.add_parser(
         "desktop",
         help="Remove an installed Ciaobot.app desktop bundle.",
@@ -3805,8 +3962,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--app-dir",
         type=Path,
         default=None,
-        help="Directory holding Ciaobot.app (defaults to /Applications, "
-        "or ~/Applications on a non-admin account).",
+        help="Directory holding Ciaobot.app (defaults to ~/Applications, "
+        "falling back to /Applications when the bundle is only there).",
     )
     desktop_uninstall_parser.add_argument("--json", action="store_true", dest="as_json")
     desktop_uninstall_parser.set_defaults(func=_desktop_command)
@@ -3863,7 +4020,6 @@ def build_parser() -> argparse.ArgumentParser:
             "with a password. Only for a machine nobody else can reach."
         ),
     )
-    setup_parser.add_argument("--push-contact", help="Web Push contact to write when .env is new.")
     setup_parser.add_argument(
         "--python",
         default=None,
@@ -3890,7 +4046,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Directory to scan for legacy launcher bundles during migration. "
-            "Defaults to /Applications when writable, else ~/Applications."
+            "Defaults to ~/Applications."
         ),
     )
     setup_parser.add_argument(
@@ -4102,9 +4258,8 @@ def build_parser() -> argparse.ArgumentParser:
     # same reason `gws` is intercepted — argparse eats `--`-prefixed args before
     # a subparser's REMAINDER can see them). Do not give it a `func`.
     #
-    # It needs a `ciao` entry point at all because the bundled runtime puts only
-    # a `ciao` wrapper on PATH (`scripts/build-bundled-runtime.sh`): on a
-    # packaged install `python3 -m ciao.critique` resolves some external
+    # It needs a `ciao` entry point at all because a packaged install puts only
+    # a `ciao` wrapper on PATH: `python3 -m ciao.critique` resolves some external
     # interpreter that has neither `ciao` nor its dependencies, so /critique
     # failed for every user who had not installed from source.
     subparsers.add_parser(
@@ -4502,7 +4657,7 @@ def build_parser() -> argparse.ArgumentParser:
             "`Workspace/Memory-Proposals.md`. This is how the nightly curator "
             "queues a durable fact it discovered by reading a chat that never "
             "grew a session-insights section, so the fact becomes reviewable "
-            "and promotable like any archive-time proposal. Re-filing "
+            "and promotable like any other queue row. Re-filing "
             "identical text is a no-op."
         ),
     )
@@ -4655,7 +4810,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Take the curation lease and print this run's planned worklist.",
         description=(
             "Serializes the nightly run: one curation run per vault at a time, "
-            "and archive-time memory auto-apply stands down while the lease is "
+            "and the run that holds it is mid-consolidation while the lease is "
             "held. Prints the same plan as `curation-plan`. Exit 0 when the "
             "lease was taken, 75 when another run holds it (do not curate), "
             "and 0 with `\"empty\": true` when there is nothing to do — the "
@@ -5058,10 +5213,10 @@ def _gws_auth_helper_command(args: argparse.Namespace) -> int:
 def _resolve_critique_paths(args: list[str]) -> list[str]:
     """Make a relative ``--input`` absolute against the caller's directory.
 
-    The bundled launcher `cd`s into the runtime root before exec'ing Python
-    (`scripts/build-bundled-runtime.sh`), so a relative path — including the
-    `memory-vault/...` form the command doc explicitly supports — would resolve
-    against the app bundle and be reported missing. The launcher records where
+    The bundled launcher `cd`s into the runtime root before exec'ing Python, so
+    a relative path — including the `memory-vault/...` form the command doc
+    explicitly supports — would resolve against the app bundle and be reported
+    missing. The launcher records where
     the caller actually stood in ``CIAO_INVOCATION_CWD``; from source there is
     no cd and the current directory is already right.
     """
@@ -5109,6 +5264,10 @@ def main(argv: list[str] | None = None) -> int:
         return package_smoke.main(argv_list[1:])
     if argv_list[:1] == ["prepare-release"]:
         return release.main(argv_list[1:])
+    if argv_list[:1] == ["update"]:
+        from ciao.engine_update import main as update_main
+
+        return update_main(argv_list[1:])
     if argv_list[:1] == ["critique"]:
         from ciao.critique import main as critique_main
 

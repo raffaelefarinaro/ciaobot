@@ -25,6 +25,7 @@ _LOOPBACK_ADDRESSES = {"127.0.0.1", "::1", "localhost"}
 # Endpoints reachable with no session at all, from anywhere.
 _PUBLIC_API = {
     "/api/auth",
+    "/api/auth/check",
     "/api/startup-status",
     "/api/active-chats",
     "/api/setup-status",
@@ -35,14 +36,16 @@ _PUBLIC_API = {
 
 # Endpoints usable without a session, but only from a process on this machine.
 # `/api/menubar-chats` and `/api/menubar-notifications` are how the tray reads
-# chat titles and pending banners (it holds no cookie), and `/api/node/handover`
-# is the client-mode escape hatch offered on the login screen, which by
-# definition runs before any session exists. All are gated on the peer address
-# rather than the Host header, which a caller controls.
+# chat titles and pending banners (it holds no cookie). `/api/admin/drain` and
+# `/api/admin/drain/cancel` are the update coordinator's own drain handshake,
+# driven by `ciao update apply` before it bootstraps the detached updater job.
+# All are gated on the peer address rather than the Host header, which a caller
+# controls.
 _LOOPBACK_ONLY_API = {
     "/api/menubar-chats",
     "/api/menubar-notifications",
-    "/api/node/handover",
+    "/api/admin/drain",
+    "/api/admin/drain/cancel",
 }
 
 
@@ -98,30 +101,25 @@ def _split_host(value: str) -> tuple[str, int | None]:
 def _allowed_origin_hosts(request: Request | WebSocket) -> set[str]:
     """Hostnames — beyond the bound ``Host`` — an origin may legitimately match.
 
-    Covers the reverse-proxy / tunnel / host-alias case where the browser
-    reaches the app under a public hostname while the server binds to (and sees
-    ``Host``) something else:
-
-    - ``X-Forwarded-Host``: the original host a proxy declares. Browsers cannot
-      set this on a WebSocket/fetch handshake, so it can't be forged by a
-      cross-site page — only a fronting proxy sets it.
-    - ``CIAO_ALLOWED_ORIGINS``: an explicit operator allowlist of hosts/origins.
+    Covers the reverse-proxy / tunnel case where the browser reaches the app
+    under a public hostname while the server binds to (and sees ``Host``)
+    something else. ``X-Forwarded-Host`` is the original host a proxy declares.
+    Browsers cannot set it on a WebSocket/fetch handshake, so it can't be forged by a
+    cross-site page — only a fronting proxy sets it.
     """
-    from urllib.parse import urlsplit
-
     hosts: set[str] = set()
     forwarded = request.headers.get("x-forwarded-host", "")
     for part in forwarded.split(","):
         host, _port = _split_host(part.strip())
         if host:
             hosts.add(host.lower().rstrip("."))
-    state = getattr(getattr(request, "app", None), "state", None)
-    cfg = getattr(state, "config", None)
-    for entry in getattr(cfg, "pwa_allowed_origins", ()) or ():
-        host = urlsplit(entry).hostname if "//" in entry else _split_host(entry)[0]
-        if host:
-            hosts.add(host.lower().rstrip("."))
     return hosts
+
+
+def _effective_port(scheme: str, port: int | None) -> int | None:
+    if port is not None:
+        return port
+    return {"http": 80, "https": 443}.get(scheme.lower())
 
 
 def _same_origin(request: Request | WebSocket, origin: str) -> bool:
@@ -131,7 +129,12 @@ def _same_origin(request: Request | WebSocket, origin: str) -> bool:
         parsed = urlsplit(origin)
     except ValueError:
         return False
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+    ):
         return False
 
     request_host, request_port = _split_host(request.headers.get("host", ""))
@@ -140,12 +143,19 @@ def _same_origin(request: Request | WebSocket, origin: str) -> bool:
         request_port = request.url.port
 
     origin_host = parsed.hostname.lower()
-    origin_port = parsed.port
+    try:
+        origin_port = parsed.port
+    except ValueError:
+        return False
     if origin_host == request_host:
-        if origin_port is not None and request_port is not None and origin_port != request_port:
-            return False
-        return True
-    # Reached under a proxy-declared or operator-allowed host (port may differ
+        request_scheme = str(getattr(request.url, "scheme", "") or parsed.scheme)
+        request_scheme = {"ws": "http", "wss": "https"}.get(
+            request_scheme, request_scheme
+        )
+        return _effective_port(parsed.scheme, origin_port) == _effective_port(
+            request_scheme, request_port
+        )
+    # Reached under a proxy-declared host (port may differ
     # across the proxy hop, so it isn't compared here).
     return origin_host in _allowed_origin_hosts(request)
 
@@ -174,7 +184,7 @@ async def authorize_websocket(websocket: WebSocket) -> bool:
     if origin and not _same_origin(websocket, origin):
         logger.warning(
             "WebSocket origin rejected: origin=%s host=%s x-forwarded-host=%s "
-            "(set CIAO_ALLOWED_ORIGINS if reaching Ciaobot under a proxy host)",
+            "(a reverse proxy must forward X-Forwarded-Host)",
             origin,
             websocket.headers.get("host", ""),
             websocket.headers.get("x-forwarded-host", ""),

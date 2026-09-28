@@ -88,6 +88,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ciao.entity_types import EntityTypeRegistry, load_entity_types
 from ciao.memory_proposals import MemoryProposal, append_proposals
 from ciao.vault_index import (
     DIR_TYPE_MAP,
@@ -123,10 +124,36 @@ RECEIPT_VERSION = 1
 
 VAULT_PREFIX = "memory-vault"
 
-# The folder a person note lives in, taken from the directory→type map so the two
+# The folder a person note lives in, read from the directory→type map so the two
 # cannot drift: `_infer_type` already treats `People/` as the person folder, and a
 # vault that renames it would otherwise be invisible here.
-PEOPLE_DIRS = frozenset(name for name, kind in DIR_TYPE_MAP.items() if kind == "person")
+#
+# A FUNCTION, not a frozenset built at import: that map is the vault's own category
+# list now (`entity_types`), and a value frozen at import could never see the
+# `<vault>/entity-types.yaml` a caller's registry was built from. Called with no
+# argument it is the shipped map, which is what a caller that cannot reach a vault
+# gets — and with no vault file it is what every caller gets.
+def dir_type_map(registry: EntityTypeRegistry | None = None) -> dict[str, str]:
+    """Folder -> type for *registry*, or the shipped map when it is omitted.
+
+    One reader of :data:`DIR_TYPE_MAP`, so the fallback and the registry cannot
+    disagree about what a folder means.
+    """
+    return DIR_TYPE_MAP if registry is None else registry.dir_type_map()
+
+
+def people_dirs(registry: EntityTypeRegistry | None = None) -> frozenset[str]:
+    """The folders whose notes are people, for *registry* or the shipped map.
+
+    Optional on the same argument as everywhere else: a caller holding a vault's
+    category list passes it, and a category the owner gave the person id — a
+    renamed folder included — is a re-home candidate, while a caller with no vault
+    in hand (a unit seam) keeps `People/`.
+    """
+    return frozenset(
+        name for name, kind in dir_type_map(registry).items() if kind == "person"
+    )
+
 
 # Person-note FILENAMES (not directories, so distinct from `EXCLUDED_TOP_DIRS`)
 # that are never candidates for re-homing. `People/User.md` is the operator's own
@@ -408,26 +435,37 @@ def vault_git_state(vault_root: Path, *, touched: Iterable[str] = ()) -> dict[st
 # ---- workspaces and roles --------------------------------------------------
 
 
-def vault_workspaces(vault_root: Path) -> list[str]:
-    """Workspace directories present in the vault, when no registry is given.
+def vault_workspaces(
+    vault_root: Path, *, registry: EntityTypeRegistry | None = None
+) -> list[str]:
+    """Workspace directories present in the vault, for a caller with no config.
 
     `Logs/`, `Templates/`, dotfolders and the *note-type* folders of a legacy
     single-root vault (`People/`, `Projects/`, …) are not workspaces — the same
-    distinction `_workspace_of` draws by testing `DIR_TYPE_MAP` membership.
-    Callers with a config should pass `config.workspace_names()` instead: the
+    distinction `_workspace_of` draws by testing the directory→type map. Callers
+    with a config should pass `config.workspace_names()` instead: the *workspace*
     registry is the truth, and a stray directory is not a workspace just because
     it exists.
+
+    ``registry`` here is the *category* registry, not the workspace registry the
+    paragraph above recommends, and it is optional: omitted, it is loaded from the
+    root this call was given (resolved, so the loader's cache key is the same root
+    a caller passing a resolved path would produce), which is what keeps a renamed
+    category folder from being claimed as a workspace name. With no vault file the
+    loaded map is the shipped one, so the answer is exactly what it was before.
     """
     root = Path(vault_root)
     if not root.is_dir():
         return []
+    if registry is None:
+        registry = load_entity_types(root.resolve())
     return sorted(
         child.name
         for child in root.iterdir()
         if child.is_dir()
         and not child.name.startswith(".")
         and child.name not in EXCLUDED_TOP_DIRS
-        and child.name not in DIR_TYPE_MAP
+        and child.name not in dir_type_map(registry)
     )
 
 
@@ -605,7 +643,13 @@ def _counterpart_file(source: Path, workspace: str, other: str, tail: Sequence[s
     return None
 
 
-def _links_back(target: Path, workspace: str, stem: str) -> bool:
+def _links_back(
+    target: Path,
+    workspace: str,
+    stem: str,
+    *,
+    registry: EntityTypeRegistry | None = None,
+) -> bool:
     """Whether ``target`` names this note in its own ``related``.
 
     A mutual link is the strongest identity claim the vault can make, and unlike
@@ -613,6 +657,11 @@ def _links_back(target: Path, workspace: str, stem: str) -> bool:
     edited to say it. It is what lets two notes be recognised as one person when
     the filenames cannot say so — `Mira` and `Mira-Rossi-Acme`, where the
     work note carries a disambiguating suffix no real alias would contain.
+
+    ``registry`` is the vault's category list, threaded rather than loaded: this
+    function holds a path into a note and not a vault root, and a ref naming the
+    person folder is only a person ref under the folder map the caller's vault
+    uses. Omitted, that is the shipped map.
     """
     if not target.is_file():
         return False
@@ -628,7 +677,7 @@ def _links_back(target: Path, workspace: str, stem: str) -> bool:
         # (`People/Mira`), which can only mean the other root once split.
         if parts[0] == workspace and len(parts) >= 3:
             candidate = parts[-1]
-        elif parts[0] in PEOPLE_DIRS and len(parts) >= 2:
+        elif parts[0] in people_dirs(registry) and len(parts) >= 2:
             candidate = parts[-1]
         else:
             continue
@@ -642,6 +691,8 @@ def _linked_counterpart(
     workspace: str,
     aliases: Sequence[str],
     registered: Iterable[str],
+    *,
+    registry: EntityTypeRegistry | None = None,
 ) -> str:
     """The other workspace holding this person's other note, or "".
 
@@ -650,6 +701,11 @@ def _linked_counterpart(
     and therefore drops every ref naming another workspace — which is precisely
     the ref this asks about. (14 such refs exist on the operator's vault; see
     the progress ledger.)
+
+    ``registry`` is the vault's category list, threaded for the same reason as in
+    :func:`_links_back`: this function reads one note and holds no vault root, and
+    the ref it is matching is `<workspace>/<person folder>/<name>` — the person
+    folder is the caller's vault's, not a constant.
     """
     others = {name for name in registered if name and name != workspace}
     if not others or not source.is_file():
@@ -661,7 +717,7 @@ def _linked_counterpart(
     stem = source.stem
     for ref in _frontmatter_related_refs(text):
         parts = Path(_new_ref(ref)).parts
-        if len(parts) < 3 or parts[0] not in others or parts[1] not in PEOPLE_DIRS:
+        if len(parts) < 3 or parts[0] not in others or parts[1] not in people_dirs(registry):
             continue
         target_stem = Path(parts[-1]).stem
         if _names_same_person(stem, aliases, target_stem):
@@ -670,7 +726,7 @@ def _linked_counterpart(
         # so. Read the far side only when the cheap test failed.
         tail = [*parts[1:-1], f"{target_stem}.md"]
         target = _counterpart_file(source, workspace, parts[0], tail)
-        if target is not None and _links_back(target, workspace, stem):
+        if target is not None and _links_back(target, workspace, stem, registry=registry):
             return parts[0]
     return ""
 
@@ -708,19 +764,32 @@ def detect_misfiled_people(
     workspaces: Sequence[str] | None = None,
     entries: list[Entry] | None = None,
     targets: Sequence[tuple[Path, str, Path]] | None = None,
+    registry: EntityTypeRegistry | None = None,
 ) -> list[Candidate]:
     """Bucket every person note into mechanical, judgement, or correctly filed.
 
-    A note is only examined when it sits at `<workspace>/People/…` for a
+    A note is only examined when it sits at `<workspace>/<person folder>/…` for a
     *registered* workspace: `People/Mo.md` in a legacy single-root vault has no
     other workspace to be misfiled from.
 
     ``entries`` lets a caller that already scanned the vault hand the scan over —
     the planner needs the same pass to build its filename index, and reading every
     note twice for one migration is waste, not caution.
+
+    ``registry`` is the vault's category list, and it is optional: omitted, it is
+    loaded from this vault root, so the folder a person note lives in is the one
+    the owner's categories name (and the one a workspace-detection pass excludes
+    from the workspace names) rather than a constant frozen at import. A vault
+    that renamed `People/` — or added a second person category — re-homes on its
+    own vocabulary; with no vault file the loaded list is the shipped one, which
+    is what every existing caller saw.
     """
     root = Path(vault_root)
-    names = list(workspaces) if workspaces is not None else vault_workspaces(root)
+    if registry is None:
+        registry = load_entity_types(root.resolve())
+    names = (
+        list(workspaces) if workspaces is not None else vault_workspaces(root, registry=registry)
+    )
     roles = resolve_role_workspaces(names)
     role_of = {name: role for role, name in roles.items()}
     registered = set(names)
@@ -740,7 +809,7 @@ def detect_misfiled_people(
             if len(parts) < 2 or parts[0] not in registered:
                 continue
             workspace, tail = parts[0], parts[1:]
-        if len(tail) < 2 or tail[0] not in PEOPLE_DIRS:
+        if len(tail) < 2 or tail[0] not in people_dirs(registry):
             continue
         if tail[-1].casefold() in EXCLUDED_PERSON_FILENAMES:
             continue
@@ -770,7 +839,9 @@ def detect_misfiled_people(
         # because tags naming two workspaces is the one case the tag rules refuse
         # to decide. Checked before the buckets so it covers the untagged case
         # too, where the proposal was to move the note on top of its counterpart.
-        if _linked_counterpart(source, workspace, entry.aliases, registered):
+        if _linked_counterpart(
+            source, workspace, entry.aliases, registered, registry=registry
+        ):
             continue
 
         if not signalled_roles:
@@ -1552,13 +1623,21 @@ def move_note_between_roots(
 
 
 def plan_rehome(
-    vault_root: Path, *, workspaces: Sequence[str] | None = None
+    vault_root: Path,
+    *,
+    workspaces: Sequence[str] | None = None,
+    registry: EntityTypeRegistry | None = None,
 ) -> dict[str, Any]:
     """Everything the migration would do, computed without writing anything.
 
     Separate from applying it so the git rail can be scoped to exactly the files
     the plan names (see :func:`vault_git_state`) and so a dry run and a real run
     can never disagree about what was going to happen.
+
+    ``registry`` is the vault's category list, and it is optional: omitted, both
+    the workspace detection and the person-folder test below load one from this
+    root, which is the same answer. A caller that already holds one passes it so a
+    preview, the scan and the write all read one list.
     """
     root = Path(vault_root)
     plan: dict[str, Any] = {
@@ -1575,10 +1654,16 @@ def plan_rehome(
         plan["skipped"] = "vault root does not exist"
         return plan
 
-    names = list(workspaces) if workspaces is not None else vault_workspaces(root)
+    if registry is None:
+        registry = load_entity_types(root.resolve())
+    names = (
+        list(workspaces) if workspaces is not None else vault_workspaces(root, registry=registry)
+    )
     plan["workspaces"] = names
     entries = scan_vault(root)
-    candidates = detect_misfiled_people(root, workspaces=names, entries=entries)
+    candidates = detect_misfiled_people(
+        root, workspaces=names, entries=entries, registry=registry
+    )
     plan["needs_judgement"] = [
         candidate.as_dict() for candidate in candidates if candidate.bucket == "needs_judgement"
     ]
@@ -1699,6 +1784,7 @@ def rehome_vault_people(
     apply: bool = False,
     workspaces: Sequence[str] | None = None,
     plan: dict[str, Any] | None = None,
+    registry: EntityTypeRegistry | None = None,
 ) -> dict[str, Any]:
     """Re-file the tag-obvious person notes and repoint every reference to them.
 
@@ -1714,11 +1800,14 @@ def rehome_vault_people(
 
     ``plan`` accepts the output of :func:`plan_rehome` so the gated entry point
     can scope its git rail to the plan's files and then execute *that* plan —
-    re-planning would let the preview and the write disagree.
+    re-planning would let the preview and the write disagree. ``registry`` is the
+    vault's category list, used only by that re-plan, for the same reason: a
+    preview and a write that read different vocabularies would disagree about
+    which notes are people.
     """
     root = Path(vault_root)
     if plan is None:
-        plan = plan_rehome(root, workspaces=workspaces)
+        plan = plan_rehome(root, workspaces=workspaces, registry=registry)
     summary: dict[str, Any] = {
         "vault_root": str(root),
         "applied": bool(apply),
@@ -1959,6 +2048,7 @@ def rehome_people(
     apply: bool = False,
     force: bool = False,
     workspaces: Sequence[str] | None = None,
+    registry: EntityTypeRegistry | None = None,
 ) -> dict[str, Any]:
     """Run the re-homing behind its safety rails and record the receipt.
 
@@ -1977,10 +2067,14 @@ def rehome_people(
     its receipt left that note misfiled with every reference to it already
     pointing at a path it never reached, while the CLI reported a finished
     migration. ``summary["complete"]`` says which kind of run this was.
+
+    ``registry`` is the vault's category list, and it is optional: omitted, the
+    plan below loads one from this vault root and the write executes that same
+    plan, so the preview and the apply can never read two vocabularies.
     """
     receipt = read_receipt(runtime_root)
     recorded = peek_receipt(runtime_root)
-    plan = plan_rehome(vault_root, workspaces=workspaces)
+    plan = plan_rehome(vault_root, workspaces=workspaces, registry=registry)
     git = vault_git_state(vault_root, touched=_touched_paths(plan))
     if apply and not force:
         if receipt is not None:
@@ -1992,7 +2086,9 @@ def rehome_people(
         if git["dirty"]:
             return {"skipped": "vault has uncommitted changes", "git": git}
 
-    summary = rehome_vault_people(vault_root, apply=apply, workspaces=workspaces, plan=plan)
+    summary = rehome_vault_people(
+        vault_root, apply=apply, workspaces=workspaces, plan=plan, registry=registry
+    )
     summary["git_head_before"] = git["head"]
     summary["forced"] = bool(force)
     summary["complete"] = not summary["failed"]

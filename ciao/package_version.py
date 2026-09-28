@@ -16,15 +16,10 @@ from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
     pass
 
-from ciao import __version__
+from ciao import __version__, install_receipt
 
 
 DEFAULT_GITHUB_REPO = "raffaelefarinaro/ciaobot"
-
-
-def _github_repo() -> str:
-    """Return the GitHub repo (owner/name) used for release lookups."""
-    return (os.environ.get("CIAO_GITHUB_REPO") or "").strip() or DEFAULT_GITHUB_REPO
 
 
 def latest_release_redirect_url(repo: str | None = None) -> str:
@@ -37,7 +32,7 @@ def latest_release_redirect_url(repo: str | None = None) -> str:
     resolves the latest *stable* (non-prerelease) release, matching the REST
     endpoint's semantics. No token is required.
     """
-    repo = (repo or _github_repo()).strip("/")
+    repo = (repo or DEFAULT_GITHUB_REPO).strip("/")
     return f"https://github.com/{repo}/releases/latest"
 
 
@@ -196,7 +191,7 @@ def package_changelog(
     returned newest-first. Any failure is reported via ``error`` and yields an
     empty commit list so the caller can still offer the update.
     """
-    repo = (repo or _github_repo()).strip("/")
+    repo = (repo or DEFAULT_GITHUB_REPO).strip("/")
     commits: list[dict[str, str]] = []
     error = ""
     compare_url = ""
@@ -245,17 +240,75 @@ def package_changelog(
     }
 
 
-def detect_install_mode() -> str:
-    """Return the runtime distribution mode used by the current process."""
-    import sys
+_BUNDLE_RUNTIME_MARKER = "Ciaobot.app/Contents/Resources/ciao-runtime"
+
+
+def _inside_app_bundle(path: str | os.PathLike[str] | None) -> bool:
+    """Whether ``path`` resolves inside a Ciaobot.app embedded runtime."""
+    if not path:
+        return False
     from pathlib import Path
 
-    # The bundled marker is authoritative. The embedded runtime imports the
-    # same ``ciao`` package as a source checkout, so checking the checkout
-    # first misclassifies a bundled app during development and in tests.
     try:
-        executable = Path(sys.executable).resolve()
-        if os.environ.get("CIAO_BUNDLED_APP") or "Ciaobot.app/Contents/Resources/ciao-runtime" in str(executable):
+        resolved = str(Path(path).resolve())
+    except (OSError, RuntimeError, ValueError):
+        resolved = str(path)
+    return _BUNDLE_RUNTIME_MARKER in resolved or _BUNDLE_RUNTIME_MARKER in str(path)
+
+
+def _imported_ciao_file() -> str | None:
+    ciao_module = sys.modules.get("ciao")
+    file = getattr(ciao_module, "__file__", None)
+    return file if isinstance(file, str) and file else None
+
+
+def _in_source_checkout(ciao_file: str | None) -> bool:
+    """Whether ``ciao_file`` is the package of a git source checkout."""
+    if not ciao_file:
+        return False
+    from pathlib import Path
+
+    try:
+        project_root = Path(ciao_file).resolve().parent.parent
+        git_marker = project_root / ".git"
+        return (project_root / "pyproject.toml").is_file() and (
+            git_marker.is_dir() or git_marker.is_file()
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def running_from_app_bundle() -> bool:
+    """Whether this process is the engine embedded in Ciaobot.app.
+
+    Decided from where the ``ciao`` package and the interpreter actually live,
+    not from ``CIAO_BUNDLED_APP`` alone: the bundled launcher exports that
+    marker, so every shell a Ciaobot chat opens inherits it, and a source dev
+    server started from such a shell would otherwise call itself bundled and
+    refuse every redeploy.
+
+    The imported package wins over the interpreter. The bundled launcher also
+    prepends the bundle's ``bin`` to ``PATH``, so ``ciao dev`` run from an app
+    shell can reuse the bundled interpreter while importing ``ciao`` from the
+    checkout it was started in; that server is a source checkout.
+    """
+    ciao_file = _imported_ciao_file()
+    if _inside_app_bundle(ciao_file):
+        return True
+    if _in_source_checkout(ciao_file):
+        return False
+    return _inside_app_bundle(sys.executable)
+
+
+def detect_install_mode() -> str:
+    """Return the runtime distribution mode: bundled_app, editable, installer or unknown."""
+    # Bundle location is authoritative when the package itself lives inside
+    # the app bundle. A package imported from a git checkout is `editable`
+    # even on the bundled interpreter (see ``running_from_app_bundle``). An
+    # inherited CIAO_BUNDLED_APP marker without a bundle location does not
+    # count.
+    try:
+        if running_from_app_bundle():
             return "bundled_app"
     except Exception:
         pass
@@ -263,16 +316,16 @@ def detect_install_mode() -> str:
     try:
         import ciao
 
-        ciao_file = Path(ciao.__file__).resolve()
-        project_root = ciao_file.parent.parent
-        git_marker = project_root / ".git"
-        if (
-            (project_root / "pyproject.toml").is_file()
-            and (git_marker.is_dir() or git_marker.is_file())
-        ):
+        if _in_source_checkout(ciao.__file__):
             return "editable"
     except Exception:
-        ciao_file = None
+        pass
+
+    try:
+        if install_receipt.running_receipt() is not None:
+            return "installer"
+    except Exception:
+        pass
 
     return "unknown"
 
@@ -370,13 +423,28 @@ def update_package(
 ) -> dict[str, Any]:
     """Explain how the current distribution is updated.
 
-    Production installs are updated atomically by the Tauri app updater or by
-    re-running the signed one-line installer. There is no package-manager
-    branch here anymore.
+    Production installs are updated atomically by re-running the signed one-line
+    installer. There is no package-manager branch here anymore.
     """
     import sys
 
     mode = detect_install_mode()
+    if mode == "installer":
+        # Before the Linux branch on purpose. Ownership, not platform, decides
+        # the answer: a Linux `systemd-user` engine installed by the shell
+        # installer is a managed install, and answering with the generic
+        # administrator workflow (no `ciao update stage`) was the #567 review
+        # finding — the platform check ran first and swallowed this branch.
+        #
+        # The command follows the platform, not just the mode: install.sh exits
+        # on Linux with "this installer supports macOS only", so pointing a
+        # Linux installer engine at it would be advice that cannot work.
+        return {
+            "ok": False,
+            "mode": mode,
+            "error": "This engine was installed by the Ciaobot installer. Stage an update with `ciao update stage`; applying it from the app arrives in a later release.",
+            "command": "ciao update stage" if sys.platform.startswith("linux") else "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install-engine.sh | sh",
+        }
     if sys.platform.startswith("linux"):
         # The documented Linux install is `pip install -e`, which
         # detect_install_mode() classifies as `editable`. A generic

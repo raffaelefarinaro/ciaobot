@@ -123,7 +123,79 @@ export const useProposalsStore = defineStore('proposals', () => {
     }
   }
 
+  // -- Row previews ----------------------------------------------------------
+  //
+  // Every queue row states what accepting it does — create a note, add to one,
+  // merge into one — so the preview is fetched for the rows on screen without
+  // waiting for a click. At most PREFETCH_CONCURRENCY run at once: a queue of
+  // forty rows must not open forty requests that each read a destination file.
+  // An id is tried once per session; a failure stays on the row as an error
+  // with its own retry (`loadPreview`) rather than being re-requested on
+  // every render.
+  const PREFETCH_CONCURRENCY = 3
+  const prefetchQueue: string[] = []
+  const prefetchTried = new Set<string>()
+  let prefetchActive = 0
+
+  /** Re-prefetch dropped previews for the rows that are still queued. */
+  function refetchPreviews(ids: string[]) {
+    if (!ids.length) return
+    const queued = new Set(rows.value.map(r => r.id))
+    const still = ids.filter(id => queued.has(id))
+    if (still.length) void prefetchPreviews(still)
+  }
+
+  function prefetchPreviews(ids: string[], limit = PREFETCH_CONCURRENCY): Promise<void> {
+    for (const id of ids) {
+      if (prefetchTried.has(id) || previews.value[id] || previewLoading.value.has(id)) continue
+      prefetchTried.add(id)
+      prefetchQueue.push(id)
+    }
+    const workers: Promise<void>[] = []
+    while (prefetchActive < limit && prefetchQueue.length) {
+      prefetchActive += 1
+      workers.push((async () => {
+        try {
+          let id = prefetchQueue.shift()
+          while (id !== undefined) {
+            // Loaded meanwhile (a card opened it): nothing to fetch.
+            if (!previews.value[id] && !previewLoading.value.has(id)) await loadPreview(id)
+            id = prefetchQueue.shift()
+          }
+        } finally {
+          prefetchActive -= 1
+        }
+      })())
+    }
+    return Promise.all(workers).then(() => undefined)
+  }
+
+  /** Previews of other rows that write the same file as `ids` were computed
+   * against the destination those accepts just changed. Their diff and their
+   * pinned revision are both out of date, so drop them (and let the prefetch
+   * try them again) before the next accept hands a stale revision back and is
+   * refused as a conflict. Returns the dropped ids for the caller to refetch.
+   * Conflicted rows keep theirs: they are re-previewed explicitly. */
+  function dropSiblingPreviews(ids: string[]): string[] {
+    const acted = new Set(ids)
+    const destinations = new Set(
+      ids.map(id => previews.value[id]?.destination).filter((d): d is string => Boolean(d)),
+    )
+    if (!destinations.size) return []
+    const dropped: string[] = []
+    for (const [id, preview] of Object.entries(previews.value)) {
+      if (acted.has(id) || conflictIds.value.has(id)) continue
+      if (!destinations.has(preview.destination)) continue
+      dropPreview(id)
+      dropped.push(id)
+    }
+    return dropped
+  }
+
   function dropPreview(id: string) {
+    // A dropped preview may be wanted again (a sibling accept moved its
+    // destination, or an undo re-queued the row), so the prefetch may retry it.
+    prefetchTried.delete(id)
     if (id in previews.value) {
       const next = { ...previews.value }
       delete next[id]
@@ -403,7 +475,9 @@ export const useProposalsStore = defineStore('proposals', () => {
       if (opts?.expectedRevision) body.expected_revision = opts.expectedRevision
       if (opts?.text) body.text = opts.text
       await api.post<ProposalBatchResponse>(`/api/proposals/${id}/${action}${query}`, body)
+      const stale = action === 'accept' ? dropSiblingPreviews([id]) : []
       await fetch({ force: true })
+      refetchPreviews(stale)
       invalidateHistory()
       return { ok: true }
     } catch (e) {
@@ -443,9 +517,10 @@ export const useProposalsStore = defineStore('proposals', () => {
     error.value = ''
     lastBatchSummary.value = []
     try {
-      // Revisions only for rows whose preview this session actually loaded.
-      // A row accepted straight from the list sends none and keeps the
-      // unguarded behaviour, rather than being blocked on a card nobody opened.
+      // Revisions only for rows whose preview this session actually loaded —
+      // which, now the queue prefetches the preview each row shows, is
+      // normally every row on screen. A row whose preview never arrived sends
+      // none and keeps the unguarded behaviour rather than being blocked.
       const revisions: Record<string, string> = {}
       for (const id of ids) {
         const revision = previews.value[id]?.revision
@@ -465,8 +540,10 @@ export const useProposalsStore = defineStore('proposals', () => {
       // bulk accept with no revision: the guarded write would silently
       // downgrade to unguarded on exactly the rows known to have moved.
       // Those rows stay, and are re-previewed below onto fresh state.
+      const stale = action === 'accept' ? dropSiblingPreviews(ids.filter(id => !conflicted.includes(id))) : []
       for (const id of ids) if (!conflicted.includes(id)) dropPreview(id)
       await fetch({ force: true })
+      refetchPreviews(stale)
       for (const id of conflicted) await loadPreview(id)
       invalidateHistory()
     } catch (e) {
@@ -614,7 +691,7 @@ export const useProposalsStore = defineStore('proposals', () => {
 
   return {
     rows, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, loadError, fetch, ensureLoaded, act, batch, dismissOlderThan,
-    previews, previewErrors, isPreviewLoading, loadPreview, dropPreview, conflictIds, lastBatchSummary,
+    previews, previewErrors, isPreviewLoading, loadPreview, prefetchPreviews, dropPreview, conflictIds, lastBatchSummary,
     receipts, receiptErrors, receiptKey, isReceiptLoading, loadReceipt, undoReceipt,
     kindFilter, search, selected,
     scopedRows, visibleRows, kindCounts, resetFilters,

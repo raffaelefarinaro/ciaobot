@@ -17,7 +17,23 @@ export function chatWsReconnectDelayMs(attempt: number): number {
   return Math.min(50 * 2 ** (attempt - 1), 2000)
 }
 
-/** Compatibility check for host proxies from before `host_unreachable` existed. */
+/**
+ * The retired client proxy's connection error. Nothing produces it any more, but
+ * a transcript written while it existed can still hold the bubble, so
+ * `chatHistory.normalizeMessages` keeps stripping it.
+ */
 export function isHostConnectionUnavailableMessage(message: string): boolean {
   return message.trim().toLowerCase().startsWith('host ws unreachable')
+}
+
+export function isWsAuthClose(code: number | undefined): boolean {
+  return code === 4001 || code === 4400
+}
+
+export function isWsPolicyClose(code: number | undefined): boolean {
+  return code === 4003
+}
+
+export function isTerminalWsClose(code: number | undefined): boolean {
+  return isWsAuthClose(code) || isWsPolicyClose(code)
 }

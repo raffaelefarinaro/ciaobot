@@ -438,6 +438,9 @@ def test_resolve_permission_strips_event_from_replay_buffer() -> None:
     assert all(
         ev.get("type") != "permission_request" for ev in replay
     ), f"permission_request leaked into replay: {replay}"
+    assert all(
+        ev.get("type") != "permission_resolved" for ev in replay
+    ), "ephemeral resolution control polluted replay"
     # The surrounding text events still replay so the trace stays intact.
     assert {"type": "text_delta", "text": "thinking..."} in replay
     assert {"type": "text_delta", "text": "more"} in replay

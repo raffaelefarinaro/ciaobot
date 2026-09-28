@@ -1,0 +1,261 @@
+/* Shared by the two Memory decision lists (Suggested, To revisit), loaded into
+   each with `<style scoped src>`: a heading and one muted line, filter chips,
+   hairline rows with a stacked neutral action column, and the bordered mono
+   box that holds a diff or a quoted line. Scoped rules never reach a child, so
+   both panels pull the same sheet rather than copying rules. */
+
+.mr-head {
+  margin: 0;
+  color: var(--fg);
+  font-size: calc(16px * var(--font-scale, 1));
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+}
+
+.mr-lede {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  max-width: 64ch;
+}
+
+.mr-lede strong { color: var(--fg); font-weight: 600; }
+
+/* ── Filter chips ─────────────────────────────────────────────────────────
+   Pills, because they are a true selector; the selected one takes the violet
+   secondary tint, never the pink that marks location and the primary action. */
+.mr-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mr-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  background: none;
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: border-color 120ms var(--ease), background 120ms var(--ease), color 120ms var(--ease);
+}
+
+.mr-chip:hover { color: var(--fg); border-color: var(--border-strong); }
+
+.mr-chip[aria-pressed='true'] {
+  border-color: color-mix(in srgb, var(--accent2) 70%, var(--border));
+  background: color-mix(in srgb, var(--accent2) 20%, transparent);
+  color: var(--fg);
+}
+
+.mr-chip-count {
+  color: var(--fg3);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.mr-chip[aria-pressed='true'] .mr-chip-count { color: var(--fg); }
+
+.mr-chip:focus-visible,
+.mr-btn:focus-visible,
+.mr-link:focus-visible,
+.mr-flag:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ── Row actions ──────────────────────────────────────────────────────────
+   Every row is the same routine choice, so none of them gets the pink primary:
+   neutral bordered buttons, a quiet one, and a text link. */
+.mr-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  /* One width for every row, so the text column and its boxes line up down
+     the list instead of shifting with each row's longest verb. */
+  width: 8.5rem;
+}
+
+.mr-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 120ms var(--ease);
+}
+
+.mr-btn:hover:not(:disabled) { border-color: var(--fg3); }
+.mr-btn:disabled { opacity: 0.55; cursor: default; }
+
+.mr-btn--quiet {
+  background: none;
+  color: var(--fg2);
+  font-weight: 500;
+}
+
+.mr-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.mr-link:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
+.mr-link:disabled { color: var(--fg3); cursor: default; }
+
+/* ── The mono box: a diff, or the lines a flag was raised on ─────────────── */
+.mr-box {
+  margin: var(--space-2) 0 0;
+  max-width: 72ch;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.mr-box-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg3);
+  font-size: var(--text-sm);
+}
+
+.mr-box-lines {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.mr-box-line {
+  display: grid;
+  grid-template-columns: 3.2em 1.2em minmax(0, 1fr);
+  padding-right: 12px;
+  color: var(--fg2);
+}
+
+.mr-box-line--nosign { grid-template-columns: 3.2em minmax(0, 1fr); }
+.mr-box-line--nonum { grid-template-columns: 1.2em minmax(0, 1fr); padding-left: 10px; }
+
+.mr-box-num {
+  padding-right: 8px;
+  color: var(--fg3);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.mr-box-sign { color: var(--fg3); user-select: none; }
+
+.mr-box-text {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mr-box-line--added { background: color-mix(in srgb, var(--success) 13%, transparent); color: var(--fg); }
+.mr-box-line--added .mr-box-sign { color: var(--fg); }
+.mr-box-line--removed { background: color-mix(in srgb, var(--error) 12%, transparent); }
+.mr-box-line--removed .mr-box-text {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--error) 60%, transparent);
+}
+.mr-box-line--hit { background: color-mix(in srgb, var(--warning) 10%, transparent); color: var(--fg); }
+
+.mr-box-line mark {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--warning) 35%, transparent);
+  color: inherit;
+}
+
+.mr-box-body {
+  margin: 0;
+  padding: 8px 12px;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+}
+
+.mr-box-body code,
+.mr-box-foot code {
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
+
+.mr-box-foot {
+  margin: 0;
+  padding: 7px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.mr-box-foot strong { color: var(--fg2); font-weight: 600; }
+
+.mr-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (pointer: coarse) {
+  .mr-chip,
+  .mr-btn,
+  .mr-link { min-height: var(--touch); }
+}
+
+@media (max-width: 640px) {
+  .mr-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    width: auto;
+  }
+  .mr-actions .mr-btn { flex: 1 1 0; min-height: var(--touch); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mr-chip,
+  .mr-btn { transition: none; }
+}

@@ -2,8 +2,8 @@
 
 The env-backed :class:`ciao.config.CiaoConfig` stays the source of
 defaults; this store holds the small set of knobs the PWA Settings →
-Models tab can change at runtime (internal-routine models and the voice
-transcription engine). Values are applied as an overlay onto the live
+Models tab can change at runtime (internal-routine models).
+Values are applied as an overlay onto the live
 config object so call sites keep reading ``config.*`` and PATCHes take
 effect without a restart. Empty string means "no override, use the
 config/env default".
@@ -67,6 +67,23 @@ _NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
     "provider_insights_models": _clean_provider_map,
     "provider_default_modes": _clean_default_modes,
 }
+_BOOLEAN_FIELDS = {"insights_enabled", "trajectories_enabled", "push_all_devices"}
+
+# Apple's on-device model used to be an insights option. It is gone, so a
+# stored sentinel reads as Automatic instead of reaching a provider as a
+# literal model id ("there's an issue with the selected model (apple)").
+_RETIRED_MODEL_IDS = frozenset({"apple", "apfel"})
+
+
+def _drop_retired_models(settings: "AppSettings") -> None:
+    if settings.insights_model.lower() in _RETIRED_MODEL_IDS:
+        settings.insights_model = ""
+    if settings.provider_insights_models:
+        settings.provider_insights_models = {
+            provider: model
+            for provider, model in settings.provider_insights_models.items()
+            if model.strip().lower() not in _RETIRED_MODEL_IDS
+        } or None
 
 
 def _default_model_settings(config: object, descriptor: object) -> Any:
@@ -93,14 +110,17 @@ class AppSettings:
     provider.
     """
 
-    # Model used by post-archive session-insights extraction.
+    insights_enabled: bool = True
+    trajectories_enabled: bool = True
+    # Web Push every subscription (this machine included) and skip the
+    # tray notification log. Off while Ciaobot.app's menu bar still shows
+    # this machine's banners; the PWA-only engine turns it on (#562).
+    push_all_devices: bool = False
+    # Model used by the post-archive memory pass.
     insights_model: str = ""
+    # HTTPS origin other devices should use (e.g. Tailscale Serve); "" = none.
+    trusted_url: str = ""
 
-    # BCP-47 language for the on-device voice engines.
-    transcription_locale: str = ""
-    # macOS voice identifier for read-aloud; empty means the sidecar picks the
-    # best installed voice for the locale.
-    tts_local_voice: str = ""
     # Comma-separated list of models for the adversarial_review MCP tool.
     critique_models: str = ""
     # Per-runtime-provider default model for new chats, keyed by provider id.
@@ -121,7 +141,7 @@ class AppSettings:
     # provider's own default ("auto").
     provider_default_thinking: dict[str, str] | None = None
 
-    # Per-provider session-insights model. Missing entry = the provider's
+    # Per-provider memory-pass model. Missing entry = the provider's
     # balanced default.
     provider_insights_models: dict[str, str] | None = None
 
@@ -131,6 +151,7 @@ class AppSettingsStore:
 
     def __init__(self, path: Path) -> None:
         self._path = path
+        self._explicit_fields: set[str] = set()
         self.settings = self._load()
         # Env-backed defaults captured on the first apply_to_config() call,
         # so clearing an override restores the original value.
@@ -144,25 +165,34 @@ class AppSettingsStore:
         except (OSError, ValueError):
             logger.warning("Unreadable app settings at %s; using defaults", self._path)
             return AppSettings()
+        if isinstance(raw, dict):
+            self._explicit_fields.update(
+                key for key in _BOOLEAN_FIELDS if isinstance(raw.get(key), bool)
+            )
         string_fields = {
             field.name
             for field in fields(AppSettings)
             if field.name not in _NESTED_CLEANERS
+            and field.name not in _BOOLEAN_FIELDS
         }
         settings = AppSettings()
         for key, value in raw.items():
             if key in string_fields and isinstance(value, str):
                 setattr(settings, key, value.strip())
+        for key in _BOOLEAN_FIELDS:
+            if isinstance(raw.get(key), bool):
+                setattr(settings, key, raw[key])
         for key, cleaner in _NESTED_CLEANERS.items():
             cleaned = cleaner(raw.get(key))
             if cleaned:
                 setattr(settings, key, cleaned)
+        _drop_retired_models(settings)
         return settings
 
     def _save(self) -> None:
         payload = {}
         for key, value in asdict(self.settings).items():
-            if value:
+            if key in _BOOLEAN_FIELDS or value:
                 payload[key] = value
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(
@@ -178,6 +208,12 @@ class AppSettingsStore:
         known = {f.name for f in fields(AppSettings)}
         for key, value in changes.items():
             if key not in known:
+                continue
+            if key in _BOOLEAN_FIELDS:
+                if not isinstance(value, bool):
+                    raise ValueError(f"{key} must be a boolean")
+                setattr(self.settings, key, value)
+                self._explicit_fields.add(key)
                 continue
             if key in _NESTED_CLEANERS:
                 if not isinstance(value, dict):
@@ -202,9 +238,46 @@ class AppSettingsStore:
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             value = value.strip()
+            if key == "trusted_url":
+                from ciao.network_addresses import normalize_trusted_url
+
+                value = normalize_trusted_url(value)
             setattr(self.settings, key, value)
+        _drop_retired_models(self.settings)
         self._save()
         return self.settings
+
+    def migrate_legacy_insights_enabled(
+        self, legacy_disabled: bool | None
+    ) -> bool | None:
+        if legacy_disabled is None:
+            return None
+        if "insights_enabled" in self._explicit_fields:
+            return None
+        self.settings.insights_enabled = not legacy_disabled
+        self._explicit_fields.add("insights_enabled")
+        self._save()
+        logger.warning(
+            "CIAO_INSIGHTS_DISABLED is no longer read; migrated it to Settings → "
+            "Automations once. Remove it from .env."
+        )
+        return self.settings.insights_enabled
+
+    def migrate_legacy_trajectories_enabled(
+        self, legacy_disabled: bool | None
+    ) -> bool | None:
+        if legacy_disabled is None:
+            return None
+        if "trajectories_enabled" in self._explicit_fields:
+            return None
+        self.settings.trajectories_enabled = not legacy_disabled
+        self._explicit_fields.add("trajectories_enabled")
+        self._save()
+        logger.warning(
+            "CIAO_TRAJECTORIES_DISABLED is no longer read; migrated it to "
+            "Settings → Automations once. Remove it from .env."
+        )
+        return self.settings.trajectories_enabled
 
     def apply_to_config(self, config) -> None:
         """Overlay settings onto the live ``CiaoConfig`` object.
@@ -216,8 +289,6 @@ class AppSettingsStore:
         if self._defaults is None:
             self._defaults = {
                 "insights_model_override": config.insights_model_override,
-                "transcription_locale": config.transcription_locale,
-                "tts_local_voice": config.tts_local_voice,
                 "critique_models": config.critique_models,
             }
             for descriptor in provider_registry.descriptors():
@@ -231,12 +302,9 @@ class AppSettingsStore:
                 )
         d = self._defaults
         s = self.settings
+        config.insights_enabled = s.insights_enabled
+        config.trajectories_enabled = s.trajectories_enabled
         config.insights_model_override = s.insights_model or d["insights_model_override"]
-
-        config.transcription_locale = (
-            s.transcription_locale or d["transcription_locale"]
-        )
-        config.tts_local_voice = s.tts_local_voice or d["tts_local_voice"]
         config.critique_models = s.critique_models or d["critique_models"]
         # Per-provider default models / thinking / routine models have no
         # env-backed default; absence means "use the provider's own default".

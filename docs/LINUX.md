@@ -2,9 +2,9 @@
 
 Ciaobot's Python backend and PWA can run on Ubuntu 24.04 with Python 3.12 and
 Node 22. Use a browser or installed PWA from macOS, Windows, Linux, or a phone.
-The agents execute on the server and use its files and credentials. Apple-native
-voice and Apple Intelligence require a Mac host; select Claude/OpenCode models
-for Linux routines. Native Windows and Linux desktop bundles are separate work.
+The agents execute on the server and use its files and credentials. Apple
+Intelligence requires a Mac host; select Claude/OpenCode models for Linux
+routines. Native Windows and Linux desktop bundles are separate work.
 
 ## Install
 
@@ -46,8 +46,11 @@ For HTTPS reverse proxy hosting, set these values in the workspace `.env`:
 PWA_HOST=127.0.0.1
 PWA_PORT=8443
 PWA_AUTH_REQUIRED=true
-CIAO_ALLOWED_ORIGINS=bot.example.com
 ```
+
+The proxy must forward the public host as `X-Forwarded-Host` (nginx:
+`proxy_set_header X-Forwarded-Host $host;`), or WebSocket upgrades from the
+browser are rejected as cross-origin.
 
 Keep the generated `PWA_AUTH_TOKEN`. Authenticate provider CLIs as `ciaobot`,
 not root. The Claude SDK includes a Claude binary; `ciao auth claude --print-only`
@@ -136,6 +139,6 @@ not just the previous code. Keep only one active host scheduler during migration
 
 Run `mypy ciao`, `pytest tests/`, and frontend tests/build from the checkout.
 On the live host verify authenticated HTTP, event/chat WebSockets, a provider
-turn and tool execution, archive/insights, schedule execution, Settings restart,
+turn and tool execution, archive/memory pass, schedule execution, Settings restart,
 and recovery after a reboot. Missing provider authentication prevents real chat
 verification even when the server, PWA, and automated tests are healthy.

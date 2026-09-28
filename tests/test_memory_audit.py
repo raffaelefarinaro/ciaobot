@@ -528,16 +528,13 @@ def test_memory_audit_command_tells_the_user_how_to_fix_over_cap(
     # code paths under test elsewhere (_load_env_file, from_env()'s dotenv
     # load, the setup wizard) write os.environ directly, so leaks survive
     # their tests. Anything that redirects the audit — a runtime root holding
-    # a workspaces.json, raised caps — flips this test's outcome, so scrub
+    # a workspaces.json — flips this test's outcome, so scrub
     # every variable it consumes instead of just the workspace trio.
     for name in (
-        "CIAO_WORKSPACES",
         "CIAO_VAULT_ROOT",
         "CIAO_WORKSPACE",
         "CIAO_VAULT_MODE",
         "CIAO_RUNTIME_ROOT",
-        "CIAO_MEMORY_CHAR_LIMIT",
-        "CIAO_USER_CHAR_LIMIT",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -554,7 +551,7 @@ def test_memory_audit_command_tells_the_user_how_to_fix_over_cap(
     assert exit_code == 1
     assert "ciao:memory over cap: " in out
     assert 'consolidate the region (e.g. "consolidate my ciao:memory' in out
-    assert "CIAO_MEMORY_CHAR_LIMIT / CIAO_USER_CHAR_LIMIT in .env" in out
+    assert "CIAO_MEMORY_CHAR_LIMIT" not in out
 
 
 def test_memory_audit_with_vault_marks_retrieved_stale_notes(
@@ -577,13 +574,10 @@ def test_memory_audit_with_vault_marks_retrieved_stale_notes(
     from ciao.memory_tool import ensure_regions
 
     for name in (
-        "CIAO_WORKSPACES",
         "CIAO_VAULT_ROOT",
         "CIAO_WORKSPACE",
         "CIAO_VAULT_MODE",
         "CIAO_RUNTIME_ROOT",
-        "CIAO_MEMORY_CHAR_LIMIT",
-        "CIAO_USER_CHAR_LIMIT",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -704,3 +698,138 @@ def test_audit_entries_reports_aging_state(tmp_path) -> None:
     )
     assert len(report["aging_state_entries"]) == 1
     assert report["aging_state_entries"][0]["kind"] == "as-of"
+
+
+# --- shared staleness predicate ---------------------------------------------
+
+
+def test_note_verification_prefers_frontmatter_and_reports_horizon() -> None:
+    from ciao.memory_audit import note_verification
+
+    today = datetime.date(2026, 9, 25)
+    result = note_verification(
+        "person", "2026-06-01", _days_ago(1, today=today), today=today
+    )
+
+    assert result is not None
+    assert result.source == "frontmatter"
+    assert result.age_days == 116
+    assert result.threshold_days == 90
+    assert result.stale is True
+    assert result.as_evidence() == {
+        "age_days": 116,
+        "threshold_days": 90,
+        "last_verified": "2026-06-01",
+        "source": "frontmatter",
+    }
+
+
+def test_note_verification_falls_back_to_mtime_and_clamps_future_dates() -> None:
+    from ciao.memory_audit import note_verification
+
+    today = datetime.date(2026, 9, 25)
+    by_mtime = note_verification("project", "", _days_ago(31, today=today), today=today)
+    assert by_mtime is not None
+    assert (by_mtime.source, by_mtime.age_days, by_mtime.stale) == ("mtime", 31, True)
+
+    future = note_verification("note", "2099-01-01", None, today=today)
+    assert future is not None
+    assert future.age_days == 0 and future.stale is False
+
+    assert note_verification("note", "not-a-date", None, today=today) is None
+
+
+def test_note_verification_exempts_event_types_including_aliases_and_case() -> None:
+    from ciao.memory_audit import is_stale_exempt_type, note_verification
+
+    today = datetime.date(2026, 9, 25)
+    for note_type in ("log", "journal", "workspace", "Journal", "hackathon-log", "project-log"):
+        assert is_stale_exempt_type(note_type), note_type
+        result = note_verification(note_type, "2020-01-01", None, today=today)
+        assert result is not None
+        # Still aged (the map shows it), never stale.
+        assert result.exempt is True and result.stale is False
+        assert result.age_days > 2000
+
+    # A capitalised type ages on its canonical horizon, not the default one.
+    person = note_verification("Person", "2026-06-01", None, today=today)
+    assert person is not None and person.threshold_days == 90 and person.stale
+
+
+def test_find_stale_notes_uses_the_shared_predicate_for_aliased_exempt_types() -> None:
+    today = datetime.date(2026, 9, 25)
+    entries = [
+        _entry("memory-vault/Journal/hack.md", "hackathon-log"),
+        _entry("memory-vault/People/Mo.md", "Person"),
+    ]
+    report = find_stale_notes(
+        entries, mtimes={str(e.path): _days_ago(120, today=today) for e in entries}, today=today
+    )
+
+    assert [f["path"] for f in report["stale_notes"]] == ["memory-vault/People/Mo.md"]
+    assert report["stale_notes"][0]["threshold_days"] == 90
+    assert report["notes_exempt"] == 1
+
+
+def test_a_vault_category_sets_its_own_staleness(tmp_path: Path) -> None:
+    """A category's `stale_after_days` is the horizon its notes age against,
+    reached through that category's aliases and dropped when it is disabled.
+
+    The alias-typed note is the load-bearing half: `client` claims no id of its
+    own, so without the registry's alias table it would age on its own spelling,
+    take the default horizon and sit unflagged at 20 days. Both notes sharing
+    the 10-day horizon is the assertion that it resolved.
+    """
+    from ciao import entity_types
+    from ciao.memory_audit import (
+        STALE_NOTE_DEFAULT_DAYS,
+        is_stale_exempt_type,
+        note_threshold_days,
+    )
+
+    today = datetime.date(2026, 8, 23)
+    vault = tmp_path / "memory-vault"
+    (vault / "Clients").mkdir(parents=True)
+    categories = vault / "entity-types.yaml"
+    customer = (
+        "- id: customer\n"
+        "  label: Customer\n"
+        "  kind: entity\n"
+        "  folder: Clients\n"
+        "  aliases: [client]\n"
+        "  stale_after_days: 10\n"
+    )
+    entries = [
+        _entry("memory-vault/Clients/Acme.md", "customer"),
+        _entry("memory-vault/Clients/Beta.md", "client"),
+        _entry("memory-vault/Journal/day.md", "journal"),
+    ]
+    mtimes = {str(e.path): _days_ago(20, today=today) for e in entries}
+
+    categories.write_text(customer, encoding="utf-8")
+    entity_types.clear_entity_types_cache()
+    report = find_stale_notes(entries, vault_root=vault, mtimes=mtimes, today=today)
+
+    assert {f["path"] for f in report["stale_notes"]} == {
+        "memory-vault/Clients/Acme.md",
+        "memory-vault/Clients/Beta.md",
+    }
+    assert {f["threshold_days"] for f in report["stale_notes"]} == {10}
+    assert report["notes_checked"] == 2
+    assert report["notes_exempt"] == 1, "the exempt set is this module's, not the file's"
+
+    # A caller holding the registry gets the same horizon with no vault in hand.
+    registry = entity_types.load_entity_types(vault)
+    assert note_threshold_days("customer", registry=registry) == 10
+    assert not is_stale_exempt_type("client", registry=registry)
+
+    # Disabled: no opinion, so the default — and 20 days is nowhere near it.
+    categories.write_text(customer + "  enabled: false\n", encoding="utf-8")
+    entity_types.clear_entity_types_cache()
+    disabled = find_stale_notes(entries, vault_root=vault, mtimes=mtimes, today=today)
+
+    assert disabled["stale_notes"] == []
+    assert disabled["notes_checked"] == 2
+    assert note_threshold_days(
+        "customer", registry=entity_types.load_entity_types(vault)
+    ) == STALE_NOTE_DEFAULT_DAYS

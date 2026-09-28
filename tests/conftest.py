@@ -31,6 +31,18 @@ def _reset_exported_dotenv() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _drop_inherited_bundled_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ignore ``CIAO_BUNDLED_APP`` inherited from a Ciaobot.app agent shell.
+
+    The bundled launcher exports it, so every command a Ciaobot chat runs -
+    including this suite - inherits it, and ``detect_install_mode`` would call
+    the test process a packaged app (``admin_deploy`` then refuses up front).
+    Tests that need it set it explicitly.
+    """
+    monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_claude_session_scan_cache() -> None:
     """Drop the cross-test ``~/.claude/projects`` listing cache.
 
@@ -74,6 +86,35 @@ def _isolate_launch_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     passing the argument per test is precisely the step that gets forgotten.
     """
     monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(tmp_path / "LaunchAgents"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_install_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let a test read or write the machine's real install receipt.
+
+    `detect_install_mode()` now consults the installer receipt, so a developer's
+    own terminal install would classify the test process as `installer` and a
+    test that exercised the receipt would rewrite the receipt their real engine
+    depends on. Autouse for the same reason as the fixtures above.
+    """
+    monkeypatch.setattr(
+        "ciao.install_receipt.default_receipt_path",
+        lambda: tmp_path / "state" / "install-receipt.json",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_update_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let a test touch the machine's real update staging area.
+
+    ``engine_update`` stages whole environments (a ``uv venv`` plus a full
+    ``pip install``) under ``~/.local/state/ciaobot/updates``, so an
+    un-isolated test would download and install a release into the developer's
+    own machine. Autouse and unconditional for the same reason as its siblings.
+    """
+    monkeypatch.setattr(
+        "ciao.engine_update.default_state_dir", lambda: tmp_path / "update-state"
+    )
 
 
 @pytest.fixture(autouse=True)

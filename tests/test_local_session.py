@@ -586,9 +586,7 @@ def test_network_git_calls_use_the_shared_ceiling() -> None:
 
     Pin every network git call in the background sync module to
     ``GIT_NETWORK_TIMEOUT`` so a new call site cannot quietly reintroduce a
-    tighter one. (``ciao.git_sync`` is deliberately excluded — it runs before
-    the server binds and keeps its own shorter ceiling; see
-    ``test_startup_sync_keeps_its_own_shorter_ceiling``.)
+    tighter one.
     """
     import ciao.local_session
 
@@ -599,31 +597,6 @@ def test_network_git_calls_use_the_shared_ceiling() -> None:
     for verb, timeout in calls:
         assert timeout == "GIT_NETWORK_TIMEOUT", (
             f"ciao.local_session: git {verb} uses timeout={timeout}"
-        )
-
-
-def test_startup_sync_keeps_its_own_shorter_ceiling() -> None:
-    """Startup sync is awaited before the server binds, so it is not a loop.
-
-    Giving it the 60s background ceiling would make an unreachable remote hold
-    a cold start for a minute on a blank app. Pinned so a future "share the
-    constant" tidy-up cannot quietly 6x the worst-case boot.
-
-    Note the cost, spelled out in ``ciao.git_sync``: nothing else pulls on its
-    own (the backup loop only pushes, and fetch/merges solely on a rejected
-    push), so a pull killed at this ceiling leaves the checkout behind until
-    the next boot or an explicit "Sync with Remote". Raise it rather than
-    tighten it if real pulls start timing out.
-    """
-    import ciao.git_sync
-
-    assert ciao.git_sync.GIT_STARTUP_TIMEOUT == 10.0
-
-    calls = _network_git_call_timeouts(Path(ciao.git_sync.__file__))
-    assert calls, "no network git calls found in ciao.git_sync"
-    for verb, timeout in calls:
-        assert timeout == "GIT_STARTUP_TIMEOUT", (
-            f"ciao.git_sync: git {verb} uses timeout={timeout}"
         )
 
 

@@ -9,7 +9,6 @@
 // draft is open yet):
 //   - a printable character opens the composer seeded with that character
 //   - a paste opens it seeded with the clipboard text, and attaches any images
-//   - Cmd/Ctrl+D opens it and starts dictating
 //
 // Keystrokes aimed at a field (the chat composer, the comment textarea itself,
 // a search box) are left alone, so this never steals typing from a focused
@@ -21,8 +20,6 @@ export type TypeToCommentOptions = {
   isActive: () => boolean
   /** Open the composer, seeded with `initialText` (may be empty). */
   open: (initialText: string) => void
-  /** Start voice dictation in the freshly opened composer. */
-  dictate?: () => void
   /** Attach pasted image files to the freshly opened draft. */
   addImages?: (files: File[]) => void | Promise<void>
 }
@@ -43,15 +40,6 @@ function isTypeThrough(e: KeyboardEvent): boolean {
 export function useTypeToComment(options: TypeToCommentOptions): void {
   function onKeydown(e: KeyboardEvent): void {
     if (!options.isActive() || isEditableTarget(e.target)) return
-    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'd' || e.key === 'D')) {
-      if (!options.dictate) return
-      // Beats the browser's own bookmark shortcut.
-      e.preventDefault()
-      e.stopPropagation()
-      options.open('')
-      options.dictate()
-      return
-    }
     // Cmd/Ctrl+V arrives as a paste event instead, with the clipboard attached.
     if (!isTypeThrough(e)) return
     e.preventDefault()

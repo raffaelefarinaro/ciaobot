@@ -244,7 +244,7 @@ def _rewrite_queue_single(
             source="pwa",
             workspace=workspace,
             vault_root=vault_root,
-        ) as _receipt:
+        ):
             queue_after = "\n".join(lines).rstrip() + "\n"
             write_queue_atomically(queue, queue_after)
     return True
@@ -792,7 +792,7 @@ async def _plan_accept_reconcile(
 ) -> tuple[ReconcileDecision | None, ReconcileDecision | None]:
     """Reconcile one queued fact against the region as it stands right now.
 
-    The retry half of the archive-time deferral. A fact queued because the
+    The retry half of the deferral. A fact queued because the
     reconcile timed out, replied unusably, or named an entry that had moved
     under it is otherwise stuck: accepting it took the plain append path, which
     is the very thing the deferral exists to prevent — the obsolete entry and
@@ -879,8 +879,8 @@ async def _promote_region_row(
     the two steps. So this returns a failure and the caller keeps the bullet.
 
     Goes through ``accept_region_fact`` rather than ``update_region`` directly,
-    so a click gets what an archive-time promotion gets: the event-shape guard,
-    the stamp-stripped duplicate check, the learned-at stamp the aging audit
+    so a click gets the full guarded write: the event-shape guard, the
+    stamp-stripped duplicate check, the learned-at stamp the aging audit
     reads, and the consolidations undo log. It takes the same guide lock
     ``update_region`` did.
 
@@ -894,8 +894,8 @@ async def _promote_region_row(
 
     ``reconcile`` runs one fresh reconcile call against the region's current
     entries first (:func:`_plan_accept_reconcile`) and applies its decision, so
-    a fact the archive-time reconcile deferred can be resolved on a retry
-    instead of being appended beside whatever it supersedes. It is off by
+    a fact an earlier reconcile deferred can be resolved on a retry instead
+    of being appended beside whatever it supersedes. It is off by
     default: the plain accept is one synchronous write, and a model call on
     every click would cost the batch endpoint one timeout per row.
     """
@@ -960,11 +960,7 @@ async def _promote_region_row(
 
     def _usage() -> dict[str, Any]:
         try:
-            status = memory_status(
-                guide,
-                memory_char_limit=int(getattr(config, "memory_char_limit", 3000)),
-                user_char_limit=int(getattr(config, "user_char_limit", 1375)),
-            )
+            status = memory_status(guide)
         except Exception:  # noqa: BLE001 — usage is advisory reporting only
             return {}
         if not isinstance(status, dict):
@@ -1032,32 +1028,104 @@ async def _promote_region_row(
     )
 
 
-def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
-    """Write an accepted `[people]` fact into a stub person note.
+def _entity_roots(config, workspace: str) -> tuple[Path, Path]:
+    """The two roots a ``[people]`` row needs: ``(notes_root, registry_root)``.
 
-    A note that already exists is not appended to blindly — merging a new fact
-    into someone's curated note is a judgment call, so the row stays queued
-    and the error says so.
+    Two, because they are different directories on an install that has not
+    re-rooted, and which is which is the whole point — a caller that resolves
+    one and uses it for both is the bug this pair exists to make impossible:
+
+    - the note goes under the workspace's **notes** root
+      (``workspace_vault_root``), which is where that person's other notes are;
+    - the category comes from the **agent** vault root (``agent_vault_root``),
+      the one that owns ``entity-types.yaml`` and ``VOCABULARY.md`` and the one
+      ``GET``/``PATCH /api/memory/entity-types`` reads and writes (#624).
+
+    Reading the registry from the notes root meant an owner's category edit —
+    ``person.folder: Humans`` — was invisible here, and the accept went on
+    writing ``People/Mo.md`` beside the very file that renamed it.
     """
-    from ciao.memory_proposals import write_people_note
+    return (
+        Path(config.workspace_vault_root(workspace)),
+        Path(config.agent_vault_root(workspace)),
+    )
+
+
+async def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
+    """Write an accepted `[people]` fact into its person note.
+
+    A missing note is created as a stub, typed and filed through the category
+    registry (``write_entity_note``) rather than against a hardcoded ``People/``,
+    so the accept path and the writer cannot disagree about where the note goes
+    or what it is typed. An existing one is folded by a model call, the same way
+    a `[project]` accept folds its doc: merging into someone's curated note needs
+    judgment about where the fact goes, so it is never a blind append. A fold
+    that changes nothing (already covered) or trips a guard keeps the row queued
+    and says so.
+    """
+    from ciao.memory_proposals import (
+        PERSON_TYPE_ID,
+        entity_note_path,
+        write_entity_note,
+    )
+    from ciao.project_doc_update import fold_fact_into_person_note
 
     name = str(row.get("target") or "").strip()
     if not name:
         return AcceptOutcome(ok=False, error="the bullet names no person")
     try:
-        vault = config.workspace_vault_root(row["workspace"])
+        notes_root, registry_root = _entity_roots(config, row["workspace"])
     except (AttributeError, ValueError) as exc:
         return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
-    try:
-        created = write_people_note(Path(vault), name, row["text"])
-    except OSError as exc:
-        return AcceptOutcome(ok=False, error=f"could not write the note: {exc}")
-    if not created:
+    note = entity_note_path(
+        notes_root, PERSON_TYPE_ID, name, registry_root=registry_root
+    )
+    if note is None:
+        # Three real causes, one unrouteable row: the payload is not a filename,
+        # the vault has no `person` category to file a note in (disabled, or
+        # without a folder), or that folder is not one inside the vault. All are
+        # the operator's to fix, not the row's.
         return AcceptOutcome(
             ok=False,
-            error=f"People/{name}.md already exists; merge the fact manually, then dismiss",
+            error=(
+                "this vault has no person category whose folder is one inside "
+                "the vault, or the bullet's name is not usable as a filename"
+            ),
         )
-    return AcceptOutcome(ok=True, destination=f"People/{name}.md")
+    # Relative to the notes root the note is written under, so the destination
+    # names the folder the category is filed in rather than a spelling this
+    # function hardcodes.
+    destination = note.relative_to(notes_root).as_posix()
+    if note.exists():
+        errors: list[str] = []
+        wrote = await fold_fact_into_person_note(
+            note_path=note,
+            fact=row["text"],
+            model=getattr(config, "insights_model", "") or "sonnet",
+            error_out=errors,
+        )
+        if errors:
+            return AcceptOutcome(ok=False, error=f"fold failed: {errors[0]}")
+        if not wrote:
+            return AcceptOutcome(
+                ok=False,
+                error=f"the fold reported no changes to {destination}; "
+                "dismiss instead if the note already covers this",
+            )
+        return AcceptOutcome(ok=True, destination=destination)
+    try:
+        outcome = write_entity_note(
+            notes_root, PERSON_TYPE_ID, name, row["text"], registry_root=registry_root
+        )
+    except OSError as exc:
+        return AcceptOutcome(ok=False, error=f"could not write the note: {exc}")
+    if outcome != "written":
+        # Created by someone else between the check and the write.
+        return AcceptOutcome(
+            ok=False,
+            error=f"{destination} appeared while accepting; try again to merge into it",
+        )
+    return AcceptOutcome(ok=True, destination=destination)
 
 
 def _accept_learnings_row(config, row: dict[str, Any]) -> AcceptOutcome:
@@ -1081,11 +1149,241 @@ def _accept_learnings_row(config, row: dict[str, Any]) -> AcceptOutcome:
     return AcceptOutcome(ok=True, destination="Workspace/Learnings.md")
 
 
+def _note_path_in_vault(vault: Path, rendered: str) -> Path:
+    """Resolve a rendered ``Entry.path`` back to a file inside *vault*.
+
+    A rendered path carries the vault's own directory name as its first segment
+    (``memory-vault/personal/Projects/Ada.md``), because the index is written
+    from the install root and read from anywhere. ``vault_migration`` strips the
+    same segment for the same reason.
+    """
+    parts = Path(rendered).parts
+    if not parts:
+        return vault
+    return vault / Path(*parts[1:])
+
+
+def _accept_category_row(config, row: dict[str, Any]) -> AcceptOutcome:
+    """Add a proposed category to the registry and retype the notes it came from.
+
+    Nothing is MOVED. The cluster the owner was shown is a set of notes already
+    sitting where they were, and the category only says what they are; a file
+    move here would rewrite paths nothing asked it to and break every link to
+    them. So the accept does exactly two things: append the entry to
+    ``<vault>/entity-types.yaml`` and set ``type:`` on the notes the proposal
+    was filed with. The unticked notes keep whatever they carry.
+
+    The order is pre-flight, then read-append-write under the registry lock. Every
+    note's current type is read BEFORE the first byte is written, because a note
+    retyped by hand since the proposal means the cluster the operator read is not
+    the cluster on disk — and a half-applied category, with notes pointing at an
+    entry that was never added, is the outcome the write-then-dismiss rule exists
+    to prevent. The registry is then loaded, appended to and validated INSIDE that
+    same lock: two accepts that both read the list before either wrote append from
+    one snapshot, and the second write silently drops the first category.
+
+    Raises :class:`ciao.entity_types.EntityTypeFileError` for a registry the
+    validator refuses (a folder already claimed by another category, a duplicate
+    id). That is a 400, not a 409: the proposal is fine, the category it would add
+    is not, and the owner can edit the id or folder and retry. Everything else is
+    an outcome the caller maps to 409.
+    """
+    from ciao import entity_types
+    from ciao.memory_receipts import journal_path, queue_lock, record_category_apply
+    from ciao.memory_proposals import read_note_type, set_note_type
+    from ciao.vocabulary_proposals import (
+        CategorySidecarError,
+        read_category_sidecar,
+    )
+
+    category_id = str(row.get("target") or "").strip()
+    if not category_id:
+        return AcceptOutcome(ok=False, error="the bullet names no category")
+    try:
+        vault = Path(config.workspace_vault_root(row["workspace"]))
+    except (AttributeError, ValueError) as exc:
+        return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
+    try:
+        sidecar = read_category_sidecar(vault, category_id)
+    except CategorySidecarError as exc:
+        return AcceptOutcome(ok=False, error=str(exc))
+    if sidecar is None:
+        return AcceptOutcome(
+            ok=False,
+            error=(
+                f"the notes behind {category_id} are no longer on record; "
+                "dismiss this row and re-run curation to propose it again"
+            ),
+        )
+    # The registry lives in the AGENT vault root (the one that owns
+    # ``entity-types.yaml`` and ``VOCABULARY.md``), which is not the workspace's
+    # notes root on an install that has not re-rooted. Same resolution the
+    # ``GET``/``PATCH /api/memory/entity-types`` route uses, so an accepted
+    # category and a hand-added one cannot both be true.
+    try:
+        registry_root = Path(config.agent_vault_root(row["workspace"]))
+    except (AttributeError, ValueError) as exc:
+        return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
+    entry = entity_types.EntityType(
+        id=category_id,
+        label=sidecar["label"],
+        kind=entity_types.KIND_ENTITY,
+        folder=sidecar["folder"],
+        description=sidecar["description"],
+        builtin=False,
+    )
+    source_type = sidecar["source_type"]
+    planned: list[tuple[Path, str]] = []
+    drifted: list[str] = []
+    for rendered in sidecar["paths"]:
+        path = _note_path_in_vault(vault, rendered)
+        current = read_note_type(path)
+        if current == category_id:
+            continue  # Already typed: a retried accept, not a change.
+        # An empty `current` is a note with no `type:` line at all, and it is
+        # retyped rather than reported as drifted: the whole point of the new
+        # category is that these notes had no canonical home, and a note that
+        # never said what it was cannot have had its type changed by somebody
+        # else. Only a note carrying a DIFFERENT type is a conflict.
+        if current and current.casefold() != source_type.casefold():
+            drifted.append(f"{path.name} is now {current}")
+            continue
+        try:
+            image = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            return AcceptOutcome(ok=False, error=f"could not read {path.name}: {exc}")
+        planned.append((path, image))
+    if drifted:
+        return AcceptOutcome(
+            ok=False,
+            error=(
+                "these notes changed type since the proposal was made, so nothing "
+                "was written: " + "; ".join(drifted) + ". Dismiss this row and "
+                "let curation re-propose the current cluster."
+            ),
+        )
+
+    registry_path = registry_root / entity_types.VAULT_FILENAME
+    with queue_lock(registry_path):
+        # Loaded, appended to and validated under the lock that writes it, so the
+        # read-append-write is one transaction. Loading before it meant two
+        # accepts that both read the list before either wrote appended from the
+        # same snapshot, and the second write dropped the first category with no
+        # error anywhere. Raises on a folder another category already claims, a
+        # duplicate id and a malformed id: the accept's 400, and the reason the
+        # bullet stays queued.
+        registry = entity_types.load_entity_types(registry_root)
+        entries = [*registry.entries(), entry]
+        entity_types.validate_entries(entries)
+        registry_existed = registry_path.exists()
+        try:
+            before_yaml = (
+                registry_path.read_text(encoding="utf-8") if registry_existed else ""
+            )
+        except (OSError, UnicodeDecodeError) as exc:
+            return AcceptOutcome(ok=False, error=f"could not read the category list: {exc}")
+        try:
+            entity_types.write_vault_file(registry_root, entries)
+        except OSError as exc:
+            return AcceptOutcome(ok=False, error=f"could not add the category: {exc}")
+        # `write_vault_file` drops the registry cache, so the next read is the
+        # file that was just written rather than the list this accept started
+        # from. The notes are then retyped under the same lock: a second accept
+        # of the same cluster must not interleave its retypes with this one's.
+        retyped: list[dict[str, Any]] = []
+        for path, image in planned:
+            if not set_note_type(path, category_id):
+                # The registry entry is already on disk and the receipt that
+                # would undo it does not exist yet, so there is nothing to point
+                # the owner at. Said plainly rather than as a retry.
+                return AcceptOutcome(
+                    ok=False,
+                    error=(
+                        f"added {category_id} to the category list but could not "
+                        f"retype {path.name}, and no receipt was recorded; remove "
+                        f"the {category_id} entry from {registry_path} by hand to "
+                        "leave the vault consistent"
+                    ),
+                )
+            # The after image is READ BACK rather than assumed from the rewrite:
+            # the undo compares each note's current bytes with it and refuses the
+            # whole operation on a mismatch, so a row without one is a receipt
+            # that can never reverse a real accept.
+            try:
+                after = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                return AcceptOutcome(
+                    ok=False,
+                    error=(
+                        f"added {category_id} to the category list but could not "
+                        f"re-read {path.name} to record it ({exc}), and no receipt "
+                        f"was recorded; remove the {category_id} entry from "
+                        f"{registry_path} by hand to leave the vault consistent"
+                    ),
+                )
+            retyped.append({"path": str(path), "before": image, "after": after})
+        try:
+            after_yaml = registry_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return AcceptOutcome(ok=False, error=f"could not re-read the category list: {exc}")
+        receipt = record_category_apply(
+            journal_path(vault, None),
+            registry_path=registry_path,
+            registry_existed=registry_existed,
+            before_text=before_yaml,
+            after_text=after_yaml,
+            notes=retyped,
+            actor="operator",
+            source="pwa",
+            workspace=str(row.get("workspace") or ""),
+            vault_root=vault,
+        )
+    return AcceptOutcome(
+        ok=True,
+        destination=sidecar["folder"],
+        receipt_id=str(receipt.get("id", "")),
+    )
+
+
+def decline_category_row(config, row: dict[str, Any]) -> str:
+    """Record the refusal of a `[category]` row; "" when it is on record.
+
+    Called by the routes BEFORE the bullet is removed, because this is the only
+    thing that stops the same cluster coming back: the queue row is the
+    proposal, and once it is gone the vault still has three notes typed
+    `Recipe Book`. A refusal that could not be recorded is not a refusal, so the
+    caller keeps the row and says why.
+
+    No sidecar is created here. A proposal whose record cannot be read is a
+    corrupt state, and inventing one would file a refusal for a cluster whose
+    notes this vault can no longer list.
+    """
+    from ciao.vocabulary_proposals import (
+        CategorySidecarError,
+        decline_category,
+    )
+
+    category_id = str(row.get("target") or "").strip()
+    if not category_id:
+        return "the bullet names no category"
+    try:
+        vault = Path(config.workspace_vault_root(row["workspace"]))
+    except (AttributeError, ValueError) as exc:
+        return f"could not resolve the vault: {exc}"
+    try:
+        decline_category(vault, category_id)
+    except CategorySidecarError as exc:
+        return str(exc)
+    except OSError as exc:
+        return f"could not record the refusal: {exc}"
+    return ""
+
+
 async def _accept_project_row(config, row: dict[str, Any]) -> AcceptOutcome:
     """Fold an accepted `[project]` bullet into its canonical doc.
 
-    Reuses the archive-time fold (guards, NO_CHANGES sentinel, per-doc lock)
-    with just this bullet as input. ``False`` back means the model judged the
+    Reuses the fold's guards, NO_CHANGES sentinel and per-doc lock with just
+    this bullet as input. ``False`` back means the model judged the
     doc already covers the fact or a guard rejected the rewrite — ambiguous
     enough that dropping the row silently would be wrong, so the caller keeps
     it queued and the operator decides.
@@ -1097,7 +1395,7 @@ async def _accept_project_row(config, row: dict[str, Any]) -> AcceptOutcome:
         return AcceptOutcome(ok=False, error="the bullet names no project doc")
     doc = Path(doc_raw)
     if not doc.is_absolute():
-        # Same resolution the archive-time fold uses: workspace-root-relative.
+        # Workspace-root-relative, as the fold has always resolved a bare name.
         doc = Path(config.workspace_root) / doc
     if not doc.is_file():
         return AcceptOutcome(ok=False, error=f"project doc not found: {doc_raw}")
@@ -1132,7 +1430,8 @@ def _decision_destination(accept_action: str, row: dict[str, Any], outcome: Acce
         return f"ciao:{region}" if region else ""
     if accept_action == "move_file":
         return str(outcome.destination or "")
-    # fold_doc, write_people_note, append_learnings all set "destination".
+    # fold_doc, write_people_note, append_learnings and add_category all set
+    # "destination".
     return str(outcome.destination or "")
 
 
@@ -1204,7 +1503,6 @@ def _region_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
     from ciao.memory_proposals import _promotable_text
     from ciao.memory_receipts import content_revision
     from ciao.memory_tool import (
-        ensure_regions,
         read_region,
         resolve_region as _resolve,
         serialize_entries,
@@ -1323,13 +1621,20 @@ def _learnings_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]
 
 
 def _people_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
-    """What accepting one `[people]` bullet would create.
+    """What accepting one `[people]` bullet would write.
 
-    Create-only, like the accept: an existing note is a merge nobody can make
-    mechanically, so the preview says so instead of offering an accept that
-    would refuse.
+    A new note is shown exactly. An existing note is folded by a model at
+    accept time, so, like a `[project]` fold, the preview shows the note as it
+    is and marks the result inexact rather than inventing the merge. The
+    destination comes from the same two roots the accept resolves
+    (:func:`_entity_roots`), so the card cannot name a folder the accept would
+    not write to.
     """
-    from ciao.memory_proposals import people_note_path
+    from ciao.memory_proposals import (
+        PERSON_TYPE_ID,
+        entity_note_path,
+        render_entity_note,
+    )
     from ciao.memory_receipts import content_revision
 
     out = _base_preview(row)
@@ -1338,39 +1643,46 @@ def _people_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
         out["reason"] = "the bullet names no person"
         return out
     try:
-        vault = Path(config.workspace_vault_root(row["workspace"]))
+        notes_root, registry_root = _entity_roots(config, row["workspace"])
     except (AttributeError, ValueError) as exc:
         out["reason"] = f"could not resolve the vault: {exc}"
         return out
-    note = people_note_path(vault, name)
+    note = entity_note_path(
+        notes_root, PERSON_TYPE_ID, name, registry_root=registry_root
+    )
     if note is None:
-        out["reason"] = "the bullet names no usable person"
-        return out
-    out["destination"] = f"People/{note.name}"
-    out["destination_path"] = str(note)
-    if note.exists():
-        out["operation"] = "none"
-        try:
-            existing = note.read_text(encoding="utf-8")
-        except OSError:
-            existing = ""
-        before_clip, cut = _clip(existing)
-        out["before"] = before_clip
-        out["after"] = before_clip
-        out["truncated"] = cut
-        out["revision"] = content_revision(existing)
-        out["exact"] = True
         out["reason"] = (
-            f"{out['destination']} already exists; merge the fact by hand, then dismiss"
+            "this vault has no person category whose folder is one inside "
+            "the vault, or the bullet's name is not usable as a filename"
         )
         return out
-    after = (
-        "---\n"
-        "tags: [person]\n"
-        f"updated: {date.today().isoformat()}\n"
-        f"---\n# {note.stem}\n\n{text}\n"
-    )
-    after_clip, cut = _clip(after)
+    out["destination"] = note.relative_to(notes_root).as_posix()
+    out["destination_path"] = str(note)
+    if note.exists():
+        # Folded by a model at accept time, like a `[project]` doc: the note is
+        # shown as it is, and the wording of the merge is decided then.
+        try:
+            existing = note.read_text(encoding="utf-8")
+        except OSError as exc:
+            out["reason"] = f"could not read {out['destination']}: {exc}"
+            return out
+        before_clip, cut = _clip(existing)
+        out["before"] = before_clip
+        out["truncated"] = cut
+        out["revision"] = content_revision(existing)
+        out["operation"] = "update"
+        out["exact"] = False
+        out["can_accept"] = True
+        # The card already says the wording is decided at accept time for any
+        # inexact preview; this line says what the merge will do.
+        out["reason"] = (
+            "merged into the existing note where it fits; if the note already "
+            "says this, nothing is written and the row stays queued"
+        )
+        return out
+    # The same renderer the accept writes through, so the card cannot show a
+    # note the accept would not produce.
+    after_clip, cut = _clip(render_entity_note(PERSON_TYPE_ID, name, text))
     out["operation"] = "add"
     out["revision"] = content_revision("")
     out["after"] = after_clip
@@ -1415,6 +1727,60 @@ def _fold_preview(config, row: dict[str, Any]) -> dict[str, Any]:
     out["exact"] = False
     out["can_accept"] = True
     out["reason"] = "a model folds this into the doc when you accept, so the exact wording is decided then"
+    return out
+
+
+def _category_preview(config, row: dict[str, Any]) -> dict[str, Any]:
+    """What accepting a `[category]` bullet would add, and to which notes.
+
+    Unlike a `[project]` fold this is fully determined before the click: the
+    entry is the one the sidecar was filed with and the notes are the ones the
+    owner ticked, so ``exact`` is True and there is no "decided when you accept"
+    to soften it with. A proposal whose sidecar cannot be read says so and
+    refuses the accept rather than guessing a note list.
+
+    The card's diff is a change *description*, not a body diff: nothing is
+    moved, so there is no before/after of a file to show.
+    """
+    from ciao.vocabulary_proposals import CategorySidecarError, read_category_sidecar
+
+    out = _base_preview(row)
+    category_id = str(row.get("target") or "").strip()
+    out["operation"] = "add_category"
+    out["destination"] = category_id
+    if not category_id:
+        out["reason"] = "the bullet names no category"
+        return out
+    try:
+        vault = Path(config.workspace_vault_root(row["workspace"]))
+    except (AttributeError, ValueError) as exc:
+        out["reason"] = f"could not resolve the vault: {exc}"
+        return out
+    try:
+        sidecar = read_category_sidecar(vault, category_id)
+    except CategorySidecarError as exc:
+        out["reason"] = str(exc)
+        return out
+    if sidecar is None:
+        out["reason"] = (
+            f"the notes behind {category_id} are no longer on record; dismiss "
+            "this row and re-run curation to propose it again"
+        )
+        return out
+    out["category"] = {
+        "id": sidecar["id"],
+        "label": sidecar["label"],
+        "folder": sidecar["folder"],
+        "description": sidecar["description"],
+        "notes": list(sidecar["paths"]),
+    }
+    out["after"] = "\n".join(sidecar["paths"])
+    out["exact"] = True
+    out["can_accept"] = True
+    out["reason"] = (
+        f"adds the {sidecar['id']} category and retypes "
+        f"{len(sidecar['paths'])} note(s) in place; nothing is moved"
+    )
     return out
 
 
@@ -1466,6 +1832,8 @@ def preview_row(config, ctx: dict[str, Any], text: str = "") -> dict[str, Any]:
         out = _people_preview(config, row, fact)
     elif accept.action == "fold_doc":
         out = _fold_preview(config, row)
+    elif accept.action == "add_category":
+        out = _category_preview(config, row)
     elif accept.action == "move_file":
         out = _rehome_preview(config, row)
     else:
@@ -1512,10 +1880,15 @@ def destination_revision(config, row: dict[str, Any]) -> str:
             vault = Path(config.workspace_vault_root(row["workspace"]))
             return content_revision(read_learnings(vault))
         if accept.action == "write_people_note":
-            from ciao.memory_proposals import people_note_path
+            from ciao.memory_proposals import PERSON_TYPE_ID, entity_note_path
 
-            vault = Path(config.workspace_vault_root(row["workspace"]))
-            note = people_note_path(vault, str(row.get("target") or ""))
+            notes_root, registry_root = _entity_roots(config, row["workspace"])
+            note = entity_note_path(
+                notes_root,
+                PERSON_TYPE_ID,
+                str(row.get("target") or ""),
+                registry_root=registry_root,
+            )
             if note is None:
                 return ""
             if not note.exists():

@@ -1,25 +1,64 @@
 <template>
   <div class="card">
-    <div class="settings-card-header settings-card-header--split">
-      <div>
-        <div class="settings-label-row">
-          <p class="section-title">Background Automations</p>
-          <button class="btn-small" :disabled="!automationLoaded" @click="fetchAutomation">Refresh</button>
-        </div>
-        <p class="hint">
-          Work Ciaobot does on its own: naming chats, extracting insights when a chat is
-          archived, keeping the vault and skills in order. Each row says when it runs and
-          what happened last time. Rows that run several steps on one trigger list those
-          steps in the order they execute.
-        </p>
+    <div class="settings-card-header">
+      <div class="automation-section-head">
+        <p class="section-title">Background automations</p>
+        <button class="text-link" type="button" :disabled="!automationLoaded" @click="fetchAutomation">Refresh</button>
       </div>
+      <p class="hint">
+        Work Ciaobot does on its own: naming chats, capturing a session trajectory when a
+        chat is archived, keeping the vault and skills in order.
+      </p>
     </div>
 
-    <div v-if="!automationLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+    <div v-if="routines" class="insights-control">
+      <div class="insights-control-copy">
+        <span class="insights-control-title">Session insights</span>
+        <span class="hint">
+          Reads the chat you just finished for durable learnings. Off stops the model pass.
+        </span>
+      </div>
+      <button
+        class="insights-toggle"
+        type="button"
+        role="switch"
+        :aria-checked="insightsEnabled"
+        aria-label="Automatic session insights"
+        :disabled="routinesSaving"
+        @click="toggleInsights"
+      >
+        <span class="switch-word">{{ insightsEnabled ? 'On' : 'Off' }}</span>
+        <span class="switch-track" aria-hidden="true"></span>
+      </button>
+    </div>
+
+    <div v-if="routines" class="insights-control">
+      <div class="insights-control-copy">
+        <span class="insights-control-title">Trajectory capture</span>
+        <span class="hint">
+          Writes a structured trajectory record for each archived chat.
+        </span>
+      </div>
+      <button
+        class="insights-toggle"
+        type="button"
+        role="switch"
+        :aria-checked="trajectoriesEnabled"
+        aria-label="Automatic trajectory capture"
+        :disabled="routinesSaving"
+        @click="toggleTrajectories"
+      >
+        <span class="switch-word">{{ trajectoriesEnabled ? 'On' : 'Off' }}</span>
+        <span class="switch-track" aria-hidden="true"></span>
+      </button>
+    </div>
+
+    <p v-if="!automationLoaded" class="loading">Loading&hellip;</p>
     <p v-else-if="automationError" class="hint hint--warn">{{ automationError }}</p>
     <template v-else-if="automationItems">
-      <p v-if="automationItems.length === 0" class="hint hint--info">
-        No automation runs recorded yet.
+      <p class="automation-runs-title">Recent runs</p>
+      <p v-if="automationItems.length === 0" class="hint automation-empty">
+        No runs recorded yet. They appear here after the first nightly pass.
       </p>
       <template v-else>
         <p
@@ -56,10 +95,8 @@
               :expanded="!!expandedAutomations[item.job]"
               :busy="!!runningJobs[item.job]"
               :run-label="runLabel(item)"
-              :retry-model-options="retryModelOptions"
-              :configured-model="configuredInsightsModel"
               @toggle="toggle(item.job)"
-              @run="runJob(item, $event)"
+              @run="runJob(item)"
             />
           </div>
         </section>
@@ -74,10 +111,8 @@
               :expanded="!!expandedAutomations[item.job]"
               :busy="!!runningJobs[item.job]"
               :run-label="runLabel(item)"
-              :retry-model-options="retryModelOptions"
-              :configured-model="configuredInsightsModel"
               @toggle="toggle(item.job)"
-              @run="runJob(item, $event)"
+              @run="runJob(item)"
             />
           </div>
         </section>
@@ -95,10 +130,8 @@
               :expanded="!!expandedAutomations[item.job]"
               :busy="!!runningJobs[item.job]"
               :run-label="runLabel(item)"
-              :retry-model-options="retryModelOptions"
-              :configured-model="configuredInsightsModel"
               @toggle="toggle(item.job)"
-              @run="runJob(item, $event)"
+              @run="runJob(item)"
             />
           </div>
         </details>
@@ -109,13 +142,8 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { api } from '../../lib/api'
 import { errorMessage } from '../../lib/errorMessage'
-import {
-  automationHeadline,
-  groupAutomations,
-  retryModelOptions as buildRetryModelOptions,
-} from '../../lib/automationView'
+import { automationHeadline, groupAutomations } from '../../lib/automationView'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import type { AutomationProcess, ProposalOutcomes, RoutineSettings } from '../../lib/types'
@@ -140,9 +168,8 @@ const props = defineProps<{
   // Model routing table, so a model-backed job that keeps failing can be
   // retried with a different model without leaving the page.
   routines: RoutineSettings | null
-  // Per-provider model lists, from /api/models.
-  providerModels: Record<string, string[]> | undefined
-  providerLabels: Record<string, string>
+  routinesSaving: boolean
+  saveRoutines: (patch: Record<string, unknown>) => Promise<void>
 }>()
 
 const taskStore = useTaskStore()
@@ -173,12 +200,18 @@ const proposalsByWorkspace = computed(() =>
   })),
 )
 
-const retryModelOptions = computed(() =>
-  buildRetryModelOptions(props.providerModels, props.providerLabels),
+const insightsEnabled = computed(() => props.routines?.insights_enabled === true)
+const trajectoriesEnabled = computed(
+  () => props.routines?.trajectories_enabled === true,
 )
-const configuredInsightsModel = computed(
-  () => props.routines?.insights_model_effective || '',
-)
+
+async function toggleInsights() {
+  await props.saveRoutines({ insights_enabled: !insightsEnabled.value })
+}
+
+async function toggleTrajectories() {
+  await props.saveRoutines({ trajectories_enabled: !trajectoriesEnabled.value })
+}
 
 const expandedAutomations = ref<Record<string, boolean>>({})
 function toggle(job: string) {
@@ -214,35 +247,18 @@ function scheduleFor(item: AutomationProcess): string {
 
 /**
  * What the row's action button offers, or '' when the job has no manual
- * trigger. Session insights runs over every archive still missing them —
- * previously a separate "Insights backfill" row, which read as an unrelated
- * automation rather than as this one's catch-up pass.
+ * trigger.
  */
 function runLabel(item: AutomationProcess): string {
-  if (item.job === 'insights') return 'Run for all sessions'
   return scheduleFor(item) ? 'Run now' : ''
 }
 
-/**
- * One entry point for every row action. `model` is only meaningful for
- * Session insights, whose bulk run accepts a one-off model override.
- */
-async function runJob(item: AutomationProcess, model: string) {
+/** One entry point for every row action: run the row's schedule now. */
+async function runJob(item: AutomationProcess) {
+  const scheduleId = scheduleFor(item)
+  if (!scheduleId) return
   runningJobs.value[item.job] = true
   try {
-    if (item.job === 'insights') {
-      await api.post('/api/automation/backfill-insights', model ? { model } : {})
-      props.notifySaved(
-        model
-          ? `Running session insights over every archive missing them, using ${model}.`
-          : 'Running session insights over every archive missing them.',
-        'Automations',
-      )
-      setTimeout(props.fetchAutomation, 2000)
-      return
-    }
-    const scheduleId = scheduleFor(item)
-    if (!scheduleId) return
     await taskStore.runScheduleNow(scheduleId)
     props.notifySaved(`Started "${item.label}" via the ${scheduleId} schedule.`, 'Automations')
     await props.fetchAutomation()
@@ -258,21 +274,37 @@ async function runJob(item: AutomationProcess, model: string) {
 /* Shared settings-card scaffolding (mirrors SettingsView.vue so the tab keeps
    its layout when rendered from a child component). */
 .card {
-  width: min(100%, 1040px);
-  margin: 0 auto;
-  gap: var(--space-4);
-  border-color: var(--border);
-  box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  gap: var(--space-3);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  scroll-margin-top: var(--space-4);
+}
+.card:focus {
+  outline: none;
 }
 .section-title {
-  letter-spacing: 0.08em;
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  text-transform: none;
 }
 .settings-card-header {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--border);
+  gap: var(--space-1);
+  padding-bottom: var(--space-1);
+  border-bottom: 0;
+}
+.settings-card-header .hint {
+  color: var(--fg3);
 }
 .settings-card-header:last-child {
   padding-bottom: 0;
@@ -288,7 +320,7 @@ async function runJob(item: AutomationProcess, model: string) {
   min-width: 0;
 }
 .settings-card-header .hint {
-  margin: var(--space-2) 0 0;
+  margin: var(--space-1) 0 0;
   max-width: 76ch;
 }
 .settings-label-row {
@@ -301,6 +333,122 @@ async function runJob(item: AutomationProcess, model: string) {
 .loading {
   color: var(--fg2);
   font-size: var(--text-base);
+}
+
+.automation-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+}
+/* Quiet text action at the section's right edge (matches SchedulePanel). */
+.text-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  flex: none;
+}
+.text-link:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
+.text-link:disabled { color: var(--fg3); cursor: default; }
+
+/* Hairline rows: title and one muted line, a switch on the right. */
+.insights-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: 56px;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+.card > .settings-card-header + .insights-control { border-top: 1px solid var(--border); }
+.insights-control-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.insights-control-title {
+  color: var(--fg);
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+.insights-control .hint {
+  margin: 0;
+  max-width: 72ch;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+}
+/* A switch reads as state, keeping pink for the accent rather than an action.
+   The visible On/Off word means it does not rely on colour. */
+.insights-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--touch);
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.insights-toggle:disabled { opacity: 0.6; cursor: default; }
+.switch-word { min-width: 2.2em; text-align: right; }
+.switch-track {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full, 9999px);
+  background: var(--bg3);
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.switch-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fg3);
+  transition: transform 120ms ease, background 120ms ease;
+}
+.insights-toggle[aria-checked='true'] .switch-word { color: var(--fg); }
+.insights-toggle[aria-checked='true'] .switch-track {
+  border-color: transparent;
+  background: var(--accent);
+}
+.insights-toggle[aria-checked='true'] .switch-track::after {
+  transform: translateX(16px);
+  background: var(--on-accent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .switch-track, .switch-track::after { transition: none; }
+}
+
+.automation-runs-title {
+  margin: var(--space-4) 0 0;
+  color: var(--fg);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.automation-empty {
+  margin: 0;
+  color: var(--fg3);
+  font-size: var(--text-sm);
 }
 
 .automation-headline {
@@ -337,11 +485,8 @@ async function runJob(item: AutomationProcess, model: string) {
 .automation-group-title {
   margin: 0;
   color: var(--fg3);
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 .automation-group-title--warn {
@@ -351,7 +496,7 @@ async function runJob(item: AutomationProcess, model: string) {
 .automation-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  border-top: 1px solid var(--border);
 }
 
 .automation-settled {
@@ -371,4 +516,5 @@ async function runJob(item: AutomationProcess, model: string) {
 .automation-settled[open] > summary {
   margin-bottom: var(--space-3);
 }
+
 </style>

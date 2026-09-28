@@ -78,6 +78,7 @@ SHIPPED_STOCK_COMMAND_DIGESTS: dict[str, frozenset[str]] = {
         "887906f04ac45fde5666fd68c5dfdfd3f6c0b145c6bdd6cf49b9eab97013cd7f",
     }),
     "interrogation.md": frozenset({
+        "11d35c9c49bffe7b37a01b7097a2b59f13ffa9c55cbd3911303a19ba063ecbfb",
         "17600a45d0fd58b5f79a6f865c57243f4bda134aeb31f2f89078223c2449ef71",
         "d21a3788354ffa84ef7178e5e3ff9dd5b159bda518eb210cb4ba2fe6e2e4faa9",
         "efcc5d781e3d4fb04657ba6505b833c56bb07851bac28d7d34f634a745fe7408",
@@ -86,10 +87,14 @@ SHIPPED_STOCK_COMMAND_DIGESTS: dict[str, frozenset[str]] = {
         "3d56ae540d634af504816743fd8725db5aa7cea152d29bcf0918c80fcb4ef94b",
         "5bbbc47cc694ee6499e9189a8f571b4135890df451b48d279b1d8e65d43d790d",
         "7aaca3b9e0c94e8d5cf7c2b0afd802fdc91c3569fba9d2f63bf344e1e17c5096",
+        "7d4b0175e15e55dad8201b98a58ef743419afbbbe472f5c89a0f3931465b658a",
         "86f6854b33701e02518cec19160fb0e2b466c31d48819678088af4c27a9560d5",
         "98950dfedb6db9dc0f2c0e8c39c2164369e3f591d4c1928dd4d18e18a6665fd3",
         "98bf1b2cda1b97d9ae7caf43357d002580b038645737b895a42267f08cf4c7ec",
+        "acdfae91dc5d3ba91803b0c2c854e0ab7a615c2800ecb79310a8b9690fd0868d",
+        "d7d8eb94dd11a6f84b9bb329c4f7ed6c5050d79a6fd2fa20fd1e7369c361ce6c",
         "e89dbfdda0580280fdced71cabf50fad529c9824fb275104f60969b000ebb012",
+        "f0124b04d973b243b87f63cea957132deefd3022c1018637b71ca702208b1e2e",
     }),
 }
 CODEX_WRAPPER_MARKER = ".ciao-codex-wrapper"
@@ -102,7 +107,7 @@ _AGENT_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
 # opencode projections. Skills and instructions need none: opencode discovers
 # `.claude/skills/<name>/SKILL.md`, `.agents/skills/<name>/SKILL.md`,
-# `AGENTS.md`, and `CLAUDE.md` natively (verified against opencode 1.18).
+# and `AGENTS.md` natively (verified against OpenCode 2.0.16).
 # Only commands, subagents, and MCP servers need generated files.
 #
 # Markdown carries its marker as an HTML comment under the frontmatter; JSON
@@ -1036,55 +1041,6 @@ def _resolve_vault_root(workspace: Path) -> Path:
     return root if root.is_absolute() else workspace / root
 
 
-def _configured_memory_char_limit(workspace: Path) -> int | None:
-    """The effective ``CIAO_MEMORY_CHAR_LIMIT`` for cap-marker migration.
-
-    Resolution order mirrors what the server does at start (dotenv loads
-    without overriding exported variables): the process environment wins,
-    then the nearest ``.env`` defining the variable — the workspace's own,
-    walking up through owning directories (an install root that scaffolds
-    per-workspace agent roots keeps its ``.env`` there, and ``ciao setup``
-    re-scaffolding passes agent roots to sync without exporting its parsed
-    values), bounded at four levels up — then ``None`` meaning "use
-    memory_tool's shipped default". Each dotenv is parsed with python-dotenv
-    itself (``dotenv_values``, which mutates nothing) so exactly the syntaxes
-    the server accepts are honoured here — ``export`` prefixes, quoting,
-    inline comments. Building no ``CiaoConfig`` matters: its constructor
-    mutates shared env state mid-sync. Unparseable numeric values are
-    ignored, falling through to the next source or the shipped default.
-    """
-    sources: list[str] = [os.environ.get("CIAO_MEMORY_CHAR_LIMIT", "").strip()]
-    try:
-        from dotenv import dotenv_values
-    except ImportError:  # pragma: no cover - dotenv ships with the app
-        logger.debug("memory: python-dotenv unavailable for cap migration")
-        return None
-    for ancestor in [workspace, *workspace.parents[:4]]:
-        dotenv = ancestor / ".env"
-        if not dotenv.exists():
-            continue
-        try:
-            values = dotenv_values(dotenv) or {}
-        except Exception:  # noqa: BLE001 — advisory migration must not block sync
-            logger.debug(
-                "memory: could not parse %s for cap migration",
-                dotenv,
-                exc_info=True,
-            )
-            continue
-        raw = str(values.get("CIAO_MEMORY_CHAR_LIMIT", "") or "").strip()
-        if raw:
-            sources.append(raw)
-            break
-    for raw in sources:
-        if raw:
-            try:
-                return int(raw)
-            except ValueError:
-                continue
-    return None
-
-
 def _resolve_runtime_root(workspace: Path) -> Path:
     raw = os.environ.get("CIAO_RUNTIME_ROOT", "").strip() or ".runtime"
     root = Path(raw).expanduser()
@@ -1275,14 +1231,8 @@ def sync_workspace_skills(
         else:
             ensure_regions(guide)
         # Restamp markers still carrying a former shipped default so the
-        # guide every session loads advertises the cap the runtime enforces.
-        # The effective limit is resolved here, not inside memory_tool: a
-        # standalone `ciao sync-skills` never loads <root>/.env, and an
-        # override that lives only there must beat the stamp like it beats
-        # the runtime default after a server start.
-        restamped = migrate_region_caps(
-            guide, char_limit=_configured_memory_char_limit(root)
-        )
+        # guide every session loads advertises the cap the runtime applies.
+        restamped = migrate_region_caps(guide)
         if restamped:
             logger.info(
                 "memory: restamped region caps to current defaults in %s: %s",

@@ -113,6 +113,10 @@ class AgentRequest:
     # (e.g. the default harness set or ``Bash``) reach the subprocess
     # without leaking through ``extra_env``.
     disallowed_tools: list[str] = field(default_factory=list)
+    # True for the end-of-conversation memory pass. Providers that have their
+    # own ruleset (opencode) select a stricter one; Claude already receives the
+    # extra denies through ``disallowed_tools``.
+    memory_pass: bool = False
     # Provider-native thinking/reasoning level (see THINKING_LEVELS).
     # Empty = provider default, nothing is forwarded.
     thinking_level: str = ""
@@ -206,6 +210,7 @@ class ToolUseEvent(StreamEvent):
     # Set for provider-native structured questions that must be answered
     # inside the active turn (provider-native request_user_input).
     request_id: str = ""
+    session_id: str = ""
     file_touches: list | None = None
 
 
@@ -222,6 +227,18 @@ class SystemStatusEvent(StreamEvent):
     """System status event."""
 
     status: str | None = None
+
+
+@dataclass(slots=True)
+class ContextEntitiesEvent(StreamEvent):
+    """The vault notes this turn's prompt was matched to (entity hints).
+
+    Emitted once, right after the turn's context capsule is built, so the chat
+    can list them for the message that is running; history reads the same list
+    back out of the stored capsule.
+    """
+
+    entities: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -280,6 +297,7 @@ class PermissionRequestEvent(StreamEvent):
     tool_name: str = ""
     tool_input: str = ""
     request_id: str = ""
+    session_id: str = ""
 
 
 @dataclass(slots=True)

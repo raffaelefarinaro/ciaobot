@@ -31,8 +31,15 @@ from __future__ import annotations
 
 import datetime
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Type-only, so importing this module still costs no YAML: the registry's
+    # views are the annotation, and `load_entity_types` is imported lazily by
+    # the one function that has a vault root to load it from.
+    from ciao.entity_types import EntityTypeRegistry
 
 # Matches the excerpt width os_audit already uses for memory findings, so the
 # Automation page and the audit markdown do not disagree on truncation.
@@ -289,10 +296,10 @@ def find_superseded_state(
 #
 # Two stamps, two clocks. `[as-of: YYYY-MM-DD]` is world time: the fact was
 # true as of that date and may have silently changed since. The trailing
-# `[YYYY-MM-DD]` learned-at stamp is system time: when auto-promotion wrote
-# the entry. Both are read here as aging evidence for the curation routine to
-# re-verify — informational, like every age signal in this module, because
-# age alone is never a defect.
+# `[YYYY-MM-DD]` learned-at stamp is system time: when the fact was promoted
+# into the region. Both are read here as aging evidence for the curation
+# routine to re-verify — informational, like every age signal in this module,
+# because age alone is never a defect.
 
 _AS_OF_RE = re.compile(r"\[as-of:\s*(\d{4}-\d{2}-\d{2})\]")
 _LEARNED_STAMP_RE = re.compile(r"\s*\[(\d{4}-\d{2}-\d{2})\]\s*$")
@@ -435,9 +442,21 @@ STALE_NOTE_EXEMPT_TYPES = frozenset({"log", "journal", "workspace"})
 _UPDATED_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def note_threshold_days(note_type: str) -> int:
-    """Days of silence after which this note type counts as unverified."""
-    return STALE_NOTE_THRESHOLDS_DAYS.get(note_type, STALE_NOTE_DEFAULT_DAYS)
+def note_threshold_days(
+    note_type: str, *, registry: EntityTypeRegistry | None = None
+) -> int:
+    """Days of silence after which this note type counts as unverified.
+
+    ``registry`` is the vault's category list, optional for the same reason as
+    everywhere else in this module: a caller that knows its vault passes one and
+    a category's own ``stale_after_days`` applies, and a caller with no vault in
+    hand keeps the two overrides above. A category with no opinion about ageing
+    is simply absent from the registry's view, so it falls through to the
+    default exactly as it does here.
+    """
+    if registry is None:
+        return STALE_NOTE_THRESHOLDS_DAYS.get(note_type, STALE_NOTE_DEFAULT_DAYS)
+    return registry.stale_thresholds().get(note_type, STALE_NOTE_DEFAULT_DAYS)
 
 
 def parse_verified_date(raw: str) -> datetime.date | None:
@@ -473,6 +492,108 @@ def note_last_verified(
     return None, ""
 
 
+def _stale_type_key(
+    note_type: str, *, registry: EntityTypeRegistry | None = None
+) -> str:
+    """The type a note ages as: its canonical form, else the lowered raw value.
+
+    Resolved through the vault's own category list so a spelling cannot move a
+    note onto the wrong horizon: ``type: Person`` ages like ``person`` and
+    ``type: hackathon-log`` (an alias of ``journal``) is a dated record that
+    never ages at all. The three steps are the canonical form, the category that
+    owns this alias, and finally the lowered raw value — a type nothing claims
+    ages on its own spelling, which is the pre-existing behaviour.
+
+    Imported lazily: this module is otherwise dependency-free and ``vault_index``
+    pulls in YAML. *registry* is threaded the same way, so a category the owner
+    added resolves here too, and a caller with no vault in hand (a pure unit
+    seam) keeps the shipped alias table.
+    """
+    from ciao.vault_index import canonical_type
+
+    raw = (note_type or "").strip()
+    # ``canonical_type`` already resolves aliases (case-insensitively) against
+    # the same registry, so a separate alias lookup here could never add an
+    # owner it did not already return.
+    canonical = canonical_type(raw, registry=registry)
+    if canonical:
+        return canonical
+    return raw.lower()
+
+
+def is_stale_exempt_type(
+    note_type: str, *, registry: EntityTypeRegistry | None = None
+) -> bool:
+    """Whether notes of this type never age out (logs, journals, queues).
+
+    The exempt set stays a constant of this module: it is a statement about
+    event surfaces, not a per-category threshold, and no stock category states
+    one.
+    """
+    return _stale_type_key(note_type, registry=registry) in STALE_NOTE_EXEMPT_TYPES
+
+
+@dataclass(frozen=True, slots=True)
+class NoteVerification:
+    """How long a note's facts have gone unverified, against its horizon.
+
+    The one answer to "is this note stale?" shared by ``find_stale_notes``
+    (memory-audit), the Memory Map's ``stale`` flag and the vault-review
+    ``unverified`` signal — three surfaces that used to compute it separately
+    and disagreed on which notes counted.
+    """
+
+    age_days: int
+    threshold_days: int
+    last_verified: datetime.date
+    source: str  # "frontmatter" | "mtime"
+    exempt: bool
+
+    @property
+    def stale(self) -> bool:
+        return not self.exempt and self.age_days >= self.threshold_days
+
+    def as_evidence(self) -> dict[str, Any]:
+        return {
+            "age_days": self.age_days,
+            "threshold_days": self.threshold_days,
+            "last_verified": self.last_verified.isoformat(),
+            "source": self.source,
+        }
+
+
+def note_verification(
+    note_type: str,
+    updated: str,
+    mtime: float | None,
+    *,
+    today: datetime.date | None = None,
+    registry: EntityTypeRegistry | None = None,
+) -> NoteVerification | None:
+    """Age and horizon for one note, or None when neither date is usable.
+
+    Unverifiable is not stale — calling it so would be a guess. Exempt types
+    still get an age (the map shows it) but are never ``stale``. Ages are
+    clamped at zero so a future ``updated:`` reads as "verified today".
+
+    ``registry`` is the vault's category list, threaded into both the type's
+    resolved name and its horizon so a category's ``stale_after_days`` reaches
+    the verdict rather than only the count beside it.
+    """
+    verified, source = note_last_verified(updated, mtime)
+    if verified is None:
+        return None
+    current = today or datetime.date.today()
+    key = _stale_type_key(note_type, registry=registry)
+    return NoteVerification(
+        age_days=max(0, (current - verified).days),
+        threshold_days=note_threshold_days(key, registry=registry),
+        last_verified=verified,
+        source=source,
+        exempt=key in STALE_NOTE_EXEMPT_TYPES,
+    )
+
+
 def find_stale_notes(
     entries: list[Any],
     *,
@@ -480,6 +601,7 @@ def find_stale_notes(
     path_prefix: Path | None = None,
     mtimes: dict[str, float] | None = None,
     today: datetime.date | None = None,
+    registry: EntityTypeRegistry | None = None,
 ) -> dict[str, Any]:
     """Vault notes whose facts have gone unverified past their type's horizon.
 
@@ -489,12 +611,22 @@ def find_stale_notes(
     ``mtimes``, or stat'ed here by stripping ``path_prefix`` off the rendered
     path and joining onto ``vault_root``.
 
+    ``registry`` is the vault's category list, and it is optional: omitted and a
+    ``vault_root`` is known, it is loaded from that root (resolved, so the
+    loader's cache key is the same root the mtime probe below used); omitted
+    with no root at all, the shipped thresholds stand, which is what keeps this
+    function usable as a pure seam over entries a test built by hand.
+
     Precision-first like every detector in this module: exempt event types,
     report age and threshold side by side so a reader can disagree with the
     verdict without losing the evidence, and return checked/exempt counts so
     an empty list is not mistaken for full coverage.
     """
     current = today or datetime.date.today()
+    if registry is None and vault_root is not None:
+        from ciao.entity_types import load_entity_types
+
+        registry = load_entity_types(Path(vault_root).resolve())
     prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
     findings: list[dict[str, Any]] = []
     checked = 0
@@ -502,10 +634,9 @@ def find_stale_notes(
 
     for entry in entries:
         note_type = (entry.type or "").strip()
-        if note_type in STALE_NOTE_EXEMPT_TYPES:
+        if is_stale_exempt_type(note_type, registry=registry):
             exempt += 1
             continue
-        threshold = note_threshold_days(note_type)
         rendered = str(entry.path)
         if mtimes is not None:
             mtime = mtimes.get(rendered, 0.0)
@@ -521,23 +652,21 @@ def find_stale_notes(
                 mtime = 0.0
         else:
             mtime = 0.0
-        verified, source = note_last_verified(entry.updated, mtime)
-        if verified is None:
+        verification = note_verification(
+            note_type, entry.updated, mtime, today=current, registry=registry
+        )
+        if verification is None:
             # Unverifiable is not stale: calling it so would be a guess.
             continue
         checked += 1
-        age_days = (current - verified).days
-        if age_days < threshold:
+        if not verification.stale:
             continue
         findings.append(
             {
                 "path": rendered,
                 "title": entry.title,
                 "type": note_type or "note",
-                "age_days": age_days,
-                "threshold_days": threshold,
-                "last_verified": verified.isoformat(),
-                "source": source,
+                **verification.as_evidence(),
             }
         )
 

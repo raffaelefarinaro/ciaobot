@@ -17,10 +17,7 @@ mirroring the Memory-Proposals.md promote/dismiss pattern:
 
 Threshold is deliberately a constant rather than a registry entry: ``5`` matched
 the tier boundary in the original sweep and is the point where a tag moves
-from ``Tags (emerging)`` to ``Tags (established)`` in ``VOCABULARY.md``. It
-is configurable via ``VOCAB_PROMOTION_THRESHOLD`` env for tests/installs
-that want a different bar, but the default is the deliberate number from the
-plan's open question.
+from ``Tags (emerging)`` to ``Tags (established)`` in ``VOCABULARY.md``.
 
 Types are a single global canonical set, so usage is counted across EVERY
 workspace vault via ``config.vault_scan_targets()`` when a registry is
@@ -36,20 +33,62 @@ informational pending actions (like ``upgrade_notices``), and they do not
 raise the audit status. A persistent queue with dismiss tracking can be added
 later without changing the generation logic, but it is not needed to satisfy
 the plan's tests or to keep the routine from auto-applying.
+
+**Category proposals are the exception**, and they are the other half of the
+module (:func:`category_candidates` onwards, issue #647). A type drift the
+audit merely reports is still drift tomorrow, and nothing in the audit output
+lets the owner *act* on it. So a cluster of notes already sharing one unlisted
+``type:`` becomes a queued ``[category <id>]`` proposal: the owner accepts it and
+the category is added to the registry and the notes are retyped in place, or
+rejects it and the id is never proposed again. The >=5 ``os_audit`` threshold
+above is untouched; this one fires at
+:data:`CATEGORY_CLUSTER_THRESHOLD` because a queue row is a decision the owner
+has to take, not a line in an informational report.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import os
+import re
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
+from ciao import vault_index
+from ciao.entity_types import EntityTypeRegistry
 from ciao.vault_index import (
-    DEFAULT_PROMOTION_THRESHOLD,
     Entry,
-    promotion_threshold,
     scan_targets,
     vocabulary_report,
 )
+
+logger = logging.getLogger(__name__)
+
+#: How many notes must share one unlisted ``type:`` before it is proposed as a
+#: category. Lower than ``vault_index.DEFAULT_PROMOTION_THRESHOLD`` (5) on
+#: purpose and it does not change it: that threshold decides what the audit
+#: *reports* about the vocabulary, this one decides what the review queue
+#: *asks the owner about*. Three notes is where a spelling stops looking like a
+#: one-off and starts looking like a category nobody wrote down.
+CATEGORY_CLUSTER_THRESHOLD = 3
+
+#: The sidecar directory beside the proposal queue, one JSON file per proposed
+#: category. The queue is one line per proposal and the note list is a list of
+#: paths (which may carry spaces and commas), so the payload travels beside the
+#: bullet rather than inside it — and the decline flag has to outlive the row
+#: anyway, or the id comes back the next night.
+CATEGORY_SIDECAR_RELATIVE = "Workspace/Memory-Category-Proposals"
+
+
+class CategorySidecarError(ValueError):
+    """A category sidecar that cannot be trusted.
+
+    Raised by the readers, never repaired: a proposal whose note list cannot be
+    read must not be accepted against a guessed one, and a decline that cannot
+    be recorded must not be reported as recorded.
+    """
 
 
 def _edit_distance(a: str, b: str, max_dist: int = 2) -> int:
@@ -201,11 +240,10 @@ def generate_vocabulary_proposals(
       among any other tag. Each carries ``tag``, ``workspaces`` and
       ``near_duplicates`` (list of the tags it resembles).
 
-    ``threshold`` overrides the env-driven default; used by tests to pin the
-    bar without touching the environment.
+    ``threshold`` overrides the default; used by tests to pin the bar.
     """
     if threshold is None:
-        threshold = promotion_threshold()
+        threshold = vault_index.DEFAULT_PROMOTION_THRESHOLD
     report = vocabulary_report(entries)
     tags: dict[str, int] = report["tags"]
     tag_workspaces: dict[str, list[str]] = report["tag_workspaces"]
@@ -400,7 +438,7 @@ def audit_vocabulary_proposals(
     "checked and clean".
     """
     empty = {
-        "threshold": promotion_threshold(),
+        "threshold": vault_index.DEFAULT_PROMOTION_THRESHOLD,
         "type_promotions": [],
         "tag_promotions": [],
         "tag_merges": [],
@@ -470,3 +508,356 @@ def audit_vocabulary_proposals(
     result = generate_vocabulary_proposals(entries)
     result["errors"] = errors
     return result
+
+
+# ── Category proposals ─────────────────────────────────────────────────────
+#
+# The deterministic half of a category proposal: ONE unlisted ``type:`` spelling
+# used by three or more notes. The agent-judged half — notes the model would say
+# are the same kind spelled canonically (companies filed as ``type: note``) —
+# has no deterministic signal at all, because ``note`` is canonical and so never
+# appears as drift. It is deliberately not here.
+
+
+def _category_words(raw: str) -> list[str]:
+    """The raw ``type:`` split into its words, on any non-alphanumeric run."""
+    return [word for word in re.split(r"[^0-9A-Za-z]+", (raw or "").strip()) if word]
+
+
+def _title_case(words: list[str]) -> str:
+    return " ".join(word[:1].upper() + word[1:] for word in words)
+
+
+def _pluralise(label: str) -> str:
+    """A label as a folder name: title case, plural, one space per word.
+
+    Deliberately a guess the owner edits in the drawer. The alternative — leaving
+    the folder empty — would make every accept's entry claim no path, so a note
+    filed under the new type could never have its type inferred back from where
+    it sits, and the category would be half a category.
+    """
+    words = label.split(" ")
+    last = words[-1].lower()
+    if last.endswith(("s", "x", "z", "ch", "sh")):
+        plural = last + "es"
+    elif last.endswith("y") and len(last) > 1 and last[-2] not in "aeiou":
+        plural = last[:-1] + "ies"
+    else:
+        plural = last + "s"
+    words[-1] = plural[:1].upper() + plural[1:]
+    return " ".join(words)
+
+
+def _prose(raw: str) -> str:
+    """A raw ``type:`` safe to write into the one-line bullet.
+
+    Whitespace is collapsed and the ``)`` that would close the ``_(from: …)_``
+    tail early is dropped, exactly as ``MemoryProposal.as_bullet`` does for the
+    field it owns.
+    """
+    return " ".join(raw.split()).replace(")", "")
+
+
+def _usable_category(category_id: str, label: str) -> bool:
+    """Whether this id/label pair would survive the registry's own validator.
+
+    Asked of :func:`ciao.entity_types.validate_entries` rather than a private
+    copy of its id pattern, so a cluster whose raw ``type:`` cannot yield a
+    usable id (``type: ---``) is skipped here rather than queued as a bullet that
+    every accept would refuse with a 400.
+    """
+    from ciao import entity_types
+
+    try:
+        entity_types.validate_entries(
+            [
+                entity_types.EntityType(
+                    id=category_id,
+                    label=label,
+                    kind=entity_types.KIND_ENTITY,
+                    builtin=False,
+                )
+            ]
+        )
+    except entity_types.EntityTypeFileError:
+        return False
+    return True
+
+
+def category_candidates(
+    entries: list[Entry],
+    *,
+    threshold: int = CATEGORY_CLUSTER_THRESHOLD,
+    declined: Collection[str] = (),
+    registry: EntityTypeRegistry | None = None,
+) -> list[dict[str, Any]]:
+    """The unlisted ``type:`` values that are really categories in waiting.
+
+    Each candidate is exactly one ``vocabulary_report`` drift record whose
+    ``suggested`` is empty — a type that already has a canonical equivalent is a
+    safe rename (:mod:`ciao.vault_migration`), not a decision for the owner —
+    carrying at least ``threshold`` notes. ``registry``, when given, is the
+    vault's own category list: a category the owner already added is canonical
+    there, so it is not drift and cannot be proposed a second time. Declined it
+    is not, and comes back as drift, so without that set every accepted category
+    would be re-proposed every night.
+
+    Each candidate carries the six suggestions the drawer shows — id, label,
+    folder, description, the note paths and their count — plus the ``raw_type``
+    they were derived from, which is the baseline an accept compares each note
+    against before retyping it.
+    """
+    report = vocabulary_report(entries, registry=registry)
+    settled = {str(item) for item in declined}
+    candidates: list[dict[str, Any]] = []
+    for raw, record in report["type_drift"].items():
+        if record.get("suggested", ""):
+            continue
+        paths = sorted(set(record.get("paths", [])))
+        if len(paths) < threshold:
+            continue
+        words = _category_words(raw)
+        if not words:
+            continue
+        label = _title_case(words)
+        category_id = "-".join(word.lower() for word in words)
+        if not _usable_category(category_id, label):
+            continue
+        if category_id in settled:
+            continue
+        if registry is not None and registry.get(category_id) is not None:
+            continue
+        candidates.append(
+            {
+                "raw_type": raw,
+                "type_id_suggestion": category_id,
+                "label_suggestion": label,
+                "folder_suggestion": _pluralise(label),
+                "description": (
+                    f"Proposed from {len(paths)} notes already typed {_prose(raw)}."
+                ),
+                "paths": paths,
+                "count": len(paths),
+            }
+        )
+    return candidates
+
+
+# ── The sidecar ────────────────────────────────────────────────────────────
+
+_SIDECAR_FIELDS = ("id", "label", "folder", "description", "source_type")
+_SIDECAR_LIST_FIELDS = ("paths",)
+
+
+def category_sidecar_dir(vault_root: Path) -> Path:
+    """The directory holding one JSON file per proposed category."""
+    return Path(vault_root) / CATEGORY_SIDECAR_RELATIVE
+
+
+def category_sidecar_path(vault_root: Path, category_id: str) -> Path:
+    return category_sidecar_dir(vault_root) / f"{category_id}.json"
+
+
+def read_category_sidecar(vault_root: Path, category_id: str) -> dict[str, Any] | None:
+    """The proposal on record for *category_id*, or None when there is none.
+
+    Raises :class:`CategorySidecarError` for a file that is there and cannot be
+    believed. There is no repair path and no default note list: an accept reads
+    the paths from here, and a guessed list would retype notes nobody ticked.
+    """
+    path = category_sidecar_path(vault_root, category_id)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CategorySidecarError(f"unreadable category proposal {path}: {exc}") from exc
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise CategorySidecarError(f"malformed category proposal {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise CategorySidecarError(
+            f"category proposal {path} is a {type(payload).__name__}, not an object"
+        )
+    problems: list[str] = []
+    for name in _SIDECAR_FIELDS:
+        if not isinstance(payload.get(name), str):
+            problems.append(f"{name} must be a string")
+    for name in _SIDECAR_LIST_FIELDS:
+        value = payload.get(name)
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) or not item for item in value
+        ):
+            problems.append(f"{name} must be a list of paths")
+    if not isinstance(payload.get("declined"), bool):
+        problems.append("declined must be a boolean")
+    if problems:
+        raise CategorySidecarError(f"category proposal {path}: {'; '.join(problems)}")
+    return payload
+
+
+def write_category_sidecar(vault_root: Path, payload: dict[str, Any]) -> Path:
+    """Write one category proposal beside the queue; return the path.
+
+    Atomic for the same reason the queue is: the accept reads this file to learn
+    which notes to retype, and a half-written one is not "the previous list" but
+    a truncated one, which would silently retype a subset of the notes the owner
+    ticked.
+    """
+    path = category_sidecar_path(vault_root, str(payload["id"]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.write.tmp")
+    try:
+        tmp.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+    return path
+
+
+def decline_category(vault_root: Path, category_id: str) -> Path:
+    """Record that the owner refused this category; return the sidecar path.
+
+    Id-keyed rather than text-keyed because a category proposal is regenerated
+    from the vault on every pass: the text dedupe in
+    :func:`ciao.memory_proposals.append_proposals` compares a bullet against the
+    live queue, and the moment the row is dismissed there is nothing left to
+    match. Without this flag the same cluster is queued again the next night,
+    forever.
+    """
+    payload = read_category_sidecar(vault_root, category_id)
+    if payload is None:
+        raise CategorySidecarError(
+            f"no category proposal on record for {category_id!r} in {vault_root}"
+        )
+    return write_category_sidecar(vault_root, {**payload, "declined": True})
+
+
+def declined_category_ids(vault_root: Path) -> set[str]:
+    """Every category id this vault has already been offered and refused.
+
+    A sidecar that cannot be read is skipped, not fatal: a corrupt file for one
+    id must not stop the pass from re-offering the other clusters, and an
+    unreadable file means the owner is not being asked about it either way.
+    """
+    directory = category_sidecar_dir(vault_root)
+    try:
+        names = sorted(p.name for p in directory.iterdir() if p.suffix == ".json")
+    except OSError:
+        return set()
+    declined: set[str] = set()
+    for name in names:
+        try:
+            payload = read_category_sidecar(vault_root, name[: -len(".json")])
+        except CategorySidecarError as exc:
+            logger.warning("ignoring %s", exc)
+            continue
+        if payload is not None and payload["declined"]:
+            declined.add(payload["id"])
+    return declined
+
+
+def _queued_category_ids(vault_root: Path) -> set[str]:
+    """The category ids a ``[category <id>]`` bullet is already queued under."""
+    from ciao import proposal_kinds
+
+    try:
+        text = (Path(vault_root) / "Workspace" / "Memory-Proposals.md").read_text(
+            encoding="utf-8"
+        )
+    except (OSError, UnicodeError):
+        return set()
+    return {
+        bullet.target
+        for bullet in (proposal_kinds.parse_bullet(line) for line in text.splitlines())
+        if bullet is not None and bullet.kind == "category" and bullet.target
+    }
+
+
+def generate_category_proposals(
+    vault_root: Path,
+    *,
+    registry: EntityTypeRegistry,
+    threshold: int = CATEGORY_CLUSTER_THRESHOLD,
+) -> list[dict[str, Any]]:
+    """Queue a ``[category …]`` bullet per unlisted ``type:`` with a cluster.
+
+    One mechanical pass, no model: the trigger is a count, so the nightly
+    curation can file these itself and the skill's "do not touch vocabulary
+    proposals" clause stays true for the agent. Returns the candidates it
+    queued, in the order they were written.
+
+    The sidecar is written BEFORE the bullet, deliberately. A sidecar with no
+    bullet is litter the next pass overwrites; a bullet with no sidecar is a row
+    whose accept refuses and keeps, which is the direction that fails safe.
+
+    ``registry`` is required, and it is NOT ``load_entity_types(vault_root)``:
+    *vault_root* is where this workspace's NOTES live, while
+    ``entity-types.yaml`` belongs to the AGENT vault root (``agent_vault_root``)
+    — the same file the accept appends to and ``GET``/``PATCH
+    /api/memory/entity-types`` reads and writes. On an install that has not
+    re-rooted those are different directories, and reading the notes root left
+    detection blind to every category the owner had just accepted: the id stayed
+    unlisted, so it was queued again, and accepting that row 400'd on a duplicate
+    it could never resolve. The caller resolves the root
+    (``ciao/curation_run.py`` threads the one the CLI resolved) and this function
+    never guesses it.
+    """
+    from ciao.memory_proposals import MemoryProposal, append_proposals
+
+    root = Path(vault_root)
+    if not root.is_dir():
+        return []
+    candidates = category_candidates(
+        vault_index.scan_vault(root, registry=registry),
+        threshold=threshold,
+        declined=declined_category_ids(root),
+        registry=registry,
+    )
+    queued = _queued_category_ids(root)
+    fresh = [c for c in candidates if c["type_id_suggestion"] not in queued]
+    if not fresh:
+        return []
+    for candidate in fresh:
+        write_category_sidecar(
+            root,
+            {
+                "id": candidate["type_id_suggestion"],
+                "label": candidate["label_suggestion"],
+                "folder": candidate["folder_suggestion"],
+                "description": candidate["description"],
+                "source_type": candidate["raw_type"],
+                "paths": list(candidate["paths"]),
+                "declined": False,
+            },
+        )
+    append_proposals(
+        [
+            MemoryProposal(
+                target="category",
+                payload=candidate["type_id_suggestion"],
+                text=(
+                    f"{candidate['label_suggestion']} → "
+                    f"{candidate['folder_suggestion']}: {candidate['description']}"
+                ),
+                source_section=(
+                    f"{candidate['count']} notes typed "
+                    f"{_prose(candidate['raw_type'])}"
+                ),
+            )
+            for candidate in fresh
+        ],
+        root,
+    )
+    # Read back rather than assumed from the call: ``append_proposals`` dedupes
+    # on the bullet TEXT against the decision history as well as the live queue,
+    # so a cluster whose text is already recorded there writes nothing. Reporting
+    # it as queued anyway would put a worklist item in every nightly run for a
+    # bullet that is not there.
+    written = _queued_category_ids(root)
+    return [c for c in fresh if c["type_id_suggestion"] in written]

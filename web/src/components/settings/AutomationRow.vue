@@ -50,22 +50,11 @@
       </button>
 
       <div v-if="runLabel" class="automation-row-actions">
-        <label v-if="showModelPicker" class="automation-model-picker">
-          <span class="automation-model-label">Model for this run</span>
-          <select v-model="selectedModel" class="automation-select" :disabled="busy">
-            <option value="">
-              {{ configuredModel ? `Configured (${configuredModel})` : 'Configured model' }}
-            </option>
-            <option v-for="option in retryModelOptions" :key="option.value" :value="option.value">
-              {{ option.label }}
-            </option>
-          </select>
-        </label>
         <button
           class="btn-small btn-run"
           type="button"
           :disabled="busy"
-          @click="emit('run', selectedModel)"
+          @click="emit('run')"
         >
           {{ busy ? 'Running…' : runLabel }}
         </button>
@@ -104,7 +93,7 @@
         :runs="step.recent"
         :title="`${step.label} — recent runs`"
       />
-      <!-- Bulk/manual variants (Session insights carries its catch-up pass). -->
+      <!-- Bulk/manual variants of this row's job. -->
       <RunHistory
         v-for="sub in item.sub_jobs || []"
         :key="sub.job"
@@ -116,7 +105,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { formatDuration, formatRelative, formatTime } from '../../lib/time'
 import {
   attentionSource,
@@ -125,7 +114,6 @@ import {
   overallHealth,
   pipelineSteps,
 } from '../../lib/automationView'
-import type { RetryModelOption } from '../../lib/automationView'
 import type { AutomationProcess } from '../../lib/types'
 import RunHistory from './AutomationRunHistory.vue'
 
@@ -135,16 +123,12 @@ const props = defineProps<{
   busy: boolean
   /** Label for the manual-run button; '' hides it (nothing to trigger). */
   runLabel: string
-  retryModelOptions: RetryModelOption[]
-  configuredModel: string
 }>()
 
-const emit = defineEmits<{ toggle: []; run: [model: string] }>()
+const emit = defineEmits<{ toggle: []; run: [] }>()
 
-const selectedModel = ref('')
-
-// Health folds in bulk variants: a failed insights backfill is a failure of
-// Session insights from the user's side of the screen.
+// Health folds in bulk variants and pipeline steps: a failure anywhere under
+// this row is a failure of the row itself, from the user's side of the screen.
 const health = computed(() => overallHealth(props.item))
 const statusLine = computed(() => lastRunSentence(props.item, formatRelative))
 
@@ -158,32 +142,17 @@ const lastErrorText = computed(() => {
   return source.last_run?.error || source.stats.last_error?.error || ''
 })
 const errorDetail = computed(() => attentionSource(props.item).stats.last_error)
-
-// Only offered where it changes the outcome: a failed model-backed run whose
-// next attempt can use a different model (Session insights' bulk pass).
-const showModelPicker = computed(
-  () =>
-    health.value === 'error'
-    && props.item.job === 'insights'
-    && props.retryModelOptions.length > 0,
-)
 </script>
 
 <style scoped>
+/* A hairline row, not a card: the list reads as one section. Failing rows
+   carry a slim error edge plus the status text, never colour alone. */
 .automation-row {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-  transition: border-color 0.15s var(--ease);
-}
-
-.automation-row:hover {
-  border-color: var(--border-strong);
+  border-bottom: 1px solid var(--border);
 }
 
 .automation-row--error {
-  border-color: color-mix(in srgb, var(--error) 45%, var(--border));
+  box-shadow: inset 2px 0 0 var(--error);
 }
 
 .automation-row-head {
@@ -191,8 +160,10 @@ const showModelPicker = computed(
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-3);
+  padding: var(--space-3) 0;
 }
+
+.automation-row--error .automation-row-head { padding-left: var(--space-3); }
 
 .automation-row-toggle {
   display: flex;
@@ -384,54 +355,9 @@ const showModelPicker = computed(
   flex: 0 0 auto;
 }
 
-.automation-model-picker {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.automation-model-label {
-  color: var(--fg3);
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-/* Mirrors `.routine-select` in SettingsView, which is scoped there and so does
-   not reach this child component. */
-.automation-select {
-  max-width: 220px;
-  min-width: 0;
-  width: 100%;
-  min-height: 38px;
-  padding: 6px 30px 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--bg);
-  color: var(--fg);
-  font-size: var(--text-sm);
-  appearance: none;
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%23888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
-  background-size: 12px 12px;
-}
-
-.automation-select::-ms-expand {
-  display: none;
-}
-
+/* Neutral: a row action repeated down the list must not compete as pink. */
 .btn-run {
-  background: var(--accent2);
-  color: #fff;
-  border: none;
   white-space: nowrap;
-}
-
-.btn-run:hover:not(:disabled) {
-  background: var(--accent-strong);
 }
 
 @media (max-width: 768px) {
@@ -444,21 +370,10 @@ const showModelPicker = computed(
     align-items: flex-end;
     justify-content: flex-end;
   }
-
-  .automation-model-picker {
-    flex: 1 1 auto;
-    min-width: 0;
-  }
-
-  .automation-select {
-    max-width: none;
-  }
 }
 
 .automation-row-detail {
-  padding: var(--space-4);
-  background: var(--bg);
-  border-top: 1px solid var(--border);
+  padding: 0 0 var(--space-4) calc(12px + var(--space-2));
   display: flex;
   flex-direction: column;
   gap: var(--space-4);

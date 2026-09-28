@@ -37,29 +37,30 @@ jobs:
           export PATH=/usr/bin:/bin:/usr/sbin:/sbin
           curl -fsSL "https://github.com/raffaelefarinaro/ciaobot/releases/download/v${VERSION}/install.sh" \
             | sh -s -- --version "$VERSION"
-          app="$HOME/Applications/Ciaobot.app"
-          test -x "$app/Contents/MacOS/ciaobot-desktop"
-          test -x "$app/Contents/Resources/ciao-runtime/bin/ciao"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$VERSION"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$HOME/Library/LaunchAgents/Ciaobot.plist")" = "$app/Contents/MacOS/ciaobot-desktop"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:1' "$HOME/Library/LaunchAgents/Ciaobot.plist")" = "--background"
-          launchctl print "gui/$(id -u)/Ciaobot" >/dev/null
-          ! xattr -p com.apple.quarantine "$app" 2>/dev/null
-      - name: Launch and wait for the engine
+          # install.sh is the engine installer as of the transition release
+          # (#651): the app can no longer be freshly installed, so what this
+          # smoke test installs is the engine, and what it checks is that the
+          # engine came up. The public name is unchanged, so the run above is
+          # still the command the docs tell a new user to paste.
+          test -x "$HOME/.local/bin/ciao"
+          test -s "$HOME/.local/state/ciaobot/install-receipt.json"
+          jq -e --arg version "$VERSION" '.version == $version' \
+            "$HOME/.local/state/ciaobot/install-receipt.json"
+      - name: Wait for the engine to answer
         run: |
           set -euo pipefail
-          app="$HOME/Applications/Ciaobot.app"
-          open -g "$app" --args --background >"$RUNNER_TEMP/ciaobot-open.log" 2>&1 &
-          for _ in {1..30}; do
-            pgrep -x ciaobot-desktop >/dev/null && break
-            sleep 1
-          done
-          pgrep -x ciaobot-desktop >/dev/null
+          # The installer above already started the engine as a LaunchAgent and
+          # waited on it; there is no app left to open (#651). The port comes
+          # from the workspace the engine was set up in, the way the installer
+          # itself reads it, rather than being assumed.
+          launchctl print "gui/$(id -u)/com.ciao.server" >/dev/null
+          port=$(awk -F= '/^PWA_PORT=/{print $2}' "$HOME/Ciaobot/.env" 2>/dev/null | tr -d '"' | tail -1 || true)
+          [ -n "$port" ] || port=8443
           for _ in {1..45}; do
-            curl -fsS http://localhost:8443/api/startup-status >/dev/null 2>&1 && break
+            curl -fsS "http://localhost:$port/api/startup-status" >/dev/null 2>&1 && break
             sleep 1
           done
-          curl -fsS http://localhost:8443/api/startup-status | jq -e '.desktop_api_version == 1'
+          curl -fsS "http://localhost:$port/api/startup-status" | jq -e '.desktop_api_version == 1'
       - name: Re-run installer as an update/recovery path
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
@@ -68,37 +69,42 @@ jobs:
           export PATH=/usr/bin:/bin:/usr/sbin:/sbin
           curl -fsSL "https://github.com/raffaelefarinaro/ciaobot/releases/download/v${VERSION}/install.sh" \
             | sh -s -- --version "$VERSION" --no-start
-          test -x "$HOME/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/bin/ciao"
-      - name: Verify updater metadata and installer assets
+          test -x "$HOME/.local/bin/ciao"
+          jq -e --arg version "$VERSION" '.version == $version' \
+            "$HOME/.local/state/ciaobot/install-receipt.json"
+      - name: Verify the engine installer assets
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.resolve.outputs.version }}
         run: |
-          gh release download "v${VERSION}" --repo raffaelefarinaro/ciaobot --pattern latest.json --pattern install.sh --pattern ciaobot-installer-verify_aarch64
-          jq -e '.platforms["darwin-aarch64"].url and .platforms["darwin-aarch64"].signature' latest.json
+          set -euo pipefail
+          # This release publishes the engine and nothing else (#653): no app
+          # archive, no latest.json feed, no native verifier, no bundled
+          # runtime. What it has to carry is the installer, under both names.
+          gh release download "v${VERSION}" --repo raffaelefarinaro/ciaobot \
+            --pattern install.sh --pattern install-engine.sh
+          # install.sh is the engine installer (#651). The placeholder belongs to
+          # the app installer, so its absence is what says the retired script is
+          # not what a new user downloads - and install-engine.sh, the name the
+          # app's Move action fetches (#604), has to be the same bytes, or that
+          # hand-over is stranded at the moment a user accepts it.
+          grep -q -- '--migrate' install.sh
           if grep -q '__VERIFIER_SHA256__' install.sh; then
-            echo "release installer still contains its checksum placeholder" >&2
+            echo "install.sh on the release is still the app installer" >&2
             exit 1
           fi
-          # Not `test -x`: a GitHub release asset does not carry a mode, so it
-          # always downloads 0644 no matter what the upload chmod'd it to, and
-          # that assertion could never pass. install.sh chmods the verifier
-          # itself before running it. What is worth asserting is that the asset
-          # is the aarch64 binary the installer expects to be able to run.
-          test -s ciaobot-installer-verify_aarch64
-          chmod 755 ciaobot-installer-verify_aarch64
-          file ciaobot-installer-verify_aarch64 | grep -qi "arm64"
-          ./ciaobot-installer-verify_aarch64 2>&1 | grep -q "usage:"
+          test "$(shasum -a 256 install.sh | awk '{print $1}')" = \
+            "$(shasum -a 256 install-engine.sh | awk '{print $1}')"
       - name: Diagnostics
         if: failure()
         run: |
           echo "--- processes ---"
-          pgrep -lf 'ciaobot|ciao' || true
+          pgrep -lf 'ciao|uv' || true
           echo "--- launchd state ---"
           launchctl print "gui/$(id -u)/com.ciao.server" 2>&1 | head -60 || true
           echo "--- LaunchAgent ---"
           cat "$HOME/Library/LaunchAgents/com.ciao.server.plist" 2>/dev/null || true
+          echo "--- install receipt ---"
+          cat "$HOME/.local/state/ciaobot/install-receipt.json" 2>/dev/null || true
           echo "--- runtime logs ---"
           find "$HOME/Ciaobot/.runtime" -maxdepth 1 -type f -print -exec tail -80 {} \; 2>/dev/null || true
-          echo "--- app launch log ---"
-          cat "$RUNNER_TEMP/ciaobot-open.log" 2>/dev/null || true

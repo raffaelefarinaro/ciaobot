@@ -2,10 +2,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import VaultReviewPanel from '../VaultReviewPanel.vue'
 import { useVaultReviewStore } from '../../stores/vaultReview'
 import { useProjectStore } from '../../stores/projects'
+import { useFileViewerStore } from '../../stores/fileViewer'
 import { pendingConfirm } from '../../lib/confirm'
 import type { ChatInfo, ProjectInfo, VaultReviewCandidate, VaultTrashedNote } from '../../lib/types'
 
@@ -64,15 +65,7 @@ function trashed(overrides: Partial<VaultTrashedNote> = {}): VaultTrashedNote {
   }
 }
 
-/** Drain both the microtask queue and jsdom's queued DOM tasks. */
-async function settle() {
-  for (let i = 0; i < 3; i += 1) {
-    await new Promise(resolve => setTimeout(resolve, 0))
-    await flushPromises()
-  }
-}
-
-function buttonByText(wrapper: ReturnType<typeof mount>, text: string) {
+function buttonByText(wrapper: VueWrapper | DOMWrapper<Element>, text: string) {
   const found = wrapper.findAll('button').find(b => b.text() === text)
   if (!found) throw new Error(`button "${text}" not found`)
   return found
@@ -103,8 +96,12 @@ describe('VaultReviewPanel', () => {
     expect(apiGet).toHaveBeenCalledWith('/api/vault/review?workspace=personal&include=trashed,cleared')
     expect(wrapper.findAll('.vr-row')).toHaveLength(1)
     expect(wrapper.text()).toContain('Mo')
-    expect(wrapper.text()).toContain('no other note links to it')
-    expect(wrapper.text()).toContain('never verified')
+    // type · reason · reason · backlinks, one short line.
+    const why = wrapper.get('.vr-why').text()
+    expect(why).toContain('note')
+    expect(why).toContain('nothing links to it')
+    expect(why).toContain('no date or tags')
+    expect(why).toContain('no backlinks')
     wrapper.unmount()
   })
 
@@ -117,19 +114,17 @@ describe('VaultReviewPanel', () => {
     wrapper.unmount()
   })
 
-  it('opens with one sentence and folds the per-button detail into a disclosure', async () => {
+  it('opens with a heading and one sentence, with no refresh or how-to disclosure', async () => {
     apiGet.mockResolvedValue({ candidates: [candidate()], trashed: [] })
     const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    const lede = wrapper.find('.vr-lede')
-    expect(lede.exists()).toBe(true)
-    expect(lede.text().length).toBeLessThan(160)
-
-    const how = wrapper.find('.vr-how')
-    expect(how.exists()).toBe(true)
-    expect(how.attributes('open')).toBeUndefined()
-    expect(wrapper.find('.vr-how-summary').text()).toBe('What each choice does')
+    expect(wrapper.get('h2').text()).toBe('1 to revisit')
+    const lede = wrapper.get('.vr-lede').text()
+    expect(lede).toContain('Still true marks a note checked today')
+    expect(lede).toContain('Retire moves it to Retired, where it can be restored')
+    expect(wrapper.find('.vr-how').exists()).toBe(false)
+    expect(wrapper.findAll('button').some(b => b.text() === 'Refresh')).toBe(false)
     wrapper.unmount()
   })
 
@@ -140,12 +135,139 @@ describe('VaultReviewPanel', () => {
     const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    const how = wrapper.find('.vr-how').text()
-    expect(how).toContain('no frontmatter')
-    expect(how).toContain('nowhere to record')
-    // And the button's own tooltip keeps the same condition.
     expect(buttonByText(wrapper, 'Still true').attributes('title'))
       .toContain('when it has frontmatter to stamp')
+    wrapper.unmount()
+  })
+
+  it('gives every row the same neutral choice, with no pink primary', async () => {
+    apiGet.mockResolvedValue({
+      candidates: [candidate(), candidate({ candidate_id: 'other', path: 'memory-vault/People/Bo.md' })],
+      trashed: [],
+    })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.findAll('.btn-primary')).toHaveLength(0)
+    const actions = wrapper.findAll('.vr-row')[0].findAll('.vr-actions button').map(b => b.text())
+    expect(actions).toEqual(['Still true', 'Retire', 'Discuss'])
+    expect(wrapper.findAll('.vr-row')[0].find('.vr-actions .mr-link').text()).toBe('Discuss')
+    wrapper.unmount()
+  })
+
+  it('filters by reason, one chip per reason present, zeros hidden', async () => {
+    apiGet.mockResolvedValue({
+      candidates: [
+        candidate({ candidate_id: 'a', signals: ['unverified'] }),
+        candidate({ candidate_id: 'b', path: 'memory-vault/People/Bo.md', signals: ['unverified', 'superseded_language'] }),
+        candidate({ candidate_id: 'c', path: 'memory-vault/People/Cy.md', signals: ['unlinked'] }),
+      ],
+      trashed: [],
+    })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const chips = wrapper.findAll('.vr-chips button')
+    expect(chips.map(c => c.text())).toEqual([
+      'All 3', 'Says it was superseded 1', 'Unchecked too long 2', 'Nothing links to it 1',
+    ])
+    expect(chips.map(c => c.text()).join(' ')).not.toContain('Possible duplicate')
+    expect(chips[0].attributes('aria-pressed')).toBe('true')
+
+    await chips[2].trigger('click')
+    expect(wrapper.findAll('.vr-row').map(r => r.find('.vr-title').text())).toEqual(['Mo', 'Bo'])
+    expect(wrapper.findAll('.vr-chips button')[2].attributes('aria-pressed')).toBe('true')
+
+    await wrapper.findAll('.vr-chips button')[0].trigger('click')
+    expect(wrapper.findAll('.vr-row')).toHaveLength(3)
+    wrapper.unmount()
+  })
+
+  it('names the age and the limit, and opens where the date came from', async () => {
+    apiGet.mockResolvedValue({
+      candidates: [
+        candidate({
+          candidate_id: 'fm',
+          signals: ['unverified'],
+          evidence: {
+            ...candidate().evidence,
+            type: 'person',
+            backlinks: ['a.md', 'b.md', 'c.md'],
+            unverified: { age_days: 95, threshold_days: 90, last_verified: '2026-06-22', source: 'frontmatter' },
+          },
+        }),
+        candidate({
+          candidate_id: 'mt',
+          path: 'memory-vault/People/Juan.md',
+          signals: ['unverified'],
+          evidence: {
+            ...candidate().evidence,
+            type: 'person',
+            unverified: { age_days: 102, threshold_days: 90, last_verified: '2026-06-15', source: 'mtime' },
+          },
+        }),
+      ],
+      trashed: [],
+    })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const [first, second] = wrapper.findAll('.vr-row')
+    expect(first.get('.vr-why').text()).toContain('unchecked 3 months (limit 90 days)')
+    expect(first.get('.vr-why').text()).toContain('3 backlinks')
+    const flag = first.get('.vr-flag')
+    expect(flag.attributes('aria-expanded')).toBe('false')
+    const box = first.get(`#${flag.attributes('aria-controls')}`)
+    expect((box.element as HTMLElement).style.display).toBe('none')
+
+    await flag.trigger('click')
+    expect(flag.attributes('aria-expanded')).toBe('true')
+    expect((box.element as HTMLElement).style.display).toBe('')
+    expect(box.text()).toContain('Last checked 2026-06-22, from the note\'s updated: field.')
+    expect(box.text()).toContain('Person notes are due every 90 days.')
+
+    await second.get('.vr-flag').trigger('click')
+    expect(second.get('.vr-evidence').text())
+      .toContain('No updated: field, so the file\'s modified date is used: 2026-06-15.')
+    wrapper.unmount()
+  })
+
+  it('quotes the superseded line with its neighbours and opens the note at it', async () => {
+    apiGet.mockResolvedValue({
+      candidates: [candidate({
+        signals: ['superseded_language'],
+        evidence: {
+          ...candidate().evidence,
+          type: 'project',
+          superseded: {
+            line: 7,
+            text: 'Scope change: order numbers moved to their own page.',
+            match: 'moved to',
+            where: 'lead',
+            before: { line: 6, text: '# LVMH P6 OCR trials' },
+            after: { line: 8, text: 'Sources: visit 8 Sep.' },
+          },
+        },
+      })],
+      trashed: [],
+    })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    const viewer = useFileViewerStore()
+    const open = vi.spyOn(viewer, 'open').mockResolvedValue(true)
+
+    expect(wrapper.get('.vr-why').text()).toContain('says it was superseded')
+    await wrapper.get('.vr-flag').trigger('click')
+    const box = wrapper.get('.vr-evidence')
+    expect(box.text()).toContain('Where it says so · lead paragraph, line 7')
+    const lines = box.findAll('.mr-box-line')
+    expect(lines.map(l => l.get('.mr-box-num').text())).toEqual(['6', '7', '8'])
+    expect(lines[1].classes()).toContain('mr-box-line--hit')
+    expect(lines[1].get('mark').text()).toBe('moved to')
+    expect(box.text()).toContain('Only the frontmatter and the opening paragraph count.')
+
+    await box.findAll('button').find(b => b.text() === 'Open at line 7')!.trigger('click')
+    expect(open).toHaveBeenCalledWith('memory-vault/People/Mo.md', 7)
     wrapper.unmount()
   })
 
@@ -181,7 +303,7 @@ describe('VaultReviewPanel', () => {
     })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('1 retired note in personal')
+    expect(wrapper.text()).toContain('1 retired note')
     expect(wrapper.text()).toContain('Old')
 
     await buttonByText(wrapper, 'Restore').trigger('click')
@@ -209,41 +331,18 @@ describe('VaultReviewPanel', () => {
     wrapper.unmount()
   })
 
-  it('retries an excerpt that failed, instead of pinning the error', async () => {
-    // A cached FAILURE used to be treated like a cached success, so one
-    // transient 500 pinned "Could not load" on the row for the life of the
-    // panel — the only way out was a full refresh.
-    apiGet.mockResolvedValue({ candidates: [candidate()], trashed: [] })
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: false, status: 500 })
-      .mockResolvedValueOnce({ ok: true, text: async () => 'the note body' })
-    vi.stubGlobal('fetch', fetchMock)
-
+  it('shows the server excerpt inline and opens the note from its path', async () => {
+    apiGet.mockResolvedValue({
+      candidates: [candidate({ evidence: { ...candidate().evidence, excerpt: 'Product owner on the OEM side.' } })],
+      trashed: [],
+    })
     const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
+    const open = vi.spyOn(useFileViewerStore(), 'open').mockResolvedValue(true)
 
-    const details = wrapper.find('details.vr-excerpt')
-    const el = details.element as HTMLDetailsElement
-    // jsdom queues its own `toggle` when `open` flips, so drain the task
-    // queue and count from a clean slate rather than racing it.
-    el.open = true
-    await settle()
-    expect(wrapper.text()).toContain('Could not load (HTTP 500)')
-    fetchMock.mockClear()
-
-    // Reopening a row whose excerpt FAILED must retry.
-    await details.trigger('toggle')
-    await settle()
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(wrapper.text()).toContain('the note body')
-    expect(wrapper.text()).not.toContain('Could not load')
-
-    // Reopening one that SUCCEEDED must not.
-    await details.trigger('toggle')
-    await settle()
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-
-    vi.unstubAllGlobals()
+    expect(wrapper.get('.vr-excerpt-inline').text()).toBe('Product owner on the OEM side.')
+    await wrapper.get('.vr-path').trigger('click')
+    expect(open).toHaveBeenCalledWith('memory-vault/People/Mo.md')
     wrapper.unmount()
   })
 
@@ -262,7 +361,7 @@ describe('VaultReviewPanel', () => {
     const pinFile = vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
     apiPost.mockClear()
 
-    await buttonByText(wrapper, 'Talk about it').trigger('click')
+    await buttonByText(wrapper, 'Discuss').trigger('click')
     await flushPromises()
 
     expect(createChat).toHaveBeenCalledTimes(1)
@@ -340,7 +439,7 @@ describe('VaultReviewPanel', () => {
       .mockResolvedValue({ chat_id: 'c-new' } as ChatInfo)
     vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
 
-    await buttonByText(wrapper, 'Talk about it').trigger('click')
+    await buttonByText(wrapper, 'Discuss').trigger('click')
     await flushPromises()
 
     const [, title, seed] = createChat.mock.calls[0]
@@ -370,13 +469,48 @@ describe('VaultReviewPanel', () => {
       .mockResolvedValue({ chat_id: 'c-new' } as ChatInfo)
     vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
 
-    await buttonByText(wrapper, 'Talk about it').trigger('click')
+    await buttonByText(wrapper, 'Discuss').trigger('click')
     await flushPromises()
 
     const [, title, seed] = createChat.mock.calls[0]
     expect(title).toBe('Retire Mo?')
     expect(seed).toContain('Do not edit, move, or delete anything')
     expect(seed).not.toContain('should link to it')
+    wrapper.unmount()
+  })
+
+  it('shows a retryable load error instead of claiming the queue is empty', async () => {
+    apiGet
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({ candidates: [], trashed: [], cleared: [] })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const alert = wrapper.get('[role="alert"]')
+    expect(alert.text()).toContain('Could not load notes to revisit')
+    expect(alert.text()).toContain('offline')
+    expect(wrapper.text()).not.toContain('Nothing to revisit')
+
+    await alert.get('button').trigger('click')
+    await flushPromises()
+    expect(apiGet).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('Nothing to revisit')
+    wrapper.unmount()
+  })
+
+  it('keeps the last successful rows visible when a refresh fails', async () => {
+    apiGet
+      .mockResolvedValueOnce({ candidates: [candidate()], trashed: [], cleared: [] })
+      .mockRejectedValueOnce(new Error('still offline'))
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    await useVaultReviewStore().fetch('personal', { force: true })
+    await flushPromises()
+
+    expect(wrapper.findAll('.vr-row')).toHaveLength(1)
+    expect(wrapper.get('[role="status"]').text()).toContain('Showing the last successful load')
+    expect(wrapper.text()).not.toContain('Nothing to revisit')
     wrapper.unmount()
   })
 

@@ -1,320 +1,44 @@
 <template>
   <div class="settings-pane">
+    <!-- One overlay at a time. The package-update path owns it while it runs;
+         otherwise an in-flight engine update does, driven by its record rather
+         than by a timer, so it never claims progress nobody made. A settled
+         record is the card's business, not a full-screen takeover.
+
+         Only the applying half of an engine update gets it: that run takes the
+         engine down, so the overlay is the whole window and is modal — this is
+         its inert boundary, and `useModalFocus` below moves focus into the
+         overlay's status region, so Tab can no longer reach Restart or Deploy
+         underneath it, then hands focus back to the card once the record
+         settles. Staging is the card's own inline progress instead, because
+         nothing goes down while it runs. -->
     <UpdateProgressView
       v-if="packageUpdating"
       :version="packageStatus?.latest_version"
     />
-    <PaneHeader page-tag="settings" @open-sidebar="emit('open-sidebar')" />
-    <div class="pane-body">
+    <div
+      v-else-if="engineUpdateOverlayOpen"
+      ref="engineUpdateOverlay"
+      class="engine-update-overlay"
+    >
+      <UpdateProgressView
+        ref="engineUpdateOverlayView"
+        :version="engineUpdateVersion"
+        :phase="engineUpdateOperation?.phase"
+        :error="engineUpdateOperation?.error"
+      />
+    </div>
+    <PaneHeader page-tag="Settings" @open-sidebar="emit('open-sidebar')" />
+    <div ref="bodyEl" class="pane-body" @scroll.passive="onBodyScroll">
+      <div class="page-grid settings-grid">
+      <div ref="mainEl" class="page-main settings-main">
 
       <!-- HOME TAB -->
       <template v-if="currentTab === 'home'">
-        <!-- Whose settings am I looking at? In client mode every card below is
-             the host's, because the API calls behind them are tunneled. Say so
-             once, at the top, and point at the one screen that is local. -->
-        <div v-if="isNodeClient" class="card scope-card">
-          <div class="settings-card-header">
-            <p class="section-title">you are viewing {{ hostScopeLabel }}</p>
-            <p class="hint">
-              This is the host's Settings, exactly as it looks on that machine. Changes here apply
-              there, including the password and restarts.
-              <router-link to="/device">This device</router-link>
-              has its own panel for role, host connection and its local app version.
-            </p>
-          </div>
-        </div>
-
-        <!-- Actions -->
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">app actions</p>
-              <p class="hint">
-                Snapshot, sync, or restart
-                {{ isNodeClient ? `the host (${hostScopeLabel})` : 'this local Ciaobot instance' }}.
-              </p>
-            </div>
-            <div class="settings-card-header-actions">
-              <button class="btn-primary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
-                {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
-              </button>
-              <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="!!actionPending" :title="localStatus?.restart_only ? 'Wait for active chats, then restart the installed server' : 'Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code'">
-                {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
-              </button>
-            </div>
-          </div>
-          <div v-if="actionResult" class="action-result" :class="{ 'action-result--error': hasDeployError }">{{ actionResult }}</div>
-          <div v-if="hasDeployError" class="deploy-steps">
-            <div v-for="step in deploySteps.filter(s => !s.ok)" :key="step.step" class="deploy-step fail">
-              <span class="step-icon">&#10007;</span>
-              <div style="flex: 1; min-width: 0;">
-                <strong>{{ step.step }} failed</strong>
-                <pre v-if="step.output" class="deploy-step-error-output">{{ step.output }}</pre>
-              </div>
-            </div>
-            <div class="action-row action-row--spaced action-row--compact">
-              <button class="btn-primary" @click="fixDeployErrorInChat">
-                Fix in Chat
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Keyboard shortcuts -->
-        <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">keyboard shortcuts</p>
-            <p class="hint">Global shortcuts. Text fields keep their normal meaning: number keys stay typeable, Cmd+A/Alt+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
-          </div>
-          <ul class="shortcut-list">
-            <li>
-              <kbd v-if="inDesktopApp">&#8984;T</kbd>
-              <kbd v-else>&#8224;N</kbd>
-              <span>Open a new chat in the default General project</span>
-            </li>
-            <li>
-              <kbd v-if="inDesktopApp">&#8984;D</kbd>
-              <kbd v-else>&#8224;D</kbd>
-              <span>Toggle voice dictation (start / stop)</span>
-            </li>
-            <li>
-              <kbd v-if="inDesktopApp">&#8984;&#9003;</kbd>
-              <kbd v-else>&#8224;&#9003;</kbd>
-              <span>Archive the open chat (asks to confirm)</span>
-            </li>
-            <li>
-              <kbd v-if="inDesktopApp">&#8984;S</kbd>
-              <kbd v-else>&#8224;S</kbd>
-              <span>Show or hide the sidebar</span>
-            </li>
-            <li>
-              <kbd v-if="inDesktopApp">&#8984;&#8679;M</kbd>
-              <kbd v-else>&#8224;M</kbd>
-              <span>Open the model picker</span>
-            </li>
-            <li><kbd>1–9</kbd><span>Switch to the first through ninth workspace in the sidebar</span></li>
-            <li>
-              <kbd v-if="inDesktopApp">&#8984;&#8679;=</kbd>
-              <kbd v-else>&#8224;=</kbd>
-              <span>Increase the font size</span>
-            </li>
-            <li>
-              <kbd v-if="inDesktopApp">&#8984;&#8679;-</kbd>
-              <kbd v-else>&#8224;-</kbd>
-              <span>Decrease the font size</span>
-            </li>
-            <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
-            <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats; stacked workspaces use up/down between lanes</span></li>
-            <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
-          </ul>
-        </div>
-
-        <!-- PWA password -->
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">PWA password</p>
-              <p class="hint">
-                <template v-if="isNodeClient">
-                  The password on {{ hostScopeLabel }} — the one you typed to open this client.
-                  Changing it here keeps this device connected; other clients have to log in again.
-                </template>
-                <template v-else>
-                  Ciaobot is always password-protected — this is the password you type to open it,
-                  and the one another device needs to connect as a client.
-                </template>
-              </p>
-            </div>
-            <span
-              v-if="authSettings"
-              class="badge"
-              :class="authSettings.auth_required ? 'badge--success' : 'badge--warn'"
-            >
-              {{ authSettings.auth_required ? 'on' : 'off' }}
-            </span>
-          </div>
-          <div v-if="!authSettings" class="action-row"><span class="loading">Loading&hellip;</span></div>
-          <template v-else>
-            <div class="settings-form-panel node-peer-form">
-              <p v-if="!authSettings.auth_required" class="hint hint--warn">
-                This instance is running unprotected because PWA_AUTH_REQUIRED=false is set in the
-                workspace .env. Setting a password here turns protection back on.
-              </p>
-              <label v-if="authSettings.auth_required" class="settings-field">
-                <span class="ws-label">Current password</span>
-                <input
-                  v-model="authCurrentPassword"
-                  type="password"
-                  class="routine-input"
-                  autocomplete="current-password"
-                  :disabled="authSettingsSaving"
-                />
-              </label>
-              <label class="settings-field">
-                <span class="ws-label">New password</span>
-                <input
-                  v-model="authNewPassword"
-                  type="password"
-                  class="routine-input"
-                  placeholder="at least 4 characters"
-                  autocomplete="new-password"
-                  :disabled="authSettingsSaving"
-                />
-              </label>
-              <div class="action-row settings-actions">
-                <button
-                  class="btn-primary btn-small"
-                  @click="saveAuthSettings"
-                  :disabled="authSettingsSaving || !canSaveAuthSettings"
-                >
-                  {{ authSettingsSaving ? 'Saving…' : 'Save password' }}
-                </button>
-              </div>
-            </div>
-            <div v-if="authSettingsResult" class="action-result" :class="{ 'action-result--error': authSettingsError }">
-              {{ authSettingsResult }}
-            </div>
-          </template>
-        </div>
-
-        <!-- Workspace health -->
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">workspace health</p>
-              <p class="hint">Checks Claude Code discovery files, vault writability, and generated asset links.</p>
-            </div>
-            <span class="badge" :class="healthBadgeClass(workspaceHealth?.status || '')">
-              {{ workspaceHealth?.status || (agentAssetsLoaded ? 'unknown' : 'loading') }}
-            </span>
-          </div>
-          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Scanning&hellip;</span></div>
-          <p v-else-if="agentAssetsError" class="hint hint--warn">{{ agentAssetsError }}</p>
-          <div v-else-if="workspaceHealth && prioritizedHealthChecks.length" class="health-list">
-            <div
-              v-for="check in prioritizedHealthChecks"
-              :key="check.id"
-              class="health-row"
-              :class="`health-row--${check.status}`"
-            >
-              <span class="health-dot" aria-hidden="true"></span>
-              <div class="health-main">
-                <div class="health-title-row">
-                  <span class="health-title">{{ check.title }}</span>
-                  <span v-if="check.path" class="health-path">{{ check.path }}</span>
-                </div>
-                <p class="hint hint--compact">{{ check.detail }}</p>
-                <p v-if="check.action" class="hint hint--compact hint--warn">{{ check.action }}</p>
-              </div>
-            </div>
-            <div v-if="workspaceHealth.status !== 'ok'" class="action-row">
-              <button
-                id="workspace-health-fix"
-                class="btn-primary"
-                :disabled="healthFixPending"
-                @click="fixWorkspaceHealth"
-              >{{ healthFixPending ? 'Fixing…' : 'Fix issues' }}</button>
-              <span v-if="healthFixError" class="hint hint--warn">{{ healthFixError }}</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Main workspace -->
-        <div v-if="routines && routines.workspace_context" class="card">
-          <div class="settings-card-header">
-            <p class="section-title">main workspace</p>
-            <p class="hint">
-              The server filesystem root for routines, skills, scripts, and runtime state.
-              Set <code>CIAO_WORKSPACE</code> in your <code>.env</code> file, then restart Ciaobot.
-              Logical chat workspaces (sidebar switcher) are managed separately under Settings &rarr; Workspaces.
-            </p>
-          </div>
-          <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
-        </div>
-
-        <!-- Package update — the desktop app drives this from the tray. -->
-        <div v-if="!inDesktopApp" class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">package update</p>
-              <p class="hint">
-                <template v-if="isNodeClient && packageStatus?.mode !== 'bundled_app'">
-                  The version installed on {{ hostScopeLabel }}. Updating restarts the host.
-                  To upgrade this computer, open <router-link to="/device">this device</router-link>.
-                </template>
-                <template v-else-if="packageStatus?.mode === 'bundled_app'">
-                  This bundled app updates through the Ciaobot menu-bar icon. Choose
-                  <strong>Update</strong> there, or run the one-line installer again.
-                </template>
-                <template v-else>
-                  Check the installed package version and upgrade this local app.
-                </template>
-              </p>
-            </div>
-            <div v-if="packageStatus && packageStatus.mode !== 'bundled_app'" class="settings-card-header-actions">
-              <button
-                :class="packageStatus.update_available ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
-                @click="openUpdatePanel"
-                :disabled="!packageStatus.update_available || packageUpdating || showUpdatePanel"
-              >
-                {{ packageStatus.update_available
-                    ? `Update to ${packageStatus.latest_version}`
-                    : 'Up to date' }}
-              </button>
-            </div>
-          </div>
-          <div v-if="packageLoading && !packageStatus" class="loading">
-            Checking package status...
-          </div>
-          <div v-else-if="packageStatus">
-            <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
-              Update check failed: {{ packageStatus.error }}
-            </div>
-
-            <div v-if="showUpdatePanel && packageStatus.mode !== 'bundled_app'" class="settings-form-panel">
-              <p class="section-title">What&rsquo;s new in {{ packageStatus.latest_version }}</p>
-              <div v-if="changelogLoading" class="loading">Loading changelog&hellip;</div>
-              <template v-else>
-                <ul v-if="changelog.commits && changelog.commits.length" class="changelog-list">
-                  <li v-for="c in changelog.commits" :key="c.sha || c.subject">
-                    <code v-if="c.sha" class="changelog-sha">{{ c.sha }}</code>
-                    <span class="changelog-subject">{{ c.subject }}</span>
-                  </li>
-                </ul>
-                <p v-else class="hint">
-                  {{ changelog.error
-                      ? `Could not load changelog: ${changelog.error}`
-                      : 'No changelog details available.' }}
-                </p>
-                <p v-if="changelog.compare_url" class="hint hint--spaced">
-                  <a :href="changelog.compare_url" target="_blank" rel="noopener">View full diff on GitHub</a>
-                </p>
-                <p v-if="packageStatus.source" class="hint hint--spaced">
-                  <a :href="packageStatus.source" target="_blank" rel="noopener">Release notes on GitHub</a>
-                </p>
-              </template>
-              <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doPackageUpdate" :disabled="packageUpdating">
-                  {{ packageUpdating ? 'Updating&hellip;' : 'Update &amp; Restart' }}
-                </button>
-                <button class="btn-small" @click="showUpdatePanel = false" :disabled="packageUpdating">
-                  Cancel
-                </button>
-              </div>
-            </div>
-          </div>
-          <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
-        </div>
-
-        <!-- Notifications — the desktop app owns this in the tray, so the
-             card drops out there rather than showing web-push controls the
-             tray already supersedes. Same card as the Notifications tab. -->
-        <SettingsNotifications hide-in-desktop-app />
-
         <!-- Appearance -->
         <div class="card">
           <div class="settings-card-header">
-            <p class="section-title">appearance</p>
+            <p class="section-title">Appearance</p>
             <p class="hint">Control the visual theme and type scale used across Ciaobot.</p>
           </div>
           <div class="setting-row setting-row--inline setting-row--flush">
@@ -364,12 +88,424 @@
           </div>
         </div>
 
-        
+        <!-- Actions -->
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">This host</p>
+              <p class="hint">
+                Snapshot, sync, or restart this Ciaobot instance.
+              </p>
+            </div>
+            <div class="settings-card-header-actions">
+              <button class="btn-secondary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
+                {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
+              </button>
+              <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="!!actionPending" :title="localStatus?.restart_only ? 'Wait for active chats, then restart the installed server' : 'Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code'">
+                {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
+              </button>
+            </div>
+          </div>
+          <div v-if="actionResult" class="action-result" :class="{ 'action-result--error': hasDeployError }">{{ actionResult }}</div>
+          <div v-if="hasDeployError" class="deploy-steps">
+            <div v-for="step in deploySteps.filter(s => !s.ok)" :key="step.step" class="deploy-step fail">
+              <span class="step-icon">&#10007;</span>
+              <div style="flex: 1; min-width: 0;">
+                <strong>{{ step.step }} failed</strong>
+                <pre v-if="step.output" class="deploy-step-error-output">{{ step.output }}</pre>
+              </div>
+            </div>
+            <div class="action-row action-row--spaced action-row--compact">
+              <button class="btn-primary" @click="fixDeployErrorInChat">
+                Fix in Chat
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Package update -->
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">Updates</p>
+              <p class="hint">
+                <template v-if="packageStatus?.mode === 'bundled_app'">
+                  This app updates by re-running the one-line installer.
+                  <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
+                </template>
+                <template v-else-if="packageStatus?.mode === 'installer' && engineUpdateEnabled">
+                  Installed with the Ciaobot engine installer. Stage a release below, then apply it;
+                  applying restarts Ciaobot once.
+                </template>
+                <template v-else-if="packageStatus?.mode === 'installer'">
+                  Installed with the Ciaobot engine installer. To update, run it again:
+                  <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install-engine.sh | sh</code>
+                </template>
+                <template v-else>
+                  Check the installed package version and upgrade this local app.
+                </template>
+              </p>
+            </div>
+            <div v-if="packageStatus && !['bundled_app', 'installer'].includes(packageStatus.mode ?? '')" class="settings-card-header-actions">
+              <button
+                v-if="packageStatus.update_available"
+                class="btn-primary btn-small"
+                @click="openUpdatePanel"
+                :disabled="packageUpdating || showUpdatePanel"
+              >
+                {{ `Update to ${packageStatus.latest_version}` }}
+              </button>
+              <!-- Nothing to do: a status, not a disabled button. -->
+              <span v-else class="settings-status">Up to date<template v-if="packageStatus.current_version"> · {{ packageStatus.current_version }}</template></span>
+            </div>
+            <!-- The same status for an engine this card can update: an installer
+                 with no job and nothing newer is up to date, and says so rather
+                 than leaving the card blank. -->
+            <div v-else-if="engineUpdateIdleAndCurrent" class="settings-card-header-actions">
+              <span class="settings-status">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
+            </div>
+          </div>
+          <div v-if="packageLoading && !packageStatus" class="loading">
+            Checking package status...
+          </div>
+          <div v-else-if="packageStatus">
+            <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
+              Update check failed: {{ packageStatus.error }}
+            </div>
+
+            <div v-if="showUpdatePanel && !['bundled_app', 'installer'].includes(packageStatus.mode ?? '')" class="settings-form-panel">
+              <p class="section-title">What&rsquo;s new in {{ packageStatus.latest_version }}</p>
+              <div v-if="changelogLoading" class="loading">Loading changelog&hellip;</div>
+              <template v-else>
+                <ul v-if="changelog.commits && changelog.commits.length" class="changelog-list">
+                  <li v-for="c in changelog.commits" :key="c.sha || c.subject">
+                    <code v-if="c.sha" class="changelog-sha">{{ c.sha }}</code>
+                    <span class="changelog-subject">{{ c.subject }}</span>
+                  </li>
+                </ul>
+                <p v-else class="hint">
+                  {{ changelog.error
+                      ? `Could not load changelog: ${changelog.error}`
+                      : 'No changelog details available.' }}
+                </p>
+                <p v-if="changelog.compare_url" class="hint hint--spaced">
+                  <a :href="changelog.compare_url" target="_blank" rel="noopener">View full diff on GitHub</a>
+                </p>
+                <p v-if="packageStatus.source" class="hint hint--spaced">
+                  <a :href="packageStatus.source" target="_blank" rel="noopener">Release notes on GitHub</a>
+                </p>
+              </template>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="doPackageUpdate" :disabled="packageUpdating">
+                  {{ packageUpdating ? 'Updating&hellip;' : 'Update &amp; Restart' }}
+                </button>
+                <button class="btn-small" @click="showUpdatePanel = false" :disabled="packageUpdating">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- The engine update job (#608). One distinct panel per record state,
+               every word of it read off the persisted operation; nothing here
+               invents progress. A sibling of the package block because it is
+               driven by a different route, and either may fail alone. -->
+          <div v-if="engineUpdateVisible" ref="engineUpdatePanel" class="settings-form-panel engine-update-panel" tabindex="-1">
+            <p class="section-title">Engine update</p>
+
+            <!-- A coordinator refusal that wrote no record of its own: a release
+                 lookup, a lock, an engine already on the target. Nothing will
+                 ever arrive on a poll for a run that left no record, so the
+                 card says why and offers the action the record allows. Text
+                 alone would be a dead end until the page reloaded. A refusal
+                 parked against an existing record answers here too: the served
+                 reason is always the newer one, because the parked reason is
+                 only served while the record it was parked against is
+                 unchanged. -->
+            <template v-if="updateStatus?.error">
+              <p class="hint hint--warn hint--spaced">{{ updateStatus.error }}</p>
+              <!-- Parking a reason changes nothing about the record it was
+                   parked against, so a rollback is still a rollback and the
+                   version it went back to is still the one now running. -->
+              <p v-if="engineUpdateRolledBack && engineUpdateOperation?.from_version" class="hint hint--spaced">
+                Back on v{{ engineUpdateOperation.from_version }}.
+              </p>
+              <div class="action-row settings-actions">
+                <!-- The action has to be the one the record allows. A `staged`
+                     record is not terminal, so `/api/update/stage` refuses it
+                     with a 409 by design (`_update_refusal`), forever: a panel
+                     that answered a refusal with Stage alone could never apply
+                     the release it had already downloaded, and the parked
+                     reason lives on the server, so a reload kept it. Apply is
+                     what a `staged` record allows; a terminal record, or no
+                     record at all, is where a new run may be started. -->
+                <button
+                  v-if="engineUpdateStage === 'staged'"
+                  class="btn-primary"
+                  @click="doEngineUpdateApply"
+                  :disabled="updateActionPending || updatePolling"
+                >
+                  {{ updateActionPending ? 'Applying…' : 'Apply update' }}
+                </button>
+                <button
+                  v-else
+                  class="btn-primary"
+                  @click="doEngineUpdateStage"
+                  :disabled="updateActionPending || updatePolling"
+                >
+                  {{ updateActionPending ? 'Staging…' : (packageStatus?.update_available ? 'Stage update' : 'Try again') }}
+                </button>
+              </div>
+            </template>
+
+            <!-- Staging runs while the engine keeps serving, so it is not a
+                 takeover: the same progress rows the overlay would carry, in
+                 the card, with the rest of the app usable and reachable. The
+                 poll keeps running, so this moves on its own. -->
+            <UpdateProgressView
+              v-else-if="engineUpdateStagingNow"
+              ref="engineUpdateInlineView"
+              inline
+              :version="engineUpdateVersion"
+              :phase="engineUpdateOperation?.phase"
+              :error="engineUpdateOperation?.error"
+            />
+
+            <!-- Applying: the engine is replacing itself and the connection is
+                 about to drop, so the full-window overlay above carries the rows
+                 and this only names the phase it is in. -->
+            <p v-else-if="engineUpdateBusy" class="hint hint--spaced">
+              {{ engineUpdatePhaseText }}<template v-if="engineUpdateOperation"> · v{{ engineUpdateOperation.to_version }}</template>
+            </p>
+
+            <!-- Staged is not a failure and not a second chance: `/api/update/
+                 stage` refuses a non-terminal record with a 409 by design, so
+                 the only way forward from here is Apply. Staging again is
+                 offered from the terminal failure phases, where a new record
+                 may be written. -->
+            <template v-else-if="engineUpdateStage === 'staged'">
+              <p class="hint hint--spaced">
+                v{{ engineUpdateOperation?.to_version || packageStatus?.latest_version }} is downloaded and verified.
+                Applying it restarts Ciaobot.
+              </p>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="doEngineUpdateApply" :disabled="updateActionPending || updatePolling">
+                  {{ updateActionPending ? 'Applying…' : 'Apply update' }}
+                </button>
+              </div>
+            </template>
+
+            <!-- Applied, and still the newest release: the record stays on disk
+                 after a successful apply, so an engine that has updated once
+                 would answer every later release with "up to date" and never
+                 offer a Stage again. -->
+            <template v-else-if="engineUpdateStage === 'done' && !engineUpdateStaleApplied">
+              <p class="hint hint--spaced">ciaobot is up to date.</p>
+            </template>
+
+            <template v-else-if="engineUpdateFailed">
+              <p class="hint hint--warn hint--spaced">{{ engineUpdateFailureText }}</p>
+              <p v-if="engineUpdateRolledBack && engineUpdateOperation?.from_version" class="hint hint--spaced">
+                Back on v{{ engineUpdateOperation.from_version }}.
+              </p>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling">
+                  {{ updateActionPending ? 'Staging…' : (engineUpdateStage === 'rolled_back' ? 'Stage again' : 'Retry') }}
+                </button>
+              </div>
+            </template>
+
+            <template v-else-if="packageStatus?.update_available">
+              <p class="hint hint--spaced">
+                v{{ packageStatus.latest_version }} is available. Staging downloads and verifies it without
+                restarting Ciaobot.
+              </p>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling">
+                  {{ updateActionPending ? 'Staging…' : 'Stage update' }}
+                </button>
+              </div>
+            </template>
+          </div>
+          <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
+        </div>
+
+        <!-- Main workspace -->
+        <div v-if="routines && routines.workspace_context" class="card">
+          <div class="settings-card-header">
+            <p class="section-title">Main workspace</p>
+            <p class="hint">
+              The server filesystem root for routines, skills, scripts, and runtime state.
+              Set <code>CIAO_WORKSPACE</code> in your <code>.env</code> file, then restart Ciaobot.
+              Logical chat workspaces (sidebar switcher) are managed separately under Settings &rarr; Workspaces.
+            </p>
+          </div>
+          <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
+        </div>
+
+        <!-- Workspace health -->
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">Workspace health</p>
+              <p class="hint">Checks Claude Code discovery files, vault writability, and generated asset links.</p>
+            </div>
+            <span class="badge" :class="healthBadgeClass(workspaceHealth?.status || '')">
+              {{ workspaceHealth?.status || (agentAssetsLoaded ? 'unknown' : 'loading') }}
+            </span>
+          </div>
+          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Scanning&hellip;</span></div>
+          <p v-else-if="agentAssetsError" class="hint hint--warn">{{ agentAssetsError }}</p>
+          <div v-else-if="workspaceHealth && prioritizedHealthChecks.length" class="health-list">
+            <div
+              v-for="check in prioritizedHealthChecks"
+              :key="check.id"
+              class="health-row"
+              :class="`health-row--${check.status}`"
+            >
+              <span class="health-dot" aria-hidden="true"></span>
+              <div class="health-main">
+                <div class="health-title-row">
+                  <span class="health-title">{{ check.title }}</span>
+                  <span v-if="check.path" class="health-path">{{ check.path }}</span>
+                </div>
+                <p class="hint hint--compact">{{ check.detail }}</p>
+                <p v-if="check.action" class="hint hint--compact hint--warn">{{ check.action }}</p>
+              </div>
+            </div>
+            <div v-if="workspaceHealth.status !== 'ok'" class="action-row">
+              <button
+                id="workspace-health-fix"
+                class="btn-primary"
+                :disabled="healthFixPending"
+                @click="fixWorkspaceHealth"
+              >{{ healthFixPending ? 'Fixing…' : 'Fix issues' }}</button>
+              <span v-if="healthFixError" class="hint hint--warn">{{ healthFixError }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- PWA password -->
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">PWA password</p>
+              <p class="hint">
+                Ciaobot is always password-protected — this is the password you type to open it,
+                and the one another device needs to sign in.
+              </p>
+            </div>
+            <span
+              v-if="authSettings"
+              class="badge"
+              :class="authSettings.auth_required ? 'badge--success' : 'badge--warn'"
+            >
+              {{ authSettings.auth_required ? 'on' : 'off' }}
+            </span>
+          </div>
+          <div v-if="!authSettings" class="action-row"><span class="loading">Loading&hellip;</span></div>
+          <template v-else>
+            <div class="settings-form-panel">
+              <p v-if="!authSettings.auth_required" class="hint hint--warn">
+                This instance is running unprotected because PWA_AUTH_REQUIRED=false is set in the
+                workspace .env. Setting a password here turns protection back on.
+              </p>
+              <label v-if="authSettings.auth_required" class="settings-field">
+                <span class="ws-label">Current password</span>
+                <input
+                  v-model="authCurrentPassword"
+                  type="password"
+                  class="routine-input"
+                  autocomplete="current-password"
+                  :disabled="authSettingsSaving"
+                />
+              </label>
+              <label class="settings-field">
+                <span class="ws-label">New password</span>
+                <input
+                  v-model="authNewPassword"
+                  type="password"
+                  class="routine-input"
+                  placeholder="at least 4 characters"
+                  autocomplete="new-password"
+                  :disabled="authSettingsSaving"
+                />
+              </label>
+              <div class="action-row settings-actions">
+                <button
+                  class="btn-primary btn-small"
+                  @click="saveAuthSettings"
+                  :disabled="authSettingsSaving || !canSaveAuthSettings"
+                >
+                  {{ authSettingsSaving ? 'Saving…' : 'Save password' }}
+                </button>
+              </div>
+            </div>
+            <div v-if="authSettingsResult" class="action-result" :class="{ 'action-result--error': authSettingsError }">
+              {{ authSettingsResult }}
+            </div>
+          </template>
+        </div>
+
+        <!-- Other devices — where to open Ciaobot from a phone or another
+             computer. The one place to set the trusted HTTPS address. -->
+        <SettingsDevices />
+
+        <!-- Notifications. Same card as the Notifications tab. -->
+        <SettingsNotifications />
+
+        <!-- Keyboard shortcuts -->
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">Keyboard shortcuts</p>
+            <p class="hint">Global shortcuts. Text fields keep their normal meaning: number keys stay typeable, Cmd+A/Alt+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
+          </div>
+          <ul id="settings-shortcut-list" class="shortcut-list">
+            <li>
+              <kbd>{{ webChord('N') }}</kbd>
+              <span>Open a new chat in the default General project</span>
+            </li>
+            <li>
+              <kbd>{{ webChord('M') }}</kbd>
+              <span>Open the model picker</span>
+            </li>
+            <li><kbd>1–9</kbd><span>Switch to the first through ninth workspace in the sidebar</span></li>
+            <template v-if="showAllShortcuts">
+              <li>
+                <kbd>{{ webChord('\u232B', 'Backspace') }}</kbd>
+                <span>Archive the open chat (asks to confirm)</span>
+              </li>
+              <li>
+                <kbd>{{ webChord('S') }}</kbd>
+                <span>Show or hide the sidebar</span>
+              </li>
+              <li>
+                <kbd>{{ webChord('=') }}</kbd>
+                <span>Increase the font size</span>
+              </li>
+              <li>
+                <kbd>{{ webChord('-') }}</kbd>
+                <span>Decrease the font size</span>
+              </li>
+              <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
+              <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats; stacked workspaces use up/down between lanes</span></li>
+              <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
+            </template>
+          </ul>
+          <button
+            type="button"
+            class="settings-disclosure"
+            aria-controls="settings-shortcut-list"
+            :aria-expanded="showAllShortcuts"
+            @click="showAllShortcuts = !showAllShortcuts"
+          >{{ showAllShortcuts ? 'Show fewer' : `Show all ${SHORTCUT_COUNT}` }}</button>
+        </div>
+
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <p class="section-title">debug</p>
+              <p class="section-title">Debug</p>
               <p class="hint">Runtime issue log: server errors and failed background jobs. Send it to a chat so the agent can self-fix.</p>
             </div>
             <div class="settings-card-header-actions">
@@ -382,19 +518,13 @@
           <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
         </div>
 
-        <!-- This device (role, host connection, local app). Rendered inline so it
-             behaves like every other tile here, instead of navigating to /device. -->
-        <div class="device-tile">
-          <DevicePanel />
-        </div>
-
         <!-- Open source. The face image on the right appears only while the
              GitHub-star ask is still live (housekeeping detects it via the
              `starred` / snoozed receipt): once the user has starred or
              dismissed, the card quiets back to prose. -->
         <div class="card open-source-card" :class="{ 'open-source-card--with-face': showStarNudge }">
           <div class="settings-card-header">
-            <p class="section-title">open source</p>
+            <p class="section-title">Open source</p>
             <p class="hint">
               Ciaobot is an open-source project. Support and contributions are welcome:
               report issues, suggest features, or open a pull request on
@@ -418,6 +548,7 @@
             draggable="false"
           />
         </div>
+
       </template>
 
       <!-- NOTIFICATIONS TAB -->
@@ -426,212 +557,11 @@
       </template>
 
 
-      <!-- MODELS TAB -->
+      <!-- MODELS TAB: chat providers, then background models.
+           The old providers tab folded in here; /settings/providers
+           redirects to /settings/models#chat-providers (router.ts). -->
       <template v-if="currentTab === 'models'">
-        <div v-if="!routinesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
-        <template v-else-if="routinesError">
-          <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
-        </template>
-        <template v-else-if="routines">
-          <!-- Internal routines -->
-          <div class="card">
-            <div class="settings-card-header">
-              <p class="section-title">internal models</p>
-              <p class="hint">
-                These tasks use their own model setting, separate from the active chat model.
-                "Automatic" keeps the built-in default.
-                System automations without a model picker are tracked on the Automations page.
-              </p>
-            </div>
-
-            <div class="routine-row">
-              <div class="routine-info">
-                <span class="routine-name">Session insights</span>
-                <span class="routine-detail">Extracts learnings when a chat is archived and appends them to that archive.</span>
-                <div v-if="getJobTelemetry('insights')" class="routine-telemetry">
-                  <span class="badge" :class="getJobBadgeClass('insights')">
-                    {{ getJobStatus('insights') }}
-                  </span>
-                  <span v-if="hasJobLastRun('insights')" class="telemetry-meta">
-                    Last run: {{ getJobLastRunLabel('insights') }} ({{ getJobDuration('insights') }})
-                  </span>
-                  <span v-if="getJobStatus('insights') === 'error' && getJobLastError('insights')" class="telemetry-error" :title="getJobLastError('insights')">
-                    &middot; {{ getJobLastError('insights') }}
-                  </span>
-                </div>
-              </div>
-              <div
-                class="routine-model-controls"
-                :class="{ 'routine-model-controls--single': routineProviderValue('insights_model') === 'apple' }"
-              >
-                <select
-                  class="routine-select routine-select--provider"
-                  :value="routineProviderValue('insights_model')"
-                  :disabled="routinesSaving"
-                  @change="saveRoutineProvider('insights_model', ($event.target as HTMLSelectElement).value)"
-                >
-                  <option value="automatic">Automatic</option>
-                  <option v-if="appleModelAvailable" value="apple">Local (free)</option>
-                  <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
-                    {{ provider.label }}
-                  </option>
-                </select>
-                <ModelSelector
-                  v-if="routineProviderValue('insights_model') !== 'apple' && routineProviderValue('insights_model') !== 'automatic'"
-                  :model-value="routineModelValue('insights_model')"
-                  :sections="routineModelSectionsFor('insights_model')"
-                  :disabled="routinesSaving"
-                  @update:model-value="saveRoutineModel('insights_model', $event)"
-                />
-                <span class="routine-model-hint">
-                  <template v-if="routineProviderValue('insights_model') === 'apple'">
-                    Runs on-device for free using Apple Intelligence. Nothing to install.
-                  </template>
-                  <template v-else>{{ routineModelSummary('insights_model') }}</template>
-                </span>
-              </div>
-            </div>
-
-            <div class="routine-row">
-              <div class="routine-info">
-                <span class="routine-name">Critique models</span>
-                <span class="routine-detail">Select one or more models for adversarial review.</span>
-              </div>
-              <div class="critique-model-picker">
-                <div class="critique-picker-header">
-                  <div class="critique-picker-summary">
-                    <div v-if="selectedCritiqueModels.length" class="critique-chip-list">
-                      <button
-                        v-for="model in selectedCritiqueModels"
-                        :key="model"
-                        type="button"
-                        class="critique-chip"
-                        :disabled="routinesSaving"
-                        title="Remove model"
-                        @click="removeCritiqueModel(model)"
-                      >
-                        <span>{{ model }}</span>
-                        <span>&times;</span>
-                      </button>
-                    </div>
-                    <span v-else>Automatic default ({{ routines?.critique_models_effective || '' }})</span>
-                  </div>
-                  <button
-                    type="button"
-                    class="btn-small"
-                    :disabled="routinesSaving || selectedCritiqueModels.length === 0"
-                    @click="setCritiqueModels([])"
-                  >
-                    Reset
-                  </button>
-                </div>
-                <ModelSelector
-                  multiple
-                  :model-value="selectedCritiqueModels"
-                  :sections="critiqueModelSections"
-                  placeholder="Select critique models"
-                  :empty-placeholder="`Automatic default (${routines?.critique_models_effective || ''})`"
-                  :disabled="routinesSaving"
-                  @update:model-value="setCritiqueModels"
-                />
-              </div>
-            </div>
-          </div>
-
-          <!-- Voice: hear (dictation) and speak (read aloud) -->
-          <div class="card">
-            <div class="settings-card-header">
-              <p class="section-title">voice</p>
-              <p class="hint">Choose the engines used to hear you (dictation) and to speak messages aloud.</p>
-            </div>
-            <!-- No engine picker: voice is on-device only now. Both engines are
-                 free and need no key, so the only thing worth saying is whether
-                 this machine can run them and, if not, why. -->
-            <div class="routine-row routine-row--flush">
-              <div class="routine-info">
-                <span class="routine-name">
-                  <svg class="routine-voice-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
-                  Hear
-                </span>
-              </div>
-              <div class="routine-model-controls routine-model-controls--single">
-                <span class="routine-model-hint">
-                  <template v-if="routines.transcription.available">
-                    Dictation runs on-device using macOS speech recognition
-                    (<code>{{ routines.transcription.locale }}</code>). Free, nothing to download.
-                  </template>
-                  <template v-else>
-                    <span class="hint--warn">
-                      Dictation is unavailable: {{ routines.transcription.unavailable_reason }}
-                    </span>
-                  </template>
-                </span>
-              </div>
-            </div>
-            <div class="routine-row routine-row--flush">
-              <div class="routine-info">
-                <span class="routine-name">
-                  <svg class="routine-voice-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
-                  Speak
-                </span>
-              </div>
-              <div class="routine-model-controls routine-model-controls--single">
-                <span class="routine-model-hint">
-                  <template v-if="routines.speech.available">
-                    Read-aloud uses the macOS system voice. Free, nothing to download.
-                  </template>
-                  <template v-else>
-                    <span class="hint--warn">
-                      Read-aloud is unavailable. It requires a macOS host with
-                      the Ciaobot desktop app installed.
-                    </span>
-                  </template>
-                </span>
-              </div>
-            </div>
-            <!-- The installed voice list differs per machine, so it is served by
-                 the engine rather than hardcoded, best quality first. Empty
-                 means "let macOS pick the best one for the language". -->
-            <div
-              v-if="routines.speech.available"
-              class="routine-row routine-row--flush"
-            >
-              <div class="routine-info">
-                <span class="routine-name routine-name--sub">Voice</span>
-              </div>
-              <div class="routine-model-controls routine-model-controls--single">
-                <select
-                  class="routine-select"
-                  :value="routines.speech.local_voice"
-                  :disabled="routinesSaving"
-                  @change="saveRoutines({ tts_local_voice: ($event.target as HTMLSelectElement).value })"
-                >
-                  <option value="">Best available for the language</option>
-                  <option v-for="voice in routines.speech.local_voices || []" :key="voice.id" :value="voice.id">
-                    {{ voice.name }} ({{ voice.locale }}{{ voice.quality === 'default' ? '' : ', ' + voice.quality }})
-                  </option>
-                </select>
-                <span class="routine-model-hint">
-                  The stock voices are the basic tier. Look for ones marked
-                  <strong>Premium</strong> (then Enhanced) &mdash; they are a free download under
-                  System Settings &rsaquo; Accessibility &rsaquo; Read &amp; Speak &rsaquo;
-                  System voice &rsaquo; Manage Voices, and Ciaobot picks the best installed one
-                  automatically.
-                  <a
-                    href="https://support.apple.com/guide/mac-help/mchlp2290/mac"
-                    target="_blank"
-                    rel="noopener"
-                  >How to add a voice</a>.
-                </span>
-              </div>
-            </div>
-          </div>
-          <div v-if="routinesResult" class="action-result">{{ routinesResult }}</div>
-        </template>
-      </template>
-
-      <!-- PROVIDERS TAB -->
-      <template v-if="currentTab === 'providers'">
+        <!-- Chat providers -->
         <div v-if="!providerKeysLoaded" class="card" role="status" aria-live="polite" aria-label="Loading providers">
           <div class="mm-loading-heading"><span class="history-loading-spinner" aria-hidden="true"></span><span>Loading providers…</span></div>
           <div class="mm-skeleton-block" aria-hidden="true">
@@ -645,27 +575,28 @@
           <div class="card"><p class="hint hint--warn">{{ providerKeysError }}</p></div>
         </template>
         <template v-else-if="providerKeys">
-          <div class="card">
+          <div id="chat-providers" class="card">
             <div class="settings-card-header">
               <div>
-                <p class="section-title">providers</p>
+                <p class="section-title">Chat providers</p>
                 <p class="hint">
                   Each provider CLI manages its own login and credentials. Ciaobot verifies every connection.
+                  The defaults below apply to new chats; any chat can override them from the picker.
                 </p>
               </div>
             </div>
 
-            <div v-if="providerKeys.connections" class="provider-connections">
-              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row">
-                <div class="setting-row-main setting-row-main--inline">
-                  <div class="routine-info">
-                    <span class="routine-name">{{ conn.label || connKey }}</span>
-                    <p class="hint hint--compact provider-connection-detail">
+            <div v-if="providerKeys.connections" class="provider-connections set-list">
+              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row set-row">
+                <div class="set-row-head provider-row-head">
+                  <div class="routine-info set-row-main">
+                    <span class="routine-name set-row-title">{{ conn.label || connKey }}</span>
+                    <p class="set-row-sub provider-connection-detail">
                       <span v-if="conn.version">{{ conn.version }}</span>
                       <span v-if="conn.account">{{ conn.account }}</span>
                       <span v-if="!conn.version && conn.detail">{{ conn.detail }}</span>
                     </p>
-                    <p v-if="conn.auth === 'not_installed'" class="hint hint--compact">
+                    <p v-if="conn.auth === 'not_installed'" class="set-row-sub">
                       {{ conn.detail }}
                       Install it with <code>{{ conn.command }}</code>
                       <template v-if="conn.path_command">
@@ -681,67 +612,76 @@
                     </p>
                     <p
                       v-if="conn.auth !== 'not_installed' && conn.path_command"
-                      class="hint hint--compact"
+                      class="set-row-sub"
                     >
                       Your terminal cannot find this CLI yet — put it on your PATH with
                       <code>{{ conn.path_command }}</code>
                     </p>
                   </div>
-                  <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
-                    {{ conn.ok ? `Connected · ${conn.auth}` : 'Not connected' }}
-                  </span>
-                </div>
-                <div class="provider-mcps-preview">
-                  <div class="ws-connectors-header">
-                    <span class="ws-label">Configured MCP Servers &amp; Connectors ({{ connectionMcps(String(connKey)).length }})</span>
-                  </div>
-                  <div class="workspace-connector-pills">
-                    <template v-if="connectionMcps(String(connKey)).length">
-                      <span
-                        v-for="mcpName in connectionMcps(String(connKey))"
-                        :key="mcpName"
-                        class="connector-pill connector-pill--enabled"
-                        :title="`${mcpName} configured for ${conn.label || connKey}`"
-                      >
-                        <span class="pill-dot"></span> {{ mcpName }}
-                      </span>
-                    </template>
-                    <span v-else class="hint hint--compact">No MCP servers enabled</span>
-                  </div>
-
-                  <!-- Platform System Skills -->
-                  <div class="ws-connectors-header" style="margin-top: 10px;">
-                    <span class="ws-label">Platform System Skills &amp; Plugins ({{ (conn.skills && conn.skills.length) ? conn.skills.length : 0 }})</span>
-                  </div>
-                  <div class="workspace-connector-pills">
-                    <template v-if="conn.skills && conn.skills.length">
-                      <span v-for="skill in conn.skills" :key="skill" class="connector-pill connector-pill--enabled" :title="`Installed CLI plugin/skill: ${skill}`">
-                        <span class="pill-dot"></span> {{ skill }}
-                      </span>
-                    </template>
-                    <template v-else>
-                      <span class="hint hint--compact">
-                        {{ conn.ok ? 'None reported by this CLI' : 'Connect to discover' }}
-                      </span>
-                    </template>
+                  <div class="set-row-actions provider-connection-actions">
+                    <span class="settings-conn-state" :class="conn.ok ? 'settings-conn-state--ok' : 'settings-conn-state--error'">
+                      {{ conn.ok ? 'Connected' : 'Not connected' }}
+                    </span>
+                    <!-- Connect is the row's one primary only while it is needed;
+                         once connected, the rare Reconnect / Log out live in the menu. -->
+                    <button
+                      v-if="!conn.ok"
+                      type="button"
+                      class="btn-primary btn-small"
+                      :disabled="providerConnectionPending === connKey"
+                      @click="providerConnectionAction(String(connKey), 'connect')"
+                    >Connect</button>
+                    <button
+                      type="button"
+                      class="set-link"
+                      :disabled="providerConnectionPending === connKey"
+                      @click="providerConnectionAction(String(connKey), 'verify')"
+                    >Verify</button>
+                    <DropdownMenuRoot
+                      v-if="conn.ok"
+                      :open="settingsMenu === `provider:${connKey}`"
+                      :modal="false"
+                      @update:open="setSettingsMenu(`provider:${connKey}`, $event)"
+                    >
+                      <DropdownMenuTrigger as-child>
+                        <button
+                          type="button"
+                          class="set-menu-btn"
+                          :aria-label="`More actions for ${conn.label || connKey}`"
+                          :disabled="providerConnectionPending === connKey"
+                        >&middot;&middot;&middot;</button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent as-child align="end" :side-offset="4" :collision-padding="8">
+                        <div class="settings-menu" @keydown.esc="closeSettingsMenuOnEscape">
+                          <DropdownMenuItem as-child @select="providerConnectionAction(String(connKey), 'connect')">
+                            <button type="button" class="settings-menu-item">Reconnect</button>
+                          </DropdownMenuItem>
+                          <DropdownMenuItem as-child @select="providerConnectionAction(String(connKey), 'logout')">
+                            <button type="button" class="settings-menu-item settings-menu-item--danger">Log out</button>
+                          </DropdownMenuItem>
+                        </div>
+                      </DropdownMenuContent>
+                    </DropdownMenuRoot>
                   </div>
                 </div>
                 <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
-                  <label class="settings-field">
-                    <span class="ws-label">Default model</span>
-                    <ModelSelector
-                      v-if="getProviderSection(String(connKey))?.configurable"
-                      :model-value="providerDefaultModelSelectorValue(String(connKey) as AliasProviderKey)"
-                      :sections="providerDefaultModelSectionsFor(String(connKey) as AliasProviderKey)"
-                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
-                      @update:model-value="saveProviderDefaultModel(String(connKey) as AliasProviderKey, $event)"
-                    />
-                    <span v-else class="hint hint--compact">Automatic — {{ (conn.label || connKey) }} picks its own default.</span>
-                  </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Permission mode</span>
+                  <div class="set-subrow">
+                    <span class="ws-label set-subrow-label">Default model</span>
+                    <div class="set-subrow-control">
+                      <ModelSelector
+                        v-if="getProviderSection(String(connKey))?.configurable"
+                        :model-value="providerDefaultModelSelectorValue(String(connKey) as AliasProviderKey)"
+                        :sections="providerDefaultModelSectionsFor(String(connKey) as AliasProviderKey)"
+                        :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                        @update:model-value="saveProviderDefaultModel(String(connKey) as AliasProviderKey, $event)"
+                      />
+                      <span v-else class="hint hint--compact">Automatic — {{ (conn.label || connKey) }} picks its own default.</span>
+                    </div>
+                  </div>
+                  <label class="set-subrow">
+                    <span class="ws-label set-subrow-label">Permission mode</span>
                     <select
-                      class="routine-select"
+                      class="routine-select set-subrow-control"
                       :value="providerDefaultModeValue(String(connKey) as AliasProviderKey)"
                       :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
                       @change="saveProviderDefaultMode(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
@@ -751,37 +691,195 @@
                       </option>
                     </select>
                   </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Default thinking</span>
-                    <select
-                      class="routine-select"
-                      :value="providerDefaultThinkingValue(String(connKey) as AliasProviderKey)"
-                      :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
-                      @change="saveProviderDefaultThinking(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
-                    >
-                      <option
-                        v-for="option in providerThinkingOptions(String(connKey) as AliasProviderKey)"
-                        :key="option.value"
-                        :value="option.value"
+                  <div class="set-subrow">
+                    <span :id="`thinking-label-${connKey}`" class="ws-label set-subrow-label">Default thinking</span>
+                    <div class="set-subrow-control">
+                      <!-- A short closed set reads best as a segmented control; a
+                           long provider list falls back to a select. -->
+                      <div
+                        v-if="providerThinkingOptions(String(connKey) as AliasProviderKey).length <= 5"
+                        class="set-seg"
+                        role="radiogroup"
+                        :aria-labelledby="`thinking-label-${connKey}`"
                       >
-                        {{ option.label }}
-                      </option>
-                    </select>
-                  </label>
+                        <button
+                          v-for="option in providerThinkingOptions(String(connKey) as AliasProviderKey)"
+                          :key="option.value"
+                          type="button"
+                          role="radio"
+                          :aria-checked="providerDefaultThinkingValue(String(connKey) as AliasProviderKey) === option.value"
+                          :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                          @click="saveProviderDefaultThinking(String(connKey) as AliasProviderKey, option.value)"
+                        >{{ thinkingOptionLabel(option) }}</button>
+                      </div>
+                      <select
+                        v-else
+                        class="routine-select"
+                        :aria-labelledby="`thinking-label-${connKey}`"
+                        :value="providerDefaultThinkingValue(String(connKey) as AliasProviderKey)"
+                        :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                        @change="saveProviderDefaultThinking(String(connKey) as AliasProviderKey, ($event.target as HTMLSelectElement).value)"
+                      >
+                        <option
+                          v-for="option in providerThinkingOptions(String(connKey) as AliasProviderKey)"
+                          :key="option.value"
+                          :value="option.value"
+                        >
+                          {{ option.label }}
+                        </option>
+                      </select>
+                    </div>
+                  </div>
                 </div>
-                <div class="action-row provider-connection-actions">
-                  <button class="btn-primary btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'connect')">
-                    {{ conn.ok ? 'Reconnect' : 'Connect' }}
-                  </button>
-                  <button class="btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'verify')">Verify</button>
-                  <button v-if="conn.ok" class="btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'logout')">Log out</button>
-                </div>
+                <!-- What the CLI brings on its own. Long chip lists, so they sit
+                     behind a disclosure, collapsed by default. -->
+                <details class="provider-brings">
+                  <summary>
+                    What this CLI brings ({{ providerBringsCounts(String(connKey), conn) }})
+                  </summary>
+                  <div class="provider-mcps-preview">
+                    <div class="ws-connectors-header">
+                      <span class="ws-label">Configured MCP Servers &amp; Connectors ({{ connectionMcps(String(connKey)).length }})</span>
+                    </div>
+                    <div class="workspace-connector-pills">
+                      <template v-if="connectionMcps(String(connKey)).length">
+                        <span
+                          v-for="mcpName in connectionMcps(String(connKey))"
+                          :key="mcpName"
+                          class="connector-pill connector-pill--enabled"
+                          :title="`${mcpName} configured for ${conn.label || connKey}`"
+                        >
+                          <span class="pill-dot"></span> {{ mcpName }}
+                        </span>
+                      </template>
+                      <span v-else class="hint hint--compact">No MCP servers enabled</span>
+                    </div>
+
+                    <!-- Platform System Skills -->
+                    <div class="ws-connectors-header" style="margin-top: 10px;">
+                      <span class="ws-label">Platform System Skills &amp; Plugins ({{ (conn.skills && conn.skills.length) ? conn.skills.length : 0 }})</span>
+                    </div>
+                    <div class="workspace-connector-pills">
+                      <template v-if="conn.skills && conn.skills.length">
+                        <span v-for="skill in conn.skills" :key="skill" class="connector-pill connector-pill--enabled" :title="`Installed CLI plugin/skill: ${skill}`">
+                          <span class="pill-dot"></span> {{ skill }}
+                        </span>
+                      </template>
+                      <template v-else>
+                        <span class="hint hint--compact">
+                          {{ conn.ok ? 'None reported by this CLI' : 'Connect to discover' }}
+                        </span>
+                      </template>
+                    </div>
+                  </div>
+                </details>
               </div>
               <div v-if="providerConnectionResult" class="action-result">{{ providerConnectionResult }}</div>
             </div>
+          </div>
+        </template>
 
-           </div>
-         </template>
+        <!-- Background models -->
+        <div v-if="!routinesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+        <template v-else-if="routinesError">
+          <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
+        </template>
+        <template v-else-if="routines">
+          <!-- Background models (internal routines) -->
+          <div class="card">
+            <div class="settings-card-header">
+              <p class="section-title">Background models</p>
+              <p class="hint">
+                These background tasks use their own model setting, separate from the chat defaults above.
+                "Automatic" keeps the built-in default.
+                System automations without a model picker are tracked on the Automations page.
+              </p>
+            </div>
+
+            <div class="routine-row">
+              <div class="routine-info">
+                <span class="routine-name">Session insights</span>
+                <span class="routine-detail">Runs the end-of-conversation memory pass when a chat is archived.</span>
+                <div v-if="getJobTelemetry('insights')" class="routine-telemetry">
+                  <span class="badge" :class="getJobBadgeClass('insights')">
+                    {{ getJobStatus('insights') }}
+                  </span>
+                  <span v-if="hasJobLastRun('insights')" class="telemetry-meta">
+                    Last run: {{ getJobLastRunLabel('insights') }} ({{ getJobDuration('insights') }})
+                  </span>
+                  <span v-if="getJobStatus('insights') === 'error' && getJobLastError('insights')" class="telemetry-error" :title="getJobLastError('insights')">
+                    &middot; {{ getJobLastError('insights') }}
+                  </span>
+                </div>
+              </div>
+              <div class="routine-model-controls">
+                <select
+                  class="routine-select routine-select--provider"
+                  :value="routineProviderValue('insights_model')"
+                  :disabled="routinesSaving"
+                  @change="saveRoutineProvider('insights_model', ($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="automatic">Automatic</option>
+                  <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
+                    {{ provider.label }}
+                  </option>
+                </select>
+                <ModelSelector
+                  v-if="routineProviderValue('insights_model') !== 'automatic'"
+                  :model-value="routineModelValue('insights_model')"
+                  :sections="routineModelSectionsFor('insights_model')"
+                  :disabled="routinesSaving"
+                  @update:model-value="saveRoutineModel('insights_model', $event)"
+                />
+                <span class="routine-model-hint">{{ routineModelSummary('insights_model') }}</span>
+              </div>
+            </div>
+
+            <div class="routine-row">
+              <div class="routine-info">
+                <span class="routine-name">Critique panel</span>
+                <span class="routine-detail">Models asked for an adversarial review.</span>
+              </div>
+              <div class="critique-model-picker">
+                <!-- One control: the multi-select picker. Picked models show as
+                     removable chips; "Use automatic" clears the list. -->
+                <div v-if="selectedCritiqueModels.length" class="critique-picker-header">
+                  <div class="critique-chip-list">
+                    <button
+                      v-for="model in selectedCritiqueModels"
+                      :key="model"
+                      type="button"
+                      class="critique-chip"
+                      :disabled="routinesSaving"
+                      :title="`Remove ${model}`"
+                      :aria-label="`Remove ${model}`"
+                      @click="removeCritiqueModel(model)"
+                    >
+                      <span>{{ model }}</span>
+                      <span aria-hidden="true">&times;</span>
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    class="set-link set-link--quiet"
+                    :disabled="routinesSaving"
+                    @click="setCritiqueModels([])"
+                  >Use automatic</button>
+                </div>
+                <ModelSelector
+                  multiple
+                  :model-value="selectedCritiqueModels"
+                  :sections="critiqueModelSections"
+                  placeholder="Select critique models"
+                  :empty-placeholder="critiqueDefaultLabel"
+                  :disabled="routinesSaving"
+                  @update:model-value="setCritiqueModels"
+                />
+              </div>
+            </div>
+          </div>
+          <div v-if="routinesResult" class="action-result">{{ routinesResult }}</div>
+        </template>
       </template>
 
       <!-- AUTOMATIONS TAB -->
@@ -795,8 +893,8 @@
           :notify-saved="notifySaved"
           :notify-failed="notifyFailed"
           :routines="routines"
-          :provider-models="workspaceModels?.provider_models"
-          :provider-labels="aliasProviderLabels"
+          :routines-saving="routinesSaving"
+          :save-routines="saveRoutines"
         />
       </template>
 
@@ -810,17 +908,17 @@
           <div class="card">
             <div class="settings-card-header settings-card-header--split">
               <div>
-                <p class="section-title">workspaces</p>
+                <p class="section-title">Workspaces</p>
                 <p class="hint">
-                  Logical chat spaces that route projects, chats, vault names, model defaults, and integration profiles.
+                  Each workspace keeps its own projects, chats, memory, model defaults and Google account.
                 </p>
               </div>
-              <button class="btn-small" @click="showNewWorkspace = !showNewWorkspace">
-                {{ showNewWorkspace ? 'Cancel' : '+ Add workspace' }}
+              <button class="btn-small" :aria-expanded="showNewWorkspace" @click="showNewWorkspace = !showNewWorkspace">
+                {{ showNewWorkspace ? 'Cancel' : 'New workspace' }}
               </button>
             </div>
 
-            <div v-if="showNewWorkspace" class="workspace-card workspace-card--new">
+            <div v-if="showNewWorkspace" id="new-workspace" class="workspace-card workspace-card--new settings-form-panel">
               <div class="workspace-card-header">
                 <div>
                   <p class="workspace-title">New workspace</p>
@@ -888,44 +986,69 @@
                 </label>
               </div>
               <div class="action-row settings-actions">
+                <button class="set-link set-link--quiet" type="button" :disabled="workspacesSaving === 'new'" @click="showNewWorkspace = false">Cancel</button>
                 <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
                   {{ workspacesSaving === 'new' ? 'Creating...' : 'Create workspace' }}
                 </button>
               </div>
             </div>
 
-            <div class="workspace-list">
+            <div class="workspace-list set-list">
               <div
                 v-for="form in workspaceForms"
                 :key="form.name"
-                class="workspace-card"
+                class="workspace-card set-row"
+                :class="{ 'workspace-card--open': openWorkspace === form.name }"
               >
-                <div class="workspace-card-header">
-                  <div>
-                    <p class="workspace-title">{{ form.name }}</p>
+                <div class="workspace-card-header set-row-head">
+                  <span class="set-dot" aria-hidden="true" :style="{ '--swatch': workspaceSwatch(form.color) }"></span>
+                  <div class="set-row-main">
+                    <p class="workspace-title set-row-title">{{ form.name }}</p>
+                    <p class="set-row-sub">{{ workspaceSummary(form) }}</p>
                   </div>
-                  <div class="workspace-actions">
+                  <div class="workspace-actions set-row-actions">
                     <button
-                      class="btn-small"
-                      @click="saveWorkspace(form.name)"
-                      :disabled="workspacesSaving === form.name"
+                      v-if="openWorkspace !== form.name"
+                      type="button"
+                      class="set-link"
+                      :aria-label="`Edit workspace ${form.name}`"
+                      :aria-expanded="false"
+                      @click="openWorkspace = form.name"
+                    >Edit</button>
+                    <DropdownMenuRoot
+                      v-if="workspaceArchivable(form.name)"
+                      :open="settingsMenu === `ws:${form.name}`"
+                      :modal="false"
+                      @update:open="setSettingsMenu(`ws:${form.name}`, $event)"
                     >
-                      {{ workspacesSaving === form.name ? 'Saving...' : 'Save' }}
-                    </button>
-                    <button
-                      v-if="workspaceForms.length > 1"
-                      class="btn-small btn-danger"
-                      @click="removeWorkspace(form.name)"
-                      :disabled="workspacesSaving === form.name"
-                    >Delete</button>
+                      <DropdownMenuTrigger as-child>
+                        <button
+                          type="button"
+                          class="set-menu-btn"
+                          :aria-label="`Actions for workspace ${form.name}`"
+                          :disabled="archivingWorkspace === form.name"
+                        >&middot;&middot;&middot;</button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent as-child align="end" :side-offset="4" :collision-padding="8">
+                        <div class="settings-menu" @keydown.esc="closeSettingsMenuOnEscape">
+                          <DropdownMenuItem as-child @select="archiveWorkspace(form.name)">
+                            <button
+                              type="button"
+                              class="settings-menu-item settings-menu-item--caution"
+                              :aria-label="`Archive workspace ${form.name}`"
+                            >{{ archivingWorkspace === form.name ? 'Archiving...' : 'Archive' }}</button>
+                          </DropdownMenuItem>
+                        </div>
+                      </DropdownMenuContent>
+                    </DropdownMenuRoot>
                   </div>
                 </div>
 
-                <div class="settings-field-grid">
-                  <div class="settings-field settings-field--wide">
-                    <span class="ws-label" :id="`workspace-color-${form.name}`">Accent color</span>
+                <div v-if="openWorkspace === form.name" class="set-row-body">
+                  <div class="set-subrow">
+                    <span class="set-subrow-label" :id="`workspace-color-${form.name}`">Accent</span>
                     <div
-                      class="workspace-color-swatches"
+                      class="workspace-color-swatches set-subrow-control"
                       role="radiogroup"
                       :aria-labelledby="`workspace-color-${form.name}`"
                     >
@@ -945,26 +1068,17 @@
                       />
                     </div>
                   </div>
-                  <label class="settings-field"><span class="ws-label">{{ workspaceProviderFieldLabel }}</span>
-                    <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
+                  <label class="settings-field set-subrow">
+                    <span class="ws-label set-subrow-label">{{ workspaceProviderFieldLabel }}</span>
+                    <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
                       <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
                         {{ provider.label }}
                       </option>
                     </select>
                   </label>
-                  <label class="settings-field">
-                    <div class="settings-label-row">
-                      <span class="ws-label">Google profile</span>
-                      <details class="field-info">
-                        <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
-                        <div class="field-info-panel">
-                          <p>
-                            Selects which Google account this workspace uses. Accounts are added and connected in the Google Workspace card below.
-                          </p>
-                        </div>
-                      </details>
-                    </div>
-                    <select class="routine-input workspace-select" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
+                  <label class="settings-field set-subrow">
+                    <span class="ws-label set-subrow-label" title="Which Google account this workspace uses. Accounts are added under Google Workspace below.">Google profile</span>
+                    <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
                       <option value="">{{ gwsUnlinkedOptionLabel }}</option>
                       <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
                         {{ profile.label }} ({{ profile.email || profile.name }})
@@ -974,11 +1088,63 @@
                       </option>
                     </select>
                   </label>
+                  <div class="workspace-edit-actions">
+                    <button
+                      v-if="workspaceDirty(form)"
+                      type="button"
+                      class="btn-primary btn-small workspace-save"
+                      :disabled="workspacesSaving === form.name || archivingWorkspace === form.name"
+                      @click="saveWorkspace(form.name)"
+                    >{{ workspacesSaving === form.name ? 'Saving...' : 'Save changes' }}</button>
+                    <button
+                      type="button"
+                      class="set-link set-link--quiet"
+                      :disabled="workspacesSaving === form.name"
+                      @click="discardWorkspace(form.name)"
+                    >{{ workspaceDirty(form) ? 'Discard' : 'Done' }}</button>
+                  </div>
                 </div>
               </div>
             </div>
 
             <div v-if="workspacesResult" class="action-result action-result--error" role="alert">{{ workspacesResult }}</div>
+
+            <section class="archived-workspaces" aria-labelledby="archived-workspaces-title">
+              <p id="archived-workspaces-title" class="subsection-title">Archived workspaces</p>
+              <p class="hint hint--compact">
+                Archived workspaces keep every file in <code>.archived-workspaces/</code> in the Ciaobot folder. Ciaobot does not read their notes or memory until you restore them.
+              </p>
+              <p v-if="archivedLoading && !archivedWorkspaces.length" class="hint">Loading&hellip;</p>
+              <div v-else-if="archivedLoadError" class="action-result action-result--error" role="alert">
+                {{ archivedLoadError }}
+                <button class="btn-small" type="button" @click="fetchArchivedWorkspaces">Retry</button>
+              </div>
+              <p v-else-if="!archivedWorkspaces.length" class="hint archived-empty">No archived workspaces.</p>
+              <ul v-if="archivedWorkspaces.length" class="archived-list">
+                <li
+                  v-for="item in archivedWorkspaces"
+                  :key="item.id"
+                  class="archived-item"
+                >
+                  <div class="archived-item-text">
+                    <p class="workspace-title">{{ item.name }}</p>
+                    <p class="hint hint--compact">
+                      Archived {{ formatArchivedAt(item.archived_at) }} &middot; <code>{{ item.path }}</code>
+                    </p>
+                    <p v-if="!item.restorable && item.blocked_reason" class="hint hint--warn hint--compact">
+                      {{ item.blocked_reason }}
+                    </p>
+                  </div>
+                  <button
+                    class="btn-small"
+                    type="button"
+                    :aria-label="`Restore workspace ${item.name}`"
+                    :disabled="!item.restorable || restoringArchiveId === item.id"
+                    @click="restoreWorkspace(item)"
+                  >{{ restoringArchiveId === item.id ? 'Restoring...' : 'Restore' }}</button>
+                </li>
+              </ul>
+            </section>
           </div>
 
           <!-- Google Workspace integration -->
@@ -986,7 +1152,7 @@
             <div class="settings-card-header settings-card-header--split">
               <div>
                 <div class="settings-label-row">
-                  <p class="section-title">google workspace</p>
+                  <p class="section-title">Google Workspace</p>
                   <details class="field-info">
                     <summary aria-label="About Google Workspace integration" title="About Google Workspace integration">i</summary>
                     <div class="field-info-panel">
@@ -1377,23 +1543,18 @@
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <p class="section-title">skills</p>
+              <p class="section-title">Skills</p>
               <p class="hint">
-                Skills are local folders: place <code>skills/&lt;name&gt;/SKILL.md</code> (or upload a validated zip) then <code>ciao sync-skills</code>. Workspace git sync propagates to other operators. No GitHub fetch.
+                Shared with Claude Code and opencode. Each skill is a folder with a <code>SKILL.md</code> in <code>skills/</code>; workspace git sync carries it to other machines.
               </p>
             </div>
             <div class="settings-card-header-actions">
-              <button class="btn-small" @click="createSkillViaChat">Add via chat</button>
-              <button class="btn-primary btn-small" @click="toggleAddSkill">
-                {{ showAddSkill ? 'Cancel' : '+ Add skill' }}
+              <button class="set-link set-link--quiet" type="button" @click="createSkillViaChat">Ask Ciao to write one</button>
+              <button class="btn-small" type="button" :aria-expanded="showAddSkill" @click="toggleAddSkill">
+                {{ showAddSkill ? 'Cancel' : 'New skill' }}
               </button>
             </div>
           </div>
-
-          <p class="hint hint--info skill-scope-note">
-             Ciaobot runs chats through Claude Code or opencode. Ciaobot-managed skills are synchronized into both runtimes where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed stock and custom skills — see
-            <RouterLink to="/settings/providers">Providers</RouterLink> for what each CLI brings on its own.
-          </p>
 
           <!-- Add Skill Form: folder note + zip upload -->
           <div v-if="showAddSkill" class="settings-form-panel">
@@ -1441,8 +1602,12 @@
           <template v-else-if="skillsInventory">
             <!-- Custom Skills Section -->
             <div class="skill-section">
-              <p class="subsection-title subsection-title--spaced">custom skills</p>
-              <p v-if="!customSkills.length" class="hint hint--section-empty">No custom skills yet. Add a folder <code>skills/&lt;name&gt;/SKILL.md</code> or upload a zip.</p>
+              <p class="subsection-title subsection-title--spaced">Custom skills</p>
+              <p v-if="!customSkills.length" class="set-empty">
+                <strong>No custom skills yet.</strong>
+                A skill teaches Ciao a repeatable task, such as a review checklist or a report format.
+                <button class="set-link" type="button" @click="createSkillViaChat">Ask Ciao to write one</button>
+              </p>
               <div v-else class="skill-list skill-list--section">
                 <div
                   v-for="skill in customSkills"
@@ -1455,6 +1620,7 @@
                     <div class="skill-title-row">
                       <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
                       <span class="skill-name">{{ skill.name }}</span>
+                      <span class="skill-badges"><span class="set-tag set-tag--custom">Custom</span></span>
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
@@ -1471,8 +1637,11 @@
 
             <!-- Stock Skills Section -->
             <div class="skill-section skill-section--spaced">
-              <p class="subsection-title subsection-title--spaced">stock skills</p>
-              <p v-if="!stockSkills.length" class="hint hint--section-empty">No stock skills installed.</p>
+              <p class="subsection-title subsection-title--spaced">Built-in skills</p>
+              <p v-if="!stockSkills.length" class="set-empty">
+                <strong>No built-in skills installed.</strong>
+                They come with the app and are restored by <code>ciao sync-skills</code>.
+              </p>
               <div v-else class="skill-list skill-list--section">
                 <div
                   v-for="skill in stockSkills"
@@ -1485,6 +1654,7 @@
                     <div class="skill-title-row">
                       <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
                       <span class="skill-name">{{ skill.name }}</span>
+                      <span class="skill-badges"><span class="set-tag">Built in</span></span>
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
@@ -1507,14 +1677,17 @@
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <p class="section-title">subagents</p>
+              <p class="section-title">Subagents</p>
               <p class="hint">
-                 Shared subagents available to Claude Code and opencode. Custom definitions are saved in <code>subagents/</code>, mirrored into the vault, and synchronized into each runtime's native format.
+                Shared with Claude Code and opencode. Saved in <code>subagents/</code> and kept in the vault.
               </p>
             </div>
-            <button class="btn-small" @click="toggleAddSubagent">
-              {{ showAddSubagent ? 'Cancel' : '+ New subagent' }}
-            </button>
+            <div class="settings-card-header-actions">
+              <button class="set-link set-link--quiet" type="button" @click="createAssetViaChat('subagent')">Ask Ciao to write one</button>
+              <button class="btn-small" type="button" :aria-expanded="showAddSubagent" @click="toggleAddSubagent">
+                {{ showAddSubagent ? 'Cancel' : 'New subagent' }}
+              </button>
+            </div>
           </div>
 
           <div v-if="showAddSubagent" class="settings-form-panel">
@@ -1543,7 +1716,11 @@
             <p class="hint hint--warn">{{ agentAssetsError }}</p>
           </template>
           <template v-else>
-            <p v-if="!subagentAssets.length" class="hint hint--section-empty">No subagents found.</p>
+            <p v-if="!subagentAssets.length" class="set-empty">
+              <strong>No subagents yet.</strong>
+              A subagent is a specialist Ciao hands part of a task to, with its own instructions.
+              <button class="set-link" type="button" @click="toggleAddSubagent">Create one</button>
+            </p>
             <div v-else class="skill-list">
               <div
                 v-for="agent in subagentAssets"
@@ -1559,6 +1736,13 @@
                     <span class="skill-badges">
                       <span :class="assetOriginClass(subagentOrigin(agent))">{{ assetOriginLabel(subagentOrigin(agent)) }}</span>
                       <span v-if="agent.scope && agent.scope !== 'custom' && agent.scope !== 'built-in'" class="badge badge--muted command-source">{{ agent.scope }}</span>
+                      <button
+                        v-if="agent.editable"
+                        type="button"
+                        class="set-link"
+                        :aria-label="`Edit subagent ${agent.name}`"
+                        @click.stop="openSubagentEditor(agent)"
+                      >Edit</button>
                     </span>
                   </div>
                   <p v-if="agent.description" class="skill-description">{{ agent.description }}</p>
@@ -1607,14 +1791,15 @@
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <p class="section-title">commands</p>
+              <p class="section-title">Commands</p>
               <p class="hint">
-                 Shared commands available to Claude Code and opencode. Custom commands are saved in <code>commands/</code>, mirrored into the vault, and exposed through each runtime's native format.
+                Slash commands shared with Claude Code and opencode. Saved in <code>commands/</code> and kept in the vault.
               </p>
             </div>
             <div class="settings-card-header-actions">
-              <button class="btn-small" @click="toggleAddCommand">
-                {{ showAddCommand ? 'Cancel' : '+ New command' }}
+              <button class="set-link set-link--quiet" type="button" @click="createAssetViaChat('command')">Ask Ciao to write one</button>
+              <button class="btn-small" type="button" :aria-expanded="showAddCommand" @click="toggleAddCommand">
+                {{ showAddCommand ? 'Cancel' : 'New command' }}
               </button>
             </div>
           </div>
@@ -1649,7 +1834,11 @@
             <p class="hint hint--warn">{{ agentAssetsError }}</p>
           </template>
           <template v-else>
-            <p v-if="!commandAssets.length" class="hint hint--section-empty">No slash commands found.</p>
+            <p v-if="!commandAssets.length" class="set-empty">
+              <strong>No slash commands yet.</strong>
+              A command is a saved prompt you run by typing <code>/name</code> in a chat.
+              <button class="set-link" type="button" @click="toggleAddCommand">Create one</button>
+            </p>
             <div v-else class="skill-list">
               <div
                 v-for="command in commandAssets"
@@ -1666,6 +1855,13 @@
                     <span class="skill-badges">
                       <span :class="assetOriginClass(commandOrigin(command))">{{ assetOriginLabel(commandOrigin(command)) }}</span>
                       <span v-if="command.scope && command.scope !== 'custom' && command.scope !== 'built-in'" class="badge badge--muted command-source">{{ command.scope }}</span>
+                      <button
+                        v-if="command.editable"
+                        type="button"
+                        class="set-link"
+                        :aria-label="`Edit command /${command.name}`"
+                        @click.stop="openCommandEditor(command)"
+                      >Edit</button>
                     </span>
                   </div>
                   <p v-if="command.description" class="skill-description">{{ command.description }}</p>
@@ -1728,21 +1924,70 @@
       <template v-if="currentTab === 'mcp'">
         <SettingsMcpServers :mcp="mcp" @create-via-chat="createMcpViaChat" />
       </template>
+      </div>
 
-
-
-
+      <!-- On this page: built from the rendered sections of the current tab,
+           so it follows whatever the tab actually shows (conditional sections
+           included) instead of a second hand-kept list. -->
+      <aside v-if="tocItems.length > 1 || assetRail" class="page-rail settings-rail" aria-label="About this page">
+        <section v-if="tocItems.length > 1" class="rail-section">
+          <h2 id="settings-toc-title" class="rail-title">On this page</h2>
+          <nav class="settings-toc" aria-label="Sections on this page">
+            <button
+              v-for="item in tocItems"
+              :key="item.id"
+              type="button"
+              class="settings-toc-item"
+              :class="{ active: item.id === activeTocId }"
+              :aria-current="item.id === activeTocId ? 'location' : undefined"
+              @click="scrollToSection(item.id)"
+            >{{ item.label }}</button>
+          </nav>
+        </section>
+        <!-- Models: a glance at whether each CLI is working. -->
+        <section
+          v-if="currentTab === 'models' && providerKeys?.connections"
+          class="rail-section settings-rail-status"
+          aria-labelledby="settings-rail-status-title"
+        >
+          <h2 id="settings-rail-status-title" class="rail-title">Status</h2>
+          <div class="rail-kvs">
+            <div v-for="(conn, connKey) in providerKeys.connections" :key="`rail-${connKey}`" class="rail-kv">
+              <span>{{ conn.label || connKey }}</span>
+              <strong :class="{ 'rail-attention': !conn.ok }">{{ conn.ok ? 'Connected' : 'Not connected' }}</strong>
+            </div>
+          </div>
+        </section>
+        <!-- Skills, subagents, commands: how many exist and where they live. -->
+        <section v-if="assetRail" class="rail-section settings-rail-assets" aria-labelledby="settings-rail-assets-title">
+          <h2 id="settings-rail-assets-title" class="rail-title">{{ assetRail.title }}</h2>
+          <div class="rail-kvs">
+            <div class="rail-kv"><span>Custom</span><strong>{{ assetRail.custom }}</strong></div>
+            <div class="rail-kv"><span>Built in</span><strong>{{ assetRail.builtin }}</strong></div>
+            <div v-if="assetRail.other" class="rail-kv"><span>Other</span><strong>{{ assetRail.other }}</strong></div>
+          </div>
+          <p class="rail-note">
+            Saved in <code>{{ assetRail.folder }}</code>.
+            <template v-if="currentTab === 'skills'">
+              Skills you install directly in a CLI stay available too; see
+              <RouterLink to="/settings/models#chat-providers">Models &amp; providers</RouterLink>.
+            </template>
+          </p>
+        </section>
+      </aside>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { formatConnectorLabel } from '../lib/mcpLabels'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
 import { formatTime, formatDuration } from '../lib/time'
-import { isDesktopApp } from '../lib/desktop'
+import { isApplePlatform } from '../lib/desktop'
 import {
   DEFAULT_FONT_SCALE,
   FONT_SCALE_STEP,
@@ -1750,8 +1995,10 @@ import {
   MIN_FONT_SCALE,
   useFontScale,
 } from '../composables/useFontScale'
+import { useModalFocus } from '../composables/useModalFocus'
 import type {
   AgentAssetsResponse,
+  ArchivedWorkspace,
   AutomationPayload,
   AutomationProcess,
   CommandAsset,
@@ -1762,8 +2009,8 @@ import type {
   GwsIntegrationSettings,
   LocalStatus,
   ModelsResponse,
-  NodeStatus,
   ProviderConfigSettings,
+  ProviderConnection,
   ProposalOutcomes,
   RoutineSettings,
   SkillInventory,
@@ -1776,27 +2023,47 @@ import type {
   PackageStatus,
   PackageChangelog,
   PackageUpdateResult,
+  EngineUpdateStatus,
   ProviderActionResult,
   LocalHandbackResult,
 } from '../lib/types'
+import {
+  updateFailed,
+  updateFailureText,
+  updateInFlight,
+  updatePhaseLabel,
+  updateStage,
+  updateStageInFlight,
+} from '../lib/engineUpdate'
 import { askConfirm } from '../lib/confirm'
+import { archiveConfirmMessage, restoreConfirmMessage, restoredMessage } from '../lib/workspaceArchive'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import { useHousekeepingStore } from '../stores/housekeeping'
+import {
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRoot,
+  DropdownMenuTrigger,
+} from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsAutomation from './settings/SettingsAutomation.vue'
+import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
-import DevicePanel from './DevicePanel.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
-import { isGwsEngineHostEligible } from '../lib/gwsEngineHost'
+import { isLoopbackHostname } from '../lib/loopback'
 import { useMcpServers } from '../composables/useMcpServers'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
-// The tray owns package updates and native notifications in the desktop app.
-const inDesktopApp = isDesktopApp()
+// The shortcuts bind altKey. Apple keyboards label that key Option (\u2325);
+// Windows and Linux keyboards label it Alt.
+const onApplePlatform = isApplePlatform()
+function webChord(key: string, nonAppleKey: string = key): string {
+  return onApplePlatform ? `\u2325${key}` : `Alt+${nonAppleKey}`
+}
 import {
   DEFAULT_WORKSPACE_COLOR,
   WORKSPACE_COLOR_PRESETS,
@@ -1829,6 +2096,114 @@ const mcp = useMcpServers({
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
   return tab
+})
+
+// ── Keyboard shortcuts: the common four, the rest behind a disclosure ────
+const SHORTCUT_COUNT = 10
+const showAllShortcuts = ref(false)
+
+// ── On this page ─────────────────────────────────────────────────────────
+// Read from the rendered tab, not a hand-kept list: a section is any
+// top-level .card with a .section-title, so conditional sections (debug,
+// client scope, loading states) appear and disappear with the page itself.
+type TocItem = { id: string; label: string }
+const bodyEl = ref<HTMLElement | null>(null)
+const mainEl = ref<HTMLElement | null>(null)
+const tocItems = ref<TocItem[]>([])
+const activeTocId = ref('')
+let tocObserver: MutationObserver | null = null
+let tocFrame = 0
+
+function slugify(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'section'
+}
+
+function tocSections(): HTMLElement[] {
+  const main = mainEl.value
+  if (!main) return []
+  return Array.from(main.querySelectorAll<HTMLElement>('.card')).filter(card => (
+    card.parentElement?.closest('.card') == null
+    && card.querySelector('.section-title')
+  ))
+}
+
+function rebuildToc(): void {
+  const used = new Set<string>()
+  const items: TocItem[] = []
+  for (const card of tocSections()) {
+    const label = card.querySelector('.section-title')?.textContent?.trim() || ''
+    if (!label) continue
+    let id = card.id
+    if (!id || used.has(id)) {
+      const base = `settings-${slugify(label)}`
+      id = base
+      for (let n = 2; used.has(id); n += 1) id = `${base}-${n}`
+      card.id = id
+    }
+    used.add(id)
+    items.push({ id, label })
+  }
+  const same = items.length === tocItems.value.length
+    && items.every((item, i) => item.id === tocItems.value[i].id && item.label === tocItems.value[i].label)
+  if (!same) tocItems.value = items
+  updateActiveToc()
+}
+
+function scheduleTocRebuild(): void {
+  if (tocFrame) return
+  tocFrame = requestAnimationFrame(() => {
+    tocFrame = 0
+    rebuildToc()
+  })
+}
+
+// The active entry is the last section whose top has scrolled past a line a
+// little below the pane's top edge.
+function updateActiveToc(): void {
+  const body = bodyEl.value
+  if (!body || !tocItems.value.length) return
+  const line = body.getBoundingClientRect().top + 96
+  let active = tocItems.value[0].id
+  for (const item of tocItems.value) {
+    const el = document.getElementById(item.id)
+    if (el && el.getBoundingClientRect().top <= line) active = item.id
+  }
+  activeTocId.value = active
+}
+
+function onBodyScroll(): void {
+  updateActiveToc()
+}
+
+function scrollToSection(id: string): void {
+  const el = document.getElementById(id)
+  if (!el) return
+  const reduce = typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  el.scrollIntoView?.({ block: 'start', behavior: reduce ? 'auto' : 'smooth' })
+  // Move focus with the view so keyboard users land in the section too.
+  if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1')
+  el.focus({ preventScroll: true })
+  activeTocId.value = id
+}
+
+watch(currentTab, () => {
+  showAllShortcuts.value = false
+  void nextTick(rebuildToc)
+})
+
+onMounted(() => {
+  void nextTick(rebuildToc)
+  if (mainEl.value && typeof MutationObserver !== 'undefined') {
+    tocObserver = new MutationObserver(scheduleTocRebuild)
+    tocObserver.observe(mainEl.value, { childList: true, subtree: true, characterData: true })
+  }
+})
+
+onUnmounted(() => {
+  tocObserver?.disconnect()
+  tocObserver = null
+  if (tocFrame) cancelAnimationFrame(tocFrame)
 })
 
 // ── GitHub star nudge, mirrored onto the open-source card ─────────────────
@@ -2000,8 +2375,8 @@ const routinesResult = ref('')
 // Every provider with models is a runtime provider now.
 type AliasProviderKey = RuntimeProvider
 type RoutineModelKey = 'insights_model'
-// The routine pickers offer Automatic, Apple, and each available provider.
-type RoutineProviderValue = 'automatic' | 'apple' | AliasProviderKey
+// The routine pickers offer Automatic and each available provider.
+type RoutineProviderValue = 'automatic' | AliasProviderKey
 
 type AliasProviderSection = {
   key: AliasProviderKey
@@ -2034,15 +2409,13 @@ async function saveRoutines(patch: Record<string, unknown>) {
     routines.value = await api.patch<RoutineSettings>('/api/settings/routines', patch)
     notifySaved('Model settings saved.')
   } catch (e) {
-    routinesResult.value = `Error: ${errorMessage(e)}`
+    const detail = errorMessage(e)
+    routinesResult.value = `Error: ${detail}`
+    notifyFailed('Could not save model settings', detail)
   } finally {
     routinesSaving.value = false
   }
 }
-
-// Apple's on-device model is hardware-gated: it shows only when this machine
-// can run it. No app-side opt-in flag any more.
-const appleModelAvailable = computed(() => routines.value?.apple_model_available === true)
 
 function parseModelList(raw: string): string[] {
   const seen = new Set<string>()
@@ -2084,6 +2457,13 @@ const critiqueModelSections = computed<ModelSection[]>(() =>
 )
 
 const selectedCritiqueModels = computed(() => parseModelList(routines.value?.critique_models || ''))
+
+// The effective panel arrives comma-joined with no spaces, so it rendered as
+// one unbreakable token that overflowed its box on a phone. Rejoin it with
+// ", " so the summary wraps between models.
+const critiqueDefaultLabel = computed(() =>
+  `Automatic default (${parseModelList(routines.value?.critique_models_effective || '').join(', ')})`,
+)
 
 async function setCritiqueModels(value: string | string[]) {
   const models = Array.isArray(value) ? value : [value]
@@ -2128,14 +2508,6 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
     })
   }
   return sections
-})
-
-// Provider key -> human label, for components that render model ids from the
-// default-model table (Automations offers a one-off retry model).
-const aliasProviderLabels = computed<Record<string, string>>(() => {
-  const labels: Record<string, string> = { claude: 'Anthropic (via Claude Code)' }
-  for (const section of aliasProviderSections.value) labels[section.key] = section.label
-  return labels
 })
 
 function getProviderSection(provider: string): AliasProviderSection | undefined {
@@ -2223,6 +2595,12 @@ function providerThinkingOptions(provider: AliasProviderKey): { value: string; l
   ]
 }
 
+/** Segment label: the automatic entry is just "Auto"; levels are capitalised. */
+function thinkingOptionLabel(option: { value: string; label: string }): string {
+  if (option.value === DEFAULT_THINKING_SELECTION) return 'Auto'
+  return option.label.charAt(0).toUpperCase() + option.label.slice(1)
+}
+
 async function saveProviderDefaultThinking(provider: AliasProviderKey, value: string) {
   const selected = value === DEFAULT_THINKING_SELECTION ? '' : value
   const defaults = JSON.parse(
@@ -2233,7 +2611,7 @@ async function saveProviderDefaultThinking(provider: AliasProviderKey, value: st
   await saveRoutines({ provider_default_thinking: defaults })
 }
 
-// ── Per-provider default permission mode (Providers tab) ────────────────
+// ── Per-provider default permission mode (Models tab) ────────────────
 const DEFAULT_MODE_SELECTION = '__ciao_mode_default__'
 
 // PWA-facing names; "manual" maps to the BridgeMode "normal" on the backend.
@@ -2281,8 +2659,6 @@ function routineEffectiveModel(key: RoutineModelKey): string {
 function inferRoutineModel(model: string): { provider: RoutineProviderValue; model: string } {
   const raw = model.trim()
   if (!raw) return { provider: 'automatic', model: '' }
-  // 'apfel' is the legacy id from when this shelled out to the apfel CLI.
-  if (raw === 'apple' || raw === 'apfel') return { provider: 'apple', model: '' }
   for (const provider of ['opencode'] as const) {
     const prefix = `${provider}:`
     if (raw.startsWith(prefix)) {
@@ -2310,7 +2686,7 @@ function routineModelValue(key: RoutineModelKey): string {
 // The concrete-model sections for a routine once its provider is chosen.
 function routineModelSectionsFor(key: RoutineModelKey): ModelSection[] {
   const provider = routineProviderValue(key)
-  if (provider === 'automatic' || provider === 'apple') return []
+  if (provider === 'automatic') return []
   return [aliasSectionEntry(provider)]
 }
 
@@ -2318,10 +2694,6 @@ async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) 
   const provider = providerValue as RoutineProviderValue
   if (provider === 'automatic') {
     await saveRoutines({ [key]: '' })
-    return
-  }
-  if (provider === 'apple') {
-    await saveRoutines({ [key]: 'apple' })
     return
   }
   // Pick the provider's effective default model as the starting point.
@@ -2362,13 +2734,12 @@ function routineModelSummary(key: RoutineModelKey): string {
     }
     return `Automatic: ${routineEffectiveModel(key) || 'default'}`
   }
-  if (provider === 'apple') return 'Local (free)'
   const model = routineModelValue(key)
   if (provider === 'opencode') return `opencode: ${model || 'default'}`
   return `${aliasProviderLabel(provider)}: ${model || 'default'}`
 }
 
-// ── Provider API Key settings (Providers tab) ─────────────────────────────────
+// ── Provider connections (Models tab, chat providers card) ───────────────────
 const providerKeys = ref<ProviderConfigSettings | null>(null)
 const providerKeysLoaded = ref(false)
 const providerKeysError = ref('')
@@ -2526,24 +2897,19 @@ function gwsReloginHelpUrl(): string {
   return 'https://cloud.google.com/sdk/docs/install'
 }
 
-// The loopback re-login listener binds to the *engine's* 127.0.0.1, so the
-// consent redirect only reaches it when the browser is on the engine host
-// (localhost) and the integration API is not proxied to a remote host. From a
-// phone, LAN browser, or client-mode node the popup's redirect would target
-// the client's own loopback and never arrive — those users must use the
+// The loopback re-login listener binds to this engine's own 127.0.0.1, so the
+// consent redirect only reaches it when the browser is on that machine
+// (localhost). From a phone or a LAN browser the popup's redirect would target
+// the browser's own loopback and never arrive — those users must use the
 // manual paste flow instead.
 function gwsOnEngineHost(): boolean {
-  return isGwsEngineHostEligible(window.location.hostname, inDesktopApp, {
-    loaded: nodeStatusLoaded.value,
-    error: nodeStatusError.value,
-    isClient: isNodeClient.value,
-  })
+  return isLoopbackHostname(window.location.hostname)
 }
 
 async function gwsReloginStart(profileName: string) {
   gwsReloginError.value[profileName] = ''
   if (!gwsOnEngineHost()) {
-    // On a client/LAN browser the loopback redirect can never arrive. Open the
+    // On a remote browser the loopback redirect can never arrive. Open the
     // manual paste flow directly so the button does something useful instead of
     // just showing an error the user then has to act on.
     await startGwsAuth(profileName)
@@ -2778,6 +3144,29 @@ async function fetchProviderKeys() {
   }
 }
 
+// /settings/providers lands on /settings/models#chat-providers. The anchor
+// only exists once the connections have loaded, so the browser's own hash
+// jump misses it, and the router has no scrollBehavior for in-app links (this
+// view stays mounted across tabs). Scroll on the first load and on each
+// navigation to the anchor — not after every refetch, or Verify/Connect would
+// yank the page back to the top of the card.
+function scrollToChatProvidersIfLinked(): void {
+  if (route.hash !== '#chat-providers') return
+  void nextTick(() => {
+    document.getElementById('chat-providers')?.scrollIntoView?.({ block: 'start' })
+  })
+}
+watch(() => route.fullPath, scrollToChatProvidersIfLinked)
+
+/** Summary line for the collapsed "What this CLI brings" disclosure. */
+function providerBringsCounts(providerId: string, conn: ProviderConnection): string {
+  const mcps = connectionMcps(providerId).length
+  const skills = conn.skills?.length ?? 0
+  const mcpLabel = `${mcps} MCP ${mcps === 1 ? 'server' : 'servers'}`
+  const skillLabel = `${skills} ${skills === 1 ? 'skill or plugin' : 'skills & plugins'}`
+  return `${mcpLabel}, ${skillLabel}`
+}
+
 
 
 async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
@@ -2861,16 +3250,47 @@ async function fixWorkspaceHealth() {
   }
 }
 
+// `skills` is optional on the wire in practice: a partial or malformed
+// response ({} from a stub or an older engine) must render the empty state,
+// not throw in render and blank the whole Settings pane.
 const stockSkills = computed(() => {
-  return skillsInventory.value?.skills.filter(s => s.label === 'stock') || []
+  return skillsInventory.value?.skills?.filter(s => s.label === 'stock') || []
 })
 
 const customSkills = computed(() => {
-  return skillsInventory.value?.skills.filter(s => s.label === 'custom') || []
+  return skillsInventory.value?.skills?.filter(s => s.label === 'custom') || []
 })
 
 const subagentAssets = computed(() => agentAssets.value?.subagents || [])
 const commandAssets = computed(() => agentAssets.value?.commands || [])
+
+type AssetRail = { title: string; custom: number; builtin: number; other: number; folder: string }
+
+function originCounts(items: { editable?: boolean; scope?: string }[]): Pick<AssetRail, 'custom' | 'builtin' | 'other'> {
+  const counts = { custom: 0, builtin: 0, other: 0 }
+  for (const item of items) {
+    const origin = commandOrigin(item)
+    if (origin === 'custom') counts.custom += 1
+    else if (origin === 'builtin') counts.builtin += 1
+    else counts.other += 1
+  }
+  return counts
+}
+
+// Rail content for the asset list tabs; null elsewhere or while loading.
+const assetRail = computed<AssetRail | null>(() => {
+  if (currentTab.value === 'skills' && skillsLoaded.value && !skillsError.value) {
+    return { title: 'Skills', custom: customSkills.value.length, builtin: stockSkills.value.length, other: 0, folder: 'skills/' }
+  }
+  if (!agentAssetsLoaded.value || agentAssetsError.value) return null
+  if (currentTab.value === 'subagents') {
+    return { title: 'Subagents', ...originCounts(subagentAssets.value), folder: 'subagents/' }
+  }
+  if (currentTab.value === 'commands') {
+    return { title: 'Commands', ...originCounts(commandAssets.value), folder: 'commands/' }
+  }
+  return null
+})
 const workspaceHealth = computed<WorkspaceHealthResponse | null>(() => agentAssets.value?.health || null)
 const prioritizedHealthChecks = computed(() => {
   const checks = workspaceHealth.value?.checks || []
@@ -3005,6 +3425,12 @@ async function addCommand() {
   }
 }
 
+// Row-level Edit: open the row and its editor in one step.
+function openSubagentEditor(agent: SubagentAsset) {
+  expandedSubagents.value[`${agent.source}:${agent.name}:${agent.path}`] = true
+  startEditSubagent(agent)
+}
+
 function startEditSubagent(agent: SubagentAsset) {
   if (!agent.editable) return
   editingSubagent.value = agent.name
@@ -3064,6 +3490,11 @@ async function deleteSubagent(agent: SubagentAsset) {
   } finally {
     savingSubagent.value = null
   }
+}
+
+function openCommandEditor(command: CommandAsset) {
+  expandedCommands.value[commandKey(command)] = true
+  startEditCommand(command)
 }
 
 function startEditCommand(command: CommandAsset) {
@@ -3189,7 +3620,26 @@ async function uploadSkillZip() {
   }
 }
 
-async function createSkillViaChat() {
+const ASSET_CHAT_PROMPTS = {
+  skill: {
+    title: 'New Custom Skill',
+    prompt: 'I want to create a new custom skill. Please guide me through writing a new skill (creating the SKILL.md under the skills/ directory).',
+  },
+  subagent: {
+    title: 'New Subagent',
+    prompt: 'I want to create a new shared subagent. Please guide me through writing its definition under the subagents/ directory.',
+  },
+  command: {
+    title: 'New Slash Command',
+    prompt: 'I want to create a new shared slash command. Please guide me through writing it under the commands/ directory.',
+  },
+} as const
+
+function createSkillViaChat() {
+  return createAssetViaChat('skill')
+}
+
+async function createAssetViaChat(kind: keyof typeof ASSET_CHAT_PROMPTS) {
   const activeProj = projectStore.activeProject
   let projectId = activeProj?.project_id
   if (!projectId) {
@@ -3204,10 +3654,9 @@ async function createSkillViaChat() {
   }
 
   try {
-    const chat = await projectStore.createChat(projectId, 'New Custom Skill')
+    const chat = await projectStore.createChat(projectId, ASSET_CHAT_PROMPTS[kind].title)
     if (chat) {
-      const prompt = 'I want to create a new custom skill. Please guide me through writing a new skill (creating the SKILL.md under the skills/ directory).'
-      projectStore.sendMessage(chat.chat_id, prompt)
+      projectStore.sendMessage(chat.chat_id, ASSET_CHAT_PROMPTS[kind].prompt)
     }
   } catch (e) {
     notifyFailed('Could not start chat', errorMessage(e))
@@ -3289,11 +3738,8 @@ function notifySaved(body: string, title = 'settings') {
   projectStore.pushToast({ chat_id: '', title, body })
 }
 
-// The failure sibling of notifySaved. `alert` cannot be used for this: wry's
-// WKUIDelegate implements no JS dialog panels, so inside the desktop app the
-// native dialog never appears and every failure reported through it was
-// completely invisible -- the action just seemed to do nothing. Error toasts
-// persist until dismissed and can seed a fix chat from `detail`.
+// The failure sibling of notifySaved. Error toasts persist until dismissed and
+// can seed a fix chat from `detail`.
 function notifyFailed(title: string, detail: string) {
   projectStore.pushErrorToast(title, detail)
 }
@@ -3302,7 +3748,27 @@ const workspacesLoaded = ref(false)
 const workspacesError = ref('')
 const workspacesSaving = ref<string | null>(null)
 const workspacesResult = ref('')
+const archivingWorkspace = ref<string | null>(null)
+const primaryWorkspace = ref<string | null>(null)
+const archivedWorkspaces = ref<ArchivedWorkspace[]>([])
+const archivedLoading = ref(false)
+const archivedLoadError = ref('')
+const restoringArchiveId = ref<string | null>(null)
 const showNewWorkspace = ref(false)
+// The sidebar's "New workspace" links to /settings/workspaces#new-workspace:
+// open the form and bring it into view instead of landing on the list.
+watch(
+  () => route.hash,
+  hash => {
+    if (hash !== '#new-workspace') return
+    showNewWorkspace.value = true
+    void nextTick(() => {
+      document.querySelector('.workspace-card--new')?.scrollIntoView?.({ block: 'start' })
+      document.querySelector<HTMLInputElement>('.workspace-card--new input')?.focus()
+    })
+  },
+  { immediate: true },
+)
 const workspaceModels = ref<ModelsResponse | null>(null)
 
 type WorkspaceForm = {
@@ -3378,6 +3844,55 @@ function workspaceModelSectionsForForm(form: WorkspaceForm): ModelSection[] {
 
 const workspaceForms = ref<WorkspaceForm[]>([])
 const newWorkspaceForm = ref<WorkspaceForm>(blankWorkspaceForm())
+// One row "..." menu open at a time, keyed by row. Esc closes it here and
+// marks the press handled: ChatLayout's window Esc handler leaves Settings
+// unless the event was already handled, and Reka's own window listener is
+// registered later, too late to mark it.
+const settingsMenu = ref<string | null>(null)
+
+function setSettingsMenu(key: string, open: boolean): void {
+  if (open) settingsMenu.value = key
+  else if (settingsMenu.value === key) settingsMenu.value = null
+}
+
+function closeSettingsMenuOnEscape(event: KeyboardEvent): void {
+  event.preventDefault()
+  settingsMenu.value = null
+}
+
+// Rows are collapsed to a summary; Edit opens one in place. The baseline is
+// the saved form, so Save appears only once something actually changed.
+const openWorkspace = ref<string | null>(null)
+const workspaceBaseline = ref<Record<string, string>>({})
+
+function workspaceDirty(form: WorkspaceForm): boolean {
+  const saved = workspaceBaseline.value[form.name]
+  return saved !== undefined && saved !== JSON.stringify(form)
+}
+
+function discardWorkspace(name: string): void {
+  const saved = workspaceBaseline.value[name]
+  const index = workspaceForms.value.findIndex((f) => f.name === name)
+  if (saved !== undefined && index >= 0) {
+    workspaceForms.value[index] = JSON.parse(saved) as WorkspaceForm
+  }
+  openWorkspace.value = null
+}
+
+function workspaceSwatch(color: WorkspaceColorId): string {
+  return WORKSPACE_COLOR_PRESETS.find((preset) => preset.id === color)?.swatch || 'var(--accent)'
+}
+
+function workspaceSummary(form: WorkspaceForm): string {
+  const provider = workspaceProviderOptions.value.find((option) => option.value === form.default_provider)?.label
+    || form.default_provider
+  const profile = form.gws_profile
+    ? gwsProfileOptions.value.find((option) => option.name === form.gws_profile)?.label || form.gws_profile
+    : ''
+  const parts = [provider, profile ? `Google: ${profile}` : 'No Google account']
+  if (form.name === primaryWorkspace.value) parts.push('Main workspace')
+  return parts.join(' · ')
+}
 
 const workspaceProviderOptions = computed(() =>
   projectStore.workspaceProviderOptions.length
@@ -3391,12 +3906,6 @@ function disallowedToolsPayload(raw: string): string[] | null {
   return cleaned.split(',').map((s) => s.trim()).filter(Boolean)
 }
 
-function formatConnectorLabel(name: string): string {
-  let clean = name.replace(/^mcp__claude_ai_/, '').replace(/^mcp__/, '')
-  if (clean === 'Google_Cloud_BigQuery') return 'BigQuery'
-  if (clean === 'incident_io') return 'incident.io'
-  return clean
-}
 
 
 
@@ -3428,8 +3937,15 @@ function connectionMcps(providerId: string): string[] {
 async function fetchWorkspacesList() {
   workspacesError.value = ''
   try {
-    await projectStore.fetchWorkspaces()
+    const res = await projectStore.fetchWorkspaces()
+    primaryWorkspace.value = res?.primary ?? null
     workspaceForms.value = projectStore.workspaces.map(workspaceToForm)
+    workspaceBaseline.value = Object.fromEntries(
+      workspaceForms.value.map((form) => [form.name, JSON.stringify(form)]),
+    )
+    if (openWorkspace.value && !workspaceForms.value.some((f) => f.name === openWorkspace.value)) {
+      openWorkspace.value = null
+    }
     newWorkspaceForm.value.default_provider = normalizeWorkspaceProvider(newWorkspaceForm.value.default_provider)
   } catch (e) {
     workspacesError.value = `Failed to load workspaces: ${errorMessage(e)}`
@@ -3469,6 +3985,7 @@ async function saveWorkspace(name: string) {
       color: form.color,
     })
     notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
+    openWorkspace.value = null
     await fetchWorkspacesList()
   } catch (e) {
     const detail = apiErrorMessage(e, 'The workspace could not be saved.')
@@ -3510,22 +4027,73 @@ async function createNewWorkspace() {
   }
 }
 
-async function removeWorkspace(name: string) {
-  if (!await askConfirm(`Delete workspace "${name}"? Chats keep their history but lose workspace routing.`, {
-    title: 'Delete workspace',
-    confirmLabel: 'Delete workspace',
-    destructive: true,
+// The primary workspace and the last one cannot be archived; the server
+// refuses both, so the button is not offered for them.
+function workspaceArchivable(name: string): boolean {
+  return workspaceForms.value.length > 1 && name !== primaryWorkspace.value
+}
+
+async function archiveWorkspace(name: string) {
+  if (!await askConfirm(archiveConfirmMessage(name), {
+    title: 'Archive workspace',
+    confirmLabel: 'Archive workspace',
+    // Recoverable, so not styled as a destructive delete (DESIGN.md).
+    destructive: false,
   })) return
-  workspacesSaving.value = name
+  archivingWorkspace.value = name
   workspacesResult.value = ''
   try {
-    await projectStore.deleteWorkspace(name)
-    notifySaved(`Workspace "${name}" deleted.`, 'Workspaces')
-    await fetchWorkspacesList()
+    const res = await projectStore.archiveWorkspace(name)
+    const where = res.archived?.path ? ` Files are in ${res.archived.path}.` : ''
+    notifySaved(`Workspace "${name}" archived.${where}`, 'Workspaces')
+    await Promise.all([fetchWorkspacesList(), fetchArchivedWorkspaces()])
   } catch (e) {
-    workspacesResult.value = `Error: ${apiErrorMessage(e, 'The workspace could not be deleted.')}`
+    const detail = apiErrorMessage(e, 'The workspace could not be archived.')
+    workspacesResult.value = `Error: ${detail}`
+    notifyFailed(`Workspace "${name}" not archived`, detail)
   } finally {
-    workspacesSaving.value = null
+    archivingWorkspace.value = null
+  }
+}
+
+async function fetchArchivedWorkspaces() {
+  archivedLoading.value = true
+  archivedLoadError.value = ''
+  try {
+    archivedWorkspaces.value = await projectStore.fetchArchivedWorkspaces()
+  } catch (e) {
+    archivedLoadError.value = `Could not load archived workspaces: ${errorMessage(e)}`
+  } finally {
+    archivedLoading.value = false
+  }
+}
+
+function formatArchivedAt(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+async function restoreWorkspace(item: ArchivedWorkspace) {
+  // The archive's metadata syncs through git like any note, so show what the
+  // restore will apply (validated server-side) before applying it.
+  if (!await askConfirm(restoreConfirmMessage(item), {
+    title: 'Restore workspace',
+    confirmLabel: 'Restore workspace',
+    destructive: false,
+  })) return
+  restoringArchiveId.value = item.id
+  workspacesResult.value = ''
+  try {
+    const res = await projectStore.restoreArchivedWorkspace(item.id)
+    notifySaved(restoredMessage(item.name, res.restored?.schedules_paused ?? 0), 'Workspaces')
+    await Promise.all([fetchWorkspacesList(), fetchArchivedWorkspaces(), projectStore.fetchAll()])
+  } catch (e) {
+    const detail = apiErrorMessage(e, 'The workspace could not be restored.')
+    workspacesResult.value = `Error: ${detail}`
+    notifyFailed(`Workspace "${item.name}" not restored`, detail)
+  } finally {
+    restoringArchiveId.value = null
   }
 }
 
@@ -3539,12 +4107,12 @@ onMounted(async () => {
   fetchLocalStatus().then(() => {
     if (localStatus.value?.dev_mode) refreshDebugIssues()
   })
-  fetchNodeStatus()
   fetchAuthSettings()
   fetchRoutines()
   fetchAutomation()
   fetchPackageStatus()
-  fetchProviderKeys()
+  fetchUpdateStatus()
+  fetchProviderKeys().then(scrollToChatProvidersIfLinked)
   mcp.fetchStatus()
   mcp.fetchUsage()
   mcp.fetchAgentStatus()
@@ -3552,6 +4120,14 @@ onMounted(async () => {
   fetchWorkspaceModels().then(() => fetchWorkspaceModels(true))
   fetchGwsIntegration()
   fetchWorkspacesList()
+  fetchArchivedWorkspaces()
+})
+
+// Another tab or device archived or restored a workspace: this view keeps its
+// own copy of the registry and the archived list, so refetch both.
+watch(() => projectStore.workspaceRegistryRevision, () => {
+  fetchWorkspacesList()
+  fetchArchivedWorkspaces()
 })
 
 
@@ -3606,15 +4182,9 @@ async function doDeploy(confirmWarnings = false) {
     }
   }
   const restartOnly = !!localStatus.value?.restart_only
-  // In dev mode the restart also rebuilds the Tauri shell when desktop/ changed,
-  // which is a multi-minute Rust build that ends by quitting and relaunching the
-  // app. Worth warning about before the window disappears.
-  const devNote = localStatus.value?.dev_mode
-    ? '\n\nDev mode: if desktop/ changed, this also rebuilds the desktop app (several minutes) and relaunches it.'
-    : ''
   const confirmation = restartOnly
     ? 'Restart the installed server? Active chats will finish before it restarts.'
-    : `Restart? This will pull latest, rebuild, and restart.${devNote}`
+    : 'Restart? This will pull latest, rebuild, and restart.'
   if (!confirmWarnings && !await askConfirm(confirmation, {
     title: restartOnly ? 'Restart server' : 'Restart and redeploy',
     confirmLabel: 'Restart',
@@ -3815,45 +4385,6 @@ async function saveAuthSettings() {
   authSettingsSaving.value = false
 }
 
-// ── Host / client: labeling only ──────────────────────────────────────────
-// The device-scoped controls live in DeviceView (/device). What is left here is
-// just enough to answer "whose settings am I editing": in client mode every
-// other card on this page is served by the host through the tunnel.
-const nodeStatus = ref<NodeStatus | null>(null)
-// Tri-state signal for gwsOnEngineHost (issue #351): nodeStatus reading null
-// is ambiguous between "still loading" and "the fetch failed", and both must
-// not be silently treated as a confirmed host role off a loopback hostname.
-const nodeStatusLoaded = ref(false)
-const nodeStatusError = ref(false)
-
-const isNodeClient = computed(() => {
-  const role = nodeStatus.value?.role
-  return role === 'client' || role === 'standby'
-})
-
-const connectedHostUrl = computed(
-  () => nodeStatus.value?.host_url || nodeStatus.value?.active_peer_url || '',
-)
-
-const hostScopeLabel = computed(() => {
-  const named = nodeStatus.value?.host_node_id
-  const url = connectedHostUrl.value
-  if (named && url) return `${named} (${url})`
-  return named || url || 'the host'
-})
-
-async function fetchNodeStatus() {
-  try {
-    nodeStatus.value = await api.get<NodeStatus>('/api/node/status')
-    nodeStatusError.value = false
-  } catch {
-    /* leave null on failure: cards then read as host-mode, which is the default */
-    nodeStatusError.value = true
-  } finally {
-    nodeStatusLoaded.value = true
-  }
-}
-
 async function localHandback(confirmWarnings = false) {
   if (!confirmWarnings && !await askConfirm('Sync changes with the remote repository?', {
     title: 'Sync with remote',
@@ -3949,6 +4480,367 @@ async function doPackageUpdate() {
   }
 }
 
+// ── Engine update job (#608) ───────────────────────────────────────────────────
+// The persisted operation record is the only source of truth here. The card
+// keeps no local guess about how far a run got, so an engine restarted
+// mid-apply — or a Settings tab opened after the fact — shows what the record
+// says rather than what this session remembers doing.
+const updateStatus = ref<EngineUpdateStatus | null>(null)
+const updatePolling = ref(false)
+const updateActionPending = ref(false)
+// 2s. Staging is a download plus a wheel build, the apply tens of seconds more;
+// faster buys nothing a reader can use, only request volume.
+const UPDATE_POLL_MS = 2000
+let updatePollTimer: number | null = null
+// A 202 says the coordinator owns the run; only the record says how far it got,
+// and `stage_update` writes nothing until it has taken the lock, resolved the
+// release over the network and removed any previous staged environment. For the
+// first seconds of a run, then, the status route can only serve the record the
+// card was already holding — the previous run's. `updateRunStarted` says this
+// session asked for a run, `updateRunSeenInFlight` says it has since seen that
+// run's own record in flight: together they are the difference between the
+// previous run's outcome and this one's, and a poll that cannot tell them apart
+// ends a run that is still going.
+let updateRunStarted = false
+let updateRunSeenInFlight = false
+let updateRunStartedAt = 0
+// The refusal the card was already holding when it asked for this run. A parked
+// reason lives on the server and is served for as long as the record it was
+// parked against is unchanged, so the previous run's refusal is still on the
+// wire during this run's pre-record window and is not this run's answer. Empty
+// when the card held no refusal, which makes any served error this run's own.
+let updateRunErrorAtStart = ''
+// A ceiling on the pre-record window, never the end condition: a run that lands
+// no record and refuses nothing must not leave the card polling forever, but a
+// slow link, a cold DNS or a re-stage of a version whose environment is still on
+// disk all have to be waited out rather than given up on.
+const UPDATE_RUN_GRACE_MS = 60_000
+
+const engineUpdateOperation = computed(() => updateStatus.value?.operation ?? null)
+const engineUpdateStage = computed(() => updateStage(engineUpdateOperation.value))
+// `applied` is the last run's outcome, not a job: nothing ever unlinks the
+// record, so a machine that has updated once would answer every later release
+// with "up to date" and never offer a Stage again. The release page and the
+// installed version are read independently of it, so a newer release is
+// exactly the signal that the record is history rather than the answer.
+const engineUpdateStaleApplied = computed(
+  () => engineUpdateStage.value === 'done' && !!packageStatus.value?.update_available,
+)
+const engineUpdateBusy = computed(() => updateInFlight(engineUpdateOperation.value))
+const engineUpdateFailed = computed(() => updateFailed(engineUpdateOperation.value))
+const engineUpdateRolledBack = computed(() => engineUpdateStage.value === 'rolled_back')
+const engineUpdatePhaseText = computed(() => updatePhaseLabel(engineUpdateOperation.value))
+const engineUpdateFailureText = computed(() => updateFailureText(engineUpdateOperation.value))
+// Only an installer engine has an install to swap, so only it gets the job
+// surface. Every other mode keeps the guidance the card has always shown.
+const engineUpdateEnabled = computed(
+  () => !!updateStatus.value && updateStatus.value.install_mode === 'installer' && updateStatus.value.can_update,
+)
+// The panel is for the states that need an action or an answer. Idle and up to
+// date is a status, and the header already says so.
+const engineUpdateVisible = computed(
+  () => engineUpdateEnabled.value
+    && (engineUpdateStage.value !== 'idle'
+      || !!updateStatus.value?.error
+      || !!packageStatus.value?.update_available),
+)
+const engineUpdateVersion = computed(
+  () => engineUpdateOperation.value?.to_version || packageStatus.value?.latest_version,
+)
+// No job and nothing newer: the header's status, not a disabled button. A
+// `done` record is history rather than a job once a newer release exists, so it
+// counts as idle here too — and the `update_available` term is what keeps the
+// header quiet, so the header and the panel below it say the same thing. A
+// version check that never answered, or that answered with a rate limit, has
+// said nothing about the installed version at all: claiming "Up to date" over
+// the "Update check failed" line two rows below would be the card asserting
+// what it does not know.
+const engineUpdateIdleAndCurrent = computed(
+  () => engineUpdateEnabled.value
+    && (engineUpdateStage.value === 'idle' || engineUpdateStaleApplied.value)
+    && !updateStatus.value?.error
+    && !!packageStatus.value
+    && !packageStatus.value.error
+    && !packageStatus.value?.update_available,
+)
+
+async function fetchUpdateStatus() {
+  try {
+    updateStatus.value = await api.get<EngineUpdateStatus>('/api/update/status')
+    reconcileUpdatePoll()
+  } catch {
+    // best-effort, exactly like the package status: an engine too old to have
+    // the route keeps the guidance it always had.
+  }
+}
+
+/**
+ * The poll's own end condition, checked after every read.
+ *
+ * What ends a poll is "nothing this run can still do", and a record the card
+ * was already holding when it asked for the run is not that: the coordinator
+ * writes its first record only after the lock, the release lookup and the
+ * removal of any previous staged environment, so for the first seconds the
+ * status route can only serve the previous run's outcome. Reading that as the
+ * end of this run stopped the poll while the run went on staging invisibly,
+ * leaving a settled-looking panel with a re-enabled button and nothing left
+ * watching. So the record is only believed once this session has seen one in
+ * flight.
+ */
+function reconcileUpdatePoll() {
+  // A record in flight is a run that still moves on its own, and the first time
+  // one is seen the card can trust the record from then on.
+  if (engineUpdateBusy.value) {
+    updateRunSeenInFlight = true
+    return
+  }
+  const status = updateStatus.value
+  if (!status) return
+  // A served error is this run's own answer only if it is not the one the card
+  // was already holding when it asked: a parked reason is served for as long as
+  // the record it was parked against is unchanged, so the previous run's refusal
+  // is still on the wire during this run's pre-record window. Reading that as
+  // the end of this run stopped the poll while it staged invisibly, behind a
+  // panel showing the previous run's reason with a re-enabled button — and that
+  // button's second click is a 409, because by then the run really is in flight.
+  if (status.error && status.error !== updateRunErrorAtStart) {
+    updateRunStarted = false
+    updateRunSeenInFlight = false
+    updateRunErrorAtStart = ''
+    stopUpdatePoll()
+    return
+  }
+  // Once the record has been seen in flight, a record that is no longer in
+  // flight is that run's outcome and nothing will move it.
+  if (updateRunSeenInFlight) {
+    updateRunStarted = false
+    updateRunSeenInFlight = false
+    updateRunErrorAtStart = ''
+    stopUpdatePoll()
+    return
+  }
+  // Otherwise this session asked for a run whose record may not be on disk yet,
+  // so keep polling. The grace bound is a ceiling on that window and nothing
+  // more: past it, a run that has produced neither a record nor a refusal is
+  // not going to, and the card would otherwise hold every button disabled until
+  // the page reloaded.
+  if (updateRunStarted && Date.now() - updateRunStartedAt >= UPDATE_RUN_GRACE_MS) {
+    updateRunStarted = false
+    updateRunErrorAtStart = ''
+    stopUpdatePoll()
+  }
+}
+
+/**
+ * Record that a 202 has started a run the card is now watching.
+ *
+ * Only the two 202 paths call this, never `startUpdatePoll` — the tab watcher
+ * starts polls too, and it is not the card asking for anything. The
+ * seen-in-flight flag resets with it: a new run has to look for its own record,
+ * so a flag left over from an earlier run must not end this one on its first
+ * read. The refusal the card is holding is captured for the same reason: it is
+ * the previous run's until a different one arrives. Neither flag is cleared by
+ * `stopUpdatePoll`, so a Settings tab that is left and reopened during the
+ * pre-record window keeps watching the run.
+ */
+function beginUpdateRun() {
+  updateRunStarted = true
+  updateRunStartedAt = Date.now()
+  updateRunSeenInFlight = false
+  updateRunErrorAtStart = updateStatus.value?.error || ''
+}
+
+function stopUpdatePoll() {
+  if (updatePollTimer !== null) {
+    window.clearInterval(updatePollTimer)
+    updatePollTimer = null
+  }
+  updatePolling.value = false
+}
+
+function startUpdatePoll() {
+  if (updatePollTimer !== null) return
+  updatePolling.value = true
+  updatePollTimer = window.setInterval(() => { void fetchUpdateStatus() }, UPDATE_POLL_MS)
+}
+
+async function doEngineUpdateStage() {
+  // A run the coordinator already owns: the 202 has not become a record yet, so
+  // the record alone cannot say the job is over. The backend refuses a second
+  // run with a 409, and the button is already disabled; both say the same thing.
+  if (updatePolling.value) return
+  updateActionPending.value = true
+  packageResult.value = ''
+  try {
+    await api.post('/api/update/stage')
+    // 202: the coordinator owns the run from here and the record is its progress.
+    // Its first record is written only after the lock, the release lookup and
+    // the removal of any previous staged environment, so the reads that follow
+    // can still be serving the last run's outcome; `beginUpdateRun` is what
+    // keeps the poll alive across them.
+    startUpdatePoll()
+    beginUpdateRun()
+    packageResult.value = 'Staging the update. Ciaobot keeps running until it is ready to apply.'
+  } catch (e) {
+    // One action, one line. The 400/409 that stage and apply answer with is a
+    // reason to read, not a stream of toasts.
+    packageResult.value = `Could not stage the update: ${apiErrorMessage(e, 'unknown error')}`
+    await fetchUpdateStatus()
+  } finally {
+    updateActionPending.value = false
+  }
+}
+
+async function doEngineUpdateApply() {
+  if (updatePolling.value) return
+  updateActionPending.value = true
+  packageResult.value = ''
+  try {
+    await api.post('/api/update/apply')
+    // The apply drains and reboots the engine, so the restart overlay is the
+    // one a Settings restart already uses: it covers the downtime and reloads
+    // the tab onto the new version. A drain the engine gives up on cancels it
+    // through `server_restart_cancelled`, and the card re-reads the record.
+    restartAndReload('Updating Ciaobot… the engine will restart')
+    startUpdatePoll()
+    // Same pre-record window as a stage: `apply_update` writes `draining` from
+    // its own thread, so the first read can still be serving the `staged` record.
+    beginUpdateRun()
+    packageResult.value = 'Applying the update. Ciaobot restarts once it is ready.'
+  } catch (e) {
+    packageResult.value = `Could not apply the update: ${apiErrorMessage(e, 'unknown error')}`
+    await fetchUpdateStatus()
+  } finally {
+    updateActionPending.value = false
+  }
+}
+
+// Poll only while a run is in flight, and only on the tab that shows the card:
+// a Settings tab left open on an idle engine must not poll forever. A run this
+// session asked for counts as in flight for this purpose too: staging is not a
+// takeover, so leaving the Updates tab mid-download and coming back has to find
+// the run still being watched rather than a card frozen on the last record.
+watch([currentTab, engineUpdateBusy], ([tab, busy]) => {
+  if (tab === 'home' && (busy || updateRunStarted)) startUpdatePoll()
+  else stopUpdatePoll()
+}, { immediate: true })
+
+// The overlay is the whole window while it is up, so it is modal: focus moves
+// into its status region, the Settings behind it go inert so Tab cannot reach
+// Restart or Deploy under the overlay, and the card takes focus back when the
+// record settles.
+const engineUpdateOverlay = ref<HTMLElement | null>(null)
+const engineUpdateOverlayView = ref<InstanceType<typeof UpdateProgressView> | null>(null)
+const engineUpdatePanel = ref<HTMLElement | null>(null)
+const engineUpdateInlineView = ref<InstanceType<typeof UpdateProgressView> | null>(null)
+// The two halves of a run are not the same thing to the app, and `useModalFocus`
+// makes the background inert up to `document.body`, so which one is up decides
+// whether the whole app is locked while it runs.
+//
+// Staging (`resolving|downloading|verifying|staging`) is a release lookup, a
+// download and a wheel build, and the engine keeps serving through all of it —
+// the card's own copy says so. Taking the window over for minutes of that is
+// the plan contradicting itself, so staging is the card's business: the same
+// progress rows rendered inline below, with nothing inert anywhere.
+//
+// Applying (`draining|applying|stopping|swapping|starting|verifying_start`, and
+// the `rolling_back` that answers a failed swap) is the engine replacing itself.
+// It goes down, the connection drops, and nothing comes back until the new one
+// is up, so there the takeover is exactly right and the copy stays.
+const engineUpdateStagingNow = computed(() => engineUpdateStage.value === 'staging')
+const engineUpdateOverlayOpen = computed(
+  () => engineUpdateBusy.value && !engineUpdateStagingNow.value && engineUpdateEnabled.value,
+)
+// The overlay's own status region, not the inert boundary: a focus target with
+// a visible ring (DESIGN) beats an invisible full-window box.
+const engineUpdateStatusRegion = computed(() => engineUpdateOverlayView.value?.statusRegion ?? null)
+// The in-card region's own focus target, for the same reason on the staging half.
+const engineUpdateInlineStatusRegion = computed(() => engineUpdateInlineView.value?.statusRegion ?? null)
+
+useModalFocus(engineUpdateOverlay, engineUpdateOverlayOpen, {
+  initialFocus: engineUpdateStatusRegion,
+  // The card owns the way back, below: the control that started the run is
+  // usually replaced by its outcome, so the captured opener is often gone.
+  restoreFocus: false,
+  // Escape is claimed and does nothing on purpose: the run under this overlay is
+  // the engine replacing itself, and no key leaves it running. Letting the key
+  // through would hand it to a global shortcut, which is worse than swallowing
+  // it.
+  onEscape: () => {
+    // Intentionally inert.
+  },
+})
+
+// Staging takes over nothing, but the control that started it is replaced by the
+// progress that replaced it, and focus left on nothing at all is worse than
+// focus on the region that now describes the run. Nothing is inert here: this is
+// a move into the card, not a claim on the window, and Tab leaves it for the
+// rest of the app like any other. Only a run this session asked for counts — a
+// run that started on the CLI or on another device must not pull focus out of
+// wherever this tab was left — and only when that control's focus is what the
+// replacement took with it.
+watch(engineUpdateStagingNow, async (staging) => {
+  if (!staging || !updateRunStarted) return
+  await nextTick()
+  const active = document.activeElement
+  if (active && active !== document.body && !engineUpdatePanel.value?.contains(active)) return
+  engineUpdateInlineStatusRegion.value?.focus()
+})
+
+// Focus comes back to the card when the overlay closes. What the run produced is
+// what the card now offers — Apply for a staged release, Retry for a failure —
+// so that is where focus goes: never onto a control the record has replaced,
+// and never onto nothing at all. An `applied` record offers no control, so the
+// panel itself is the target — it carries `tabindex="-1"` and states its own
+// focus ring below, because a region has no ring of its own.
+watch(engineUpdateOverlayOpen, async (open) => {
+  if (open) return
+  await nextTick()
+  focusEngineUpdatePanel()
+})
+
+function focusEngineUpdatePanel() {
+  const panel = engineUpdatePanel.value
+  if (!panel) return
+  const control = panel.querySelector<HTMLElement>('button:not([disabled])')
+  const target = control ?? panel
+  target.focus()
+}
+
+/**
+ * Focus that fell on the document is not focus anyone put there.
+ *
+ * A re-render that removes the focused control drops focus on `body`, and the
+ * card can do that to itself: a record that settles on `applied` re-reads the
+ * version check, and a machine now on the release that check named has no
+ * control left in the panel — so the control the focus return just landed on is
+ * gone by the next answer. Focus the user moved themselves is left alone.
+ */
+function reclaimEngineUpdatePanelFocus() {
+  const active = document.activeElement
+  if (active && active !== document.body) return
+  focusEngineUpdatePanel()
+}
+
+// Applied: the record says the new version is running, so the package status is
+// re-read too and its "Up to date" is the engine's own answer.
+watch(() => engineUpdateStage.value, (stage, previous) => {
+  // "Staging…"/"Applying…" describes a run that is in flight. Once the record
+  // settles it is the last thing that happened rather than the state, and would
+  // otherwise sit under the panel that replaced it.
+  if (updateStageInFlight(previous) && !updateStageInFlight(stage)) packageResult.value = ''
+  if (stage !== 'done' || previous === 'done') return
+  void (async () => {
+    await Promise.all([fetchPackageStatus(), fetchUpdateStatus()])
+    // Those reads can replace the control the focus return landed on with a
+    // panel that has none, which is focus falling on the document rather than
+    // anywhere. The card takes it back; see `reclaimEngineUpdatePanelFocus`.
+    reclaimEngineUpdatePanelFocus()
+  })()
+})
+
+onUnmounted(stopUpdatePoll)
+
 </script>
 
 <!-- Styles the extracted Settings panels share with this view. Scoped rules
@@ -3966,52 +4858,173 @@ async function doPackageUpdate() {
   container-type: inline-size;
 }
 
+/* The engine update's inert boundary: an empty full-window layer the overlay
+   paints into, so the Settings behind it can be made inert while it is up. */
+.engine-update-overlay {
+  position: fixed;
+  inset: 0;
+}
+
+/* The card's own focus target, for the run that leaves it with nothing to
+   click: the app's focus ring (DESIGN: 2px accent) does not reach a region, so
+   the panel states one exactly as the overlay's status region does. */
+.engine-update-panel:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .shortcut-list {
   list-style: none;
-  margin: 12px 0 0;
+  margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
 }
 
 .shortcut-list li {
   display: flex;
   align-items: center;
   gap: 12px;
-  font-size: 13px;
-  color: var(--fg2);
+  min-height: 40px;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-sm);
+  color: var(--fg);
 }
 
 .shortcut-list kbd {
-  font-family: var(--font);
-  font-size: 12px;
-  min-width: 44px;
-  text-align: center;
-  padding: 4px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg2);
-  color: var(--fg);
-  flex: 0 0 auto;
+  flex: 0 0 150px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg2);
+}
+
+@media (max-width: 700px) {
+  .shortcut-list kbd { flex-basis: 72px; }
 }
 .pane-body {
   flex: 1;
   overflow-y: auto;
-  padding: var(--space-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-  align-items: center;
+  padding: var(--space-6) 0 48px;
 }
-/* The inline device panel renders its own .card tiles; give the wrapper the
-   same width as every other card here so they line up with the rest. */
-.device-tile {
-  width: min(100%, 1040px);
-  margin: 0 auto;
+
+/* Sections stack in the page grid's main column with generous separation;
+   the rail holds the tab's table of contents. */
+.settings-main {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: 36px;
+}
+
+.settings-toc {
+  display: grid;
+  border-left: 1px solid var(--border);
+}
+
+.settings-toc-item {
+  min-height: 32px;
+  margin-left: -1px;
+  padding: 4px 0 4px 12px;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: none;
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-toc-item:hover {
+  color: var(--fg);
+}
+
+.settings-toc-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.settings-toc-item.active {
+  border-left-color: var(--accent);
+  color: var(--fg);
+}
+
+@media (pointer: coarse) {
+  .settings-toc-item { min-height: var(--touch); }
+}
+
+/* One button size across every settings section: the standard secondary
+   control. Header actions used to mix 44px primaries with compact chips,
+   which is what made each card read as its own little app. */
+.settings-main :deep(:is(.btn-primary, .btn-secondary, .btn-caution, .btn-small)) {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+@media (pointer: coarse) {
+  .settings-main :deep(:is(.btn-primary, .btn-secondary, .btn-caution, .btn-small)) {
+    min-height: var(--touch);
+  }
+}
+
+/* Connection state as text with a leading dot, not a mono pill. */
+.settings-conn-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.settings-conn-state::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.settings-conn-state--ok::before { background: var(--success); }
+.settings-conn-state--error { color: var(--error); }
+
+.settings-main :deep(:is(.btn-primary, .btn-secondary, .btn-caution, .btn-small)) {
+  white-space: nowrap;
+}
+
+.settings-status {
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+/* Narrow panes collapse the grid; a table of contents under the page it
+   indexes would only be something to scroll past. */
+@container chat-pane (max-width: 940px) {
+  .settings-rail { display: none; }
+}
+
+.settings-disclosure {
+  align-self: flex-start;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.settings-disclosure:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+@media (pointer: coarse) {
+  .settings-disclosure { min-height: var(--touch); }
 }
 /* Open-source card with the star ask still live: the pixel face sits on the
    right, out of the prose's flow. Without the nudge the card has no class and
@@ -4155,6 +5168,11 @@ async function doPackageUpdate() {
   font-size: var(--text-sm);
   font-weight: 500;
 }
+/* The global mobile rule gives .btn-small a 44px target; the compact caution
+   variant above resets min-height and would otherwise drop below it. */
+@media (max-width: 768px) {
+  .btn-caution.btn-small { min-height: var(--touch); }
+}
 .btn-caution:hover { background: color-mix(in srgb, var(--warning) 15%, var(--bg3)); }
 .btn-secondary:active,
 .btn-caution:active { transform: scale(0.98); }
@@ -4167,12 +5185,6 @@ a.btn-secondary {
   align-items: center;
   text-decoration: none;
 }
-/* Client mode: names the machine whose settings the rest of the page edits. */
-.scope-card {
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
-  background: color-mix(in srgb, var(--accent) 6%, var(--bg2));
-}
-
 .action-result--error {
   color: var(--error);
 }
@@ -4248,111 +5260,6 @@ a.btn-secondary {
   white-space: nowrap;
 }
 
-.node-path {
-  display: flex;
-  align-items: stretch;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  margin-top: var(--space-1);
-}
-.node-path-endpoint {
-  flex: 1 1 140px;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-}
-.node-path-endpoint--host {
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
-  background: color-mix(in srgb, var(--accent) 5%, var(--bg));
-}
-.node-path-label {
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  color: var(--fg3, var(--fg2));
-}
-.node-path-value {
-  color: var(--fg);
-  font-size: var(--text-sm);
-  font-family: var(--font);
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-.node-path-link {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 0 2px;
-  min-width: 72px;
-}
-.node-path-arrow {
-  color: var(--accent);
-  font-size: calc(18px * var(--font-scale));
-  font-weight: 700;
-  line-height: 1;
-}
-@container (max-width: 720px) {
-  .node-path {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .node-path-link {
-    flex-direction: row;
-    justify-content: flex-start;
-    min-width: 0;
-    padding: 2px 0;
-    gap: var(--space-2);
-  }
-  .node-path .node-path-arrow {
-    transform: rotate(90deg);
-  }
-}
-
-.node-peer-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  margin-bottom: var(--space-3);
-}
-.node-peer-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-}
-.node-peer-main {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.node-peer-form {
-  margin-top: 0;
-  margin-bottom: 0;
-}
-
-.connected-clients-panel {
-  margin-top: var(--space-4);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
-}
-.connected-clients-panel .section-title {
-  margin-bottom: var(--space-2);
-}
-
 .deploy-steps {
   display: flex;
   flex-direction: column;
@@ -4402,30 +5309,38 @@ a.btn-secondary {
 
 .instance-toggle {
   display: flex;
-  gap: 0;
+  gap: 2px;
+  padding: 2px;
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid var(--border);
   margin-top: 0;
   width: 100%;
 }
+/* A quiet segmented control: the current choice is a raised tile, not an
+   accent fill - the accent stays reserved for each section's one action. */
 .toggle-btn {
   flex: 1;
-  padding: 10px 16px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--fg2);
   font-size: var(--text-sm);
   font-weight: 600;
-  border: none;
-  cursor: pointer;
-  background: var(--bg);
-  color: var(--fg);
   transition: background 0.15s, color 0.15s;
 }
-.toggle-btn:not(:last-child) {
-  border-right: 1px solid var(--border);
+.toggle-btn:hover:not(:disabled) {
+  color: var(--fg);
 }
 .toggle-btn.active {
-  background: var(--accent);
-  color: white;
+  background: var(--bg3);
+  color: var(--fg);
+}
+@media (pointer: coarse) {
+  .toggle-btn { min-height: var(--touch); }
 }
 .toggle-btn:disabled {
   opacity: 0.6;
@@ -4458,10 +5373,6 @@ a.btn-secondary {
 .routine-row--flush {
   border-top: 0;
   padding-top: 0;
-}
-.routine-voice-icon {
-  flex: none;
-  color: var(--fg2);
 }
 .routine-detail {
   font-size: var(--text-xs);
@@ -4512,9 +5423,6 @@ a.btn-secondary {
   grid-template-columns: minmax(0, 1fr) 136px;
   gap: 8px;
   align-items: start;
-}
-.routine-model-controls--single {
-  grid-template-columns: 1fr;
 }
 .routine-model-controls .routine-select {
   max-width: none;
@@ -4573,12 +5481,6 @@ a.btn-secondary {
   min-width: 320px;
   flex: 0 0 auto;
 }
-.voice-warning {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-}
 .critique-model-picker {
   width: 100%;
   min-width: 0;
@@ -4604,11 +5506,17 @@ a.btn-secondary {
   color: var(--fg2);
   font-size: var(--text-sm);
 }
+.critique-picker-default {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .critique-picker-header .btn-small {
   width: 100%;
   min-height: 32px;
 }
 .critique-chip-list {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -4631,6 +5539,9 @@ a.btn-secondary {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.critique-chip span:last-child {
+  flex: none;
 }
 .critique-chip:disabled {
   cursor: default;
@@ -4697,26 +5608,21 @@ a.btn-secondary {
   margin-top: var(--space-3);
 }
 .gws-profile-list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: stretch;
-  gap: var(--space-3);
+  display: flex;
+  flex-direction: column;
   margin-top: var(--space-3);
 }
-/* Equal-height cards: the grid stretches each card, and the action row is
-   pushed to the bottom (margin-top: auto) so both columns line up however
-   much description or how many chips one of them carries. */
+/* Account entries follow the flat settings-section rhythm rather than
+   competing card surfaces. */
 .gws-profile-card {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   min-width: 0;
-  height: 100%;
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  padding: var(--space-4) 0;
+  border-bottom: 1px solid var(--border);
 }
+.gws-profile-card:first-child { padding-top: 0; }
 /* Title, status chip and Remove share one wrapping row. No absolute or
    negative positioning: the title shrinks (min-width: 0) and the chip and
    button hold their size, so nothing can ever overprint the title. */
@@ -4830,9 +5736,7 @@ a.btn-secondary {
   font-size: var(--text-xs);
   font-weight: 500;
 }
-/* Pinned to the bottom of the card so both columns' buttons share a baseline. */
 .gws-profile-actions {
-  margin-top: auto;
   padding-top: var(--space-3);
   display: flex;
   flex-direction: column;
@@ -4952,7 +5856,10 @@ a.btn-secondary {
   .gws-profile-card .btn-small,
   .gws-profile-card .btn-primary,
   .gws-profile-card .file-upload-btn,
-  .gws-manual-toggle {
+  .gws-manual-toggle,
+  .critique-picker-header .btn-small,
+  .critique-chip,
+  .routine-row :deep(.model-selector__trigger) {
     min-height: var(--touch);
   }
 }
@@ -4994,11 +5901,7 @@ a.btn-secondary {
     min-width: 0;
     width: 100%;
   }
-  .gws-profile-list {
-    grid-template-columns: 1fr;
-  }
-  /* Single column: the heading takes the full row and the chip + Remove wrap
-     onto the line below it rather than squeezing against the title. */
+  /* The heading takes the full row; status and account actions wrap below. */
   .gws-profile-heading {
     flex: 1 1 100%;
   }
@@ -5113,24 +6016,25 @@ a.btn-secondary {
 .workspace-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  margin-top: var(--space-2);
 }
+/* One workspace = one collapsed hairline row (.set-row); Edit opens its
+   fields in place underneath. */
 .workspace-card {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  border-radius: 0;
+  background: transparent;
 }
+/* The unsaved new workspace keeps a light frame: it is a draft form, and it
+   has to read as not-yet-real next to the saved rows. */
 .workspace-card--new {
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
-  background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
 }
 .workspace-card-header {
   display: flex;
-  align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
 }
@@ -5138,7 +6042,17 @@ a.btn-secondary {
   margin: 0;
   color: var(--fg);
   font-size: var(--text-base);
-  font-weight: 700;
+  font-weight: 600;
+}
+.workspace-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.workspace-edit-actions .btn-small {
+  flex: 0 0 auto;
 }
 .workspace-actions {
   display: flex;
@@ -5148,6 +6062,55 @@ a.btn-secondary {
 }
 .workspace-actions .btn-small {
   flex: 0 0 auto;
+}
+.archived-workspaces {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.archived-workspaces .subsection-title {
+  margin: 0;
+}
+.archived-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+.archived-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 52px;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+.archived-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.archived-item-text p {
+  margin: 0;
+}
+.archived-item-text code {
+  overflow-wrap: anywhere;
+}
+.archived-item .btn-small {
+  flex: 0 0 auto;
+}
+/* The reason is printed beside it; the dimming only confirms it. */
+.archived-item .btn-small:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
 }
 .provider-defaults {
   display: grid;
@@ -5168,18 +6131,10 @@ a.btn-secondary {
   font-weight: 600;
   color: var(--fg);
 }
+/* The provider's defaults are indented hairline rows (.set-subrow) under its
+   head, not a boxed grid of selects. */
 .provider-inline-defaults {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-3);
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  background: color-mix(in srgb, var(--bg) 76%, transparent);
-  margin-bottom: var(--space-3);
-}
-@media (max-width: 720px) {
-  .provider-inline-defaults { grid-template-columns: 1fr; }
+  display: block;
 }
 @media (max-width: 720px) {
   .provider-defaults {
@@ -5189,28 +6144,37 @@ a.btn-secondary {
 .workspace-color-swatches {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: 6px;
   align-items: center;
 }
+/* 26px swatch; the selected one carries a ring in the text colour so the
+   choice reads without relying on the swatch hue. */
 .workspace-color-swatch {
-  width: var(--touch);
-  height: var(--touch);
+  width: 26px;
+  height: 26px;
   padding: 0;
-  border: 2px solid var(--border);
+  border: 0;
   border-radius: 50%;
-  background:
-    radial-gradient(circle at center, var(--swatch) 0 58%, transparent 60%),
-    var(--bg);
+  background: var(--swatch);
   cursor: pointer;
-  transition: border-color 120ms var(--ease), transform 120ms var(--ease);
+  transition: box-shadow 120ms var(--ease), transform 120ms var(--ease);
 }
 .workspace-color-swatch:hover:not(:disabled) {
-  border-color: var(--border-strong);
-  transform: translateY(-1px);
+  transform: scale(1.08);
 }
 .workspace-color-swatch.active {
-  border-color: var(--swatch);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--swatch) 35%, transparent);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--fg);
+}
+@media (pointer: coarse) {
+  .workspace-color-swatch {
+    width: var(--touch);
+    height: var(--touch);
+    background: radial-gradient(circle at center, var(--swatch) 0 13px, transparent 14px);
+  }
+  .workspace-color-swatch.active {
+    box-shadow: none;
+    background: radial-gradient(circle at center, var(--swatch) 0 13px, var(--bg) 14px 15px, var(--fg) 16px 17px, transparent 18px);
+  }
 }
 .workspace-color-swatch:focus-visible {
   outline: 2px solid var(--accent);
@@ -5327,19 +6291,9 @@ a.btn-secondary {
   margin-bottom: var(--space-2);
 }
 @container (max-width: 720px) {
-  .voice-warning {
-    align-items: stretch;
-    flex-direction: column;
-  }
-  .workspace-card-header {
+  .archived-item {
     flex-direction: column;
     align-items: stretch;
-  }
-  .workspace-actions {
-    width: 100%;
-  }
-  .workspace-actions .btn-small {
-    flex: 1 1 auto;
   }
 }
 .skill-source {
@@ -5440,9 +6394,11 @@ a.btn-secondary {
   margin-top: 0;
   width: 100%;
 }
+.font-scale-row {
+  justify-content: flex-end;
+}
 .font-scale-row .btn-small {
-  flex: 1 1 0;
-  min-width: 0;
+  flex: 0 0 auto;
 }
 .font-scale-display {
   font-size: var(--text-base);
@@ -5451,6 +6407,46 @@ a.btn-secondary {
   flex: 0 0 56px;
   text-align: center;
 }
+
+/* "What this CLI brings": the per-provider MCP and skill chip lists, folded
+   away by default so the models tab stays scannable. The summary is the whole
+   touch target, so it keeps the 44px minimum. */
+.provider-brings > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--touch);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  list-style: none;
+}
+.provider-brings > summary::-webkit-details-marker { display: none; }
+/* inline-flex drops the native marker, so draw the disclosure caret. */
+.provider-brings > summary::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin: 0 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 120ms var(--ease);
+}
+.provider-brings[open] > summary::before { transform: rotate(45deg); }
+@media (prefers-reduced-motion: reduce) {
+  .provider-brings > summary::before { transition: none; }
+}
+/* /settings/providers scrolls here; keep the card clear of the pane header. */
+#chat-providers { scroll-margin-top: var(--space-4); }
+.provider-brings > summary:hover { color: var(--fg); }
+.provider-brings > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.provider-brings[open] > .provider-mcps-preview { margin-top: var(--space-1); }
 
 /* Provider & Workspace MCP Connectors Bar */
 .provider-mcps-preview {

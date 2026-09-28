@@ -143,6 +143,20 @@ def test_an_unregistered_directory_refuses(tmp_path: Path) -> None:
     assert any("research" in item for item in result.unclassified)
 
 
+def test_unclassified_refusal_is_explained_in_plan_serialization(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    (vault / "research").mkdir()
+
+    payload = plan(tmp_path, vault, ["personal", "work"]).as_dict()
+
+    assert payload["refused"] is True
+    assert payload["refusals"]
+    assert any(
+        "research" in reason and "no destination" in reason
+        for reason in payload["refusals"]
+    )
+
+
 def test_an_unrecognised_loose_file_refuses(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     (vault / "scratch.md").write_text("notes\n", encoding="utf-8")
@@ -228,6 +242,10 @@ def test_rehearse_records_a_refusal_as_refused(tmp_path: Path) -> None:
     payload = rehearse(tmp_path, vault, ["personal", "work"], runtime)
 
     assert payload["status"] == "refused"
+    assert payload["refusals"]
+    assert any("research" in reason for reason in payload["refusals"])
+    receipt = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    assert receipt["refusals"] == payload["refusals"]
     assert read_receipt(runtime) is None
 
 
@@ -368,6 +386,23 @@ def test_apply_refuses_on_modified_tracked_files(tmp_path: Path) -> None:
     assert applied["status"] == "refused"
     assert any("uncommitted" in r for r in applied["refusals"])
     assert (install / "memory-vault").is_dir(), "it moved something despite refusing"
+    assert read_receipt(runtime) is None
+
+
+def test_apply_explains_an_unclassified_vault_entry(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    (vault / "research").mkdir()
+
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert applied["status"] == "refused"
+    assert applied["refusals"]
+    assert any(
+        "research" in reason and "no destination" in reason
+        for reason in applied["refusals"]
+    )
+    receipt = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    assert receipt["refusals"] == applied["refusals"]
     assert read_receipt(runtime) is None
 
 
@@ -1617,6 +1652,36 @@ def test_reroot_cli_resolves_the_vault_under_the_named_workspace(
     assert "foreign" not in payload["vault_root"]
 
 
+def test_reroot_cli_explains_an_unclassified_vault_entry(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from ciao.cli import main
+
+    install, vault, runtime = _git_install(tmp_path)
+    (vault / "research").mkdir()
+    _registry(
+        runtime,
+        [
+            {"name": "personal", "vault_root": "memory-vault/personal"},
+            {"name": "work", "vault_root": "memory-vault/work"},
+        ],
+    )
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test")
+
+    code = main(["workspace-reroot", "--workspace", str(install)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload["refused"] is True
+    assert payload["refusals"]
+    assert any(
+        "research" in reason and "no destination" in reason
+        for reason in payload["refusals"]
+    )
+
+
 def test_the_dry_run_shows_every_move_the_apply_would_make(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -2126,11 +2191,9 @@ def test_the_trigger_never_raises_on_a_broken_config(tmp_path: Path) -> None:
     assert result["reason"]
 
 
-def test_startup_runs_the_trigger_between_the_sync_and_the_index(tmp_path: Path) -> None:
-    """Ordering is the caller's job and it matters both ways.
-
-    After the git sync, so the clean-tree gate judges the real tree. Before the
-    index refresh, so the indexes are rebuilt for the layout that now exists.
+def test_startup_runs_the_trigger_before_the_index(tmp_path: Path) -> None:
+    """Ordering is the caller's job: the re-root runs before the index
+    refresh, so the indexes are rebuilt for the layout that now exists.
     """
     import inspect
 
@@ -2145,10 +2208,9 @@ def test_startup_runs_the_trigger_between_the_sync_and_the_index(tmp_path: Path)
     source = "\n".join(
         line.split("#", 1)[0] for line in inspect.getsource(main).splitlines()
     )
-    sync = source.index("await sync_workspace(")
     reroot = source.index("migrate_if_needed, config")
     index = source.index("_refresh_vault_index,")
-    assert sync < reroot < index, (sync, reroot, index)
+    assert reroot < index, (reroot, index)
 
 
 def test_startup_restarts_after_a_successful_migration(tmp_path: Path) -> None:
@@ -2169,7 +2231,7 @@ def test_startup_restarts_after_a_successful_migration(tmp_path: Path) -> None:
         line.split("#", 1)[0] for line in inspect.getsource(main).splitlines()
     )
     reroot = source.index("migrate_if_needed, config")
-    restart = source.index("return config.restart_exit_code", reroot)
+    restart = source.index("return RESTART_EXIT_CODE", reroot)
     serve = source.index("await server.serve()")
     assert reroot < restart < serve, "it must return before anything serves"
 

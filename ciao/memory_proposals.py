@@ -1,43 +1,38 @@
-"""Route session-insight facts to their real destination.
+"""The memory-proposal queue, the regions it promotes into, and the receipts
+both leave behind.
 
-The post-archive insights pipeline (``ciao/insights.py``) appends a
-``## Session insights`` section to each archived chat. That section already
-contains the high-signal facts we'd want in memory — errors, decisions, new
-entities, user corrections, reusable snippets.
-
-This module turns those facts into *destination-addressed* proposals. Each
-bullet may carry a trailing destination tag written by the extraction model:
+A fact worth remembering reaches memory as a *proposal*: one bullet in
+``<workspace-vault>/Workspace/Memory-Proposals.md``, tagged with where it
+belongs. The destination vocabulary is :data:`DESTINATIONS`:
 
 * ``[memory]``   — cross-project preference/environment/lesson → the
   ``ciao:memory`` region of the workspace ``AGENTS.md``.
 * ``[profile]``  — identity/communication style → the ``ciao:profile`` region.
 * ``[project]``  — true only within this project → the project's canonical
-  doc (folded at archive time by :mod:`ciao.project_doc_update`; queued with
-  the doc path only when the fold did not consume it).
-* ``[people: <Name>]`` — durable fact about a person → ``People/<Name>.md``.
+  doc, which :mod:`ciao.project_doc_update` folds.
+* ``[people: <Name>]`` — durable fact about a person → the ``person``
+  category's note, in the folder the vault's category registry names for it
+  (``People/<Name>.md`` with the shipped categories).
 * ``[learnings]`` — reusable how-to knowledge → ``Workspace/Learnings.md``.
-* ``[review]``   — the model was not sure → waits for human or curator review.
+* ``[review]``   — nobody was sure → waits for a human or the curator.
 
-Untagged bullets fall back to conservative defaults derived from their
-section (corrections → memory, operator identity → profile, everything else
-→ review): a missing tag *is* uncertainty.
+It also owns the one note-rewriting primitive the queue needs outside a region:
+:func:`set_note_type`, which a `[category <id>]` accept uses to retype the notes
+that were already filed under a spelling nobody had written down.
 
-Auto-apply is the default posture (``auto_promote_memory``): every confident,
-state-shaped fact is written straight to its destination at archive time —
-regions through the :mod:`ciao.memory_audit` event-shape guard, people notes
-as stubs when absent, learnings as dated bullets. Anything the guards reject,
-any destination whose write fails, every region fact whose write-time
-reconcile came back unusable, every region fact whose ``[idx=N]`` citation
-the transcript does not support, and every ``[review]`` bullet land in the
-queue file instead: ``<workspace-vault>/Workspace/Memory-Proposals.md``.
+The one-shot archive-time producer of those bullets is gone (#627): the memory
+pass, a chat of the app's own, now writes memory directly. What this module
+owns is the half that outlives it — a person or the agent files a proposal by
+hand (``ciao memory-proposal-add``, :func:`append_proposals`), the review
+surface lists and dismisses them, and a user accepts one into its destination
+(:func:`accept_region_fact`, :func:`reconcile_region_fact`). Every settled row
+leaves a receipt, so the History tab can say who changed memory and from where.
 
-Shape is not evidence. The guards above ask whether a fact *looks* like
-durable state; :func:`unsupported_region_facts` asks the separate question of
-whether any turn the user actually typed says so, which a fluent model
-satisfies on formatting alone otherwise. The structured form of that question
-— the fact candidate v1 record, the normalized transcript it is checked
-against, and the verdict codes — lives in :mod:`ciao.fact_candidates`; this
-module owns the routing decision that follows from it.
+The write is not a plain append. :func:`_promote_to_region` puts a fact
+through the :mod:`ciao.memory_audit` event-shape guard first, records a
+provenance row from :mod:`ciao.fact_candidates`, and copies any entry it
+replaces into ``Workspace/Memory-Consolidations.md`` before that entry
+disappears — nothing is dropped silently.
 """
 
 from __future__ import annotations
@@ -45,22 +40,127 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Iterable
-from urllib.parse import unquote
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, date
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
 
-from ciao.curation_run import curation_in_progress
-from ciao.vault_links import MARKDOWN_LINK_RE, WIKILINK_RE
 
 logger = logging.getLogger(__name__)
 
 
 _PROPOSALS_RELATIVE = "Workspace/Memory-Proposals.md"
 _LEARNINGS_RELATIVE = "Workspace/Learnings.md"
-_PEOPLE_DIR = "People"
+
+#: The category a ``[people]`` proposal's accept writes. ``people`` is the
+#: queue's label for a fact about a person; ``person`` is the id that category
+#: carries as a frontmatter ``type:`` and the folder it lives in. Named once so
+#: the accept path and the writer cannot drift apart on the mapping between them.
+PERSON_TYPE_ID = "person"
+
+
+# ── Note types ─────────────────────────────────────────────────────────────
+#
+# The only note-rewriting the queue does, and it is deliberately narrower than
+# `vault_migration._retype_frontmatter`: that one is the SAFE RENAME half of a
+# migration, so it refuses a note with no frontmatter and a note whose `type:`
+# line no longer says what it expected — both mean "not the note this pass
+# planned for". A category accept is not that. It was decided against a cluster
+# the owner was shown, and a note with no frontmatter at all is a perfectly
+# ordinary member of one.
+#
+# So the baseline check lives in the CALLER, which knows the type the proposal
+# was made against, and this function does the one thing it is for: set the
+# `type:` to a given value, creating the block when there is none, and leave
+# every other byte of the note alone.
+
+# The opening fence, the block (which may be empty), and the closing fence WITH
+# its line terminator. The block's own terminator is deliberately outside the
+# capture so a retyped note is rebuilt from parsed lines with one join, and an
+# empty block (``---\n---\n``) is a block rather than no block at all.
+_FRONTMATTER_RE = re.compile(r"\A(---[ \t]*\r?\n)(.*?\r?\n?)(---[ \t]*(?:\r?\n|\Z))", re.DOTALL)
+
+
+def read_note_type(path: Path) -> str:
+    """The note's frontmatter ``type:``, or "" when it has none.
+
+    "" covers both "no frontmatter" and "frontmatter with no ``type:`` line",
+    because a category accept treats them the same way: a note that never said
+    what it was is exactly the note a new category is being created for.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    match = _FRONTMATTER_RE.match(text)
+    if match is None:
+        return ""
+    for line in match.group(2).splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip() == "type":
+            return value.strip().strip("\"'")
+    return ""
+
+
+def set_note_type(path: Path, type_id: str) -> bool:
+    """Set the note's frontmatter ``type:`` to *type_id*; report whether it took.
+
+    Creates the frontmatter block when the note has none, rewrites only the
+    ``type:`` line when it has one, and leaves every other key, their order, the
+    body's bytes and the file's mode exactly as they were. A note already typed
+    *type_id* is a no-op reported as success, so an accept retried against a
+    half-finished cluster converges instead of failing.
+
+    False means the note could not be read or written — never that the write was
+    skipped for a judgement reason, so a caller can tell a refusal from a
+    failure without re-reading the file.
+
+    Atomic (a temp file beside the note plus one ``os.replace``) for the reason
+    the queue is: every reader of the vault parses a note's frontmatter, and a
+    truncated note is not "the old type" but an unparseable file that drops out
+    of the index.
+    """
+    from ciao.memory_receipts import write_queue_atomically
+
+    target = Path(path)
+    if not type_id:
+        return False
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    match = _FRONTMATTER_RE.match(text)
+    if match is None:
+        # No block at all: open one and put the type in it. The blank line after
+        # the closing fence is the separator every note in the vault has, so a
+        # retyped note reads like the ones around it.
+        rewritten = f"---\ntype: {type_id}\n---\n\n{text}"
+    else:
+        opening, block, closing = match.group(1), match.group(2), match.group(3)
+        eol = "\r\n" if opening.endswith("\r\n") else "\n"
+        lines = block.splitlines()
+        replaced = False
+        for index, line in enumerate(lines):
+            key, separator, value = line.partition(":")
+            if not separator or key.strip() != "type":
+                continue
+            if value.strip().strip("\"'") == type_id:
+                return True
+            lines[index] = f"type: {type_id}"
+            replaced = True
+            break
+        if not replaced:
+            lines.insert(0, f"type: {type_id}")
+        rewritten = (
+            opening + eol.join(lines) + eol + closing + text[match.end() :]
+        )
+    if rewritten == text:
+        return True
+    try:
+        write_queue_atomically(target, rewritten)
+    except OSError:
+        return False
+    return True
 
 
 # ── Typed decision statuses ───────────────────────────────────────────────
@@ -154,22 +254,6 @@ def _defer(
     return row
 
 
-@dataclass(slots=True, frozen=True)
-class DeferredFact:
-    """One fact the apply step queued instead of writing, and why.
-
-    ``apply_proposals`` fills these into its optional ``deferrals``
-    out-parameter. The count alone (``stats["deferred"]``) says a reconcile
-    backend is down or a model is asserting uncited facts, but not which facts
-    or against what — which is the whole of what a human needs to resolve one.
-    """
-
-    text: str
-    region: str
-    reason: str
-    competing: tuple[str, ...] = ()
-
-
 # ── Destinations ──────────────────────────────────────────────────────────
 
 
@@ -181,19 +265,14 @@ DESTINATIONS: tuple[str, ...] = (
     "learnings",
     "review",
 )
-"""Destination vocabulary shared with the extraction prompts. A bullet tagged
-outside this set is treated as untagged and falls back to section defaults."""
+"""Destination vocabulary shared with the proposals queue and the stock memory
+assets. A bullet tagged outside this set is treated as untagged and falls back
+to section defaults."""
 
 # Matches a trailing destination tag: ``[memory]``, ``[project]``,
-# ``[people: Mo Salah]``. The colon-payload form is what the extraction
-# prompts ask for; the queue-file form uses a space (``[people Mo Salah]``),
+# ``[people: Mo Salah]``. The colon-payload form is what the queue and the
+# memory pass ask for; the queue-file form uses a space (``[people Mo Salah]``),
 # which :mod:`ciao.proposal_kinds` owns.
-_DESTINATION_RE = re.compile(
-    rf"\s*\[({'|'.join(DESTINATIONS)})(?::[ \t]*([^\]]+))?\]\s*$",
-    re.IGNORECASE,
-)
-
-_IDX_TAG_RE = re.compile(r"\s*\[idx\s*=\s*([\d,\s]+)\]\s*$")
 
 
 def _one_line(value: str) -> str:
@@ -206,41 +285,6 @@ def _one_line(value: str) -> str:
     re-filing it would dodge the text dedupe.
     """
     return " ".join(value.split())
-
-
-def _peel_trailing_metadata(text: str) -> tuple[str, str, tuple[int, ...], str]:
-    """Split trailing citation and destination metadata off a bullet.
-
-    Returns ``(kind, payload, citations, remaining_text)``. Models write the
-    tag after the citation per the prompt, but either order is accepted:
-    trailing bracketed groups are peeled from the end, and each must be an
-    ``[idx=…]`` citation or a destination tag — anything else stops the peel
-    and stays in the text rather than being guessed at. When several tags
-    somehow stack up, the one closest to the end of the line wins.
-
-    ``citations`` are the transcript message indices the bullet cites. They
-    used to be thrown away here, which left region promotion with no way to
-    ask whether a fact was tied to any real turn: a confidently formatted
-    bullet carrying a fabricated ``[idx=99]`` — or no citation at all — read
-    exactly like a grounded one and was auto-saved into always-loaded context.
-    :func:`unsupported_region_facts` is the consumer.
-    """
-    kind, payload = "", ""
-    cited: list[int] = []
-    while True:
-        match = _DESTINATION_RE.search(text)
-        if match is not None:
-            if not kind:
-                kind = match.group(1).lower()
-                payload = (match.group(2) or "").strip()
-            text = text[: match.start()].rstrip()
-            continue
-        match = _IDX_TAG_RE.search(text)
-        if match is not None:
-            cited.extend(int(part) for part in re.findall(r"\d+", match.group(1)))
-            text = text[: match.start()].rstrip()
-            continue
-        return kind, payload, tuple(sorted(set(cited))), text
 
 
 @dataclass(slots=True, frozen=True)
@@ -279,8 +323,8 @@ def _split_sections(insights_md: str) -> dict[str, list[str]]:
 
     Strips bullet markers only. Citation tags — ``[idx=12]`` and the
     multi-index ``[idx=12,34]`` shape models improvise — and destination tags
-    both survive here; they are split later, per bullet, by
-    :func:`_peel_trailing_metadata`, where the routing decision happens.
+    both survive here; they are split later, per bullet, by the accept path,
+    where the routing decision happens.
     Stripping the citation at this stage destroyed the one piece of evidence
     that ties a fact to a real turn before anything could check it. Empty
     sections are dropped.
@@ -305,171 +349,19 @@ def _split_sections(insights_md: str) -> dict[str, list[str]]:
     return sections
 
 
-def _is_durable(text: str) -> bool:
-    """Reject obvious per-session noise before proposing.
-
-    This is the second line of defence behind the extraction prompt: bullets
-    that reach here are already terse, but the model still drifts toward the
-    "User said: X -> assistant did Y" event shape. A correction that only
-    records what happened in one chat is exactly the shape ``memory_audit``
-    flags as rot if it ever reaches a region, so it is stopped at the queue —
-    unless it carries a ``Durable rule:`` clause, which is the durable part
-    and survives regardless (a placeholder rule still stays pending for the
-    curator to judge rather than being auto-promoted).
-    """
-    from ciao.memory_audit import find_event_shaped
-
-    lowered = text.lower()
-    if any(lowered.startswith(p) for p in ("tried ", "asked ", "ran ")):
-        return False
-    if len(text) < 12 or len(text) > 400:
-        return False
-    if _durable_rule_of(text) is not None:
-        # Has a Durable rule clause (real or placeholder): keep it pending so
-        # the curator decides. A real clause is promoted; a placeholder stays
-        # queued rather than being silently proposed as durable.
-        return True
-    # No durable-rule clause: a bullet shaped like a transcript event is
-    # session noise, not state. `find_event_shaped` is the same detector
-    # memory_audit uses, so a bullet that would be flagged as rot on promotion
-    # is never proposed at all.
-    return not find_event_shaped("memory", [text])
+# ── Promotion ─────────────────────────────────────────────────────────────
 
 
-def _durable_rule_of(text: str) -> str | None:
-    """The standing rule a bullet asserts, or None when it carries no clause.
-
-    Returns ``None`` when there is no "Durable rule:" clause; otherwise the
-    clause text, which may be empty or a placeholder ("None"/"n/a"/an echoed
-    template). Callers decide what an empty/placeholder clause means.
-    """
-    matches = list(_DURABLE_RULE_RE.finditer(text))
-    if not matches:
-        return None
-    return matches[-1].group(1).strip().rstrip(".").strip()
-
-
-# ── Proposal generation ───────────────────────────────────────────────────
-
-
-# Section headers used by the extraction prompts in ``ciao/insights.py``.
-_BEHAVIORAL_SECTIONS = ("User corrections", "Decisions")
-_IDENTITY_SECTIONS = ("New entities",)
-
-
-def _default_destination(section: str, text: str) -> tuple[str, str]:
-    """Where an untagged bullet goes, given its insight section.
-
-    Conservative by design: corrections and operator identity were always
-    region-bound, so they keep those targets; anything else the model did not
-    classify goes to review rather than pretending a region wants it.
-    """
-    if section == "User corrections":
-        return "memory", ""
-    if section == "New entities":
-        match = re.match(r"^person\s*:\s*(operator|user)\b", text, re.I)
-        if match:
-            return "profile", ""
-        person = re.match(r"^person\s*:\s*([^-–—]+?)\s*-", text, re.I)
-        if person:
-            return "people", person.group(1).strip()
-    return "review", ""
-
-
-# A "Decisions" bullet that opens on a past-tense action is a changelog line
-# ("Added regression test ...", "Deleted the ESL schedule ...", "Committed only
-# the three modified files"): it records what this session did, which the
-# archive already holds. Measured on a real queue history: 60 such bullets,
-# none ever accepted. A bullet that also states what holds from now on keeps
-# its place — "Retired X; Y remains the active skill going forward" is state.
-_CHANGELOG_VERBS = (
-    "fixed|added|deleted|removed|committed|created|updated|renamed|moved|"
-    "marked|stopped|merged|pushed|shipped|ran|wrote|edited|filed|sent|"
-    "drafted|replied|implemented|refactored|reverted|restored|replaced|"
-    "bumped|installed|configured|enabled|disabled|cleaned|tested|verified|"
-    "confirmed|opened|closed|published|released|rewrote|migrated|documented|"
-    "archived|retired|dropped|landed"
-)
-_CHANGELOG_RE = re.compile(rf"^(?:the\s+\w+\s+)?(?:{_CHANGELOG_VERBS})\b", re.IGNORECASE)
-_STANDING_MARKER_RE = re.compile(
-    r"going forward|from now on|in future|future sessions|this governs|"
-    r"standard way|\bdefault\b|\balways\b|\bnever\b|\bshould\b|\bmust\b|"
-    r"\brule\b|\bprefer",
-    re.IGNORECASE,
-)
-
-
-def _is_changelog_decision(text: str) -> bool:
-    """A Decisions bullet that only reports an action this session took."""
-    return bool(_CHANGELOG_RE.match(text)) and not _STANDING_MARKER_RE.search(text)
-
-
-def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
-    """Scan an insights markdown blob and emit destination-addressed proposals.
-
-    The unreadable-output section is scanned alongside the routed ones. A
-    structured extraction renders every row it could not parse there as a
-    ``[review]`` bullet carrying the parse error
-    (:func:`ciao.fact_candidates.candidates_from_structured`); without this the
-    row would reach the archive and stop, which is the silent loss the review
-    destination exists to prevent. Nothing is auto-applied from it — ``review``
-    is queue-only — so the section can only ever add a question for a human.
-    """
-    from ciao.fact_candidates import UNREADABLE_SECTION
-
-    if not insights_md.strip():
-        return []
-
-    sections = _split_sections(insights_md)
-    proposals: list[MemoryProposal] = []
-
-    for heading in (
-        *_BEHAVIORAL_SECTIONS, *_IDENTITY_SECTIONS, UNREADABLE_SECTION, "Open loops"
-    ):
-        for item in sections.get(heading, []):
-            kind, payload, citations, text = _peel_trailing_metadata(item)
-            if heading == "Open loops" and not (kind == "project" and payload):
-                # Open loops are the chat's own business and the doc fold's
-                # to track; only one the model filed under a named other
-                # project needs routing, because the fold skips those.
-                continue
-            if not kind:
-                kind, payload = _default_destination(heading, text)
-            if not _is_durable(text):
-                continue
-            if heading == "Decisions" and (
-                kind == "review" or _is_changelog_decision(text)
-            ):
-                # A decision the model could not place is, in practice, a
-                # one-off choice about this session: 564 of them on a real
-                # queue, none accepted. A precedent-setting decision names its
-                # home ([memory], [learnings], [project]) and still flows.
-                continue
-            proposals.append(MemoryProposal(
-                target=kind,
-                text=text,
-                source_section=heading,
-                payload=payload,
-                citations=citations,
-            ))
-
-    return proposals
-
-
-# ── Auto-apply ────────────────────────────────────────────────────────────
-
-
-# The extraction prompt asks for the standing preference a correction implies
-# as a trailing "Durable rule: <...>" sentence. That clause — not the
-# "User said X -> assistant did Y" event around it — is what belongs in a
-# region: the regions are a state surface, and memory_audit flags the event
-# shape as rot for the nightly curator to remove.
+# A bullet states the standing preference a correction implies as a trailing
+# "Durable rule: <...>" sentence. That clause — not the "User said X ->
+# assistant did Y" event around it — is what belongs in a region: the regions
+# are a state surface, and memory_audit flags the event shape as rot for the
+# nightly curator to remove.
 #
-# Both extraction prompts in ciao.insights embed this label verbatim (a test
-# asserts the link), and the regex is built from it so the producer prompts
-# and this consumer cannot drift apart silently. Case-sensitive and anchored
-# to a sentence start so a chat fragment quoted inside the bullet ("... as a
-# durable rule: ...") never matches.
+# The regex is built from the label, so a producer and this consumer cannot
+# drift apart silently. Case-sensitive and anchored to a sentence start so a
+# chat fragment quoted inside the bullet ("... as a durable rule: ...") never
+# matches.
 DURABLE_RULE_LABEL = "Durable rule:"
 _DURABLE_RULE_RE = re.compile(
     rf"(?:^|[.!?]\s+){re.escape(DURABLE_RULE_LABEL)}\s*(.+)$"
@@ -600,7 +492,7 @@ def _promote_to_region(
     under the lock before replacing the file, so an external direct edit is
     reported as a conflict rather than overwritten.
 
-    ``decision`` is this fact's row from :func:`plan_region_reconcile`, when
+    ``decision`` is this fact's row from :func:`reconcile_region_fact`, when
     the caller ran one: ``{"action": "covered"}`` drops the fact as already
     remembered, ``{"action": "update", "index": N, "text": ...}`` replaces
     entry ``N`` (1-based) with the merged text — the replaced entry goes to
@@ -611,8 +503,7 @@ def _promote_to_region(
     ``receipt_out`` is an optional caller-owned dict this fills with the
     receipt ``commit_region_change`` recorded, when a write actually happened.
     It is an out-parameter rather than a third return value on purpose: the
-    return tuple is unpacked by the archive-time apply loop and by a dozen
-    tests, and the only caller that needs the receipt is the PWA accept. The
+    only caller that needs the receipt is the PWA accept. The
     decision ledger records the ORIGINAL bullet — that is what append-time
     dedupe compares a re-extracted fact against — so an edited accept's ledger
     row cannot be matched back to its receipt by text. This is how the row gets
@@ -878,8 +769,8 @@ def accept_region_fact(
     """Write one approved region fact through the guarded path.
 
     The UI accept button used to call ``update_region(action="add")`` directly,
-    which skipped everything the archive-time path does: the event-shape guard
-    (so an event-shaped bullet landed verbatim in always-loaded context), the
+    which skipped everything this path does: the event-shape guard (so an
+    event-shaped bullet landed verbatim in always-loaded context), the
     stamp-stripped duplicate check, the learned-at stamp the aging audit reads,
     and the consolidations undo log.
 
@@ -888,8 +779,8 @@ def accept_region_fact(
     sequentially inside one request. Reconciliation is offered alongside it
     rather than inside it — :func:`reconcile_region_fact` runs one fresh call
     against the *current* region and hands the result in as ``decision``, which
-    is how a fact deferred at archive time gets resolved on a retry. A caller
-    that passes none takes the plain append path.
+    is how a fact a previous reconcile could not decide gets resolved on a
+    retry. A caller that passes none takes the plain append path.
 
     Returns ``_promote_to_region``'s ``(outcome, promotable)``. Both
     out-parameters are forwarded unchanged. ``deferral_out`` lets an
@@ -915,48 +806,148 @@ def accept_region_fact(
 
 
 def _safe_name(name: str) -> str:
-    """A person payload as a filename stem, without path separators."""
+    """A proposal payload as a filename stem, without path separators."""
     cleaned = re.sub(r"[\\/:*?\"<>|]+", " ", name).strip().rstrip(".")
     return cleaned[:80]
 
 
-def people_note_path(vault_root: Path, name: str) -> Path | None:
-    """Where a ``[people]`` accept would write, or None for an unusable name.
+EntityNoteOutcome = Literal["written", "exists", "refused"]
+"""What one entity-note write did.
 
+``written`` is the stub on disk. ``exists`` means a note is already there, so
+the fact needs a *merge* into it rather than a create — the review queue folds
+that with a model and reports no change when the note already covers the fact.
+``refused`` is a routing failure with nothing written: a ``type_id`` the vault
+has no category for, a category the owner disabled, a category with no folder to
+write into, a folder that would put the note outside the vault, or a name that
+cannot be a filename.
+"""
+
+
+def _entity_folder(registry_root: Path, type_id: str) -> str | None:
+    """The folder *type_id*'s notes live in, or None when it takes no notes.
+
+    Read from the category registry rather than from a constant here, which is
+    what gives a category the owner added a writer at all. A disabled entry is
+    refused with the rest: it is out of every derived view on purpose, so it is
+    not a ``type:`` a new note should carry.
+
+    *registry_root* is the vault that holds ``entity-types.yaml`` — the agent
+    vault root, which is not the notes root the note itself lands in. See
+    :func:`entity_note_path`, which takes both.
+    """
+    from ciao.entity_types import load_entity_types
+
+    entry = load_entity_types(registry_root).get(type_id)
+    if entry is None or not entry.enabled or not entry.folder:
+        return None
+    return entry.folder
+
+
+def _inside(root: Path, candidate: Path) -> bool:
+    """Whether *candidate* stays under *root*, without touching the disk.
+
+    Lexical, because that is the comparison the caller makes: the destination is
+    rendered with ``relative_to``, a parts comparison, so a resolved answer here
+    could disagree with the path the operator is shown (a vault reached through
+    a symlink — ``/var`` on macOS — resolves to a different string than the root
+    it was joined to). It is also how a parts comparison reads: ``relative_to``
+    matches a prefix, so ``vault/../elsewhere/Mo.md`` looks like a path *inside*
+    ``vault`` with a ``..`` on the end rather than one outside it.
+
+    A ``..`` is refused rather than collapsed, because collapsing it means
+    resolving, and a category folder is one folder name, not a path expression.
+    """
+    root_parts = root.parts
+    parts = candidate.parts
+    if parts[: len(root_parts)] != root_parts:
+        return False
+    return ".." not in parts[len(root_parts):]
+
+
+def entity_note_path(
+    vault_root: Path, type_id: str, name: str, *, registry_root: Path
+) -> Path | None:
+    """Where a note in category *type_id* would be written, or ``None``.
+
+    Two roots, and neither one implies the other. *vault_root* is where the note
+    is written: a workspace's **notes** root, which is where that person's other
+    notes already are. *registry_root* is where the category is looked up: the
+    vault holding ``entity-types.yaml``, i.e. the **agent** vault root, the one
+    that owns ``VOCABULARY.md`` and the file
+    ``GET``/``PATCH /api/memory/entity-types`` reads and writes. They are the
+    same directory only on a re-rooted install, so a caller that passes one for
+    both is how an owner's category edit came to be invisible to the very accept
+    meant to honour it.
+
+    None covers the ways there is no such note: the category takes no notes
+    (:func:`_entity_folder`), the name is not usable as a filename, or the
+    category's folder would put the note outside the vault. That last one is a
+    value the owner typed — an absolute folder, or one spelled with ``..`` — and
+    it is refused with the rest rather than acted on: the note would be written
+    outside the vault, and the caller's ``relative_to`` would raise instead of
+    reporting it. The category editor validates the list before it stores it;
+    a hand-edited ``entity-types.yaml`` is the reachable case.
     Public so the review queue can name the destination — and say whether the
     note already exists — before the accept runs, without a second copy of the
-    filename rules :func:`write_people_note` applies.
+    rules :func:`write_entity_note` applies.
     """
+    folder = _entity_folder(registry_root, type_id)
     stem = _safe_name(name)
-    if not stem:
+    if folder is None or not stem:
         return None
-    return vault_root / _PEOPLE_DIR / f"{stem}.md"
+    note = vault_root / folder / f"{stem}.md"
+    if not _inside(vault_root, note):
+        return None
+    return note
 
 
-def write_people_note(vault_root: Path, name: str, text: str) -> bool:
-    """Create a stub person note. False when it already exists (needs a merge).
+def render_entity_note(type_id: str, name: str, text: str, *, today: str = "") -> str:
+    """The note body :func:`write_entity_note` would write, without writing it.
+
+    Split out for the reason :func:`render_learning_append` is: the review card
+    shows the exact replacement before the accept performs it, so the preview and
+    the write cannot disagree about what lands.
+
+    ``updated:`` records the note's creation as its first verification, so an
+    entity the system stopped hearing about ages out visibly instead of relying
+    on mtime (which file copies and migrations reset silently).
+    """
+    return (
+        "---\n"
+        f"type: {type_id}\n"
+        f"updated: {today or date.today().isoformat()}\n"
+        f"tags: [{type_id}]\n"
+        f"---\n# {_safe_name(name)}\n\n{text}\n"
+    )
+
+
+def write_entity_note(
+    vault_root: Path, type_id: str, name: str, text: str, *, registry_root: Path
+) -> EntityNoteOutcome:
+    """Create a stub note for one entity, typed as *type_id* in its own folder.
 
     Public because accepting a ``[people]`` proposal from the review queue
-    performs exactly this write.
+    performs exactly this write, for :data:`PERSON_TYPE_ID`. Typed and
+    registry-routed rather than hardcoded to ``People/``, so a category the owner
+    added (``customer`` → ``Customers/``) has a writer and every note written
+    here carries a ``type:`` the linter accepts — the missing ``type:`` on a
+    person note is what left an accepted person note untyped and lint-flagged.
+    The two roots are the ones :func:`entity_note_path` names: the note lands
+    under the notes root, the category is read from the root that holds the
+    registry.
+
+    Never overwrites: an existing note is reported as ``exists`` so the caller
+    merges into it.
     """
-    stem = _safe_name(name)
-    path = people_note_path(vault_root, name)
+    path = entity_note_path(vault_root, type_id, name, registry_root=registry_root)
     if path is None:
-        return False
+        return "refused"
     if path.exists():
-        return False
+        return "exists"
     path.parent.mkdir(parents=True, exist_ok=True)
-    # `updated:` records the note's creation as its first verification, so a
-    # person the system stopped hearing about ages out visibly instead of
-    # relying on mtime (which file copies and migrations reset silently).
-    note = (
-        "---\n"
-        "tags: [person]\n"
-        f"updated: {date.today().isoformat()}\n"
-        f"---\n# {stem}\n\n{text}\n"
-    )
-    path.write_text(note, encoding="utf-8")
-    return True
+    path.write_text(render_entity_note(type_id, name, text), encoding="utf-8")
+    return "written"
 
 
 # One structured learning line. The shape is a contract: the curation skill
@@ -1112,167 +1103,6 @@ def append_learning(vault_root: Path, text: str, *, source: str = "") -> bool:
     return True
 
 
-def apply_proposals(
-    proposals: list[MemoryProposal],
-    *,
-    guide_path: Path | None = None,
-    vault_root: Path | None = None,
-    region_decisions: RegionDecisions | None = None,
-    learning_source: str = "",
-    actor: str = "auto",
-    source: str = "archive",
-    workspace: str = "",
-    stats: dict[str, int] | None = None,
-    deferrals: list[DeferredFact] | None = None,
-) -> tuple[list[MemoryProposal], list[str]]:
-    """Write every confidently-addressed proposal to its destination.
-
-    Returns ``(remaining, applied_texts)``. Regions take state-shaped text
-    (see :func:`_promotable_text`); people notes are created only when absent;
-    learnings append. ``[project]`` rows are owned by the archive-time doc
-    fold and ``[review]`` rows by a human, so both stay in ``remaining``.
-    Exact duplicates vanish from both lists: the fact is already remembered,
-    which is neither an apply nor something to re-decide. On any write failure
-    the proposal stays reviewable.
-
-    ``region_decisions`` maps :func:`_decision_key` (region + promotable fact
-    text) to its reconcile decision (see :func:`plan_region_reconcile`);
-    absent or None, every region write is the plain append path.
-
-    ``actor``/``source``/``workspace`` are stamped into the region write's
-    receipt so the review History can say who changed memory and from where.
-
-    ``stats``, when given, is filled with ``deferred``: region facts sent to
-    the queue instead of the region because something about them could not be
-    trusted — an uncertain reconcile, or a citation the transcript does not
-    support (:func:`unsupported_region_facts`). They are in ``remaining`` like
-    any other queued row, which alone cannot say why.
-
-    ``deferrals``, when given, receives one :class:`DeferredFact` per such
-    fact: its reason and the region entries it competes with. The count says a
-    reconcile backend is down; only these say which facts are waiting and what
-    they are waiting on.
-    """
-    from ciao.memory_tool import resolve_region
-
-    remaining: list[MemoryProposal] = []
-    applied: list[str] = []
-
-    def _record_auto(*, text: str, kind: str, destination: str, outcome: str) -> None:
-        # Best-effort: a decision-history write must never fail the apply it
-        # is only recording. Silent skip when there is no vault to log to
-        # (region-only callers, e.g. accept_region_fact, pass no vault_root).
-        if vault_root is None:
-            return
-        try:
-            record_promotion(
-                vault_root / _PROPOSALS_RELATIVE,
-                text=text,
-                kind=kind,
-                via="auto",
-                source=learning_source,
-                destination=destination,
-                outcome=outcome,
-            )
-        except Exception:  # noqa: BLE001
-            logger.info("memory apply: could not record auto decision for %r", text[:80])
-
-    for proposal in proposals:
-        try:
-            if proposal.target in ("memory", "profile"):
-                if guide_path is None:
-                    remaining.append(proposal)
-                    continue
-                promotable_key = _promotable_text(proposal.text)
-                decision = None
-                if region_decisions and promotable_key:
-                    decision = region_decisions.get(
-                        _decision_key(resolve_region(proposal.target), promotable_key)
-                    )
-                deferral_out: list[ReconcileDecision] = []
-                outcome, promotable = _promote_to_region(
-                    proposal,
-                    guide_path,
-                    vault_root=vault_root,
-                    decision=decision,
-                    actor=actor,
-                    source=source,
-                    workspace=workspace,
-                    deferral_out=deferral_out,
-                )
-                if outcome == "written":
-                    applied.append(promotable or proposal.text)
-                    _record_auto(
-                        text=promotable or proposal.text,
-                        kind=proposal.target,
-                        destination=f"ciao:{resolve_region(proposal.target)}",
-                        outcome="written",
-                    )
-                elif outcome == "duplicate":
-                    _record_auto(
-                        text=promotable or proposal.text,
-                        kind=proposal.target,
-                        destination=f"ciao:{resolve_region(proposal.target)}",
-                        outcome="duplicate",
-                    )
-                else:
-                    # Failed writes, revision conflicts, event-shaped text and
-                    # deferred facts all stay queued: the first two for a retry
-                    # or a re-plan, the third for a curator to rephrase into a
-                    # standing rule, the fourth for a human to resolve against
-                    # the region it may supersede. None of them is a decision
-                    # yet, so none is recorded.
-                    if outcome == "deferred":
-                        if stats is not None:
-                            stats["deferred"] = stats.get("deferred", 0) + 1
-                        if deferrals is not None:
-                            deferred_row = (
-                                deferral_out[0] if deferral_out else _defer("")
-                            )
-                            deferrals.append(
-                                DeferredFact(
-                                    text=promotable or proposal.text,
-                                    region=resolve_region(proposal.target),
-                                    reason=deferred_row.get("reason")
-                                    or "uncertain reconcile",
-                                    competing=tuple(
-                                        deferred_row.get("competing") or ()
-                                    ),
-                                )
-                            )
-                    remaining.append(proposal)
-            elif proposal.target == "people" and vault_root is not None:
-                name = proposal.payload or _safe_name(proposal.text.split("-")[0])
-                if write_people_note(vault_root, name, proposal.text):
-                    applied.append(proposal.text)
-                    _record_auto(
-                        text=proposal.text,
-                        kind=proposal.target,
-                        destination=f"{_PEOPLE_DIR}/{_safe_name(name)}.md",
-                        outcome="written",
-                    )
-                else:
-                    remaining.append(proposal)
-            elif proposal.target == "learnings" and vault_root is not None:
-                if append_learning(vault_root, proposal.text, source=learning_source):
-                    applied.append(proposal.text)
-                    _record_auto(
-                        text=proposal.text,
-                        kind=proposal.target,
-                        destination=_LEARNINGS_RELATIVE,
-                        outcome="written",
-                    )
-                else:
-                    remaining.append(proposal)
-            else:
-                # project (the fold owns it) and review (a human owns it).
-                remaining.append(proposal)
-        except Exception as exc:  # noqa: BLE001 — never lose the batch to one row
-            logger.info("memory apply: %s stays queued (%s)", proposal.target, exc)
-            remaining.append(proposal)
-    return remaining, applied
-
-
 # ── Write-time reconcile (ADD / UPDATE / COVERED) ──────────────────────────
 
 
@@ -1296,16 +1126,6 @@ No prose, no code fences, no trailing commentary.
 # candidates, so a short timeout keeps a slow backend from stalling archive
 # post-processing. Failure is safe: the caller degrades to plain appends.
 _RECONCILE_TIMEOUT_S = 120.0
-
-
-def _decision_key(region: str, fact: str) -> str:
-    """The ``region_decisions`` map key for one candidate fact.
-
-    Region-qualified: the same sentence can be bound to both ``memory`` and
-    ``profile`` in one archive, and a bare-text key would let one region's
-    ``update`` index be applied against the other region's entries.
-    """
-    return f"{region}\n{fact}"
 
 
 def _parse_reconcile_reply(raw: str, count: int) -> list[ReconcileDecision] | None:
@@ -1350,285 +1170,6 @@ def _parse_reconcile_reply(raw: str, count: int) -> list[ReconcileDecision] | No
     return rows
 
 
-def _reconcile_candidates(
-    archive_path: Path,
-    guide_path: Path,
-) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-    """The region-bound facts a reconcile call would compare, and its entries.
-
-    Returns ``(candidates_by_region, entries_by_region)``. A candidate is a
-    state-shaped fact that is not already an exact duplicate and whose region
-    is non-empty — the two cases a model call cannot improve on. Shared with
-    :func:`defer_region_facts` so the fallback defers exactly the facts the
-    planner would have reconciled, no more.
-    """
-    from ciao.memory_audit import strip_learned_stamp
-    from ciao.memory_tool import read_region, resolve_region
-
-    by_region: dict[str, list[str]] = {}
-    entries_by_region: dict[str, list[str]] = {}
-    try:
-        text = archive_path.read_text(encoding="utf-8")
-    except OSError:
-        return by_region, entries_by_region
-    body = _extract_insights_section(text)
-    if not body:
-        return by_region, entries_by_region
-
-    for proposal in propose_from_insights(body):
-        if proposal.target not in ("memory", "profile"):
-            continue
-        promotable = _promotable_text(proposal.text)
-        if promotable is None:
-            continue
-        try:
-            region = resolve_region(proposal.target)
-            if region not in entries_by_region:
-                entries, diags = read_region(guide_path, region)
-                if diags:
-                    continue
-                entries_by_region[region] = entries
-        except Exception:  # noqa: BLE001 — reconcile is best-effort
-            continue
-        stripped = {
-            strip_learned_stamp(entry) for entry in entries_by_region[region]
-        }
-        if promotable in stripped:
-            continue
-        # An empty region has nothing to reconcile against.
-        if not entries_by_region[region]:
-            continue
-        by_region.setdefault(region, []).append(promotable)
-    return by_region, entries_by_region
-
-
-@dataclass(slots=True, frozen=True)
-class TranscriptEvidence:
-    """Which transcript turns exist, and which of them the user actually typed.
-
-    Built from the line-oriented JSON :func:`ciao.insights.filter_session_jsonl`
-    hands the extraction model — the same records whose ``idx`` the prompt
-    tells it to cite — so "does this citation name a real turn" is answered
-    against the exact material the model saw, not against prose.
-    """
-
-    known: frozenset[int]
-    attended_user: frozenset[int]
-
-
-def transcript_evidence(filtered_jsonl: str) -> TranscriptEvidence | None:
-    """Index a filtered transcript by citation id. None when there is none.
-
-    None means "no transcript to check against", not "nothing is supported":
-    the text-mode extraction prompt explicitly asks for paraphrase citations
-    and forbids ``[idx=N]``, and a legacy archive re-processed without its
-    session blob has no indices either. Gating those on indices that were
-    never meant to exist would queue every fact in them for no evidence gain.
-
-    The id/role view of the same normalization
-    :func:`ciao.fact_candidates.normalize_transcript` builds, kept as its own
-    narrow type because most callers only need "does this turn exist, and did
-    the user type it" and should not have to carry the turn bodies to ask.
-    """
-    from ciao.fact_candidates import normalize_transcript
-
-    transcript = normalize_transcript(filtered_jsonl)
-    if transcript is None:
-        return None
-    return TranscriptEvidence(transcript.known, transcript.attended_user)
-
-
-def _evidence_gap(citations: tuple[int, ...], evidence: TranscriptEvidence) -> str:
-    """Why a bullet's citation fails to support it, or "" when it holds.
-
-    The id-only subset of :func:`ciao.fact_candidates.validate_candidate`,
-    kept for callers that hold citations without the fact they support:
-    nothing cited at all, a citation naming a turn the transcript does not
-    contain (a fabricated id, or the ``[idx=0]`` the prompt forbids), and a
-    citation that lands only on assistant output or on automation turns.
-    """
-    if not citations:
-        return "bullet cites no source turn"
-    unknown = sorted(idx for idx in citations if idx not in evidence.known)
-    if unknown:
-        return f"citation idx={unknown[0]} names no turn in the transcript"
-    if not any(idx in evidence.attended_user for idx in citations):
-        return "no cited turn is one the user typed"
-    return ""
-
-
-def unsupported_region_facts(
-    archive_path: Path,
-    *,
-    filtered_jsonl: str,
-) -> RegionDecisions:
-    """Defer rows for region facts the transcript does not actually support.
-
-    Region promotion checked a fact's *shape* — durable-rule clause, not
-    event-shaped — which a fluent model satisfies whether or not any turn said
-    the thing. This adds the missing half, through the fact-candidate v1
-    evidence policy (:mod:`ciao.fact_candidates`): the bullet must cite a turn
-    that exists, that the user typed, that contains the claim in their own
-    words rather than in pasted or tool material, that asserts it rather than
-    negating it or offering it as an example, and that no later turn corrects.
-    Its destination must also be one this workspace actually routes to.
-
-    Facts that fail take the ``"defer"`` route, so an unverifiable fact is
-    handled exactly like an uncertain reconcile — queued in
-    ``Workspace/Memory-Proposals.md`` for a human, never dropped and never
-    written to always-loaded context on the model's word. Each row carries the
-    verdict code, the cited ids and the policy version, so the queue can say
-    *which* check refused the fact rather than only that something did.
-
-    Keyed like :func:`plan_region_reconcile`'s rows so the caller can overlay
-    these on top of a reconcile plan; an evidence failure must win over an
-    ``add``/``update``/``covered`` the reconcile produced, because reconcile
-    only compares a fact against the region, never against the transcript.
-
-    Unlike the reconcile candidates, this covers facts bound for an *empty*
-    region too: nothing to conflict with is not evidence, and the first entry
-    written into an empty always-loaded region is the one nothing later
-    contradicts.
-    """
-    from ciao.fact_candidates import (
-        candidate_from_proposal,
-        normalize_transcript,
-        validate_candidate,
-    )
-    from ciao.memory_tool import resolve_region
-
-    transcript = normalize_transcript(filtered_jsonl)
-    if transcript is None:
-        return {}
-    try:
-        text = archive_path.read_text(encoding="utf-8")
-    except OSError:
-        return {}
-    body = _extract_insights_section(text)
-    if not body:
-        return {}
-
-    rows: RegionDecisions = {}
-    for proposal in propose_from_insights(body):
-        if proposal.target not in ("memory", "profile"):
-            continue
-        promotable = _promotable_text(proposal.text)
-        if promotable is None:
-            # Already headed for the queue on shape grounds; a second reason
-            # to queue it would change nothing.
-            continue
-        # The evidence is weighed against the text that would actually be
-        # written — the `Durable rule:` clause — not the narration around it.
-        verdict = validate_candidate(
-            candidate_from_proposal(proposal),
-            transcript,
-            claim_text=promotable,
-        )
-        if verdict.ok:
-            continue
-        try:
-            region = resolve_region(proposal.target)
-        except ValueError:
-            continue
-        logger.info(
-            "memory evidence: %r is unverified (%s: %s); queuing for review",
-            promotable[:80],
-            verdict.code,
-            verdict.reason,
-        )
-        rows[_decision_key(region, promotable)] = _defer(
-            f"unverified: {verdict.reason}", evidence=verdict.as_row()
-        )
-    return rows
-
-
-def defer_region_facts(
-    archive_path: Path,
-    guide_path: Path,
-    *,
-    reason: str,
-) -> RegionDecisions | None:
-    """Defer every fact :func:`plan_region_reconcile` would have compared.
-
-    The planner swallows its own failures, but a raise that escapes it — or any
-    other reason a caller cannot run it — leaves ``region_decisions`` at
-    ``None``, and ``None`` is the plain append path: the obsolete fact and its
-    replacement both land in the always-loaded region. Callers use this instead
-    of ``None`` so an un-run reconcile is as conservative as a failed one.
-
-    Never raises: it is a fallback, and a fallback that throws would put the
-    caller back on the append path it is here to avoid.
-    """
-    try:
-        by_region, entries_by_region = _reconcile_candidates(archive_path, guide_path)
-    except Exception:  # noqa: BLE001 — a failed fallback must not resurface
-        logger.info("memory reconcile: could not build deferral rows")
-        return None
-    decisions: RegionDecisions = {}
-    for region_name, candidates in by_region.items():
-        competing = entries_by_region.get(region_name, [])
-        for fact in candidates:
-            decisions[_decision_key(region_name, fact)] = _defer(reason, competing)
-    return decisions or None
-
-
-async def plan_region_reconcile(
-    archive_path: Path,
-    guide_path: Path,
-    *,
-    model: str,
-    provider: str = "claude",
-    cwd: Path | None = None,
-) -> RegionDecisions | None:
-    """Decide ADD / UPDATE / COVERED for an archive's region-bound facts.
-
-    The Mem0 pattern, done at write time where dedupe is cheap: before the
-    sync apply step runs, one small model call per region compares the new
-    facts against the region's current entries (the whole region fits in a
-    prompt — it is capped at a few thousand characters). Returns a map from
-    promotable fact text to its decision row, or None when there is nothing to
-    reconcile — the caller then takes the plain append path, which never blocks
-    archiving.
-
-    A call that fails or replies unusably yields a ``defer`` row per candidate
-    rather than no row at all: the candidates that reach a model call are the
-    ones with existing region content to conflict with, and appending them
-    unreconciled is what left an obsolete fact and its replacement both live in
-    the region every session loads. Deferred facts stay in the proposals queue,
-    so nothing is lost and a human resolves them against the current region.
-    """
-    # Candidates per region: state-shaped facts that are not already exact
-    # duplicates (those need no model call to drop).
-    by_region, entries_by_region = _reconcile_candidates(archive_path, guide_path)
-    if not by_region:
-        return None
-
-    decisions: RegionDecisions = {}
-    for region_name, candidates in by_region.items():
-        rows = await _reconcile_region(
-            region_name,
-            entries_by_region[region_name],
-            candidates,
-            model=model,
-            provider=provider,
-            cwd=cwd,
-        )
-        if rows is None:
-            # No row at all reads downstream as "no reconcile was run", which
-            # is the plain append path. These candidates were compared against
-            # a non-empty region, so that is the one thing it must not mean.
-            for fact in candidates:
-                decisions[_decision_key(region_name, fact)] = _defer(
-                    f"reconcile unavailable for ciao:{region_name}",
-                    entries_by_region[region_name],
-                )
-            continue
-        for fact, row in zip(candidates, rows):
-            decisions[_decision_key(region_name, fact)] = row
-
-    return decisions or None
-
-
 async def _reconcile_region(
     region_name: str,
     entries: list[str],
@@ -1642,9 +1183,8 @@ async def _reconcile_region(
     """One reconcile call: decide ADD / UPDATE / COVERED per candidate.
 
     Returns one row per candidate in the given order, or None when the call
-    failed or replied unparseably — :func:`plan_region_reconcile` then defers
-    every candidate in the batch to the proposals queue, which never blocks and
-    never loses a fact.
+    failed or replied unparseably — :func:`reconcile_region_fact` then defers
+    the fact to the proposals queue, which never blocks and never loses it.
 
     An ``update`` row carries ``old``: the entry its index named in the snapshot
     the model actually saw. The apply step re-reads the region and refuses the
@@ -1732,9 +1272,9 @@ async def reconcile_region_fact(
 ) -> ReconcileDecision | None:
     """Reconcile one queued fact against the region's *current* entries.
 
-    This is the retry half of the deferral: a fact queued because the
-    archive-time reconcile timed out, replied unusably, or named an entry that
-    had moved is not stuck there — a later attempt reads the region as it is
+    This is the retry half of the deferral: a fact queued because a reconcile
+    timed out, replied unusably, or named an entry that had moved is not stuck
+    there — a later attempt reads the region as it is
     now and can come back with a usable ``add``/``covered``/``update``. The
     decision is planned against the snapshot read here and applied by
     :func:`_promote_to_region`, which re-reads under the guide lock and refuses
@@ -1747,7 +1287,7 @@ async def reconcile_region_fact(
     model call on them is the cost this deliberately avoids.
 
     A call that fails or replies unusably comes back as a ``defer`` row with
-    its reason and the competing entries, exactly as at archive time: a retry
+    its reason and the competing entries: a retry
     that cannot decide must not become a licence to append.
     """
     from ciao.memory_audit import strip_learned_stamp
@@ -2065,7 +1605,7 @@ def _record_decision(
     log_path = dismissed_log_path(proposals_path)
     if once and _has_decision(proposals_path, key=key, text=cleaned, outcome=outcome):
         # Idempotent paths only. A decision the operator makes is a fresh event
-        # every time, but the archive-time pipeline re-derives the same
+        # every time, but a repeated sweep re-derives the same
         # "already applied, skipped" verdict on every pass over the same
         # transcript, and appending a row per pass grew the history without
         # recording anything new.
@@ -2212,7 +1752,7 @@ def history_row_id(entry: dict[str, Any], workspace: str = "") -> str:
     """Stable id for one decision-history row, derived from its content.
 
     Unlike the live queue's :func:`ciao.proposal_tracking.stable_proposal_id`,
-    this cannot key off a path/line: auto-apply only has a vault root, the CLI
+    this cannot key off a path/line: the API only has a vault root, the CLI
     only has an optional workspace name, and legacy sidecar rows have neither.
 
     Timestamps are second-precision, so content alone is not unique: the same
@@ -2301,9 +1841,9 @@ _STUB_HEADER = (
     "tags: [ciao, memory, proposals]\n"
     "---\n"
     "# Memory Proposals\n\n"
-    "Auto-generated proposals from session-insights curation. Each batch is "
-    "timestamped. Confident facts are applied automatically at archive time; "
-    "what lands here waited because the model was unsure or a write failed.\n\n"
+    "Memory proposals awaiting a decision. Each batch is timestamped. The "
+    "memory pass records what it is confident about; what lands here is what "
+    "it was unsure about, or a write that failed.\n\n"
     "Destinations: `[memory]` / `[profile]` are the bounded `ciao:memory` / "
     "`ciao:profile` regions of the workspace `AGENTS.md` (edit the region "
     "first, then dismiss with `ciao memory-proposal-dismiss --text-file <file> "
@@ -2357,773 +1897,6 @@ def _refresh_header(file_text: str) -> str:
     if boundary >= len(file_text):
         return file_text
     return _STUB_HEADER + file_text[boundary:]
-
-
-# ── Already-applied guard ─────────────────────────────────────────────────
-
-# Minimum character overlap for a proposal to be considered already present in
-# a destination file. Shorter than a meaningful fact would be noise; longer
-# than a sentence would require exact formatting.
-_APPLIED_MIN_OVERLAP = 40
-
-
-def _normalize_for_match(text: str) -> str:
-    """Lowercased, whitespace-collapsed form for containment checks."""
-    return " ".join(text.lower().split())
-
-
-_NEGATION_RE = re.compile(r"\b(?:do not|don't|never|avoid)\b")
-
-# Where one fact ends and the next begins, in text that has already been
-# through `_normalize_for_match`. That collapse removes every newline, so a
-# markdown file arrives here as one line and the bullet markers that started
-# each item are the only separator left between two independent facts. Without
-# them a single "- Never commit secrets" bullet reads as the containing
-# sentence of everything below it, and every later fact in the file is scored
-# as negated — so an already-applied proposal fails this guard and is queued
-# back into Review, which is the exact loop the guard exists to close.
-_SEGMENT_SPLIT_RE = re.compile(r"[.!?;\n]|(?:^|(?<= ))(?:[-*+\u2022\u2013\u2014]|\d+\.) ")
-
-
-def _positive_contains(text: str, needle: str) -> bool:
-    """Match *needle* unless its containing sentence is negated."""
-    start = 0
-    while True:
-        at = text.find(needle, start)
-        if at < 0:
-            return False
-        boundary = 0
-        for match in _SEGMENT_SPLIT_RE.finditer(text, 0, at):
-            boundary = match.end()
-        if not _NEGATION_RE.search(text[boundary:at]):
-            return True
-        start = at + 1
-
-
-def _is_already_in_file(path: Path, proposal_text: str) -> bool:
-    """True when *path* already contains the proposal's substance."""
-    try:
-        content = path.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    norm_content = _normalize_for_match(content)
-    norm_proposal = _normalize_for_match(proposal_text)
-    if not norm_proposal:
-        return False
-    # Exact containment first (fast, precise for copy-paste facts like paths).
-    if _positive_contains(norm_content, norm_proposal):
-        return True
-    if len(norm_proposal) < _APPLIED_MIN_OVERLAP:
-        return False
-    # Also check the promotable variant for memory/profile: the region holds
-    # "Avoid em dashes; use commas instead." while the proposal may carry
-    # "User said: ... Durable rule: Avoid em dashes; use commas instead."
-    promotable = _promotable_text(proposal_text)
-    if promotable and promotable != proposal_text:
-        norm_promotable = _normalize_for_match(promotable)
-        if len(norm_promotable) >= _APPLIED_MIN_OVERLAP and _positive_contains(norm_content, norm_promotable):
-            return True
-    # Do not use unordered token overlap here. It treats contradictory or
-    # unrelated sentences as equivalent (for example, "use Python" versus
-    # "do not use Python"). A false negative leaves a reviewable proposal;
-    # a false positive silently loses a user fact.
-    return False
-
-
-def _is_already_in_region(guide_path: Path, region: str, proposal_text: str) -> bool:
-    """True when a bounded region already holds the proposal."""
-    from ciao.memory_tool import read_region
-
-    try:
-        entries, diags = read_region(guide_path, region)
-    except Exception:
-        return False
-    if diags:
-        return False
-    # Exact promotable match is the canonical dedupe (see _promote_to_region),
-    # but the guard also suppresses near-duplicates already present with
-    # different punctuation/casing so they never reach the review tab.
-    promotable = _promotable_text(proposal_text) or proposal_text
-    norm_promotable = _normalize_for_match(promotable)
-    for entry in entries:
-        norm_entry = _normalize_for_match(entry)
-        if norm_promotable == norm_entry:
-            return True
-        if len(norm_promotable) >= _APPLIED_MIN_OVERLAP and _positive_contains(norm_entry, norm_promotable):
-            return True
-        if len(norm_entry) >= _APPLIED_MIN_OVERLAP and _positive_contains(norm_promotable, norm_entry):
-            return True
-    return False
-
-
-def _resolve_doc_path(vault_root: Path, doc_path: str) -> Path:
-    """Resolve *doc_path* against *vault_root*, handling shared-prefix duplication.
-
-    ``doc_path`` may be absolute, vault-relative, or already a full path that
-    starts with the vault's own prefix (so ``vault_root / doc_path`` would
-    duplicate). Try vault-relative first, then the literal path (cwd-relative
-    or absolute), preferring whichever exists.
-    """
-    p = Path(doc_path)
-    if p.is_absolute():
-        return p
-    candidate = vault_root / doc_path
-    if candidate.exists():
-        return candidate
-    if p.exists():
-        return p
-    # Fall back to the vault-relative candidate even when neither exists yet;
-    # the caller will check existence before reading.
-    return candidate
-
-
-def _is_already_applied(
-    proposal: MemoryProposal,
-    vault_root: Path,
-    guide_path: Path | None,
-    project_doc_path: str = "",
-) -> bool:
-    """True when the destination already holds the proposal's fact.
-
-    This is the extra check before creating a review card: if the chat already
-    applied the edit (via Edit/Write/memory_update in-session), the post-archive
-    insight will re-extract the same fact and must not re-queue it.
-    """
-    if proposal.target in ("memory", "profile") and guide_path is not None:
-        try:
-            if guide_path.exists() and _is_already_in_region(
-                guide_path, proposal.target, proposal.text
-            ):
-                return True
-        except Exception:
-            pass
-    if proposal.target == "project":
-        doc_path = proposal.payload or project_doc_path
-        if doc_path:
-            p = _resolve_doc_path(vault_root, doc_path)
-            if _is_already_in_file(p, proposal.text):
-                return True
-    if proposal.target == "people" and vault_root is not None:
-        name = proposal.payload or _safe_name(proposal.text.split("-")[0])
-        p = vault_root / _PEOPLE_DIR / f"{_safe_name(name)}.md"
-        if p.exists() and _is_already_in_file(p, proposal.text):
-            return True
-        # Also check if any people note already contains the fact (payload may
-        # differ from canonical filename due to model paraphrase).
-        try:
-            people_dir = vault_root / _PEOPLE_DIR
-            if people_dir.is_dir():
-                for note in people_dir.glob("*.md"):
-                    if _is_already_in_file(note, proposal.text):
-                        return True
-        except OSError:
-            pass
-    if proposal.target == "learnings" and vault_root is not None:
-        p = vault_root / _LEARNINGS_RELATIVE
-        if p.exists() and _is_already_in_file(p, proposal.text):
-            return True
-    if proposal.target == "review":
-        # Review has no known destination; suppress only if the fact is
-        # demonstrably already remembered somewhere obvious (memory/profile
-        # regions or the canonical doc). Do not scan the whole vault.
-        if guide_path is not None and guide_path.exists():
-            for region in ("memory", "profile"):
-                if _is_already_in_region(guide_path, region, proposal.text):
-                    return True
-        if project_doc_path:
-            p = _resolve_doc_path(vault_root, project_doc_path)
-            if p.exists() and _is_already_in_file(p, proposal.text):
-                return True
-    return False
-
-
-# ── Known-entity routing ──────────────────────────────────────────────────
-
-
-# A "New entities" bullet opens on "<type>: <name>" ("Person: Mo - ...",
-# "Anthropic person: Finn Cummins (...)", "Project: ai-native-sdk / ...").
-_ENTITY_SUBJECT_RE = re.compile(
-    r"^(?P<type>[^:]{1,40}?)\s*:\s*(?P<name>.+?)(?:\s+[-–—]\s|\s*[(;,:]|$)"
-)
-# Project folder names that are containers, not a project a fact belongs to.
-_ROUTING_SKIP_PROJECTS = frozenset({"general"})
-_NON_PROJECT_STEMS = frozenset({"readme", "index", "log"})
-
-
-def _is_scaffold(name: str) -> bool:
-    """An index, template or `_`-prefixed scaffold, not a project a fact belongs to.
-
-    Deliberately narrower than ``vault_lint.is_template_stem`` (a substring
-    test), which would also drop a real project named ``email-templates``.
-    """
-    lowered = name.lower()
-    return (
-        lowered in _ROUTING_SKIP_PROJECTS
-        or lowered in _NON_PROJECT_STEMS
-        or lowered.startswith(("_", "template"))
-        or lowered.endswith(("-template", "_template"))
-    )
-# Shorter names ("mo", "ux") match too much prose to count as a mention.
-_MIN_ENTITY_MENTION = 4
-
-
-def entity_key(name: str) -> str:
-    """``Finn-Cummins`` / ``finn cummins`` / ``Finn_Cummins`` → ``finn cummins``."""
-    return " ".join(re.sub(r"[-_]+", " ", name).lower().split())
-
-
-def known_entities(vault_root: Path) -> tuple[dict[str, Path], dict[str, str]]:
-    """Known projects (key → canonical doc) and people (key → note stem).
-
-    The same roster the extraction prompt is shown (``insights._known_context_block``)
-    read back so code can enforce what the prompt only asks: a fact about an
-    entity the vault already has belongs in that entity's note.
-    """
-    projects: dict[str, Path] = {}
-    people: dict[str, str] = {}
-    try:
-        for bucket in ("active", "completed"):
-            folder = vault_root / "projects" / bucket
-            if not folder.is_dir():
-                continue
-            for entry in folder.iterdir():
-                if not entry.is_dir() or _is_scaffold(entry.name):
-                    continue
-                # README first, the order the app's own project-doc lookup
-                # uses (`project_chats._project_doc_file`), so a folder with
-                # both routes facts to the doc the app treats as canonical.
-                for doc in (entry / "README.md", entry / f"{entry.name}.md"):
-                    if doc.is_file():
-                        projects.setdefault(entity_key(entry.name), doc)
-                        break
-        # The roster also lists single-file projects (``projects/<name>.md``);
-        # a ``[project: <name>]`` tag naming one must resolve here too, or it
-        # falls through to the chat's own doc.
-        projects_dir = vault_root / "projects"
-        if projects_dir.is_dir():
-            for doc in projects_dir.glob("*.md"):
-                if doc.is_file() and not _is_scaffold(doc.stem):
-                    projects.setdefault(entity_key(doc.stem), doc)
-        people_dir = vault_root / _PEOPLE_DIR
-        if people_dir.is_dir():
-            for note in people_dir.glob("*.md"):
-                people.setdefault(entity_key(note.stem), note.stem)
-    except OSError:
-        logger.debug("memory proposals: could not read the entity roster", exc_info=True)
-    return projects, people
-
-
-def project_name(doc: Path) -> str:
-    """The roster name of a project doc: its folder, or a single file's stem."""
-    return doc.stem if doc.parent.name == "projects" else doc.parent.name
-
-
-def entity_mention_counts(text: str, keys: Iterable[str]) -> dict[str, int]:
-    """How often each entity key is named in *text* as a whole word.
-
-    A key matches in its spaced or hyphenated spelling ("finn cummins",
-    "finn-cummins"). One alternation, longest spelling first, scans the text
-    once however many entities the vault has; the longest name wins where
-    names overlap, so "finn cummins" is not also a mention of "finn".
-    """
-    # Keys are `entity_key`-normalized (no hyphens), so a spelling names
-    # exactly one key.
-    forms: dict[str, str] = {}
-    for key in keys:
-        for form in {key, key.replace(" ", "-")}:
-            if len(form) >= _MIN_ENTITY_MENTION:
-                forms[form] = key
-    if not forms or not text:
-        return {}
-    pattern = re.compile(
-        r"(?<![\w-])("
-        + "|".join(re.escape(form) for form in sorted(forms, key=len, reverse=True))
-        + r")(?![\w-])"
-    )
-    counts: dict[str, int] = {}
-    for match in pattern.finditer(text.lower()):
-        key = forms[match.group(1)]
-        counts[key] = counts.get(key, 0) + 1
-    return counts
-
-
-def _unwrap_links(text: str) -> str:
-    """Markdown links and wikilinks replaced by the words they display."""
-    text = MARKDOWN_LINK_RE.sub(lambda m: m.group("label"), text)
-    return WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), text)
-
-
-def _known_project_doc(payload: str, projects: dict[str, Path]) -> Path | None:
-    """The doc a ``[project: <name>]`` payload names, when it is a known project.
-
-    The extraction prompt asks for the name exactly as the roster lists it;
-    a model that writes the doc path instead still resolves by its folder.
-    """
-    if not payload.strip():
-        return None
-    raw = Path(payload.strip())
-    # A path names its project by folder ("projects/active/wedding/notes/x.md"),
-    # so every enclosing folder, innermost first, is tried before the stem.
-    for candidate in (payload, *(parent.name for parent in raw.parents), raw.stem):
-        doc = projects.get(entity_key(candidate))
-        if doc is not None:
-            return doc
-    return None
-
-
-def _address_tagged(
-    proposal: MemoryProposal,
-    projects: dict[str, Path],
-    people: dict[str, str],
-    *,
-    own_doc: Path | None,
-    own_doc_path: str = "",
-    fold_wrote: bool,
-) -> MemoryProposal | None:
-    """Resolve a model-tagged destination against the vault roster.
-
-    ``[project: <name>]`` naming a known project other than the chat's own
-    goes to that project's doc — the extraction prompt lists the roster so
-    the model can choose, and code resolves the choice instead of guessing
-    from the wording. A bare ``[project]`` belongs to the chat's own doc:
-    consumed (``None``) when the fold already read it, else addressed to it,
-    and ``[review]`` in a chat that has no doc. ``[people: <Name>]`` is
-    normalized to the existing note's stem, so "Finn Cummins" lands in
-    ``People/Finn-Cummins.md`` rather than creating a second note.
-    """
-    if proposal.target == "people" and proposal.payload:
-        stem = people.get(entity_key(proposal.payload))
-        return replace(proposal, payload=stem) if stem else proposal
-    if proposal.target != "project":
-        return proposal
-    named = _known_project_doc(proposal.payload, projects)
-    if named is not None and not _same_doc(named, own_doc):
-        return replace(proposal, payload=str(named))
-    payload = proposal.payload.strip()
-    if payload and named is None and "/" not in payload and not payload.endswith(".md"):
-        # A named tag means "a different project"; one the roster cannot
-        # resolve belongs to a human, not to this chat's doc. A path is the
-        # older tag shape for this chat's own project and is handled below.
-        return replace(proposal, target="review", payload="")
-    if own_doc is not None:
-        # The chat's resolved canonical doc is authoritative over a path the
-        # model invented; only a roster name can move a fact elsewhere. Only
-        # a bare [project] was the fold's to consume: the fold prompt skips
-        # every named tag, so dropping one here would lose it.
-        if fold_wrote and not proposal.payload:
-            return None
-        return replace(proposal, payload=own_doc_path or str(own_doc))
-    # A General chat has no project document to own a project-scoped fact.
-    # Keep the claim reviewable, never an unroutable project row.
-    return replace(proposal, target="review", payload="")
-
-
-def _same_doc(a: Path | str, resolved: Path | None) -> bool:
-    """Whether *a* names the already-resolved doc, however *a* is spelled."""
-    if resolved is None:
-        return False
-    try:
-        return Path(a).resolve() == resolved
-    except OSError:
-        return Path(a) == resolved
-
-
-def _route_to_known_entity(
-    proposal: MemoryProposal,
-    projects: dict[str, Path],
-    people: dict[str, str],
-) -> MemoryProposal:
-    """Give a ``[review]`` fact about a known person or project its home.
-
-    ``[review]`` means "nowhere to put this", and a review row cannot be
-    accepted — so a fact about a project or person that already has a note
-    reached the queue as a dead end. Routed, in order:
-
-    * a "New entities" bullet whose subject is a known person or project →
-      that note or doc. Whether it restates the note or changes it is not
-      decidable from the wording (an update need not carry a date, and a
-      restatement can), so it is routed either way and the accept's fold
-      answers "already covered";
-    * any bullet naming exactly one known project → that project's doc.
-
-    Anything else stays ``[review]``. The destination accept still folds
-    through a model call that can answer "already covered", so a routed row
-    is a proposal, not a write.
-    """
-    from ciao.fact_candidates import UNREADABLE_SECTION
-
-    # An unreadable structured row is a parse failure waiting for a human;
-    # re-addressing it by the names it mentions could hand it to a doc the
-    # fold already read, which drops it without anyone seeing it.
-    if proposal.target != "review" or proposal.source_section == UNREADABLE_SECTION:
-        return proposal
-    text = proposal.text
-
-    def routed(target: str, payload: str) -> MemoryProposal:
-        return replace(proposal, target=target, payload=payload)
-
-    if proposal.source_section == "New entities":
-        # Unwrap links first: "project: [Wedding](./projects/...) - ..." names
-        # Wedding, and the subject pattern would otherwise stop at the "(".
-        subject = _ENTITY_SUBJECT_RE.match(_unwrap_links(text))
-        if subject:
-            key = entity_key(subject.group("name").split(" / ")[0])
-            person = key in people and bool(
-                re.search(r"\b(?:person|people)\b", subject.group("type"), re.I)
-            )
-            if person or key in projects:
-                if person:
-                    return routed("people", people[key])
-                return routed("project", str(projects[key]))
-    named = list(entity_mention_counts(text, projects))
-    if len(named) == 1:
-        return routed("project", str(projects[named[0]]))
-    return proposal
-
-
-# ── Facts the session already wrote ───────────────────────────────────────
-
-
-_BACKTICK_TOKEN_RE = re.compile(r"`([^`\n]{4,})`")
-# Vault changes to these trees record an episode, not a durable home; a fact
-# that only reached a journal entry still deserves its own destination.
-_EPISODIC_PREFIXES = ("journal/", "logs/")
-
-
-def _session_vault_changes(insights_md: str) -> list[tuple[str, frozenset[int]]]:
-    """``(path, cited idx)`` for each "Vault changes" bullet the extractor wrote."""
-    out: list[tuple[str, frozenset[int]]] = []
-    for item in _split_sections(insights_md).get("Vault changes", []):
-        _kind, _payload, citations, text = _peel_trailing_metadata(item)
-        # The citation rule asks for vault paths as relative Markdown links,
-        # so "[Mo](./People/Mo.md) - ..." names People/Mo.md; a name with
-        # spaces is `[Mo](<./People/Mo Salah.md>)` or `%20`-escaped. Match the
-        # link before splitting on " - ", which a label may itself contain.
-        link = MARKDOWN_LINK_RE.match(text.strip())
-        if link:
-            target = link.group("angle") or link.group("bare") or ""
-            path = unquote(re.split(r"[#?]", target, maxsplit=1)[0])
-        else:
-            path = re.split(r"\s+[-–—]\s", text, maxsplit=1)[0].strip().strip("`")
-        if path and citations:
-            out.append((path, frozenset(citations)))
-    return out
-
-
-def _changed_file_text(path: str, vault_root: Path) -> str | None:
-    """The current text of a Vault changes path, or None when it is unreadable.
-
-    Paths come back vault-relative ("People/Mo.md") or workspace-relative
-    ("work/commands/styleit.md", two levels above the vault).
-    """
-    rel = path.lstrip("./")
-    for base in (vault_root, vault_root.parent, vault_root.parent.parent):
-        candidate = base / rel
-        try:
-            if candidate.is_file():
-                return candidate.read_text(encoding="utf-8", errors="replace").lower()
-        except OSError:
-            continue
-    return None
-
-
-def _written_this_session(
-    proposal: MemoryProposal,
-    changes: list[tuple[str, frozenset[int]]],
-    vault_root: Path,
-) -> bool:
-    """True when the fact is the session's own edit to a file, restated.
-
-    The extractor lists what the session wrote under "Vault changes" and then,
-    often, repeats the same edit as a Decision ("Chose to create `/styleit`
-    ... in `work/commands/styleit.md`"). The destination guard cannot see
-    that — the edit went to a file, not the region the proposal targets — so
-    the review queue asked for a fact that was already saved.
-
-    Precision-first, three signals together: the bullet cites a turn that a
-    vault change also cites, it names that changed file in backticks, and the
-    same file as it is now contains another term the bullet puts in backticks —
-    so an unrelated edit to a file the fact merely mentions ("`scripts/test.sh`
-    is the entry point" alongside a new flag in it) is not taken as the fact
-    being saved. A command file named for what it defines (`/styleit` for
-    `commands/styleit.md`) only has to exist. Anything unreadable stays
-    reviewable.
-    A User correction is never suppressed: "run tests via `scripts/test.sh`"
-    can share a turn with the edit to that script and still be a standing
-    preference the file itself does not state.
-    """
-    if proposal.source_section == "User corrections":
-        return False
-    if not proposal.citations or not changes:
-        return False
-    cited = set(proposal.citations)
-    tokens = {
-        tok.strip().lstrip("./").lower()
-        for tok in _BACKTICK_TOKEN_RE.findall(proposal.text)
-    }
-    if not tokens:
-        return False
-    co_cited = [
-        (path, path.lstrip("./").lower())
-        for path, idx in changes
-        if cited & idx
-        and not any(
-            path.lstrip("./").lower().startswith(p) or f"/{p}" in path.lower()
-            for p in _EPISODIC_PREFIXES
-        )
-    ]
-    for path, norm in co_cited:
-        text = _changed_file_text(path, vault_root)
-        if text is None:
-            continue
-        named = {
-            tok for tok in tokens
-            if tok == norm or norm.endswith("/" + tok) or tok.endswith("/" + norm)
-        }
-        # The evidence must be in the file the fact names, not in some other
-        # file the same turn happened to edit.
-        if named and any(tok in text for tok in tokens - named):
-            return True
-        # The name a command file defines: `/styleit` for `commands/styleit.md`.
-        # Only a definition file counts — `deploy` naming `scripts/deploy.sh`
-        # is a mention, and an unrelated edit to that script proves nothing.
-        stem = Path(norm).stem
-        if (
-            len(stem) >= 5
-            and stem in tokens
-            and any(part in {"commands", "subagents", "agents"} for part in Path(norm).parent.parts)
-        ):
-            return True
-    return False
-
-
-# ── Pipeline entry point ──────────────────────────────────────────────────
-
-
-def proposals_from_archive(
-    archive_path: Path,
-    workspace_vault_root: Path,
-    *,
-    auto_promote_memory: bool = False,
-    guide_path: Path | None = None,
-    stats: dict[str, int] | None = None,
-    project_doc_path: str = "",
-    project_fold_wrote: bool = False,
-    region_decisions: RegionDecisions | None = None,
-    workspace: str = "",
-    error_out: list[str] | None = None,
-    deferrals: list[DeferredFact] | None = None,
-) -> Path | None:
-    """Read an archived chat, route its insights, optionally auto-apply.
-
-    With ``auto_promote_memory`` set, every confidently-addressed proposal is
-    written straight to its destination via :func:`apply_proposals`;
-    everything else — plus any write that failed — lands in the proposals
-    file.
-
-    ``project_doc_path`` is the chat's canonical doc (workspace-root-relative
-    or absolute). When ``project_fold_wrote`` is true the fold consumed this
-    archive's insights, so ``[project]`` bullets are dropped rather than
-    queued; otherwise they are queued addressed to that doc so a one-click
-    accept can fold them later.
-
-    Returns the proposals file path when something was written, else None.
-    Swallows all exceptions; this runs as a fire-and-forget step.
-
-    ``stats``, when given, is filled with ``proposed`` (how many proposals were
-    written to the file), ``promoted`` (how many were auto-applied) and
-    ``deferred`` (how many region facts an uncertain reconcile or a failed
-    evidence check sent to the queue instead of the region). The archived
-    chat reports these counts back
-    to the user, which the returned path alone cannot express. It stays an
-    out-parameter so the return contract every existing caller relies on is
-    unchanged.
-
-    ``deferrals``, when given, is filled with one :class:`DeferredFact` per
-    deferred region fact — its reason and the entries it competes with — so a
-    caller can report *what* is waiting, not only how much.
-
-    ``error_out``, when given, records a reason for an internal failure (the
-    archive was unreadable, or a write/dedupe step raised). ``None`` alone
-    cannot distinguish that from a legitimate no-op — "the archive carried no
-    actionable facts" also returns ``None`` — so the resumable pipeline passes
-    this list to settle the stage as failed rather than succeeded.
-    """
-    try:
-        if not archive_path.exists():
-            return None
-        text = archive_path.read_text(encoding="utf-8")
-        body = _extract_insights_section(text)
-        if not body:
-            return None
-        proposals = propose_from_insights(body)
-
-        projects, people = known_entities(workspace_vault_root)
-        own_doc = (
-            _resolve_doc_path(workspace_vault_root, project_doc_path).resolve()
-            if project_doc_path
-            else None
-        )
-        def route(p: MemoryProposal) -> MemoryProposal | None:
-            addressed = _address_tagged(
-                p,
-                projects,
-                people,
-                own_doc=own_doc,
-                own_doc_path=project_doc_path,
-                fold_wrote=project_fold_wrote,
-            )
-            if addressed is None:
-                return None
-            routed = _route_to_known_entity(addressed, projects, people)
-            if (
-                routed.target == "review"
-                and routed.source_section == "Decisions"
-                and not (p.target == "project" and p.payload)
-            ):
-                # Same rule as `propose_from_insights`, for the bare [project]
-                # decisions a General chat demoted to review above. A named
-                # project the roster could not resolve stays for a human.
-                return None
-            return routed
-
-        routed_all = [route(p) for p in proposals]
-        dropped = sum(1 for p in routed_all if p is None)
-        if dropped:
-            logger.info(
-                "memory proposals: dropped %d fact(s) already folded, restated, "
-                "or with no destination from %s",
-                dropped,
-                archive_path.name,
-            )
-        proposals = [p for p in routed_all if p is not None]
-        session_changes = _session_vault_changes(body)
-
-        # Extra guard before creating a review card: if the chat already
-        # applied the change in-session (via memory_update/Edit/Write), the
-        # destination now contains the fact and the insight must not re-queue it.
-        if proposals:
-            filtered: list[MemoryProposal] = []
-            suppressed = 0
-            for _p in proposals:
-                if _written_this_session(
-                    _p, session_changes, workspace_vault_root
-                ) or _is_already_applied(
-                    _p, workspace_vault_root, guide_path, project_doc_path
-                ):
-                    suppressed += 1
-                    logger.info(
-                        "memory proposals: suppressed already-applied %r from %s",
-                        _p.text[:80],
-                        archive_path.name,
-                    )
-                    try:
-                        record_promotion(
-                            workspace_vault_root / _PROPOSALS_RELATIVE,
-                            text=_p.text,
-                            kind=_p.target,
-                            via="auto",
-                            source=archive_path.stem,
-                            outcome="suppressed",
-                            # Re-processing the same archive re-derives this
-                            # same verdict; record it once, not once per pass.
-                            once=True,
-                            # The fact was applied in-session, not promoted
-                            # through the queue. Keep the row out of the dedupe
-                            # readers so a later revert can be re-queued.
-                            history_only=True,
-                        )
-                    except Exception:  # noqa: BLE001 — recording must not break the pipeline
-                        logger.info(
-                            "memory proposals: could not record suppression for %r",
-                            _p.text[:80],
-                        )
-                    continue
-                filtered.append(_p)
-            if suppressed:
-                logger.info(
-                    "memory proposals: suppressed %d already-applied fact(s) from %s",
-                    suppressed,
-                    archive_path.name,
-                )
-            proposals = filtered
-            if not proposals:
-                if stats is not None:
-                    stats["proposed"] = 0
-                    stats["promoted"] = stats.get("promoted", 0)
-                return None
-
-        if auto_promote_memory and proposals and curation_in_progress(workspace_vault_root):
-            # A curation run is mid-consolidation: it read the region minutes
-            # ago and will write back a rewritten body. An append landing
-            # underneath that read is either lost to the rewrite or duplicated
-            # by it, and neither outcome is visible to anyone. Standing down
-            # costs nothing here — every proposal falls through to
-            # `append_proposals` below, which is the queue the curation run is
-            # about to work anyway.
-            auto_promote_memory = False
-            logger.info(
-                "memory proposals: curation holds %s; queuing %d fact(s) from %s "
-                "instead of auto-applying",
-                workspace_vault_root,
-                len(proposals),
-                archive_path.name,
-            )
-
-        if auto_promote_memory and proposals:
-            proposals, promoted = apply_proposals(
-                proposals,
-                guide_path=guide_path,
-                vault_root=workspace_vault_root,
-                region_decisions=region_decisions,
-                learning_source=archive_path.stem,
-                actor="auto",
-                source="archive",
-                workspace=workspace,
-                stats=stats,
-                deferrals=deferrals,
-            )
-            if promoted:
-                if stats is not None:
-                    stats["promoted"] = len(promoted)
-                logger.info(
-                    "memory proposals: auto-applied %d fact(s) from %s",
-                    len(promoted),
-                    archive_path.name,
-                )
-        written = append_proposals(
-            proposals,
-            workspace_vault_root,
-            source_path=archive_path,
-        )
-        if stats is not None:
-            # Counted from what was actually filed, not from what was parsed:
-            # auto-apply removes the applied facts from the list above.
-            stats["proposed"] = len(proposals) if written else 0
-        return written
-    except Exception as exc:  # noqa: BLE001 — never crash the pipeline
-        logger.exception("memory proposals failed for %s", archive_path)
-        if error_out is not None:
-            error_out.append(
-                f"{type(exc).__name__}: {exc}"[:400] or "memory proposals failed"
-            )
-        return None
-
-
-def _extract_insights_section(archive_md: str) -> str:
-    """Return the body of the archive's real appended insights section, or ''.
-
-    Delegates to :func:`ciao.insights.locate_insights_section` so a transcript
-    that merely quotes the header (curation chats do) is never mistaken for
-    the appended section — the old first-occurrence match re-proposed bullets
-    the curator had already reviewed and deleted from the queue.
-    """
-    from ciao.insights import locate_insights_section
-
-    location = locate_insights_section(archive_md)
-    if location is None:
-        return ""
-    return archive_md[location[1]:].strip()
 
 
 # ── Review surface (CLI) ──────────────────────────────────────────────────

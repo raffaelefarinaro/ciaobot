@@ -2,7 +2,7 @@
 
 Status: adopted for new work, migration in progress
 Written: 2026-08-11
-Scope: `web/` (the PWA). Not the desktop shell or the Python app.
+Scope: `web/` (the PWA). Not the Python engine.
 
 This document is the contract. When adding or changing UI in `web/`, follow it.
 When it and an existing component disagree, the component is wrong — but do not
@@ -196,7 +196,7 @@ part of the signal spec.
 A transient *working* mark where the work originates, and a persistent
 *needs you* count where its output waits. One without the other either hides
 that anything happened, or hides that something is now pending. Worked
-example — the insights/memory-proposal pipeline: post-archive work shows a
+example — the memory pass and the proposals queue: post-archive work shows a
 transient `tidying` working signal (ChatSignals + `chatIsPostprocessing` in
 the store), and the persistent waiting count is the memory rail badge
 (proposals store counts rendered in `ProjectSidebar.vue`).
@@ -260,7 +260,7 @@ sites), then settings incrementally per tab. Do not big-bang 28 cards.
 
 `SettingsView.vue` is the largest file in the app: a 2,210-line template and
 2,051 lines of scoped CSS covering seven routed tabs. The routes already exist
-(`/settings/providers`, `/settings/workspaces`, `/settings/models`,
+(`/settings/workspaces`, `/settings/models`,
 `/settings/context`, `/settings/skills`, `/settings/automations`), so the tabs
 are separable with no router change — each becomes its own SFC. This is also
 where most of the L1.1 violations live, and splitting makes them visible.

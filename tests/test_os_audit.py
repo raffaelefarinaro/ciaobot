@@ -288,7 +288,7 @@ def test_format_audit_markdown_over_cap_names_the_fix(tmp_path: Path) -> None:
     assert "Regions over cap: 1" in markdown
     assert "ciao:memory over cap: " in markdown
     assert "consolidate the region" in markdown
-    assert "CIAO_MEMORY_CHAR_LIMIT / CIAO_USER_CHAR_LIMIT in .env" in markdown
+    assert "CIAO_MEMORY_CHAR_LIMIT" not in markdown
 
 
 def test_audit_memory_reports_unclosed_expiration_tag(tmp_path: Path) -> None:

@@ -47,15 +47,17 @@ class _FakeClient:
     def __init__(self, payload: Any) -> None:
         self._payload = payload
 
-    async def get(self, path: str) -> Any:
-        # /children returns the child list; per-child message reads return
-        # none — one payload shape per endpoint, like the real server.
-        body = self._payload if path.endswith("/children") else []
-        response = SimpleNamespace(
+    async def get(self, path: str, *, params: Any = None) -> Any:
+        # The V2 session list returns children for parentID; per-child message
+        # reads return an empty page.
+        if path == "/api/session":
+            body = {"data": self._payload, "cursor": {"previous": None, "next": None}}
+        else:
+            body = {"data": [], "cursor": {"previous": None, "next": None}}
+        return SimpleNamespace(
             raise_for_status=lambda: None,
             json=lambda: body,
         )
-        return response
 
 
 class _HealthyEphemeralServer:
@@ -133,7 +135,7 @@ def test_successful_collab_read_still_caches(
     first = asyncio.run(OpencodeProvider.read_collab_tree(tmp_path, "ses_parent"))
     second = asyncio.run(OpencodeProvider.read_collab_tree(tmp_path, "ses_parent"))
 
-    assert first == [{"info": payload[0], "messages": []}]
+    assert first == [{"info": payload[0], "messages": [], "active": None}]
     assert second == first
     assert _HealthyEphemeralServer.spawns == 1
 

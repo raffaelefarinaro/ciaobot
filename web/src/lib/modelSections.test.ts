@@ -80,4 +80,15 @@ describe('opencode section', () => {
       'google/gemini-3-pro',
     ])
   })
+
+  it("tags each provider's default model", () => {
+    const sections = sectionsFromModelsResponse({
+      ...base,
+      models: ['a-model', 'b-model'],
+      opencode_models: ['google/gemini-3-pro'],
+      provider_defaults: { claude: 'b-model', opencode: 'google/gemini-3-pro' },
+    })
+    expect(sections.find((s) => s.key === 'anthropic')?.modelBadges).toEqual({ 'b-model': ['Default'] })
+    expect(sections.find((s) => s.key === 'opencode')?.modelBadges).toEqual({ 'google/gemini-3-pro': ['Default'] })
+  })
 })

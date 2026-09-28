@@ -1,80 +1,14 @@
 /**
- * Whether the PWA is being served inside the macOS `Ciaobot.app` shell.
+ * Whether the browser runs on macOS or iOS, where the Alt key is labelled
+ * Option and shown as the ⌥ glyph. Windows and Linux keyboards say "Alt".
  *
- * The main webview loads the live localhost PWA as *remote* content. The app
- * injects `__CIAOBOT_DESKTOP__` with a document-start initialization script as
- * a one-way marker. A very small Tauri command surface is also exposed so the
- * PWA can ask macOS for native permissions (microphone, notifications,
- * camera in the future); these commands are gated by the `main` capability in
- * the Tauri shell and only allow the main window/localhost origin.
+ * This is about the user's keyboard, not about which app is running: the PWA
+ * has one runtime, and its modifier chords label themselves per platform.
  */
-declare global {
-  interface Window {
-    __CIAOBOT_DESKTOP__?: boolean
-    __TAURI__?: {
-      core: {
-        invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>
-      }
-    }
-  }
-}
-
-export const isDesktopApp = (): boolean =>
-  typeof window !== 'undefined' && window.__CIAOBOT_DESKTOP__ === true
-
-export type DesktopPermissionKind = 'microphone' | 'notifications' | 'camera'
-export type DesktopPermissionState =
-  | 'not_determined'
-  | 'restricted'
-  | 'denied'
-  | 'authorized'
-
-function canInvokeTauri(): boolean {
-  return isDesktopApp() && typeof window.__TAURI__ !== 'undefined'
-}
-
-export async function queryDesktopPermission(
-  kind: DesktopPermissionKind,
-): Promise<DesktopPermissionState | null> {
-  if (!canInvokeTauri()) return null
-  try {
-    return await window.__TAURI__!.core.invoke<DesktopPermissionState>(
-      'check_permission',
-      { kind },
-    )
-  } catch (e) {
-    console.error('Could not query desktop permission:', e)
-    return null
-  }
-}
-
-export async function requestDesktopPermission(
-  kind: DesktopPermissionKind,
-): Promise<DesktopPermissionState | null> {
-  if (!canInvokeTauri()) return null
-  try {
-    return await window.__TAURI__!.core.invoke<DesktopPermissionState>(
-      'request_permission',
-      { kind },
-    )
-  } catch (e) {
-    console.error('Could not request desktop permission:', e)
-    return null
-  }
-}
-
-/**
- * Starts the same app+engine update flow as the tray's "Update" item,
- * confirmation dialog included. Returns false when not running inside the
- * desktop shell, so callers can fall back to the web update path.
- */
-export async function triggerDesktopUpdate(): Promise<boolean> {
-  if (!canInvokeTauri()) return false
-  try {
-    await window.__TAURI__!.core.invoke('trigger_app_update')
-    return true
-  } catch (e) {
-    console.error('Could not start desktop update:', e)
-    return false
-  }
+export function isApplePlatform(): boolean {
+  if (typeof navigator === 'undefined') return false
+  const nav = navigator as Navigator & { userAgentData?: { platform?: string } }
+  const platform = nav.userAgentData?.platform || nav.platform || ''
+  if (platform) return /mac|iphone|ipad|ipod/i.test(platform)
+  return /macintosh|mac os x|iphone|ipad|ipod/i.test(nav.userAgent || '')
 }

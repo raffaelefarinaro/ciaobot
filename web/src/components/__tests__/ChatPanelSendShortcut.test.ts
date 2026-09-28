@@ -121,7 +121,6 @@ async function mountPanel(archived = false): Promise<{
       stubs: {
         PaneHeader: PaneHeaderStub,
         ModelSelector: ChildStub,
-        VoiceRecorder: ChildStub,
         SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,

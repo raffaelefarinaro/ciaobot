@@ -79,9 +79,19 @@ UNDONE = "undone"
 _TERMINAL = frozenset({APPLIED, FAILED, ROLLED_BACK, CONFLICT, UNDONE})
 
 # Kinds whose before image is enough to undo. A queue resolution restores a
-# bullet, which is meaningful too; a prune is reversible for the same reason.
+# bullet, which is meaningful too; a prune is reversible for the same reason. A
+# category apply is the first kind here that touches more than one destination
+# file: the registry and every note it retyped, which is why it carries its own
+# list rather than borrowing the region protocol's one before/after pair.
 UNDOABLE_KINDS = frozenset(
-    {"region_apply", "region_update", "region_remove", "queue_resolve", "prune_expired"}
+    {
+        "region_apply",
+        "region_update",
+        "region_remove",
+        "queue_resolve",
+        "prune_expired",
+        "category_apply",
+    }
 )
 
 # Above this size an image is omitted and the operation stays view-only: the
@@ -1511,6 +1521,79 @@ def _complete_outcome(receipt: dict[str, Any]) -> bool:
         return False
 
 
+# ── Category mutation receipt ──────────────────────────────────────────────
+
+
+def record_category_apply(
+    journal: Path,
+    *,
+    registry_path: Path,
+    registry_existed: bool,
+    before_text: str,
+    after_text: str,
+    notes: list[dict[str, Any]],
+    actor: str,
+    source: str,
+    workspace: str = "",
+    vault_root: Path | None = None,
+) -> dict[str, Any]:
+    """Record a category added to the registry and the notes retyped with it.
+
+    One row for the whole operation, because it is one decision: half of it
+    undone — the category without its notes, or notes pointing at a category
+    that is no longer there — is worse than either end of it. So the row carries
+    the registry file's own before/after (the ``before_text``/``after_text`` pair
+    every reader of a receipt already expects) *and* the per-note before images
+    in ``category_notes``, each as the note's whole text rather than just its
+    ``type:`` line, so an undo restores a note that had no frontmatter to a note
+    that still has none.
+
+    ``undoable=False`` is written when a note's image was too large to keep
+    (see :data:`MAX_IMAGE_CHARS`). The row stays in History as a record of what
+    happened and offers no Undo, which is what :func:`is_undoable` already knows
+    how to render.
+
+    Never raises: a receipt is a record, and failing to record one must not fail
+    the write it describes.
+    """
+    receipt: dict[str, Any] = {
+        "id": new_receipt_id(
+            f"{registry_path}|category_apply|{sorted(n['path'] for n in notes)}|"
+            f"{content_revision(before_text)}",
+            journal,
+        ),
+        "ts": _now(),
+        "actor": actor,
+        "source": source,
+        "workspace": workspace,
+        "kind": "category_apply",
+        "registry": str(registry_path),
+        "registry_existed": bool(registry_existed),
+        "vault_root": str(vault_root) if vault_root is not None else "",
+        "before_revision": content_revision(before_text),
+        "after_revision": content_revision(after_text),
+        "before_text": _image(before_text),
+        "after_text": _image(after_text),
+        "category_notes": [
+            {
+                "path": str(note["path"]),
+                "before": _image(str(note.get("before", ""))),
+                "after": str(note.get("after", "")),
+            }
+            for note in notes
+        ],
+        "status": APPLIED,
+    }
+    if any(row["before"] is None for row in receipt["category_notes"]):
+        receipt["undoable"] = False
+    try:
+        _append(journal, receipt)
+    except Exception:  # noqa: BLE001 — recording must not fail the write
+        logger.debug("memory receipts: category receipt failed", exc_info=True)
+        return {}
+    return receipt
+
+
 # ── Undo ──────────────────────────────────────────────────────────────────
 
 
@@ -1547,6 +1630,8 @@ def undo_receipt(
     kind = str(receipt.get("kind", ""))
     if kind == "queue_resolve":
         return _undo_queue(receipt, journal, vault_root, actor, source)
+    if kind == "category_apply":
+        return _undo_category(receipt, journal)
     return _undo_region(receipt, journal, vault_root, actor, source)
 
 
@@ -1558,7 +1643,6 @@ def _undo_region(
     source: str,
 ) -> dict[str, Any]:
     from ciao.memory_tool import guide_lock, read_region, release_guide_lock
-    from ciao.memory_tool import MemoryLockError
 
     guide = Path(str(receipt.get("guide", "")))
     region = str(receipt.get("region", ""))
@@ -1646,6 +1730,77 @@ def _undo_queue(
         tmp = path.with_name(f".{path.name}.undo.tmp")
         tmp.write_text(str(before), encoding="utf-8")
         os.replace(tmp, path)
+    undone = {
+        **{k: v for k, v in receipt.items() if k != "v"},
+        "status": UNDONE,
+        "undo_of": str(receipt.get("id", "")),
+        "settled_at": _now(),
+    }
+    _append(journal, undone)
+    return undone
+
+
+def _undo_category(receipt: dict[str, Any], journal: Path) -> dict[str, Any]:
+    """Put the registry and every retyped note back the way they were.
+
+    All-or-nothing on purpose. A category accept is one decision that touched N
+    files; undoing the registry alone leaves notes pointing at a category that no
+    longer exists, and undoing the notes alone leaves them pointing at nothing.
+    So every destination is checked before any of them is written, and one
+    destination that moved refuses the whole undo — the same
+    :class:`RevisionConflict` the region and queue undos raise, for the same
+    reason: replacing a file whose contents no longer match what this operation
+    left behind would silently discard whatever landed since.
+    """
+    registry_path = Path(str(receipt.get("registry", "")))
+    if not registry_path.name:
+        raise UndoUnsupported("receipt names no category registry")
+    before = receipt.get("before_text")
+    if before is None or receipt.get("after_text") is None:
+        raise UndoUnsupported("receipt carries no registry image")
+    try:
+        current = registry_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        current = ""
+    except OSError as exc:
+        raise MemoryReceiptError(f"category registry unreadable: {exc}") from exc
+    if content_revision(current) != str(receipt.get("after_revision", "")):
+        raise RevisionConflict(
+            "the category list changed after this operation; undo was refused"
+        )
+    # Checked before anything is written, so a conflict on note 3 of 5 does not
+    # leave notes 1 and 2 already restored and the receipt claiming otherwise.
+    restores: list[tuple[Path, str]] = []
+    for note in receipt.get("category_notes") or []:
+        path = Path(str(note.get("path", "")))
+        image = note.get("before")
+        if not path.name or image is None:
+            raise UndoUnsupported("receipt carries no before image for every note")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RevisionConflict(
+                f"{path} is unreadable, so the retype cannot be reversed: {exc}"
+            ) from exc
+        if text != str(note.get("after", "")):
+            raise RevisionConflict(
+                f"{path} changed after this operation; undo would remove an "
+                "unrelated edit, so it was refused"
+            )
+        restores.append((path, str(image)))
+    if receipt.get("registry_existed"):
+        write_queue_atomically(registry_path, str(before))
+    else:
+        # The vault had no category file before this accept, so restoring one
+        # would leave behind an override file the operator never wrote.
+        registry_path.unlink(missing_ok=True)
+    for path, image in restores:
+        write_queue_atomically(path, image)
+    # The registry is cached per vault against the file's mtime, so the undo is
+    # invisible to the next read until the cache is dropped.
+    from ciao.entity_types import clear_entity_types_cache
+
+    clear_entity_types_cache()
     undone = {
         **{k: v for k, v in receipt.items() if k != "v"},
         "status": UNDONE,

@@ -1379,8 +1379,6 @@ def run_os_audit(
     workspace = (workspace_dir or Path.cwd()).expanduser().resolve()
     vault = (vault_root or (workspace / "memory-vault")).expanduser().resolve()
     runtime = (runtime_dir or (workspace / ".runtime")).expanduser().resolve()
-    memory_char_limit = getattr(config, "memory_char_limit", DEFAULT_MEMORY_CHAR_LIMIT)
-    user_char_limit = getattr(config, "user_char_limit", DEFAULT_USER_CHAR_LIMIT)
     want_workspace = scope in {"all", "workspace"}
     want_global = scope in {"all", "global"}
     root, notes = _audit_roots(config, workspace_name, workspace, vault)
@@ -1426,7 +1424,10 @@ def run_os_audit(
             notes, proposal_paths, workspace_name
         )
         current = today or datetime.date.today()
-        region_limits = {"memory": memory_char_limit, "profile": user_char_limit}
+        region_limits = {
+            "memory": DEFAULT_MEMORY_CHAR_LIMIT,
+            "profile": DEFAULT_USER_CHAR_LIMIT,
+        }
         # One guide when a workspace is named, every registered guide otherwise.
         # Reporting all N guides inside a per-workspace run is the same N-times
         # duplication as the global sections, one level down.
@@ -1738,8 +1739,7 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
         if memory.get("over_cap"):
             lines.append(
                 "    Fix: open a chat in that workspace and ask the agent to "
-                "consolidate the region, or raise CIAO_MEMORY_CHAR_LIMIT / "
-                "CIAO_USER_CHAR_LIMIT in .env (restart Ciaobot to apply)."
+                "consolidate the region."
             )
         for finding in memory.get("event_shaped_entries", [])[:5]:
             lines.append(

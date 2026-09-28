@@ -26,12 +26,25 @@ def test_build_dev_environment_loads_dotenv_and_sets_dev_defaults(tmp_path: Path
     assert result.workspace == workspace.resolve()
     assert result.web_dir == (workspace / "web").resolve()
     assert result.env["PWA_AUTH_TOKEN"] == "test-token"
-    assert result.env["CIAO_AUTO_SYNC_ON_START"] == "false"
     assert result.env["PWA_PORT"] == "8543"
     assert result.env["VITE_BACKEND_URL"] == "http://127.0.0.1:8543"
     assert result.env["CIAO_WORKSPACE"] == str(workspace.resolve())
     assert result.backend_url == "http://127.0.0.1:8543"
     assert result.frontend_url == "http://localhost:5173"
+
+
+def test_build_dev_environment_drops_inherited_bundled_marker(tmp_path: Path) -> None:
+    # A shell opened by Ciaobot.app inherits CIAO_BUNDLED_APP=1; the source
+    # backend must not see it or it reports itself as the packaged app.
+    workspace = tmp_path / "workspace"
+    (workspace / "web").mkdir(parents=True)
+
+    result = dev.build_dev_environment(
+        workspace,
+        base_env={"PWA_AUTH_TOKEN": "token", "CIAO_BUNDLED_APP": "1"},
+    )
+
+    assert "CIAO_BUNDLED_APP" not in result.env
 
 
 def test_build_dev_environment_requires_web_checkout(tmp_path: Path) -> None:

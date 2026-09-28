@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ciao.web.auth import is_loopback_client
+
+# One test per subscription per cooldown: the button is for a person, and a
+# loop hammering a push service would get this server's VAPID key throttled.
+_TEST_COOLDOWN_SECONDS = 10.0
+_last_test_at: dict[str, float] = {}
 
 
 async def push_public_key(request: Request) -> JSONResponse:
@@ -79,3 +87,28 @@ async def push_subscription_check(request: Request) -> JSONResponse:
         "registered": bool(endpoint) and pm.has(endpoint),
         "count": pm.count(),
     })
+
+
+async def push_test(request: Request) -> JSONResponse:
+    """Send a test notification to the caller's own push subscription."""
+    pm = request.app.state.push_manager
+    try:
+        data = await request.json()
+    except ValueError:
+        data = {}
+    endpoint = str((data or {}).get("endpoint") or "").strip() if isinstance(data, dict) else ""
+    if not endpoint:
+        return JSONResponse({"error": "endpoint is required"}, status_code=400)
+    if not pm.has(endpoint):
+        return JSONResponse({"error": "This device is not subscribed on the server. Turn notifications off and on again."}, status_code=404)
+    now = time.monotonic()
+    last = _last_test_at.get(endpoint)
+    if last is not None and now - last < _TEST_COOLDOWN_SECONDS:
+        return JSONResponse({"error": "Wait a few seconds before sending another test."}, status_code=429)
+    _last_test_at[endpoint] = now
+    if not pm.configured:
+        return JSONResponse({"error": "Web Push is not configured on this server."}, status_code=502)
+    accepted = await asyncio.to_thread(pm.send_test, endpoint)
+    if not accepted:
+        return JSONResponse({"error": "The push service did not accept the test notification."}, status_code=502)
+    return JSONResponse({"ok": True, "accepted": True})

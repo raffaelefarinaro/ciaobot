@@ -527,14 +527,13 @@ def test_case_variant_of_alias_type_is_safe_rename_not_promotion(tmp_path: Path)
 
 
 def test_established_tag_tier_uses_configured_threshold(tmp_path: Path, monkeypatch):
-    """VOCAB_PROMOTION_THRESHOLD must drive the established-tag tier in
+    """The promotion threshold must drive the established-tag tier in
     VOCABULARY.md, not just the promotion proposals — one value classifies
     both, so a six-use tag with threshold 10 is neither established in the
     vocabulary nor a promotion candidate."""
     from ciao import vault_index as vi_mod
 
-    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "10")
-    assert vi_mod.promotion_threshold() == 10
+    monkeypatch.setattr(vi_mod, "DEFAULT_PROMOTION_THRESHOLD", 10)
 
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -560,7 +559,7 @@ def test_emerging_tier_upper_bound_tracks_configured_threshold(tmp_path: Path, m
     VOCABULARY.md entirely."""
     from ciao import vault_index as vi_mod
 
-    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "10")
+    monkeypatch.setattr(vi_mod, "DEFAULT_PROMOTION_THRESHOLD", 10)
     vault = tmp_path / "vault"
     vault.mkdir()
     for i in range(6):
@@ -599,19 +598,6 @@ def test_migration_renames_case_variant_of_canonical(tmp_path: Path):
     summary = migrate_vault_vocabulary(vault, apply=False)
     assert summary["unresolved"] == {}
     assert any(c["from"] == "Note" and c["to"] == "note" for c in summary["planned"])
-
-
-def test_promotion_threshold_rejects_one(tmp_path: Path, monkeypatch):
-    """A threshold of 1 would classify every one-use tag as both candidate and
-    established and describe an impossible emerging range; it must be rejected
-    in favor of the default."""
-    from ciao import vault_index as vi_mod
-
-    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "1")
-    assert vi_mod.promotion_threshold() == vi_mod.DEFAULT_PROMOTION_THRESHOLD
-    # A threshold of 2 is accepted.
-    monkeypatch.setenv("VOCAB_PROMOTION_THRESHOLD", "2")
-    assert vi_mod.promotion_threshold() == 2
 
 
 def test_audit_preserves_empty_shared_vault_stamp(tmp_path: Path):
@@ -845,3 +831,92 @@ def test_tag_repeated_in_one_note_counts_once(tmp_path: Path):
     assert vi_mod.vocabulary_report(entries)["tags"] == {"research": 1}
     proposals = generate_vocabulary_proposals(entries, threshold=5)
     assert proposals["tag_promotions"] == []
+
+
+# ---- Category clusters (issue #647) -----------------------------------------
+#
+# The deterministic half: ONE unlisted ``type:`` used by three or more notes.
+# The threshold is its own constant and the >=5 ``os_audit`` one above is
+# untouched, so a cluster of three is still a one-off to the audit and a
+# category worth asking the owner about here.
+
+
+def _cluster(tmp_path: Path, type_: str, count: int) -> list[vi.Entry]:
+    vault = tmp_path / "vault"
+    vault.mkdir(exist_ok=True)
+    for i in range(count):
+        _write(vault / f"Note{i}.md", _note_body(type_=type_, title=f"Note{i}"))
+    return vi.scan_vault(vault)
+
+
+def test_a_three_note_cluster_is_a_category_candidate(tmp_path: Path):
+    """Exactly the threshold fires, and it carries the four suggestions."""
+    from ciao.vocabulary_proposals import CATEGORY_CLUSTER_THRESHOLD, category_candidates
+
+    assert CATEGORY_CLUSTER_THRESHOLD == 3
+    entries = _cluster(tmp_path, "recipe-book", 3)
+    candidates = category_candidates(entries)
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate["type_id_suggestion"] == "recipe-book"
+    assert candidate["label_suggestion"] == "Recipe Book"
+    assert candidate["folder_suggestion"] == "Recipe Books"
+    assert candidate["description"]
+    assert candidate["count"] == 3
+    assert len(candidate["paths"]) == 3
+    # The raw spelling rides along: it is the baseline an accept compares each
+    # note's own `type:` against before retyping it.
+    assert candidate["raw_type"] == "recipe-book"
+
+
+def test_a_two_note_cluster_is_not_a_category(tmp_path: Path):
+    """Two notes is a spelling, not a category: the one-off the audit already
+    reports and nobody is asked about."""
+    from ciao.vocabulary_proposals import category_candidates
+
+    assert category_candidates(_cluster(tmp_path, "recipe-book", 2)) == []
+
+
+def test_an_aliased_type_is_a_rename_not_a_category(tmp_path: Path):
+    """`doc` is an alias of `document`, so its drift already has a target and
+    the safe-rename path owns it. Proposing a `doc` CATEGORY would put a second
+    spelling of an existing category into the registry."""
+    from ciao.vocabulary_proposals import category_candidates
+
+    entries = _cluster(tmp_path, "doc", 5)
+    assert vi.vocabulary_report(entries)["type_drift"]["doc"]["suggested"] == "document"
+    assert category_candidates(entries) == []
+
+
+def test_a_declined_category_id_is_not_offered_again(tmp_path: Path):
+    from ciao.vocabulary_proposals import category_candidates
+
+    entries = _cluster(tmp_path, "recipe-book", 3)
+    assert category_candidates(entries, declined=["recipe-book"]) == []
+    # The set is by id, so an unrelated refusal does not silence this one.
+    assert len(category_candidates(entries, declined=["cookbook"])) == 1
+
+
+def test_a_type_the_registry_already_knows_is_not_a_category(tmp_path: Path):
+    """The vault's own list is the closed set: a category the owner already
+    added is canonical there, so it can never be proposed a second time."""
+    from ciao import entity_types
+    from ciao.vocabulary_proposals import category_candidates
+
+    entries = _cluster(tmp_path, "recipe-book", 3)
+    registry = entity_types.EntityTypeRegistry(
+        [
+            *entity_types.stock_entity_type_registry().entries(),
+            entity_types.EntityType(id="recipe-book", label="Recipe book"),
+        ]
+    )
+    assert category_candidates(entries, registry=registry) == []
+    assert len(category_candidates(entries)) == 1
+
+
+def test_a_raw_type_that_cannot_become_an_id_is_skipped(tmp_path: Path):
+    """`---` is drift, but no kebab-case id can be derived from it. Queuing it
+    would file a row every accept then has to refuse."""
+    from ciao.vocabulary_proposals import category_candidates
+
+    assert category_candidates(_cluster(tmp_path, "---", 3)) == []

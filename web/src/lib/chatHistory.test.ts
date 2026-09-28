@@ -194,6 +194,11 @@ describe('toChatMessage', () => {
       timestamp: 'T', turn_index: 4, unattended: true, effective_model: 'm', i: 9, lazy: true, full_length: 400,
     })
   })
+
+  test('keeps the notes a user message was matched to', () => {
+    const entities = [{ name: 'Mo', path: 'work/People/Mo.md', category: 'person' }]
+    expect(toChatMessage({ role: 'user', content: 'q', context_entities: entities }).context_entities).toEqual(entities)
+  })
 })
 
 describe('isLiveTraceRow', () => {

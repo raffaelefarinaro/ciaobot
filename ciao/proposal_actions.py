@@ -37,18 +37,16 @@ from ciao import proposal_kinds
 # Every accept descriptor a queued kind can carry. Spelled out here rather
 # than passed as a bare action string so a caller cannot hand this module a
 # region it read off a descriptor that has none.
-AcceptDescriptor = (
-    proposal_kinds.RegionAccept
-    | proposal_kinds.RehomeAccept
-    | proposal_kinds.DocFoldAccept
-    | proposal_kinds.PeopleAccept
-    | proposal_kinds.LearningsAccept
-    | proposal_kinds.ReviewAccept
-)
+AcceptDescriptor = proposal_kinds.AcceptDescriptor
 
 # The accept actions that write to a named destination file rather than to a
 # bounded region of the workspace guide. They share one result shape.
-_DESTINATION_ACTIONS = ("fold_doc", "write_people_note", "append_learnings")
+_DESTINATION_ACTIONS = (
+    "fold_doc",
+    "write_people_note",
+    "append_learnings",
+    "add_category",
+)
 
 
 @dataclass(frozen=True)
@@ -221,6 +219,16 @@ def record_decision(
     dedupe compares a re-extracted fact against it, so an accept promoted with
     edited wording is unmatchable by text and the receipt reference is the only
     way back to what actually landed. A dismiss writes nothing and so has none.
+
+    A category refusal is the one decision that has to outlive its row by ID
+    rather than by text. A category proposal is regenerated from the vault on
+    every pass, so the text dedupe below has nothing left to match the moment the
+    row is gone and the same cluster comes straight back. That flag is therefore
+    written by the caller BEFORE the bullet is removed — see
+    :func:`ciao.web.proposal_service.decline_category_row` — so a refusal that
+    could not be recorded keeps its row instead of being reported as one, and it
+    is not this function's to write: by the time a decision is recorded the row
+    is already out of the queue, which is too late for it to matter.
 
     Imports are deferred so a test that patches ``ciao.memory_proposals`` or
     ``ciao.proposal_outcomes`` still sees its patch honoured here.

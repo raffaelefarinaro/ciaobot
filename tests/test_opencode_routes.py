@@ -280,7 +280,9 @@ def test_opencode_subagents_read_child_sessions(
         "description": "Research it",
         "subagent_type": "opencode",
         "is_async": True,
-        "status": "completed",
+        # The fake read has no live-process activity metadata; unknown must
+        # remain conservative rather than settling a possibly-running child.
+        "status": "running",
         "turn_index": 0,
     }]
 

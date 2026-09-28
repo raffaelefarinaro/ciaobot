@@ -44,6 +44,10 @@ export const useTaskStore = defineStore('tasks', () => {
   const models = ref<ModelsResponse | null>(null)
   const stats = ref<CliStats | null>(null)
   const loading = ref(false)
+  const scheduleLoading = ref(false)
+  const scheduleLoadError = ref('')
+  const schedulesLoaded = ref(false)
+  let scheduleRequestId = 0
 
   // Interval schedules bound to one existing chat -- the cadence that replaced
   // loops. Kept as one shared lookup because Home, the sidebar, and the chat
@@ -61,8 +65,25 @@ export const useTaskStore = defineStore('tasks', () => {
     return byChat
   })
 
-  async function fetchSchedules() {
-    schedules.value = await api.get<Schedule[]>('/api/schedules')
+  async function fetchSchedules(): Promise<void> {
+    const requestId = ++scheduleRequestId
+    scheduleLoading.value = true
+    scheduleLoadError.value = ''
+    try {
+      const next = await api.get<Schedule[]>('/api/schedules')
+      if (requestId !== scheduleRequestId) return
+      schedules.value = next
+      schedulesLoaded.value = true
+    } catch (error: unknown) {
+      if (requestId === scheduleRequestId) {
+        scheduleLoadError.value = error instanceof Error
+          ? error.message
+          : 'Could not load automations.'
+      }
+      throw error
+    } finally {
+      if (requestId === scheduleRequestId) scheduleLoading.value = false
+    }
   }
 
   async function fetchStatus() {
@@ -83,8 +104,11 @@ export const useTaskStore = defineStore('tasks', () => {
 
   async function fetchAll() {
     loading.value = true
-    await Promise.all([fetchSchedules(), fetchStatus(), fetchModels(), fetchStats()])
-    loading.value = false
+    try {
+      await Promise.all([fetchSchedules(), fetchStatus(), fetchModels(), fetchStats()])
+    } finally {
+      loading.value = false
+    }
   }
 
   async function updateStatus(updates: { model?: string; mode?: string }) {
@@ -166,6 +190,7 @@ export const useTaskStore = defineStore('tasks', () => {
 
   return {
     schedules, intervalsByChat, status, models, stats, loading,
+    scheduleLoading, scheduleLoadError, schedulesLoaded,
     fetchSchedules, fetchStatus, fetchModels, fetchStats, fetchAll,
     createSchedule, runScheduleNow, updateSchedule, deleteSchedule, updateStatus,
   }

@@ -6,32 +6,33 @@
       class="pop-backdrop"
       @click="onBackdropClick"
     ></div>
-    <div
+    <FocusScope
       v-if="popover && comment"
-      class="pop"
-      :style="{ top: popover.top + 'px', left: popover.left + 'px' }"
-      @mousedown.stop
-      @mouseenter="onPopoverEnter"
-      @mouseleave="onPopoverLeave"
+      as-child
+      loop
+      :trapped="false"
+      @mount-auto-focus="onMountAutoFocus"
+      @unmount-auto-focus="onUnmountAutoFocus"
     >
-      <div class="pop-header">
+      <div
+        ref="popEl"
+        class="pop"
+        role="dialog"
+        aria-label="Comment"
+        :style="{ top: popover.top + 'px', left: popover.left + 'px' }"
+        @mousedown.stop
+        @mouseenter="onPopoverEnter"
+        @mouseleave="onPopoverLeave"
+        @keydown="onKeydown"
+      >
+        <div v-if="comment.selection" class="pop-quote">“{{ comment.selection.length > 60 ? `${comment.selection.slice(0, 57)}…` : comment.selection }}”</div>
+        <div class="pop-note">{{ comment.comment }}</div>
         <div class="pop-actions">
-          <button class="pop-btn-edit" @click.stop="onEdit" title="Edit">✎</button>
-          <button class="pop-btn-remove" @click.stop="onDelete" title="Delete">×</button>
+          <button type="button" class="pop-btn-edit" @click.stop="onEdit">Edit</button>
+          <button type="button" class="pop-btn-remove" @click.stop="onDelete">Delete</button>
         </div>
       </div>
-      <div v-if="comment.images?.length" class="pop-images">
-        <img
-          v-for="img in comment.images"
-          :key="img"
-          :src="`/api/images/${img}`"
-          :alt="img"
-          class="pop-thumb"
-          @click.stop
-        />
-      </div>
-      <div class="pop-note">{{ comment.comment }}</div>
-    </div>
+    </FocusScope>
   </Teleport>
 </template>
 
@@ -47,11 +48,14 @@
 //
 // The parent drives it imperatively through the exposed handlers, which it binds
 // at event time rather than render time so the ref is not a render dependency.
-import { computed, watch } from 'vue'
+import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
+import { FocusScope } from 'reka-ui'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
+import { useViewportHeight } from '../composables/useViewportHeight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
+import { onViewportChange, viewportWidth } from '../lib/viewport'
 
-type ChatComment = { id: string; comment: string; images?: string[] }
+type ChatComment = { id: string; comment: string; selection?: string; images?: string[] }
 
 const emit = defineEmits<{
   (e: 'edit', comment: ChatComment): void
@@ -72,14 +76,28 @@ function highlightFromEvent(e: MouseEvent): HTMLElement | null {
 }
 
 const POP_WIDTH = 280
-const POP_HEIGHT = 80
+const POP_FALLBACK_HEIGHT = 80
+const measuredHeight = ref(POP_FALLBACK_HEIGHT)
+
+// The box is position: fixed, so its containing block is the visual viewport,
+// not the layout viewport. Keep both dimensions reactive: iOS can shrink the
+// visible height for the software keyboard and rotation can narrow the width
+// after the popover has already been opened.
+const viewportH = useViewportHeight()
+const viewportW = ref(viewportWidth())
+const stopViewportChange = onViewportChange(() => {
+  viewportW.value = viewportWidth()
+})
+onScopeDispose(stopViewportChange)
+
+const popEl = ref<HTMLElement | null>(null)
 
 // Clamped to the viewport, since the popover is position: fixed.
 function anchorFromElement(el: HTMLElement): { top: number; left: number } {
   const rect = el.getBoundingClientRect()
   return {
-    top: clampAnchorTop(rect.bottom + 6, POP_HEIGHT),
-    left: clampAnchorLeft(rect.left, POP_WIDTH),
+    top: clampAnchorTop(rect.bottom + 6, measuredHeight.value, viewportH.value),
+    left: clampAnchorLeft(rect.left, POP_WIDTH, viewportW.value),
   }
 }
 
@@ -93,6 +111,7 @@ const {
   onTargetOut,
   onPopoverEnter,
   onPopoverLeave,
+  reposition,
 } = useHoverPinPopover<ChatComment>({
   resolveTarget: highlightFromEvent,
   anchorFor: anchorFromElement,
@@ -101,9 +120,67 @@ const {
 })
 
 let pinTimestamp = 0
-watch(() => popover.value?.pinned, (pinned) => {
-  if (pinned) pinTimestamp = Date.now()
+function measureAndReposition(): void {
+  nextTick(() => {
+    const height = popEl.value?.offsetHeight
+    if (height) measuredHeight.value = height
+    reposition()
+  })
+}
+
+watch(() => popover.value?.id, () => {
+  measuredHeight.value = POP_FALLBACK_HEIGHT
+  measureAndReposition()
 })
+watch(() => comment.value?.images?.length, measureAndReposition)
+
+watch(() => popover.value?.pinned, (pinned) => {
+  if (pinned) {
+    pinTimestamp = Date.now()
+    // A hover preview must never steal focus. Once the user has explicitly
+    // pinned it, focus the first action so keyboard users can edit/delete
+    // without tabbing through the transcript first.
+    nextTick(() => popEl.value?.querySelector<HTMLElement>('button')?.focus())
+  }
+})
+
+// Re-clamp an already-open popover when the software keyboard or orientation
+// changes. `onViewportChange` is intentionally used instead of a scroll
+// listener: iOS visualViewport scroll events fire while the caret is being
+// kept visible and must not make this box jump.
+watch([viewportH, viewportW], () => {
+  if (popover.value) reposition()
+})
+
+let skipNextFocusRestore = false
+
+function onMountAutoFocus(event: Event): void {
+  // FocusScope is used as an app-specific bridge here, not as a modal: hover
+  // previews are informational and must not move focus out of the transcript.
+  // Explicit pins are focused by the watcher above.
+  event.preventDefault()
+}
+
+function onUnmountAutoFocus(event: Event): void {
+  // Edit/Delete immediately hand focus to the composer or the next action;
+  // allowing the old scope's deferred restoration to run would steal it back.
+  if (skipNextFocusRestore) {
+    skipNextFocusRestore = false
+    event.preventDefault()
+  }
+}
+
+function closeForHandoff(): void {
+  skipNextFocusRestore = true
+  close()
+}
+
+function onKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Escape') return
+  event.preventDefault()
+  event.stopPropagation()
+  close()
+}
 
 function onBackdropClick(): void {
   if (Date.now() - pinTimestamp < 150) return
@@ -128,14 +205,14 @@ function pinFromEvent(e: MouseEvent): string | null {
 function onEdit(): void {
   if (!comment.value) return
   const c = comment.value
-  close()
+  closeForHandoff()
   emit('edit', c)
 }
 
 function onDelete(): void {
   if (!comment.value) return
   const id = comment.value.id
-  close()
+  closeForHandoff()
   emit('delete', id)
 }
 
@@ -147,47 +224,64 @@ defineExpose({ show, close, clearPendingClose, onTargetOver, onTargetOut, pinFro
   position: fixed;
   inset: 0;
   z-index: 40;
-  background: rgba(0, 0, 0, 0.32);
+  background: color-mix(in srgb, var(--bg) 40%, transparent);
 }
 .pop {
   position: fixed;
   z-index: 41;
   width: 280px;
   max-width: calc(100vw - 16px);
-  background: var(--bg);
-  border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--accent, #60a5fa);
-  border-radius: 8px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
-  padding: 8px 12px 10px;
   box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg2);
+  box-shadow: 0 14px 36px rgb(0 0 0 / 28%);
+  font-size: var(--text-sm);
 }
-.pop-header {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  margin-bottom: 2px;
+.pop-quote {
+  margin-bottom: 4px;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+.pop-note {
+  margin: 0;
+  color: var(--fg);
+  line-height: 1.45;
+  word-break: break-word;
 }
 .pop-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 12px;
+  margin-top: 6px;
 }
 .pop-btn-edit,
 .pop-btn-remove {
+  min-height: 28px;
+  padding: 0;
+  border: 0;
   background: transparent;
-  border: none;
-  color: var(--fg2);
-  font-size: 13px;
-  line-height: 1;
-  padding: 2px 4px;
-  border-radius: 4px;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
   cursor: pointer;
 }
 .pop-btn-edit:hover,
 .pop-btn-remove:hover {
-  background: var(--bg2);
-  color: var(--fg);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.pop-btn-edit:focus-visible,
+.pop-btn-remove:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+@media (pointer: coarse) {
+  .pop-btn-edit,
+  .pop-btn-remove { min-height: var(--touch); }
 }
 .pop-images {
   display: flex;
@@ -202,10 +296,5 @@ defineExpose({ show, close, clearPendingClose, onTargetOver, onTargetOut, pinFro
   border-radius: 4px;
   border: 1px solid var(--border);
   background: var(--bg);
-}
-.pop-note {
-  margin: 0;
-  color: var(--fg);
-  word-break: break-word;
 }
 </style>

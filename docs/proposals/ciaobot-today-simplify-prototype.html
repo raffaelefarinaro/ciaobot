@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Today, simplified</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #1a1a2e; --bg2: #1f2240; --bg3: #2a2e54; --bg-elev: #23264a;
+    --fg: #e8e8f0; --fg2: #b4b4c4; --fg3: #8f90a8;
+    --accent: #ff4d6d; --accent-strong: #ff2e54; --accent2: #6a47b8; --on-accent: #1a1a2e;
+    --border: #2e3258; --border-strong: #3a3f70; --success: #4caf50; --warning: #ff9800;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, "Fira Code", monospace;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f4f4fa; --bg2: #ffffff; --bg3: #e6e8f4; --bg-elev: #fcfcfd;
+    --fg: #1a1a2e; --fg2: #5f607d; --fg3: #66687f;
+    --accent: #d81b60; --accent-strong: #b00d46; --accent2: #512da8; --on-accent: #fff;
+    --border: #d2d4e3; --border-strong: #b6b8cf;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.5 var(--sans); }
+  ::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+  button, textarea { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  svg.i { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  svg.i-sm { width: 14px; height: 14px; }
+
+  /* Prototype chrome — not part of the design */
+  .lab { display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--bg2); font-size: 12px; color: var(--fg2); flex-wrap: wrap; }
+  .lab strong { color: var(--fg); }
+  .seg { display: inline-flex; padding: 2px; border: 1px solid var(--border); border-radius: 8px; margin-left: auto; }
+  .seg button { min-height: 30px; padding: 0 12px; border: 0; border-radius: 6px; background: none; cursor: pointer; color: var(--fg2); }
+  .seg button[aria-pressed="true"] { background: var(--bg3); color: var(--fg); font-weight: 600; }
+  .lab-btn { min-height: 34px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: none; cursor: pointer; }
+
+  .frame { display: flex; min-height: calc(100vh - 51px); }
+  .side { width: 300px; flex: none; display: flex; flex-direction: column; gap: 10px; padding: 12px; border-right: 1px solid var(--border); background: var(--bg2); }
+  .brand { display: flex; align-items: center; gap: 9px; padding: 2px 4px 4px; font: 700 16px var(--mono); }
+  .brand-glyph { width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid var(--accent); border-radius: 6px; color: var(--accent); }
+  .brand .toggle { margin-left: auto; color: var(--fg3); }
+  .ws { position: relative; }
+  .ws-btn { width: 100%; min-height: 44px; display: flex; align-items: center; gap: 9px; padding: 0 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-elev); cursor: pointer; text-align: left; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+  .ws-name { flex: 1; font-weight: 650; }
+  .menu { position: absolute; z-index: 5; top: calc(100% + 4px); left: 0; right: 0; padding: 4px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--bg2); box-shadow: 0 16px 40px rgb(0 0 0 / 30%); }
+  .menu[hidden] { display: none; }
+  .opt { width: 100%; min-height: 40px; display: flex; align-items: center; gap: 9px; padding: 0 9px; border: 0; border-radius: 6px; background: none; cursor: pointer; text-align: left; }
+  .opt:hover, .opt[aria-current="true"] { background: var(--bg3); }
+  .opt .meta { margin-left: auto; color: var(--fg3); font: 11px var(--mono); }
+  .opt .need { color: var(--accent); font: 600 11px var(--sans); }
+  .new { min-height: 40px; display: flex; align-items: center; gap: 9px; padding: 0 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); cursor: pointer; font-weight: 600; }
+  .new:hover { border-color: var(--accent); }
+  .new .plus { color: var(--accent); font-size: 19px; line-height: 1; }
+  nav { display: grid; gap: 2px; }
+  .nav { position: relative; min-height: 38px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border: 1px solid transparent; border-radius: 7px; color: var(--fg2); text-decoration: none; }
+  .nav:hover { background: var(--bg-elev); color: var(--fg); }
+  .nav.on { color: var(--fg); background: color-mix(in srgb, var(--accent) 13%, transparent); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+  .nav.on svg { color: var(--accent); }
+  .signal { margin-left: auto; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  .count { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: #e53935; color: #fff; font: 700 10px/18px var(--mono); text-align: center; }
+  .keycap { min-width: 19px; height: 19px; padding: 0 4px; display: inline-grid; place-items: center; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--fg3); font: 700 10px var(--mono); }
+  .label { padding: 10px 10px 2px; color: var(--fg3); font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+  .row { min-height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-radius: 7px; color: var(--fg2); }
+  .row.proj { font-weight: 600; }
+  .row.chat { padding-left: 28px; }
+  .row:hover { background: var(--bg-elev); color: var(--fg); }
+
+  main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .top { min-height: 58px; display: flex; align-items: center; gap: 12px; padding: 0 24px; border-bottom: 1px solid var(--border); }
+  .top .view { font-weight: 650; }
+  .top .crumb-scope { font-weight: 650; }
+  .top .sep, .top .crumb-view { color: var(--fg3); }
+  .host { margin-left: auto; display: flex; align-items: center; gap: 6px; color: var(--fg2); font-size: 12px; }
+  .host .dot { width: 7px; height: 7px; background: var(--success); }
+  .menu-btn { display: none; width: 44px; height: 44px; margin-left: -12px; border: 0; background: none; place-items: center; }
+
+  .bench { width: 100%; max-width: 1240px; margin: 0 auto; padding: 56px 32px 40px; display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 56px; align-items: start; }
+  .col { min-width: 0; }
+  .eyebrow { margin: 0 0 10px; color: var(--fg3); font: 600 11px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+  h1 { margin: 0 0 24px; font-size: clamp(28px, 3vw, 40px); line-height: 1.08; letter-spacing: -.04em; font-weight: 650; text-wrap: balance; }
+  [data-state="before"] h1 { font-size: clamp(32px, 4.3vw, 57px); letter-spacing: -.055em; line-height: 1.03; margin-bottom: 12px; }
+  .lede { max-width: 570px; margin: 0 0 26px; color: var(--fg2); font-size: 16px; }
+
+  .composer { border: 1px solid var(--border-strong); border-radius: 15px; background: var(--bg2); padding: 7px; box-shadow: 0 18px 50px rgb(0 0 0 / 14%); }
+  .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong)); }
+  .composer textarea { width: 100%; min-height: 108px; resize: none; border: 0; outline: 0; background: none; padding: 12px 12px 8px; font-size: 17px; }
+  .composer textarea::placeholder { color: var(--fg3); }
+  .bar { display: flex; align-items: center; gap: 6px; padding: 6px 4px 2px 6px; border-top: 1px solid var(--border); }
+  .chip { position: relative; min-height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); color: var(--fg2); font-size: 13px; cursor: pointer; white-space: nowrap; }
+  .chip:hover, .chip[aria-expanded="true"] { border-color: var(--border-strong); color: var(--fg); }
+  .chip .ic { color: var(--accent); }
+  .chip .mdot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent2); }
+  .chip.readonly { cursor: default; }
+  .note { color: var(--fg3); font-size: 12px; }
+  .spacer { flex: 1; }
+  .kbd { color: var(--fg3); font: 11px var(--mono); }
+  .send { width: 36px; height: 36px; display: grid; place-items: center; border: 0; border-radius: 9px; background: var(--accent); color: var(--on-accent); cursor: pointer; }
+  .send:hover { background: var(--accent-strong); }
+  .model-menu { position: absolute; z-index: 6; left: 0; top: calc(100% + 6px); width: 260px; padding: 6px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg2); box-shadow: 0 16px 40px rgb(0 0 0 / 30%); color: var(--fg); text-align: left; white-space: normal; cursor: default; }
+  .model-menu[hidden] { display: none; }
+  .mm-sec { padding: 8px 8px 4px; color: var(--fg3); font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+  .mm-opt { width: 100%; min-height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border: 0; border-radius: 6px; background: none; cursor: pointer; text-align: left; font-size: 13px; }
+  .mm-opt:hover { background: var(--bg3); }
+  .mm-opt .def { margin-left: auto; color: var(--fg3); font-size: 11px; }
+  .mm-opt[aria-checked="true"] { color: var(--accent); font-weight: 600; }
+
+  h2 { margin: 0; font-size: 16px; letter-spacing: -.02em; font-weight: 650; }
+  .continue { margin-top: 48px; }
+  .lane-head { display: flex; align-items: center; gap: 8px; min-height: 40px; color: var(--fg3); font-size: 12px; }
+  .lane-head .n { font-weight: 650; color: var(--fg2); font-size: 13px; }
+  .lane-head .plusnew { margin-left: auto; }
+  .tier { margin-top: 14px; padding-bottom: 4px; border-bottom: 1px solid var(--border); color: var(--fg3); font: 11px var(--mono); }
+  .chat-row { min-height: 60px; display: flex; align-items: center; gap: 16px; padding: 9px 2px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .chat-row:hover .t { color: var(--accent); }
+  .chat-row .m { flex: 1; min-width: 0; }
+  .t { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .s { display: block; color: var(--fg3); font-size: 12px; }
+  .s .wait { color: var(--accent); }
+  .time { color: var(--fg3); font: 11px var(--mono); }
+  .q { display: block; margin-top: 3px; color: var(--fg); font-size: 13px; }
+  .needs { padding-left: 12px; box-shadow: inset 2px 0 0 var(--accent); }
+  .live { width: 8px; height: 8px; border-radius: 50%; background: var(--accent2); flex: none; animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  .rail h2 { margin-bottom: 12px; }
+  .rail .intro { margin: -6px 0 14px; color: var(--fg2); font-size: 13px; }
+  .pulse { display: flex; align-items: flex-start; gap: 11px; padding: 14px 0; border-top: 1px solid var(--border); cursor: pointer; }
+  .pulse:last-of-type { border-bottom: 1px solid var(--border); }
+  .pulse:hover .pt { color: var(--accent); }
+  .picon { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 7px; color: var(--accent); flex: none; }
+  .pt { display: block; font-size: 13px; font-weight: 650; }
+  .pn { display: block; color: var(--fg2); font-size: 12px; }
+  .pa { margin-left: auto; color: var(--fg3); font: 11px var(--mono); }
+  .rail-link { display: inline-flex; align-items: center; gap: 5px; margin-top: 12px; min-height: 36px; color: var(--accent); font-size: 12px; text-decoration: none; }
+  .clear { padding: 14px 0; border-top: 1px solid var(--border); color: var(--fg3); font-size: 13px; }
+
+  /* Before-only noise, so the toggle shows what goes */
+  [data-state="after"] .before-only { display: none !important; }
+  [data-state="before"] .after-only { display: none !important; }
+
+  @media (max-width: 1000px) { .bench { grid-template-columns: 1fr; gap: 36px; } }
+  @media (max-width: 720px) {
+    .side { display: none; }
+    .menu-btn { display: inline-grid; }
+    .top { padding: 0 16px; }
+    .host { display: none; }
+    .bench { padding: 28px 16px; }
+    h1, [data-state="before"] h1 { font-size: 28px; }
+    .composer textarea { font-size: 16px; min-height: 92px; }
+    .chip, .send { min-height: 44px; }
+    .send { width: 44px; height: 44px; }
+    .note, .kbd { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) { .live { animation: none; } }
+</style>
+</head>
+<body>
+<div class="lab" role="region" aria-label="Prototype controls">
+  <strong>Today — simplify pass</strong>
+  <span>Toggle to compare. Click the model chip to open the picker.</span>
+  <div class="seg" role="group" aria-label="Version">
+    <button type="button" data-set="before" aria-pressed="false">Shipped</button>
+    <button type="button" data-set="after" aria-pressed="true">Proposed</button>
+  </div>
+  <button type="button" class="lab-btn" id="theme">Light / dark</button>
+</div>
+
+<div class="frame" id="app" data-state="after">
+  <aside class="side" aria-label="Sidebar">
+    <div class="brand"><span class="brand-glyph">›</span>ciaobot
+      <svg class="i toggle" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M9 4v16"/></svg>
+    </div>
+    <div class="ws">
+      <button type="button" class="ws-btn" id="ws-btn" aria-haspopup="menu" aria-expanded="false">
+        <span class="dot"></span><span class="ws-name">Personal</span>
+        <span class="count before-only">1</span><span class="keycap before-only">1</span>
+        <svg class="i i-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5"/></svg>
+      </button>
+      <div class="menu" id="ws-menu" role="menu" hidden>
+        <button class="opt" role="menuitem" aria-current="true"><span class="dot"></span>Personal<span class="meta">1</span></button>
+        <button class="opt" role="menuitem"><span class="dot" style="background:#38bdf8"></span>Work<span class="need after-only" style="margin-left:auto">2 need you</span><span class="meta after-only" style="margin-left:8px">2</span><span class="meta before-only">2</span></button>
+      </div>
+    </div>
+    <button type="button" class="new"><span class="plus">+</span>New chat<span class="keycap before-only" style="margin-left:auto">⌘T</span></button>
+    <nav aria-label="Primary">
+      <a class="nav on" href="#"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14"/><path d="M6 9h8M6 13h12"/></svg>Today<span class="count before-only">3</span><span class="signal after-only" title="3 chats need you"></span></a>
+      <a class="nav" href="#"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18"/><path d="M12 8v4l3 2"/></svg>Automations</a>
+      <a class="nav" href="#"><svg class="i" viewBox="0 0 24 24"><path d="M4 4h16v12H4zM4 16h16v4H4zM8 8h8"/></svg>Memory<span class="count before-only">16</span></a>
+      <a class="nav" href="#"><svg class="i" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>Settings</a>
+    </nav>
+    <div class="label">Projects</div>
+    <div class="row proj">General</div>
+    <div class="row chat">Prepare launch brief</div>
+    <div class="row proj">Launch notes</div>
+    <div class="row chat">Review memory proposals</div>
+    <div class="row proj">Research</div>
+  </aside>
+
+  <main>
+    <header class="top">
+      <button class="menu-btn" aria-label="Open sidebar"><svg class="i" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <span class="before-only"><span class="crumb-scope">Personal</span> <span class="sep">/</span> <span class="crumb-view">Today</span></span>
+      <span class="view after-only">Today</span>
+      <span class="host"><span class="dot"></span>Host</span>
+    </header>
+
+    <div class="bench">
+      <div class="col">
+        <p class="eyebrow before-only">Good evening · Personal</p>
+        <h1>What should Ciao work on?</h1>
+        <p class="lede before-only">Describe the outcome. Ciao brings the project's context, runs the work, and leaves a durable trail you can still own.</p>
+
+        <form class="composer" onsubmit="return false" aria-label="Start a new chat">
+          <label for="prompt" style="position:absolute;left:-9999px">Ask Ciao to do something</label>
+          <textarea id="prompt" placeholder="Describe a task or ask a question"></textarea>
+          <div class="bar">
+            <button type="button" class="chip" aria-haspopup="dialog" title="Project for the new chat">
+              <svg class="i i-sm ic" viewBox="0 0 24 24"><path d="M3.5 7.5h6l2-2h9v13h-17z"/></svg>General
+              <svg class="i i-sm" viewBox="0 0 24 24"><path d="m7 9 5 5 5-5"/></svg>
+            </button>
+            <span class="chip readonly before-only"><span class="mdot"></span>opencode</span>
+            <button type="button" class="chip after-only" id="model-btn" aria-haspopup="listbox" aria-expanded="false" title="Model for the new chat">
+              <span class="mdot"></span><span id="model-label">opencode default</span>
+              <svg class="i i-sm" viewBox="0 0 24 24"><path d="m7 9 5 5 5-5"/></svg>
+              <span class="model-menu" id="model-menu" role="listbox" hidden>
+                <span class="mm-sec">Workspace default</span>
+                <span class="mm-opt" role="option" aria-checked="true" data-model="opencode default">opencode default<span class="def">inherits</span></span>
+                <span class="mm-sec">Claude</span>
+                <span class="mm-opt" role="option" data-model="Opus">Opus</span>
+                <span class="mm-opt" role="option" data-model="Sonnet">Sonnet</span>
+                <span class="mm-opt" role="option" data-model="Haiku">Haiku</span>
+                <span class="mm-sec">opencode</span>
+                <span class="mm-opt" role="option" data-model="gpt-5.2">openai/gpt-5.2</span>
+                <span class="mm-opt" role="option" data-model="gemini-3-pro">google/gemini-3-pro</span>
+              </span>
+            </button>
+            <span class="note before-only">context is added automatically</span>
+            <span class="spacer"></span>
+            <span class="kbd after-only">⌘↩</span>
+            <button type="submit" class="send" aria-label="New"><svg class="i i-sm" viewBox="0 0 24 24"><path d="m5 12 14-7-4 14-3-6z"/><path d="M12 13 19 5"/></svg></button>
+          </div>
+        </form>
+
+        <section class="continue" aria-labelledby="c-h">
+          <h2 id="c-h">Continue where you left off</h2>
+          <div class="lane-head before-only"><span class="keycap">1</span><span class="n">Personal</span>1 chat needs your attention. 1 agent still working.<span class="plusnew">+ new</span></div>
+          <div class="tier">needs you</div>
+          <div class="chat-row needs"><span class="m"><span class="t">Prepare launch brief</span><span class="s">Launch notes · <span class="wait">waiting for you</span></span><span class="q">Which launch date should we use?</span></span><span class="time">4m</span></div>
+          <div class="tier">working</div>
+          <div class="chat-row"><span class="m"><span class="t">Weekly planning</span><span class="s">Research · agent is working</span></span><span class="live" aria-hidden="true"></span><span class="time">now</span></div>
+          <div class="tier">earlier</div>
+          <div class="chat-row"><span class="m"><span class="t">Review memory proposals</span><span class="s">General · no new activity</span></span><span class="time">2d</span></div>
+          <div class="chat-row"><span class="m"><span class="t">Trip budget</span><span class="s">General · no new activity</span></span><span class="time">1w</span></div>
+        </section>
+      </div>
+
+      <aside class="rail" aria-labelledby="r-h">
+        <p class="eyebrow before-only">Memory pulse</p>
+        <h2 id="r-h">What changed</h2>
+        <p class="intro before-only">The useful outcome of your work, not a second inbox.</p>
+        <div class="pulse"><span class="picon before-only"><svg class="i i-sm" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg></span><span><span class="pt">16 memory proposals</span><span class="pn">Durable facts are ready to accept, edit, or reject.</span></span><span class="pa before-only">review</span></div>
+        <div class="pulse before-only"><span class="picon"><svg class="i i-sm" viewBox="0 0 24 24"><path d="M5 4h10a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z"/></svg></span><span><span class="pt">Notes to revisit</span><span class="pn">Up to date. No notes need a memory decision in this workspace.</span></span><span class="pa">open</span></div>
+        <div class="pulse"><span class="picon before-only"><svg class="i i-sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg></span><span><span class="pt">6 active automations</span><span class="pn">Workspace care · next Fri 02:01</span></span><span class="pa before-only">view</span></div>
+        <a class="rail-link" href="#">Open Memory →</a>
+      </aside>
+    </div>
+  </main>
+</div>
+
+<script>
+  const app = document.getElementById('app')
+  document.querySelectorAll('[data-set]').forEach(b => b.addEventListener('click', () => {
+    app.dataset.state = b.dataset.set
+    document.querySelectorAll('[data-set]').forEach(x => x.setAttribute('aria-pressed', String(x === b)))
+  }))
+  document.getElementById('theme').addEventListener('click', () => {
+    const r = document.documentElement
+    r.dataset.theme = r.dataset.theme === 'light' ? 'dark' : 'light'
+  })
+  const wsBtn = document.getElementById('ws-btn'), wsMenu = document.getElementById('ws-menu')
+  wsBtn.addEventListener('click', () => { wsMenu.hidden = !wsMenu.hidden; wsBtn.setAttribute('aria-expanded', String(!wsMenu.hidden)) })
+  const mBtn = document.getElementById('model-btn'), mMenu = document.getElementById('model-menu')
+  mBtn.addEventListener('click', e => {
+    const opt = e.target.closest('.mm-opt')
+    if (opt) {
+      document.getElementById('model-label').textContent = opt.dataset.model
+      mMenu.querySelectorAll('.mm-opt').forEach(o => o.setAttribute('aria-checked', String(o === opt)))
+    }
+    mMenu.hidden = !mMenu.hidden || !!opt
+    mBtn.setAttribute('aria-expanded', String(!mMenu.hidden))
+  })
+</script>
+</body>
+</html>

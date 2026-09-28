@@ -16,7 +16,7 @@ You are not tied to one CLI, model, or provider. Use Claude, opencode with a clo
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-Open `http://localhost:8443` and follow the setup wizard. It will help you choose or create your workspace, set a dashboard password, and connect the provider you want to use.
+Installs the engine with uv, starts it as a LaunchAgent, and prints a one-time link. Open `http://localhost:8443` and follow the setup wizard. It will help you choose or create your workspace, set a dashboard password, and connect the provider you want to use.
 
 During setup, choose the folder where Ciaobot should work. It can be a new folder or an existing one with notes and memories. Ciaobot creates or adopts the vault there and can help migrate existing memories when needed. The folder remains yours: you can keep it under version control, open it in Obsidian or a text editor, and reuse it with Claude Code, opencode, or another CLI.
 
@@ -25,11 +25,35 @@ During setup, choose the folder where Ciaobot should work. It can be a new folde
 Ciaobot does not replace the agent CLI or ask you to create a second model account. It runs the CLI you have already authenticated:
 
 - **Anthropic / Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`; it lands in `~/.local/bin`, so add that to your `PATH` if `claude` is not found afterwards), sign in with `claude auth login`, then choose **Claude Code** in Ciaobot. Ciaobot uses that official Claude Code session, adds the relevant workspace and project context, and handles chat archiving, memory extraction, and proposal review around it.
-- **OpenAI, OpenRouter, Ollama, and other providers:** install [opencode](https://opencode.ai/docs/), then configure and authenticate the provider in opencode. Choose **opencode** in Ciaobot; its connected models appear in Ciaobot's model picker. This also includes local models running on your own machine.
+- **OpenAI, OpenRouter, Ollama, and other providers:** install [OpenCode 2.0.16+](https://opencode.ai/v2/docs/), then configure and authenticate the provider in OpenCode. Choose **OpenCode** in Ciaobot; its connected models appear in Ciaobot's model picker. This also includes local models running on your own machine.
 
 Ciaobot keeps provider credentials in the provider's own CLI. It supplies the interface, workspace context, files, projects, scheduling, and second-brain memory around the agent. See [INTEGRATIONS.md](INTEGRATIONS.md) for current installation and authentication commands.
 
 Contributors running from a git checkout can follow [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
+### Upgrading from the macOS app
+
+v1.0.0 retires the macOS `Ciaobot.app`; the PWA is now served by the engine. There is no data migration and no vault change. If you still run the app, run `curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh -s -- --migrate`: `--migrate` hands the engine the app currently manages over to the terminal installer and keeps your workspace, password, chats, schedules and push subscriptions. Then run `ciao desktop uninstall` once to remove the old bundle. Your workspace folder and its notes are kept. See [INTEGRATIONS.md](INTEGRATIONS.md#install) for the same note in full.
+
+Updates are the same one-liner again, or **Settings → Home** in the PWA, which stages and applies the engine package update in the background. There is no in-app app updater.
+
+### Uninstall
+
+To stop the engine, use its own service command:
+
+```bash
+ciao service stop
+```
+
+That stops the `com.ciao.server` LaunchAgent; the workspace folder and its notes are kept, so a later `ciao service start` picks it back up.
+
+A machine that still has a **legacy** `Ciaobot.app` bundle from an older install can remove it with:
+
+```bash
+ciao desktop uninstall
+```
+
+This removes the bundle (from `~/Applications`, or `/Applications` for older installs; pass `--app-dir` to point elsewhere) and its LaunchAgents. It only deletes a `~/.local/bin/ciao` shim that pointed inside that bundle, so an engine installed by the one-line installer is left alone.
 
 ## How it works
 
@@ -49,7 +73,7 @@ The screenshot shows the selected **workspace** at the top of the sidebar, the *
 
 Memory is stored as ordinary Markdown in your workspace. You can read it in Ciaobot, Obsidian, a text editor, Claude Code, opencode, or any other tool that works with files.
 
-When you archive a conversation, Ciaobot extracts decisions, useful learnings, and other durable facts. Confident facts are filed automatically; uncertain ones become proposals for you to review. This lets your second brain grow from the work you actually do without making the vault a proprietary database.
+When you archive a conversation, Ciaobot extracts decisions, useful learnings, and other durable facts. Confident facts are filed automatically; uncertain ones become proposals for you to review. Turn **Automatic session insights** off in Settings → Automations to stop model processing for new and archived chats, or turn off **Automatic trajectory capture** to stop structured trajectory records; explicit run actions remain available for one-time requests. This lets your second brain grow from the work you actually do without making the vault a proprietary database.
 
 If you want to understand the extraction and memory pipeline in detail, point your agent to [`docs/MEMORY_DESIGN.md`](https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/MEMORY_DESIGN.md) and ask it to explain the relevant parts.
 

@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from importlib import resources
 from pathlib import Path
 from typing import Any, Iterable

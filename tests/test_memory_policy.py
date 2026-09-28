@@ -1,11 +1,13 @@
 """One accurate memory and unattended-execution policy, pinned to its copies.
 
 The review that produced this file (AI-01) found four surfaces disagreeing:
-the architecture claimed new memory needs review while archive extraction
-called ``auto_promote_memory=True``; the memory agent and the ``/remember``
-command claimed the typed path enforces the region cap while ``update_region``
-documents and implements an advisory one; and the unattended capsule said "do
-not ask" without saying what to do with work that requires approval.
+the architecture claimed new memory needs review while archive-time extraction
+called ``auto_promote_memory=True`` (that auto-apply went away with the one-shot
+pipeline in #627, so this file's rewrite in the same PR retired the contrast
+rather than pinning it); the memory agent and the ``/remember`` command claimed
+the typed path enforces the region cap while ``update_region`` documents and
+implements an advisory one; and the unattended capsule said "do not ask" without
+saying what to do with work that requires approval.
 
 ``ciao/memory_policy.py`` is now the single statement of that policy. These
 tests pin it to every shipped copy — the capsule, the stock assets, the MCP
@@ -41,25 +43,47 @@ def test_every_policy_row_declares_advisory_caps_only() -> None:
 def test_the_matrix_covers_the_reviewed_contexts() -> None:
     assert set(mp.CONTEXT_KEYS) == {
         "attended_explicit_remember",
-        "archive_extraction",
+        "memory_pass",
         "unattended_curation",
         "direct_edit",
         "proposal_acceptance",
     }
 
 
-def test_archive_auto_applies_but_unattended_curation_does_not() -> None:
-    """Readers must be able to tell why curation is narrower than archiving."""
-    archive = mp.context_policy("archive_extraction")
+def test_the_memory_pass_writes_live_and_curation_is_narrower() -> None:
+    """The archive-time auto-apply is gone; the attended pass replaced it.
+
+    The post-archive writer is the memory pass, a chat a person is present for:
+    it promotes a confident fact itself and queues what it is unsure of. Curation
+    still runs with no reviewer at all, so it may only consolidate what a region
+    already holds and file every new fact as a proposal.
+    """
+    memory_pass = mp.context_policy("memory_pass")
     curation = mp.unattended_policy()
-    assert archive.promotes_new_region_facts == mp.PROMOTE_AUTO
+    assert memory_pass.promotes_new_region_facts == mp.PROMOTE_ATTENDED
+    assert memory_pass.queues_uncertain is True
     assert curation.promotes_new_region_facts == mp.PROMOTE_REVIEWED
     assert curation.consolidates_regions == "at_threshold"
     assert curation.undo_log_required is True
-    # Archive time may write vault destinations; curation may only consolidate.
-    assert archive.writes_vault is True
+    # Both may write vault destinations; only the pass is attended.
+    assert memory_pass.writes_vault is True
     assert curation.writes_vault is True
-    assert archive.approval != curation.approval
+    assert memory_pass.approval == "attended"
+    assert memory_pass.approval != curation.approval
+
+
+def test_only_attended_contexts_promote_a_new_region_fact() -> None:
+    """No unattended row may write one, and every attended row is attended-marked.
+
+    This is the machine-readable half of the ARCHITECTURE table row: the memory
+    pass promotes live, the nightly curator never does.
+    """
+    for key in mp.CONTEXT_KEYS:
+        policy = mp.context_policy(key)
+        if policy.promotes_new_region_facts == mp.PROMOTE_ATTENDED:
+            assert policy.approval == "attended", key
+        else:
+            assert policy.approval == "unattended", key
 
 
 def test_the_review_destination_is_always_the_unsure_bucket() -> None:
@@ -180,6 +204,42 @@ def test_remember_command_no_longer_claims_enforcement() -> None:
     assert "over_cap" in command
 
 
+def test_stock_prompts_route_categories_to_the_vocabulary_block() -> None:
+    """Every surface that writes a note must name the block that lists them.
+
+    The category list is the owner's: it gains rows in Settings, so an agent
+    that memorized it silently writes notes against a vocabulary that no longer
+    exists. Each of these files has to point at the **Categories** section, say
+    the note is filed in the folder it names, and route the no-fit case to the
+    owner instead of a coined `type:`.
+    """
+    for relative in (
+        "agents/memory.md",
+        "commands/remember.md",
+        "commands/interrogation.md",
+    ):
+        asset = _stock(relative)
+        assert "**Categories** section" in asset, relative
+        assert "new-category" in asset, relative
+
+
+def test_the_memory_agent_says_where_a_note_goes_and_who_adds_a_category() -> None:
+    role = _stock("agents/memory.md")
+    assert "Read it before writing a note and file the note in the folder its line names" in role
+    assert "queue a new-category question in `Workspace/Memory-Proposals.md`" in role
+    # The list is read, never memorized: a category added in Settings must reach
+    # the agent without editing this file.
+    assert "do not memorize this" in role
+
+
+def test_the_core_prompt_points_at_the_same_block() -> None:
+    from ciao.core_prompt import _system_instructions
+
+    core = _system_instructions()
+    assert "**Categories** section of `VOCABULARY.md`" in core
+    assert "a note that fits none is a new-category question" in core
+
+
 def test_curation_skill_defers_and_never_hard_caps() -> None:
     skill = _stock("skills/memory-curation/SKILL.md")
     assert "You are an unattended run: defer, never ask, never route around" in skill
@@ -208,7 +268,7 @@ def test_architecture_doc_states_the_policy_matrix() -> None:
     # The matrix's own section, the narrower-curation rationale, and the
     # deferred-approval rule must all be present.
     assert "### Memory write policy matrix" in doc
-    assert "Why curation is narrower than archive extraction" in doc
+    assert "Why curation is narrower than the memory pass" in doc
     assert "Unattended runs defer; they do not route around the missing" in doc
     # The old contradictory phrase is gone.
     assert "Promoting NEW facts into a region stays user-reviewed" not in doc

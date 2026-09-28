@@ -56,7 +56,7 @@
 <rect x="692" y="164" width="480" height="110" rx="10" fill="#ffffff" stroke="#d2d4e3"/><text x="704" y="184" class="label">Ciaobot · opus — done</text><text x="704" y="200" class="mono">Here's a draft outline with three options …</text><text x="704" y="220" class="mono">See the pinned q4-planning.md for the full doc.</text><text x="704" y="244" class="mono">Outputs:  q4-planning.md  ·  Activity ▾</text>
 <rect x="692" y="284" width="480" height="44" rx="8" fill="#fff3e0" stroke="#ffcc80"/><text x="704" y="304" class="label">⧉ Permission — Edit memory-vault/personal/… ?</text><text x="704" y="318" class="mono">[1] Allow  [2] Deny</text>
 <rect x="692" y="340" width="480" height="70" rx="10" fill="#e6e8f4"/><text x="704" y="360" class="label">You — comment on “three options”</text><text x="704" y="376" class="mono">“Prefer option 2, but keep the timeline.”</text>
-<rect x="692" y="430" width="480" height="56" rx="10" fill="#f4f4fa" stroke="#d2d4e3" stroke-dasharray="6 4"/><text x="704" y="450" class="label">Composer — dictation · image · file · send</text><text x="704" y="466" class="mono">Ask, attach, or dictate — 44px targets, keyboard first</text>
+<rect x="692" y="430" width="480" height="56" rx="10" fill="#f4f4fa" stroke="#d2d4e3" stroke-dasharray="6 4"/><text x="704" y="450" class="label">Composer — image · file · send</text><text x="704" y="466" class="mono">Ask or attach — 44px targets, keyboard first</text>
 <text x="692" y="520" class="label" font-weight="700">Placeholder — replace with real capture</text>
 <text x="692" y="538" class="mono">Capture: macOS light mode, pink accent, 1200×760, &lt;300KB PNG.</text>
 <text x="692" y="552" class="mono">Show: Home lanes + chat + pinned file. Alt text required in README.</text>

@@ -5,8 +5,16 @@ You are working on the Ciaobot app repository.
 Before changing code:
 - Read `docs/ARCHITECTURE.md` for the system design and `docs/DEVELOPMENT.md` for the dev workflow.
 - Read `web/README.md` before changing the PWA.
-- Read [`DESIGN.md`](DESIGN.md) before changing the PWA or tray UI, and keep its tokens and interaction principles aligned with the implementation.
+- Read [`DESIGN.md`](DESIGN.md) before changing the PWA, and keep its tokens and interaction principles aligned with the implementation.
 - Keep changes scoped and covered by tests.
+- Do not add fallbacks or compatibility shims. Delete dead or superseded code
+  outright rather than leaving a code path "just in case". When removing a
+  fallback would break an install that people already have, stop and ask
+  the maintainer before removing it.
+- Avoid new environment variables. Hardcode a sensible default as a
+  constant; if a value truly must vary per user, make it a Settings option
+  instead. Add an env var only when nothing else can work (secrets,
+  install paths, test isolation), and document it in `INTEGRATIONS.md`.
 - Do not commit secrets, private workspace data, or operator credentials.
 
 Project shape:
@@ -14,6 +22,7 @@ Project shape:
 - PWA code lives in `web/`.
 - Generic package assets live in `ciao/stock/`.
 - User vaults and runtime data belong in a separate workspace, not in the public app repo.
+- There is no client/host split any more: one engine, one origin, one session. Keep `/api/*` behind the signed session cookie, keep every `/ws/*` handshake same-origin-gated, and keep the loopback-only set (`_LOOPBACK_ONLY_API` in `ciao/web/auth.py`) gated on the TCP peer. The boundary audit is in `docs/REMOTE_BOUNDARY.md`.
 
 Verification:
 - Run focused tests for the changed behavior.
@@ -24,8 +33,8 @@ Verification:
      for one) are typed `Any` because they are wired after construction, so
      returning a call on one straight out of a typed function is an error.
      Annotate the local instead.
-  2. `pytest tests/` — the full suite, before claiming backend work is
-     complete. A fake object in an unrelated test can break on a new
+  2. `pytest -n auto tests/` — the full suite (parallel, about a minute),
+     before claiming backend work is complete. A fake object in an unrelated test can break on a new
      attribute (adding a field to the `/ws/events` snapshot broke
      `tests/test_ws_auth.py`, whose `SimpleNamespace` stub had no such
      attribute), so a green focused run proves nothing about the suite.
@@ -33,17 +42,17 @@ Verification:
      `npx vitest` on an older Node silently skips component files while
      printing green.
   4. `cd web && npm run build` after frontend changes.
+  PRs into `develop` only run these on Linux; the macOS job (browser tests and
+  an engine cold-start) runs after merge, so a PR going green is not proof the
+  macOS job will.
   `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
   Lint is still worth running — it just will not fail the build for you.
-- Run `./scripts/check-desktop.sh` after changes under `desktop/` — nothing else
-  compiles the Rust shell, the Swift native sidecar, or assembles `Ciaobot.app`,
-  so those break in CI rather than locally. Use `--fast` to skip the bundle step
-  when you have not touched `desktop/native/` or `tauri.conf.json`. It needs
-  Rust (`brew install rustup && rustup default 1.90.0`) and `swiftc`
-  (`xcode-select --install`).
 - For UI changes, verify keyboard focus, browser zoom, and mobile touch targets.
 - Workspace shortcuts map unmodified `1`–`9` to the visible sidebar order and
   must remain inert while a text field is focused.
+- OpenCode provider changes must preserve the V2-only 2.0.16+ contract. Replay
+  the V2 fixtures and run one tiny real turn against the installed OpenCode 2.x
+  server; do not restore V1 route or response-shape fallbacks.
 - Every new feature must be visually inspected in the browser before pushing.
 
 Branching and releases:

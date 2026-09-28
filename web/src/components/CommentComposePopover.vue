@@ -1,20 +1,30 @@
 <template>
-  <Teleport to="body">
-    <div
+  <!-- Inside a modal dialog the popover must stay in the dialog's DOM: reka
+       disables pointer events outside the dialog and treats a click there as
+       "close", so a body-teleported popover could be seen but not used. -->
+  <Teleport to="body" :disabled="inline">
+    <FocusScope
       v-if="anchor"
-      ref="rootEl"
-      class="compose"
-      :style="{ top: placed.top + 'px', left: placed.left + 'px' }"
-      @mousedown.stop
+      as-child
+      loop
+      :trapped="false"
+      @mount-auto-focus="onMountAutoFocus"
     >
+      <div
+        class="compose"
+        role="dialog"
+        aria-label="Add comment"
+        :style="{ top: placed.top + 'px', left: placed.left + 'px' }"
+        @mousedown.stop
+        @keydown="onKeydown"
+      >
       <textarea
         ref="inputEl"
         :value="modelValue"
         class="compose-input"
-        placeholder="Add a comment…"
+        placeholder="Add a note for Ciao"
         rows="3"
         @input="onInput"
-        @keydown="onKeydown"
       ></textarea>
       <div v-if="images.length" class="compose-images">
         <span v-for="(img, i) in images" :key="img" class="compose-image">
@@ -32,17 +42,7 @@
           <input type="file" accept="image/*" multiple hidden @change="onUpload" />
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </label>
-        <div class="compose-voice">
-          <VoiceRecorder
-            v-if="!transcribing"
-            ref="voiceRecorderRef"
-            @recorded="handleVoice"
-            @error="handleVoiceError"
-          />
-          <span v-else class="voice-transcribing" title="Transcribing...">
-            <span class="transcribe-spinner"></span>
-          </span>
-        </div>
+        <span class="compose-spacer" aria-hidden="true" />
         <button class="compose-btn" @click="emit('cancel')" type="button">Cancel</button>
         <button
           class="compose-btn primary"
@@ -51,7 +51,8 @@
           type="button"
         >Add comment</button>
       </div>
-    </div>
+      </div>
+    </FocusScope>
   </Teleport>
 </template>
 
@@ -67,13 +68,11 @@
 // reserve height and they disagreed, so a popover opened near the bottom edge
 // could put its Save button past the fold, where `position: fixed` means no
 // amount of scrolling reaches it.
+import { FocusScope } from 'reka-ui'
 import { computed, nextTick, ref, watch } from 'vue'
 
 import { useViewportHeight } from '../composables/useViewportHeight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
-import { useProjectStore } from '../stores/projects'
-import { errorMessage } from '../lib/errorMessage'
-import VoiceRecorder from './VoiceRecorder.vue'
 
 type ComposeAnchor = { top: number; left: number }
 
@@ -86,8 +85,11 @@ const props = withDefaults(defineProps<{
   anchor: ComposeAnchor | null
   modelValue: string
   images?: string[]
+  /** Render in place instead of teleporting to <body> (use inside dialogs). */
+  inline?: boolean
 }>(), {
   images: () => [],
+  inline: false,
 })
 
 const emit = defineEmits<{
@@ -100,13 +102,9 @@ const emit = defineEmits<{
 
 const images = computed(() => props.images ?? [])
 const inputEl = ref<HTMLTextAreaElement>()
-const rootEl = ref<HTMLElement>()
-const voiceRecorderRef = ref<InstanceType<typeof VoiceRecorder> | null>(null)
-const transcribing = ref(false)
 // Measured height, once rendered. Null until then, so the first paint uses the
 // COMPOSE_H estimate rather than jumping.
 const measuredH = ref<number | null>(null)
-const store = useProjectStore()
 
 // Reactive on purpose. Opening this popover focuses the textarea, so on a phone
 // the keyboard comes up a moment later and shrinks the viewport under a box that
@@ -125,7 +123,7 @@ const placed = computed<ComposeAnchor>(() => {
 
 function measure(): void {
   nextTick(() => {
-    const h = rootEl.value?.offsetHeight
+    const h = inputEl.value?.closest<HTMLElement>('.compose')?.offsetHeight
     if (h) measuredH.value = h
   })
 }
@@ -143,9 +141,15 @@ function onUpload(e: Event): void {
   emit('upload', e)
 }
 
+function onMountAutoFocus(event: Event): void {
+  event.preventDefault()
+  focus()
+}
+
 function onKeydown(e: KeyboardEvent): void {
   if (e.key === 'Escape') {
     e.preventDefault()
+    e.stopPropagation()
     emit('cancel')
     return
   }
@@ -153,13 +157,6 @@ function onKeydown(e: KeyboardEvent): void {
     e.preventDefault()
     emit('save')
     return
-  }
-  // Same dictation shortcut that opens this popover from a selection, so it
-  // keeps working once the textarea has focus.
-  if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'd' || e.key === 'D')) {
-    e.preventDefault()
-    e.stopPropagation()
-    toggleDictation()
   }
 }
 
@@ -180,6 +177,7 @@ watch(
   (a) => {
     if (a) focus()
   },
+  { immediate: true },
 )
 
 function insertTextAtCursor(text: string): void {
@@ -198,69 +196,39 @@ function insertTextAtCursor(text: string): void {
   })
 }
 
-async function handleVoice(blob: Blob): Promise<void> {
-  const chatId = store.activeChatId
-  if (!chatId) {
-    store.pushErrorToast('Voice dictation unavailable', 'No active chat')
-    return
-  }
-  transcribing.value = true
-  try {
-    const text = await store.transcribeVoice(chatId, blob)
-    if (text.trim()) {
-      insertTextAtCursor(text.trimEnd())
-    }
-  } catch (e) {
-    console.error('Voice error:', e)
-    store.pushErrorToast('Voice transcription failed', `${errorMessage(e)}`)
-  } finally {
-    transcribing.value = false
-  }
-}
-
-function handleVoiceError(message: string): void {
-  store.pushErrorToast('Voice dictation unavailable', message)
-}
-
-// Allow the parent (and a future global shortcut) to toggle recording.
-function toggleDictation(): void {
-  voiceRecorderRef.value?.toggleRecording()
-}
-
-defineExpose({ focus, toggleDictation })
+defineExpose({ focus })
 </script>
 
 <style scoped>
 .compose {
   position: fixed;
   z-index: 41;
-  width: 280px;
+  width: 360px;
   max-width: calc(100vw - 16px);
-  background: var(--bg);
-  border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--accent, #60a5fa);
-  border-radius: 8px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
-  padding: 10px 12px;
   box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg2);
+  box-shadow: 0 14px 36px rgb(0 0 0 / 28%);
 }
 .compose-input {
   width: 100%;
   resize: vertical;
-  min-height: 60px;
+  min-height: 64px;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
   font-family: inherit;
   font-size: var(--text-base);
   line-height: 1.45;
-  color: var(--fg);
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
-  box-sizing: border-box;
 }
 .compose-input:focus {
   outline: none;
-  border-color: var(--accent, #60a5fa);
+  border-color: var(--accent);
 }
 .compose-images {
   display: flex;
@@ -307,74 +275,56 @@ defineExpose({ focus, toggleDictation })
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
   color: var(--fg2);
-  margin-right: auto;
 }
 .compose-attach:hover {
   background: var(--bg3);
   color: var(--fg);
-  border-color: var(--fg2);
 }
 .compose-btn {
+  flex: none;
+  white-space: nowrap;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 4px;
+  min-height: 32px;
+  padding: 0 12px;
   border: 1px solid var(--border);
-  background: transparent;
+  border-radius: 8px;
+  background: var(--bg-elev);
   color: var(--fg);
   cursor: pointer;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
 }
 .compose-btn:hover {
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
+  border-color: var(--border-strong);
 }
 .compose-btn.primary {
-  background: var(--accent, #60a5fa);
-  border-color: var(--accent, #60a5fa);
-  color: var(--bg);
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--on-accent);
 }
 .compose-btn.primary:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
-.compose-voice {
-  display: flex;
-  align-items: center;
+.compose-spacer { flex: 1; }
+.compose-hint {
+  margin-right: auto;
+  min-width: 0;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  line-height: 1.3;
 }
-.compose-voice :deep(.voice-btn) {
-  min-width: 28px;
-  min-height: 28px;
-  width: 28px;
-  height: 28px;
-  border-radius: 4px;
-}
-.compose-voice :deep(.voice-btn svg) {
-  width: 16px;
-  height: 16px;
-}
-.voice-transcribing {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-}
-.transcribe-spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent, #60a5fa);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-@keyframes spin {
-  to { transform: rotate(360deg); }
+.compose-attach { margin-right: 0; }
+@media (pointer: coarse) {
+  .compose-btn { min-height: var(--touch); }
+  .compose-attach { width: var(--touch); height: var(--touch); min-width: var(--touch); min-height: var(--touch); }
 }
 
 @media (max-width: 640px) {
@@ -383,6 +333,22 @@ defineExpose({ focus, toggleDictation })
     right: 8px;
     width: auto;
     max-width: none;
+  }
+}
+@media (pointer: coarse) {
+  .compose-attach,
+  .compose-btn {
+    min-width: var(--touch);
+    min-height: var(--touch);
+    width: var(--touch);
+    height: var(--touch);
+  }
+
+  .compose-image-remove {
+    box-sizing: content-box;
+    top: -12px;
+    right: -12px;
+    padding: 14px;
   }
 }
 </style>

@@ -26,17 +26,23 @@ def _sse(payload: dict[str, Any]) -> str:
 
 
 _DELTA = _sse({
-    "type": "message.part.delta",
-    "properties": {"sessionID": "s1", "partID": "p1", "field": "text", "delta": "Hello "},
-})
-_PART_FULL = _sse({
-    "type": "message.part.updated",
-    "properties": {
-        "sessionID": "s1",
-        "part": {"type": "text", "id": "p1", "text": "Hello recovered world"},
+    "type": "session.text.delta",
+    "data": {
+        "sessionID": "s1", "assistantMessageID": "msg_a", "ordinal": 0,
+        "delta": "Hello ",
     },
 })
-_IDLE = _sse({"type": "session.idle", "properties": {"sessionID": "s1"}})
+_PART_FULL = _sse({
+    "type": "session.text.ended",
+    "data": {
+        "sessionID": "s1", "assistantMessageID": "msg_a", "ordinal": 0,
+        "text": "Hello recovered world",
+    },
+})
+_IDLE = _sse({
+    "type": "session.execution.succeeded",
+    "data": {"sessionID": "s1"},
+})
 
 
 class _FlakyStream(_FakeEventStream):
@@ -54,9 +60,16 @@ class _FlakyStream(_FakeEventStream):
 class _RecoveryClient:
     """Scripted per-attempt stream behaviour plus a message-list read."""
 
-    def __init__(self, attempts: list[Any], messages: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        attempts: list[Any],
+        messages: list[dict[str, Any]],
+        *,
+        active_ids: set[str] | None = None,
+    ) -> None:
         self._attempts = attempts
         self._messages = messages
+        self.active_ids = active_ids or set()
         self.stream_calls = 0
         self.get_calls: list[str] = []
 
@@ -67,35 +80,59 @@ class _RecoveryClient:
             raise spec
         return spec
 
-    async def get(self, path: str):
+    async def get(self, path: str, *, params=None):
         self.get_calls.append(path)
+        if path == "/api/session/active":
+            active = {sid: {"type": "running"} for sid in self.active_ids}
+
+            class _Active:
+                status_code = 200
+
+                def raise_for_status(self) -> None:
+                    return None
+
+                @staticmethod
+                def json():
+                    return {"data": active}
+
+            return _Active()
         if path.endswith("/message"):
+            messages = self._messages
+
             class _Messages:
                 status_code = 200
 
                 def raise_for_status(self) -> None:
                     return None
 
-                def json(self):
-                    return self._messages
+                @staticmethod
+                def json():
+                    return {
+                        "data": messages,
+                        "cursor": {"previous": None, "next": None},
+                    }
 
-            response = _Messages()
-            response._messages = self._messages  # type: ignore[attr-defined]
-            return response
+            return _Messages()
 
         class _Other:
             status_code = 404
             text = ""
 
             def json(self):
-                return {}
+                return {"data": []}
 
         return _Other()
 
     async def post(self, _path: str, json=None):
+        message_id = str((json or {}).get("id") or "")
+
         class _Accepted:
             status_code = 200
             text = ""
+
+            @staticmethod
+            def json():
+                return {"data": {"id": message_id}}
 
         return _Accepted()
 
@@ -109,6 +146,10 @@ def _wire(provider: OpencodeProvider, monkeypatch: pytest.MonkeyPatch, client) -
 
     monkeypatch.setattr(provider, "_ensure_server", fake_server)
     monkeypatch.setattr(provider, "_ensure_session", fake_session)
+    monkeypatch.setattr(
+        "ciao.providers.opencode.secrets.token_hex",
+        lambda _size: "u2",
+    )
     # Keep the test fast: instant backoff + tiny poll cadence/window.
     async def _instant_sleep(_delay: float) -> None:
         return None
@@ -160,10 +201,11 @@ async def test_exhausted_reconnects_reconcile_via_message_poll(
 ) -> None:
     provider = _provider(tmp_path)
     messages = [
+        {"id": "msg_u2", "type": "user", "text": "hi"},
         {
-            "info": {"role": "assistant"},
-            "parts": [{"type": "text", "id": "p1", "text": "Hello recovered world"}],
-        }
+            "id": "msg_a", "type": "assistant",
+            "content": [{"type": "text", "text": "Hello recovered world"}],
+        },
     ]
     # Every stream attempt dies after the prompt lands; the message poll
     # then quiesces on its second read and replays the settled part.
@@ -182,7 +224,7 @@ async def test_exhausted_reconnects_reconcile_via_message_poll(
     ]
 
     assert client.stream_calls == 3
-    assert "/session/s1/message" in client.get_calls
+    assert "/api/session/s1/message" in client.get_calls
     result = events[-1]
     assert result.type == "result"
     assert not result.is_error
@@ -190,6 +232,162 @@ async def test_exhausted_reconnects_reconcile_via_message_poll(
     assert provider._turn_recovered_via_poll is True
     # A clean poll reconciliation is not a fallback answer.
     assert result.fallback_final is False
+
+
+@pytest.mark.asyncio
+async def test_poll_recovery_settles_an_output_free_terminal_failure(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+    messages = [
+        {"id": "msg_u2", "type": "user", "text": "hi"},
+        {"id": "idle_failed", "type": "idle", "outcome": "failed"},
+    ]
+    client = _RecoveryClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=messages,
+    )
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    result = events[-1]
+    assert result.is_error is True
+    assert "OpenCode execution failed" in result.result
+    assert client.get_calls.count("/api/session/s1/message") <= 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["failed", "interrupted"])
+async def test_poll_recovery_treats_error_idle_outcomes_as_terminal_errors(
+    outcome, tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+    messages = [
+        {"id": "msg_u2", "type": "user", "text": "hi"},
+        {"id": f"idle_{outcome}", "type": "idle", "outcome": outcome},
+    ]
+    client = _RecoveryClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=messages,
+    )
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    result = events[-1]
+    assert result.is_error is True
+    assert (
+        "OpenCode execution was interrupted" in result.result
+        if outcome == "interrupted"
+        else "OpenCode execution failed" in result.result
+    )
+
+
+@pytest.mark.asyncio
+async def test_poll_recovery_accepts_output_free_succeeded_idle(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+    messages = [
+        {"id": "msg_u2", "type": "user", "text": "hi"},
+        {"id": "idle_ok", "type": "idle", "outcome": "succeeded"},
+    ]
+    client = _RecoveryClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=messages,
+    )
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    result = events[-1]
+    assert result.is_error is False
+    assert result.result == ""
+    assert result.fallback_final is False
+    assert provider._turn_recovered_via_poll is True
+
+
+@pytest.mark.asyncio
+async def test_poll_recovery_timeout_is_an_error_not_an_empty_success(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+    client = _RecoveryClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=[{"id": "msg_u2", "type": "user", "text": "hi"}],
+    )
+    _wire(provider, monkeypatch, client)
+    monkeypatch.setattr("ciao.providers.opencode._OPENCODE_RECOVERY_WINDOW_S", 0.0)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    result = events[-1]
+    assert result.is_error is True
+    assert "recovery timed out" in result.result
+    assert result.fallback_final is True
+    assert provider._turn_recovered_via_poll is False
+
+
+@pytest.mark.asyncio
+async def test_poll_recovery_stops_at_this_turns_idle_boundary(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+    messages = [
+        {"id": "msg_u2", "type": "user", "text": "ours"},
+        {
+            "id": "msg_ours", "type": "assistant",
+            "content": [{"type": "text", "text": "OURS"}],
+        },
+        {"id": "idle_ours", "type": "idle", "outcome": "succeeded"},
+        {"id": "msg_u3", "type": "user", "text": "later"},
+        {
+            "id": "msg_later", "type": "assistant",
+            "content": [{"type": "text", "text": "LATER TURN"}],
+        },
+    ]
+    client = _RecoveryClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=messages,
+    )
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    texts = "".join(event.text for event in events if event.type == "text")
+    assert texts == "OURS"
+    assert events[-1].result == "OURS"
 
 
 @pytest.mark.asyncio
@@ -207,32 +405,30 @@ async def test_failure_before_prompt_still_hard_fails(tmp_path, monkeypatch) -> 
 
     result = events[-1]
     assert result.is_error
-    assert "opencode connection failed" in result.result
+    assert "OpenCode connection failed" in result.result
 
 
 @pytest.mark.asyncio
 async def test_poll_reconciliation_ignores_earlier_turns(tmp_path, monkeypatch) -> None:
     """A mid-turn drop must not replay the whole session as this turn's text.
 
-    ``GET /session/{id}/message`` returns every message ever sent, and
+    ``GET /api/session/{id}/message`` returns every message ever sent, and
     ``_reset_turn_state`` clears the per-part emitted counts at the start of
     each turn — so replaying all assistant messages re-emitted turns 1..N as
     the current turn's answer, which ``record_turn`` then persisted.
     """
     provider = _provider(tmp_path)
     messages = [
-        {"info": {"id": "u1", "role": "user"}, "parts": [
-            {"type": "text", "id": "up1", "text": "first question"},
-        ]},
-        {"info": {"id": "a1", "role": "assistant"}, "parts": [
-            {"type": "text", "id": "old1", "text": "ANSWER FROM TURN ONE"},
-        ]},
-        {"info": {"id": "u2", "role": "user"}, "parts": [
-            {"type": "text", "id": "up2", "text": "second question"},
-        ]},
-        {"info": {"id": "a2", "role": "assistant"}, "parts": [
-            {"type": "text", "id": "p1", "text": "Hello recovered world"},
-        ]},
+        {"id": "msg_u1", "type": "user", "text": "first question"},
+        {
+            "id": "msg_a1", "type": "assistant",
+            "content": [{"type": "text", "text": "ANSWER FROM TURN ONE"}],
+        },
+        {"id": "msg_u2", "type": "user", "text": "second question"},
+        {
+            "id": "msg_a", "type": "assistant",
+            "content": [{"type": "text", "text": "Hello recovered world"}],
+        },
     ]
     client = _RecoveryClient(
         [
@@ -263,7 +459,7 @@ async def test_poll_reconciliation_anchors_on_the_live_user_message(
     """The anchor is the turn's own user message, not just the newest one.
 
     If another client prompted the same session after us, the trailing user
-    message is not ours; the id learned from ``message.updated`` is.
+    message is not ours; the id learned from the V2 prompt receipt is.
     """
     provider = _provider(tmp_path)
     messages = [
@@ -280,6 +476,118 @@ async def test_poll_reconciliation_anchors_on_the_live_user_message(
     provider._user_message_id = "u2"
 
     assert [part["id"] for part in provider._turn_assistant_parts(messages)] == ["new1"]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_prompt_transport_retries_the_same_v2_message_id(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+
+    class _AmbiguousPostClient(_RecoveryClient):
+        def __init__(self):
+            super().__init__(
+                [_FakeEventStream([]), _FakeEventStream([_IDLE])],
+                messages=[],
+            )
+            self.post_ids: list[str] = []
+
+        async def post(self, _path: str, json=None):
+            self.post_ids.append(str((json or {}).get("id") or ""))
+            if len(self.post_ids) == 1:
+                raise httpx.ReadError("response lost after admission")
+            return await super().post(_path, json=json)
+
+    client = _AmbiguousPostClient()
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    assert len(client.post_ids) == 2
+    assert client.post_ids[0] == client.post_ids[1] == "msg_u2"
+    assert events[-1].is_error is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_prompt_receipt_reconciles_by_the_stable_message_id(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+
+    class _InvalidReceiptClient(_RecoveryClient):
+        async def post(self, _path: str, json=None):
+            class _Invalid:
+                status_code = 200
+                text = ""
+
+                @staticmethod
+                def json():
+                    return {"data": {}}
+
+            return _Invalid()
+
+    messages = [
+        {"id": "msg_u2", "type": "user", "text": "hi"},
+        {"id": "idle_ok", "type": "idle", "outcome": "succeeded"},
+    ]
+    client = _InvalidReceiptClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=messages,
+    )
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    result = events[-1]
+    assert result.is_error is False
+    assert result.result == ""
+    assert provider._turn_recovered_via_poll is True
+
+
+@pytest.mark.asyncio
+async def test_unverifiable_prompt_admission_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    provider = _provider(tmp_path)
+
+    class _MissingReceiptClient(_RecoveryClient):
+        async def post(self, _path: str, json=None):
+            class _Missing:
+                status_code = 200
+                text = ""
+
+                @staticmethod
+                def json():
+                    return {"data": {}}
+
+            return _Missing()
+
+    client = _MissingReceiptClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=[],
+    )
+    _wire(provider, monkeypatch, client)
+    monkeypatch.setattr("ciao.providers.opencode._OPENCODE_RECOVERY_WINDOW_S", 0.0)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    result = events[-1]
+    assert result.is_error is True
+    assert "recovery timed out" in result.result
 
 
 @pytest.mark.asyncio
@@ -312,5 +620,5 @@ async def test_rejected_prompt_yields_exactly_one_terminal_error(
     results = [event for event in events if event.type == "result"]
     assert len(results) == 1
     assert results[0].is_error is True
-    assert "opencode rejected the prompt" in results[0].result
+    assert "OpenCode rejected the prompt" in results[0].result
     assert "model not configured" in results[0].result

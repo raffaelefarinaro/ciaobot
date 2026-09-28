@@ -6,7 +6,6 @@ import type { ProjectInfo, ChatInfo } from '../lib/types'
 import {
   shouldReconnectActiveChatOnStreamingStarted,
   chatWsReconnectDelayMs,
-  isHostConnectionUnavailableMessage,
   setListIndex,
   useProjectStore,
 } from './projects'
@@ -15,7 +14,11 @@ const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
 const apiPatch = vi.hoisted(() => vi.fn())
 const apiDel = vi.hoisted(() => vi.fn())
-const reloadWhenServerReady = vi.hoisted(() => vi.fn(() => Promise.resolve()))
+const reloadWhenServerReady = vi.hoisted(() =>
+  // Signature mirrors the real one so a caller can be checked for the signal
+  // it hands over.
+  vi.fn((_timeoutMs?: number, _signal?: AbortSignal) => Promise.resolve())
+)
 
 vi.mock('../lib/api', () => ({
   api: {
@@ -55,7 +58,7 @@ class FakeWebSocket {
 
   readyState = FakeWebSocket.OPEN
   onmessage: ((event: { data: string }) => void) | null = null
-  onclose: (() => void) | null = null
+  onclose: ((event: CloseEvent) => void) | null = null
   onerror: (() => void) | null = null
 
   // The store distinguishes a socket that completed its handshake from one
@@ -76,9 +79,11 @@ class FakeWebSocket {
 
   send = vi.fn()
 
-  close() {
+  // `code` is the close code the server sent: 4001/4400 (no session) and 4003
+  // (origin refused) are refusals the store must not re-dial.
+  close(code?: number) {
     this.readyState = FakeWebSocket.CLOSED
-    this.onclose?.()
+    this.onclose?.({ code } as CloseEvent)
   }
 }
 
@@ -308,6 +313,54 @@ describe('resume from background reconnects a dead awareness socket', () => {
   })
 })
 
+describe('reconnectNow', () => {
+  // The engine coming back is news: both sockets can be sitting in a 2s-64s
+  // backoff, or the per-chat one can have given up for good after five failed
+  // handshakes. Waiting that out after the curtain lifts reads as a dead app.
+  test('closes an open events socket and reconnects the active chat at once', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-recover'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    store.connectEventsWs()
+    const eventsSocket = fakeSockets[fakeSockets.length - 1]
+    expect(eventsSocket.url).toContain('/ws/events')
+    expect(eventsSocket.readyState).toBe(FakeWebSocket.OPEN)
+    const countBefore = fakeSockets.length
+
+    vi.useFakeTimers()
+    try {
+      store.reconnectNow()
+      // A live socket is closed rather than left alone; its onclose reconnects
+      // on the 50ms fast path, not on a backoff the outage earned.
+      expect(eventsSocket.readyState).toBe(FakeWebSocket.CLOSED)
+      // The chat is re-attached immediately too, so events missed during the
+      // outage are replayed instead of waiting for the next user action.
+      expect(fakeSockets.filter((s) => s.url.includes(chatId)).length).toBe(2)
+      await vi.advanceTimersByTimeAsync(60)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(fakeSockets.length).toBeGreaterThan(countBefore)
+    expect(fakeSockets.some((s) => s.url.includes('/ws/events') && s !== eventsSocket)).toBe(true)
+  })
+
+  test('opens the events socket immediately when there is none left', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const countBefore = fakeSockets.length
+
+    store.reconnectNow()
+
+    // No timer to advance: a recovery nudge that waits for one is the 64s wait
+    // this exists to avoid.
+    expect(fakeSockets.length).toBe(countBefore + 1)
+    expect(fakeSockets[fakeSockets.length - 1].url).toContain('/ws/events')
+  })
+})
+
 describe('streaming started reconnect guard', () => {
   test('does not reconnect when the active chat socket is already open', () => {
     expect(shouldReconnectActiveChatOnStreamingStarted({ readyState: 1 })).toBe(false)
@@ -425,6 +478,43 @@ describe('per-chat WS auto-reconnect', () => {
     }
 
     expect(fakeSockets.length).toBe(1) // background chat's socket stays closed
+  })
+
+  test.each([4001, 4400, 4003])('does not re-dial a socket the server refused (%i)', async (code) => {
+    // A refused handshake answers the same way forever, so retrying it spins
+    // against an answer that cannot change. The login flow owns the way back in.
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = `c-refused-${code}`
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close(code)
+      await vi.advanceTimersByTimeAsync(64000)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(fakeSockets.length).toBe(1)
+  })
+
+  test('does not re-dial the awareness socket the server refused', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.connectEventsWs()
+    expect(fakeSockets.length).toBe(1)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close(4001)
+      await vi.advanceTimersByTimeAsync(64000)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(fakeSockets.length).toBe(1)
   })
 })
 
@@ -875,6 +965,33 @@ describe('deferred send visibility and re-send de-duplication', () => {
     }
   })
 
+  test('context_entities attaches the matched notes to its user bubble', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-deferred-entities'
+      store.activeChatId = chatId
+
+      store.sendMessage(chatId, 'ask Mo')
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+      socket.onmessage?.({ data: JSON.stringify({ type: 'user_echo', text: 'ask Mo', turn_index: 0 }) })
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'context_entities',
+          turn_index: 0,
+          entities: [{ name: 'Mo', path: 'work/People/Mo.md', category: 'person' }],
+        }),
+      })
+
+      const [bubble] = userBubbles(store, chatId, 'ask Mo')
+      expect(bubble.context_entities).toEqual([{ name: 'Mo', path: 'work/People/Mo.md', category: 'person' }])
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
   test('a deferred send that lands mid-turn becomes one queue entry, not a bubble plus a chip', async () => {
     try {
       const store = useProjectStore()
@@ -1020,64 +1137,7 @@ describe('stopped turns', () => {
   })
 })
 
-describe('client host connection failures', () => {
-  test('recognizes the legacy proxy error', () => {
-    expect(isHostConnectionUnavailableMessage(
-      "Host WS unreachable: [Errno 61] Connect call failed ('10.0.0.5', 8443)",
-    )).toBe(true)
-  })
-
-  test('shows one ephemeral reconnecting state without adding chat errors', () => {
-    const store = useProjectStore()
-    const chatId = 'c-client-offline'
-    store.activeChatId = chatId
-    store.messages[chatId] = [
-      { role: 'system', content: 'Error: Host WS unreachable: old attempt 1', timestamp: '' },
-      { role: 'system', content: 'Error: Host WS unreachable: old attempt 2', timestamp: '' },
-      { role: 'user', content: 'keep this', timestamp: '' },
-    ]
-    store.connectWs(chatId)
-
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({ type: 'host_unreachable' }),
-    })
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({ type: 'host_unreachable' }),
-    })
-
-    expect(store.hostConnectionUnavailable).toBe(true)
-    expect(store.messages[chatId]).toEqual([
-      { role: 'user', content: 'keep this', timestamp: '' },
-    ])
-
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({ type: 'keepalive' }),
-    })
-    expect(store.hostConnectionUnavailable).toBe(false)
-  })
-
-  test('a successful poll clears the host-unreachable banner', async () => {
-    // The banner was only cleared from a chat WebSocket frame. If the socket
-    // stayed down (or no chat was open) after the host came back, "Can't reach
-    // the host" sat on screen over a working connection until a page reload.
-    // syncLatest is proxied to the host, so a 200 is proof it is reachable.
-    const store = useProjectStore()
-    const chatId = 'c-recovers'
-    store.activeChatId = chatId
-    store.messages[chatId] = []
-    store.connectWs(chatId)
-
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({ type: 'host_unreachable' }),
-    })
-    expect(store.hostConnectionUnavailable).toBe(true)
-
-    apiGet.mockResolvedValueOnce([])   // /api/chats answered by the host
-    await store.syncLatest()
-
-    expect(store.hostConnectionUnavailable).toBe(false)
-  })
-
+describe('result frames and unread state', () => {
   test('a stopped turn renders its partial text without badging the chat', () => {
     // Every connected client gets this frame, so a backgrounded tab or a second
     // device would otherwise show an unread marker for the half sentence the
@@ -1123,71 +1183,6 @@ describe('client host connection failures', () => {
     })
 
     expect(store.unread[chatId]).toBe(1)
-  })
-
-  test('the awareness socket raises the banner with no chat open', () => {
-    // The per-chat socket only exists while a chat is on screen, so on the
-    // home screen nothing used to notice the host was gone -- the app looked
-    // perfectly healthy. /ws/events is proxied too and carries the same frame.
-    const store = useProjectStore()
-    store.connectEventsWs()
-    const events = fakeSockets[fakeSockets.length - 1]
-    expect(events.url).toContain('/ws/events')
-
-    events.onmessage?.({ data: JSON.stringify({ type: 'host_unreachable' }) })
-    expect(store.hostConnectionUnavailable).toBe(true)
-
-    // A keepalive forwarded from the host proves it is back.
-    events.onmessage?.({ data: JSON.stringify({ type: 'keepalive' }) })
-    expect(store.hostConnectionUnavailable).toBe(false)
-  })
-
-  test('a host-unreachable awareness socket backs off instead of respinning', async () => {
-    // The proxy accepts the browser socket before it tries the host, so the
-    // close looks like a healthy blip and took the 50ms path -- twenty
-    // reconnects a second for as long as the host stayed away.
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.connectEventsWs()
-      const events = fakeSockets[fakeSockets.length - 1]
-      const countBefore = fakeSockets.length
-
-      events.onmessage?.({ data: JSON.stringify({ type: 'host_unreachable' }) })
-      events.close()
-
-      // First retry is still prompt, then the delay grows.
-      await vi.advanceTimersByTimeAsync(60)
-      expect(fakeSockets.length).toBe(countBefore + 1)
-
-      const retry = fakeSockets[fakeSockets.length - 1]
-      retry.onmessage?.({ data: JSON.stringify({ type: 'host_unreachable' }) })
-      retry.close()
-      await vi.advanceTimersByTimeAsync(60)
-      expect(fakeSockets.length).toBe(countBefore + 1)
-      await vi.advanceTimersByTimeAsync(100)
-      expect(fakeSockets.length).toBe(countBefore + 2)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('treats the legacy generic event as the same single connection state', () => {
-    const store = useProjectStore()
-    const chatId = 'c-client-legacy'
-    store.activeChatId = chatId
-    store.messages[chatId] = []
-    store.connectWs(chatId)
-
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({
-        type: 'error',
-        message: 'Host WS unreachable: host offline',
-      }),
-    })
-
-    expect(store.hostConnectionUnavailable).toBe(true)
-    expect(store.messages[chatId]).toEqual([])
   })
 })
 
@@ -2370,6 +2365,355 @@ describe('provider-neutral input state', () => {
       utilization: '0.2',
     })
   })
+
+  test('keeps a native permission card across a terminal stream frame', () => {
+    const store = useProjectStore()
+    const chatId = 'permission-survives-result'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Approval',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'auto',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+      pending_permission: JSON.stringify({
+        request_id: 'permission-live',
+        session_id: 'session-1',
+      }),
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'permission_request',
+      request_id: 'permission-live',
+      session_id: 'session-1',
+      tool_name: 'shell',
+      tool_input: 'echo ok',
+      message: 'Approve?',
+    }) })
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'result',
+      text: '',
+      is_error: false,
+      effective_model: 'gpt-test',
+      usage: {},
+      session_id: 'session-1',
+    }) })
+
+    expect(store.pendingPermissions[chatId]?.[0]?.request_id).toBe('permission-live')
+  })
+
+  test('queues a permission verdict while the socket is down and flushes it on reconnect', () => {
+    const store = useProjectStore()
+    const chatId = 'queued-permission'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Queued approval',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'auto',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+      pending_permission: JSON.stringify({
+        request_id: 'permission-1',
+        session_id: 'session-1',
+      }),
+    }]
+    store.pendingPermissions[chatId] = [{
+      request_id: 'permission-1',
+      session_id: 'session-1',
+      tool_name: 'shell',
+      tool_input: 'echo ok',
+      message: 'Approve?',
+      received_at: Date.now(),
+    }]
+
+    expect(store.respondPermission(chatId, 'permission-1', false, 'User denied')).toBe(false)
+    expect(store.permissionSubmissions[chatId]?.queued).toBe(true)
+    expect(store.pendingPermissions[chatId]).toHaveLength(1)
+
+    store.connectWs(chatId)
+    const sent = fakeSockets[0].send.mock.calls.map(([raw]) => JSON.parse(String(raw)))
+    expect(sent).toContainEqual({
+      type: 'permission_response',
+      request_id: 'permission-1',
+      session_id: 'session-1',
+      approved: false,
+      reason: 'User denied',
+    })
+    expect(store.permissionSubmissions[chatId]?.queued).toBe(false)
+
+    fakeSockets[0].onmessage?.({ data: JSON.stringify({
+      type: 'permission_response_result',
+      request_id: 'permission-1',
+      session_id: 'session-1',
+      ok: true,
+    }) })
+    expect(store.pendingPermissions[chatId]).toBeUndefined()
+  })
+
+  test('reconciles settled native cards from the authoritative chat snapshot', async () => {
+    const store = useProjectStore()
+    const chatId = 'snapshot-reconcile'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Snapshot',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'auto',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+      pending_permission: JSON.stringify({
+        request_id: 'permission-snapshot',
+        session_id: 'session-1',
+      }),
+      pending_question: JSON.stringify({
+        request_id: 'form-snapshot',
+        session_id: 'session-1',
+        questions: [{ id: 'choice', question: 'Continue?' }],
+      }),
+    }]
+    store.pendingPermissions[chatId] = [{
+      request_id: 'permission-snapshot',
+      session_id: 'session-1',
+      tool_name: 'shell',
+      tool_input: 'echo ok',
+      message: 'Approve?',
+      received_at: Date.now(),
+    }]
+    store.activeQuestions[chatId] = [{
+      id: 'choice',
+      question: 'Continue?',
+      header: '',
+      multiSelect: false,
+      allowOther: true,
+      isSecret: false,
+      requestId: 'form-snapshot',
+      sessionId: 'session-1',
+      options: [],
+    }]
+    apiGet.mockResolvedValue([])
+
+    await store.loadMessages(chatId)
+    expect(store.pendingPermissions[chatId]).toHaveLength(1)
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+
+    store.chats[0].pending_permission = ''
+    store.chats[0].pending_question = ''
+    await store.loadMessages(chatId)
+    expect(store.pendingPermissions[chatId]).toBeUndefined()
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+  })
+
+  test('keeps answers and queued delivery state when the broker replays the same form', () => {
+    const store = useProjectStore()
+    const chatId = 'replayed-form'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Replayed form',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'normal',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const event = {
+      type: 'tool_use',
+      tool_name: 'AskUserQuestion',
+      request_id: 'form-1',
+      session_id: 'session-1',
+      tool_input: JSON.stringify({
+        questions: [{ id: 'choice', question: 'Choose?', header: 'Choice' }],
+      }),
+    }
+    socket.onmessage?.({ data: JSON.stringify(event) })
+    const firstReference = store.activeQuestions[chatId]
+    expect(store.respondQuestion(chatId, 'form-1', { choice: ['yes'] })).toBe(true)
+
+    socket.onmessage?.({ data: JSON.stringify(event) })
+
+    expect(store.activeQuestions[chatId]).toBe(firstReference)
+    expect(store.questionSubmissions[chatId]?.requestId).toBe('form-1')
+    expect(store.questionSubmissions[chatId]?.pending).toBe(true)
+  })
+
+  test('ignores stale success frames when a provider reuses a request id in a new session', () => {
+    const store = useProjectStore()
+    const chatId = 'reused-request-session'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Session scoped',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'normal',
+      session_id: 'ses_new',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    store.pendingPermissions[chatId] = [{
+      request_id: 'reused',
+      session_id: 'ses_new',
+      tool_name: 'shell',
+      tool_input: 'echo new',
+      message: 'Approve new?',
+      received_at: Date.now(),
+    }]
+    store.permissionSubmissions[chatId] = {
+      requestId: 'reused',
+      sessionId: 'ses_new',
+      approved: true,
+      reason: '',
+      pending: true,
+      queued: false,
+      error: '',
+      retryable: true,
+    }
+    store.activeQuestions[chatId] = [{
+      id: 'choice',
+      question: 'Continue?',
+      header: 'Choice',
+      multiSelect: false,
+      allowOther: true,
+      isSecret: false,
+      requestId: 'reused',
+      sessionId: 'ses_new',
+      options: [],
+      type: 'string',
+      required: true,
+    }]
+    store.questionSubmissions[chatId] = {
+      requestId: 'reused',
+      sessionId: 'ses_new',
+      action: 'reply',
+      answers: { choice: ['yes'] },
+      pending: true,
+      queued: false,
+      error: '',
+      retryable: true,
+    }
+
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'permission_response_result', request_id: 'reused', session_id: 'ses_old', ok: true,
+    }) })
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'question_response_result', request_id: 'reused', session_id: 'ses_old', ok: true,
+    }) })
+
+    expect(store.pendingPermissions[chatId]?.[0]?.session_id).toBe('ses_new')
+    expect(store.activeQuestions[chatId]?.[0]?.sessionId).toBe('ses_new')
+  })
+
+  test('accepts the same request id again after the provider changes session', () => {
+    const store = useProjectStore()
+    const chatId = 'new-session-same-request'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'New session form',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'normal',
+      session_id: 'ses_new',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const event = (sessionId: string) => ({
+      type: 'tool_use',
+      tool_name: 'AskUserQuestion',
+      request_id: 'reused',
+      session_id: sessionId,
+      tool_input: JSON.stringify({
+        questions: [{ id: 'choice', question: 'Continue?' }],
+      }),
+    })
+
+    socket.onmessage?.({ data: JSON.stringify(event('ses_old')) })
+    store.questionSubmissions[chatId] = {
+      requestId: 'reused',
+      sessionId: 'ses_old',
+      action: 'reply',
+      answers: {},
+      pending: true,
+      queued: false,
+      error: '',
+      retryable: true,
+    }
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'question_response_result',
+      request_id: 'reused',
+      session_id: 'ses_old',
+      ok: true,
+    }) })
+    socket.onmessage?.({ data: JSON.stringify(event('ses_new')) })
+
+    expect(store.activeQuestions[chatId]?.[0]?.sessionId).toBe('ses_new')
+  })
+
+  test('queues a native form response while the socket is down and flushes it on reconnect', () => {
+    const store = useProjectStore()
+    const chatId = 'queued-form'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Queued form',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'normal',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.activeQuestions[chatId] = [{
+      id: 'choice',
+      question: 'Choose?',
+      header: 'Choice',
+      multiSelect: false,
+      allowOther: true,
+      isSecret: false,
+      requestId: 'form-1',
+      type: 'string',
+      required: true,
+      options: [],
+    }]
+
+    expect(store.respondQuestion(chatId, 'form-1', { choice: ['yes'] }, 'reply')).toBe(false)
+    expect(store.questionSubmissions[chatId]?.queued).toBe(true)
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({
+      type: 'question_response',
+      request_id: 'form-1',
+      action: 'reply',
+      answers: { choice: ['yes'] },
+    }))
+    expect(store.questionSubmissions[chatId]?.queued).toBe(false)
+
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'question_response_result',
+      request_id: 'form-1',
+      ok: true,
+    }) })
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+    expect(store.questionSubmissions[chatId]).toBeUndefined()
+  })
 })
 
 describe('image-capability questions', () => {
@@ -2776,9 +3120,9 @@ describe('postprocessingChats (home tidying list)', () => {
   test('lists only chats whose pipeline is still running, newest archive first', () => {
     const store = useProjectStore()
     store.chats = [
-      { chat_id: 'c-done', project_id: 'p1', title: 'Settled', archived: true, postprocess: { state: 'done', step: 'insights', steps: {} } },
-      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'insights', expected: [], steps: {} } },
-      { chat_id: 'c-fresher', project_id: 'p1', title: 'Fresher', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'running', step: 'memory_proposals', expected: [], steps: {} } },
+      { chat_id: 'c-done', project_id: 'p1', title: 'Settled', archived: true, postprocess: { state: 'done', step: 'trajectory', steps: {} } },
+      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'trajectory', expected: [], steps: {} } },
+      { chat_id: 'c-fresher', project_id: 'p1', title: 'Fresher', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'running', step: 'memory_pass', expected: [], steps: {} } },
       { chat_id: 'c-plain', project_id: 'p1', title: 'No pipeline', archived: true },
     ] as unknown as typeof store.chats
     expect(store.postprocessingChats().map(c => c.chat_id)).toEqual(['c-fresher', 'c-running'])
@@ -2791,11 +3135,11 @@ describe('postprocessingChats (home tidying list)', () => {
       { project_id: 'p2', workspace: 'personal' },
     ] as unknown as typeof store.projects
     store.chats = [
-      { chat_id: 'c-failed', project_id: 'p1', title: 'Failed', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'error' } } } },
-      { chat_id: 'c-partial', project_id: 'p1', title: 'Partial', archived: true, last_activity_at: '2026-08-16T09:00:00Z', postprocess: { state: 'incomplete', job: { job_id: 'j', state: 'incomplete', unfinished: ['memory_proposals'] } } },
-      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'insights', expected: [], steps: {} } },
-      { chat_id: 'c-ok', project_id: 'p2', title: 'Ok', archived: true, last_activity_at: '2026-08-14T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'ok' } } } },
-      { chat_id: 'c-skipped', project_id: 'p2', title: 'Skipped', archived: true, last_activity_at: '2026-08-13T10:00:00Z', postprocess: { state: 'done', steps: { insights: { status: 'skipped' } } } },
+      { chat_id: 'c-failed', project_id: 'p1', title: 'Failed', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'blocked', blocked_reason: 'archive file is missing' } },
+      { chat_id: 'c-partial', project_id: 'p1', title: 'Partial', archived: true, last_activity_at: '2026-08-16T09:00:00Z', postprocess: { state: 'incomplete', job: { job_id: 'j', state: 'incomplete', unfinished: ['trajectory'] } } },
+      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'trajectory', expected: [], steps: {} } },
+      { chat_id: 'c-ok', project_id: 'p2', title: 'Ok', archived: true, last_activity_at: '2026-08-14T10:00:00Z', postprocess: { state: 'done', steps: { trajectory: { status: 'ok' } } } },
+      { chat_id: 'c-skipped', project_id: 'p2', title: 'Skipped', archived: true, last_activity_at: '2026-08-13T10:00:00Z', postprocess: { state: 'done', steps: { trajectory: { status: 'skipped' } } } },
       { chat_id: 'c-plain', project_id: 'p1', title: 'No pipeline', archived: true },
     ] as unknown as typeof store.chats
     expect(store.insightsFailedChats().map(c => c.chat_id)).toEqual(['c-failed', 'c-partial'])
@@ -2937,6 +3281,33 @@ describe('server restart overlay', () => {
       }),
     })
     expect(store.serverRestarting).toBe(true)
+  })
+
+  // An update drain that timed out reopens admission. Without this the
+  // overlay would stick on an engine that is perfectly healthy, blocking the
+  // user's next turn behind a restart that is never coming.
+  test('server_restart_cancelled over /ws/events clears the overlay', () => {
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'server_restarting',
+        message: 'Ciaobot is waiting for active chats to finish before restarting',
+      }),
+    })
+    expect(store.serverRestarting).toBe(true)
+    const signal = reloadWhenServerReady.mock.calls.at(-1)?.[1]
+    expect(signal?.aborted).toBe(false)
+
+    sock.onmessage?.({
+      data: JSON.stringify({ type: 'server_restart_cancelled' }),
+    })
+    expect(store.serverRestarting).toBe(false)
+    expect(store.serverRestartMessage).toBe('')
+    // The reload loop is stopped too. Left running, it would hard-reload
+    // every tab at the end of its timeout against an engine that is healthy.
+    expect(signal?.aborted).toBe(true)
   })
 
   test('per-chat server_restarting undoes the optimistic send and skips the error bubble', () => {
@@ -3086,6 +3457,235 @@ describe('deep-link chat navigation', () => {
     expect(store.activeChatId).toBeNull()
   })
 
+  // ── #619: an archived chat is viewable, just inert ─────────────────────
+  // The deep link kept the URL and rendered nothing, because the only
+  // predicate guarding activation was the liveness one. These cover the split:
+  // `canOpenChat` (may this be opened at all) accepts an archived chat,
+  // `chatExistsInList` (may this be re-attached) still does not.
+  describe('archived chat selection', () => {
+    const ARCHIVED: ChatInfo = {
+      chat_id: 'c-archived',
+      project_id: 'p1',
+      title: 'Archived',
+      model: '',
+      provider: 'claude',
+      mode: '',
+      session_id: '',
+      created_at: '',
+      archived: true,
+      archive_path: 'archive/c-archived.jsonl',
+    }
+    const LIVE: ChatInfo = {
+      chat_id: 'c-live',
+      project_id: 'p1',
+      title: 'Live',
+      model: '',
+      provider: 'claude',
+      mode: '',
+      session_id: '',
+      created_at: '',
+      archived: false,
+    }
+
+    function chatSockets(): FakeWebSocket[] {
+      return fakeSockets.filter(s => s.url.includes('/ws/chat/'))
+    }
+
+    function fetchedPaths(): string[] {
+      return apiGet.mock.calls.map(([path]) => String(path))
+    }
+
+    let store: ReturnType<typeof useProjectStore>
+
+    beforeEach(() => {
+      store = useProjectStore()
+      store.projects = [
+        { project_id: 'p1', name: 'Proj', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+      ]
+      store.chats = [LIVE, ARCHIVED]
+      store.activeWorkspace = 'personal'
+    })
+
+    test('openChatFromDeepLink selects an archived chat without going live', async () => {
+      await store.openChatFromDeepLink(ARCHIVED.chat_id)
+
+      // Selected, and `activeChat` resolves — that is all ChatLayout's
+      // `v-else-if` needed to mount the panel and its archived branch.
+      expect(store.activeChatId).toBe(ARCHIVED.chat_id)
+      expect(store.activeChat?.archived).toBe(true)
+      expect(routerPush).toHaveBeenCalledWith('/chat/c-archived')
+      // Inert: no socket, no history, no subagents. The provider reclaimed the
+      // session, so every one of those is a request that cannot change anything.
+      expect(chatSockets()).toEqual([])
+      expect(fetchedPaths().some(p => p.includes('/messages'))).toBe(false)
+      expect(fetchedPaths().some(p => p.includes('/subagents'))).toBe(false)
+      // Marking it read is the one request an open still makes.
+      expect(apiPost.mock.calls.some(([path]) => path === '/api/chats/c-archived/read')).toBe(true)
+    })
+
+    // The liveness predicate is deliberately *not* widened. It gates
+    // reloadAndReconnectChat, the funnel behind resume-from-background, the
+    // watchdog, reconnectNow and re-opening the already-active chat — so an
+    // archived chat must not be re-attached from any of them.
+    test('re-opening the already-active archived chat does not re-attach a socket', async () => {
+      await store.openChatFromDeepLink(ARCHIVED.chat_id)
+      const before = chatSockets().length
+
+      store.reconnectNow()
+
+      expect(chatSockets()).toHaveLength(before)
+      expect(fetchedPaths().some(p => p.includes('/messages'))).toBe(false)
+    })
+
+    test('the same path still re-attaches a live chat', async () => {
+      await store.openChatFromDeepLink(LIVE.chat_id)
+      apiGet.mockClear()
+      const before = chatSockets().length
+
+      store.reconnectNow()
+
+      expect(chatSockets().length).toBeGreaterThan(before)
+      expect(fetchedPaths().some(p => p.includes('/messages'))).toBe(true)
+    })
+
+    test('archiving the open chat still clears the selection', async () => {
+      // The inverse of this fix, and the one that must not have regressed: you
+      // archived the chat you had open, so the pane closes.
+      await store.openChatFromDeepLink(LIVE.chat_id)
+      expect(store.activeChatId).toBe(LIVE.chat_id)
+      apiPost.mockResolvedValue({ ok: true })
+
+      await store.archiveChat(LIVE.chat_id)
+
+      expect(store.activeChatId).toBeNull()
+      expect(store.chats.find(c => c.chat_id === LIVE.chat_id)?.archived).toBe(true)
+    })
+
+    test('the boot URL restore selects an archived chat without going live', async () => {
+      window.history.replaceState({}, '', '/chat/c-archived')
+      Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+      apiGet.mockImplementation((path: string) => {
+        if (path === '/api/workspaces') {
+          return Promise.resolve({ workspaces: [], active: 'home', provider_options: [] })
+        }
+        if (path === '/api/projects') {
+          return Promise.resolve([
+            { project_id: 'p1', name: 'General', workspace: 'home', context: '', created_at: '', order: 0, vault_folder: 'general' },
+          ])
+        }
+        if (path === '/api/chats') return Promise.resolve([LIVE, ARCHIVED])
+        return Promise.resolve([])
+      })
+
+      await store.fetchAll()
+
+      expect(store.activeChatId).toBe(ARCHIVED.chat_id)
+      expect(store.activeChat?.archived).toBe(true)
+      expect(fetchedPaths().some(p => p.includes('/messages'))).toBe(false)
+      expect(chatSockets()).toEqual([])
+      window.history.replaceState({}, '', '/')
+    })
+  })
+
+  function workspaceFixture(store: ReturnType<typeof useProjectStore>) {
+    store.projects = [
+      { project_id: 'p-personal', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+      { project_id: 'p-work', name: 'General', workspace: 'work', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c-personal', project_id: 'p-personal', title: 'Personal', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'c-work', project_id: 'p-work', title: 'Work', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'work'
+    store.activeChatId = 'c-work'
+    store.connectWs('c-work')
+    return fakeSockets[fakeSockets.length - 1]
+  }
+
+  const archivedResponse = {
+    workspaces: [{ name: 'personal', vault_root: 'personal', default_provider: 'claude' }],
+    active: 'personal',
+    archived: { path: '.archived-workspaces/work-20260923-000000' },
+  }
+
+  test('archiveWorkspace clears the selected chat of the archived workspace', async () => {
+    const store = useProjectStore()
+    const chatSocket = workspaceFixture(store)
+    localStorage.setItem('ciao-active-chat', 'c-work')
+    apiPost.mockResolvedValue(archivedResponse)
+    routerPush.mockClear()
+
+    await store.archiveWorkspace('work')
+
+    expect(store.activeWorkspace).toBe('personal')
+    expect(store.activeChatId).toBeNull()
+    expect(store.chats.map(c => c.chat_id)).toEqual(['c-personal'])
+    expect(store.projects.map(p => p.project_id)).toEqual(['p-personal'])
+    expect(chatSocket.readyState).toBe(FakeWebSocket.CLOSED)
+    // Settings stays open; only the selection is cleared, and durably.
+    expect(routerPush).not.toHaveBeenCalled()
+    expect(localStorageData['ciao-active-chat']).toBeUndefined()
+  })
+
+  test('archiveWorkspace clears the selection when project_deleted lands first', async () => {
+    const store = useProjectStore()
+    const chatSocket = workspaceFixture(store)
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    apiPost.mockImplementation(async () => {
+      events.onmessage?.({ data: JSON.stringify({ type: 'project_deleted', project_id: 'p-work' }) })
+      return archivedResponse
+    })
+
+    await store.archiveWorkspace('work')
+
+    expect(store.activeChatId).toBeNull()
+    expect(store.chats.map(c => c.chat_id)).toEqual(['c-personal'])
+    expect(chatSocket.readyState).toBe(FakeWebSocket.CLOSED)
+  })
+
+  test('project_deleted event clears the selected chat and closes its socket', () => {
+    const store = useProjectStore()
+    const chatSocket = workspaceFixture(store)
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+
+    events.onmessage?.({ data: JSON.stringify({ type: 'project_deleted', project_id: 'p-work' }) })
+
+    expect(store.activeChatId).toBeNull()
+    expect(store.chats.map(c => c.chat_id)).toEqual(['c-personal'])
+    expect(chatSocket.readyState).toBe(FakeWebSocket.CLOSED)
+  })
+
+  test('workspaces_changed from another client refetches the registry and drops archived projects', async () => {
+    const store = useProjectStore()
+    const chatSocket = workspaceFixture(store)
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') {
+        return { workspaces: [{ name: 'personal', vault_root: 'personal', default_provider: 'claude' }], active: 'personal' }
+      }
+      if (path === '/api/projects') {
+        return [{ project_id: 'p-personal', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' }]
+      }
+      return {}
+    })
+    const revision = store.workspaceRegistryRevision
+
+    events.onmessage?.({ data: JSON.stringify({ type: 'workspaces_changed' }) })
+
+    await vi.waitFor(() => {
+      expect(store.workspaceRegistryRevision).toBe(revision + 1)
+    })
+    expect(store.workspaces.map(w => w.name)).toEqual(['personal'])
+    expect(store.activeWorkspace).toBe('personal')
+    expect(store.projects.map(p => p.project_id)).toEqual(['p-personal'])
+    expect(store.chats.map(c => c.chat_id)).toEqual(['c-personal'])
+    expect(store.activeChatId).toBeNull()
+    expect(chatSocket.readyState).toBe(FakeWebSocket.CLOSED)
+  })
+
   function twoChats(): ChatInfo[] {
     return [
       { chat_id: 'parent', project_id: 'p1', title: 'Parent', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
@@ -3104,15 +3704,15 @@ describe('deep-link chat navigation', () => {
     expect(store.chats.map(chat => chat.archived)).toEqual([true, false])
   })
 
-  test('archive response keeps the background insights status visible', async () => {
+  test('archive response keeps the background pipeline status visible', async () => {
     const store = useProjectStore()
     store.chats = twoChats()
     apiPost.mockResolvedValue({
       ok: true,
       postprocess: {
         state: 'running',
-        step: 'insights',
-        expected: ['insights', 'trajectory'],
+        step: 'trajectory',
+        expected: ['trajectory'],
         steps: {},
       },
     })
@@ -4959,5 +5559,74 @@ describe('loadSubagent', () => {
 
     expect(store.subagents.c1).toHaveLength(1)
     expect(store.subagents.c1[0].messages).toHaveLength(1)
+  })
+})
+
+describe('memory pass surfaces', () => {
+  function seedProjects(store: ReturnType<typeof useProjectStore>) {
+    store.activeWorkspace = 'personal'
+    store.projects = [
+      { project_id: 'p1', name: 'General', workspace: 'personal', order: 0 },
+      { project_id: 'p-mem', name: 'Memory', workspace: 'personal', order: 1, kind: 'memory' },
+      { project_id: 'p-mem-work', name: 'Memory', workspace: 'work', order: 0, kind: 'memory' },
+      { project_id: 'p2', name: 'Notes', workspace: 'work', order: 1 },
+    ] as unknown as typeof store.projects
+  }
+
+  test('hides the memory project from workspaceProjects', () => {
+    // The pass runs in an app-owned project; showing it would put a row in the
+    // sidebar for something the user never created and cannot use.
+    const store = useProjectStore()
+    seedProjects(store)
+    expect(store.workspaceProjects.map(p => p.project_id)).toEqual(['p1'])
+  })
+
+  test('finds the memory project for a workspace without showing it', () => {
+    const store = useProjectStore()
+    seedProjects(store)
+    expect(store.memoryProjectFor('personal')?.project_id).toBe('p-mem')
+    expect(store.memoryProjectFor('work')?.project_id).toBe('p-mem-work')
+  })
+
+  test('flags only an unclean pass as needing attention', () => {
+    const store = useProjectStore()
+    seedProjects(store)
+    store.chats = [
+      { chat_id: 'c-attention', project_id: 'p-mem', archived: false, helper: { kind: 'memory_pass', state: 'attention', source_chat_id: 'c1', archive_path: '', doc_path: '', source_title: '', source_project: '', archive_policy: 'when_clean' } },
+      { chat_id: 'c-running', project_id: 'p-mem', archived: false, helper: { kind: 'memory_pass', state: 'running', source_chat_id: 'c1', archive_path: '', doc_path: '', source_title: '', source_project: '', archive_policy: 'when_clean' } },
+      { chat_id: 'c-plain', project_id: 'p1', archived: false },
+    ] as unknown as typeof store.chats
+    expect(store.memoryPassNeedsAttention('c-attention')).toBe(true)
+    expect(store.memoryPassNeedsAttention('c-running')).toBe(false)
+    expect(store.memoryPassNeedsAttention('c-plain')).toBe(false)
+    expect(store.memoryPassNeedsAttention('missing')).toBe(false)
+  })
+
+  test('latestMemoryPassChat picks the newest non-archived pass in the workspace', () => {
+    const store = useProjectStore()
+    seedProjects(store)
+    store.chats = [
+      { chat_id: 'c-old', project_id: 'p-mem', archived: false, last_activity_at: '2026-08-15T10:00:00Z' },
+      { chat_id: 'c-clean', project_id: 'p-mem', archived: true, last_activity_at: '2026-08-18T10:00:00Z' },
+      { chat_id: 'c-new', project_id: 'p-mem', archived: false, last_activity_at: '2026-08-17T10:00:00Z' },
+      { chat_id: 'c-other-workspace', project_id: 'p-mem-work', archived: false, last_activity_at: '2026-08-19T10:00:00Z' },
+      { chat_id: 'c-not-a-pass', project_id: 'p1', archived: false, last_activity_at: '2026-08-20T10:00:00Z' },
+    ] as unknown as typeof store.chats
+    // A clean pass is archived by the time the owner could reach for it, and
+    // the newest row is an ordinary chat, so neither can win.
+    expect(store.latestMemoryPassChat('personal')?.chat_id).toBe('c-new')
+    expect(store.latestMemoryPassChat('work')?.chat_id).toBe('c-other-workspace')
+  })
+
+  test('latestMemoryPassChat returns null without a memory project or an open pass', () => {
+    const store = useProjectStore()
+    seedProjects(store)
+    store.chats = [] as unknown as typeof store.chats
+    expect(store.latestMemoryPassChat('work')).toBeNull()
+
+    store.chats = [
+      { chat_id: 'c-done', project_id: 'p-mem', archived: true },
+    ] as unknown as typeof store.chats
+    expect(store.latestMemoryPassChat('personal')).toBeNull()
   })
 })

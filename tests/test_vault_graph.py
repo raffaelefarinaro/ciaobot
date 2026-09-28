@@ -170,3 +170,87 @@ def test_vault_graph_frontmatter_updated_beats_old_mtime(client, tmp_path):
     assert node["stale"] is False
     assert node["age_days"] <= 0
     assert node["updated"] == "2099-01-01"
+
+
+def _age(path, days):
+    import os
+    import time
+
+    old = time.time() - days * 86400
+    os.utime(path, (old, old))
+
+
+def test_vault_graph_never_flags_what_the_review_queue_never_lists(client, tmp_path):
+    """The map's "unchecked" count must equal what the queue can show."""
+    vault = tmp_path / "memory-vault" / "personal"
+    notes = {
+        "Workspace/Proposals.md": "note",
+        "journal/daily/_template.md": "note",
+        "projects/completed/Done.md": "project",
+        "Ideas/ops.md": "log",
+        "Ideas/diary.md": "journal",
+    }
+    for rel, note_type in notes.items():
+        path = vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\ntype: {note_type}\n---\n# {path.stem}\n", encoding="utf-8")
+        _age(path, 400)
+
+    data = client.get("/api/vault/graph").json()
+    for rel in notes:
+        node = next(n for n in data["nodes"] if n["id"].endswith(rel))
+        assert node["stale"] is False, rel
+        # The age is still reported: the map shows it either way.
+        assert node["age_days"] >= 400, rel
+
+
+def test_vault_graph_stale_set_matches_unverified_candidates(client, tmp_path):
+    from ciao.vault_review import generate_candidates
+
+    vault = tmp_path / "memory-vault" / "personal"
+    (vault / "People").mkdir()
+    (vault / "People" / "Mo.md").write_text(
+        "---\ntype: person\ntags: [p]\n---\n# Mo\n\nSee [A](../A.md).\n", encoding="utf-8"
+    )
+    _age(vault / "People" / "Mo.md", 120)
+    (vault / "Workspace").mkdir()
+    (vault / "Workspace" / "Queue.md").write_text("---\ntype: note\n---\n# Queue\n", encoding="utf-8")
+    _age(vault / "Workspace" / "Queue.md", 400)
+    _age(vault / "B.md", 400)
+
+    graph_stale = {
+        n["id"].rsplit("personal/", 1)[-1]
+        for n in client.get("/api/vault/graph?workspace=personal").json()["nodes"]
+        if n["stale"]
+    }
+    queued = {
+        c.path.rsplit("personal/", 1)[-1] if "personal/" in c.path else c.path.split("memory-vault/", 1)[-1]
+        for c in generate_candidates(vault, workspace="personal", max_candidates=200, write_queue=False)
+        if "unverified" in c.signals
+    }
+    assert graph_stale == queued == {"People/Mo.md", "B.md"}
+
+
+def test_keep_clears_the_graph_stale_flag(client, tmp_path):
+    from ciao.vault_review import generate_candidates, record_decision
+
+    vault = tmp_path / "memory-vault" / "personal"
+    (vault / "People").mkdir()
+    note = vault / "People" / "Mo.md"
+    note.write_text("---\ntype: person\ntags: [p]\nupdated: 2025-01-01\n---\n# Mo\n", encoding="utf-8")
+
+    def mo():
+        data = client.get("/api/vault/graph").json()
+        return next(n for n in data["nodes"] if n["title"] == "Mo")
+
+    assert mo()["stale"] is True
+    candidate = next(
+        c for c in generate_candidates(vault, workspace="personal", write_queue=False)
+        if c.path.endswith("People/Mo.md")
+    )
+    assert "unverified" in candidate.signals
+    # The horizon rides on the node, so the map names the rule from the same
+    # table the flag came from.
+    assert mo()["threshold_days"] == 90
+    record_decision(vault, candidate, disposition="keep")
+    assert mo()["stale"] is False

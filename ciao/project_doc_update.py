@@ -1,11 +1,11 @@
-"""Archive-time canonical project doc updates from session insights.
+"""Canonical project doc and people-note folds on the memory accept path.
 
-When a chat that belongs to a vault-backed project is archived, the insights
-pipeline (``ciao/insights.py``) already extracts a ``## Session insights``
-section with full chat context in hand. This module folds the material parts
-of that section — Decisions and Open loops — into the project's canonical doc
-right away, instead of waiting for the nightly ``system-memory-curation``
-schedule (which only fires while the server happens to be running).
+A ``[project]`` bullet accepted from the proposals queue is folded into the
+project's canonical doc, and an accepted ``[people: <Name>]`` bullet is merged
+into that person's existing note, right away, instead of waiting for the
+nightly ``system-memory-curation`` schedule (which only fires while the server
+happens to be running). Both share the guards below, so an accept rewrites a
+doc under the same rules the deleted archive-time fold did.
 
 Safety posture:
 
@@ -15,7 +15,7 @@ Safety posture:
   half is rejected — a truncated or hallucinated rewrite must never replace
   a good doc.
 * Writes to the same doc are serialized with a per-path asyncio lock so two
-  chats archiving into one project cannot interleave.
+  accepts into one project cannot interleave.
 * The nightly curation schedule stays on as the cross-chat consolidator.
 """
 
@@ -42,9 +42,9 @@ _MIN_SIZE_RATIO = 0.5
 
 _DOC_UPDATE_SYSTEM_PROMPT = """\
 You maintain the canonical documentation file for a project.
-You receive the current doc and the session-insights section of a chat that
-was just archived for this project. Fold in only material changes: decisions
-made, open loops added or resolved, status changes.
+You receive the current doc and a short set of material bullets from a
+conversation that just ended in this project. Fold in only material changes:
+decisions made, open loops added or resolved, status changes.
 
 Rules:
 - Preserve the doc's existing frontmatter, structure, headings, and voice.
@@ -54,14 +54,14 @@ Rules:
 - Strip `[idx=N]` citations and bracketed destination tags (`[memory]`,
   `[project]`, `[people: <Name>]`, `[learnings]`, `[review]`) from anything
   you carry over.
-- If nothing in the insights materially changes the doc, reply with exactly
+- If nothing in those bullets materially changes the doc, reply with exactly
   NO_CHANGES and nothing else.
 - Otherwise reply with the complete updated doc content and nothing else —
   no code fences, no commentary.
 """
 
 
-# One lock per doc path; two chats archiving into the same project must not
+# One lock per doc path; two accepts into the same project must not
 # interleave their read-modify-write cycles.
 _doc_locks: dict[str, asyncio.Lock] = {}
 
@@ -120,12 +120,12 @@ async def update_project_doc(
     timeout_s: float = 300.0,
     error_out: list[str] | None = None,
 ) -> bool:
-    """Fold session insights into the canonical doc. Returns True on write.
+    """Fold the Decisions/Open loops of *insights_md* into the canonical doc.
 
-    No-ops (returning False) when the doc does not exist, the insights carry
-    no Decisions/Open loops, the model reports ``NO_CHANGES``, or the output
-    fails the safety guards. Never raises — callers treat this as
-    fire-and-forget.
+    Returns True on write. No-ops (returning False) when the doc does not
+    exist, the input carries no Decisions/Open loops, the model reports
+    ``NO_CHANGES``, or the output fails the safety guards. Never raises —
+    callers treat this as fire-and-forget.
 
     ``error_out``, when given, records a non-empty reason for an internal
     failure (the provider call raised, the doc was unreadable, the write
@@ -148,7 +148,8 @@ async def update_project_doc(
                 "Current canonical doc:\n\n"
                 f"{current}\n\n"
                 "---\n\n"
-                "Session insights from the just-archived chat:\n\n"
+                "Decisions to fold in (the accepted facts addressed to this "
+                "doc):\n\n"
                 f"{insights_md}"
             )
             kwargs: dict = {
@@ -170,4 +171,90 @@ async def update_project_doc(
         logger.exception("project doc update failed for %s", doc_path)
         if error_out is not None:
             error_out.append(f"{type(exc).__name__}: {exc}"[:400] or "project doc update failed")
+        return False
+
+
+_PERSON_FOLD_SYSTEM_PROMPT = """\
+You maintain a note about one person in a personal knowledge vault.
+You receive the current note and one new fact about that person that the
+operator has approved. Merge the fact into the note where it belongs: the
+section it fits, or a short new line under the most fitting heading.
+
+Rules:
+- Preserve the note's existing frontmatter, structure, headings, and voice.
+- Do not invent facts, and do not drop or reword anything already there
+  except to correct what the new fact directly supersedes.
+- Strip `[idx=N]` citations and bracketed destination tags (`[memory]`,
+  `[project]`, `[people: <Name>]`, `[learnings]`, `[review]`) from the fact.
+- If the note already says what the fact says, reply with exactly
+  NO_CHANGES and nothing else.
+- Otherwise reply with the complete updated note and nothing else —
+  no code fences, no commentary.
+"""
+
+
+async def fold_fact_into_person_note(
+    *,
+    note_path: Path,
+    fact: str,
+    model: str,
+    timeout_s: float = 300.0,
+    error_out: list[str] | None = None,
+) -> bool:
+    """Merge one approved fact into an existing person note. True on write.
+
+    The accept-time counterpart of :func:`update_project_doc` for `[people]`
+    rows: same per-file lock, fence stripping and rewrite guards, with a prompt
+    that takes a single approved fact instead of a session's insights. False
+    means ``NO_CHANGES`` (``error_out`` left empty) or, with ``error_out``
+    filled, a guard rejection, a note edited during the model call, or a
+    failure; the note is untouched in every case.
+    """
+    try:
+        if not note_path.is_file() or not fact.strip():
+            return False
+        async with _lock_for(note_path):
+            current = note_path.read_text(encoding="utf-8")
+
+            from ciao.providers.oneshot import run_oneshot
+
+            prompt = (
+                "Current person note:\n\n"
+                f"{current}\n\n"
+                "---\n\n"
+                f"Approved fact to merge:\n\n{fact.strip()}"
+            )
+            output = await run_oneshot(
+                prompt,
+                system_prompt=_PERSON_FOLD_SYSTEM_PROMPT,
+                model=model,
+                timeout_s=timeout_s,
+            )
+            updated = _strip_code_fence(output)
+            if updated == _NO_CHANGES or updated == current.strip():
+                return False
+            if not _is_safe_rewrite(current, updated):
+                # Not "already covered": the model produced a merge the guards
+                # refused (dropped frontmatter, shrank the note). Say so, or the
+                # operator is told to dismiss a fact that was never filed.
+                if error_out is not None:
+                    error_out.append(
+                        "the model's rewrite was rejected (it dropped the "
+                        "frontmatter or shrank the note)"
+                    )
+                return False
+            # The per-path lock only serializes this process's folds. A hand
+            # edit (or an agent's Edit) during the model call would otherwise be
+            # overwritten by a merge computed from the older text.
+            if note_path.read_text(encoding="utf-8") != current:
+                if error_out is not None:
+                    error_out.append(f"{note_path.name} changed during the fold; nothing was written")
+                return False
+            note_path.write_text(updated + "\n", encoding="utf-8")
+            logger.info("person note updated from an accepted proposal: %s", note_path)
+            return True
+    except Exception as exc:  # noqa: BLE001 — a failed fold keeps the row queued
+        logger.exception("person note fold failed for %s", note_path)
+        if error_out is not None:
+            error_out.append(f"{type(exc).__name__}: {exc}"[:400] or "person note fold failed")
         return False

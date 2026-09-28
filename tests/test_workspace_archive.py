@@ -1,0 +1,1285 @@
+"""Archiving a workspace keeps its files intact and out of the agent's reach.
+
+Removing a workspace used to MOVE its projects and notes into the primary
+workspace, which mixed e.g. Work notes into Personal memory with no way back.
+It is now archived like a completed project: unregistered, its folder moved
+byte for byte to ``<install>/.archived-workspaces/<name>-<stamp>/``, its chats
+archived, its schedules taken with it, and its notes dropped from search and
+the shared index. A restore puts the files, the registry entry and the
+schedules back; vault-backed projects are rediscovered from the notes.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.testclient import TestClient
+
+from ciao import fts_search, vault_index, vault_lint
+from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.schedules import ScheduleManager, ScheduleStore
+from ciao.sessions import StateStore
+from ciao.transcripts import TranscriptStore
+from ciao.web.project_chats import ProjectChatManager
+from ciao.web.routes_api import (
+    archive_workspace_setting,
+    list_archived_workspaces,
+    list_workspaces,
+    restore_archived_workspace,
+)
+from ciao.workspace_archive import (
+    ARCHIVE_DIR_NAME,
+    WorkspaceArchiveError,
+    archive_root,
+    list_archives,
+    plan_archive,
+)
+
+
+# ── fixtures ───────────────────────────────────────────────────────────────
+
+
+def _reroot(tmp_path: Path) -> None:
+    receipt = tmp_path / ".runtime" / "migration" / "workspace-rooting.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
+    reset_reroot_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolated(tmp_path, monkeypatch):
+    # The search database must be this test's, never the operator's.
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / ".runtime"))
+    monkeypatch.setattr(
+        "ciao.sync_skills.sync_workspace_skills", lambda *_a, **_kw: None
+    )
+    reset_reroot_cache()
+    yield
+    reset_reroot_cache()
+
+
+def _config(tmp_path: Path, *, rerooted: bool) -> CiaoConfig:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    if rerooted:
+        _reroot(tmp_path)
+        roots = {name: f"{name}/memory-vault" for name in ("personal", "work")}
+    else:
+        roots = {name: f"memory-vault/{name}" for name in ("personal", "work")}
+    return CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root=roots["personal"]),
+            "work": WorkspaceConfig(
+                name="work",
+                vault_root=roots["work"],
+                gws_profile="work",
+                color="cyan",
+                default_provider="claude",
+            ),
+        },
+    )
+
+
+def _manager(tmp_path: Path, config: CiaoConfig) -> ProjectChatManager:
+    runtime = tmp_path / ".runtime"
+    state = StateStore(config.state_path, tmp_path, config.media_root)
+    transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
+    return ProjectChatManager(
+        config,
+        state_store=state,
+        transcript_store=transcripts,
+        path=runtime / "web_projects.json",
+    )
+
+
+def _app(tmp_path: Path, *, rerooted: bool):
+    config = _config(tmp_path, rerooted=rerooted)
+    for name in ("personal", "work"):
+        vault = Path(config.workspace_vault_root(name))
+        (vault / "People").mkdir(parents=True, exist_ok=True)
+        (vault / "People" / f"{name}-friend.md").write_text(
+            f"---\ntype: person\n---\n# Friend of {name}\n\nquokka {name}\n",
+            encoding="utf-8",
+        )
+    if rerooted:
+        # Agent assets that belong to the work root and must travel with it.
+        work_root = tmp_path / "work"
+        (work_root / "AGENTS.md").write_text("# work guide\n", encoding="utf-8")
+        (work_root / ".claude" / "skills").mkdir(parents=True)
+        (work_root / ".claude" / "skills" / "linked").symlink_to(tmp_path / "personal")
+    pcm = _manager(tmp_path, config)
+    store = ScheduleStore(tmp_path / ".runtime", workspace_names=config.workspace_names)
+    schedules = ScheduleManager(store)
+    app = Starlette(
+        routes=[
+            Route("/api/workspaces", list_workspaces, methods=["GET"]),
+            Route("/api/workspaces/archived", list_archived_workspaces, methods=["GET"]),
+            Route(
+                "/api/workspaces/archived/restore",
+                restore_archived_workspace,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/workspaces/{name}/archive",
+                archive_workspace_setting,
+                methods=["POST"],
+            ),
+            Route("/api/workspaces/{name}", archive_workspace_setting, methods=["DELETE"]),
+        ]
+    )
+    app.state.config = config
+    app.state.project_chat_manager = pcm
+    app.state.schedule_manager = schedules
+    return TestClient(app), config, pcm, store
+
+
+def _tree(root: Path) -> dict[str, str]:
+    """Every entry under ``root`` with a content hash (or link target)."""
+    out: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            out[rel] = "link:" + str(path.readlink())
+        elif path.is_file():
+            out[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+        else:
+            out[rel] = "dir"
+    return out
+
+
+def _index_all(config: CiaoConfig) -> Path:
+    db = fts_search.get_db_path(config.state_path.parent)
+    conn = sqlite3.connect(db)
+    try:
+        fts_search.init_db(conn)
+        for root, _name, _prefix in config.vault_scan_targets():
+            fts_search.index_vault(conn, root, path_base=config.workspace_root)
+    finally:
+        conn.close()
+    return db
+
+
+def _search_paths(db: Path, query: str) -> list[str]:
+    conn = sqlite3.connect(db)
+    try:
+        return [row["path"] for row in fts_search.search_vault(conn, query, limit=50)]
+    finally:
+        conn.close()
+
+
+# ── archive: per-root (fresh / re-rooted) layout ─────────────────────────────
+
+
+def test_archive_moves_the_whole_agent_root_intact(tmp_path):
+    client, config, pcm, _store = _app(tmp_path, rerooted=True)
+    work_root = tmp_path / "work"
+    before = _tree(work_root)
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 200, response.json()
+    archived = response.json()["archived"]
+    folder = archive_root(config) / archived["id"]
+    assert folder.parent == tmp_path / ARCHIVE_DIR_NAME
+    assert archived["id"].startswith("work-")
+    assert not work_root.exists()
+    assert _tree(folder / "work") == before, "the archived root changed on the way"
+    # Nothing was merged into the primary workspace.
+    personal_vault = Path(config.workspace_vault_root("personal"))
+    assert not (personal_vault / "People" / "work-friend.md").exists()
+
+    metadata = json.loads((folder / "archive.json").read_text(encoding="utf-8"))
+    assert metadata["status"] == "archived"
+    assert metadata["name"] == "work"
+    assert metadata["layout"] == "per-root"
+    assert metadata["original_path"] == "work"
+    assert metadata["workspace"]["color"] == "cyan"
+    assert metadata["workspace"]["gws_profile"] == "work"
+    assert metadata["workspace"]["default_provider"] == "claude"
+    assert metadata["archived_at"].endswith("Z")
+
+
+def test_archive_unregisters_the_workspace(tmp_path):
+    client, config, pcm, _store = _app(tmp_path, rerooted=True)
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 200
+    assert config.workspace("work") is None
+    assert [w["name"] for w in response.json()["workspaces"]] == ["personal"]
+    registry = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    assert [entry["name"] for entry in registry] == ["personal"]
+    # Gone from every scan target and agent root: nothing enumerates it now.
+    assert all(name != "work" for _root, name, _p in config.vault_scan_targets())
+    assert all(name != "work" for _root, name in config.agent_root_targets())
+    assert all(p.workspace != "work" for p in pcm.list_projects())
+
+
+def test_archive_drops_the_workspace_from_search(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    db = _index_all(config)
+    assert any("work" in p for p in _search_paths(db, "quokka"))
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 200
+    assert response.json()["archived"]["search_rows_removed"] >= 1
+    paths = _search_paths(db, "quokka")
+    assert paths, "the primary workspace's notes must stay searchable"
+    assert not any(p.startswith("work/") for p in paths)
+    # And a later full index pass does not bring them back.
+    _index_all(config)
+    assert not any(p.startswith("work/") for p in _search_paths(db, "quokka"))
+
+
+def test_archive_archives_the_workspace_chats(tmp_path):
+    client, config, pcm, _store = _app(tmp_path, rerooted=True)
+    general = next(p for p in pcm.list_projects("work") if p.is_auto)
+    chat = pcm.create_chat(general.project_id, title="work chat")
+    personal_general = next(p for p in pcm.list_projects("personal") if p.is_auto)
+    kept = pcm.create_chat(personal_general.project_id, title="personal chat")
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 200
+    assert response.json()["archived"]["projects"] >= 1
+    assert pcm.get_chat(chat.chat_id) is None
+    assert general.project_id not in {p.project_id for p in pcm.list_projects()}
+    # The other workspace's chats are untouched and NOT repointed anywhere.
+    assert pcm.get_chat(kept.chat_id) is not None
+
+
+def test_archive_refuses_while_a_chat_in_the_workspace_is_running(tmp_path, monkeypatch):
+    client, config, pcm, _store = _app(tmp_path, rerooted=True)
+    general = next(p for p in pcm.list_projects("work") if p.is_auto)
+    chat = pcm.create_chat(general.project_id, title="busy")
+    monkeypatch.setattr(pcm, "active_chat_ids", lambda: [chat.chat_id])
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 409
+    assert "still working" in response.json()["error"]
+    assert config.workspace("work") is not None
+    assert (tmp_path / "work").is_dir()
+    assert pcm.get_chat(chat.chat_id) is not None
+
+
+def test_archive_takes_the_workspace_schedules_and_stops_its_routines(tmp_path):
+    client, config, pcm, store = _app(tmp_path, rerooted=True)
+    general = next(p for p in pcm.list_projects("work") if p.is_auto)
+    mine = store.create(
+        daily_time_utc="08:00", prompt="standup", model="", mode="auto",
+        chat_id=0, workspace="work",
+    )
+    by_project = store.create(
+        daily_time_utc="09:00", prompt="digest", model="", mode="auto",
+        chat_id=0, web_project_id=general.project_id,
+    )
+    other = store.create(
+        daily_time_utc="10:00", prompt="personal", model="", mode="auto",
+        chat_id=0, workspace="personal",
+    )
+    system_store = ScheduleStore(
+        tmp_path / ".runtime", include_system=True, workspace_names=config.workspace_names
+    )
+    assert any(e.schedule_id.endswith("@work") for e in system_store.list_entries())
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 200
+    assert response.json()["archived"]["schedules"] == 2
+    remaining = {e.schedule_id for e in store.list_entries()}
+    assert remaining == {other.schedule_id}
+    # Per-workspace system routines fan out over the registry, so they stop.
+    assert not any(e.schedule_id.endswith("@work") for e in system_store.list_entries())
+    assert any(e.schedule_id.endswith("@personal") for e in system_store.list_entries())
+    folder = archive_root(config) / response.json()["archived"]["id"]
+    metadata = json.loads((folder / "archive.json").read_text(encoding="utf-8"))
+    assert {s["schedule_id"] for s in metadata["schedules"]} == {
+        mine.schedule_id,
+        by_project.schedule_id,
+    }
+
+
+@pytest.mark.parametrize("rerooted", [True, False])
+def test_the_primary_and_the_last_workspace_are_refused(tmp_path, rerooted):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=rerooted)
+
+    refused = client.post("/api/workspaces/personal/archive")
+    assert refused.status_code == 400
+    assert "primary" in refused.json()["error"]
+    assert config.workspace("personal") is not None
+
+    assert client.post("/api/workspaces/work/archive").status_code == 200
+    last = client.post("/api/workspaces/personal/archive")
+    assert last.status_code == 400
+    assert "last" in last.json()["error"]
+
+
+def test_unknown_workspace_is_404(tmp_path):
+    client, _config, _pcm, _store = _app(tmp_path, rerooted=True)
+    assert client.post("/api/workspaces/nope/archive").status_code == 404
+
+
+def test_delete_is_an_alias_that_archives(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+
+    response = client.delete("/api/workspaces/work")
+
+    assert response.status_code == 200
+    assert "archived" in response.json()
+    assert list(archive_root(config).glob("work-*/work/memory-vault/People/work-friend.md"))
+
+
+# ── archive: shared (not re-rooted) layout ───────────────────────────────────
+
+
+def test_shared_layout_moves_only_the_workspace_folder_and_rebuilds_index(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=False)
+    shared = Path(config.vault_root)
+    (shared / "INDEX.md").write_text(
+        "stale index naming work/People/work-friend.md\n", encoding="utf-8"
+    )
+    work_vault = shared / "work"
+    before = _tree(work_vault)
+    db = _index_all(config)
+    assert any(p.startswith("memory-vault/work/") for p in _search_paths(db, "quokka"))
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 200, response.json()
+    archived = response.json()["archived"]
+    assert archived["index_rebuilt"] is True
+    folder = archive_root(config) / archived["id"]
+    assert folder.parent == tmp_path / ARCHIVE_DIR_NAME
+    assert not work_vault.exists()
+    assert _tree(folder / "work") == before
+    metadata = json.loads((folder / "archive.json").read_text(encoding="utf-8"))
+    assert metadata["layout"] == "shared"
+    assert metadata["original_path"] == "memory-vault/work"
+    index = (shared / "INDEX.md").read_text(encoding="utf-8")
+    assert "work-friend" not in index
+    assert "personal-friend" in index
+    paths = _search_paths(db, "quokka")
+    assert paths and not any(p.startswith("memory-vault/work/") for p in paths)
+    # The shared vault's other contents stay put.
+    assert (shared / "personal" / "People" / "personal-friend.md").is_file()
+
+
+def test_shared_layout_refuses_a_vault_outside_its_standard_folder(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=False)
+    pinned = tmp_path / "legacy-work"
+    (pinned / "People").mkdir(parents=True)
+    config.workspaces["work"] = WorkspaceConfig(name="work", vault_root=str(pinned))
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 409
+    assert "vault-relocate" in response.json()["error"]
+    assert config.workspace("work") is not None
+    assert pinned.is_dir()
+    assert not archive_root(config).exists()
+
+
+def test_shared_layout_refuses_the_workspace_that_owns_the_whole_vault(tmp_path):
+    config = _config(tmp_path, rerooted=False)
+    config.workspaces["work"] = WorkspaceConfig(name="work", vault_root=str(config.vault_root))
+    with pytest.raises(WorkspaceArchiveError) as excinfo:
+        plan_archive(config, "work")
+    assert excinfo.value.status == 409
+    assert "whole shared vault" in excinfo.value.message
+
+
+def test_shared_layout_refuses_a_vault_outside_the_install(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-external-vault"
+    (outside / "work").mkdir(parents=True)
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        vault_root=outside,
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root=str(outside / "personal")),
+            "work": WorkspaceConfig(name="work", vault_root=str(outside / "work")),
+        },
+    )
+    with pytest.raises(WorkspaceArchiveError) as excinfo:
+        plan_archive(config, "work")
+    assert "outside the install" in excinfo.value.message
+    assert (outside / "work").is_dir()
+
+
+def test_per_root_layout_refuses_a_vault_outside_its_root(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    outside = tmp_path.parent / f"{tmp_path.name}-external"
+    outside.mkdir()
+    config.workspaces["work"] = WorkspaceConfig(name="work", vault_root=str(outside))
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 409
+    assert config.workspace("work") is not None
+    assert (tmp_path / "work").is_dir()
+
+
+def test_a_symlinked_workspace_folder_is_refused(tmp_path):
+    config = _config(tmp_path, rerooted=False)
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    shared = Path(config.vault_root)
+    shared.mkdir(parents=True, exist_ok=True)
+    (shared / "work").symlink_to(real)
+    config.workspaces["work"] = WorkspaceConfig(
+        name="work", vault_root=str(shared / "work")
+    )
+    with pytest.raises(WorkspaceArchiveError):
+        plan_archive(config, "work")
+
+
+def test_a_workspace_with_no_folder_yet_archives_its_registry_entry(tmp_path):
+    config = _config(tmp_path, rerooted=True)
+    target = plan_archive(config, "work")
+    assert not target.source.exists()
+    from ciao.workspace_archive import move_to_archive
+
+    archived = move_to_archive(config, target)
+    folder = archive_root(config) / archived["id"]
+    assert (folder / "archive.json").is_file()
+    assert archived["content_dir"] == ""
+
+
+# ── the archive stays out of every scanner ───────────────────────────────────
+
+
+def test_scanners_skip_the_archive_even_when_the_install_is_the_vault(tmp_path):
+    """Existing-folder setup can make the install root the vault itself."""
+    archived_note = tmp_path / ARCHIVE_DIR_NAME / "work-20260101-000000" / "work" / "Secret.md"
+    archived_note.parent.mkdir(parents=True)
+    archived_note.write_text("---\ntype: note\n---\n# Secret\n\nquokka archived\n", encoding="utf-8")
+    (tmp_path / "Visible.md").write_text("---\ntype: note\n---\n# Visible\n\nquokka live\n", encoding="utf-8")
+
+    entries = vault_index.scan_vault(tmp_path)
+    assert [Path(e.path).name for e in entries] == ["Visible.md"]
+
+    conn = sqlite3.connect(tmp_path / "fts.db")
+    try:
+        fts_search.init_db(conn)
+        fts_search.index_vault(conn, tmp_path, path_base=tmp_path)
+        paths = [row["path"] for row in fts_search.search_vault(conn, "quokka")]
+    finally:
+        conn.close()
+    assert paths == ["Visible.md"]
+    assert vault_lint._is_excluded(archived_note.relative_to(tmp_path))
+
+
+def test_forget_subtree_refuses_prefixes_that_are_not_one_subtree(tmp_path):
+    conn = sqlite3.connect(tmp_path / "fts.db")
+    try:
+        fts_search.init_db(conn)
+        conn.execute("INSERT INTO vault_fts (path, title, body) VALUES ('a/x.md','x','y')")
+        conn.commit()
+        assert fts_search.forget_subtree(conn, "") == 0
+        assert fts_search.forget_subtree(conn, fts_search.NO_MATCH_KEY_PREFIX) == 0
+        assert fts_search.forget_subtree(conn, "a_/") == 0, "LIKE wildcards must be escaped"
+        assert fts_search.forget_subtree(conn, "a/") == 1
+    finally:
+        conn.close()
+
+
+# ── restore ──────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("rerooted", [True, False])
+def test_restore_round_trip(tmp_path, rerooted):
+    client, config, pcm, store = _app(tmp_path, rerooted=rerooted)
+    store.create(
+        daily_time_utc="08:00", prompt="standup", model="", mode="auto",
+        chat_id=0, workspace="work",
+    )
+    source = tmp_path / "work" if rerooted else Path(config.vault_root) / "work"
+    before = _tree(source)
+    registry_before = next(
+        entry
+        for entry in json.loads(
+            json.dumps(
+                client.get("/api/workspaces").json()["workspaces"]
+            )
+        )
+        if entry["name"] == "work"
+    )
+
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    listing = client.get("/api/workspaces/archived").json()["archived"]
+    assert [item["id"] for item in listing] == [archived["id"]]
+    assert listing[0]["restorable"] is True
+    assert listing[0]["color"] == "cyan"
+    assert listing[0]["schedules"] == 1
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert restored.json()["restored"]["schedules"] == 1
+    assert _tree(source) == before
+    entry = next(w for w in restored.json()["workspaces"] if w["name"] == "work")
+    assert entry == registry_before
+    assert [e.workspace for e in store.list_entries()] == ["work"]
+    assert any(p.workspace == "work" and p.is_auto for p in pcm.list_projects("work"))
+    # The archive folder is cleaned up and the list is empty again.
+    assert not (archive_root(config) / archived["id"]).exists()
+    assert client.get("/api/workspaces/archived").json()["archived"] == []
+
+
+def test_restore_refuses_a_taken_name(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    # Someone created a new workspace with the same name (different case).
+    config.workspaces["Work"] = WorkspaceConfig(name="Work", vault_root="Work/memory-vault")
+
+    listing = client.get("/api/workspaces/archived").json()["archived"]
+    assert listing[0]["restorable"] is False
+    assert "already exists" in listing[0]["blocked_reason"]
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 409
+    assert "already exists" in refused.json()["error"]
+    assert (archive_root(config) / archived["id"] / "work").is_dir()
+
+
+def test_restore_refuses_when_the_folder_came_back_by_hand(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    (tmp_path / "work").mkdir()
+
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 409
+    assert "already exists" in refused.json()["error"]
+    assert config.workspace("work") is None
+
+
+def test_restore_refuses_an_archive_from_the_other_layout(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=False)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    _reroot(tmp_path)
+
+    listing = list_archives(config)
+    assert listing[0]["restorable"] is False
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+    assert refused.status_code == 409
+    assert "by hand" in refused.json()["error"]
+
+
+@pytest.mark.parametrize("bad", ["", "../x", "work", "work-20260101-000000/../../etc"])
+def test_restore_rejects_bad_ids(tmp_path, bad):
+    client, _config, _pcm, _store = _app(tmp_path, rerooted=True)
+    response = client.post("/api/workspaces/archived/restore", json={"id": bad})
+    assert response.status_code in (400, 404)
+
+
+def test_primary_is_reported_so_the_ui_can_hide_its_archive_button(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    assert client.get("/api/workspaces").json()["primary"] == "personal"
+
+
+# ── review follow-ups ────────────────────────────────────────────────────────
+
+
+def test_a_failed_move_keeps_the_chats_and_schedules(tmp_path, monkeypatch):
+    client, config, pcm, store = _app(tmp_path, rerooted=True)
+    general = next(p for p in pcm.list_projects("work") if p.is_auto)
+    chat = pcm.create_chat(general.project_id, title="work chat")
+    mine = store.create(
+        daily_time_utc="08:00", prompt="standup", model="", mode="auto",
+        chat_id=0, workspace="work",
+    )
+
+    def _refuse(*_a, **_kw):
+        raise OSError("busy")
+
+    monkeypatch.setattr("ciao.workspace_archive.os.rename", _refuse)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500
+    assert config.workspace("work") is not None
+    assert (tmp_path / "work").is_dir()
+    assert pcm.get_chat(chat.chat_id) is not None
+    assert general.project_id in {p.project_id for p in pcm.list_projects("work")}
+    assert {e.schedule_id for e in store.list_entries()} == {mine.schedule_id}
+    root = archive_root(config)
+    assert not root.exists() or not any(root.iterdir())
+
+
+def test_archive_waits_for_a_running_archive_job(tmp_path):
+    client, config, pcm, _store = _app(tmp_path, rerooted=True)
+    general = next(p for p in pcm.list_projects("work") if p.is_auto)
+    chat = pcm.create_chat(general.project_id, title="postprocessing")
+
+    class _Running:
+        def done(self) -> bool:
+            return False
+
+    pcm._archive_tasks[chat.chat_id] = _Running()  # type: ignore[assignment]
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 409
+    assert "being archived" in response.json()["error"]
+    assert (tmp_path / "work").is_dir()
+
+
+def test_shared_layout_restores_a_custom_vault_folder_name(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=False)
+    shared = Path(config.vault_root)
+    (shared / "work").rename(shared / "client-a")
+    config.workspaces["work"] = WorkspaceConfig(
+        name="work", vault_root="memory-vault/client-a", color="cyan"
+    )
+    before = _tree(shared / "client-a")
+
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    assert not (shared / "client-a").exists()
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert not (shared / "work").exists()
+    assert _tree(shared / "client-a") == before
+    assert Path(config.workspace_vault_root("work")) == shared / "client-a"
+
+
+@pytest.mark.parametrize("content_dir", ["..", "../personal", "/etc", "a/b"])
+def test_restore_refuses_an_unsafe_content_dir(tmp_path, content_dir):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    meta_path = archive_root(config) / archived["id"] / "archive.json"
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    metadata["content_dir"] = content_dir
+    meta_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 409
+    assert config.workspace("work") is None
+    assert (tmp_path / "personal").is_dir()
+
+
+def test_shared_layout_refuses_a_vault_that_is_its_own_repository(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=False)
+    (Path(config.vault_root) / ".git").mkdir()
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 409
+    assert "own repository" in response.json()["error"]
+    assert (Path(config.vault_root) / "work").is_dir()
+
+
+# ── metadata and registry I/O failures ───────────────────────────────────────
+
+
+def _work_schedule(store: ScheduleStore):
+    return store.create(
+        daily_time_utc="08:00", prompt="standup", model="", mode="auto",
+        chat_id=0, workspace="work",
+    )
+
+
+def _assert_archive_undone(tmp_path, config, store, schedule_id, before):
+    assert config.workspace("work") is not None
+    assert _tree(tmp_path / "work") == before
+    assert {e.schedule_id for e in store.list_entries()} == {schedule_id}
+    root = archive_root(config)
+    assert not root.is_dir() or not any(root.iterdir())
+
+
+def test_archive_folder_creation_failure_puts_the_schedules_back(tmp_path):
+    client, config, _pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    before = _tree(tmp_path / "work")
+    # A file where the archive root should be: mkdir fails with an OSError.
+    archive_root(config).write_text("not a directory", encoding="utf-8")
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500
+    assert "archive folder" in response.json()["error"]
+    assert config.workspace("work") is not None
+    assert _tree(tmp_path / "work") == before
+    assert {e.schedule_id for e in store.list_entries()} == {mine.schedule_id}
+
+
+def test_first_metadata_write_failure_puts_the_schedules_back(tmp_path, monkeypatch):
+    client, config, _pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    before = _tree(tmp_path / "work")
+
+    def _disk_full(*_a, **_kw):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("ciao.workspace_archive._write_metadata", _disk_full)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500
+    assert "archive.json" in response.json()["error"]
+    _assert_archive_undone(tmp_path, config, store, mine.schedule_id, before)
+
+
+def test_final_metadata_write_failure_moves_the_folder_back(tmp_path, monkeypatch):
+    from ciao import workspace_archive
+
+    client, config, _pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    before = _tree(tmp_path / "work")
+    real_write = workspace_archive._write_metadata
+    calls = {"n": 0}
+
+    def _second_fails(folder, metadata):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError(13, "Permission denied")
+        real_write(folder, metadata)
+
+    monkeypatch.setattr("ciao.workspace_archive._write_metadata", _second_fails)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500
+    assert "left where it was" in response.json()["error"]
+    _assert_archive_undone(tmp_path, config, store, mine.schedule_id, before)
+
+
+def test_a_raw_oserror_from_the_move_still_puts_the_schedules_back(tmp_path, monkeypatch):
+    client, config, _pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+
+    def _boom(*_a, **_kw):
+        raise OSError("unexpected")
+
+    monkeypatch.setattr("ciao.workspace_archive.move_to_archive", _boom)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500
+    assert "could not archive 'work'" in response.json()["error"]
+    assert config.workspace("work") is not None
+    assert {e.schedule_id for e in store.list_entries()} == {mine.schedule_id}
+
+
+@pytest.mark.parametrize("rerooted", [True, False])
+def test_restore_registry_save_failure_leaves_the_archive_restorable(
+    tmp_path, monkeypatch, rerooted
+):
+    client, config, _pcm, store = _app(tmp_path, rerooted=rerooted)
+    _work_schedule(store)
+    source = tmp_path / "work" if rerooted else Path(config.vault_root) / "work"
+    before = _tree(source)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    folder = archive_root(config) / archived["id"]
+    registry_path = tmp_path / ".runtime" / "workspaces.json"
+    registry_before = registry_path.read_text(encoding="utf-8")
+    names_before = set(config.workspaces)
+
+    real_persist = CiaoConfig.persist_workspace_registry
+    failing = {"on": True}
+
+    def _disk_full(self: CiaoConfig) -> None:
+        if failing["on"]:
+            raise OSError(28, "No space left on device")
+        real_persist(self)
+
+    monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 500
+    assert "registry could not be saved" in refused.json()["error"]
+    assert set(config.workspaces) == names_before
+    assert not source.exists()
+    assert (folder / "archive.json").is_file()
+    assert registry_path.read_text(encoding="utf-8") == registry_before
+    assert store.list_entries() == []
+    listing = client.get("/api/workspaces/archived").json()["archived"]
+    assert listing[0]["restorable"] is True, listing
+
+    failing["on"] = False
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert restored.json()["restored"]["schedules"] == 1
+    assert _tree(source) == before
+
+
+# ── failures after the move: roll back to a registered workspace ─────────────
+
+
+def test_chat_archival_failure_keeps_the_workspace_registered_and_retryable(
+    tmp_path, monkeypatch
+):
+    client, config, pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    general = next(p for p in pcm.list_projects("work") if p.is_auto)
+    first = pcm.create_chat(general.project_id, title="first")
+    second = pcm.create_chat(general.project_id, title="second")
+    before = _tree(tmp_path / "work")
+    real_archive = pcm._transcripts.archive_session
+    calls = {"n": 0}
+
+    def _second_fails(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError(13, "Permission denied: Logs")
+        return real_archive(**kwargs)
+
+    monkeypatch.setattr(pcm._transcripts, "archive_session", _second_fails)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500, response.json()
+    assert "chats could not be archived" in response.json()["error"]
+    _assert_archive_undone(tmp_path, config, store, mine.schedule_id, before)
+    # The project stays, in memory and on disk, with the chat that did not
+    # archive; the one that did is durably gone. Nothing points a chat at a
+    # workspace that is no longer registered.
+    assert general.project_id in {p.project_id for p in pcm.list_projects("work")}
+    remaining = {c.chat_id for c in pcm.list_chats(general.project_id)}
+    assert len(remaining & {first.chat_id, second.chat_id}) == 1
+    on_disk = json.loads((tmp_path / ".runtime" / "web_projects.json").read_text())
+    assert general.project_id in on_disk["projects"]
+    assert set(on_disk["chats"]) & {first.chat_id, second.chat_id} == remaining & {
+        first.chat_id, second.chat_id
+    }
+
+    monkeypatch.setattr(pcm._transcripts, "archive_session", real_archive)
+    retried = client.post("/api/workspaces/work/archive")
+
+    assert retried.status_code == 200, retried.json()
+    assert config.workspace("work") is None
+    assert retried.json()["archived"]["schedules"] == 1
+
+
+def test_registry_save_failure_on_archive_restores_the_entry_and_the_folder(
+    tmp_path, monkeypatch
+):
+    client, config, pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    registry_path = tmp_path / ".runtime" / "workspaces.json"
+    config.persist_workspace_registry()
+    registry_before = registry_path.read_text(encoding="utf-8")
+    before = _tree(tmp_path / "work")
+    order_before = list(config.workspaces)
+
+    real_persist = CiaoConfig.persist_workspace_registry
+    failing = {"on": True}
+
+    def _disk_full(self: CiaoConfig) -> None:
+        if failing["on"]:
+            raise OSError(28, "No space left on device")
+        real_persist(self)
+
+    monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500, response.json()
+    assert "registry could not be saved" in response.json()["error"]
+    assert list(config.workspaces) == order_before
+    assert registry_path.read_text(encoding="utf-8") == registry_before
+    _assert_archive_undone(tmp_path, config, store, mine.schedule_id, before)
+    # The refresh gave the still-registered workspace its General project back.
+    assert any(p.is_auto for p in pcm.list_projects("work"))
+
+    failing["on"] = False
+    retried = client.post("/api/workspaces/work/archive")
+
+    assert retried.status_code == 200, retried.json()
+    assert config.workspace("work") is None
+    assert "work" not in registry_path.read_text(encoding="utf-8")
+
+
+def test_unregister_failure_puts_the_entry_back_in_place(tmp_path, monkeypatch):
+    from ciao import workspace_archive
+
+    config = _config(tmp_path, rerooted=True)
+    order_before = list(config.workspaces)
+
+    def _disk_full(self: CiaoConfig) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
+    with pytest.raises(OSError):
+        workspace_archive.unregister(config, "work")
+
+    assert list(config.workspaces) == order_before
+
+
+def test_restore_schedule_save_failure_keeps_the_archive_and_its_schedules(
+    tmp_path, monkeypatch
+):
+    client, config, _pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    before = _tree(tmp_path / "work")
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    folder = archive_root(config) / archived["id"]
+
+    real_put_back = store.put_back_user_items
+    failing = {"on": True}
+
+    def _disk_full(items):
+        if failing["on"]:
+            raise OSError(28, "No space left on device")
+        return real_put_back(items)
+
+    monkeypatch.setattr(store, "put_back_user_items", _disk_full)
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 500, refused.json()
+    assert "archive was left in place" in refused.json()["error"]
+    assert config.workspace("work") is None
+    assert not (tmp_path / "work").exists()
+    metadata = json.loads((folder / "archive.json").read_text(encoding="utf-8"))
+    assert [row["schedule_id"] for row in metadata["schedules"]] == [mine.schedule_id]
+    listing = client.get("/api/workspaces/archived").json()["archived"]
+    assert listing[0]["restorable"] is True, listing
+
+    failing["on"] = False
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert restored.json()["restored"]["schedules"] == 1
+    assert {e.schedule_id for e in store.list_entries()} == {mine.schedule_id}
+    assert _tree(tmp_path / "work") == before
+    assert not folder.exists()
+
+
+# ── review round: rollback keeps metadata, registry events, restore races ────
+
+
+def test_rollback_keeps_archive_json_when_the_schedules_cannot_be_put_back(
+    tmp_path, monkeypatch
+):
+    """A full disk can fail the registry save AND the schedule save."""
+    client, config, _pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    before = _tree(tmp_path / "work")
+
+    def _disk_full(self: CiaoConfig) -> None:
+        raise OSError(28, "No space left on device")
+
+    def _no_put_back(_items):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
+    monkeypatch.setattr(store, "put_back_user_items", _no_put_back)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500, response.json()
+    assert "kept in" in response.json()["error"]
+    assert config.workspace("work") is not None
+    assert _tree(tmp_path / "work") == before
+    # The only durable copy of the automation survived the rollback.
+    folders = list(archive_root(config).iterdir())
+    assert len(folders) == 1
+    metadata = json.loads((folders[0] / "archive.json").read_text(encoding="utf-8"))
+    assert [row["schedule_id"] for row in metadata["schedules"]] == [mine.schedule_id]
+    assert metadata["status"] == "rolled-back"
+    listing = list_archives(config)
+    assert listing[0]["restorable"] is False
+    assert "did not finish" in listing[0]["blocked_reason"]
+
+
+def test_rollback_removes_archive_json_only_after_the_schedules_are_back(
+    tmp_path, monkeypatch
+):
+    client, config, _pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    seen: list[bool] = []
+    real_put_back = store.put_back_user_items
+
+    def _watch(items):
+        seen.append(any(archive_root(config).glob("work-*/archive.json")))
+        return real_put_back(items)
+
+    def _disk_full(self: CiaoConfig) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
+    monkeypatch.setattr(store, "put_back_user_items", _watch)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 500
+    assert seen == [True], "archive.json must exist while the schedules go back"
+    assert {e.schedule_id for e in store.list_entries()} == {mine.schedule_id}
+    root = archive_root(config)
+    assert not root.is_dir() or not any(root.iterdir())
+
+
+def _capture_events(monkeypatch, pcm) -> list[dict]:
+    events: list[dict] = []
+    monkeypatch.setattr(pcm.events, "publish", events.append)
+    return events
+
+
+def test_archive_and_restore_tell_other_clients_the_registry_changed(
+    tmp_path, monkeypatch
+):
+    client, _config, pcm, _store = _app(tmp_path, rerooted=True)
+    events = _capture_events(monkeypatch, pcm)
+
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    assert {"type": "workspaces_changed"} in events
+
+    events.clear()
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+    assert restored.status_code == 200, restored.json()
+    assert {"type": "workspaces_changed"} in events
+
+
+def test_a_failed_archive_does_not_announce_a_registry_change(tmp_path, monkeypatch):
+    client, _config, pcm, _store = _app(tmp_path, rerooted=True)
+    events = _capture_events(monkeypatch, pcm)
+
+    def _disk_full(self: CiaoConfig) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
+    assert client.post("/api/workspaces/work/archive").status_code == 500
+    assert {"type": "workspaces_changed"} not in events
+
+
+def test_restore_rechecks_the_name_after_the_folder_move(tmp_path, monkeypatch):
+    """A create for the archived name can land while the move runs in a thread."""
+    from ciao import workspace_archive
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    folder = archive_root(config) / archived["id"]
+    real_move_back = workspace_archive.move_back
+    created = WorkspaceConfig(name="work", vault_root="work/memory-vault", color="green")
+
+    def _move_then_create(cfg, archive_id):
+        result = real_move_back(cfg, archive_id)
+        cfg.workspaces["work"] = created
+        return result
+
+    monkeypatch.setattr(workspace_archive, "move_back", _move_then_create)
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 409, refused.json()
+    assert "created while restoring" in refused.json()["error"]
+    # The workspace created meanwhile keeps its own settings...
+    assert config.workspaces["work"] is created
+    # ...and the archive went back where it was, whole, to be restored later.
+    assert (folder / "work" / "memory-vault").is_dir()
+    assert (folder / "archive.json").is_file()
+
+
+def test_workspace_create_and_update_take_the_registry_lock(tmp_path):
+    """Serialized with restore, so a create cannot land in its await gap."""
+    from ciao.web.routes_api import upsert_workspace_setting
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    client.app.router.routes.insert(
+        0, Route("/api/workspaces", upsert_workspace_setting, methods=["POST"])
+    )
+    held: list[bool] = []
+
+    class _RecordingLock:
+        async def __aenter__(self):
+            held.append(True)
+
+        async def __aexit__(self, *_exc):
+            held.append(False)
+
+    client.app.state.workspace_archive_lock = _RecordingLock()
+    response = client.post("/api/workspaces", json={"name": "extra"})
+
+    assert response.status_code == 201, response.json()
+    assert held == [True, False]
+    assert config.workspace("extra") is not None
+
+
+# ── untrusted archive.json on restore (it is synced through git) ─────────────
+
+
+def _tamper(config: CiaoConfig, archive_id: str, edit) -> None:
+    path = archive_root(config) / archive_id / "archive.json"
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+    edit(metadata)
+    path.write_text(json.dumps(metadata), encoding="utf-8")
+
+
+def test_restored_automations_come_back_paused_and_pinned_to_the_workspace(tmp_path):
+    client, config, pcm, store = _app(tmp_path, rerooted=True)
+    mine = _work_schedule(store)
+    personal_general = next(p for p in pcm.list_projects("personal") if p.is_auto)
+    personal_chat = pcm.create_chat(personal_general.project_id, title="personal")
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+
+    def _edit(metadata):
+        row = metadata["schedules"][0]
+        row["enabled"] = True
+        row["mode"] = "bypass"
+        row["workspace"] = "personal"
+        row["last_triggered_on"] = "2099-01-01"
+        row["unknown_key"] = "x"
+        metadata["schedules"].extend([
+            # An unattended loop aimed at another workspace's chat.
+            {
+                "schedule_id": "sched-evil001", "prompt": "exfiltrate",
+                "frequency": "interval", "interval_minutes": 1,
+                "daily_time_utc": "", "chat_id": 0, "enabled": True,
+                "web_chat_id": personal_chat.chat_id, "workspace": "personal",
+            },
+            {"schedule_id": "system-memory-curation@work", "prompt": "x",
+             "frequency": "manual", "scope": "system"},
+            {"schedule_id": "sched-bad0001", "prompt": "x", "frequency": "hourly"},
+            {"schedule_id": "../../x", "prompt": "x", "frequency": "manual"},
+            {"schedule_id": "sched-bad0002", "prompt": "x", "frequency": "daily",
+             "daily_time_utc": "25:99"},
+            {"schedule_id": "sched-bad0003", "prompt": "x", "frequency": "manual",
+             "provider": "evil"},
+            "not a row",
+        ])
+
+    _tamper(config, archived["id"], _edit)
+    listing = client.get("/api/workspaces/archived").json()["archived"]
+    assert listing[0]["schedules"] == 2
+    assert listing[0]["schedules_dropped"] == 6
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    body = restored.json()["restored"]
+    assert body["schedules"] == 2
+    assert body["schedules_paused"] == 2
+    assert body["schedules_dropped"] == 6
+    entries = {e.schedule_id: e for e in store.list_entries()}
+    assert set(entries) == {mine.schedule_id, "sched-evil001"}
+    for entry in entries.values():
+        assert entry.enabled is False
+        assert entry.workspace == "work"
+        assert entry.mode == ""
+        assert entry.scope == "user"
+        assert entry.last_triggered_on == ""
+    # The foreign chat binding was dropped rather than kept.
+    assert entries["sched-evil001"].web_chat_id is None
+    raw = json.loads((tmp_path / ".runtime" / "schedules.json").read_text())
+    assert all("unknown_key" not in row for row in raw["schedules"])
+
+
+@pytest.mark.parametrize(
+    "vault_root",
+    ["personal/memory-vault", "/etc", "../outside", "work/../personal/memory-vault", 7],
+)
+def test_restore_refuses_a_vault_root_outside_the_restored_folder(tmp_path, vault_root):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    _tamper(
+        config,
+        archived["id"],
+        lambda metadata: metadata["workspace"].__setitem__("vault_root", vault_root),
+    )
+
+    listing = client.get("/api/workspaces/archived").json()["archived"]
+    assert listing[0]["restorable"] is False
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 409, refused.json()
+    assert config.workspace("work") is None
+    assert (archive_root(config) / archived["id"] / "work").is_dir()
+    assert not (tmp_path / "work").exists()
+
+
+def test_restore_refuses_a_notes_folder_that_became_a_symlink(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    tree = archive_root(config) / archived["id"] / "work"
+    import shutil
+
+    shutil.rmtree(tree / "memory-vault")
+    (tree / "memory-vault").symlink_to(tmp_path / "personal" / "memory-vault")
+
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 409, refused.json()
+    assert "symlink" in refused.json()["error"]
+    assert config.workspace("work") is None
+
+
+def test_restore_rebuilds_settings_and_never_widens_access(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+
+    def _edit(metadata):
+        metadata["workspace"].update({
+            "default_provider": "evil-cli",
+            "allowed_mcp_servers": ["github", {"all": True}],
+            "disallowed_tools": "Bash",
+            "gws_profile": "../../secrets",
+            "color": "ultraviolet",
+        })
+
+    _tamper(config, archived["id"], _edit)
+    preview = client.get("/api/workspaces/archived").json()["archived"][0]
+    assert preview["allowed_mcp_servers"] == []
+    assert preview["disallowed_tools"] is None
+    assert preview["default_provider"] == "claude"
+    assert preview["gws_profile"] == ""
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    work = config.workspaces["work"]
+    assert work.default_provider == "claude"
+    assert work.allowed_mcp_servers == [], "an unreadable allowlist must deny all"
+    assert work.disallowed_tools is None
+    assert work.gws_profile == ""
+    assert work.color == "pink"
+    assert work.vault_root == "work/memory-vault"
+
+
+def test_restore_preview_shows_a_valid_allowlist_and_deny_list(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    config.workspaces["work"].allowed_mcp_servers = ["github", "n8n_mcp"]
+    config.workspaces["work"].disallowed_tools = ["Bash"]
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+
+    preview = client.get("/api/workspaces/archived").json()["archived"][0]
+
+    assert preview["id"] == archived["id"]
+    assert preview["allowed_mcp_servers"] == ["github", "n8n_mcp"]
+    assert preview["disallowed_tools"] == ["Bash"]
+
+
+def test_shared_layout_refuses_a_vault_root_pointing_at_another_workspace(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=False)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    _tamper(
+        config,
+        archived["id"],
+        lambda metadata: metadata["workspace"].__setitem__("vault_root", "memory-vault/personal"),
+    )
+
+    refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert refused.status_code == 409, refused.json()
+    assert "outside its own folder" in refused.json()["error"]
+    assert config.workspace("work") is None
+    assert (archive_root(config) / archived["id"] / "work").is_dir()
+
+
+def test_a_missing_vault_root_is_rebuilt_for_the_layout(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    _tamper(config, archived["id"], lambda metadata: metadata["workspace"].pop("vault_root"))
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert config.workspaces["work"].vault_root == "work/memory-vault"

@@ -1,20 +1,40 @@
 <template>
-  <header class="pane-header" :class="{ 'pane-header--no-center': !hasCenter }">
-    <button class="header-hamburger touch-hit" aria-label="Open sidebar" @click="$emit('open-sidebar')">
-      <!-- 18px at stroke 2, the size and weight every other icon in this header
-           and in the sidebar uses (see the .btn-icon block below). At 22px and
-           stroke 2.2 it read as a heavier glyph than the actions it shares the
-           row with. -->
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-        <line x1="4" y1="7" x2="20" y2="7"/>
-        <line x1="4" y1="12" x2="20" y2="12"/>
-        <line x1="4" y1="17" x2="20" y2="17"/>
-      </svg>
-    </button>
+  <header
+    class="pane-header"
+    :class="{
+      'pane-header--no-center': !hasCenter,
+      'pane-header--tag-title': !hasTitle && !!pageTag,
+    }"
+  >
+    <!-- Phones only (the sidebar is a drawer there, so its back / forward
+         pair is out of sight): the menu button, then Back when there is
+         in-app history to go back to. -->
+    <div class="header-lead">
+      <button class="header-hamburger touch-hit" aria-label="Open sidebar" @click="$emit('open-sidebar')">
+        <!-- 18px at stroke 2, the size and weight every other icon in this header
+             and in the sidebar uses (see the .btn-icon block below). At 22px and
+             stroke 2.2 it read as a heavier glyph than the actions it shares the
+             row with. -->
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <line x1="4" y1="7" x2="20" y2="7"/>
+          <line x1="4" y1="12" x2="20" y2="12"/>
+          <line x1="4" y1="17" x2="20" y2="17"/>
+        </svg>
+      </button>
+      <button
+        v-if="historyNav.canBack.value"
+        class="header-back touch-hit"
+        :aria-label="historyNav.backLabel.value"
+        :title="historyNav.backLabel.value"
+        @click="historyNav.back"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+    </div>
     <div v-if="hasTitle" class="header-title">
       <slot name="title" />
     </div>
-    <div class="header-center">
+    <div class="header-center" :class="{ 'header-center--with-title': hasTitle }">
       <BrandMark v-if="brand" />
       <!-- Which view this is. Styled as a quiet marker, never as a heading: it
            answers "where am I", it is not the subject of the page, so it stays at
@@ -36,6 +56,7 @@
 <script setup lang="ts">
 import { computed, useSlots } from 'vue'
 import BrandMark from './BrandMark.vue'
+import { useHistoryNav } from '../composables/useHistoryNav'
 
 const props = withDefaults(defineProps<{
   activeBgAgents?: number
@@ -47,6 +68,7 @@ const props = withDefaults(defineProps<{
 defineEmits<{ 'open-sidebar': [] }>()
 
 const slots = useSlots()
+const historyNav = useHistoryNav()
 // An empty `.header-title` would still claim the left grid track and, on mobile,
 // a second row. Views with no title of their own (home, settings, the automations
 // list) drop the element and let the page tag name them instead.
@@ -75,7 +97,10 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   align-items: center;
   /* Match the sidebar header: 44px controls + 8px vertical padding + border. */
   height: calc(61px + var(--safe-top));
-  padding: calc(var(--space-2) + var(--safe-top)) var(--space-2) var(--space-2);
+  /* Horizontal padding follows the page grid (App.vue --page-*), so the title
+     starts where the page content starts and the actions end where its rail
+     ends, instead of both hugging the pane edges. */
+  padding: calc(var(--space-2) + var(--safe-top)) var(--page-inset) var(--space-2);
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   column-gap: var(--space-2);
@@ -140,6 +165,47 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   .header-center :deep(.brand) { font-size: var(--text-sm); }
   .header-center :deep(.brand-label) { min-width: 5ch; }
 }
+
+/* A title plus three text actions needs the full pane. Hide the duplicate
+   centre mark first; pages without their own title keep it as the compact
+   reload affordance on tablet-sized panes. */
+@container chat-pane (max-width: 899px) {
+  .header-center--with-title :deep(.brand) { display: none; }
+}
+
+/* The expanded sidebar carries the product mark, so on a pane wide enough for
+   a real title the header drops its centred wordmark. A view with no title of
+   its own (Home, Settings, Automations, Memory) shows its page tag as that
+   title, on the left, where every other page's title sits - not as a pill in
+   the middle of the header. */
+@container chat-pane (min-width: 600px) {
+  .header-center :deep(.brand) { display: none; }
+  .pane-header--tag-title {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .pane-header--tag-title .header-center {
+    grid-column: 1;
+    justify-self: start;
+  }
+  .pane-header--tag-title .header-trail {
+    grid-column: 2;
+  }
+  .pane-header--tag-title .page-tag {
+    position: static;
+    width: auto;
+    height: auto;
+    margin: 0;
+    overflow: hidden;
+    clip: auto;
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: var(--text-lg);
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    text-overflow: ellipsis;
+  }
+}
+
 /* Kept in the document, not on the screen. The page now names itself next to
    its own nav icon in the sidebar, which is where it was asked for, so a second
    copy here beside the wordmark was the same fact twice. It stays rendered
@@ -184,6 +250,8 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   gap: var(--space-1);
   flex-shrink: 0;
 }
+.header-lead { display: none; }
+.header-back,
 .header-hamburger {
   display: none;
   align-items: center;
@@ -197,6 +265,7 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   border-radius: var(--radius-sm);
   flex-shrink: 0;
 }
+.header-back:active,
 .header-hamburger:active { transform: scale(0.96); }
 /* Unify header icon sizes with the sidebar (30px containers, 18px content).
    ::before keeps hover/active fills at the 30px visual footprint. */
@@ -279,12 +348,16 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
     padding-right: calc(var(--space-3) + var(--safe-right));
     row-gap: var(--space-1);
   }
-  .header-hamburger {
+  .header-lead {
     display: flex;
+    align-items: center;
+    gap: var(--space-2);
     grid-column: 1;
     grid-row: 1;
     justify-self: start;
   }
+  .header-back,
+  .header-hamburger { display: flex; }
   .header-center {
     grid-column: 2;
     grid-row: 1;

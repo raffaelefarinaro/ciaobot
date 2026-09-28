@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 from typing import Any, cast
@@ -17,6 +18,14 @@ from typing import Any, cast
 logger = logging.getLogger(__name__)
 
 NOTIFICATION_LOG_MAX = 100
+
+# Payload of the Settings → Notifications "Send test notification" button. The
+# service worker shows it under its own tag so it never reads as a chat reply.
+TEST_PAYLOAD = {
+    "kind": "test",
+    "title": "Ciaobot",
+    "body": "Test notification: notifications work on this device.",
+}
 
 
 def _b64url(data: bytes) -> str:
@@ -26,13 +35,14 @@ def _b64url(data: bytes) -> str:
 class PushManager:
     """Persist VAPID keys + subscriptions, send Web Push notifications."""
 
-    def __init__(self, runtime_root: Path, subject: str = "") -> None:
+    def __init__(self, runtime_root: Path, subject: str = "", *, push_all: Callable[[], bool] | None = None) -> None:
         self._runtime = runtime_root
         self._runtime.mkdir(parents=True, exist_ok=True)
         self._vapid_path = runtime_root / "vapid.json"
         self._subs_path = runtime_root / "push_subscriptions.json"
         self._log_path = runtime_root / "notifications.jsonl"
         self._subject = subject
+        self._push_all = push_all
         self._lock = Lock()
         self._subs: list[dict[str, Any]] = []
         self._private_pem: str = ""
@@ -40,6 +50,16 @@ class PushManager:
         self._public_b64: str = ""
         self._load_or_create_keys()
         self._load_subs()
+
+    def push_all_devices(self) -> bool:
+        """Whether Web Push should cover every subscription, this machine included."""
+        if self._push_all is None:
+            return False
+        try:
+            return bool(self._push_all())
+        except Exception:
+            logger.exception("push_all_devices lookup failed; keeping the tray split")
+            return False
 
     # ── VAPID keys ──────────────────────────────────────────────────────
 
@@ -96,6 +116,11 @@ class PushManager:
     @property
     def public_key(self) -> str:
         return self._public_b64
+
+    @property
+    def configured(self) -> bool:
+        """Whether Web Push can be sent at all (a VAPID subject is required)."""
+        return bool(self._subject)
 
     # ── Subscriptions ───────────────────────────────────────────────────
 
@@ -207,10 +232,23 @@ class PushManager:
         the native banner on that unverifiable signal made notifications vanish
         entirely. The menu bar is always running and reliable, so it owns the
         local notification; Web Push is a best-effort channel for other devices.
+
+        With push_all_devices on, every subscription is pushed and the tray log is skipped.
         """
+        if self.push_all_devices():
+            self._deliver(list(self._subs), payload)
+            return
         self._log_notification(payload)
         remote = [s for s in self._subs if not s.get("local")]
         self._deliver(remote, payload)
+
+    def send_test(self, endpoint: str) -> int:
+        """Push TEST_PAYLOAD to the one subscription with ``endpoint``; returns 1 if accepted.
+
+        Never written to the tray log: a test is about this browser's delivery path.
+        """
+        subs = [s for s in self._subs if s.get("endpoint") == endpoint]
+        return self._deliver(subs, dict(TEST_PAYLOAD))
 
     def clear_chat(self, chat_id: str) -> None:
         """Clear delivered notifications for ``chat_id`` on every channel.

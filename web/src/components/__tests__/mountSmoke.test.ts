@@ -19,30 +19,14 @@ import { api } from '../../lib/api'
 vi.mock('../../lib/api', () => {
   let routineSettings = {
     insights_model: '',
+    insights_enabled: true,
+    trajectories_enabled: true,
 
     critique_models: '',
     insights_model_effective: 'haiku',
 
     critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
 
-    transcription: {
-      engine: 'local',
-      cloud_model: 'gpt-transcribe',
-      locale: 'en-US',
-      local_available: true,
-      local_unavailable_reason: '',
-      cloud_available: true,
-    },
-    speech: {
-      engine: 'cloud',
-      cloud_voice: 'nova',
-      local_voice: '',
-      local_available: true,
-      local_voices: [
-        { id: 'com.apple.voice.compact.en-US.Samantha', name: 'Samantha', locale: 'en-US', quality: 'default' },
-      ],
-      cloud_available: true,
-    },
     model_options: {
       anthropic: ['haiku', 'sonnet', 'opus', 'fable'],
     },
@@ -55,14 +39,6 @@ vi.mock('../../lib/api', () => {
   const responses: Record<string, unknown> = {
     '/api/settings': {},
     '/api/settings/providers': {
-      keys: {},
-      service_keys: {
-        OPENAI_API_KEY: {
-          label: 'OpenAI voice API key',
-          description: 'Used directly by Ciaobot for cloud transcription and speech.',
-          configured: false,
-        },
-      },
       connections: {
         claude: {
           name: 'claude',
@@ -86,8 +62,6 @@ vi.mock('../../lib/api', () => {
           short_label: 'opencode',
         },
       },
-      requires_restart: true,
-      env_path: '/tmp/workspace/.env',
     },
     '/api/local/status': { git_repo: true, branch: 'main', dirty: false },
     '/api/admin/skills': {
@@ -208,18 +182,6 @@ vi.mock('../../lib/api', () => {
           avg_duration_ms: 300000,
           last_error: { error: 'TimeoutError', ts: '2026-08-03T20:06:14+00:00' },
         },
-        sub_jobs: [
-          {
-            job: 'backfill_insights',
-            label: 'Insights backfill',
-            category: 'system',
-            description: 'Runs session insights over every archive that is missing them.',
-            trigger: 'On server startup, and on demand from this page.',
-            last_run: null,
-            recent: [],
-            stats: { total_runs: 0, success_rate: null, avg_duration_ms: 0, last_error: null },
-          },
-        ],
       },
       {
         job: 'title',
@@ -287,7 +249,7 @@ vi.mock('../../lib/api', () => {
     return Promise.resolve([])
   })
   const post = vi.fn(() => Promise.resolve({}))
-  const patch = vi.fn((path: string, body: Record<string, string>) => {
+  const patch = vi.fn((path: string, body: Record<string, unknown>) => {
     if (path === '/api/settings/routines') {
       routineSettings = { ...routineSettings, ...body }
       return Promise.resolve(routineSettings)
@@ -320,7 +282,6 @@ const NoopStub = { name: 'NoopStub', render: () => h('div') }
 // module. Without the flag it hands the whole mock namespace to the renderer
 // as the component.
 const AsyncNoopStub = { default: NoopStub, __esModule: true }
-vi.mock('../VoiceRecorder.vue', () => ({ default: NoopStub }))
 vi.mock('../ChatPanel.vue', () => ({ default: NoopStub }))
 vi.mock('../SubagentPanel.vue', () => ({ default: NoopStub }))
 vi.mock('../PinnedFilePanel.vue', () => ({ default: NoopStub }))
@@ -452,9 +413,36 @@ describe('component mount smoke', () => {
 
     expect(wrapper.text()).toContain('Skills')
     expect(wrapper.text()).toContain('airtable-projects')
-    expect(wrapper.text()).toContain('custom skills')
-    expect(wrapper.text()).toContain('stock skills')
+    expect(wrapper.text()).toContain('Custom skills')
+    expect(wrapper.text()).toContain('Built-in skills')
     wrapper.unmount()
+  })
+
+  it('SettingsView shows the skills empty state when the inventory has no skills list', async () => {
+    // A partial response ({} from an older engine or a stub) used to throw in
+    // render (`skills.filter` on undefined) and blank the whole Settings pane.
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const original = testApi.getResponse('/api/admin/skills')
+    testApi.setResponse('/api/admin/skills', {})
+    const router = makeRouter()
+    await router.push('/settings/skills')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    try {
+      await flushPromises()
+      await nextTick()
+      expect(wrapper.text()).toContain('No custom skills yet.')
+      expect(wrapper.find('.settings-rail-assets').text()).toContain('Custom')
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/admin/skills', original)
+    }
   })
 
   it('SettingsView renders the notifications card on /settings/notifications', async () => {
@@ -468,33 +456,9 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    expect(wrapper.text()).toContain('notifications')
-    expect(wrapper.text()).toContain('Get a notification when a chat replies')
+    expect(wrapper.text()).toContain('Notifications')
+    expect(wrapper.text()).toContain('notifies you when a chat replies')
     wrapper.unmount()
-  })
-
-  it('SettingsView explains notifications in the desktop app instead of blanking', async () => {
-    // The tray's "Notification Settings…" navigates the desktop window here, so
-    // the desktop branch must render guidance rather than nothing.
-    window.__CIAOBOT_DESKTOP__ = true
-    try {
-      const router = makeRouter()
-      await router.push('/settings/notifications')
-      await router.isReady()
-      const mod = await import('../SettingsView.vue')
-      const wrapper = mount(mod.default as never, {
-        global: { plugins: [router], stubs: { Teleport: true } },
-      })
-      await flushPromises()
-      await nextTick()
-
-      expect(wrapper.text()).toContain('menu-bar')
-      expect(wrapper.text()).toContain('Native Notifications')
-      expect(wrapper.text()).not.toContain('Enable on this device')
-      wrapper.unmount()
-    } finally {
-      delete window.__CIAOBOT_DESKTOP__
-    }
   })
 
   it('SettingsView keeps subagents and commands on separate settings pages', async () => {
@@ -553,38 +517,10 @@ describe('component mount smoke', () => {
     expect(failing).toHaveLength(1)
     expect(failing[0].text()).toContain('When a chat is archived.')
     expect(failing[0].text()).toContain('TimeoutError')
-    // The old separate "Insights backfill" row is gone; it is this row's action.
-    expect(wrapper.text()).not.toContain('Insights backfill —')
-    expect(failing[0].find('.btn-run').text()).toBe('Run for all sessions')
+    // The insights row has no manual trigger, so it carries no run button.
+    expect(failing[0].find('.btn-run').exists()).toBe(false)
     // A settled one-time migration is folded away, not presented as live work.
     expect(wrapper.find('.automation-settled').text()).toContain('Legacy memory migration')
-    wrapper.unmount()
-  })
-
-  it('SettingsView retries failing insights with a different model', async () => {
-    const router = makeRouter()
-    await router.push('/settings/automations')
-    await router.isReady()
-    const mod = await import('../SettingsView.vue')
-    const wrapper = mount(mod.default as never, {
-      global: { plugins: [router], stubs: { Teleport: true } },
-    })
-    await flushPromises()
-    await nextTick()
-
-    const failing = wrapper.find('.automation-row--error')
-    const select = failing.find('select')
-    expect(select.exists()).toBe(true)
-    // Default keeps the configured model; options are concrete model ids.
-    expect(select.findAll('option')[0].text()).toContain('Configured')
-    await select.setValue('opus')
-    await failing.find('.btn-run').trigger('click')
-    await flushPromises()
-
-    expect(api.post).toHaveBeenCalledWith(
-      '/api/automation/backfill-insights',
-      { model: 'opus' },
-    )
     wrapper.unmount()
   })
 
@@ -598,6 +534,16 @@ describe('component mount smoke', () => {
     })
     await flushPromises()
     await nextTick()
+
+    // The effective panel arrives comma-joined with no spaces. It is shown
+    // rejoined with ", " as the picker's placeholder, and the ellipsized
+    // trigger carries the full value as its title. With nothing picked there
+    // is no second summary control beside it.
+    const defaultLabel = 'Automatic default (anthropic/claude-sonnet-4.5, anthropic/claude-haiku-4.5)'
+    expect(wrapper.find('.critique-picker-default').exists()).toBe(false)
+    expect(
+      wrapper.find('.critique-model-picker .model-selector__trigger').attributes('title'),
+    ).toBe(defaultLabel)
 
     // The critique picker is now a searchable ModelSelector.
     const critiqueSelector = wrapper.find('.critique-model-picker .model-selector')
@@ -626,6 +572,10 @@ describe('component mount smoke', () => {
       critique_models: 'opus,opencode:openai/gpt-5.6-luna',
     })
     expect(wrapper.text()).toContain('opencode:openai/gpt-5.6-luna')
+    // Chip text ellipsizes, so the remove button names the model it removes.
+    expect(
+      wrapper.findAll('.critique-chip').map((chip) => chip.attributes('aria-label')),
+    ).toContain('Remove opencode:openai/gpt-5.6-luna')
     wrapper.unmount()
   })
 
@@ -640,7 +590,7 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    const addButton = wrapper.findAll('button').find((button) => button.text().includes('Add workspace'))
+    const addButton = wrapper.findAll('button').find((button) => button.text() === 'New workspace')
     expect(addButton).toBeTruthy()
     await addButton!.trigger('click')
     await nextTick()
@@ -691,6 +641,9 @@ describe('component mount smoke', () => {
     await nextTick()
 
     try {
+      // Rows are collapsed; Edit opens the workspace's fields in place.
+      await wrapper.get('[aria-label="Edit workspace legacy"]').trigger('click')
+      await nextTick()
       const providerField = wrapper.findAll('label.settings-field')
         .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
       expect(providerField).toBeTruthy()
@@ -740,7 +693,13 @@ describe('component mount smoke', () => {
     await nextTick()
 
     try {
-      await wrapper.find('.workspace-actions .btn-small').trigger('click')
+      // Save appears only after a change in the opened row.
+      await wrapper.get('[aria-label="Edit workspace personal"]').trigger('click')
+      await nextTick()
+      expect(wrapper.find('.workspace-save').exists()).toBe(false)
+      await wrapper.get('.workspace-color-swatch[aria-label="Terminal Cyan"]').trigger('click')
+      await nextTick()
+      await wrapper.get('.workspace-save').trigger('click')
       await flushPromises()
 
       const result = wrapper.find('.action-result[role="alert"]')
@@ -760,9 +719,115 @@ describe('component mount smoke', () => {
     }
   })
 
+  it('SettingsView models tab stacks chat providers and background models', async () => {
+    const router = makeRouter()
+    await router.push('/settings/models')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    const titles = wrapper.findAll('.section-title').map((el) => el.text())
+    expect(titles).toEqual(['Chat providers', 'Background models'])
+    expect(wrapper.find('#chat-providers').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('SettingsView scrolls to the chat providers card once, not after every refetch', async () => {
+    const proto = Element.prototype as Element & { scrollIntoView?: unknown }
+    const original = proto.scrollIntoView
+    const scrolled = vi.fn()
+    proto.scrollIntoView = scrolled
+    const router = makeRouter()
+    await router.push('/settings/models#chat-providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    // Attached, so document.getElementById can find the card.
+    const wrapper = mount(mod.default as never, {
+      attachTo: document.body,
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    try {
+      await flushPromises()
+      await nextTick()
+      expect(scrolled).toHaveBeenCalledTimes(1)
+
+      // Verify refetches the connections; the hash is still in the URL but
+      // the page must not jump back to the top of the card.
+      const verify = wrapper.findAll('.provider-connection-actions button').find((b) => b.text() === 'Verify')
+      await verify!.trigger('click')
+      await flushPromises()
+      await nextTick()
+      expect(scrolled).toHaveBeenCalledTimes(1)
+
+      // An in-app link to the anchor (this view stays mounted) scrolls again.
+      await router.push('/settings/skills')
+      await router.push('/settings/models#chat-providers')
+      await flushPromises()
+      await nextTick()
+      expect(scrolled).toHaveBeenCalledTimes(2)
+    } finally {
+      wrapper.unmount()
+      proto.scrollIntoView = original
+    }
+  })
+
+  it('SettingsView folds what each CLI brings behind a collapsed disclosure', async () => {
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const original = testApi.getResponse('/api/settings/providers') as {
+      connections: Record<string, Record<string, unknown>>
+    }
+    testApi.setResponse('/api/settings/providers', {
+      ...original,
+      connections: {
+        ...original.connections,
+        claude: {
+          ...original.connections.claude,
+          mcps: ['ciao-memory', 'github'],
+          skills: ['frontend-design'],
+        },
+      },
+    })
+    const router = makeRouter()
+    await router.push('/settings/models')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    try {
+      const disclosures = wrapper.findAll('.provider-connections details.provider-brings')
+      expect(disclosures).toHaveLength(2)
+      // Collapsed by default: the chip lists are there but folded away.
+      for (const d of disclosures) {
+        expect((d.element as HTMLDetailsElement).open).toBe(false)
+        expect(d.find('.provider-mcps-preview').exists()).toBe(true)
+      }
+      const claude = disclosures[0]!
+      expect(claude.find('summary').text()).toMatch(/What this CLI brings \(\d+ MCP servers?, 1 skill or plugin\)/)
+      expect(claude.text()).toContain('frontend-design')
+      expect(disclosures[1]!.find('summary').text()).toContain('0 MCP servers, 0 skills & plugins')
+      // The defaults and actions stay outside the disclosure.
+      expect(wrapper.find('details.provider-brings .provider-inline-defaults').exists()).toBe(false)
+      expect(wrapper.find('details.provider-brings .provider-connection-actions').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/settings/providers', original)
+    }
+  })
+
   it('SettingsView labels every provider connection from the backend registry', async () => {
     const router = makeRouter()
-    await router.push('/settings/providers')
+    await router.push('/settings/models')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -787,7 +852,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView renders no API-key entry UI even when the payload advertises keys', async () => {
     const router = makeRouter()
-    await router.push('/settings/providers')
+    await router.push('/settings/models')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -799,7 +864,6 @@ describe('component mount smoke', () => {
     // Provider auth goes through each CLI (`ciao auth <provider>`), so the old
     // key-entry rows and Save Keys button are gone — even if a stale payload
     // still advertises key metadata.
-    expect(wrapper.text()).not.toContain('OpenAI voice API key')
     expect(wrapper.findAll('input[type="password"]').length).toBe(0)
     expect(wrapper.text()).not.toContain('Save Keys')
     expect(wrapper.text()).not.toContain('Agent SDK ready')
@@ -810,7 +874,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView shows per-provider defaults and saves a default model', async () => {
     const router = makeRouter()
-    await router.push('/settings/providers')
+    await router.push('/settings/models')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -859,7 +923,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView offers a per-provider default permission mode', async () => {
     const router = makeRouter()
-    await router.push('/settings/providers')
+    await router.push('/settings/models')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -893,7 +957,7 @@ describe('component mount smoke', () => {
       opencode_models: [],
     })
     const router = makeRouter()
-    await router.push('/settings/providers')
+    await router.push('/settings/models')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {

@@ -344,3 +344,4 @@ async def test_run_oneshot_rejects_unknown_provider() -> None:
         await oneshot.run_oneshot(
             "hi", system_prompt="s", model="haiku", provider="nope"
         )
+

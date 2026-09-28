@@ -93,7 +93,7 @@ def test_render_launchd_plist_uses_bundled_engine_path() -> None:
 
 
 def test_run_step_reports_missing_binary_as_failed_step() -> None:
-    from ciao.desktop_build import run_step as _run_step
+    from ciao.subprocess_step import run_step as _run_step
 
     result = _run_step(["definitely-not-a-real-binary-xyz"], cwd="/tmp", timeout=5)
     assert result.returncode == 127
@@ -102,7 +102,7 @@ def test_run_step_reports_missing_binary_as_failed_step() -> None:
 
 
 def test_run_step_passes_through_success(tmp_path) -> None:
-    from ciao.desktop_build import run_step as _run_step
+    from ciao.subprocess_step import run_step as _run_step
 
     result = _run_step(["true"], cwd=str(tmp_path), timeout=5)
     assert result.returncode == 0

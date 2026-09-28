@@ -52,11 +52,18 @@ function mountPanel(seed?: (mcp: McpServersController) => void) {
 }
 
 describe('SettingsMcpServers', () => {
-  it('lists the agent CLI row and every project server', () => {
+  it('lists project MCP servers without the agent CLI control surface', () => {
     const { wrapper } = mountPanel()
     const names = wrapper.findAll('.skill-name').map(n => n.text())
-    expect(names).toEqual(['agent cli', 'notion'])
+    expect(names).toEqual(['notion'])
     expect(wrapper.find('#mcp-servers').exists()).toBe(true)
+  })
+
+  it('explains an empty list and opens the add form from it', async () => {
+    const { wrapper, mcp } = mountPanel(m => { m.status.value = { enabled: true, bound: true, tool_count: 0, project_servers: [] } })
+    expect(wrapper.find('.mcp-empty').text()).toContain('No MCP servers yet.')
+    await wrapper.find('.mcp-empty button').trigger('click')
+    expect(mcp.showAddServer.value).toBe(true)
   })
 
   it('badges a server that is missing its secrets', () => {
@@ -89,7 +96,7 @@ describe('SettingsMcpServers', () => {
 
   it('expands a server row and shows its editable connection and secret fields', async () => {
     const { wrapper, mcp } = mountPanel()
-    await wrapper.findAll('.skill-row')[1].trigger('click')
+    await wrapper.findAll('.skill-row')[0].trigger('click')
     await nextTick()
     expect(mcp.isExpanded('notion')).toBe(true)
     expect(wrapper.find('input[aria-label="MCP server URL"]').exists()).toBe(true)
@@ -109,22 +116,6 @@ describe('SettingsMcpServers', () => {
     const after = wrapper.find('.mcp-env-block .settings-actions').findAll('button')
     expect(after[0].attributes('disabled')).toBeUndefined()
     expect(after[1].attributes('disabled')).toBeUndefined()
-  })
-
-  it('renders the agent CLI status fields when expanded', async () => {
-    const { wrapper, mcp } = mountPanel()
-    mcp.agentStatus.value = {
-      ready: true,
-      operations: ['context_get', 'vault_search'],
-      telemetry_path: '/ws/.runtime/mcp_tool_calls.jsonl',
-      version: '0.17.0',
-    }
-    await wrapper.findAll('.skill-row')[0].trigger('click')
-    await nextTick()
-    expect(wrapper.text()).toContain('agent cli')
-    expect(wrapper.text()).toContain('ready')
-    expect(wrapper.text()).toContain('mcp_tool_calls.jsonl')
-    expect(wrapper.text()).toContain('0.17.0')
   })
 
   it('deletes through the controller', async () => {

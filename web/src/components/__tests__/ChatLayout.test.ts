@@ -11,7 +11,6 @@ import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useFontScale } from '../../composables/useFontScale'
 import { pendingNewChat } from '../../lib/newChat'
 
-const toggleDictation = vi.fn()
 const toggleModelPicker = vi.fn()
 const handleSendShortcut = vi.fn(() => true)
 const archiveActiveChat = vi.fn()
@@ -20,7 +19,7 @@ const ChatPanelStub = defineComponent({
   name: 'ChatPanel',
   emits: ['close'],
   setup(_, { emit, expose }) {
-    expose({ toggleDictation, toggleModelPicker, handleSendShortcut, archiveActiveChat })
+    expose({ toggleModelPicker, handleSendShortcut, archiveActiveChat })
     return () => h('button', {
       'data-testid': 'close-chat',
       onClick: () => emit('close'),
@@ -61,8 +60,6 @@ describe('ChatLayout', () => {
   })
 
   afterEach(() => {
-    window.__CIAOBOT_DESKTOP__ = undefined
-    toggleDictation.mockReset()
     toggleModelPicker.mockReset()
     handleSendShortcut.mockReset()
     handleSendShortcut.mockReturnValue(true)
@@ -543,126 +540,7 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
-  it('routes Cmd+D to the active chat composer in the desktop app', async () => {
-    window.__CIAOBOT_DESKTOP__ = true
-    Object.defineProperty(window, 'innerWidth', {
-      configurable: true,
-      value: 1180,
-    })
-
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
-    })
-    await router.push('/')
-    await router.isReady()
-
-    const store = useProjectStore()
-    store.projects = [{
-      project_id: 'project-1',
-      name: 'General',
-      workspace: 'personal',
-    }] as unknown as typeof store.projects
-    store.chats = [{
-      chat_id: 'chat-1',
-      project_id: 'project-1',
-      title: 'Test chat',
-    }] as unknown as typeof store.chats
-    store.activeChatId = 'chat-1'
-    store.bootstrapped = true
-    vi.spyOn(store, 'fetchAll').mockResolvedValue()
-
-    const taskStore = useTaskStore()
-    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-
-    const { default: ChatLayout } = await import('../ChatLayout.vue')
-    const wrapper = mount(ChatLayout, {
-      global: {
-        plugins: [router],
-        stubs: {
-          ChatPanel: ChatPanelStub,
-          ProjectSidebar: EmptyStub,
-          ProjectView: EmptyStub,
-          SchedulePanel: EmptyStub,
-          SettingsView: EmptyStub,
-          FileViewerModal: EmptyStub,
-          PinnedFilePanel: EmptyStub,
-          PaneHeader: EmptyStub,
-          HomeRecentChats: EmptyStub,
-        },
-      },
-    })
-    await flushPromises()
-
-    const event = new KeyboardEvent('keydown', { key: 'd', metaKey: true, cancelable: true })
-    window.dispatchEvent(event)
-
-    expect(toggleDictation).toHaveBeenCalledOnce()
-    expect(event.defaultPrevented).toBe(true)
-    wrapper.unmount()
-  })
-
-  it('routes Alt+D to the active chat composer in the web PWA', async () => {
-    window.__CIAOBOT_DESKTOP__ = undefined
-    Object.defineProperty(window, 'innerWidth', {
-      configurable: true,
-      value: 1180,
-    })
-
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
-    })
-    await router.push('/')
-    await router.isReady()
-
-    const store = useProjectStore()
-    store.projects = [{
-      project_id: 'project-1',
-      name: 'General',
-      workspace: 'personal',
-    }] as unknown as typeof store.projects
-    store.chats = [{
-      chat_id: 'chat-1',
-      project_id: 'project-1',
-      title: 'Test chat',
-    }] as unknown as typeof store.chats
-    store.activeChatId = 'chat-1'
-    store.bootstrapped = true
-    vi.spyOn(store, 'fetchAll').mockResolvedValue()
-
-    const taskStore = useTaskStore()
-    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
-
-    const { default: ChatLayout } = await import('../ChatLayout.vue')
-    const wrapper = mount(ChatLayout, {
-      global: {
-        plugins: [router],
-        stubs: {
-          ChatPanel: ChatPanelStub,
-          ProjectSidebar: EmptyStub,
-          ProjectView: EmptyStub,
-          SchedulePanel: EmptyStub,
-          SettingsView: EmptyStub,
-          FileViewerModal: EmptyStub,
-          PinnedFilePanel: EmptyStub,
-          PaneHeader: EmptyStub,
-          HomeRecentChats: EmptyStub,
-        },
-      },
-    })
-    await flushPromises()
-
-    const event = new KeyboardEvent('keydown', { key: 'd', altKey: true, cancelable: true })
-    window.dispatchEvent(event)
-
-    expect(toggleDictation).toHaveBeenCalledOnce()
-    expect(event.defaultPrevented).toBe(true)
-    wrapper.unmount()
-  })
-
-  it('Cmd+T opens the new-chat picker instead of creating a chat directly', async () => {
-    window.__CIAOBOT_DESKTOP__ = true
+  it('Option+N opens the new-chat picker instead of creating a chat directly', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
     const router = createRouter({
@@ -704,7 +582,7 @@ describe('ChatLayout', () => {
     })
     await flushPromises()
 
-    const event = new KeyboardEvent('keydown', { key: 't', metaKey: true, cancelable: true })
+    const event = new KeyboardEvent('keydown', { key: 'n', code: 'KeyN', altKey: true, cancelable: true })
     window.dispatchEvent(event)
     await flushPromises()
 
@@ -715,14 +593,9 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
-  // The sidebar toggle follows the same split as the other modifier
-  // shortcuts: Cmd+S in the desktop app, Option+S in the PWA, because a
-  // browser has already spent Cmd+S on Save Page.
-  it.each([
-    ['the desktop app', true, { key: 's', metaKey: true }],
-    ['the web PWA', undefined, { key: 's', altKey: true }],
-  ] as const)('toggles the sidebar in %s', async (_label, desktopFlag, keyInit) => {
-    window.__CIAOBOT_DESKTOP__ = desktopFlag
+  // The sidebar toggle is Option+S, not Cmd+S: a browser has already spent
+  // Cmd+S on Save Page.
+  it('toggles the sidebar on Option+S', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
     const router = createRouter({
@@ -762,27 +635,22 @@ describe('ChatLayout', () => {
     // asserting both directions, since "opens and closes" is the whole point.
     expect(wrapper.find('.chat-layout').classes()).toContain('sidebar-open')
 
-    const collapse = new KeyboardEvent('keydown', { ...keyInit, cancelable: true })
+    const collapse = new KeyboardEvent('keydown', { key: 's', code: 'KeyS', altKey: true, cancelable: true })
     window.dispatchEvent(collapse)
     await nextTick()
     expect(wrapper.find('.chat-layout').classes()).not.toContain('sidebar-open')
     expect(collapse.defaultPrevented).toBe(true)
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { ...keyInit, cancelable: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 's', code: 'KeyS', altKey: true, cancelable: true }))
     await nextTick()
     expect(wrapper.find('.chat-layout').classes()).toContain('sidebar-open')
 
     wrapper.unmount()
   })
 
-  // The model picker follows the same split: Cmd+Shift+M in the desktop app,
-  // Option+M in the PWA, because macOS reserves plain Cmd+M for Minimize
-  // Window. Needs an active chat, like dictation.
-  it.each([
-    ['the desktop app', true, { key: 'm', metaKey: true, shiftKey: true }],
-    ['the web PWA', undefined, { key: 'm', altKey: true }],
-  ] as const)('opens the model picker in %s', async (_label, desktopFlag, keyInit) => {
-    window.__CIAOBOT_DESKTOP__ = desktopFlag
+  // The model picker is Option+M: macOS reserves the Cmd chords (plain Cmd+M
+  // for Minimize Window) above the page. Needs an active chat.
+  it('opens the model picker on Option+M', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
     const router = createRouter({
@@ -829,7 +697,7 @@ describe('ChatLayout', () => {
     })
     await flushPromises()
 
-    const event = new KeyboardEvent('keydown', { ...keyInit, cancelable: true })
+    const event = new KeyboardEvent('keydown', { key: 'm', code: 'KeyM', altKey: true, cancelable: true })
     window.dispatchEvent(event)
 
     expect(toggleModelPicker).toHaveBeenCalledOnce()
@@ -838,15 +706,10 @@ describe('ChatLayout', () => {
   })
 
   // Archive moved off Cmd+A (select-all owns it inside text fields) to
-  // Cmd+Backspace in the desktop app and Option+Backspace in the PWA, and it
-  // deliberately fires even while a text field is focused: archiving from
-  // mid-thought without clicking out is the point, and the confirm dialog
-  // archiveActiveChat raises is what makes that safe.
-  it.each([
-    ['the desktop app', true, { key: 'Backspace', metaKey: true }],
-    ['the web PWA', undefined, { key: 'Backspace', altKey: true }],
-  ] as const)('archives the open chat on Cmd/Option+Backspace in %s, even while typing', async (_label, desktopFlag, keyInit) => {
-    window.__CIAOBOT_DESKTOP__ = desktopFlag
+  // Option+Backspace, and it deliberately fires even while a text field is
+  // focused: archiving from mid-thought without clicking out is the point, and
+  // the confirm dialog archiveActiveChat raises is what makes that safe.
+  it('archives the open chat on Option+Backspace, even while typing', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
     const router = createRouter({
@@ -898,7 +761,12 @@ describe('ChatLayout', () => {
     document.body.appendChild(textarea)
     textarea.focus()
 
-    const event = new KeyboardEvent('keydown', { ...keyInit, cancelable: true })
+    const event = new KeyboardEvent('keydown', {
+      key: 'Backspace',
+      code: 'Backspace',
+      altKey: true,
+      cancelable: true,
+    })
     window.dispatchEvent(event)
 
     expect(archiveActiveChat).toHaveBeenCalledOnce()
@@ -909,8 +777,7 @@ describe('ChatLayout', () => {
 
   // No open chat: nothing to archive, so the chord keeps its default meaning
   // (e.g. the browser's history-back on Option+Backspace).
-  it('leaves Cmd+Backspace alone when no chat is open', async () => {
-    window.__CIAOBOT_DESKTOP__ = true
+  it('leaves Option+Backspace alone when no chat is open', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
     const router = createRouter({
@@ -946,7 +813,7 @@ describe('ChatLayout', () => {
     })
     await flushPromises()
 
-    const event = new KeyboardEvent('keydown', { key: 'Backspace', metaKey: true, cancelable: true })
+    const event = new KeyboardEvent('keydown', { key: 'Backspace', code: 'Backspace', altKey: true, cancelable: true })
     window.dispatchEvent(event)
 
     expect(archiveActiveChat).not.toHaveBeenCalled()
@@ -957,11 +824,7 @@ describe('ChatLayout', () => {
   // Cmd/Ctrl+Enter has to reach the composer from outside it. Attaching an
   // image or a comment leaves focus on the control that closed, so without
   // this a message carrying only attachments could not be sent by keyboard.
-  it.each([
-    ['the desktop app', true],
-    ['the web PWA', undefined],
-  ] as const)('sends the composer draft on Cmd+Enter from outside the composer in %s', async (_label, desktopFlag) => {
-    window.__CIAOBOT_DESKTOP__ = desktopFlag
+  it('sends the composer draft on Cmd+Enter from outside the composer', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
     const router = createRouter({
@@ -1020,7 +883,6 @@ describe('ChatLayout', () => {
   // whatever meaning the focused control gives it.
   it('leaves Cmd+Enter alone when the composer declines it', async () => {
     handleSendShortcut.mockReturnValue(false)
-    window.__CIAOBOT_DESKTOP__ = true
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
     const router = createRouter({
@@ -1079,7 +941,6 @@ describe('ChatLayout', () => {
   // layout must never claim it from a text field: sending from the popover
   // would fire alongside the popover's own save.
   it('leaves Cmd+Enter to the focused text field', async () => {
-    window.__CIAOBOT_DESKTOP__ = true
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
     const router = createRouter({
@@ -1148,7 +1009,6 @@ describe('ChatLayout', () => {
   // would send the unrelated chat draft and swallow the button's own Enter
   // activation instead of saving the file comment.
   it('defers to an open comment popover in the pinned file panel', async () => {
-    window.__CIAOBOT_DESKTOP__ = true
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
     const router = createRouter({
@@ -1215,7 +1075,6 @@ describe('ChatLayout', () => {
   it('leaves the sidebar alone when the shortcut fires inside a text field', async () => {
     // Option+S is how you type ß, so stealing it mid-composition would break
     // text entry for the sake of a view toggle.
-    window.__CIAOBOT_DESKTOP__ = undefined
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
     const router = createRouter({
@@ -1266,13 +1125,12 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
-  it('increments --font-scale by the shared step on Cmd/Ctrl+Shift+=', async () => {
-    // The shortcut should be available in both the desktop app and the PWA:
-    // it is the platform's primary modifier. The step, bounds, and
-    // persistence key must match Settings → Appearance so the two surfaces
-    // stay in sync. Asserts both: the CSS variable is bumped and the value
-    // is persisted to localStorage.
-    window.__CIAOBOT_DESKTOP__ = true
+  it('increments --font-scale by the shared step on Option+=', async () => {
+    // Option+= is the chord a browser can still claim: Cmd+Shift+= *is*
+    // Cmd++ on a US layout, which the browser zooms with above the page, so it
+    // ignores preventDefault. The step, bounds, and persistence key must match
+    // Settings → Appearance so the two surfaces stay in sync. Asserts both: the
+    // CSS variable is bumped and the value is persisted to localStorage.
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
     // Seed through the composable, not localStorage: the scale ref is
     // module-scoped and shared, so writing storage after import would not
@@ -1308,7 +1166,7 @@ describe('ChatLayout', () => {
     })
     await flushPromises()
 
-    const event = new KeyboardEvent('keydown', { key: '=', metaKey: true, shiftKey: true, cancelable: true })
+    const event = new KeyboardEvent('keydown', { key: '=', code: 'Equal', altKey: true, cancelable: true })
     window.dispatchEvent(event)
 
     // The composable writes the live value to both the CSS variable and
@@ -1320,11 +1178,10 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
-  it('decrements --font-scale on Cmd/Ctrl+Shift+- (matches the shared step)', async () => {
+  it('decrements --font-scale on Option+- (matches the shared step)', async () => {
     // Mirror of the increment case above, exercising the minus path with a
     // pre-seeded value so the assertion is deterministic regardless of
     // any cross-test CSS-variable carryover.
-    window.__CIAOBOT_DESKTOP__ = true
     useFontScale().set(1.2)
 
     const router = createRouter({
@@ -1356,7 +1213,7 @@ describe('ChatLayout', () => {
     })
     await flushPromises()
 
-    const event = new KeyboardEvent('keydown', { key: '-', metaKey: true, shiftKey: true, cancelable: true })
+    const event = new KeyboardEvent('keydown', { key: '-', code: 'Minus', altKey: true, cancelable: true })
     window.dispatchEvent(event)
 
     const cssValue = parseFloat(document.documentElement.style.getPropertyValue('--font-scale'))
@@ -1366,12 +1223,11 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
-  it('clamps Cmd+Ctrl+Shift+- at the lower font-scale bound', async () => {
+  it('clamps Option+- at the lower font-scale bound', async () => {
     // Start at exactly the floor (0.8) and confirm the shortcut does not
     // underflow past the bound. Without clamp, --font-scale would become
     // 0.75 and persist, breaking the "reset back to default" workflow
     // because the slider/buttons would have nowhere to go down.
-    window.__CIAOBOT_DESKTOP__ = true
     useFontScale().set(0.8)
 
     const router = createRouter({
@@ -1403,7 +1259,7 @@ describe('ChatLayout', () => {
     })
     await flushPromises()
 
-    const event = new KeyboardEvent('keydown', { key: '-', metaKey: true, shiftKey: true, cancelable: true })
+    const event = new KeyboardEvent('keydown', { key: '-', code: 'Minus', altKey: true, cancelable: true })
     window.dispatchEvent(event)
 
     // Both writes must land at the floor. We do not read the CSS variable
@@ -1432,7 +1288,6 @@ describe('ChatLayout home arrow navigation', () => {
   })
 
   afterEach(() => {
-    window.__CIAOBOT_DESKTOP__ = undefined
     vi.restoreAllMocks()
   })
 
@@ -1517,7 +1372,9 @@ describe('ChatLayout home arrow navigation', () => {
   it('drops the global new-chat buttons once any chat exists', async () => {
     const wrapper = await mountHome()
     expect(wrapper.find('.empty-actions').exists()).toBe(false)
-    expect(wrapper.findAll('.home-lane-new').length).toBeGreaterThan(0)
+    // The composer is home's one way to start work; the selected lane no
+    // longer repeats it with its own "+ new".
+    expect(wrapper.find('.home-intake-new').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -1530,6 +1387,8 @@ describe('ChatLayout home arrow navigation', () => {
     wrapper.unmount()
   })
 
+  // One keydown listener owns the unmodified keys: handling arrows here AND
+  // again in onShortcutKeydown ran onArrow twice and skipped a card per press.
   it('moves focus through the home grid from a window keydown', async () => {
     const wrapper = await mountHome()
     const cards = wrapper.findAll('.home-chat-item')
@@ -1548,8 +1407,7 @@ describe('ChatLayout home arrow navigation', () => {
     wrapper.unmount()
   })
 
-  it('works in the PWA, not just the desktop app', async () => {
-    window.__CIAOBOT_DESKTOP__ = undefined
+  it('moves into the grid with ArrowRight', async () => {
     const wrapper = await mountHome()
     const cards = wrapper.findAll('.home-chat-item')
 
@@ -1560,7 +1418,6 @@ describe('ChatLayout home arrow navigation', () => {
   })
 
   it('keeps number keys as workspace shortcuts from home', async () => {
-    window.__CIAOBOT_DESKTOP__ = undefined
     const wrapper = await mountHome()
     const store = useProjectStore()
 
@@ -1570,38 +1427,25 @@ describe('ChatLayout home arrow navigation', () => {
     wrapper.unmount()
   })
 
-  it('switches sections with Cmd+Arrow in the desktop app', async () => {
-    window.__CIAOBOT_DESKTOP__ = true
-    const wrapper = await mountHome()
-    expect(router.currentRoute.value.path).toBe('/')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', metaKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/schedules')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', metaKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/memory')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', metaKey: true, bubbles: true }))
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/schedules')
-    wrapper.unmount()
-  })
-
-  it('switches sections with Option+Arrow in the web PWA', async () => {
-    window.__CIAOBOT_DESKTOP__ = undefined
+  it('switches sections with Option+Arrow', async () => {
     const wrapper = await mountHome()
     expect(router.currentRoute.value.path).toBe('/')
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
     await flushPromises()
     expect(router.currentRoute.value.path).toBe('/schedules')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/memory')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/schedules')
     wrapper.unmount()
   })
 
   it('does not treat bare arrow keys as section switches', async () => {
-    window.__CIAOBOT_DESKTOP__ = undefined
     const wrapper = await mountHome()
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
@@ -1613,7 +1457,6 @@ describe('ChatLayout home arrow navigation', () => {
   // Esc used to do nothing at all on settings and automations, because those
   // views are excluded from shortcutsActive. It is the universal way back.
   it('returns to home on Esc from a full-screen view', async () => {
-    window.__CIAOBOT_DESKTOP__ = undefined
     const wrapper = await mountHome()
     const store = useProjectStore()
     store.activeChatId = null
@@ -1629,7 +1472,6 @@ describe('ChatLayout home arrow navigation', () => {
   })
 
   it('leaves Esc alone when already on home with no chat open', async () => {
-    window.__CIAOBOT_DESKTOP__ = undefined
     const wrapper = await mountHome()
     const store = useProjectStore()
     store.activeChatId = null
@@ -1646,7 +1488,6 @@ describe('ChatLayout home arrow navigation', () => {
   it('closes the open chat on Esc, including while typing in the composer', async () => {
     // Requested behaviour: escaping a chat should not require clicking out of
     // the composer first. Widgets that own Esc claim it with stopPropagation.
-    window.__CIAOBOT_DESKTOP__ = undefined
     const wrapper = await mountHome()
     const store = useProjectStore()
     store.activeChatId = 'chat-1'
@@ -1668,7 +1509,6 @@ describe('ChatLayout home arrow navigation', () => {
   // screen - disconnecting it, and deleting it outright when it was an unused
   // draft with an unsent composer message.
   it('leaves a retained hidden chat alone when escaping Settings', async () => {
-    window.__CIAOBOT_DESKTOP__ = undefined
     const wrapper = await mountHome()
     const store = useProjectStore()
     store.activeChatId = 'chat-1'
@@ -1684,7 +1524,6 @@ describe('ChatLayout home arrow navigation', () => {
   })
 
   it('does the same escaping Automations', async () => {
-    window.__CIAOBOT_DESKTOP__ = undefined
     const wrapper = await mountHome()
     const store = useProjectStore()
     store.activeChatId = 'chat-1'
@@ -1701,7 +1540,6 @@ describe('ChatLayout home arrow navigation', () => {
 
   // A popover that handled Escape itself must not also navigate away.
   it('defers to a nested control that consumed Escape', async () => {
-    window.__CIAOBOT_DESKTOP__ = undefined
     const wrapper = await mountHome()
     const store = useProjectStore()
     store.activeChatId = null
@@ -1722,7 +1560,6 @@ describe('ChatLayout home arrow navigation', () => {
     // with the same open chat. Gating the shortcut on viewMode === 'chat' made
     // Esc (and the arrow keys) dead for anyone who opened a chat through a
     // project, which read as "Esc only works after I click somewhere else".
-    window.__CIAOBOT_DESKTOP__ = undefined
     const wrapper = await mountHome('/project/project-1')
     const store = useProjectStore()
     store.activeChatId = 'chat-1'
@@ -1740,7 +1577,6 @@ describe('ChatLayout home arrow navigation', () => {
   })
 
   it('leaves Esc alone when a widget claims it with stopPropagation', async () => {
-    window.__CIAOBOT_DESKTOP__ = undefined
     const wrapper = await mountHome()
     const store = useProjectStore()
     store.activeChatId = 'chat-1'
@@ -1759,23 +1595,208 @@ describe('ChatLayout home arrow navigation', () => {
     textarea.remove()
     wrapper.unmount()
   })
+})
 
-  it('advances exactly one card per press in the desktop app', async () => {
-    // The desktop app binds a second keydown listener (onShortcutKeydown) on
-    // top of the unconditional one. When both handled arrows, one press ran
-    // onArrow twice and focus skipped a card -- and only in the desktop app,
-    // so the PWA looked fine. Mode must not change how far an arrow moves.
-    window.__CIAOBOT_DESKTOP__ = true
-    const wrapper = await mountHome()
-    const cards = wrapper.findAll('.home-chat-item')
+// On macOS, Option rewrites KeyboardEvent.key into the character the chord
+// would type (⌥D is "∂", ⌥S "ß", ⌥N a dead key), so the PWA's Option chords
+// must match the physical key (`code`). Windows/Linux Alt leaves `key` alone;
+// both shapes have to reach the same action.
+describe('ChatLayout PWA Option/Alt chords', () => {
+  class MemoryStorage {
+    private values = new Map<string, string>()
+    getItem(key: string): string | null { return this.values.get(key) ?? null }
+    setItem(key: string, value: string): void { this.values.set(key, value) }
+    removeItem(key: string): void { this.values.delete(key) }
+    clear(): void { this.values.clear() }
+  }
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
+  })
+
+  afterEach(() => {
+    toggleModelPicker.mockReset()
+    archiveActiveChat.mockReset()
+    pendingNewChat.value?.resolve(null)
+    vi.restoreAllMocks()
+  })
+
+  async function mountWebLayout() {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as unknown as typeof store.projects
+    store.chats = [{ chat_id: 'chat-1', project_id: 'project-1', title: 'Test chat' }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub, ProjectSidebar: EmptyStub, ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub, SettingsView: EmptyStub, FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub, PaneHeader: EmptyStub, HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+    return wrapper
+  }
+
+  function press(init: KeyboardEventInit, target: EventTarget = window): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', { altKey: true, bubbles: true, cancelable: true, ...init })
+    target.dispatchEvent(event)
+    return event
+  }
+
+  const platforms = [
+    ['Mac Option', { n: 'Dead', m: 'µ', s: 'ß', eq: '≠', minus: '–' }],
+    ['Windows Alt', { n: 'n', m: 'm', s: 's', eq: '=', minus: '-' }],
+  ] as const
+
+  it.each(platforms)('%s+M opens the model picker', async (_label, keys) => {
+    const wrapper = await mountWebLayout()
+    const event = press({ key: keys.m, code: 'KeyM' })
+    expect(toggleModelPicker).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it.each(platforms)('%s+N opens the new-chat picker', async (_label, keys) => {
+    const wrapper = await mountWebLayout()
+    const event = press({ key: keys.n, code: 'KeyN' })
+    await flushPromises()
+    expect(event.defaultPrevented).toBe(true)
+    expect(pendingNewChat.value).not.toBeNull()
+    wrapper.unmount()
+  })
+
+  it.each(platforms)('%s+Backspace archives the open chat', async () => {
+    const wrapper = await mountWebLayout()
+    const event = press({ key: 'Backspace', code: 'Backspace' })
+    expect(archiveActiveChat).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it.each(platforms)('%s+S toggles the sidebar', async (_label, keys) => {
+    const wrapper = await mountWebLayout()
+    expect(wrapper.find('.chat-layout').classes()).toContain('sidebar-open')
+    const event = press({ key: keys.s, code: 'KeyS' })
     await nextTick()
-    expect(document.activeElement).toBe(cards[0].element)
+    expect(wrapper.find('.chat-layout').classes()).not.toContain('sidebar-open')
+    expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
 
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+  it.each(platforms)('%s+= and %s+- step the font scale', async (_label, keys) => {
+    useFontScale().set(1.2)
+    const wrapper = await mountWebLayout()
+    const zoomIn = press({ key: keys.eq, code: 'Equal' })
+    expect(localStorage.getItem('ciao-font-scale')).toBe('1.25')
+    expect(zoomIn.defaultPrevented).toBe(true)
+    const zoomOut = press({ key: keys.minus, code: 'Minus' })
+    expect(localStorage.getItem('ciao-font-scale')).toBe('1.2')
+    expect(zoomOut.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  // In a text field Option+S types ß and Option+= types ≠ on a Mac; matching
+  // by physical key must not start stealing them.
+  it.each(platforms)('%s+S and %s+= stay inert while a text field is focused', async (_label, keys) => {
+    useFontScale().set(1.2)
+    const wrapper = await mountWebLayout()
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    input.focus()
+
+    const sidebar = press({ key: keys.s, code: 'KeyS' }, input)
+    const zoom = press({ key: keys.eq, code: 'Equal' }, input)
     await nextTick()
-    expect(document.activeElement).toBe(cards[1].element)
+
+    expect(wrapper.find('.chat-layout').classes()).toContain('sidebar-open')
+    expect(sidebar.defaultPrevented).toBe(false)
+    expect(zoom.defaultPrevented).toBe(false)
+    expect(localStorage.getItem('ciao-font-scale')).toBe('1.2')
+
+    input.remove()
+    wrapper.unmount()
+  })
+
+  // Option+letter is how a Mac types accents and symbols (⌥N then N is ñ), so
+  // inside a text field a Mac Option press must reach the field
+  // untouched. The same events outside a text field are shortcuts.
+  it.each([
+    ['⌥N', { key: 'Dead', code: 'KeyN' }],
+    ['⌥M', { key: 'µ', code: 'KeyM' }],
+  ] as const)('Mac %s in a focused textarea types the character instead of firing', async (_label, init) => {
+    const wrapper = await mountWebLayout()
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    textarea.focus()
+
+    const event = press(init, textarea)
+    await flushPromises()
+
+    expect(event.defaultPrevented).toBe(false)
+    expect(toggleModelPicker).not.toHaveBeenCalled()
+    expect(pendingNewChat.value).toBeNull()
+
+    textarea.remove()
+    wrapper.unmount()
+  })
+
+  it('Mac ⌥N fires its shortcut when focus is on the body', async () => {
+    const wrapper = await mountWebLayout()
+    const newChat = press({ key: 'Dead', code: 'KeyN' }, document.body)
+    await flushPromises()
+    expect(newChat.defaultPrevented).toBe(true)
+    expect(pendingNewChat.value).not.toBeNull()
+    pendingNewChat.value?.resolve(null)
+    await flushPromises()
+
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['Windows Alt+N', { key: 'n', code: 'KeyN' }],
+    ['Mac ⌥Backspace', { key: 'Backspace', code: 'Backspace' }],
+  ] as const)('%s still fires while a textarea is focused', async (label, init) => {
+    const wrapper = await mountWebLayout()
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    textarea.focus()
+
+    const event = press(init, textarea)
+    await flushPromises()
+
+    expect(event.defaultPrevented).toBe(true)
+    if (label === 'Windows Alt+N') expect(pendingNewChat.value).not.toBeNull()
+    else expect(archiveActiveChat).toHaveBeenCalledOnce()
+
+    textarea.remove()
+    wrapper.unmount()
+  })
+
+  // The physical key decides when `code` is present: Option on the M key is
+  // the model picker whatever character the layout reports.
+  it('ignores the Option-produced character when code names another key', async () => {
+    const wrapper = await mountWebLayout()
+    const event = press({ key: 'm', code: 'KeyE' })
+    expect(toggleModelPicker).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
     wrapper.unmount()
   })
 })

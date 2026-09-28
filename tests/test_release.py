@@ -48,7 +48,6 @@ def test_resolve_source_falls_back_to_local_when_no_remote(tmp_path: Path, monke
 def _write_release_tree(root: Path) -> None:
     (root / "ciao").mkdir()
     (root / "web").mkdir()
-    (root / "desktop" / "src-tauri").mkdir(parents=True)
     (root / "web" / "public").mkdir()
     (root / "ciao" / "web" / "static").mkdir(parents=True)
     for sw in (
@@ -83,38 +82,6 @@ def _write_release_tree(root: Path) -> None:
         '    }\n'
         '  }\n'
         '}\n',
-        encoding="utf-8",
-    )
-    (root / "desktop" / "package.json").write_text(
-        '{\n  "name": "ciaobot-desktop",\n  "version": "0.1.0"\n}\n',
-        encoding="utf-8",
-    )
-    (root / "desktop" / "package-lock.json").write_text(
-        '{\n'
-        '  "name": "ciaobot-desktop",\n'
-        '  "version": "0.1.0",\n'
-        '  "packages": {\n'
-        '    "": {\n'
-        '      "name": "ciaobot-desktop",\n'
-        '      "version": "0.1.0"\n'
-        '    }\n'
-        '  }\n'
-        '}\n',
-        encoding="utf-8",
-    )
-    (root / "desktop" / "src-tauri" / "Cargo.toml").write_text(
-        '[package]\nname = "ciaobot-desktop"\nversion = "0.1.0"\n',
-        encoding="utf-8",
-    )
-    (root / "desktop" / "src-tauri" / "Cargo.lock").write_text(
-        'version = 4\n\n'
-        '[[package]]\n'
-        'name = "ciaobot-desktop"\n'
-        'version = "0.1.0"\n',
-        encoding="utf-8",
-    )
-    (root / "desktop" / "src-tauri" / "tauri.conf.json").write_text(
-        '{\n  "productName": "Ciaobot",\n  "version": "0.1.0"\n}\n',
         encoding="utf-8",
     )
 
@@ -158,11 +125,6 @@ def test_apply_release_files_updates_versions_and_changelog(tmp_path: Path) -> N
     assert versions.package == "0.3.0"
     assert versions.pwa == "0.3.0"
     assert versions.package_lock == "0.3.0"
-    assert versions.desktop == "0.3.0"
-    assert versions.desktop_lock == "0.3.0"
-    assert versions.desktop_cargo == "0.3.0"
-    assert versions.desktop_cargo_lock == "0.3.0"
-    assert versions.desktop_tauri == "0.3.0"
     assert (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8") == (
         "# Changelog\n\n"
         "## v0.3.0 - 2026-07-05\n\n"
@@ -170,8 +132,6 @@ def test_apply_release_files_updates_versions_and_changelog(tmp_path: Path) -> N
         "- feat: add release automation\n"
     )
     assert tmp_path / "web" / "package-lock.json" in touched
-    assert tmp_path / "desktop" / "src-tauri" / "Cargo.toml" in touched
-    assert tmp_path / "desktop" / "src-tauri" / "Cargo.lock" in touched
 
 
 def test_apply_release_files_bumps_service_worker_caches(tmp_path: Path) -> None:
@@ -229,6 +189,15 @@ def test_apply_release_files_prepends_existing_changelog(tmp_path: Path) -> None
     assert "## v0.2.0 - 2026-07-01" in changelog
 
 
+def _is_audit_command(command: list[str]) -> bool:
+    if not command:
+        return False
+    executable = Path(command[0]).stem.lower()
+    return executable == "pip-audit" or (
+        executable == "npm" and command[1:2] == ["audit"]
+    )
+
+
 def test_release_gate_blocks_on_types_like_ci_does(monkeypatch, tmp_path: Path) -> None:
     """CI's `test` job blocks on `mypy ciao` and this suite did not, so a type
     error passed every local gate and first surfaced as a red release PR - after
@@ -243,9 +212,29 @@ def test_release_gate_blocks_on_types_like_ci_does(monkeypatch, tmp_path: Path) 
     assert "mypy ciao" in labels
     # CI runs pip-audit, eslint and npm audit with `|| true`, so gating on them
     # here would make a release stricter than the thing it predicts.
-    flat = " ".join(" ".join(c) for c in ran)
-    assert "pip-audit" not in flat
-    assert "audit" not in flat
+    assert not any(_is_audit_command(command) for command in ran)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["/worktrees/release-audit/.venv/bin/pip-audit"],
+        ["/worktrees/release-audit/node/bin/npm", "audit", "--json"],
+    ],
+)
+def test_release_gate_audit_check_matches_exact_invocations(command: list[str]) -> None:
+    assert _is_audit_command(command)
+
+
+def test_release_gate_audit_check_ignores_audit_in_checkout_path() -> None:
+    command = [
+        "/worktrees/release-audit/.venv/bin/python",
+        "-m",
+        "mypy",
+        "ciao",
+    ]
+
+    assert not _is_audit_command(command)
 
 
 def test_built_pwa_check_requires_the_shell(tmp_path: Path) -> None:

@@ -6,9 +6,9 @@ import asyncio
 import contextlib
 import errno
 import functools
-import hashlib
 import json
 import logging
+import math
 import mimetypes
 import os
 import posixpath
@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
@@ -40,13 +41,18 @@ from ciao import proposal_actions
 from ciao import proposal_kinds
 from ciao import proposal_outcomes
 from ciao import subagent_tracking
-from ciao import desktop_build
+from ciao import entity_types
 from ciao import provider_registry
 from ciao.jsonio import write_private_text
-from ciao.memory_receipts import QueueReceiptUnavailable
+from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.web.document_conversion import is_anydoc_document
-from ciao.native_sessions import live_sessions_for_workspace
-from ciao.config import WorkspaceConfig
+from ciao.config import (
+    CLAUDE_MODELS,
+    GWS_DEFAULT_PROFILE,
+    MAX_IMAGE_SIZE_BYTES,
+    RESTART_EXIT_CODE,
+    WorkspaceConfig,
+)
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
@@ -58,9 +64,10 @@ from ciao.workspaces import (
 )
 # Kept as an alias: several call sites predate the shared module.
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
-from ciao.tool_path import login_shell_path, resolve_tool
+from ciao.tool_path import resolve_tool
 from ciao.providers.opencode import OpencodeProvider
 from ciao.provider_service import capabilities_for, supported_providers
+from ciao.subprocess_step import run_step
 from ciao.schedules import (
     DEFAULT_INTERVAL_MINUTES,
     FREQUENCIES,
@@ -82,10 +89,14 @@ from ciao.setup_status import setup_status
 from ciao.cli import _auth_command_for_provider
 from ciao.skills_inventory import build_skill_inventory
 from ciao.vault_index import (
+    Entry,
     _build_graph,
+    canonical_type,
     filter_entries,
     scan_targets,
+    scan_vault,
     strip_references,
+    write_vocabulary_file,
 )
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.async_reads import run_read
@@ -137,13 +148,6 @@ async def _read_upload_limited(upload, max_bytes: int) -> bytes:
 
 _STATS_CACHE_PATH = Path.home() / ".claude" / "stats-cache.json"
 
-# Provider API keys editable from Settings. Empty: every provider authenticates
-# through its own CLI (`ciao auth <provider>`), so there is no key to type here.
-_PROVIDER_KEY_META: dict[str, dict[str, str]] = {}
-# Keys Ciaobot itself consumes, as opposed to provider logins. Empty since
-# voice moved on-device: OPENAI_API_KEY lived here for cloud transcription and
-# speech, and nothing else in the app ever read it.
-_SERVICE_KEY_META: dict[str, dict[str, str]] = {}
 # Labels and example chips for the two account names that predate the account
 # registry. Nothing creates them any more — a fresh install starts with no
 # Google account — but an install that already has one keeps its wording.
@@ -225,6 +229,9 @@ def _workspaces_payload(config) -> dict:
     return {
         "workspaces": workspaces,
         "active": workspaces[0]["name"] if workspaces else None,
+        # The workspace that cannot be archived; the PWA hides its Archive
+        # button rather than offering an action the server refuses.
+        "primary": config.primary_workspace() or None,
         "provider_options": _workspace_provider_options(config),
     }
 
@@ -260,53 +267,55 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
     route_name = request.path_params.get("name")
     if route_name:
         body = {**body, "name": route_name}
-    existing = config.workspace(str(body.get("name", "")).strip())
-    try:
-        workspace = _workspace_from_request(body, config=config, existing=existing)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    created = workspace.name not in config.workspaces
-    profile_changed = (
-        not created
-        and existing is not None
-        and str(getattr(existing, "gws_profile", "") or "")
-        != str(getattr(workspace, "gws_profile", "") or "")
-    )
-    config.workspaces[workspace.name] = workspace
-    _persist_workspaces(config)
-    _refresh_project_manager_workspaces(request)
-    payload = _workspaces_payload(config)
-    if created:
-        payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
-    elif profile_changed:
-        # Linking a workspace to its first account (or unlinking it) changes
-        # which `gws-*` stock skills it should get, and skill sync only runs at
-        # startup/repair. Resync now so the catalog matches the new linkage
-        # instead of waiting for a restart. On a pre-re-root install the target
-        # root is shared by every workspace, so the gate aggregates all of them
-        # (unlinking one must not prune the shared catalog while another still
-        # links an account).
-        from ciao.sync_skills import (  # noqa: PLC0415
-            resolve_workspace_skills_gws_gate,
-            sync_workspace_skills,
-        )
-
+    # Serialized with archive and restore; see ``_workspace_archive_lock``.
+    async with _workspace_archive_lock(request):
+        existing = config.workspace(str(body.get("name", "")).strip())
         try:
-            root = Path(config.agent_root(workspace.name))
-            await asyncio.to_thread(
+            workspace = _workspace_from_request(body, config=config, existing=existing)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        created = workspace.name not in config.workspaces
+        profile_changed = (
+            not created
+            and existing is not None
+            and str(getattr(existing, "gws_profile", "") or "")
+            != str(getattr(workspace, "gws_profile", "") or "")
+        )
+        config.workspaces[workspace.name] = workspace
+        _persist_workspaces(config)
+        _refresh_project_manager_workspaces(request)
+        payload = _workspaces_payload(config)
+        if created:
+            payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
+        elif profile_changed:
+            # Linking a workspace to its first account (or unlinking it) changes
+            # which `gws-*` stock skills it should get, and skill sync only runs at
+            # startup/repair. Resync now so the catalog matches the new linkage
+            # instead of waiting for a restart. On a pre-re-root install the target
+            # root is shared by every workspace, so the gate aggregates all of them
+            # (unlinking one must not prune the shared catalog while another still
+            # links an account).
+            from ciao.sync_skills import (  # noqa: PLC0415
+                resolve_workspace_skills_gws_gate,
                 sync_workspace_skills,
-                root,
-                refresh_upstream=False,
-                gws_profile=resolve_workspace_skills_gws_gate(
-                    config, root, workspace.name
-                ),
             )
-        except Exception:  # noqa: BLE001 - the update already succeeded
-            logger.exception(
-                "Could not resync skills for workspace %s after profile change",
-                workspace.name,
-            )
-    return JSONResponse(payload, status_code=201 if created else 200)
+
+            try:
+                root = Path(config.agent_root(workspace.name))
+                await asyncio.to_thread(
+                    sync_workspace_skills,
+                    root,
+                    refresh_upstream=False,
+                    gws_profile=resolve_workspace_skills_gws_gate(
+                        config, root, workspace.name
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - the update already succeeded
+                logger.exception(
+                    "Could not resync skills for workspace %s after profile change",
+                    workspace.name,
+                )
+        return JSONResponse(payload, status_code=201 if created else 200)
 
 
 async def _bootstrap_new_agent_root(config, name: str) -> bool:
@@ -347,172 +356,406 @@ async def _bootstrap_new_agent_root(config, name: str) -> bool:
     return True
 
 
-async def delete_workspace_setting(request: Request) -> JSONResponse:
+async def _resync_shared_skills(config, name: str, verb: str) -> None:
+    """Resync the shared skill catalog after the registry changed.
+
+    On a pre-re-root install the shared catalog serves every workspace, so
+    removing (or restoring) the only one with a GWS profile changes whether the
+    gws-* skills belong there. After re-rooting the active catalogs live under
+    each <install>/<workspace> root and the install root is retired, so syncing
+    it would recreate CLAUDE.md/.claude/skills there - skip it in that layout.
+    """
+    if getattr(config, "_rerooted", lambda: False)():
+        return
+    try:
+        from ciao.sync_skills import (  # noqa: PLC0415
+            resolve_workspace_skills_gws_gate,
+            sync_workspace_skills,
+        )
+
+        root = Path(config.workspace_root)
+        await asyncio.to_thread(
+            sync_workspace_skills,
+            root,
+            refresh_upstream=False,
+            gws_profile=resolve_workspace_skills_gws_gate(
+                config, root, config.primary_workspace()
+            ),
+        )
+    except Exception:  # noqa: BLE001 - the registry change already succeeded
+        logger.exception("Could not resync shared skills after %s workspace %s", verb, name)
+
+
+def _schedule_manager(request: Request) -> Any:
+    return getattr(request.app.state, "schedule_manager", None)
+
+
+def _publish_automations_changed(request: Request) -> None:
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        return
+    try:
+        from ciao.schedules import publish_automations_changed  # noqa: PLC0415
+
+        publish_automations_changed(pcm)
+    except Exception:  # noqa: BLE001 - a missed nudge only delays a refresh
+        logger.debug("Could not publish automations_changed", exc_info=True)
+
+
+def _publish_workspaces_changed(request: Request) -> None:
+    """Tell every open client the workspace registry changed.
+
+    Other tabs and devices only see ``project_*`` frames when a workspace is
+    archived or restored; without this their workspace list and active
+    workspace stayed stale until a reload. Carries no payload: clients refetch
+    ``/api/workspaces``. Fire-and-forget, like ``schedules_changed``.
+    """
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    events = getattr(pcm, "events", None)
+    if events is None:
+        return
+    try:
+        events.publish({"type": "workspaces_changed"})
+    except Exception:  # noqa: BLE001 - a missed nudge only delays a refresh
+        logger.debug("Could not publish workspaces_changed", exc_info=True)
+
+
+def _workspace_archive_lock(request: Request) -> asyncio.Lock:
+    """One registry change at a time per app: archive, restore, create, update.
+
+    Without it a double-submitted archive ran twice: the second pass found the
+    folder already gone and recorded an empty "archived" copy, or its failed
+    rename refreshed the manager while the workspace was still registered and
+    recreated the General folder at the old path. Create and update take it
+    too: a restore awaits its folder move, and a create for the archived name
+    landing in that gap was silently overwritten by the archived settings.
+    Kept on ``app.state`` rather
+    than at module level so it binds to the app's own event loop.
+    """
+    lock = getattr(request.app.state, "workspace_archive_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        request.app.state.workspace_archive_lock = lock
+    return lock
+
+
+async def archive_workspace_setting(request: Request) -> JSONResponse:
+    """Archive a workspace: unregister it and move its folder aside, intact.
+
+    Nothing is merged into another workspace and nothing is deleted - see
+    ``ciao/workspace_archive.py``. Order matters: everything that is refused is
+    refused before anything changes; schedules are taken and the folder moves
+    first, so a failed move changes nothing that cannot be put back; only then
+    are the chats archived (irreversible), still while the workspace is
+    registered; the registry entry goes last. A failure after the move puts
+    the folder and schedules back so the workspace stays registered and the
+    archive can be retried.
+    """
+    from ciao import workspace_archive  # noqa: PLC0415
+
     config = request.app.state.config
     name = str(request.path_params.get("name", "")).strip()
-    if name not in config.workspaces:
-        return JSONResponse({"error": "workspace not found"}, status_code=404)
-    if len(config.workspaces) <= 1:
-        return JSONResponse({"error": "cannot delete the last workspace"}, status_code=400)
-    target = config.primary_workspace()
-    if target == name:
-        return JSONResponse(
-            {"error": "cannot delete the primary workspace"}, status_code=400
-        )
-    # The chats outlive the registry entry, so they are MOVED rather than left
-    # pointing at a workspace that no longer exists - which resolved them to
-    # the primary agent root by accident of the fallback.
-    vault = _migrate_workspace_vault(config, name, target)
-    if vault["unsupported"]:
-        return JSONResponse({"error": vault["unsupported"]}, status_code=409)
-    if vault["refused"]:
-        # ALL OR NOTHING, and nothing has moved yet - the scan above was a dry
-        # run. Completing a partial migration would strand the refused notes:
-        # once the registry entry is gone the old vault drops out of
-        # `vault_scan_targets`, and the response's `refused` list is not
-        # surfaced by the PWA, so those notes would simply vanish from the app
-        # while still sitting on disk. Refusing the whole delete keeps the
-        # workspace registered and every note reachable.
-        return JSONResponse(
-            {
-                "error": (
-                    "cannot delete: some notes would collide in "
-                    f"{target} and were not migrated"
-                ),
-                "refused": vault["refused"],
-            },
-            status_code=409,
-        )
-    vault = _migrate_workspace_vault(config, name, target, apply=True)
-    moved_projects = _reassign_project_manager_workspace(request, name, target)
-    config.workspaces.pop(name, None)
-    _persist_workspaces(config)
-    _refresh_project_manager_workspaces(request)
-    payload = _workspaces_payload(config)
-    payload["migrated"] = {
-        "into": target,
-        "projects": moved_projects,
-        "notes": len(vault["moved"]),
-        "refused": vault["refused"],
-    }
-    # On a pre-re-root install the shared catalog serves every workspace, so
-    # deleting the only one with a GWS profile must prune the now-unusable
-    # gws-* skills (and deleting an unlinked workspace is a no-op). Resync the
-    # shared root through the aggregate gate. After re-rooting the active
-    # catalogs live under each <install>/<workspace> root and the install root
-    # is retired, so syncing it would recreate CLAUDE.md/.claude/skills there —
-    # skip the resync entirely in that layout.
-    if not getattr(config, "_rerooted", lambda: False)():
+    async with _workspace_archive_lock(request):
         try:
-            from ciao.sync_skills import (  # noqa: PLC0415
-                resolve_workspace_skills_gws_gate,
-                sync_workspace_skills,
+            target = workspace_archive.plan_archive(config, name)
+        except workspace_archive.WorkspaceArchiveError as exc:
+            return JSONResponse({"error": exc.message}, status_code=exc.status)
+
+        pcm = getattr(request.app.state, "project_chat_manager", None)
+        busy = getattr(pcm, "workspace_busy_chat_ids", None)
+        if callable(busy) and busy(name):
+            return JSONResponse(
+                {
+                    "error": (
+                        f"a chat in '{name}' is still working or being archived; "
+                        "let it finish or stop it, then archive the workspace"
+                    )
+                },
+                status_code=409,
             )
 
-            root = Path(config.workspace_root)
-            await asyncio.to_thread(
-                sync_workspace_skills,
-                root,
-                refresh_upstream=False,
-                gws_profile=resolve_workspace_skills_gws_gate(config, root, target),
+        scope = getattr(pcm, "workspace_scope", None)
+        project_ids, chat_ids = scope(name) if callable(scope) else (set(), set())
+
+        def _belongs(item: dict) -> bool:
+            return (
+                str(item.get("workspace") or "") == name
+                or str(item.get("web_project_id") or "") in project_ids
+                or str(item.get("fallback_project_id") or "") in project_ids
+                or str(item.get("web_chat_id") or "") in chat_ids
             )
-        except Exception:  # noqa: BLE001 - the delete already succeeded
-            logger.exception(
-                "Could not resync shared skills after deleting workspace %s", name
+
+        counts = getattr(pcm, "workspace_counts", None)
+        summary: dict[str, Any] = (
+            dict(counts(name)) if callable(counts) else {"projects": 0, "chats": 0}
+        )
+        manager = _schedule_manager(request)
+        take = getattr(manager, "take_user_items", None)
+        schedules: list[dict] = take(_belongs) if callable(take) else []
+        summary["schedules"] = len(schedules)
+        try:
+            # On the event loop on purpose: from the busy check above to the
+            # chats being archived below there is no await, so no turn can start
+            # in this workspace in between. The move is one same-filesystem
+            # rename plus two small metadata writes.
+            archived = workspace_archive.move_to_archive(
+                config, target, schedules=schedules, summary=summary
             )
-    return JSONResponse(payload)
+        except (workspace_archive.WorkspaceArchiveError, OSError) as exc:
+            # ``move_to_archive`` leaves the workspace where it was on every
+            # failure, so the schedules it took go straight back.
+            put_back = getattr(manager, "put_back_user_items", None)
+            if callable(put_back) and schedules:
+                put_back(schedules)
+            if isinstance(exc, workspace_archive.WorkspaceArchiveError):
+                return JSONResponse({"error": exc.message}, status_code=exc.status)
+            logger.exception("Archiving workspace %s failed", name)
+            return JSONResponse(
+                {"error": f"could not archive '{name}': {exc}"}, status_code=500
+            )
 
+        def _roll_back(failure: str) -> JSONResponse:
+            """Leave the workspace registered, with its folder and schedules.
 
-def _reassign_project_manager_workspace(request: Request, old: str, new: str) -> int:
-    pcm = getattr(request.app.state, "project_chat_manager", None)
-    reassign = getattr(pcm, "reassign_workspace", None)
-    return int(reassign(old, new)) if callable(reassign) else 0
+            A step after the move failed while the workspace is still
+            registered. Chats already archived stay archived (that part is
+            irreversible and was persisted); everything else goes back so the
+            archive can simply be retried. The schedules go back even when the
+            folder cannot: they belong to a registered workspace, and
+            ``archive.json`` keeps its own copy.
+            """
+            undo_error = ""
+            try:
+                workspace_archive.undo_move_to_archive(config, target, archived)
+            except workspace_archive.WorkspaceArchiveError as undo_exc:
+                undo_error = undo_exc.message
+            schedules_back = True
+            put_back = getattr(manager, "put_back_user_items", None)
+            if callable(put_back) and schedules:
+                try:
+                    put_back(schedules)
+                except Exception:  # noqa: BLE001 - archive.json still holds them
+                    schedules_back = False
+                    logger.exception(
+                        "Could not put back the schedules of %s; they remain in %s",
+                        name,
+                        archived["path"],
+                    )
+            if not undo_error:
+                # ``archive.json`` outlived the folder move on purpose: it is
+                # the schedules' only durable copy until they are back.
+                if schedules_back:
+                    workspace_archive.discard_rolled_back_archive(config, archived)
+                else:
+                    workspace_archive.mark_rolled_back(config, archived)
+                    _refresh_project_manager_workspaces(request)
+                    return JSONResponse(
+                        {
+                            "error": (
+                                f"could not archive '{name}': {failure}; the "
+                                "workspace was left in place, but its automations "
+                                "could not be saved back and are kept in "
+                                f"{archived['path']}/{workspace_archive.METADATA_FILE}"
+                            )
+                        },
+                        status_code=500,
+                    )
+            if undo_error:
+                # Not refreshed: the manager would recreate the General folder
+                # at the old path, where the archived folder has to go back.
+                return JSONResponse(
+                    {
+                        "error": (
+                            f"could not archive '{name}': {failure}; {undo_error}. "
+                            f"It is still registered and its folder is in "
+                            f"{archived['path']}"
+                        )
+                    },
+                    status_code=500,
+                )
+            # Chat archival may have removed projects from memory before failing;
+            # the refresh recreates the General project of the registered workspace.
+            _refresh_project_manager_workspaces(request)
+            return JSONResponse(
+                {
+                    "error": (
+                        f"could not archive '{name}': {failure}; the workspace "
+                        "was left in place, retry the archive"
+                    )
+                },
+                status_code=500,
+            )
 
+        archive_chats = getattr(pcm, "archive_workspace_projects", None)
+        if callable(archive_chats):
+            try:
+                archive_chats(name)
+            except Exception as exc:  # noqa: BLE001 - unregistering now would orphan the chats
+                # Unregistering with the chat registry removal not saved would
+                # bring the chats back at the next start, routed through the
+                # primary workspace.
+                logger.exception("Could not archive every chat of workspace %s", name)
+                return _roll_back(f"its chats could not be archived ({exc})")
+        try:
+            workspace_archive.unregister(config, name)
+        except OSError as exc:
+            logger.exception("Could not save the registry after archiving %s", name)
+            return _roll_back(f"the workspace registry could not be saved ({exc})")
+        _refresh_project_manager_workspaces(request)
+        _publish_workspaces_changed(request)
+        if schedules:
+            _publish_automations_changed(request)
 
-def _migrate_workspace_vault(
-    config, name: str, target: str, *, apply: bool = False
-) -> dict[str, Any]:
-    """Move a workspace's notes into *target*, taking their links with them.
+        def _forget() -> tuple[int, bool]:
+            rows = 0
+            rebuilt = False
+            try:
+                rows = workspace_archive.forget_search_rows(config, target.vault)
+            except Exception:  # noqa: BLE001 - derived state; the next index pass prunes it
+                logger.exception("Could not drop search rows for archived workspace %s", name)
+            try:
+                rebuilt = workspace_archive.refresh_shared_index(config)
+            except Exception:  # noqa: BLE001 - regenerated at the next startup
+                logger.exception("Could not rebuild INDEX.md after archiving %s", name)
+            return rows, rebuilt
 
-    Per-note rather than a directory rename, because both directions of every
-    link have to be rewritten - a bulk move would leave every reference to
-    these notes pointing at a path that no longer exists. A note whose
-    destination is already taken is REFUSED and reported, never overwritten.
-
-    Called twice by the delete route: once with ``apply=False`` to find out
-    whether every note CAN move, and only then for real. Discovering a
-    collision halfway through would leave the vault split across two roots,
-    one of which is about to stop being registered.
-    """
-    from ciao.vault_rehome import move_note_between_roots
-
-    moved: list[str] = []
-    refused: list[dict[str, Any]] = []
-    unsupported = ""
-    install_root = Path(config.workspace_root)
-    try:
-        source_root = Path(config.workspace_vault_root(name))
-    except (ValueError, TypeError):
-        return {"moved": moved, "refused": refused, "unsupported": unsupported}
-    if not source_root.is_dir():
-        return {"moved": moved, "refused": refused, "unsupported": unsupported}
-    # Only a RE-ROOTED install needs this. There the deleted workspace's vault
-    # is its own scan target, so losing the registry entry makes those notes
-    # unreachable and they have to move. On the shared layout the vault is
-    # `memory-vault/<name>` under the single scan target that covers every
-    # workspace, so the notes stay visible either way - and the cross-root
-    # mover refuses that shape by design, which would have refused every note
-    # and made the workspace undeletable.
-    try:
-        relative_vault = source_root.relative_to(install_root)
-    except ValueError:
-        # `CIAO_VAULT_MODE=existing` can point a workspace at an absolute vault
-        # outside the install. Nothing here can move it: every note fails the
-        # same `relative_to`, so both passes reported no refusals and no moves
-        # and the delete went ahead - leaving the whole external vault on disk
-        # while it dropped out of every scan with the registry entry. Refuse
-        # rather than silently orphan somebody's vault.
-        return {
-            "moved": moved,
-            "refused": refused,
-            "unsupported": (
-                f"'{name}' uses a vault outside the install "
-                f"({source_root}); move or unlink it before deleting the "
-                "workspace"
-            ),
+        search_rows, index_rebuilt = await asyncio.to_thread(_forget)
+        await _resync_shared_skills(config, name, "archiving")
+        payload = _workspaces_payload(config)
+        payload["archived"] = {
+            "id": archived["id"],
+            "name": name,
+            "path": archived["path"],
+            "archived_at": archived["archived_at"],
+            "projects": int(summary.get("projects", 0)),
+            "chats": int(summary.get("chats", 0)),
+            "schedules": len(schedules),
+            "search_rows_removed": search_rows,
+            "index_rebuilt": index_rebuilt,
         }
-    if len(relative_vault.parts) != 2 or relative_vault.parts[0] != name:
-        return {"moved": moved, "refused": refused, "unsupported": unsupported}
-    targets = config.vault_scan_targets()
-    workspaces = config.workspace_names()
-    from ciao.workspace_reroot import _REGENERATED_ROOT_NOTES
+        return JSONResponse(payload)
 
-    for note in sorted(source_root.rglob("*.md")):
-        # `rebuild_indexes` writes these per root, so the primary already has
-        # its own copy of each and every one collided - which, with the delete
-        # now all-or-nothing, meant a workspace could NEVER be deleted even
-        # when every user-authored note could move. They are regenerated, not
-        # authored, so they are not migrated at all: the deleted root's copies
-        # go away with it.
-        if note.parent == source_root and note.name in _REGENERATED_ROOT_NOTES:
-            continue
+
+async def list_archived_workspaces(request: Request) -> JSONResponse:
+    """Archived workspaces, newest first, with whether each can be restored."""
+    from ciao import workspace_archive  # noqa: PLC0415
+
+    config = request.app.state.config
+    archives = await asyncio.to_thread(workspace_archive.list_archives, config)
+    return JSONResponse({"archived": archives})
+
+
+async def restore_archived_workspace(request: Request) -> JSONResponse:
+    """Move an archived workspace back and re-register it."""
+    from ciao import workspace_archive  # noqa: PLC0415
+
+    config = request.app.state.config
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "expected an object"}, status_code=400)
+    archive_id = str(body.get("id") or "").strip()
+    async with _workspace_archive_lock(request):
         try:
-            relative = note.relative_to(install_root).as_posix()
-        except ValueError:
-            continue
-        result = move_note_between_roots(
-            install_root,
-            relative,
-            target,
-            targets=targets,
-            workspaces=workspaces,
-            apply=apply,
+            folder, metadata, destination = await asyncio.to_thread(
+                workspace_archive.move_back, config, archive_id
+            )
+        except workspace_archive.WorkspaceArchiveError as exc:
+            return JSONResponse({"error": exc.message}, status_code=exc.status)
+        # The registry is mutated here, on the event loop, never in the worker:
+        # other handlers iterate ``config.workspaces`` on this thread.
+        try:
+            restored = workspace_archive.register_restored(
+                config, folder, metadata, destination
+            )
+        except workspace_archive.WorkspaceArchiveError as exc:
+            return JSONResponse({"error": exc.message}, status_code=exc.status)
+        name = str(restored["name"])
+        pcm = getattr(request.app.state, "project_chat_manager", None)
+
+        def _foreign_target(kind: str, target_id: str) -> bool:
+            # A chat or project that resolves right now belongs to another
+            # workspace: this one's were archived with it, and its projects
+            # are only rediscovered by the refresh below.
+            if pcm is None:
+                return False
+            if kind == "chat":
+                chat = pcm.get_chat(target_id)
+                project = pcm.get_project(chat.project_id) if chat is not None else None
+                return chat is not None and getattr(project, "workspace", "") != name
+            project = pcm.get_project(target_id)
+            return project is not None and getattr(project, "workspace", "") != name
+
+        # archive.json is synced through git, so its rows are untrusted input:
+        # rebuilt, pinned to this workspace and paused (see
+        # ``schedules.restorable_user_schedule``).
+        schedules, dropped = workspace_archive.restorable_schedules(
+            config, restored, foreign_target=_foreign_target
         )
-        if not result.get("refusals"):
-            moved.append(relative)
+        added = 0
+        manager = _schedule_manager(request)
+        put_back = getattr(manager, "put_back_user_items", None)
+        if callable(put_back) and schedules:
+            try:
+                added = int(put_back(schedules))
+            except Exception as exc:  # noqa: BLE001 - archive.json is their only copy
+                logger.exception("Could not put back the schedules of %s", name)
+                try:
+                    workspace_archive.unregister_restored(
+                        config, folder, metadata, destination
+                    )
+                except workspace_archive.WorkspaceArchiveError as undo_exc:
+                    _refresh_project_manager_workspaces(request)
+                    return JSONResponse(
+                        {
+                            "error": (
+                                f"'{name}' was restored but its schedules could not "
+                                f"be saved ({exc}), and undoing the restore failed: "
+                                f"{undo_exc.message}. The schedules are kept in "
+                                f"{workspace_archive.ARCHIVE_DIR_NAME}/{restored['id']}/"
+                                f"{workspace_archive.METADATA_FILE}"
+                            )
+                        },
+                        status_code=500,
+                    )
+                return JSONResponse(
+                    {
+                        "error": (
+                            f"could not restore '{name}': its schedules could not "
+                            f"be saved ({exc}); the archive was left in place"
+                        )
+                    },
+                    status_code=500,
+                )
+        # Only now: until the schedules are back, archive.json is their only copy.
+        workspace_archive.discard_archive_folder(folder)
+        _refresh_project_manager_workspaces(request)
+        _publish_workspaces_changed(request)
+        if added:
+            _publish_automations_changed(request)
+        try:
+            await asyncio.to_thread(workspace_archive.refresh_shared_index, config)
+        except Exception:  # noqa: BLE001 - regenerated at the next startup
+            logger.exception("Could not rebuild INDEX.md after restoring %s", name)
+        if getattr(config, "_rerooted", lambda: False)():
+            # The root's guide and assets came back with it, but its skill mirrors
+            # may point at a packaged catalog that changed while it was archived.
+            await _bootstrap_new_agent_root(config, name)
         else:
-            refused.append({"note": relative, "refusals": result.get("refusals", [])})
-    return {"moved": moved, "refused": refused, "unsupported": unsupported}
+            await _resync_shared_skills(config, name, "restoring")
+        payload = _workspaces_payload(config)
+        payload["restored"] = {
+            "id": archive_id,
+            "name": name,
+            "path": restored.get("restored_to", ""),
+            # Every restored automation is paused until re-enabled.
+            "schedules": added,
+            "schedules_paused": added,
+            "schedules_dropped": dropped,
+        }
+        return JSONResponse(payload)
 
 
 def _env_path(config) -> Path:
@@ -552,54 +795,10 @@ def _write_env_values(path: Path, updates: dict[str, str]) -> None:
     write_private_text(path, "\n".join(out).rstrip() + "\n")
 
 
-def _read_env_value(path: Path, key: str) -> str:
-    for line in _read_env_lines(path):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in line:
-            continue
-        env_key, value = line.split("=", 1)
-        if env_key.strip() == key:
-            return value.strip().strip("'\"")
-    return ""
-
-
-def _provider_key_auth_method(config, key: str, providers: dict) -> str:
-    """Return how a provider key is authenticated: 'api_key', 'oauth', or 'missing'.
-
-    ``providers`` is the already-computed ``setup_status()`` result for this
-    request; reusing it avoids re-running the Claude CLI credential probe a
-    second time per request.
-    """
-    env_value = os.environ.get(key, "").strip()
-    if env_value:
-        return "api_key"
-    file_value = _read_env_value(_env_path(config), key)
-    if file_value:
-        return "api_key"
-    if key == "ANTHROPIC_API_KEY" and providers.get("claude", {}).get("auth") == "oauth":
-        return "oauth"
-    return "missing"
-
-
 def _provider_config_payload(config) -> dict:
     providers = setup_status(config, env=os.environ).get("providers", {})
 
-    def key_payload(meta_by_key: dict) -> dict:
-        keys = {}
-        for key, meta in meta_by_key.items():
-            auth_method = _provider_key_auth_method(config, key, providers)
-            keys[key] = {
-                **meta,
-                "configured": auth_method != "missing",
-                "auth_method": auth_method,
-            }
-        return keys
-
     return {
-        "keys": key_payload(_PROVIDER_KEY_META),
-        "service_keys": key_payload(_SERVICE_KEY_META),
-        "requires_restart": True,
-        "env_path": str(_env_path(config)),
         # Each row carries its own labels so the Settings card does not have to
         # map provider ids to names; a new provider gets a correct card for
         # free instead of falling through to another provider's label.
@@ -692,60 +891,8 @@ async def provider_connection_action(request: Request) -> JSONResponse:
     return JSONResponse({"error": "unsupported action"}, status_code=404)
 
 
-def _apply_provider_key_updates(config, updates: dict[str, str]) -> None:
-    """Push edited service keys into the process env.
-
-    No provider key reaches the live config: every provider authenticates
-    through its own CLI, so there is nothing here to re-point.
-    """
-    for key, value in updates.items():
-        value = value.strip()
-        if value:
-            os.environ[key] = value
-        else:
-            os.environ.pop(key, None)
-
-
 async def provider_config_settings(request: Request) -> JSONResponse:
     config = request.app.state.config
-    if request.method == "GET":
-        return JSONResponse(await asyncio.to_thread(_provider_config_payload, config))
-    try:
-        body = await request.json()
-    except ValueError:
-        return JSONResponse({"error": "invalid JSON"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "expected object"}, status_code=400)
-    updates = {}
-    if "keys" in body:
-        if not isinstance(body["keys"], dict):
-            return JSONResponse({"error": "keys must be an object"}, status_code=400)
-        key_updates = {str(key): str(value) for key, value in body["keys"].items()}
-        supported_keys = set(_PROVIDER_KEY_META) | set(_SERVICE_KEY_META)
-        unsupported = sorted(set(key_updates) - supported_keys)
-        if unsupported:
-            return JSONResponse(
-                {"error": f"unsupported provider key(s): {', '.join(unsupported)}"},
-                status_code=400,
-            )
-        updates.update(key_updates)
-
-    _write_env_values(_env_path(config), updates)
-    provider_key_changes = {
-        k: v for k, v in updates.items()
-        if k in _PROVIDER_KEY_META or k in _SERVICE_KEY_META
-    }
-    _apply_provider_key_updates(config, provider_key_changes)
-    if provider_key_changes:
-        async def _do_restart():
-            await asyncio.sleep(0.5)
-            fn = getattr(request.app.state, "request_restart", None)
-            if callable(fn):
-                fn(config.restart_exit_code)
-            else:
-                from ciao.signals import RestartRequested
-                raise RestartRequested(config.restart_exit_code)
-        asyncio.create_task(_do_restart())
     return JSONResponse(await asyncio.to_thread(_provider_config_payload, config))
 
 
@@ -919,7 +1066,7 @@ def _gws_integration_payload(config) -> dict:
     names = _gws_profile_names(config)
     # An operator default that names no existing account is not a default the
     # UI should advertise; workspaces then show "No Google account" instead.
-    default_profile = str(getattr(config, "gws_default_profile", "") or "").strip()
+    default_profile = GWS_DEFAULT_PROFILE
     if default_profile not in names:
         default_profile = ""
     return {
@@ -1143,7 +1290,7 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
             pkce_store.consume(flow_id, profile)
         # Refresh the cached token-validity state so the Settings UI clears
         # the "Login expired" banner immediately instead of waiting up to
-        # ``CIAO_GWS_HEALTH_INTERVAL`` seconds. Mirrors gws_relogin_status.
+        # for the next periodic check. Mirrors gws_relogin_status.
         monitor = getattr(request.app.state, "gws_health_monitor", None)
         if monitor is not None:
             try:
@@ -1492,22 +1639,49 @@ async def project_files_upload(request: Request) -> JSONResponse:
 
     form = await request.form()
     saved: list[dict] = []
-    errors: list[dict] = []
+    errors: list[dict[str, str]] = []
+    upload_count = 0
+    total_bytes = 0
     for key in form:
         upload = form[key]
         if not hasattr(upload, "read"):
             continue
+        upload_count += 1
         filename = getattr(upload, "filename", "") or ""
+        display_name = _drop_display_name(Path(filename))
+        if upload_count > _DESKTOP_DROP_MAX_FILES:
+            errors.append({"filename": "file", "error": "too many files"})
+            break
         try:
             data = await _read_upload_limited(upload, chat_service._PROJECT_UPLOAD_MAX_BYTES)
+            total_bytes += len(data)
+            if total_bytes > _DESKTOP_DROP_MAX_TOTAL_BYTES:
+                errors.append({"filename": display_name, "error": "upload is too large"})
+                continue
             entry = pcm.save_project_file_upload(project_id, data, filename)
-            saved.append(entry)
+            relative_path = Path(str(entry.get("path", "")))
+            safe_path = (
+                ""
+                if relative_path.is_absolute() or ".." in relative_path.parts
+                else relative_path.as_posix()
+            )
+            saved.append(
+                {
+                    "path": safe_path,
+                    "kind": str(entry.get("kind", "binary"))[:32],
+                    "size": int(entry.get("size", 0) or 0),
+                    "mtime": str(entry.get("mtime", ""))[:64],
+                }
+            )
         except LookupError as exc:
             # Project has no vault folder to upload into. Same status across
             # all uploads in this request — return 409 immediately.
             return JSONResponse({"error": str(exc)}, status_code=409)
-        except ValueError as exc:
-            errors.append({"filename": filename, "error": str(exc)})
+        except (OSError, ValueError) as exc:
+            errors.append({
+                "filename": display_name,
+                "error": _safe_desktop_drop_error(Path(filename), exc),
+            })
     return JSONResponse({"saved": saved, "errors": errors})
 
 async def chat_attachments_upload(request: Request) -> JSONResponse:
@@ -1516,28 +1690,65 @@ async def chat_attachments_upload(request: Request) -> JSONResponse:
     if chat is None:
         return JSONResponse({"error": "chat not found"}, status_code=404)
     form = await request.form()
-    saved, errors = [], []
+    saved: list[dict] = []
+    errors: list[dict[str, str]] = []
+    total_bytes = 0
     for key in form:
         upload = form[key]
         if not hasattr(upload, "read"):
             continue
+        if len(saved) + len(errors) >= _DESKTOP_DROP_MAX_FILES:
+            errors.append({"filename": "file", "error": "too many files"})
+            break
         filename = getattr(upload, "filename", "") or ""
+        display_name = _drop_display_name(Path(filename))
         try:
             data = await _read_upload_limited(upload, chat_service._PROJECT_UPLOAD_MAX_BYTES)
-            saved.append(
-                await asyncio.to_thread(
-                    pcm.save_chat_attachment_upload, chat.project_id, data, filename
-                )
+            total_bytes += len(data)
+            if total_bytes > _DESKTOP_DROP_MAX_TOTAL_BYTES:
+                errors.append({"filename": display_name, "error": "upload is too large"})
+                continue
+            entry = await asyncio.to_thread(
+                pcm.save_chat_attachment_upload, chat.project_id, data, filename
             )
+            source = entry.get("markdown_path") or entry.get("absolute_path")
+            if not source:
+                raise ValueError("upload produced no file")
+            ref = pcm.register_file_ref(chat.chat_id, Path(str(source)))
+            saved.append({"ref": ref, "name": display_name})
         except LookupError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
-        except (ValueError, RuntimeError) as exc:
-            errors.append({"filename": filename, "error": str(exc)})
-    return JSONResponse({"saved": saved, "errors": errors})
+        except (ValueError, RuntimeError, OSError) as exc:
+            errors.append(
+                {
+                    "filename": display_name,
+                    "error": _safe_desktop_drop_error(Path(filename), exc),
+                }
+            )
+    return JSONResponse({"file_refs": saved, "errors": errors})
 
 
 _DESKTOP_DROP_GRANT_TTL_SECONDS = 5 * 60
 _DESKTOP_DROP_MAX_FILES = 100
+_DESKTOP_DROP_MAX_PATH_BYTES = 4096
+_DESKTOP_DROP_MAX_TOTAL_BYTES = 512 * 1024 * 1024
+_DESKTOP_DROP_MAX_ERROR_BYTES = 512
+_DESKTOP_DROP_MAX_GRANT_BYTES = 512 * 1024
+
+
+def _read_native_file_limited(path: Path, max_bytes: int) -> bytes:
+    """Read a dropped file without trusting a size that can change after stat."""
+    if max_bytes < 0:
+        raise ValueError("invalid file size limit")
+    with path.open("rb") as source:
+        data = source.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError("file too large")
+    return data
+
+
+def _utf8_size(value: str) -> int:
+    return len(value.encode("utf-8", "surrogatepass"))
 
 
 def _looks_like_nsird_screenshot(path: Path) -> bool:
@@ -1558,17 +1769,17 @@ def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
     """User-facing text for a dropped file this process cannot read.
 
     A drag straight from the macOS screenshot thumbnail hands over a path only
-    the app that received the drop may read, so the desktop shell stages a copy
-    first (`stage_dropped_file` in desktop/src-tauri/src/lib.rs). When there is
-    no staged copy, because the shell is older than that fix or the drop was not
-    an image, the raw errno tells the user nothing they can act on.
+    the app that received the drop may read, so the shell that received it
+    staged a copy first. When there is no staged copy, because the shell is
+    older than that fix or the drop was not an image, the raw errno tells the
+    user nothing they can act on.
 
     Four tiers, narrowest first. An NSIRD path gets screenshot-specific advice.
     ``EDEADLK`` means a cloud placeholder (see below). Any other permission
     denial still gets actionable text, just without naming a screenshot, so a
     plain unreadable drop is not mislabelled and does not regress to a raw
-    errno. Anything else falls through to the errno, which is all we know
-    about it.
+    errno. Unknown filesystem errors use a bounded generic message rather than
+    echoing an errno string that may contain the source path.
     """
     if _looks_like_nsird_screenshot(path):
         return (
@@ -1581,55 +1792,87 @@ def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
         # existence check passes, and the read is then refused with EDEADLK
         # ("Resource deadlock avoided") because this process may not ask the
         # provider to materialise it. Unlike EPERM the errno is unambiguous
-        # here, so it needs no corroborating path check. The desktop shell
-        # stages unreadable drops past this (`needs_drop_staging` in
-        # desktop/src-tauri/src/lib.rs); a file over the staging limit, an
-        # older shell, or a client node transferring a non-image still lands
-        # here. A non-image dropped on a host does not: the path is handed to
-        # the agent unread, so the agent hits the same errno on its own.
+        # here, so it needs no corroborating path check. The shell that
+        # received the drop stages unreadable drops past this; a file over the
+        # staging limit or an older shell still lands here. A non-image
+        # dropped on this Mac does
+        # not: the path is handed to the agent unread, so the agent hits the
+        # same errno on its own.
         return (
-            f"{path.name} is not downloaded to this Mac yet. Right-click it in "
+            f"{_drop_display_name(path)} is not downloaded to this Mac yet. Right-click it in "
             "Finder, choose Download Now, then drag it in again."
         )
     if isinstance(exc, PermissionError):
         return (
-            f"macOS would not let Ciaobot read {path.name}. Save the file to a "
+            f"macOS would not let Ciaobot read {_drop_display_name(path)}. Save the file to a "
             "folder first, then drag it in."
         )
-    return str(exc)
+    # Do not echo arbitrary OSError text: errno implementations commonly append
+    # the source filename, which would turn a per-file error into an absolute
+    # path disclosure.  The dropped basename is enough for the user to act.
+    return f"Ciaobot could not read {_drop_display_name(path)}. Save the file to a folder and try again."
 
 
-def _clear_desktop_drop_staging(request: Request, grant_id: str) -> None:
-    """Delete the desktop shell's staged copies for a consumed grant.
-
-    Only the image copies are dead weight by this point: their bytes are in
-    media_root or on the host. A staged non-image copy is the agent's only
-    readable handle on a cloud placeholder, so it is deliberately left in
-    place for the agent to keep reading; the shell's stale sweep reclaims it
-    later. Best-effort: the shell's own stale sweep covers a grant that errored
-    out before reaching here.
-    """
+def _safe_desktop_drop_error(path: Path, exc: Exception) -> str:
+    if isinstance(exc, OSError):
+        return _desktop_drop_read_error(path, exc)
+    message = " ".join(str(exc).split()) or "could not be imported"
+    display_name = _drop_display_name(path)
+    candidates = [str(path), display_name]
     try:
-        # The id reaches us from the request body, and this builds an rmtree
-        # target. Re-check the UUID form here rather than trusting that every
-        # caller validated it first.
+        candidates.append(str(path.resolve(strict=False)))
+    except OSError:
+        pass
+    for candidate in candidates:
+        if candidate:
+            message = message.replace(candidate, display_name)
+    # A conversion/import failure can mention a different source path than the
+    # browser filename.  Redact any remaining absolute-looking token before the
+    # message crosses the drop API boundary.
+    message = re.sub(
+        r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|/)[^\s\"']*",
+        display_name,
+        message,
+    )
+    return message[:_DESKTOP_DROP_MAX_ERROR_BYTES]
+
+
+def _desktop_drop_ref(pcm, chat_id: str, path: Path) -> dict[str, str]:
+    ref = pcm.register_file_ref(chat_id, path)
+    return {"ref": ref, "name": _drop_display_name(path)}
+
+
+def _drop_display_name(path: Path) -> str:
+    name = "".join(char for char in path.name if char.isprintable()).strip()
+    return (name or "file")[:255]
+
+
+def _clear_desktop_drop_staging(
+    request: Request,
+    grant_id: str,
+    *,
+    keep_paths: set[Path] | None = None,
+) -> None:
+    try:
         if str(UUID(grant_id)) != grant_id:
             return
     except (ValueError, AttributeError):
         return
     grant_dir = request.app.state.config.state_path.parent / "desktop-drop-grants"
     staged_dir = grant_dir / "staged" / grant_id
+    keep = {path.resolve(strict=False) for path in (keep_paths or set())}
     try:
         for index_dir in staged_dir.iterdir():
             if not index_dir.is_dir():
                 continue
             for staged in index_dir.iterdir():
-                if (
-                    staged.is_file()
-                    and staged.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS
-                ):
+                try:
+                    if staged.resolve(strict=False) in keep:
+                        continue
+                except OSError:
+                    pass
+                if staged.is_file() or staged.is_symlink():
                     staged.unlink(missing_ok=True)
-            # Drop the index dir once every copy in it went away.
             try:
                 index_dir.rmdir()
             except OSError:
@@ -1658,8 +1901,16 @@ def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
         raise LookupError("desktop drop grant not found or already used") from exc
 
     try:
-        payload = json.loads(consuming.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        if consuming.stat().st_size > _DESKTOP_DROP_MAX_GRANT_BYTES:
+            raise ValueError("invalid desktop drop grant")
+        with consuming.open("rb") as source:
+            raw_grant = source.read(_DESKTOP_DROP_MAX_GRANT_BYTES + 1)
+        if len(raw_grant) > _DESKTOP_DROP_MAX_GRANT_BYTES:
+            raise ValueError("invalid desktop drop grant")
+        payload = json.loads(raw_grant.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("invalid desktop drop grant")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("invalid desktop drop grant") from exc
     finally:
         consuming.unlink(missing_ok=True)
@@ -1668,9 +1919,15 @@ def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
         raise ValueError("invalid desktop drop grant")
     created_at = payload.get("created_at")
     raw_paths = payload.get("paths")
-    if not isinstance(created_at, (int, float)):
+    if isinstance(created_at, bool) or not isinstance(created_at, (int, float)):
         raise ValueError("invalid desktop drop grant")
-    age = datetime.now(UTC).timestamp() - float(created_at)
+    try:
+        created_at_seconds = float(created_at)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("invalid desktop drop grant") from exc
+    if not math.isfinite(created_at_seconds):
+        raise ValueError("invalid desktop drop grant")
+    age = datetime.now(UTC).timestamp() - created_at_seconds
     if age < -30 or age > _DESKTOP_DROP_GRANT_TTL_SECONDS:
         # The two failure modes are different bugs and must not be reported
         # identically. Log the grant id, timestamp, age and reason so a 400
@@ -1695,238 +1952,127 @@ def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
         or not raw_paths
         or len(raw_paths) > _DESKTOP_DROP_MAX_FILES
         or not all(isinstance(path, str) for path in raw_paths)
+        or any(_utf8_size(path) > _DESKTOP_DROP_MAX_PATH_BYTES for path in raw_paths)
     ):
         raise ValueError("invalid desktop drop grant")
 
     paths = [Path(path) for path in raw_paths]
-    if any(not path.is_absolute() or not path.exists() for path in paths):
-        raise ValueError("a dropped file is no longer available")
+    total_bytes = 0
+    for path in paths:
+        if not path.is_absolute() or not path.exists():
+            raise ValueError("a dropped file is no longer available")
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise ValueError("a dropped file is no longer available") from exc
+        total_bytes += size
+        if total_bytes > _DESKTOP_DROP_MAX_TOTAL_BYTES:
+            raise ValueError("desktop drop is too large")
     return paths
 
 
 async def desktop_drop_import(request: Request) -> JSONResponse:
-    """Resolve a single-use native Finder drop for the active host or client."""
-    body = await request.json()
-    grant_id = str(body.get("grant_id") or "")
-    project_id = str(body.get("project_id") or "")
-    chat_id = str(body.get("chat_id") or "")
+    grant_id = ""
+    keep_paths: set[Path] = set()
+    preserve_staged = False
     try:
-        paths = _consume_desktop_drop_grant(request, grant_id)
-    except LookupError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=404)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        grant_id = str(body.get("grant_id") or "")
+        project_id = str(body.get("project_id") or "")
+        chat_id = str(body.get("chat_id") or "")
+        try:
+            paths = _consume_desktop_drop_grant(request, grant_id)
+        except LookupError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
-    node_mgr = getattr(request.app.state, "node_state_manager", None)
-    role = node_mgr.get_role() if node_mgr else "host"
-    is_client = role in {"client", "standby"}
-    image_paths = [
-        path
-        for path in paths
-        if path.is_file() and path.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS
-    ]
-    regular_paths = [path for path in paths if path not in image_paths]
-    errors: list[dict[str, str]] = []
+        image_paths = [
+            path
+            for path in paths
+            if path.is_file() and path.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS
+        ]
+        regular_paths = [path for path in paths if path not in image_paths]
+        errors: list[dict[str, str]] = []
+        file_refs: list[dict[str, str]] = []
 
-    if not is_client:
-        pcm = request.app.state.project_chat_manager
+        pcm = getattr(request.app.state, "project_chat_manager", None)
+        if pcm is None:
+            return JSONResponse({"error": "project chat manager unavailable"}, status_code=503)
         chat = pcm.get_chat(chat_id)
         if chat is None:
-            _clear_desktop_drop_staging(request, grant_id)
             return JSONResponse({"error": "chat not found"}, status_code=404)
         project_id = chat.project_id
-        host_image_refs: list[str] = []
-        attachments: list[dict] = []
-        converted_paths: set[Path] = set()
-        if image_paths and pcm.get_chat(chat_id) is None:
-            errors.extend(
-                {"filename": path.name, "error": "chat not found"}
-                for path in image_paths
-            )
-        else:
-            for path in image_paths:
-                try:
-                    if path.stat().st_size > request.app.state.config.max_image_size_bytes:
-                        raise ValueError("image too large")
-                    host_image_refs.append(
-                        pcm.save_image_upload(path.read_bytes(), path.name).path.name
-                    )
-                except OSError as exc:
-                    errors.append(
-                        {
-                            "filename": path.name,
-                            "error": _desktop_drop_read_error(path, exc),
-                        }
-                    )
-                except ValueError as exc:
-                    errors.append({"filename": path.name, "error": str(exc)})
+        image_refs: list[str] = []
+        for path in image_paths:
+            try:
+                if path.stat().st_size > MAX_IMAGE_SIZE_BYTES:
+                    raise ValueError("image too large")
+                image_data = await asyncio.to_thread(
+                    _read_native_file_limited, path, MAX_IMAGE_SIZE_BYTES
+                )
+                image_refs.append(pcm.save_image_upload(image_data, path.name).path.name)
+            except (OSError, ValueError) as exc:
+                errors.append(
+                    {
+                        "filename": _drop_display_name(path),
+                        "error": _safe_desktop_drop_error(path, exc),
+                    }
+                )
         for path in regular_paths:
-            if is_anydoc_document(path.name):
-                try:
-                    attachments.append(
-                        await asyncio.to_thread(
-                            pcm.convert_chat_document, project_id, path
-                        )
+            if not path.is_file():
+                errors.append(
+                    {
+                        "filename": _drop_display_name(path),
+                        "error": "folders cannot be attached",
+                    }
+                )
+                continue
+            try:
+                if is_anydoc_document(path.name):
+                    converted = await asyncio.to_thread(
+                        pcm.convert_chat_document, project_id, path
                     )
-                    converted_paths.add(path)
-                except (OSError, LookupError, RuntimeError, ValueError) as exc:
-                    errors.append({"filename": path.name, "error": str(exc)})
-        _clear_desktop_drop_staging(request, grant_id)
+                    generated = Path(str(converted.get("markdown_path") or ""))
+                    if not generated.is_file():
+                        raise ValueError("document conversion produced no file")
+                    file_refs.append(_desktop_drop_ref(pcm, chat_id, generated))
+                    keep_paths.add(path)
+                else:
+                    file_refs.append(_desktop_drop_ref(pcm, chat_id, path))
+                    keep_paths.add(path)
+            except (OSError, LookupError, RuntimeError, ValueError) as exc:
+                errors.append(
+                    {
+                        "filename": _drop_display_name(path),
+                        "error": _safe_desktop_drop_error(path, exc),
+                    }
+                )
+        preserve_staged = True
         return JSONResponse(
             {
-                "paths": [str(path) for path in regular_paths if path not in converted_paths],
-                "attachments": attachments,
-                "image_refs": host_image_refs,
+                "file_refs": file_refs,
+                "image_refs": image_refs,
                 "errors": errors,
             }
         )
-
-    if node_mgr is None:
-        return JSONResponse({"error": "client node state unavailable"}, status_code=503)
-    host_url = node_mgr.get_active_peer_url()
-    if not host_url:
-        return JSONResponse({"error": "client has no reachable host"}, status_code=503)
-
-    import httpx
-
-    from ciao.web.auth import SESSION_COOKIE
-
-    headers = {"origin": host_url.rstrip("/")}
-    host_session = node_mgr.get_host_session()
-    if host_session:
-        headers["cookie"] = f"{SESSION_COOKIE}={host_session}"
-    # Host uploads synchronously convert supported documents. Give a Finder
-    # drop enough time for large PDFs/workbooks without leaving the request
-    # unbounded, so a client timeout does not invite duplicate retries.
-    timeout = httpx.Timeout(10 * 60.0, connect=5.0)
-    imported_paths: list[str] = []
-    image_refs: list[str] = []
-
-    try:
-        # These are fixed API endpoints, so a redirect is never expected.
-        # Refusing it also prevents a configured/compromised peer from
-        # forwarding the stored host-session cookie to another origin.
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-            if image_paths:
-                image_files = []
-                for index, path in enumerate(image_paths):
-                    # Per-file, like the host branch above: one unreadable
-                    # screenshot must not turn the whole drop into a 502.
-                    try:
-                        if path.stat().st_size > request.app.state.config.max_image_size_bytes:
-                            errors.append({"filename": path.name, "error": "image too large"})
-                            continue
-                        data = path.read_bytes()
-                    except OSError as exc:
-                        errors.append(
-                            {
-                                "filename": path.name,
-                                "error": _desktop_drop_read_error(path, exc),
-                            }
-                        )
-                        continue
-                    image_files.append(
-                        (
-                            f"file{index}",
-                            (
-                                path.name,
-                                data,
-                                mimetypes.guess_type(path.name)[0] or "application/octet-stream",
-                            ),
-                        )
-                    )
-                if image_files:
-                    response = await client.post(
-                        f"{host_url.rstrip('/')}/api/chats/{chat_id}/images",
-                        headers=headers,
-                        files=image_files,
-                    )
-                    payload = response.json()
-                    if response.is_success and isinstance(payload, list):
-                        for entry in payload:
-                            if entry.get("ref"):
-                                image_refs.append(str(entry["ref"]))
-                            elif entry.get("error"):
-                                errors.append(
-                                    {
-                                        "filename": str(entry.get("filename") or ""),
-                                        "error": str(entry["error"]),
-                                    }
-                                )
-                    else:
-                        raise ValueError(
-                            payload.get("error", "host image upload failed")
-                            if isinstance(payload, dict)
-                            else "host image upload failed"
-                        )
-
-            files: list[tuple[str, tuple[str, bytes, str]]] = []
-            for path in regular_paths:
-                if path.is_dir():
-                    errors.append(
-                        {
-                            "filename": path.name,
-                            "error": "folders cannot be transferred to the host",
-                        }
-                    )
-                    continue
-                try:
-                    if path.stat().st_size > chat_service._PROJECT_UPLOAD_MAX_BYTES:
-                        errors.append({"filename": path.name, "error": "file too large"})
-                        continue
-                    data = path.read_bytes()
-                except OSError as exc:
-                    errors.append(
-                        {
-                            "filename": path.name,
-                            "error": _desktop_drop_read_error(path, exc),
-                        }
-                    )
-                    continue
-                files.append(
-                    (
-                        f"file{len(files)}",
-                        (
-                            path.name,
-                            data,
-                            mimetypes.guess_type(path.name)[0] or "application/octet-stream",
-                        ),
-                    )
-                )
-            if files:
-                response = await client.post(
-                    f"{host_url.rstrip('/')}/api/chats/{chat_id}/attachments",
-                    headers=headers,
-                    files=files,
-                )
-                payload = response.json()
-                if not response.is_success or not isinstance(payload, dict):
-                    raise ValueError(
-                        payload.get("error", "host file upload failed")
-                        if isinstance(payload, dict)
-                        else "host file upload failed"
-                    )
-                imported_paths.extend(
-                    str(path)
-                    for entry in payload.get("saved", [])
-                    for path in (entry.get("original_path"), entry.get("markdown_path"))
-                    if path
-                )
-                errors.extend(
-                    {
-                        "filename": str(entry.get("filename") or ""),
-                        "error": str(entry.get("error") or "upload failed"),
-                    }
-                    for entry in payload.get("errors", [])
-                )
-    except (OSError, httpx.HTTPError, ValueError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=502)
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": _safe_desktop_drop_error(Path("file"), exc)}, status_code=502)
+    except Exception:
+        logger.exception("Desktop drop import failed")
+        return JSONResponse({"error": "desktop drop import failed"}, status_code=500)
     finally:
-        _clear_desktop_drop_staging(request, grant_id)
-
-    return JSONResponse(
-        {"paths": imported_paths, "image_refs": image_refs, "errors": errors}
-    )
+        if grant_id:
+            _clear_desktop_drop_staging(
+                request,
+                grant_id,
+                keep_paths=keep_paths if preserve_staged else set(),
+            )
 
 
 async def create_project_chat(request: Request) -> JSONResponse:
@@ -2236,11 +2382,10 @@ async def chat_archive(request: Request) -> JSONResponse:
 async def chat_retry_insights(request: Request) -> JSONResponse:
     """Resume unfinished post-archive stages for a single archived chat.
 
-    Re-runs whatever is still pending/failed on the archive's manifest —
-    insights extraction when it is missing, plus the project fold, trajectory
-    and memory proposals when a crash landed after insights. Returns the retry
-    status and the manifest view so the archived-chat panel can render partial
-    completion. A pipeline already running for the chat is left alone.
+    Re-runs whatever is still pending/failed on the archive's manifest — the
+    session trajectory is the only stage left. Returns the retry status and the
+    manifest view so the archived-chat panel can render partial completion. A
+    pipeline already running for the chat is left alone.
     """
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
@@ -2423,29 +2568,6 @@ async def chat_message_part(request: Request) -> JSONResponse:
     return JSONResponse(row)
 
 
-async def native_sessions(request: Request) -> JSONResponse:
-    """List locally-running Claude Code CLI sessions for a workspace.
-
-    Serves ``GET /api/native/sessions?workspace=<path>``; without the param
-    the configured workspace root is used. Read-only liveness probe used by
-    the node-handover flow to warn about externally-started CLI sessions.
-    """
-    params = _request_params(request)
-    workspace = params.get("workspace") or str(
-        request.app.state.config.workspace_root
-    )
-    try:
-        sessions = live_sessions_for_workspace(workspace)
-    except OSError:
-        logger.exception("Native session scan failed for %s", workspace)
-        sessions = []
-    return JSONResponse({
-        "sessions": sessions,
-        "workspace": workspace,
-        "checked_at": datetime.now(UTC).isoformat(),
-    })
-
-
 async def chat_subagents(request: Request) -> JSONResponse:
     """Return subagent activity for this chat's session, if any.
 
@@ -2458,8 +2580,8 @@ async def chat_subagents(request: Request) -> JSONResponse:
     Each entry additionally carries dispatch metadata parsed from the parent
     session JSONL when available (see ciao/subagent_tracking.py):
     ``tool_use_id``, ``description``, ``subagent_type``, ``is_async``,
-    ``status`` ("running"/"completed"/"failed"), and ``turn_index`` — the
-    user turn that dispatched the agent, aligned with the ``turn_index``
+    ``status`` ("running"/"completed"/"failed"/"stopped"), and ``turn_index`` —
+    the user turn that dispatched the agent, aligned with the ``turn_index``
     stamped on user bubbles by /messages so the PWA can anchor the subagent
     panel to the right turn.
 
@@ -2500,8 +2622,10 @@ async def chat_subagents(request: Request) -> JSONResponse:
         ):
             collab_tree = await live_provider.read_live_collab_tree()
         else:
+            resolver = getattr(pcm, "_agent_root_for_chat", None)
+            root = resolver(chat_id) if resolver is not None else config.workspace_root
             collab_tree = await OpencodeProvider.read_collab_tree(
-                config.workspace_root, chat.session_id
+                root, chat.session_id
             )
         for item in collab_tree:
             info = item.get("info")
@@ -2525,7 +2649,11 @@ async def chat_subagents(request: Request) -> JSONResponse:
                 # endpoint is polled every few seconds while a turn streams —
                 # derive the lifecycle from the child's own messages and anchor
                 # it to the parent turn sent before the child was created.
-                "status": transcript_service._opencode_child_status(messages),
+                "status": transcript_service._opencode_child_status(
+                    messages,
+                    info,
+                    item.get("active") if isinstance(item.get("active"), bool) else None,
+                ),
                 "turn_index": transcript_service._opencode_child_turn_index(info, chat),
             })
         return JSONResponse(opencode_entries)
@@ -2718,7 +2846,11 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
                 continue
             messages = item.get("messages")
             messages = messages if isinstance(messages, list) else []
-            if transcript_service._opencode_child_status(messages) != "running":
+            if transcript_service._opencode_child_status(
+                messages,
+                info,
+                item.get("active") if isinstance(item.get("active"), bool) else None,
+            ) != "running":
                 continue
             rows.append({
                 "agent_id": agent_id,
@@ -2793,78 +2925,6 @@ def _merge_subagent_dispatch_meta(
             entry["turn_index"] = info.turn_index
 
 
-# ── Voice ────────────────────────────────────────────────────────────────
-
-async def chat_voice(request: Request) -> JSONResponse:
-    """Upload and transcribe a voice file."""
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    chat = pcm.get_chat(chat_id)
-    if chat is None:
-        return JSONResponse({"error": "chat not found"}, status_code=404)
-
-    form = await request.form()
-    upload = form.get("audio")
-    if upload is None:
-        return JSONResponse({"error": "no audio file"}, status_code=400)
-
-    filename = getattr(upload, "filename", "audio.webm") or "audio.webm"
-
-    try:
-        data = await _read_upload_limited(
-            upload, request.app.state.config.max_voice_size_bytes
-        )
-        path = pcm.save_voice_upload(data, filename)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-
-    try:
-        text, cost = await pcm.transcribe_voice(path)
-    except ValueError as exc:
-        path.unlink(missing_ok=True)
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    except Exception as exc:
-        path.unlink(missing_ok=True)
-        return JSONResponse({"error": f"Transcription failed: {exc}"}, status_code=500)
-
-    path.unlink(missing_ok=True)
-
-    return JSONResponse({
-        "text": text,
-        "cost": round(cost, 6),
-    })
-
-
-async def chat_speak(request: Request) -> Response:
-    """Synthesize speech for a message; returns the audio bytes directly."""
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    chat = pcm.get_chat(chat_id)
-    if chat is None:
-        return JSONResponse({"error": "chat not found"}, status_code=404)
-
-    try:
-        body = await request.json()
-    except ValueError:
-        return JSONResponse({"error": "invalid JSON"}, status_code=400)
-    text = (body.get("text") or "").strip() if isinstance(body, dict) else ""
-    if not text:
-        return JSONResponse({"error": "no text to speak"}, status_code=400)
-
-    try:
-        audio, mime, cost = await pcm.synthesize_speech(text)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    except Exception as exc:
-        return JSONResponse({"error": f"Speech synthesis failed: {exc}"}, status_code=500)
-
-    return Response(
-        audio,
-        media_type=mime,
-        headers={"X-TTS-Cost": f"{cost:.6f}", "Cache-Control": "no-store"},
-    )
-
-
 # ── Images ───────────────────────────────────────────────────────────────
 
 async def chat_images(request: Request) -> JSONResponse:
@@ -2884,7 +2944,7 @@ async def chat_images(request: Request) -> JSONResponse:
         filename = getattr(upload, "filename", "image.jpg") or "image.jpg"
         try:
             data = await _read_upload_limited(
-                upload, request.app.state.config.max_image_size_bytes
+                upload, MAX_IMAGE_SIZE_BYTES
             )
             attachment = pcm.save_image_upload(data, filename)
             results.append({
@@ -3458,22 +3518,26 @@ async def vault_graph(request: Request) -> JSONResponse:
             # symlink) must not fail the whole graph request.
             return 0.0
 
-    # Aging uses the same thresholds as the audit and the daily curation pass,
-    # so the map's "needs review" list cannot disagree with what the routine
-    # acts on. One shared detector, three consumers.
-    from ciao.memory_audit import (
-        note_last_verified,
-        note_threshold_days,
-    )
+    # Aging uses the one predicate the audit and the review queue's
+    # `unverified` signal also use, so the map's "unchecked" count cannot
+    # disagree with the queue it sends the user to. Notes the queue never lists
+    # (Workspace/ files, templates, completed projects) and exempt types
+    # (logs, journals) keep their age but are never flagged.
+    from ciao.memory_audit import note_verification
+    from ciao.vault_review import never_queued
 
     current_date = datetime.now(UTC).date()
 
-    def _staleness(e) -> tuple[bool, int | None]:
-        verified, _source = note_last_verified(e.updated, _mtime(str(e.path)))
-        if verified is None:
-            return False, None
-        age_days = (current_date - verified).days
-        return age_days >= note_threshold_days((e.type or "").strip()), age_days
+    def _staleness(e) -> tuple[bool, int | None, int | None]:
+        verification = note_verification(
+            e.type or "", e.updated or "", _mtime(str(e.path)), today=current_date
+        )
+        if verification is None:
+            return False, None, None
+        stale = verification.stale and not never_queued(str(e.path))
+        # The horizon travels with the flag so the map can name the rule
+        # without keeping its own copy of the thresholds table.
+        return stale, verification.age_days, verification.threshold_days
 
     nodes = [
         {
@@ -3487,7 +3551,7 @@ async def vault_graph(request: Request) -> JSONResponse:
             "degree": len(graph.get(str(e.path), ())),
             "mtime": _mtime(str(e.path)),
             "updated": e.updated,
-            **dict(zip(("stale", "age_days"), _staleness(e))),
+            **dict(zip(("stale", "age_days", "threshold_days"), _staleness(e))),
         }
         for e in scoped
     ]
@@ -3545,7 +3609,7 @@ async def vault_review(request: Request) -> JSONResponse:
                 review.generate_candidates,
                 root,
                 workspace=workspace,
-                max_candidates=50,
+                max_candidates=review.MAX_CANDIDATES_CEILING,
                 write_queue=request.method != "GET",
             )
         )
@@ -3618,7 +3682,7 @@ async def _vault_review_snapshot(root: Path, workspace: str) -> dict[str, Any]:
             review.generate_candidates,
             root,
             workspace=workspace,
-            max_candidates=50,
+            max_candidates=review.MAX_CANDIDATES_CEILING,
             write_queue=True,
         )
     )
@@ -3711,6 +3775,230 @@ async def vault_delete_note(request: Request) -> JSONResponse:
     except OSError as exc:
         return JSONResponse({"error": f"delete failed: {exc}"}, status_code=500)
     return JSONResponse({"ok": True, "edited_backlinks": edited})
+
+
+def _scan_entity_types(
+    vault: Path, workspace: str, registry: entity_types.EntityTypeRegistry
+) -> tuple[list[Entry], dict[str, int]]:
+    """One scan of *vault*: its entries, and its notes per ``type:`` value.
+
+    A note counts under both the value it carries and the owner that value
+    resolves to, because the two questions the callers ask are different. The
+    owning side is what the index and the linter mean by a count, so
+    ``type: doc`` counts for ``document``. The literal side is what a category's
+    own notes say, and it is not redundant: a category the user has just added
+    is in none of the static tables when its notes are typed with that
+    category's own alias, so a count resolved through those tables alone would
+    report every such new category as empty, and the delete guard below would
+    drop a category whose notes still carried its ``type:``. The index, the
+    linter and the staleness check all read the registry now (#626), but this
+    scan runs its own literal-plus-canonical fold, so the literal side is what
+    keeps a just-added category's notes counted here regardless.
+
+    *registry* is the caller's already-loaded registry, not a second load, and
+    it is the only thing that knows a custom category's own aliases: a note typed
+    with one of those is the category's note, not drift under a spelling no row
+    claims. The static table is consulted first, so a stock alias keeps
+    resolving the way the index and the linter resolve it. The registry's alias
+    view is enabled-only, which is right here too: a disabled category claims no
+    ``type:``, so its aliases stay drift.
+
+    A ``type:`` that is neither a category nor an alias of one is drift. It is
+    counted under its own spelling, which no row claims, so it stays visible as
+    an unlisted type instead of inflating a category that does not own it.
+    """
+    entries = scan_vault(vault, workspace=workspace)
+    aliases = registry.aliases()
+    counts: dict[str, int] = defaultdict(int)
+    for entry in entries:
+        raw = entry.type.strip()
+        if raw:
+            counts[raw] += 1
+        owner = canonical_type(raw) or aliases.get(raw, "")
+        if owner and owner != raw:
+            counts[owner] += 1
+    return entries, dict(counts)
+
+
+def _write_entity_types_under_lock(
+    vault: Path, entries: list[entity_types.EntityType]
+) -> None:
+    """Write the whole category list under the lock the accept also takes.
+
+    ``write_vault_file`` is atomic but not locked, and the ``[category]`` accept
+    reads the registry, appends to it and writes it as one transaction under
+    this same lock — so a PATCH that wrote outside it could land between that
+    read and that write, and the accepted category would be dropped with no
+    error on either side. A PATCH is a full replacement rather than a diff, so
+    serialization is all it needs: whichever of the two arrives second wins,
+    which is the contract it already had.
+
+    Raises :class:`QueueLockError` rather than writing unlocked, like every
+    other managed writer of a file behind this lock.
+    """
+    from ciao.memory_receipts import queue_lock
+
+    with queue_lock(vault / entity_types.VAULT_FILENAME):
+        entity_types.write_vault_file(vault, entries)
+
+
+def _regenerate_vocabulary(
+    vault: Path, workspace: str
+) -> tuple[dict[str, int], entity_types.EntityTypeRegistry]:
+    """Rewrite ``VOCABULARY.md`` with the Categories section; return the counts
+    and the registry they were counted against.
+
+    One worker thread for the scan and the write, and one load of the registry
+    the save left on disk, shared by all three consumers of it — the counts, the
+    Categories section and the body the caller answers — because a Categories
+    section that disagreed with the type census beside it, or with the rows the
+    response lists, would be worse than no section. The counts ride back out
+    because the caller needs them for the response and the scan that produced
+    them is already paid for.
+    """
+    registry = entity_types.load_entity_types(vault)
+    entries, counts = _scan_entity_types(vault, workspace, registry)
+    write_vocabulary_file(entries, vault / "VOCABULARY.md", registry=registry)
+    return counts, registry
+
+
+async def memory_entity_types(request: Request) -> JSONResponse:
+    """GET the effective category list; PATCH the user's edits to it.
+
+    One handler for both, as in ``settings_routines``, and both answer the same
+    body: a PATCH returns the list it produced, so a client never has to re-GET
+    a vault scan it can already have.
+
+    The registry is per vault FILE, and ``<vault>`` is the agent vault root —
+    the one that owns ``VOCABULARY.md`` and ``entity-types.yaml``, not a
+    workspace's notes root. On a pre-re-rooting install that root is shared, so
+    two workspaces editing categories edit the same list; that is the same
+    sharing ``INDEX.md`` and ``VOCABULARY.md`` already have, and the registry
+    follows its file rather than inventing a per-workspace split.
+
+    A PATCH is the desired list of entries, not a diff: idempotent, and a
+    client that sends the GET's own rows back unchanged writes nothing. Two
+    rules in ``ciao.entity_types`` make the resubmission safe, both stated
+    precisely because they hold for a stock id and not for a custom one: a row
+    whose id is a stock id is a partial override of the shipped default (so a
+    client that changes one field of a stock row resets nothing), and a stock
+    row identical to the shipped default is not persisted at all (so an
+    upgrade's change to a default still reaches the install). A custom id has
+    no shipped default to fall back on, so a field it leaves out takes the
+    built-in default instead — the contract is to send the whole list, which is
+    exactly what the GET hands a client.
+    """
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip()
+    if not workspace or config.workspace(workspace) is None:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    try:
+        vault = Path(config.agent_vault_root(workspace))
+    except (AttributeError, ValueError, OSError) as exc:
+        return JSONResponse({"error": f"vault unavailable: {exc}"}, status_code=409)
+
+    if request.method == "GET":
+        # One registry for the scan and the body: the counts have to resolve a
+        # custom category's own aliases, and that registry is the same one the
+        # rows are rendered from, so the two cannot describe different lists.
+        registry = entity_types.load_entity_types(vault)
+        _entries, counts = await asyncio.to_thread(
+            functools.partial(_scan_entity_types, vault, workspace, registry)
+        )
+        return JSONResponse(_entity_types_body(vault, workspace, counts, registry))
+
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict) or not isinstance(body.get("types"), list):
+        return JSONResponse({"error": "expected an object with a types list"}, status_code=400)
+    try:
+        entries = entity_types.parse_payload(body["types"])
+        entity_types.validate_entries(entries)
+    except entity_types.EntityTypeFileError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    # A custom category the list omits is deleted from the file, and the notes
+    # that carry its `type:` would be left pointing at nothing. So the delete is
+    # refused while those notes exist, with the count that blocks it: the fix
+    # is to retype them, not to lose the category. A stock id is never deleted
+    # — omitting one leaves it at its default, and `enabled: false` is how a
+    # user turns one off.
+    registry = entity_types.load_entity_types(vault)
+    submitted = {entry.id for entry in entries}
+    orphaned = [
+        entry
+        for entry in registry.entries()
+        if not entry.builtin and entry.id not in submitted
+    ]
+    if orphaned:
+        _entries, counts = await asyncio.to_thread(
+            functools.partial(_scan_entity_types, vault, workspace, registry)
+        )
+        blocking = [
+            f"{entry.id} ({counts[entry.id]} note{'' if counts[entry.id] == 1 else 's'})"
+            for entry in orphaned
+            if counts.get(entry.id, 0)
+        ]
+        if blocking:
+            return JSONResponse(
+                {
+                    "error": "refusing to delete a category its notes still use: "
+                    + ", ".join(blocking)
+                    + " — retype those notes first, or keep the category"
+                },
+                status_code=400,
+            )
+
+    try:
+        await asyncio.to_thread(
+            functools.partial(_write_entity_types_under_lock, vault, entries)
+        )
+    except QueueLockError as exc:
+        return JSONResponse(
+            {"error": f"the categories file is busy; nothing was written: {exc}"},
+            status_code=503,
+        )
+    except OSError as exc:
+        return JSONResponse(
+            {"error": f"could not write the categories file: {exc}"}, status_code=500
+        )
+    try:
+        counts, fresh = await asyncio.to_thread(
+            functools.partial(_regenerate_vocabulary, vault, workspace)
+        )
+    except OSError as exc:
+        return JSONResponse(
+            {
+                "error": "categories saved, but VOCABULARY.md could not be "
+                f"regenerated: {exc}"
+            },
+            status_code=500,
+        )
+    # The write cleared the registry cache, so this body is read back off the
+    # file that was just written: the list a client gets is the one the next GET
+    # will serve, not the submission echoed at it.
+    return JSONResponse(_entity_types_body(vault, workspace, counts, fresh))
+
+
+def _entity_types_body(
+    vault: Path,
+    workspace: str,
+    counts: dict[str, int],
+    registry: entity_types.EntityTypeRegistry,
+) -> dict[str, Any]:
+    """The response both methods answer: the vault, and its effective list.
+
+    The registry is the caller's, loaded once by the method that already had to
+    read it, so the counts in the body and the rows beside them are the same
+    configuration rather than two reads that could straddle a write.
+    """
+    return {
+        "workspace": workspace,
+        "vault": str(vault),
+        "types": entity_types.effective_payload(registry, counts),
+    }
 
 
 # Binary downloads (PDFs, ZIPs, office docs) live under their own endpoint so
@@ -4253,50 +4541,6 @@ async def list_automation(request: Request) -> JSONResponse:
     })
 
 
-async def trigger_backfill_insights(request: Request) -> JSONResponse:
-    """Run session insights over every archive that is missing them.
-
-    Accepts an optional ``model`` for a one-off run with a different model —
-    the recovery path when the configured insights model keeps failing (it
-    times out on slow local backends). The stored Settings → Models choice is
-    left alone.
-    """
-    import asyncio
-    from ciao.job_runs import track
-    from ciao.insights import backfill_insights_task, format_backfill_summary
-
-    config = request.app.state.config
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001 — empty body means "use the configured model"
-        body = {}
-    model = (body or {}).get("model")
-    model = model.strip() if isinstance(model, str) else ""
-
-    async def _run_backfill():
-        async with track(
-            "backfill_insights", "Insights backfill", category="system",
-            model=model,
-        ) as handle:
-            result = await backfill_insights_task(
-                config,
-                mode="both",
-                model_override=model,
-                chat_workspaces=request.app.state.project_chat_manager.chat_workspaces(),
-            )
-            handle.extra.update(result)
-            summary = format_backfill_summary(result)
-            handle.extra["summary"] = summary
-            if model:
-                handle.extra["model_override"] = model
-            if result["errors"]:
-                handle.status = "error"
-                handle.error = summary
-
-    asyncio.create_task(_run_backfill())
-    return JSONResponse({"status": "started", "model": model}, status_code=202)
-
-
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
@@ -4596,15 +4840,15 @@ async def list_models(request: Request) -> JSONResponse:
     model_reasoning_levels = opencode_reasoning_levels
     # Claude Code serves one upstream, so its models are a single list rather
     # than the work/personal split the routing-backend era needed.
-    claude_models = list(config.claude_models)
+    claude_models = list(CLAUDE_MODELS)
     claude_default = (
         config.claude_default_model
         if config.claude_default_model in claude_models
-        else (claude_models[0] if claude_models else "")
+        else claude_models[0]
     )
 
     return JSONResponse({
-        "models": config.claude_models,
+        "models": list(CLAUDE_MODELS),
         "default": config.claude_default_model,
         "provider_models": {
             "claude": claude_models,
@@ -4639,14 +4883,6 @@ async def list_models(request: Request) -> JSONResponse:
 
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
-    from ciao import native_sidecar
-    from ciao.voice import (
-        apple_dictation_available,
-        apple_speech_available,
-        dictation_unavailable_reason,
-        system_voices,
-    )
-
     s = app_settings.settings
     from ciao.critique import critique_models_effective
 
@@ -4658,7 +4894,7 @@ def _routines_payload(config, app_settings) -> dict:
             config.primary_workspace()
         )
 
-    # On Automatic the insights routine resolves per workspace
+    # On Automatic the memory pass resolves per workspace
     # (resolve_insights_model takes the chat's workspace), so the single
     # *_effective value above is only the primary-workspace answer. Reporting it
     # alone reads as a global choice and is wrong for every other workspace, so
@@ -4672,6 +4908,11 @@ def _routines_payload(config, app_settings) -> dict:
     return {
         # Overrides as stored ("" = automatic default).
         "insights_model": s.insights_model,
+        # The HTTPS origin other devices should use, as stored ("" = none).
+        "trusted_url": s.trusted_url,
+        "insights_enabled": config.insights_enabled,
+        "trajectories_enabled": config.trajectories_enabled,
+        "push_all_devices": s.push_all_devices,
 
         "critique_models": s.critique_models,
         # Per-provider default model for new chats, as stored (missing =
@@ -4693,30 +4934,9 @@ def _routines_payload(config, app_settings) -> dict:
         "insights_model_by_workspace": insights_by_workspace,
 
         "critique_models_effective": critique_effective,
-        # The "apple" title/insights options are hardware-gated: they need
-        # macOS 26+, the desktop app, and Apple Intelligence switched on in
-        # System Settings. No app-side opt-in: the routine rows show the
-        # missing prerequisite instead of hiding the option.
-        "apple_model_available": native_sidecar.apple_model_available(),
-        "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
-        "transcription": {
-            "locale": config.transcription_locale,
-            # On-device dictation needs macOS 26+, the installed app, and a
-            # dictation language. Settings hides the local option entirely when
-            # it cannot run, and shows the reason when the user asks.
-            "available": apple_dictation_available(),
-            "unavailable_reason": dictation_unavailable_reason(),
-        },
-        "speech": {
-            "local_voice": config.tts_local_voice,
-            "available": apple_speech_available(),
-            # Voices differ per machine, so the picker is populated from the
-            # system rather than a hardcoded list, best quality first.
-            "local_voices": system_voices(),
-        },
         # Grouped options for the routine model selectors.
         "model_options": {
-            "anthropic": list(config.claude_models),
+            "anthropic": list(CLAUDE_MODELS),
         },
         "backends": {
             "anthropic": True,
@@ -4762,10 +4982,7 @@ async def settings_routines(request: Request) -> JSONResponse:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         app_settings.apply_to_config(config)
-    # _routines_payload probes the native sidecar, which spawns a subprocess on
-    # first call. Off the event loop: the availability checks it replaced were
-    # in-process find_spec/which calls, so this used to be free.
-    return JSONResponse(await asyncio.to_thread(_routines_payload, config, app_settings))
+    return JSONResponse(_routines_payload(config, app_settings))
 
 
 # ── Status ───────────────────────────────────────────────────────────────
@@ -4791,12 +5008,9 @@ async def status_endpoint(request: Request) -> JSONResponse:
 
 
 async def startup_status_endpoint(request: Request) -> JSONResponse:
-    """Return startup phase progress and node role state."""
+    """Return startup phase progress and the host's own version state."""
     from ciao import __version__
 
-    node_mgr = getattr(request.app.state, "node_state_manager", None)
-    role = node_mgr.get_role() if node_mgr else "host"
-    active_peer_url = node_mgr.get_active_peer_url() if node_mgr else None
     config = getattr(request.app.state, "config", None)
 
     tracker = getattr(request.app.state, "startup_tracker", None)
@@ -4805,13 +5019,6 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
     payload.update({
         "version": __version__,
         "desktop_api_version": 1,
-        # Identifies the machine that answered. A client asks its host for this
-        # so the mirrored UI can name whose data it is showing.
-        "node_id": node_mgr.node_id if node_mgr else "",
-        "node_role": role,
-        "active_peer_url": active_peer_url,
-        "host_url": node_mgr.get_host_url() if node_mgr else None,
-        "has_host_session": bool(node_mgr.get_host_session()) if node_mgr else False,
         "auth_required": bool(getattr(config, "pwa_auth_required", False)) if config else False,
         "latest_version": latest_version,
         "update_available": update_available,
@@ -4893,10 +5100,6 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
     session cookie) — see ``_LOOPBACK_ONLY_API`` in ``ciao.web.auth``. Unlike
     ``/api/active-chats`` this returns titles and workspace names, so it must
     not be reachable from the network.
-
-    In client mode the proxy forwards this to the active peer so the tray list
-    matches the chats that ``/api/active-chats`` reports as working — local
-    ``web_projects.json`` can lag the leader after handover.
     """
     limit_raw = request.query_params.get("limit", "10")
     try:
@@ -5014,9 +5217,9 @@ def _setup_finish_origin_allowed(request: Request) -> bool:
 def _interactive_foreground_run() -> bool:
     """True when setup can hand the bootstrap server to launchd.
 
-    The bundled desktop app deliberately starts bootstrap with no terminal
-    attached, but it still owns the one-time onboarding process and must hand
-    the configured server to the LaunchAgent when setup completes.
+    A process started without a terminal attached still owns the one-time
+    onboarding process and must hand the configured server to the LaunchAgent
+    when setup completes.
     """
     try:
         return sys.stderr.isatty() or os.environ.get("CIAO_BOOTSTRAP_LAUNCHD_HANDOFF") == "1"
@@ -5104,9 +5307,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             },
             status_code=400,
         )
-    # Optional: an empty push contact leaves Web Push disabled until the
-    # operator configures one in Settings.
-    push_contact = str(body.get("push_contact", "")).strip()
     try:
         port = int(body.get("port") or config.pwa_port)
     except (TypeError, ValueError):
@@ -5165,7 +5365,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
                 workspace,
                 auth_token=password,
                 auth_required=True,
-                push_contact=push_contact,
                 vault_root=str(body.get("vault_root", "")).strip() or None,
                 vault_mode=vault_mode,
                 workspace_name=workspace_name,
@@ -5214,7 +5413,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if restart:
         restart_fn = getattr(request.app.state, "request_restart", None)
         if callable(restart_fn):
-            restart_fn(0 if handoff else config.restart_exit_code)
+            restart_fn(0 if handoff else RESTART_EXIT_CODE)
 
     return JSONResponse({
         "ok": True,
@@ -5523,11 +5722,55 @@ def _run_root_npm_install(codebase_root: Path) -> subprocess.CompletedProcess:
             stdout="skipped: no root package.json",
             stderr="",
         )
-    return desktop_build.run_step(args, cwd=str(codebase_root), timeout=180)
+    return run_step(args, cwd=str(codebase_root), timeout=180)
+
+
+def _restart_only(config, *, dev_mode: bool) -> bool:
+    """Whether Settings' Restart must only restart, never redeploy from source.
+
+    Redeploy (``admin_deploy``) pulls, pip-installs, and rebuilds a source
+    checkout, so it only makes sense for a developer running from one. A
+    packaged Ciaobot.app never qualifies: its embedded runtime is not a
+    checkout, and ``pip install -e`` cannot replace it even when
+    ``CIAO_APP_REPO`` names one. Linux hosts outside dev mode are
+    administrator-managed and restart only. Everywhere else, including Linux
+    dev mode, anything that is not a deployable checkout (a plain package
+    install) restarts only too, since deploy would stop at "locate checkout".
+    """
+    from ciao.package_version import detect_install_mode
+
+    if detect_install_mode() in ("bundled_app", "installer"):
+        return True
+    if sys.platform.startswith("linux") and not dev_mode:
+        return True
+    if config is None:
+        return False
+    return bool(_checkout_problem(_resolve_codebase_root(config)))
+
+
+_BUNDLED_DEPLOY_REFUSAL = (
+    "This engine runs from the installed Ciaobot.app, not a source checkout, "
+    "so there is nothing to pull or rebuild. Use Restart to restart it; updates "
+    "come from the in-app updater or the one-line installer."
+)
+
+_INSTALLER_DEPLOY_REFUSAL = (
+    "This engine was installed by the Ciaobot engine installer, not run from a "
+    "source checkout, so it cannot be redeployed from source. Re-run the "
+    "installer to update it."
+)
 
 
 async def admin_restart(request: Request) -> JSONResponse:
-    """Restart the installed engine after draining work, without updating code."""
+    """Restart the installed engine after draining work, without updating code.
+
+    ``request_restart`` drains chats, shuts uvicorn down, and returns the
+    restart exit code from ``ciao.main``; ``ciao.cli._run_server`` then
+    re-execs a fresh interpreter in the same process. That works under every
+    supervisor: the bundled app's ``com.ciao.server`` LaunchAgent keeps
+    tracking the same pid (and its ``KeepAlive`` relaunches the job if the
+    exec ever fails), and a foreground ``ciao run`` comes back on its own.
+    """
     from starlette.background import BackgroundTask
 
     restart = getattr(request.app.state, "request_restart", None)
@@ -5535,7 +5778,7 @@ async def admin_restart(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "restart unavailable"}, status_code=503)
 
     async def after_response() -> None:
-        restart(request.app.state.config.restart_exit_code)
+        restart(RESTART_EXIT_CODE)
 
     return JSONResponse(
         {"ok": True, "steps": [{"step": "restart", "ok": True, "output": "Waiting for active chat work to drain"}]},
@@ -5543,8 +5786,85 @@ async def admin_restart(request: Request) -> JSONResponse:
     )
 
 
+# The updater addresses the engine as `localhost`, and it is the only caller
+# allowed to. A page that rebinds DNS to a name resolving to 127.0.0.1 is a
+# loopback *peer* whose Origin matches its own Host, so the origin check alone
+# does not exclude it — and these routes need no session. The Host check
+# closes that: the name in the request is the only part of a rebound request
+# the attacker controls, so it has to be one this engine serves.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _forbidden_host(request: Request) -> JSONResponse | None:
+    """The 403 a request for a host this engine does not serve gets, or None."""
+    host = (request.url.hostname or "").lower()
+    if host in _LOOPBACK_HOSTS:
+        return None
+    return JSONResponse({"error": "forbidden host"}, status_code=403)
+
+
+async def admin_drain(request: Request) -> JSONResponse:
+    """Close admission for new turns (update drain); loopback-only, no session.
+
+    The updater's foreground half calls this before it hands the rest of the
+    transaction to the detached updater job, so a turn started after the drain
+    began cannot extend the downtime it is waiting out. The active chat IDs
+    come back in the same response the engine already publishes, so the caller
+    does not have to make a second request to find out what it is waiting for.
+
+    Refused while a Settings restart is already draining: that restart owns the
+    same flag, and taking it over would let the update's cancel reopen
+    admission underneath a restart that is still waiting for its chats. The
+    update's own repeated calls (it polls by asking again) are idempotent.
+    """
+    refusal = _forbidden_host(request)
+    if refusal is not None:
+        return refusal
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        return JSONResponse({"error": "drain unavailable"}, status_code=503)
+    if pcm.restart_draining and not getattr(request.app.state, "update_drain_active", False):
+        return JSONResponse({"error": "a restart is already draining"}, status_code=409)
+    request.app.state.update_drain_active = True
+    pcm.begin_restart_drain()
+    return JSONResponse({"draining": True, "active_chat_ids": pcm.active_chat_ids()})
+
+
+async def admin_drain_cancel(request: Request) -> JSONResponse:
+    """Reopen admission after an update's drain timed out; no session.
+
+    Without this a drain that never completes would leave the running engine
+    refusing turns forever, which is a far worse outcome than the update it was
+    meant to enable. Only an update's own drain is cancelled: one that is not
+    the engine's to cancel is left exactly as it is and reported as such, so a
+    caller cannot reopen admission under a pending Settings restart.
+    """
+    refusal = _forbidden_host(request)
+    if refusal is not None:
+        return refusal
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        return JSONResponse({"error": "drain unavailable"}, status_code=503)
+    if not getattr(request.app.state, "update_drain_active", False):
+        return JSONResponse({"draining": pcm.restart_draining})
+    request.app.state.update_drain_active = False
+    pcm.cancel_restart_drain()
+    return JSONResponse({"draining": False})
+
+
 async def admin_deploy(request: Request) -> JSONResponse:
     """Snapshot local work, pull latest, rebuild frontend, restart service."""
+    from ciao.package_version import detect_install_mode
+
+    # Refuse before the secrets preflight and the snapshot: a packaged app can
+    # never be redeployed from source, so none of the steps below may run.
+    mode = detect_install_mode()
+    if mode in ("bundled_app", "installer"):
+        return JSONResponse(
+            {"steps": [], "ok": False, "error": _BUNDLED_DEPLOY_REFUSAL if mode == "bundled_app" else _INSTALLER_DEPLOY_REFUSAL},
+            status_code=400,
+        )
+
     mgr = getattr(request.app.state, "local_session_manager", None)
     confirm_warnings = False
     try:
@@ -5611,7 +5931,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # 2. pip install
     import sys
     result = await asyncio.to_thread(
-        desktop_build.run_step, [sys.executable, "-m", "pip", "install", "-e", "."],
+        run_step, [sys.executable, "-m", "pip", "install", "-e", "."],
         cwd=str(codebase_root), timeout=120,
     )
     steps.append(_record_step("pip install", result))
@@ -5639,7 +5959,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # 3. npm build
     web_dir = codebase_root / "web"
     result = await asyncio.to_thread(
-        desktop_build.run_step, ["npm", "run", "build"],
+        run_step, ["npm", "run", "build"],
         cwd=str(web_dir), timeout=120,
     )
     steps.append(_record_step("npm build", result))
@@ -5648,35 +5968,6 @@ async def admin_deploy(request: Request) -> JSONResponse:
             {"steps": steps, "ok": False, "error": f"npm build failed: {steps[-1]['output']}"},
             status_code=500,
         )
-
-    # 3b. Desktop shell. Changes under desktop/ only reach the window through a
-    # rebuilt bundle, so dev instances rebuild it here and swap it in during the
-    # restart below. Released installs skip this: no checkout, no cargo. The
-    # rebuild is minutes long, hence the staleness check rather than doing it on
-    # every restart.
-
-    relaunch_desktop = False
-    # The desktop shell is a macOS Tauri bundle: attempting its rebuild on
-    # Linux fails after git/pip/npm have already mutated the install, and the
-    # resulting 500 aborts before the restart. Linux dev deploys skip it.
-    if getattr(config, "dev_mode", False) and sys.platform == "darwin":
-        needed, reason = await asyncio.to_thread(desktop_build.needs_rebuild, codebase_root)
-        if not needed:
-            steps.append({"step": "desktop app", "ok": True, "output": f"skipped: {reason}"})
-        else:
-            steps.append({"step": "desktop app", "ok": True, "output": f"rebuilding: {reason}"})
-            desktop_steps, relaunch_desktop = await asyncio.to_thread(
-                desktop_build.build_and_stage, codebase_root, runner=desktop_build.run_step,
-            )
-            steps.extend(desktop_steps)
-            failed = next((s for s in desktop_steps if not s["ok"]), None)
-            if failed is not None:
-                return JSONResponse(
-                    {"steps": steps, "ok": False, "error": f"{failed['step']} failed: {failed['output']}"},
-                    status_code=500,
-                )
-    elif getattr(config, "dev_mode", False):
-        steps.append({"step": "desktop app", "ok": True, "output": "skipped: the desktop shell builds on macOS only"})
 
     # 4. Signal restart. Must go through app.state.request_restart (which sets
     # the restart flag and calls server.shutdown()). Raising RestartRequested
@@ -5689,36 +5980,14 @@ async def admin_deploy(request: Request) -> JSONResponse:
 
     async def _do_restart():
         await asyncio.sleep(2)
-        # The desktop swap runs before the engine restart, not after: the
-        # relaunched app comes up against a live engine and then rides the
-        # normal restart-drain path, instead of racing launchd for the runtime
-        # directory while the engine is down.
-        if relaunch_desktop:
-            try:
-                installed = await asyncio.to_thread(
-                    desktop_build.install_staged_and_relaunch, runner=desktop_build.run_step,
-                )
-                for step in installed:
-                    if step["ok"]:
-                        logger.info("deploy: %s: %s", step["step"], step["output"])
-                    else:
-                        logger.error("deploy: %s: %s", step["step"], step["output"])
-            except Exception:
-                # A failed relaunch must not strand the engine on stale code;
-                # the operator can reopen the app by hand.
-                logger.exception("deploy: desktop install and relaunch failed")
         fn = getattr(request.app.state, "request_restart", None)
         if callable(fn):
-            fn(config.restart_exit_code)
+            fn(RESTART_EXIT_CODE)
         else:
-            raise RestartRequested(config.restart_exit_code)
+            raise RestartRequested(RESTART_EXIT_CODE)
 
     asyncio.create_task(_do_restart())
-    steps.append({
-        "step": "restart",
-        "ok": True,
-        "output": "swapping in the rebuilt desktop app first" if relaunch_desktop else "",
-    })
+    steps.append({"step": "restart", "ok": True, "output": ""})
 
     return JSONResponse({"steps": steps, "ok": True})
 
@@ -5788,11 +6057,10 @@ async def skill_import(request: Request) -> JSONResponse:
     config = request.app.state.config
     # Reject oversized bodies before multipart parsing. `request.form()` fully
     # consumes and spools the multipart file, so a very large upload would
-    # exhaust temporary disk (and, in client mode, the proxy buffers the body in
-    # memory) before the per-file cap below is ever applied. A missing or
-    # malformed Content-Length (chunked/HTTP2 clients) is rejected too: without
-    # it there is no cheap pre-parse bound, and a legitimate zip upload always
-    # carries the header.
+    # exhaust temporary disk before the per-file cap below is ever applied. A
+    # missing or malformed Content-Length (chunked/HTTP2 clients) is rejected
+    # too: without it there is no cheap pre-parse bound, and a legitimate zip
+    # upload always carries the header.
     max_zip_bytes = 10 * 1024 * 1024
     content_length = request.headers.get("content-length")
     try:
@@ -5961,7 +6229,7 @@ async def admin_status(request: Request) -> JSONResponse:
     return JSONResponse({
         "cost": state.bot_state.cost,
         "branch": branch,
-        "models": config.claude_models,
+        "models": list(CLAUDE_MODELS),
         "default_model": config.claude_default_model,
         "default_mode": config.claude_mode,
     })
@@ -6028,7 +6296,10 @@ async def local_status(request: Request) -> JSONResponse:
             {"error": "local session manager not initialised"}, status_code=500
         )
     status = dict(mgr.status())
-    status["restart_only"] = sys.platform.startswith("linux") and not status.get("dev_mode", False)
+    status["restart_only"] = _restart_only(
+        getattr(request.app.state, "config", None),
+        dev_mode=bool(status.get("dev_mode", False)),
+    )
     return JSONResponse(status)
 
 
@@ -6365,11 +6636,10 @@ async def proposals_history(request: Request) -> JSONResponse:
     Reads the same per-workspace decision sidecar :func:`record_dismissal`
     and :func:`record_promotion` write (``Memory-Proposals.dismissed.jsonl``),
     which now carries ``via`` (who decided: the operator through the PWA, the
-    curation agent, or the archive-time auto-promoter), a ``destination``, and
+    curation agent, or a prior automated promotion), a ``destination``, and
     an ``outcome`` qualifier alongside the original ``kind``/``text``. This is
     the read side of the review page's History tab: what was accepted or
-    dismissed, by whom, and what the overnight pipeline added or skipped on
-    its own.
+    dismissed, by whom, and what the memory pass recorded on its own.
     """
     from ciao.memory_proposals import history_row_id, read_decisions
 
@@ -6993,6 +7263,25 @@ async def proposals_batch(request: Request) -> JSONResponse:
             # fact whose region was over cap, silently and in bulk.
             promoted: dict[str, proposal_service.AcceptOutcome] = {}
             keep_lines: set[int] = set()
+            if action == "dismiss":
+                # Same rule as the single-row route, and for the same reason: the
+                # row is the proposal, so the id-keyed refusal has to be on record
+                # before the bullet goes. A refusal that could not be written
+                # aborts the batch whole rather than half-resolving it.
+                for row in entry["rows"]:
+                    if row.get("kind") != "category":
+                        continue
+                    refusal = await asyncio.to_thread(
+                        proposal_service.decline_category_row, config, row
+                    )
+                    if refusal:
+                        return JSONResponse(
+                            {
+                                "error": refusal,
+                                "ids": sorted({ctx["row"]["id"] for ctx in resolved}),
+                            },
+                            status_code=409,
+                        )
             if action == "accept":
                 # The claim above only covers this process. Another resolver
                 # (the CLI, the undo path, a second server) may have taken a
@@ -7047,9 +7336,19 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         # sequentially; write-then-dismiss still holds per row.
                         promotion = await proposal_service._accept_project_row(config, row)
                     elif accept.action == "write_people_note":
-                        promotion = proposal_service._accept_people_row(config, row)
+                        promotion = await proposal_service._accept_people_row(config, row)
                     elif accept.action == "append_learnings":
                         promotion = proposal_service._accept_learnings_row(config, row)
+                    elif accept.action == "add_category":
+                        # A registry the validator refuses (a folder another
+                        # category already claims) is the owner's problem to fix,
+                        # not a transient failure, so it is reported as a
+                        # refusal with the reason rather than retried. The row
+                        # stays queued, like every other failure in this loop.
+                        try:
+                            promotion = proposal_service._accept_category_row(config, row)
+                        except entity_types.EntityTypeFileError as exc:
+                            promotion = proposal_service.AcceptOutcome(ok=False, error=str(exc))
                     else:
                         # route_manually: nothing to perform, and the row stays.
                         promotion = proposal_service.AcceptOutcome(
@@ -7340,6 +7639,15 @@ async def proposal_action(request: Request) -> JSONResponse:
         )
     row = ctx["row"]
 
+    if action == "dismiss" and row.get("kind") == "category":
+        # Recorded BEFORE the bullet is removed, because the row IS the proposal:
+        # once it is gone the vault still has the cluster, and the sidecar flag is
+        # the only thing that keeps the next pass from filing it again. A refusal
+        # that could not be written keeps its row.
+        decline_error = proposal_service.decline_category_row(config, row)
+        if decline_error:
+            return JSONResponse({"error": decline_error, "id": pid}, status_code=409)
+
     if ctx.get("file"):
         # A whole file, not a bullet in a queue: the line-removal path below
         # would read it and delete line -1 of it.
@@ -7503,8 +7811,8 @@ async def proposal_action(request: Request) -> JSONResponse:
             elif accept.action == "edit_region":
                 # `?reconcile=1` re-runs the write-time reconcile against the
                 # region's current entries before writing, which is how a fact
-                # the archive-time pass deferred (timed-out call, stale index)
-                # gets resolved rather than appended beside what it supersedes.
+                # a previous pass deferred (timed-out call, stale index) gets
+                # resolved rather than appended beside what it supersedes.
                 # Opt-in: it is a model call, and the plain accept is one
                 # synchronous write.
                 reconcile = (
@@ -7542,7 +7850,7 @@ async def proposal_action(request: Request) -> JSONResponse:
                         status_code=409,
                     )
             elif accept.action == "write_people_note":
-                promoted = proposal_service._accept_people_row(config, promote_row)
+                promoted = await proposal_service._accept_people_row(config, promote_row)
                 if not promoted.ok:
                     return JSONResponse(
                         {"error": promoted.error or "could not write the note", "id": pid},
@@ -7553,6 +7861,24 @@ async def proposal_action(request: Request) -> JSONResponse:
                 if not promoted.ok:
                     return JSONResponse(
                         {"error": promoted.error or "could not append", "id": pid},
+                        status_code=409,
+                    )
+            elif accept.action == "add_category":
+                # A registry the validator refuses — a folder another category
+                # already claims, a malformed id — is a 400 and not a 409: the
+                # proposal is sound, the category it would add is not, and the
+                # owner's next move is to edit the id or folder, not to retry.
+                # Nothing has been written, so the bullet stays.
+                try:
+                    promoted = proposal_service._accept_category_row(config, promote_row)
+                except entity_types.EntityTypeFileError as exc:
+                    return JSONResponse({"error": str(exc), "id": pid}, status_code=400)
+                if not promoted.ok:
+                    return JSONResponse(
+                        {
+                            "error": promoted.error or "could not add the category",
+                            "id": pid,
+                        },
                         status_code=409,
                     )
             else:
@@ -7774,3 +8100,40 @@ async def dismiss_housekeeping_action(request: Request) -> JSONResponse:
             "actions": [action.as_dict() for action in actions],
         }
     )
+
+
+async def addresses_endpoint(request: Request) -> JSONResponse:
+    """Where other devices can open this engine, trusted HTTPS first.
+
+    Session-protected: it enumerates LAN interfaces. URLs never carry a
+    password or setup token; every device signs in on its own.
+    """
+    from ciao.network_addresses import (
+        is_loopback_url,
+        normalize_trusted_url,
+        server_addresses,
+    )
+
+    config = request.app.state.config
+    port = int(getattr(config, "pwa_port", 8443) or 8443)
+    app_settings = getattr(request.app.state, "app_settings", None)
+    stored = getattr(getattr(app_settings, "settings", None), "trusted_url", "") or ""
+    # Re-validate what was stored: app_settings.json can be hand-edited, and a
+    # token smuggled into the stored value must never reach the QR code. A
+    # value the setter would have refused is treated as no trusted URL at all.
+    try:
+        trusted = normalize_trusted_url(stored)
+    except ValueError:
+        trusted = ""
+    entries: list[dict[str, object]] = []
+    if trusted:
+        entries.append({"url": trusted, "kind": "trusted", "secure": True, "loopback": False})
+    urls = await asyncio.to_thread(server_addresses, port)
+    for url in urls:
+        if is_loopback_url(url):
+            continue
+        entries.append({"url": url, "kind": "lan", "secure": False, "loopback": False})
+    for url in urls:
+        if is_loopback_url(url):
+            entries.append({"url": url, "kind": "loopback", "secure": False, "loopback": True})
+    return JSONResponse({"port": port, "trusted_url": trusted or None, "addresses": entries})

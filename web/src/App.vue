@@ -1,39 +1,5 @@
 <template>
   <div id="ciao-app" :data-workspace-color="workspaceColor">
-    <div
-      v-if="clientMode && !onDevicePage"
-      class="client-mode-banner"
-      :class="{ 'is-offline': hostUnreachable }"
-      :role="hostUnreachable ? 'alert' : 'status'"
-    >
-      <!-- The host can drop while no chat is open, and the per-chat card that
-           announces it lives inside ChatPanel. This banner is the only piece of
-           chrome present on every screen, so it carries the state too. -->
-      <span v-if="hostUnreachable">
-        <span class="client-mode-banner-spinner" aria-hidden="true"></span>
-        Can’t reach <code>{{ clientHostLabel }}</code> — reconnecting…
-      </span>
-      <span v-else>
-        Client mode — everything below is
-        <code>{{ clientHostLabel }}</code>
-        <template v-if="!clientHasSession"> · host password needed</template>
-      </span>
-      <div class="client-mode-banner-actions">
-        <button
-          type="button"
-          class="client-mode-banner-link"
-          :disabled="switchingToHost"
-          @click="switchBackToHost"
-        >
-          {{ switchingToHost ? 'Switching…' : 'Switch to host' }}
-        </button>
-        <!-- The one screen that is about this computer, not the host. -->
-        <router-link
-          class="client-mode-banner-link"
-          to="/device"
-        >This device</router-link>
-      </div>
-    </div>
     <Transition name="fade">
       <StartupView
         v-if="showStartup"
@@ -47,6 +13,14 @@
       v-if="projectStore.serverRestarting"
       :message="projectStore.serverRestartMessage"
     />
+    <EngineOfflineView
+      v-if="showEngineOffline"
+      :state="engineState === 'updating' ? 'updating' : 'unreachable'"
+      :loopback="canUseDeviceControls"
+      :host="engineHost"
+      :retrying="engineRetrying"
+      @retry="retryEngine"
+    />
     <router-view />
     <InAppToast />
     <ConfirmDialog />
@@ -57,16 +31,16 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
 import ConfirmDialog from './components/ConfirmDialog.vue'
-import { errorMessage } from './lib/errorMessage'
+import EngineOfflineView from './components/EngineOfflineView.vue'
 import InAppToast from './components/InAppToast.vue'
 import NewChatPicker from './components/NewChatPicker.vue'
 import PromptDialog from './components/PromptDialog.vue'
 import RestartNotice from './components/RestartNotice.vue'
 import StartupView from './components/StartupView.vue'
-import { askConfirm } from './lib/confirm'
+import { createEngineMonitor, type EngineState } from './lib/engineStatus'
 import { normalizeWorkspaceColor } from './lib/workspaceColors'
+import { isLoopbackPage } from './lib/loopback'
 import { useProjectStore } from './stores/projects'
 
 interface Phase {
@@ -78,91 +52,58 @@ interface Phase {
 }
 
 const projectStore = useProjectStore()
-const route = useRoute()
 const phases = ref<Phase[]>([])
 const overallReady = ref(false)
 const serverVersion = ref('')
 const skipped = ref(false)
 const startupDone = ref(false)
-const clientMode = ref(false)
-const clientHostUrl = ref('')
-const clientHasSession = ref(false)
-const switchingToHost = ref(false)
+// The engine is either on this machine (a loopback origin) or on another one
+// the user reached over the network; the offline curtain names one or the other.
+const canUseDeviceControls = isLoopbackPage()
 
-const showStartup = computed(() => !startupDone.value && !skipped.value)
-// The device panel is about this machine, so the "you are seeing the host"
-// banner would contradict it.
-const onDevicePage = computed(() => route.path.startsWith('/device'))
+// An engine that stops answering (crash, `ciao service stop`, reboot) used to
+// leave a loaded tab with no honest state: API calls failed one at a time and
+// the WebSocket backed off silently. The monitor reports `unreachable` only
+// after two consecutive failed probes, so a single blip never flashes the
+// screen, and an announced restart reads as `updating` rather than an outage.
+const engineState = ref<EngineState>('ready')
+const engineRetrying = ref(false)
+const engineHost = window.location.host
+const engineMonitor = createEngineMonitor({
+  isUpdating: () => projectStore.serverRestarting,
+  onChange: (s) => {
+    const prev = engineState.value
+    engineState.value = s
+    const wasDown = prev === 'unreachable' || prev === 'updating'
+    if (wasDown && s === 'booting') { startupDone.value = false; skipped.value = false }   // show boot progress again
+    if (wasDown && (s === 'ready' || s === 'booting')) projectStore.reconnectNow()
+  },
+})
+const engineUnreachable = computed(() => engineState.value === 'unreachable' || engineState.value === 'updating')
+
+// A cold launch with the engine down never gets a startup answer, so the boot
+// view would have nothing to show: the curtain replaces it whenever the engine
+// is unreachable (it then has to boot out loud before we trust it), and the two
+// are never on screen together.
+const showStartup = computed(() => !startupDone.value && !skipped.value && !engineUnreachable.value)
+// Over the app, never replacing it: the route, its scroll position and its
+// in-memory state have to survive the outage.
+const showEngineOffline = computed(() => engineUnreachable.value)
+async function retryEngine() {
+  engineRetrying.value = true
+  try { await engineMonitor.retry() } finally { engineRetrying.value = false }
+}
 const workspaceColor = computed(() => {
   const active = projectStore.activeWorkspace
   const ws = projectStore.workspaces.find((item) => item.name === active)
   return normalizeWorkspaceColor(ws?.color)
 })
-// True only in client mode: the local node proxy reports it cannot reach the
-// host (see the `host_unreachable` frame handling in the projects store).
-//
-// A mounted ChatPanel renders its own `host-connection-card` from the same
-// flag, with a richer recovery action, so the banner stands down there rather
-// than announcing the same outage twice -- to the eye and to a screen reader.
-// Keyed on the panel actually being on screen rather than on the URL: /chat
-// with no id and /chat/:id/subagent/:id are both chat paths that mount no
-// panel, and those screens need the banner like any other.
-const hostUnreachable = computed(
-  () => projectStore.hostConnectionUnavailable && projectStore.chatPanelsMounted === 0,
-)
-const clientHostLabel = computed(() => {
-  const raw = clientHostUrl.value
-  if (!raw) return 'remote host'
-  try {
-    return new URL(raw).host || raw
-  } catch {
-    return raw
-  }
-})
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null
-let nodePollTimer: ReturnType<typeof setInterval> | null = null
-
-async function switchBackToHost() {
-  if (switchingToHost.value) return
-  const confirmed = await askConfirm(
-    'Stop client mode and become host on this machine? Changes that exist only on the other host may not be synced.',
-    {
-      title: 'Become host on this device?',
-      confirmLabel: 'Disconnect and become host',
-    },
-  )
-  if (!confirmed) return
-  switchingToHost.value = true
-  try {
-    const res = await fetch('/api/node/handover', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({
-        target_node_url: clientHostUrl.value,
-        force: true,
-      }),
-    })
-    if (!res.ok) {
-      const payload = await res.json().catch(() => ({}))
-      throw new Error((payload as { error?: string }).error || `HTTP ${res.status}`)
-    }
-    window.location.assign('/')
-  } catch (e) {
-    switchingToHost.value = false
-    // Not `window.alert`: the desktop webview shows no native dialog, so this
-    // failure was invisible there. See lib/prompt for the same constraint.
-    projectStore.pushErrorToast(
-      'Could not switch back to host',
-      errorMessage(e, 'The request failed.'),
-    )
-  }
-}
 
 async function pollStartup() {
   try {
-    const res = await fetch('/api/startup-status')
+    const res = await fetch('/api/startup-status', { redirect: 'manual' })
     if (!res.ok) return
     const data = await res.json()
     if (data.version && serverVersion.value !== data.version) {
@@ -179,26 +120,9 @@ async function pollStartup() {
     if (overallReady.value) {
       startupDone.value = true
     }
-    refreshClientBanner(data)
   } catch {
-    // ignore fetch errors during startup
-  }
-}
-
-function refreshClientBanner(data: Record<string, unknown>) {
-  const role = String(data.node_role || '')
-  clientMode.value = role === 'client' || role === 'standby'
-  clientHostUrl.value = String(data.host_url || data.active_peer_url || '')
-  clientHasSession.value = Boolean(data.has_host_session)
-}
-
-async function pollClientBanner() {
-  try {
-    const res = await fetch('/api/startup-status')
-    if (!res.ok) return
-    refreshClientBanner(await res.json())
-  } catch {
-    /* ignore */
+    // A failed probe is no news: the boot curtain keeps showing and the next
+    // tick re-reads it.
   }
 }
 
@@ -219,86 +143,21 @@ function stopPolling() {
 
 onMounted(() => {
   pollStartup().then(scheduleNextPoll)
-  void pollClientBanner()
-  nodePollTimer = setInterval(() => { void pollClientBanner() }, 5000)
+  engineMonitor.start()
 })
 
 onUnmounted(() => {
   stopPolling()
-  if (nodePollTimer) {
-    clearInterval(nodePollTimer)
-    nodePollTimer = null
-  }
+  engineMonitor.stop()
 })
 
 watch(showStartup, (show) => {
   if (!show) stopPolling()
+  else if (!pollTimer) void pollStartup().then(scheduleNextPoll)
 })
 </script>
 
 <style>
-.client-mode-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 14px;
-  background: color-mix(in srgb, var(--warn, #ff9800) 18%, var(--bg2));
-  border-bottom: 1px solid var(--border);
-  color: var(--fg);
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 12px;
-  line-height: 1.4;
-}
-.client-mode-banner.is-offline {
-  background: color-mix(in srgb, var(--error) 22%, var(--bg2));
-}
-.client-mode-banner-spinner {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  margin-right: var(--space-2);
-  vertical-align: baseline;
-  border: 2px solid color-mix(in srgb, var(--fg) 30%, transparent);
-  border-top-color: var(--fg);
-  border-radius: var(--radius-pill);
-  animation: client-mode-banner-spin 0.9s linear infinite;
-}
-@keyframes client-mode-banner-spin {
-  to { transform: rotate(360deg); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .client-mode-banner-spinner { animation: none; }
-}
-.client-mode-banner code {
-  color: var(--accent, #ff4d6d);
-  font-size: inherit;
-}
-.client-mode-banner-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-}
-.client-mode-banner-link {
-  color: var(--accent, #ff4d6d);
-  text-decoration: none;
-  font-weight: 600;
-  white-space: nowrap;
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
-  cursor: pointer;
-}
-.client-mode-banner-link:hover:not(:disabled) {
-  text-decoration: underline;
-}
-.client-mode-banner-link:disabled {
-  opacity: 0.6;
-  cursor: wait;
-}
-
 :root {
   /* Font scale multiplier. The reference is the original (pre-rescale) UI;
      the default 1.2 corresponds to "100%" in the Settings display, so the
@@ -313,11 +172,16 @@ watch(showStartup, (show) => {
   /* Text */
   --fg: #e8e8f0;
   --fg2: #b4b4c4;       /* lifted from #a0a0b0 for legibility on small screens */
-  --fg3: #7a7a90;
+  --fg3: #8f90a8;
   /* Accent */
   --accent: #ff4d6d;    /* warmer pink for contrast on dark */
   --accent-strong: #ff2e54;
   --accent2: #6a47b8;
+  /* Label colour on a filled accent surface (.btn-primary, active pills,
+     accent badges). The dark-theme accents are bright, so white on them sits
+     at 2-3.6:1; the canvas indigo clears WCAG AA (4.5:1) on every dark accent
+     and its hover shade. */
+  --on-accent: #1a1a2e;
   /* Edges */
   --border: #2e3258;
   --border-strong: #3a3f70;
@@ -343,6 +207,15 @@ watch(showStartup, (show) => {
   --space-4: 16px;
   --space-5: 24px;
   --space-6: 32px;
+  /* Page grid shared by every pane (header, body, rail, composer):
+     content is capped at --page-max, centred, with --page-gutter inside it,
+     and an optional --page-rail column on the right. --page-inset is the
+     resulting horizontal padding for a full-width row (e.g. a header) so its
+     edges land on the content's edges. */
+  --page-max: 1180px;
+  --page-gutter: 32px;
+  --page-rail: 280px;
+  --page-inset: max(var(--page-gutter), calc((100% - var(--page-max)) / 2 + var(--page-gutter)));
   /* Safe area passthrough. In browser mode we zero out --safe-bottom because
      the browser's own bottom UI (Safari toolbar) already occupies that zone;
      adding our own safe-inset on top creates dead space below the input bar.
@@ -373,11 +246,12 @@ watch(showStartup, (show) => {
   /* Text */
   --fg: #1a1a2e;        /* dark slate text matching dark bg */
   --fg2: #5f607d;       /* medium-dark slate */
-  --fg3: #8e90a8;       /* lighter slate */
+  --fg3: #66687f;       /* readable secondary metadata */
   /* Accent */
   --accent: #d81b60;    /* crisp pink/crimson for white bg */
   --accent-strong: #b00d46;
   --accent2: #512da8;   /* deep violet secondary */
+  --on-accent: #ffffff; /* light accents are deep enough for white labels */
   /* Edges */
   --border: #d2d4e3;    /* light grey border */
   --border-strong: #b6b8cf;
@@ -391,14 +265,17 @@ watch(showStartup, (show) => {
    Applied on #ciao-app for the active workspace, and on individual
    controls (home new-chat buttons, workspace pills, chat badges) that
    belong to another workspace. Pink is explicit so a pink-target control
-   inside a non-pink active workspace does not inherit the parent accent. */
+   inside a non-pink active workspace does not inherit the parent accent.
+   Every pair keeps --on-accent at WCAG AA on both --accent and --accent-strong:
+   dark presets hover to a shade still >= 4.5:1 against the indigo label, light
+   presets are deep enough for white labels (and for accent text on white). */
 [data-workspace-color="pink"] {
   --accent: #ff4d6d;
   --accent-strong: #ff2e54;
 }
 [data-workspace-color="cyan"] {
   --accent: #38bdf8;
-  --accent-strong: #0284c7;
+  --accent-strong: #0ea5e9;
 }
 [data-workspace-color="amber"] {
   --accent: #fb923c;
@@ -410,23 +287,23 @@ watch(showStartup, (show) => {
 }
 [data-workspace-color="violet"] {
   --accent: #a78bfa;
-  --accent-strong: #7c3aed;
+  --accent-strong: #9670f7;
 }
 :root.theme-light [data-workspace-color="pink"] {
   --accent: #d81b60;
   --accent-strong: #b00d46;
 }
 :root.theme-light [data-workspace-color="cyan"] {
-  --accent: #0284c7;
-  --accent-strong: #0369a1;
+  --accent: #0369a1;
+  --accent-strong: #075985;
 }
 :root.theme-light [data-workspace-color="amber"] {
-  --accent: #ea580c;
-  --accent-strong: #c2410c;
+  --accent: #c2410c;
+  --accent-strong: #9a3412;
 }
 :root.theme-light [data-workspace-color="emerald"] {
-  --accent: #059669;
-  --accent-strong: #047857;
+  --accent: #047857;
+  --accent-strong: #065f46;
 }
 :root.theme-light [data-workspace-color="violet"] {
   --accent: #7c3aed;
@@ -451,18 +328,30 @@ html.keyboard-open {
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-/* Hide scrollbars globally but keep scroll behavior. Applies to every
-   scrollable element in the PWA (chat transcript, sidebar, settings,
-   modals, etc.). Chrome/Safari/Edge via ::-webkit-scrollbar, Firefox via
-   scrollbar-width, legacy Edge via -ms-overflow-style. */
+/* Keep scroll affordances visible. Quiet by default, stronger at the edges of
+   bounded data regions, but never mistaken for disabled content. */
 * {
-  scrollbar-width: none;      /* Firefox */
-  -ms-overflow-style: none;   /* IE / legacy Edge */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+  -ms-overflow-style: scrollbar;
 }
 *::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-  display: none;              /* WebKit (Chrome, Safari, new Edge) */
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 2px solid transparent;
+  border-radius: var(--radius-pill);
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--fg3);
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 html, body {
@@ -481,24 +370,6 @@ body {
   /* Keep browser zoom available for accessibility. Individual controls use
      touch-action: manipulation to avoid delayed/double activation. */
   touch-action: auto;
-}
-
-/* Subtle CRT-style grain. Fixed, behind all content, no pointer events.
-   Inline SVG noise tile keeps it zero-asset. */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  opacity: 0.025;
-  mix-blend-mode: screen;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.6 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
-  background-size: 160px 160px;
-}
-:root.theme-light body::before {
-  mix-blend-mode: multiply;
-  opacity: 0.015;
 }
 
 #ciao-app {
@@ -564,7 +435,11 @@ a {
   text-decoration-thickness: 1px;
   transition: color 120ms var(--ease);
 }
-a:hover {
+/* Anchors styled as buttons keep their button text colour on hover. A bare
+   a:hover (0,1,1) outranks .btn-primary (0,1,0), so it used to repaint the
+   label accent-strong — the same colour .btn-primary:hover paints the
+   background — and the text vanished. */
+a:not(.btn-small, .btn-primary, .btn-chip, .btn-icon):hover {
   color: var(--accent-strong);
 }
 
@@ -597,11 +472,12 @@ a:hover {
   border: none;
   border-radius: var(--radius);
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
   cursor: pointer;
   font-family: var(--font);
   font-size: calc(14px * var(--font-scale));
   font-weight: 600;
+  text-decoration: none;
   transition: background 120ms var(--ease), transform 120ms var(--ease);
 }
 
@@ -613,6 +489,86 @@ a:hover {
    the border-box for taps; negative margin keeps flex/grid spacing tight.
    ::before paints the visible hover surface at 30px so highlights don't bleed
    into the expanded hit target (matches sidebar nav-item icons). */
+/* ── Page grid ─────────────────────────────────────────────────────────
+   One layout for every pane body: a main column and an optional right rail,
+   capped at --page-max and centred, so switching pages never moves the
+   content's edges. Collapses to one column when the pane (not the window)
+   is narrow; chat-pane is the container ChatLayout declares on .chat-main. */
+.page-grid {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto;
+  padding-inline: var(--page-gutter);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--page-rail);
+  align-items: start;
+  gap: 48px;
+}
+.page-grid--single { grid-template-columns: minmax(0, 1fr); }
+.page-main { min-width: 0; }
+.page-rail {
+  position: sticky;
+  /* 0, not a gap: inside a padded scroll body a non-zero sticky offset pushes
+     the rail below the main column's first heading before any scrolling. */
+  top: 0;
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+@container chat-pane (max-width: 940px) {
+  .page-grid { grid-template-columns: minmax(0, 1fr); gap: var(--space-6); }
+  .page-rail { position: static; }
+}
+@media (max-width: 700px) {
+  :root { --page-gutter: 16px; }
+}
+
+/* Rail vocabulary: a small heading, hairline key/value rows, hairline link
+   rows, and a muted note. Shared so every page's rail reads the same. */
+.rail-title {
+  margin: 0 0 10px;
+  color: var(--fg);
+  font-size: calc(15px * var(--font-scale));
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.rail-title + .rail-kvs, .rail-title + .rail-list { margin-top: 0; }
+.rail-section + .rail-section { margin-top: var(--space-5); }
+.rail-label { margin: 0 0 4px; color: var(--fg3); font-size: var(--text-sm); }
+.rail-note { margin: 8px 0 0; color: var(--fg3); font-size: var(--text-sm); line-height: 1.45; }
+.rail-kvs, .rail-list { border-top: 1px solid var(--border); }
+.rail-kv {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 36px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg2);
+}
+.rail-kv strong { color: var(--fg); font-weight: 600; text-align: right; }
+.rail-kv .rail-attention { color: var(--warning); }
+.rail-item {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: var(--touch);
+  justify-content: center;
+  padding: 6px 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.rail-item:hover { color: var(--accent); }
+.rail-item small { color: var(--fg3); font-size: var(--text-xs); }
+.rail-item .rail-attention { color: var(--warning); }
+
 .touch-hit {
   box-sizing: content-box;
   --touch-hit-visual: 30px;
@@ -817,7 +773,7 @@ input:focus, textarea:focus, select:focus {
   line-height: 1.3;
   letter-spacing: 0.3px;
 }
-.badge--accent { background: var(--accent); color: #fff; }
+.badge--accent { background: var(--accent); color: var(--on-accent); }
 .badge--accent2 { background: var(--accent2); color: var(--fg); }
 .badge--muted {
   background: var(--bg3);
@@ -913,7 +869,7 @@ input:focus, textarea:focus, select:focus {
   color: var(--error) !important;
 }
 
-@media (max-width: 768px) {
+@media (pointer: coarse) {
   .btn-small,
   .btn-primary,
   .btn-chip,

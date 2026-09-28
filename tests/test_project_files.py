@@ -408,6 +408,7 @@ def test_upload_route_round_trip(tmp_path: Path) -> None:
     body = resp.json()
     saved_paths = {e["path"] for e in body["saved"]}
     assert "a.md" in saved_paths
+    assert "absolute_path" not in resp.text
     assert any(e["filename"] == "b.exe" for e in body["errors"])
     assert (folder / "a.md").read_bytes() == b"alpha"
 
@@ -432,12 +433,31 @@ def test_chat_document_upload_uses_mocked_converter_and_removes_temp(
         files={"file": ("report.docx", b"source", "application/octet-stream")},
     )
     assert response.status_code == 200
-    entry = response.json()["saved"][0]
-    assert entry["original_path"] is None
-    assert entry["markdown_path"].endswith("/report.md")
+    body = response.json()
+    entry = body["file_refs"][0]
+    assert entry["ref"].startswith("drop_")
+    assert "original_path" not in body["file_refs"][0]
+    assert "markdown_path" not in body["file_refs"][0]
+    assert str(tmp_path) not in response.text
     assert (folder / "report.md").read_text(encoding="utf-8") == "# Converted\n"
     assert not seen[0].exists()
     assert not (folder / "report.docx").exists()
+
+
+def test_chat_attachment_response_is_opaque_by_default(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = next(iter(pcm.list_projects()))
+    chat = pcm.create_chat(project.project_id, title="Opaque")
+    response = _make_client(pcm, pcm._config).post(
+        f"/api/chats/{chat.chat_id}/attachments",
+        files={"file": ("notes.txt", b"hello", "text/plain")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["file_refs"][0]["ref"].startswith("drop_")
+    assert "absolute_path" not in response.text
+    assert "original_path" not in response.text
+    assert "markdown_path" not in response.text
 
 
 def test_chat_document_upload_rejects_path_components(
@@ -500,8 +520,10 @@ def test_native_document_drop_uses_chat_project_and_excludes_converted_source(
         json={"grant_id": grant_id, "project_id": second_project.project_id, "chat_id": chat.chat_id},
     ).json()
 
-    assert body["paths"] == []
-    assert body["attachments"][0]["markdown_path"].startswith(str(first))
+    assert body["file_refs"]
+    assert body["file_refs"][0]["ref"].startswith("drop_")
+    assert "paths" not in body
+    assert "attachments" not in body
     assert (first / "report.md").exists()
     assert not (second / "report.md").exists()
 
@@ -539,7 +561,11 @@ def test_native_desktop_drop_returns_full_host_path_and_image_ref(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["paths"] == [str(dropped_file.resolve())]
+    assert body["file_refs"][0]["name"] == dropped_file.name
+    assert body["file_refs"][0]["ref"].startswith("drop_")
+    assert "paths" not in body
+    assert "attachments" not in body
+    assert str(dropped_file.resolve()) not in response.text
     assert len(body["image_refs"]) == 1
     assert body["errors"] == []
     assert client.post(
@@ -638,6 +664,36 @@ def test_native_desktop_drop_keeps_generic_error_for_non_screenshot(tmp_path: Pa
     assert "Save the file to a folder first" in error["error"]
 
 
+def test_native_desktop_drop_does_not_echo_generic_filesystem_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unknown OS errors are bounded user copy, never a raw absolute errno."""
+    pcm = _make_manager(tmp_path)
+    config = pcm._config
+    project = next(iter(pcm.list_projects()))
+    chat = pcm.create_chat(project.project_id, title="Drop test")
+    dropped_image = tmp_path / "private.png"
+    dropped_image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    grant_id = _write_desktop_drop_grant(config, [dropped_image.resolve()])
+
+    def refuse_with_path(path: Path, _max_bytes: int) -> bytes:
+        raise OSError(f"open {path}: broken pipe")
+
+    monkeypatch.setattr(
+        "ciao.web.routes_api._read_native_file_limited", refuse_with_path
+    )
+    response = _make_client(pcm, config).post(
+        "/api/desktop-drop",
+        json={"grant_id": grant_id, "project_id": project.project_id, "chat_id": chat.chat_id},
+    )
+
+    assert response.status_code == 200
+    error = response.json()["errors"][0]["error"]
+    assert str(dropped_image) not in error
+    assert "Errno" not in error
+    assert dropped_image.name in error
+
+
 def test_native_desktop_drop_explains_an_undownloaded_cloud_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -659,14 +715,16 @@ def test_native_desktop_drop_explains_an_undownloaded_cloud_file(
     grant_id = _write_desktop_drop_grant(config, [dropped_image.resolve()])
     client = _make_client(pcm, config)
 
-    unpatched_read_bytes = Path.read_bytes
+    from ciao.web.routes_api import _read_native_file_limited
 
-    def refuse_unmaterialised_read(self: Path) -> bytes:
-        if self == dropped_image.resolve():
+    def refuse_unmaterialised_read(path: Path, max_bytes: int) -> bytes:
+        if path == dropped_image.resolve():
             raise OSError(errno.EDEADLK, "Resource deadlock avoided")
-        return unpatched_read_bytes(self)
+        return _read_native_file_limited(path, max_bytes)
 
-    monkeypatch.setattr(Path, "read_bytes", refuse_unmaterialised_read)
+    monkeypatch.setattr(
+        "ciao.web.routes_api._read_native_file_limited", refuse_unmaterialised_read
+    )
 
     response = client.post(
         "/api/desktop-drop",
@@ -776,16 +834,37 @@ def test_native_desktop_drop_keeps_a_staged_non_image_copy(
     assert response.status_code == 200
     body = response.json()
     assert len(body["image_refs"]) == 1
-    assert body["paths"] == []
+    assert body["file_refs"]
+    assert body["file_refs"][0]["ref"].startswith("drop_")
+    assert "paths" not in body
+    assert "attachments" not in body
     assert body["errors"] == []
-    assert body["attachments"][0]["original_path"] == str(staged_doc.resolve())
-    assert body["attachments"][0]["markdown_path"].endswith("/report.md")
     assert (tmp_path / "memory-vault" / "work" / "projects" / "active" / "drop-test" / "report.md").exists()
     # The image copy is gone; the agent's non-image handle is still readable.
     assert not staged_image.exists()
     assert staged_doc.exists()
     assert not image_dir.exists()
     assert doc_dir.exists()
+
+
+def test_native_desktop_drop_cleans_staging_when_grant_is_invalid(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    config = pcm._config
+    grant_dir = config.state_path.parent / "desktop-drop-grants"
+    grant_id = str(uuid.uuid4())
+    staged_dir = grant_dir / "staged" / grant_id / "0"
+    staged_dir.mkdir(parents=True)
+    staged = staged_dir / "orphan.txt"
+    staged.write_text("orphan", encoding="utf-8")
+    (grant_dir / f"{grant_id}.json").write_text("{", encoding="utf-8")
+
+    response = _make_client(pcm, config).post(
+        "/api/desktop-drop",
+        json={"grant_id": grant_id, "project_id": "", "chat_id": ""},
+    )
+
+    assert response.status_code == 400
+    assert not (grant_dir / "staged" / grant_id).exists()
 
 
 def test_native_desktop_drop_rejects_expired_grant(tmp_path: Path) -> None:
@@ -806,6 +885,22 @@ def test_native_desktop_drop_rejects_expired_grant(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert response.json()["error"] == "desktop drop grant expired: grant is too old"
+
+
+def test_native_desktop_drop_rejects_nonfinite_grant_timestamp(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    config = pcm._config
+    dropped_file = tmp_path / "nan.md"
+    dropped_file.write_text("nan", encoding="utf-8")
+    grant_id = _write_desktop_drop_grant(config, [dropped_file], created_at=float("nan"))
+
+    response = _make_client(pcm, config).post(
+        "/api/desktop-drop",
+        json={"grant_id": grant_id, "project_id": "", "chat_id": ""},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid desktop drop grant"
 
 
 def test_native_desktop_drop_rejects_future_grant(tmp_path: Path) -> None:

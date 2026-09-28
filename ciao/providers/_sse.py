@@ -1,4 +1,4 @@
-"""Minimal SSE decoder for opencode's ``/event`` stream.
+"""Minimal SSE decoder for OpenCode's ``/api/event`` stream.
 
 Adapted from ``httpx-sse`` (MIT, Florimond Manca) and the Stainless-generated
 ``opencode-sdk-python`` decoder. Spec-compliant handling of multi-line

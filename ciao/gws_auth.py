@@ -258,8 +258,10 @@ def workspace_gws_profile(config, workspace_name: str | None) -> str:
         # A synthetic or stale explicit link (no account actually exists).
         # Fall through to the default rather than treating it as connected.
         pass
-    default = getattr(config, "gws_default_profile", "")
-    if default and default in _known():
+    from ciao.config import GWS_DEFAULT_PROFILE
+
+    default = GWS_DEFAULT_PROFILE
+    if default in _known():
         return default
     return ""
 

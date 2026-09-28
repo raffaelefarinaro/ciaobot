@@ -19,6 +19,7 @@ from claude_agent_sdk import (
     get_session_messages as _sdk_get_session_messages,
 )
 
+from ciao.context.entity_tagger import context_entities
 from ciao.jsonio import read_json_dict
 from ciao.models import AgentRequest, ChatContext
 
@@ -471,8 +472,8 @@ class TranscriptStore:
     def peek_turn_count(self, ctx: ChatContext, provider: str = "claude") -> int:
         """Number of recorded turns in the current (pre-archive) transcript.
 
-        Used by archive_chat to size-gate post-archive insights extraction
-        before archive_session consumes the in-memory transcript file.
+        Used by archive_chat to size-gate the post-archive memory pass before
+        archive_session consumes the in-memory transcript file.
         """
         transcript = self._load_current(ctx, provider)
         turns = transcript.get("turns") if isinstance(transcript, dict) else None
@@ -491,15 +492,20 @@ class TranscriptStore:
             if not isinstance(turn, dict):
                 continue
             timestamp = str(turn.get("timestamp") or "")
-            prompt = _INJECTED_CONTEXT_RE.sub("", str(turn.get("prompt") or "")).strip()
+            raw_prompt = str(turn.get("prompt") or "")
+            prompt = _INJECTED_CONTEXT_RE.sub("", raw_prompt).strip()
             response = str(turn.get("response") or "").strip()
             if prompt:
-                rows.append({
+                user_row: dict[str, Any] = {
                     "role": "user",
                     "content": prompt,
                     "turn_index": index,
                     "sent_at": timestamp,
-                })
+                }
+                entities = context_entities(raw_prompt)
+                if entities:
+                    user_row["context_entities"] = entities
+                rows.append(user_row)
             if response:
                 row: dict[str, Any] = {
                     "role": "assistant",
@@ -525,18 +531,18 @@ class TranscriptStore:
     def current_filtered_jsonl(
         self, ctx: ChatContext, provider: str = "claude"
     ) -> str:
-        """Return provider-neutral line JSON for insights and trajectories."""
+        """Return provider-neutral line JSON for the memory pass and trajectories."""
         transcript = self._load_current(ctx, provider)
         turns = transcript.get("turns") if isinstance(transcript, dict) else None
         if not isinstance(turns, list):
             return ""
         lines: list[str] = []
-        # 1-based to match `ciao.insights.filter_session_jsonl`: the extraction
-        # prompt tells the model "Indices start at 1; never cite `[idx=0]`", so
-        # a 0-based transcript shifted every citation by one turn. Harmless
-        # while citations were only decoration, but they are now checked — a
-        # correct `[idx=1]` citation resolved to the assistant turn here and
-        # the fact was queued as unsupported.
+        # 1-based to match `ciao.insights.filter_session_jsonl`: the memory pass
+        # tells the model "Indices start at 1; never cite `[idx=0]`", so a
+        # 0-based transcript shifted every citation by one turn. Harmless while
+        # citations were only decoration, but they are now checked — a correct
+        # `[idx=1]` citation resolved to the assistant turn here and the fact
+        # was queued as unsupported.
         index = 1
         for turn in turns:
             if not isinstance(turn, dict):
@@ -956,6 +962,84 @@ def find_claude_session_file(
     return matches[0] if matches else None
 
 
+def _lift_compact_summary_flags(
+    messages: list[SessionMessage], session_id: str, directory: str | None
+) -> list[SessionMessage]:
+    if not messages:
+        return messages
+    lines: list[str] | None = None
+    try:
+        from claude_agent_sdk._internal.sessions import _read_session_file
+
+        raw = _read_session_file(session_id, directory)
+        if raw:
+            lines = raw.splitlines()
+    except (ImportError, AttributeError, OSError, TypeError, ValueError, RuntimeError):
+        pass
+    if lines is None:
+        root = Path(directory) if directory is not None else Path.cwd()
+        try:
+            path = find_claude_session_file(session_id, root, force_refresh=True)
+        except (OSError, ValueError):
+            path = None
+        if path is not None:
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                return messages
+        else:
+            try:
+                candidates = sorted(
+                    (root / ".claude" / "projects").glob(
+                        f"*/{session_id}.jsonl"
+                    )
+                )
+            except OSError:
+                candidates = []
+            if not candidates:
+                return messages
+            try:
+                lines = candidates[0].read_text(encoding="utf-8").splitlines()
+            except OSError:
+                return messages
+    flagged: set[str] = set()
+    flagged_contents: set[str] = set()
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(entry, dict) or not isinstance(entry.get("uuid"), str):
+            continue
+        payload = entry.get("message")
+        flagged_on_message = isinstance(payload, dict) and bool(
+            payload.get("isCompactSummary")
+        )
+        if entry.get("isCompactSummary") or flagged_on_message:
+            flagged.add(entry["uuid"])
+            payload = entry.get("message")
+            if isinstance(payload, dict) and isinstance(payload.get("content"), str):
+                flagged_contents.add(payload["content"])
+    if not flagged:
+        return messages
+    for message in messages:
+        uuid = getattr(message, "uuid", "")
+        payload = getattr(message, "message", None)
+        content = payload.get("content") if isinstance(payload, dict) else None
+        if uuid not in flagged and not (
+            not uuid and isinstance(content, str) and content in flagged_contents
+        ):
+            continue
+        if isinstance(payload, dict):
+            payload["isCompactSummary"] = True
+        else:
+            try:
+                setattr(message, "isCompactSummary", True)
+            except (AttributeError, TypeError):
+                continue
+    return messages
+
+
 def get_session_messages_full(
     session_id: str,
     directory: str | None = None,
@@ -968,23 +1052,20 @@ def get_session_messages_full(
     """
     import sys
 
-    def _fallback(gsm: Any = get_session_messages) -> list[SessionMessage]:
-        # Prefer a caller-supplied getter so tests that replace
-        # sys.modules["claude_agent_sdk"] still reach their mock instead of the
-        # statically imported SDK binding from module import time.
-        #
-        # The getter is Any (it may be an SDK binding or a test double), so its
-        # result is cast rather than inferred - without that the Any leaks out
-        # through this function's callers and mypy rejects the return.
+    def _fallback(gsm: Any | None = None) -> list[SessionMessage]:
+        if gsm is None:
+            gsm = get_session_messages
         if limit is None and offset == 0:
-            return cast("list[SessionMessage]", gsm(session_id, directory=directory))
-        try:
-            return cast(
-                "list[SessionMessage]",
-                gsm(session_id, directory=directory, limit=limit, offset=offset),
-            )
-        except TypeError:
-            return cast("list[SessionMessage]", gsm(session_id, directory=directory))
+            result = cast("list[SessionMessage]", gsm(session_id, directory=directory))
+        else:
+            try:
+                result = cast(
+                    "list[SessionMessage]",
+                    gsm(session_id, directory=directory, limit=limit, offset=offset),
+                )
+            except TypeError:
+                result = cast("list[SessionMessage]", gsm(session_id, directory=directory))
+        return _lift_compact_summary_flags(result, session_id, directory)
 
     if get_session_messages is not _sdk_get_session_messages:
         return _fallback()
@@ -1002,7 +1083,7 @@ def get_session_messages_full(
             _validate_uuid,
         )
     except (ImportError, AttributeError):
-        return get_session_messages(session_id, directory=directory, limit=limit, offset=offset)
+        return _fallback(get_session_messages)
 
     if not _validate_uuid(session_id):
         return []
@@ -1013,7 +1094,7 @@ def get_session_messages_full(
         content = None
 
     if not content:
-        return get_session_messages(session_id, directory=directory, limit=limit, offset=offset)
+        return _fallback(get_session_messages)
 
     try:
         entries = _parse_transcript_entries(content)
@@ -1100,5 +1181,5 @@ def get_session_messages_full(
         return messages
     except Exception:
         logger.exception("get_session_messages_full custom chain failed for %s; falling back", session_id)
-        return get_session_messages(session_id, directory=directory, limit=limit, offset=offset)
+        return _fallback(get_session_messages)
 

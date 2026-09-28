@@ -1,19 +1,10 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
-const routes = [
+export const routes: RouteRecordRaw[] = [
   {
     path: '/login',
     name: 'login',
     component: () => import('./components/LoginView.vue'),
-  },
-  {
-    // This machine, not the host it mirrors: role, host connection, local
-    // install. Deliberately outside the auth guard and outside ChatLayout —
-    // it is the way out of client mode, so it must load when the host (and
-    // with it every proxied API call) is unreachable.
-    path: '/device',
-    name: 'device',
-    component: () => import('./components/DeviceView.vue'),
   },
   {
     path: '/',
@@ -55,16 +46,17 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
-    path: '/memory',
+    // One route per memory section, listed in the sidebar like Settings'
+    // tabs. Bare /memory lands on the last section visited (MemoryMapView).
+    path: '/memory/:section(suggested|revisit|map|categories|retired|history)?',
     name: 'memory',
     component: () => import('./components/ChatLayout.vue'),
     meta: { requiresAuth: true },
   },
   {
+    // The proposal queue's old address; Suggested is where it lives now.
     path: '/proposals',
-    name: 'proposals',
-    component: () => import('./components/ChatLayout.vue'),
-    meta: { requiresAuth: true },
+    redirect: '/memory/suggested',
   },
   {
     path: '/schedules/:scheduleId',
@@ -77,6 +69,12 @@ const routes = [
     name: 'settings',
     component: () => import('./components/ChatLayout.vue'),
     meta: { requiresAuth: true },
+  },
+  {
+    // The providers tab folded into models (chat providers are its first
+    // card). Keep old links and bookmarks working.
+    path: '/settings/providers',
+    redirect: { path: '/settings/models', hash: '#chat-providers' },
   },
   {
     path: '/settings/:tab',

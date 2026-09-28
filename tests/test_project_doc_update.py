@@ -239,3 +239,114 @@ def test_no_changes_sentinel_reports_no_error(
 
     assert wrote is False
     assert errors == []
+
+
+# ── fold_fact_into_person_note ───────────────────────────────────────────
+
+_NOTE = """---
+tags: [person]
+---
+# Laurene Racine
+
+**Role:** Product Manager
+"""
+
+
+def _write_note(tmp_path: Path) -> Path:
+    note = tmp_path / "Laurene-Racine.md"
+    note.write_text(_NOTE, encoding="utf-8")
+    return note
+
+
+def test_person_fold_writes_the_merged_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    note = _write_note(tmp_path)
+    merged = _NOTE.strip() + "\n**Q4 2026:** committed to Handoff Intelligence."
+    calls: list = []
+    _patch_oneshot(monkeypatch, merged, calls)
+
+    wrote = asyncio.run(pdu.fold_fact_into_person_note(
+        note_path=note, fact="Her Q4 2026 capacity is committed to Handoff Intelligence.", model="m",
+    ))
+
+    assert wrote is True
+    assert "Handoff Intelligence" in note.read_text(encoding="utf-8")
+    assert "Laurene Racine" in calls[0]
+    assert "Handoff Intelligence" in calls[0]
+
+
+def test_person_fold_no_changes_leaves_the_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    note = _write_note(tmp_path)
+    _patch_oneshot(monkeypatch, "NO_CHANGES")
+    errors: list[str] = []
+
+    wrote = asyncio.run(pdu.fold_fact_into_person_note(
+        note_path=note, fact="Product Manager.", model="m", error_out=errors,
+    ))
+
+    assert wrote is False
+    assert errors == []
+    assert note.read_text(encoding="utf-8") == _NOTE
+
+
+def test_person_fold_rejects_a_rewrite_that_drops_frontmatter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    note = _write_note(tmp_path)
+    _patch_oneshot(monkeypatch, "# Laurene Racine\n\n**Role:** Product Manager\nNew fact.")
+
+    errors: list[str] = []
+
+    wrote = asyncio.run(pdu.fold_fact_into_person_note(
+        note_path=note, fact="New fact.", model="m", error_out=errors,
+    ))
+
+    assert wrote is False
+    assert note.read_text(encoding="utf-8") == _NOTE
+    # A guard refusal is not "already covered", so it must not read as a no-op.
+    assert errors and "rejected" in errors[-1]
+
+
+def test_person_fold_keeps_an_edit_made_during_the_model_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    note = _write_note(tmp_path)
+    edited = _NOTE + "\nHand edit while the model ran.\n"
+
+    async def slow(prompt, **kwargs):
+        note.write_text(edited, encoding="utf-8")
+        return _NOTE.strip() + "\nNew fact."
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", slow)
+    errors: list[str] = []
+
+    wrote = asyncio.run(pdu.fold_fact_into_person_note(
+        note_path=note, fact="New fact.", model="m", error_out=errors,
+    ))
+
+    assert wrote is False
+    assert note.read_text(encoding="utf-8") == edited
+    assert errors and "changed during the fold" in errors[-1]
+
+
+def test_person_fold_reports_a_model_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    note = _write_note(tmp_path)
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("upstream down")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", boom)
+    errors: list[str] = []
+
+    wrote = asyncio.run(pdu.fold_fact_into_person_note(
+        note_path=note, fact="New fact.", model="m", error_out=errors,
+    ))
+
+    assert wrote is False
+    assert errors and "upstream down" in errors[-1]
+    assert note.read_text(encoding="utf-8") == _NOTE

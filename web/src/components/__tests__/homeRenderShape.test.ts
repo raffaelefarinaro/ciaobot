@@ -4,7 +4,7 @@
  * Renders the home lanes and asserts the *shape* of what a user sees, as a
  * readable snapshot of the reviewed feedback:
  *
- *   - older chats listed inline with quiet, no separate section or disclosure
+ *   - older chats listed inline with earlier, no separate section or disclosure
  *   - the needs-you tier absent entirely when nothing needs the user
  *   - tier labels lowercase
  *
@@ -79,16 +79,16 @@ describe('home lane rendered shape', () => {
     if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
   })
 
-  it('lists a three-week-old chat in quiet, with no older section', async () => {
+  it('lists a three-week-old chat in earlier, with no older section', async () => {
     expect(await render(true)).toEqual([
       'needs you: Needs an answer',
-      'quiet: A quiet chat | A three week old chat',
+      'earlier: A quiet chat | A three week old chat',
     ])
   })
 
   it('omits the needs-you tier when nothing needs the user', async () => {
     expect(await render(false)).toEqual([
-      'quiet: A quiet chat | A three week old chat',
+      'earlier: A quiet chat | A three week old chat',
     ])
   })
 
@@ -108,10 +108,10 @@ describe('home lane rendered shape', () => {
       rows: tier.findAll('.home-chat-title').map(t => t.text()),
     }))
     const unread = tiers.find(t => t.label === 'unread')
-    const quiet = tiers.find(t => t.label === 'quiet')
+    const earlier = tiers.find(t => t.label === 'earlier')
 
     expect(unread?.rows).toContain('A quiet chat')
-    expect(quiet?.rows ?? []).not.toContain('A quiet chat')
+    expect(earlier?.rows ?? []).not.toContain('A quiet chat')
     wrapper.unmount()
   })
 })

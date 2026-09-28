@@ -34,9 +34,9 @@ export async function boot(page: Page, path = '/', ready: string = BOOTED): Prom
   await expect(page.locator(ready).first()).toBeVisible()
 }
 
-/** The workspace button the sidebar is currently showing as active. */
+/** The current workspace scope control at the top of the sidebar. */
 export function activeWorkspaceButton(page: Page) {
-  return page.locator('button[aria-keyshortcuts].active').first()
+  return page.locator('.workspace-scope-trigger').first()
 }
 
 /**

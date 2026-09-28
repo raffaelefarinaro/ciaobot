@@ -4,7 +4,6 @@ import { useHousekeepingStore } from '../stores/housekeeping'
 import { useProjectStore } from '../stores/projects'
 import type { OperatorAction } from '../lib/types'
 import { renderMarkdown } from '../lib/safeMarkdown'
-import { isDesktopApp, triggerDesktopUpdate } from '../lib/desktop'
 
 const housekeeping = useHousekeepingStore()
 const projectStore = useProjectStore()
@@ -130,26 +129,18 @@ async function onDetailClick(event: MouseEvent): Promise<void> {
   }
 }
 
-// The update tile's button reaches the desktop shell's own tray-update flow
-// directly (native confirm dialog, coordinated engine+app restart) rather
-// than opening a chat about how to install — chat is only the web fallback,
-// where there is no tray to reuse.
+// The backend names the tile's lead button. "chat" (the update tile) makes the
+// chat button the filled primary and demotes the link to a chip; anything else
+// keeps the default order, where run/link/view buttons lead.
+function chatLeads(action: OperatorAction): boolean {
+  return action.primary === 'chat' && !!action.chat_prompt
+}
+
 function chatButtonLabel(action: OperatorAction): string {
-  if (action.id === 'package-update' && isDesktopApp()) return 'Update now'
   return action.chat_label || 'Discuss in chat'
 }
 
 async function onChatButtonClick(action: OperatorAction): Promise<void> {
-  if (action.id === 'package-update' && isDesktopApp()) {
-    if (chatBusy.value) return
-    chatBusy.value = true
-    try {
-      const started = await triggerDesktopUpdate()
-      if (started) return
-    } finally {
-      chatBusy.value = false
-    }
-  }
   await openChat(action)
 }
 
@@ -197,6 +188,17 @@ async function openChat(action: OperatorAction): Promise<void> {
         <div class="housekeeping-detail" v-html="renderedDetail(action.detail)" @click="onDetailClick"></div>
       </div>
       <div class="housekeeping-actions">
+        <!-- A chat-led tile (the update tile) puts its chat button first and
+             filled, in DOM order so focus and screen readers meet it first. -->
+        <button
+          v-if="action.chat_prompt && chatLeads(action)"
+          type="button"
+          class="btn-small btn-primary"
+          :disabled="chatBusy"
+          @click="onChatButtonClick(action)"
+        >
+          {{ chatButtonLabel(action) }}
+        </button>
         <button
           v-if="action.run_label"
           type="button"
@@ -208,7 +210,8 @@ async function openChat(action: OperatorAction): Promise<void> {
         </button>
         <a
           v-if="action.link_url"
-          class="btn-small btn-primary housekeeping-link"
+          class="btn-small housekeeping-link"
+          :class="chatLeads(action) ? 'btn-chip' : 'btn-primary'"
           :href="action.link_url"
           target="_blank"
           rel="noopener noreferrer"
@@ -223,7 +226,7 @@ async function openChat(action: OperatorAction): Promise<void> {
           {{ action.view_label || 'Open' }}
         </button>
         <button
-          v-if="action.chat_prompt"
+          v-if="action.chat_prompt && !chatLeads(action)"
           type="button"
           class="btn-small btn-chip"
           :disabled="chatBusy"
@@ -360,9 +363,10 @@ async function openChat(action: OperatorAction): Promise<void> {
   width: 100%;
 }
 
-/* The link variant is an <a> styled like the run button: same size, centered
-   text, no underline. It inherits .btn-small/.btn-primary from the global
-   button tokens; only the anchor-specific resets are needed here. */
+/* The link variant is an <a> styled like a button: same size, centered text,
+   no underline. It inherits .btn-small plus .btn-primary (or .btn-chip on a
+   chat-led tile) from the global button tokens; only the anchor-specific
+   resets are needed here. */
 .housekeeping-link {
   display: inline-flex;
   align-items: center;

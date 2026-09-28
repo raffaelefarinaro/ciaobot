@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Features · Ciaobot</title>
+  <meta name="description" content="What Ciaobot can do and how to use each feature: projects, documents side by side, memory, automations, Google Workspace, and more.">
+  <link rel="icon" href="assets/img/favicon.png">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="./"><img src="assets/img/logo.png" alt="">Ciaobot</a>
+      <nav class="site-nav" aria-label="Main">
+        <a href="./">Home</a>
+        <a href="guide.html">Get started</a>
+        <a href="features.html" aria-current="page">Features</a>
+        <a href="memory.html">Memory</a>
+        <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="narrow">
+      <p class="eyebrow">Features</p>
+      <h1>What Ciaobot can do, and how to use it</h1>
+      <p class="lead">Every screenshot below is the real app, with the quickest way to use each feature.</p>
+    </section>
+
+    <div class="feature" id="organise">
+      <div class="feature-text">
+        <p class="eyebrow">Stay organised</p>
+        <h2>Workspaces, projects and chats</h2>
+        <p>Separate the big areas of your life into <strong>workspaces</strong> (Personal, Work, a client), each with its own memory. Inside, a <strong>project</strong> holds the background for a topic, and each <strong>chat</strong> is one task.</p>
+        <p>The home screen shows what needs you: unread answers first, then chats still working, then the quiet ones. When a project is done, mark it <strong>Complete</strong>: it leaves the sidebar, and its notes stay in memory.</p>
+        <p class="how"><strong>How:</strong> <em>+ New Project</em> at the bottom of the sidebar, <em>+ new</em> for a chat, keys <kbd>1</kbd>–<kbd>9</kbd> to switch workspace. Or ask: "Create a project called Moving house".</p>
+      </div>
+      <figure>
+        <a href="assets/img/home.webp"><img src="assets/img/home.webp" alt="Home screen with workspaces, projects and chats" loading="lazy" width="1600" height="1000"></a>
+      </figure>
+    </div>
+
+    <div class="feature flip" id="documents">
+      <div class="feature-text">
+        <p class="eyebrow">Work on real files</p>
+        <h2>Documents side by side</h2>
+        <p>When Ciaobot writes a note, a plan or a table, it opens next to the chat. Ask for a change and watch the file update. Tables (CSV) are editable, and you can comment on a single cell.</p>
+        <p>To point at something precisely, <strong>highlight any passage</strong>, in the document or in the chat, and add a comment. The comment goes out with your next message, so "make this friendlier" knows exactly what "this" is.</p>
+        <p class="how"><strong>How:</strong> ask for a document ("write the wedding-day timeline as a note"). Open any file card and use <em>Pin to sidebar</em> to keep it beside the chat. Word, PowerPoint, Excel and PDF files you drop in are converted so Ciaobot can read them.</p>
+      </div>
+      <figure>
+        <a href="assets/img/chat-doc.webp"><img src="assets/img/chat-doc.webp" alt="A chat on the left and the wedding-day timeline document open on the right, just updated by Ciaobot" loading="lazy" width="1600" height="1000"></a>
+      </figure>
+    </div>
+
+    <div class="feature" id="memory">
+      <div class="feature-text">
+        <p class="eyebrow">Your second brain</p>
+        <h2>Memory you can see and correct</h2>
+        <p>Archive a chat and Ciaobot files what matters: a decision in the project note, a detail on a person's note, a preference in its short core memory. Anything it's unsure about waits for you in <strong>Review</strong>.</p>
+        <p>The <strong>Memory</strong> view shows every note as a map of connections, and most changes can be undone.</p>
+        <p class="how"><strong>How:</strong> the brain icon at the top of the sidebar. Or ask: "Remember that I'm allergic to penicillin". <a href="memory.html">How memory works →</a></p>
+      </div>
+      <figure>
+        <a href="assets/img/memory-map.webp"><img src="assets/img/memory-map.webp" alt="The Memory map: notes for projects, people and places connected by lines" loading="lazy" width="1600" height="1000"></a>
+      </figure>
+    </div>
+
+    <div class="feature flip" id="automations">
+      <div class="feature-text">
+        <p class="eyebrow">Let it work on its own</p>
+        <h2>Automations</h2>
+        <p>If you do something more than once, schedule it. A morning agenda, weekly vocabulary, the Monday status draft. Each run leaves its result in a chat for you to read, just like a message from an assistant.</p>
+        <p>Runs can be one-off, daily, weekly, monthly, every few minutes, or manual. Two system routines ship with Ciaobot: <em>Workspace care</em> tidies memory every night, and <em>Skill reflection</em> suggests improvements to your skills every week.</p>
+        <p class="how"><strong>How:</strong> the clock icon, then <em>+ New Automation</em>. Or ask: "Every weekday at 8, tell me what's on my calendar". Ciaobot shows you a draft before creating it.</p>
+      </div>
+      <figure>
+        <a href="assets/img/automations.webp"><img src="assets/img/automations.webp" alt="The Automations list with custom routines and system routines and their next run times" loading="lazy" width="1600" height="1000"></a>
+      </figure>
+    </div>
+
+    <div class="feature" id="google">
+      <div class="feature-text">
+        <p class="eyebrow">Mail, calendar, documents</p>
+        <h2>Google Workspace, built in</h2>
+        <p>An assistant needs your calendar and inbox. Ciaobot works with Google's own command-line tool, <a href="https://github.com/googleworkspace/cli"><code>gws</code></a>, and ships ready-made skills for <strong>Gmail</strong> (read, triage, reply, send), <strong>Calendar</strong>, <strong>Drive</strong>, <strong>Docs</strong>, <strong>Sheets</strong>, <strong>Slides</strong>, <strong>Tasks</strong> and <strong>Forms</strong>.</p>
+        <p>Add as many Google accounts as you need and link <strong>one per workspace</strong>: your personal Gmail in Personal, your company account in Work.</p>
+        <p class="how"><strong>How:</strong> Settings → Workspaces → Google Workspace. Then just ask: "What's on my calendar tomorrow?"</p>
+      </div>
+      <figure>
+        <a href="assets/img/google.webp"><img src="assets/img/google.webp" alt="Settings, Workspaces tab: each workspace with its colour, AI tool and Google profile, and the Google Workspace card for adding accounts" loading="lazy" width="1600" height="1000"></a>
+      </figure>
+    </div>
+
+    <div class="feature phone flip" id="devices">
+      <div class="feature-text">
+        <p class="eyebrow">Wherever you are</p>
+        <h2>From any device</h2>
+        <p>Ciaobot runs on one computer, your Mac at home or a small rented server, and every other device is a window onto it. Your phone gets the same chats, projects and memory, and can be added to the home screen like an app.</p>
+        <p>A cheap VPS (for example from <a href="https://www.hostinger.com/vps-hosting">Hostinger</a>) makes an always-on host that's reachable from everywhere, even when your laptop is closed.</p>
+        <p class="how"><strong>How:</strong> <a href="remote.html">Use it anywhere →</a></p>
+      </div>
+      <figure>
+        <a href="assets/img/mobile-home.webp"><img src="assets/img/mobile-home.webp" alt="Ciaobot on a phone: the Personal workspace with unread and quiet chats" loading="lazy" width="600" height="1298"></a>
+      </figure>
+    </div>
+
+
+    <nav class="next-page narrow" aria-label="Next pages">
+      <a class="btn" href="guide.html">← Getting started</a>
+      <a class="btn btn-primary" href="builtin.html">What's built in →</a>
+    </nav>
+  </main>
+
+  <footer class="site-footer">
+    <div class="inner">
+      <span>Ciaobot is open source.</span>
+      <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
+    </div>
+  </footer>
+  <script src="assets/site.js" defer></script>
+</body>
+</html>

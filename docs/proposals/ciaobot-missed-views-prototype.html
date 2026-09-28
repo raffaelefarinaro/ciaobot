@@ -1,0 +1,804 @@
+<title>Ciaobot missed views</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #1a1a2e; --bg2: #1f2240; --bg3: #2a2e54; --bg-elev: #23264a;
+    --fg: #e8e8f0; --fg2: #b4b4c4; --fg3: #8f90a8;
+    --accent: #ff4d6d; --accent-strong: #ff2e54; --accent2: #6a47b8; --on-accent: #1a1a2e;
+    --border: #2e3258; --border-strong: #3a3f70;
+    --success: #4caf50; --warning: #ff9800; --error: #f44336;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    --mono: "SF Mono", ui-monospace, Menlo, "Fira Code", monospace;
+    --r-xs: 4px; --r-sm: 6px; --r-md: 10px; --r-lg: 14px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      color-scheme: light;
+      --bg: #f4f4fa; --bg2: #ffffff; --bg3: #e6e8f4; --bg-elev: #fbfbfe;
+      --fg: #1a1a2e; --fg2: #5f607d; --fg3: #66687f;
+      --accent: #d81b60; --accent-strong: #b00d46; --accent2: #512da8; --on-accent: #ffffff;
+      --border: #d2d4e3; --border-strong: #b6b8cf; --warning: #c2410c; --success: #2e7d32; --error: #c62828;
+    }
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f4f4fa; --bg2: #ffffff; --bg3: #e6e8f4; --bg-elev: #fbfbfe;
+    --fg: #1a1a2e; --fg2: #5f607d; --fg3: #66687f;
+    --accent: #d81b60; --accent-strong: #b00d46; --accent2: #512da8; --on-accent: #ffffff;
+    --border: #d2d4e3; --border-strong: #b6b8cf; --warning: #c2410c; --success: #2e7d32; --error: #c62828;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.6 var(--sans); padding-inline: 16px; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  code { font: 12px var(--mono); color: var(--fg2); }
+
+  /* ── Document ─────────────────────────────── */
+  .doc { max-width: 1400px; margin: 0 auto; padding-block: 40px 80px; }
+  .intro { max-width: 760px; }
+  .brand { display: flex; align-items: center; gap: 8px; font: 700 14px var(--mono); color: var(--fg2); }
+  .brand i { width: 10px; height: 10px; border-radius: 2px; background: var(--accent); }
+  h1 { margin: 12px 0 8px; font-size: 26px; line-height: 1.25; letter-spacing: -.02em; text-wrap: balance; }
+  .lede { margin: 0; color: var(--fg2); font-size: 15px; max-width: 66ch; }
+  .keys { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 16px; color: var(--fg3); font-size: 13px; }
+  .tag { display: inline-flex; align-items: center; min-height: 20px; padding: 0 6px; border-radius: var(--r-xs); font: 600 11px var(--mono); letter-spacing: .3px; border: 1px solid var(--border-strong); color: var(--fg2); white-space: nowrap; }
+  .tag.p1 { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); }
+  .tag.p2 { border-color: color-mix(in srgb, var(--warning) 55%, var(--border)); color: var(--warning); }
+  .tag.keep { color: var(--fg3); }
+
+  .index-wrap { margin-top: 32px; overflow-x: auto; }
+  table.index { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px; }
+  .index th { text-align: left; font-weight: 600; color: var(--fg3); padding: 8px 10px 8px 0; border-bottom: 1px solid var(--border-strong); }
+  .index td { padding: 10px 10px 10px 0; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .index a { color: var(--fg); text-decoration: none; font-weight: 600; }
+  .index a:hover { color: var(--accent); }
+  .index td.muted { color: var(--fg2); }
+
+  .principles { margin-top: 32px; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 32px; }
+  .principles div { border-top: 1px solid var(--border); padding-top: 10px; }
+  .principles b { display: block; font-size: 13px; }
+  .principles span { color: var(--fg2); font-size: 13px; }
+
+  /* ── One view ─────────────────────────────── */
+  .view { margin-top: 72px; scroll-margin-top: 16px; }
+  .view-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border-strong); }
+  .view-h h2 { margin: 0; font-size: 19px; letter-spacing: -.02em; }
+  .view-h .src { color: var(--fg3); font: 12px var(--mono); }
+  .seg { display: inline-flex; padding: 2px; border: 1px solid var(--border); border-radius: 8px; margin-left: auto; }
+  .seg button { min-height: 30px; padding: 0 10px; border: 0; border-radius: 6px; background: none; color: var(--fg2); cursor: pointer; font-size: 12px; }
+  .seg button[aria-pressed="true"] { background: var(--bg3); color: var(--fg); font-weight: 600; }
+  .cmp { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 16px; align-items: start; }
+  .cmp[data-mode="now"] { grid-template-columns: 1fr; }
+  .cmp[data-mode="now"] .new, .cmp[data-mode="new"] .now { display: none; }
+  .cmp[data-mode="new"] { grid-template-columns: 1fr; }
+  @media (max-width: 1000px) { .cmp[data-mode="both"] { grid-template-columns: 1fr; } }
+  figure { margin: 0; min-width: 0; }
+  figcaption { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; color: var(--fg3); font-size: 12px; font-weight: 600; }
+  figcaption .d { width: 7px; height: 7px; border-radius: 50%; background: var(--fg3); }
+  .new figcaption .d { background: var(--accent); }
+  .now img { display: block; width: 100%; cursor: zoom-in; border: 1px solid var(--border); border-radius: var(--r-md); }
+  .changes { margin: 16px 0 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 32px; }
+  .changes li { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--fg2); }
+  .changes b { color: var(--fg); font-weight: 600; }
+  .note { margin: 12px 0 0; padding: 10px 12px; border-left: 2px solid var(--warning); color: var(--fg2); font-size: 13px; background: color-mix(in srgb, var(--warning) 6%, transparent); }
+
+  /* ── Mock pane (the new design system) ────── */
+  .pane { container-type: inline-size; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg); overflow: hidden; }
+  .ph { min-height: 56px; display: flex; align-items: center; gap: 10px; padding: 0 24px; border-bottom: 1px solid var(--border); }
+  .ph h3 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ph .crumb { color: var(--fg3); font-size: 13px; white-space: nowrap; }
+  .ph .end { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  .pg { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 32px; padding: 24px; }
+  .pg.single { grid-template-columns: minmax(0, 1fr); }
+  @container (max-width: 700px) { .pg { grid-template-columns: minmax(0, 1fr); gap: 24px; } .ph, .pg { padding-inline: 16px; } }
+  .sec + .sec { margin-top: 28px; }
+  .sec-h { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+  .sec-h h4 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.02em; }
+  .sec-h .end { margin-left: auto; display: flex; gap: 14px; align-items: baseline; }
+  .muted { margin: 0 0 8px; color: var(--fg3); font-size: 13px; }
+  .rows { border-top: 1px solid var(--border); }
+  .r { min-height: 44px; display: flex; align-items: center; gap: 14px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .r .k { width: 116px; flex: none; color: var(--fg3); }
+  .r .v { flex: 1; min-width: 0; }
+  .r .m { flex: 1; min-width: 0; }
+  .r .t { display: block; font-weight: 600; font-size: 14px; }
+  .r .s { display: block; color: var(--fg3); font-size: 12px; }
+  .r .end { margin-left: auto; display: flex; align-items: center; gap: 12px; flex: none; }
+  .r.top { align-items: flex-start; }
+  .r.sub { padding-left: 16px; }
+  .rail h5 { margin: 0 0 6px; font-size: 15px; font-weight: 650; }
+  .rail h5 + .rows { margin-bottom: 20px; }
+  .rail .r { min-height: 36px; justify-content: space-between; }
+  .rail .r .k { width: auto; }
+  .rail .r b { font-variant-numeric: tabular-nums; }
+  .rail .muted { margin-top: 8px; }
+  .toc a { display: block; padding: 5px 0 5px 12px; border-left: 1px solid var(--border); color: var(--fg2); text-decoration: none; font-size: 13px; }
+  .toc a.on { border-left: 2px solid var(--accent); color: var(--fg); padding-left: 11px; }
+
+  .btn { min-height: 34px; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); color: var(--fg); cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .btn:hover { border-color: var(--border-strong); }
+  .btn.pri { border-color: transparent; background: var(--accent); color: var(--on-accent); }
+  .btn.caution { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); background: none; }
+  .btn.danger { color: var(--error); border-color: color-mix(in srgb, var(--error) 45%, var(--border)); background: none; }
+  .link { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; font-size: 13px; white-space: nowrap; }
+  .link.quiet { color: var(--fg2); }
+  .ico { width: 34px; height: 34px; display: inline-grid; place-items: center; border: 0; border-radius: 8px; background: none; color: var(--fg2); cursor: pointer; }
+  .ico:hover { background: var(--bg3); color: var(--fg); }
+  .chip { min-height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); color: var(--fg); font-size: 13px; cursor: pointer; white-space: nowrap; max-width: 100%; }
+  .chip .md { width: 7px; height: 7px; border-radius: 50%; background: var(--accent2); flex: none; }
+  .chip svg { color: var(--fg3); }
+  .field { min-height: 36px; width: 100%; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--fg); font-size: 13px; }
+  textarea.field { min-height: 88px; resize: vertical; line-height: 1.5; }
+  .field::placeholder { color: var(--fg3); }
+  .sg { display: inline-flex; flex-wrap: wrap; padding: 2px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+  .sg span { min-height: 28px; display: inline-flex; align-items: center; padding: 0 10px; border-radius: 6px; color: var(--fg2); font-size: 13px; cursor: pointer; }
+  .sg span.on { background: var(--bg3); color: var(--fg); font-weight: 600; }
+  .days { display: flex; flex-wrap: wrap; gap: 4px; }
+  .days span { min-width: 40px; min-height: 30px; display: inline-grid; place-items: center; padding: 0 6px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; color: var(--fg2); }
+  .days span.on { background: color-mix(in srgb, var(--accent) 14%, transparent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); color: var(--fg); }
+  .sw { position: relative; width: 36px; height: 20px; border-radius: 10px; background: var(--bg3); border: 1px solid var(--border-strong); flex: none; }
+  .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--fg3); }
+  .sw.on { background: var(--accent); border-color: transparent; }
+  .sw.on::after { left: 18px; background: var(--on-accent); }
+  .swl { display: inline-flex; align-items: center; gap: 8px; color: var(--fg2); font-size: 13px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }
+  .dot.ok { background: var(--success); } .dot.warn { background: var(--warning); } .dot.acc { background: var(--accent); }
+  .stag { display: inline-flex; align-items: center; min-height: 20px; padding: 0 6px; border-radius: var(--r-xs); border: 1px solid var(--border-strong); color: var(--fg2); font-size: 11px; font-weight: 600; }
+  .stag.warn { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }
+  .swatches { display: flex; gap: 6px; }
+  .swatches span { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; }
+  .swatches span.on { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--fg); }
+  .foot { display: flex; justify-content: flex-end; align-items: center; gap: 16px; margin-top: 20px; }
+  .kvline { display: flex; gap: 6px; flex-wrap: wrap; color: var(--fg3); font-size: 12px; }
+  details.dis summary { cursor: pointer; color: var(--fg2); font-size: 13px; padding: 8px 0; list-style: none; display: flex; gap: 6px; align-items: center; }
+  details.dis summary::before { content: "›"; color: var(--fg3); }
+
+  /* memory map */
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .toolbar .end { margin-left: auto; color: var(--fg3); font-size: 12px; }
+  .canvas { position: relative; height: 300px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg2); overflow: hidden; }
+  .canvas svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .zoom { position: absolute; right: 8px; top: 8px; display: grid; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); }
+  .zoom button { width: 32px; height: 32px; border: 0; background: none; color: var(--fg2); cursor: pointer; font-size: 15px; }
+  .zoom button + button { border-top: 1px solid var(--border); }
+  .tbl-wrap { overflow-x: auto; }
+  table.t { width: 100%; min-width: 520px; border-collapse: collapse; font-size: 13px; }
+  .t th { text-align: left; color: var(--fg3); font-weight: 600; padding: 8px 8px 8px 0; border-bottom: 1px solid var(--border-strong); white-space: nowrap; }
+  .t td { padding: 10px 8px 10px 0; border-bottom: 1px solid var(--border); }
+  .t td.num { font-variant-numeric: tabular-nums; }
+  .t .tg { color: var(--fg3); }
+
+  /* popover + modal mocks */
+  .stage { position: relative; padding: 24px; min-height: 360px; background: color-mix(in srgb, var(--bg) 80%, #000 20%); display: grid; place-items: center; }
+  .pop { width: min(100%, 320px); border: 1px solid var(--border-strong); border-radius: var(--r-md); background: var(--bg-elev); box-shadow: 0 16px 40px rgb(0 0 0 / 30%); padding: 6px; }
+  .pop .srch { margin: 2px 2px 6px; }
+  .pop .grp { padding: 8px 8px 4px; color: var(--fg3); font-size: 12px; font-weight: 600; }
+  .opt { min-height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+  .opt:hover { background: var(--bg3); }
+  .opt.sel { background: var(--bg3); }
+  .opt .ck { width: 16px; color: var(--accent); }
+  .opt .s { margin-left: auto; color: var(--fg3); font-size: 12px; }
+  .pop hr { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
+  .pop .thk { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px 6px; font-size: 13px; color: var(--fg2); }
+  .modal { width: min(100%, 420px); border: 1px solid var(--border-strong); border-radius: var(--r-lg); background: var(--bg2); box-shadow: 0 20px 50px rgb(0 0 0 / 35%); padding: 18px; }
+  .modal h4 { margin: 0; font-size: 16px; }
+  .modal .muted { margin-top: 2px; }
+  .pick { min-height: 44px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border-radius: 8px; font-size: 14px; }
+  .pick.sel { background: color-mix(in srgb, var(--accent) 13%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+  .pick .s { margin-left: auto; color: var(--fg3); font-size: 12px; }
+  .pick .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  kbd { font: 11px var(--mono); color: var(--fg3); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+
+  /* banner + sidebar mocks */
+  .banner { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 16px; border-bottom: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border)); background: color-mix(in srgb, var(--warning) 8%, var(--bg)); font-size: 13px; }
+  .banner .end { margin-left: auto; display: flex; gap: 12px; align-items: center; }
+  .mini { display: grid; grid-template-columns: 220px 1fr; min-height: 280px; }
+  @container (max-width: 520px) { .mini { grid-template-columns: 1fr; } .mini .blank { display: none; } }
+  .sb { background: var(--bg2); border-right: 1px solid var(--border); padding: 12px; display: flex; flex-direction: column; gap: 2px; }
+  .sb .lbl { display: flex; align-items: center; padding: 10px 8px 4px; color: var(--fg3); font-size: 11px; font-weight: 600; }
+  .sb .lbl .link { margin-left: auto; font-size: 12px; }
+  .sb .it { min-height: 34px; display: flex; align-items: center; padding: 0 8px; border-radius: 7px; color: var(--fg2); font-size: 13px; }
+  .sb .it.on { background: var(--bg3); color: var(--fg); }
+  .sb .it .s { margin-left: auto; color: var(--fg3); font: 11px var(--mono); }
+  .blank { display: grid; place-items: center; color: var(--fg3); font-size: 13px; }
+  .readonly { display: flex; align-items: center; gap: 12px; margin: 0 24px 20px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg2); color: var(--fg2); font-size: 13px; }
+  .readonly .end { margin-left: auto; }
+  .empty h4 { margin: 0 0 4px; font-size: 18px; letter-spacing: -.02em; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="doc">
+  <header class="intro">
+    <div class="brand"><i></i>ciaobot · design alignment</div>
+    <h1>Views the page-grid pass missed</h1>
+    <p class="lede">The Today, Chat, Project, Automations, Settings → General and Memory → Suggested pages already use the shared page grid. This page covers every other surface I could render on the <code>core-ui-workbench</code> branch against the e2e fixture: what it looks like now, and how it moves onto the same system.</p>
+    <div class="keys">
+      <span><span class="tag p1">P1</span> clearly off-system, users hit it often</span>
+      <span><span class="tag p2">P2</span> partly aligned, visible drift</span>
+      <span><span class="tag">P3</span> rare or small</span>
+      <span><span class="tag keep">Keep</span> intentionally different</span>
+    </div>
+  </header>
+
+  <div class="index-wrap">
+    <table class="index">
+      <thead><tr><th>View</th><th>Priority</th><th>Component</th><th>Main change</th></tr></thead>
+      <tbody>
+        <tr><td><a href="#v-new-automation">New automation</a></td><td><span class="tag p1">P1</span></td><td class="muted"><code>NewScheduleForm.vue</code></td><td class="muted">Card with uppercase labels becomes the same sections as the automation detail page</td></tr>
+        <tr><td><a href="#v-memory-map">Memory → Map (graph and list)</a></td><td><span class="tag p1">P1</span></td><td class="muted"><code>MemoryMapView.vue</code></td><td class="muted">Onto the page grid with a rail; sidebar stops being a second dashboard</td></tr>
+        <tr><td><a href="#v-workspaces">Settings → Workspaces</a></td><td><span class="tag p1">P1</span></td><td class="muted"><code>SettingsView.vue</code></td><td class="muted">One row per workspace; Save only when changed; Archive behind a menu</td></tr>
+        <tr><td><a href="#v-models">Settings → Models &amp; providers</a></td><td><span class="tag p1">P1</span></td><td class="muted"><code>SettingsView.vue</code></td><td class="muted">No pink Reconnect bar; defaults as hairline rows; one critique control</td></tr>
+        <tr><td><a href="#v-bg-automations">Settings → Automations</a></td><td><span class="tag p2">P2</span></td><td class="muted"><code>settings/SettingsAutomation.vue</code></td><td class="muted">Real switches, sans titles, rail with run status</td></tr>
+        <tr><td><a href="#v-lists">Settings → Skills, Subagents, Commands, MCP</a></td><td><span class="tag p2">P2</span></td><td class="muted"><code>SettingsView.vue</code>, <code>SettingsMcpServers.vue</code></td><td class="muted">One shared list pattern with a counts rail and a real empty state</td></tr>
+        <tr><td><a href="#v-memory-tabs">Memory → Notes to revisit, History</a></td><td><span class="tag p2">P2</span></td><td class="muted"><code>VaultReviewPanel.vue</code>, <code>ProposalHistoryList.vue</code>, <code>ProposalReviewPanel.vue</code></td><td class="muted">Drop the inner inset and pill filters; neutral per-row actions</td></tr>
+        <tr><td><a href="#v-subagent">Subagent transcript</a></td><td><span class="tag p2">P2</span></td><td class="muted"><code>SubagentChatView.vue</code></td><td class="muted">Chat header, chat empty state, rail with run facts</td></tr>
+        <tr><td><a href="#v-model-selector">Model picker popover</a></td><td><span class="tag p2">P2</span></td><td class="muted"><code>ModelSelector.vue</code></td><td class="muted">No uppercase mono groups, no pink-filled selection</td></tr>
+        <tr><td><a href="#v-notifications">Settings → Notifications</a></td><td><span class="tag">P3</span></td><td class="muted"><code>settings/SettingsNotifications.vue</code></td><td class="muted">Status as a row, not a boxed callout</td></tr>
+        <tr><td><a href="#v-device">This device (<code>/device</code>)</a></td><td><span class="tag">P3</span></td><td class="muted"><code>DevicePanel.vue</code></td><td class="muted">Cards and lowercase mono titles become plain sections</td></tr>
+        <tr><td><a href="#v-chrome">Connection banner, sidebar footers, New chat picker</a></td><td><span class="tag">P3</span></td><td class="muted"><code>ChatLayout.vue</code>, <code>ProjectSidebar.vue</code>, <code>NewChatPicker.vue</code></td><td class="muted">Sans banner; footer buttons move into section labels; picker selection matches the sidebar</td></tr>
+        <tr><td>Login</td><td><span class="tag keep">Keep</span></td><td class="muted"><code>LoginView.vue</code></td><td class="muted">A terminal moment, allowed by DESIGN.md. No change.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="principles">
+    <div><b>Page grid everywhere</b><span>Main column plus a 280px rail, collapsing below 940px of pane width. The mocks here use a container query, so they collapse the same way inside their frame.</span></div>
+    <div><b>Sections, not cards</b><span>Sentence-case 16px heading, muted line, hairline rows, text-link actions. No uppercase field labels.</span></div>
+    <div><b>One pink thing per region</b><span>Repeated row actions are neutral. Destructive and rare actions go behind a menu.</span></div>
+    <div><b>Same words, same shape</b><span>Create and detail views of the same object share section names and order.</span></div>
+  </div>
+
+  <!-- ═════════ 1. New automation ═════════ -->
+  <section class="view" id="v-new-automation">
+    <div class="view-h"><span class="tag p1">P1</span><h2>New automation</h2><span class="src">NewScheduleForm.vue</span>
+      <div class="seg" role="group" aria-label="Compare"><button aria-pressed="true" data-m="both">Side by side</button><button data-m="now">Now</button><button data-m="new">New</button></div></div>
+    <div class="cmp" data-mode="both">
+      <figure class="now"><figcaption><span class="d"></span>Now · click to enlarge</figcaption><img src="missed-views/new-schedule.png" alt="Current new automation form: a bordered card with uppercase labels, uppercase weekday pills and a full-width pink Create bar" loading="lazy"></figure>
+      <figure class="new"><figcaption><span class="d"></span>New design system</figcaption>
+        <div class="pane">
+          <div class="ph"><button class="ico" aria-label="Close"><svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button><h3>New automation</h3></div>
+          <div class="pg">
+            <div>
+              <div class="sec">
+                <div class="sec-h"><h4>Prompt</h4></div>
+                <p class="muted">What Ciao does each time this runs.</p>
+                <textarea class="field" id="na-prompt">Review the latest project activity and write a concise briefing.</textarea>
+              </div>
+              <div class="sec">
+                <div class="sec-h"><h4>When</h4></div>
+                <div class="rows">
+                  <div class="r"><span class="k">Repeats</span><span class="v"><span class="sg"><span>Daily</span><span class="on">Weekly</span><span>Monthly</span></span></span></div>
+                  <div class="r"><span class="k">On</span><span class="v days"><span class="on">Mon</span><span>Tue</span><span class="on">Wed</span><span>Thu</span><span class="on">Fri</span><span>Sat</span><span>Sun</span></span></div>
+                  <div class="r"><span class="k">At</span><span class="v" style="display:flex;gap:8px;flex-wrap:wrap"><input class="field" id="na-time" value="08:00" style="width:96px"><span class="chip">Europe/Zurich <svg class="i" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></span></span></div>
+                </div>
+              </div>
+              <div class="sec">
+                <div class="sec-h"><h4>Where it runs</h4></div>
+                <div class="rows">
+                  <div class="r"><span class="k">Workspace</span><span class="v">Alpha</span></div>
+                  <div class="r"><span class="k">Deliver to</span><span class="v"><span class="chip">A new chat in General <svg class="i" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></span></span></div>
+                  <div class="r"><span class="k">Model</span><span class="v"><span class="chip"><span class="md"></span>Workspace default · Claude <svg class="i" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></span></span></div>
+                </div>
+              </div>
+              <div class="sec">
+                <div class="sec-h"><h4>Results</h4></div>
+                <div class="rows">
+                  <div class="r top"><span class="k">Afterwards</span><span class="v"><span class="sg"><span class="on">Keep the chat</span><span>Archive if nothing to judge</span></span><span class="s" style="display:block;color:var(--fg3);font-size:12px;margin-top:6px">Archive runs a short check first. Chats with decisions or warnings stay visible.</span></span></div>
+                </div>
+              </div>
+              <div class="foot"><button class="link quiet">Cancel</button><button class="btn pri">Create automation</button></div>
+            </div>
+            <aside class="rail">
+              <h5>Preview</h5>
+              <div class="rows">
+                <div class="r"><span class="k">Next run</span><b>Fri 08:00</b></div>
+                <div class="r"><span class="k">Then</span><b>Mon 08:00</b></div>
+                <div class="r"><span class="k">Runs a week</span><b>3</b></div>
+              </div>
+              <p class="muted">Times are Europe/Zurich. Each run opens a new chat in General.</p>
+            </aside>
+          </div>
+        </div>
+      </figure>
+    </div>
+    <ul class="changes">
+      <li><b>Same sections as the detail page.</b> When, Where it runs, Model and Results, in the order <code>SchedulePanel</code> already shows them, so creating and reading an automation look alike.</li>
+      <li><b>Prompt first.</b> It is the part people think about; the schedule is the detail.</li>
+      <li><b>Labels move into hairline key/value rows.</b> No uppercase field labels, no bordered card around the form.</li>
+      <li><b>Controls match the rest of the app.</b> Frequency and archive behaviour become segmented controls, weekdays become sentence-case toggles, the model uses the composer's model chip.</li>
+      <li><b>Normal-size primary action.</b> One pink "Create automation" at the end, next to Cancel, instead of a full-width bar.</li>
+      <li><b>Rail shows the result.</b> The next two runs, computed from the choices, replace the unexplained "i" button.</li>
+    </ul>
+  </section>
+
+  <!-- ═════════ 2. Memory map ═════════ -->
+  <section class="view" id="v-memory-map">
+    <div class="view-h"><span class="tag p1">P1</span><h2>Memory → Map</h2><span class="src">MemoryMapView.vue</span>
+      <div class="seg" role="group" aria-label="Compare"><button aria-pressed="true" data-m="both">Side by side</button><button data-m="now">Now</button><button data-m="new">New</button></div></div>
+    <div class="cmp" data-mode="both">
+      <figure class="now"><figcaption><span class="d"></span>Now: graph and list</figcaption><img src="missed-views/memory-map.png" alt="Current memory graph: toolbar buttons, full-bleed canvas, unlabeled zoom glyphs, a long filter sidebar" loading="lazy"><img src="missed-views/memory-list.png" alt="Current memory list: uppercase column headers, link bars, start and end buttons per row" loading="lazy" style="margin-top:12px"></figure>
+      <figure class="new"><figcaption><span class="d"></span>New design system</figcaption>
+        <div class="pane">
+          <div class="ph"><h3>Memory</h3><div class="end"><span class="sg"><span>Review</span><span class="on">Map</span></span></div></div>
+          <div class="pg">
+            <div>
+              <div class="toolbar">
+                <span class="sg"><span class="on">Graph</span><span>List</span></span>
+                <span class="chip">All notes <svg class="i" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></span>
+                <span class="end">3 notes · 2 links</span>
+              </div>
+              <div class="canvas" role="img" aria-label="Example vault graph with three notes">
+                <svg viewBox="0 0 400 300" preserveAspectRatio="xMidYMid meet">
+                  <line x1="120" y1="110" x2="290" y2="70" stroke="var(--border-strong)" stroke-width="1.2"/>
+                  <line x1="120" y1="110" x2="170" y2="230" stroke="var(--border-strong)" stroke-width="1.2"/>
+                  <circle cx="120" cy="110" r="11" fill="#7c9cff"/><text x="137" y="114" fill="var(--fg)" font-size="12">Launch decision</text>
+                  <circle cx="290" cy="70" r="9" fill="#6ec3e8" stroke="var(--warning)" stroke-width="2"/><text x="220" y="52" fill="var(--fg)" font-size="12">Team working agreements</text>
+                  <circle cx="170" cy="230" r="9" fill="var(--accent)"/><text x="186" y="234" fill="var(--fg)" font-size="12">Product positioning</text>
+                </svg>
+                <div class="zoom"><button aria-label="Zoom in">+</button><button aria-label="Zoom out">−</button><button aria-label="Fit to view">⤢</button></div>
+              </div>
+              <p class="muted" style="margin-top:8px">Click a note to pin its neighbours. Drag to pan. Every note is also in List.</p>
+              <div class="sec" style="margin-top:24px">
+                <div class="sec-h"><h4>The List toggle shows</h4><span class="end"><span class="muted" style="margin:0">Sorted by name</span></span></div>
+                <div class="tbl-wrap"><table class="t">
+                  <thead><tr><th>Name</th><th>Type</th><th>Tags</th><th>Links</th><th>Checked</th><th></th></tr></thead>
+                  <tbody>
+                    <tr><td>Launch decision</td><td class="tg">Projects</td><td class="tg">launch, decision</td><td class="num">2</td><td class="num">3 mo</td><td><button class="ico" aria-label="Note actions">⋯</button></td></tr>
+                    <tr><td>Product positioning</td><td class="tg">Ideas</td><td class="tg">positioning, launch</td><td class="num">1</td><td class="num">3 mo</td><td><button class="ico" aria-label="Note actions">⋯</button></td></tr>
+                    <tr><td>Team working agreements</td><td class="tg">Colleagues</td><td class="tg">team</td><td class="num">1</td><td class="num">4 mo <span class="stag warn">Needs review</span></td><td><button class="ico" aria-label="Note actions">⋯</button></td></tr>
+                  </tbody>
+                </table></div>
+              </div>
+            </div>
+            <aside class="rail">
+              <h5>Vault</h5>
+              <div class="rows">
+                <div class="r"><span class="k">Notes</span><b>3</b></div>
+                <div class="r"><span class="k">Links</span><b>2</b></div>
+                <div class="r"><span class="k">Unlinked</span><b>0</b></div>
+              </div>
+              <h5>Needs review</h5>
+              <div class="rows">
+                <div class="r"><span class="k" style="color:var(--fg)">Team working agreements</span><span class="muted" style="margin:0">4 mo</span></div>
+              </div>
+              <h5>Recently written</h5>
+              <div class="rows">
+                <div class="r"><span class="k" style="color:var(--fg)">Product positioning</span><span class="muted" style="margin:0">2 d</span></div>
+              </div>
+              <button class="link">Open Notes to revisit</button>
+            </aside>
+          </div>
+        </div>
+      </figure>
+    </div>
+    <ul class="changes">
+      <li><b>Page grid with a rail.</b> The graph and list sit in the main column; the rail carries the same Vault numbers as Review, so switching tabs does not move them.</li>
+      <li><b>The sidebar goes back to navigation.</b> Search and Categories stay; Most connected, Needs review and Recently written move into the rail. The long explanatory paragraph goes.</li>
+      <li><b>One orphan filter.</b> "Hide orphans" and "Only orphans" become one menu: All notes, Linked only, Orphans only.</li>
+      <li><b>Named canvas controls.</b> Zoom in, Zoom out and Fit sit in a small bordered group with accessible names, as DESIGN.md's canvas rule requires.</li>
+      <li><b>Plain table.</b> Sentence-case headers, tags as muted text, link counts as numbers without the pink bar, "Needs review" as the squared 4px tag.</li>
+      <li><b>Path start/end move to a row menu.</b> Two bordered buttons on every row become one "⋯" with Set as path start and Set as path end.</li>
+    </ul>
+  </section>
+
+  <!-- ═════════ 3. Workspaces ═════════ -->
+  <section class="view" id="v-workspaces">
+    <div class="view-h"><span class="tag p1">P1</span><h2>Settings → Workspaces</h2><span class="src">SettingsView.vue</span>
+      <div class="seg" role="group" aria-label="Compare"><button aria-pressed="true" data-m="both">Side by side</button><button data-m="now">Now</button><button data-m="new">New</button></div></div>
+    <div class="cmp" data-mode="both">
+      <figure class="now"><figcaption><span class="d"></span>Now · click to enlarge</figcaption><img src="missed-views/s-workspaces.png" alt="Current workspaces settings: every workspace always expanded with Save and orange Archive buttons and large colour circles" loading="lazy"></figure>
+      <figure class="new"><figcaption><span class="d"></span>New design system</figcaption>
+        <div class="pane">
+          <div class="ph"><h3>Settings</h3></div>
+          <div class="pg">
+            <div>
+              <div class="sec">
+                <div class="sec-h"><h4>Workspaces</h4><span class="end"><button class="btn">New workspace</button></span></div>
+                <p class="muted">Each workspace keeps its own projects, chats, memory and model defaults.</p>
+                <div class="rows">
+                  <div class="r top">
+                    <span class="dot" style="background:#ff4d6d;margin-top:8px"></span>
+                    <span class="m"><span class="t">Alpha</span><span class="s">Claude · Google profile: alpha · Main workspace</span>
+                      <div style="display:grid;gap:10px;margin-top:12px">
+                        <div class="r" style="border-top:1px solid var(--border)"><span class="k">Accent</span><span class="v swatches"><span class="on" style="background:#ff4d6d"></span><span style="background:#38bdf8"></span><span style="background:#fb923c"></span><span style="background:#34d399"></span><span style="background:#a78bfa"></span></span></div>
+                        <div class="r" style="border:0;padding-top:0"><span class="k">Runtime</span><span class="v"><span class="chip">Claude <svg class="i" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></span></span></div>
+                        <div class="r" style="border:0;padding-top:0"><span class="k">Google profile</span><span class="v"><span class="chip">Custom: alpha <svg class="i" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></span></span></div>
+                      </div>
+                      <div class="foot" style="justify-content:flex-start;margin-top:8px"><button class="btn pri">Save changes</button><button class="link quiet">Discard</button></div>
+                    </span>
+                    <span class="end"><button class="ico" aria-label="Alpha actions">⋯</button></span>
+                  </div>
+                  <div class="r"><span class="dot" style="background:#38bdf8"></span><span class="m"><span class="t">Beta</span><span class="s">Claude · Google profile: beta</span></span><span class="end"><button class="link">Edit</button><button class="ico" aria-label="Beta actions">⋯</button></span></div>
+                  <div class="r"><span class="dot" style="background:#34d399"></span><span class="m"><span class="t">Gamma</span><span class="s">opencode · No Google profile</span></span><span class="end"><button class="link">Edit</button><button class="ico" aria-label="Gamma actions">⋯</button></span></div>
+                </div>
+              </div>
+            </div>
+            <aside class="rail">
+              <h5>On this page</h5>
+              <nav class="toc"><a class="on" href="#v-workspaces">Workspaces</a><a href="#v-workspaces">Google Workspace</a><a href="#v-workspaces">Archived</a></nav>
+              <p class="muted">Keys 1–9 switch workspaces in the sidebar order.</p>
+            </aside>
+          </div>
+        </div>
+      </figure>
+    </div>
+    <ul class="changes">
+      <li><b>Collapsed rows.</b> Each workspace is one hairline row with an accent dot and a summary line; Edit opens it in place. Only one is open at a time.</li>
+      <li><b>Save only when something changed.</b> One primary "Save changes" appears inside the open row, with Discard. No Save on untouched rows.</li>
+      <li><b>Archive moves into the row menu.</b> It is rare and hard to undo, so it no longer sits as an orange button on every row.</li>
+      <li><b>Smaller swatches.</b> 26px accent swatches with a ring on the selected one, instead of 40px circles.</li>
+      <li><b>Real page names.</b> Sentence-case workspace names; "+ Add workspace" becomes "New workspace", matching the sidebar entry.</li>
+      <li><b>Rail stays useful.</b> On this page gains Archived, plus the 1–9 shortcut hint.</li>
+    </ul>
+  </section>
+
+  <!-- ═════════ 4. Models ═════════ -->
+  <section class="view" id="v-models">
+    <div class="view-h"><span class="tag p1">P1</span><h2>Settings → Models &amp; providers</h2><span class="src">SettingsView.vue</span>
+      <div class="seg" role="group" aria-label="Compare"><button aria-pressed="true" data-m="both">Side by side</button><button data-m="now">Now</button><button data-m="new">New</button></div></div>
+    <div class="cmp" data-mode="both">
+      <figure class="now"><figcaption><span class="d"></span>Now · click to enlarge</figcaption><img src="missed-views/s-models.png" alt="Current models settings: boxed group of selects, full-width pink Reconnect with Verify and Log out, duplicated critique controls" loading="lazy"></figure>
+      <figure class="new"><figcaption><span class="d"></span>New design system</figcaption>
+        <div class="pane">
+          <div class="ph"><h3>Settings</h3></div>
+          <div class="pg">
+            <div>
+              <div class="sec">
+                <div class="sec-h"><h4>Chat providers</h4></div>
+                <p class="muted">Each CLI manages its own login. These defaults apply to new chats; any chat can change them from the model chip.</p>
+                <div class="rows">
+                  <div class="r"><span class="m"><span class="t">Claude Code</span><span class="s">2.0.0 · fixture@example.com</span></span><span class="end"><span class="swl"><span class="dot ok"></span>Connected</span><button class="link">Verify</button><button class="ico" aria-label="Claude Code actions">⋯</button></span></div>
+                  <div class="r sub"><span class="k">Default model</span><span class="v"><span class="chip"><span class="md"></span>Automatic · synthetic-model <svg class="i" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></span></span></div>
+                  <div class="r sub"><span class="k">Permissions</span><span class="v"><span class="chip">App default <svg class="i" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></span></span></div>
+                  <div class="r sub"><span class="k">Thinking</span><span class="v"><span class="sg"><span class="on">Auto</span><span>Low</span><span>High</span></span></span></div>
+                </div>
+                <details class="dis"><summary>What this CLI brings: 0 MCP servers, 0 skills</summary></details>
+                <div class="rows" style="margin-top:4px">
+                  <div class="r"><span class="m"><span class="t">opencode</span><span class="s">Not installed</span></span><span class="end"><button class="btn">Set up</button></span></div>
+                </div>
+              </div>
+              <div class="sec">
+                <div class="sec-h"><h4>Background models</h4></div>
+                <p class="muted">Models for work Ciao does on its own. Automatic keeps the built-in choice.</p>
+                <div class="rows">
+                  <div class="r"><span class="m"><span class="t">Session insights</span><span class="s">Learnings extracted when a chat is archived</span></span><span class="end"><span class="chip">Automatic · synthetic-model <svg class="i" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></span></span></div>
+                  <div class="r"><span class="m"><span class="t">Critique panel</span><span class="s">Models asked for an adversarial review</span></span><span class="end"><span class="chip">Automatic <svg class="i" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></span></span></div>
+                </div>
+              </div>
+            </div>
+            <aside class="rail">
+              <h5>On this page</h5>
+              <nav class="toc"><a class="on" href="#v-models">Chat providers</a><a href="#v-models">Background models</a><a href="#v-models">Voice</a></nav>
+              <h5 style="margin-top:20px">Status</h5>
+              <div class="rows"><div class="r"><span class="k">Claude Code</span><span class="swl"><span class="dot ok"></span>OK</span></div><div class="r"><span class="k">opencode</span><span class="muted" style="margin:0">Off</span></div></div>
+            </aside>
+          </div>
+        </div>
+      </figure>
+    </div>
+    <ul class="changes">
+      <li><b>No pink Reconnect bar.</b> Reconnect is only needed when a login breaks, so Reconnect and Log out move into the provider's "⋯" menu. Verify stays as a text link. When a provider is disconnected, Reconnect becomes that row's single primary.</li>
+      <li><b>Defaults as indented rows.</b> Model, permissions and thinking are hairline rows under the provider instead of a bordered box of three selects.</li>
+      <li><b>Chips that match the composer.</b> The default model uses the composer's model chip; thinking uses the same Auto/Low/High segmented control as the picker below.</li>
+      <li><b>One critique control.</b> The free-text field, its Reset and the separate multi-select collapse into one chip that opens a multi-select.</li>
+      <li><b>Rail shows provider status.</b> A glance tells you whether each CLI is working without scrolling.</li>
+    </ul>
+  </section>
+
+  <!-- ═════════ 5. Background automations ═════════ -->
+  <section class="view" id="v-bg-automations">
+    <div class="view-h"><span class="tag p2">P2</span><h2>Settings → Automations</h2><span class="src">settings/SettingsAutomation.vue</span>
+      <div class="seg" role="group" aria-label="Compare"><button aria-pressed="true" data-m="both">Side by side</button><button data-m="now">Now</button><button data-m="new">New</button></div></div>
+    <div class="cmp" data-mode="both">
+      <figure class="now"><figcaption><span class="d"></span>Now · click to enlarge</figcaption><img src="missed-views/s-automations.png" alt="Current background automations: Refresh button next to the heading, monospace row titles, pink On button used as a toggle, a violet-edged empty state box" loading="lazy"></figure>
+      <figure class="new"><figcaption><span class="d"></span>New design system</figcaption>
+        <div class="pane">
+          <div class="ph"><h3>Settings</h3></div>
+          <div class="pg">
+            <div>
+              <div class="sec">
+                <div class="sec-h"><h4>Background automations</h4><span class="end"><button class="link">Refresh</button></span></div>
+                <p class="muted">Work Ciao does on its own: naming chats, extracting insights when a chat is archived, keeping the vault and skills tidy.</p>
+                <div class="rows">
+                  <div class="r"><span class="m"><span class="t">Session insights</span><span class="s">Reads new and archived chats for durable learnings</span></span><span class="end"><span class="swl">On <span class="sw on" role="switch" aria-checked="true" aria-label="Session insights"></span></span></span></div>
+                  <div class="r"><span class="m"><span class="t">Trajectory capture</span><span class="s">Writes a structured record for each archived chat</span></span><span class="end"><span class="swl">Off <span class="sw" role="switch" aria-checked="false" aria-label="Trajectory capture"></span></span></span></div>
+                </div>
+              </div>
+              <div class="sec">
+                <div class="sec-h"><h4>Recent runs</h4></div>
+                <p class="muted">No runs recorded yet. They appear here after the first nightly pass.</p>
+              </div>
+            </div>
+            <aside class="rail">
+              <h5>Status</h5>
+              <div class="rows"><div class="r"><span class="k">Running</span><b>2 of 2</b></div><div class="r"><span class="k">Last run</span><b>—</b></div><div class="r"><span class="k">Next run</span><b>Tonight 03:00</b></div></div>
+              <button class="link">Open Automations</button>
+            </aside>
+          </div>
+        </div>
+      </figure>
+    </div>
+    <ul class="changes">
+      <li><b>Real switches.</b> A pink "On" button is read as an action. A switch with a visible On/Off word is a state, and keeps the pink for the accent.</li>
+      <li><b>Sans titles, shorter descriptions.</b> Monospace is for technical metadata, not row titles.</li>
+      <li><b>Refresh is a text link</b> at the section's right edge, like every other section action.</li>
+      <li><b>Empty state is a muted line</b> under a "Recent runs" heading, not a violet-edged box.</li>
+      <li><b>Rail with run status</b>, linking to the Automations page where scheduled runs already live.</li>
+    </ul>
+  </section>
+
+  <!-- ═════════ 6. List tabs ═════════ -->
+  <section class="view" id="v-lists">
+    <div class="view-h"><span class="tag p2">P2</span><h2>Settings → Skills, Subagents, Commands, MCP servers</h2><span class="src">SettingsView.vue · SettingsMcpServers.vue</span>
+      <div class="seg" role="group" aria-label="Compare"><button aria-pressed="true" data-m="both">Side by side</button><button data-m="now">Now</button><button data-m="new">New</button></div></div>
+    <div class="cmp" data-mode="both">
+      <figure class="now"><figcaption><span class="d"></span>Now: MCP servers and Subagents</figcaption><img src="missed-views/s-mcp.png" alt="Current MCP servers tab: heading with two buttons and an empty page, no rail" loading="lazy"><img src="missed-views/s-subagents.png" alt="Current subagents tab: heading, New subagent button and a bare 'No subagents found' line" loading="lazy" style="margin-top:12px"></figure>
+      <figure class="new"><figcaption><span class="d"></span>New design system (one pattern for all four)</figcaption>
+        <div class="pane">
+          <div class="ph"><h3>Settings</h3></div>
+          <div class="pg">
+            <div>
+              <div class="sec">
+                <div class="sec-h"><h4>Subagents</h4><span class="end"><button class="link quiet">Ask Ciao to write one</button><button class="btn">New subagent</button></span></div>
+                <p class="muted">Shared with Claude Code and opencode. Saved in <code>subagents/</code> and kept in the vault.</p>
+                <div class="rows">
+                  <div class="r"><span class="m"><span class="t">researcher</span><span class="s">Finds current external information and cites sources</span></span><span class="end"><span class="stag">Custom</span><button class="link">Edit</button></span></div>
+                  <div class="r"><span class="m"><span class="t">memory</span><span class="s">Curates vault notes and processes proposals</span></span><span class="end"><span class="stag">Custom</span><button class="link">Edit</button></span></div>
+                  <div class="r"><span class="m"><span class="t">Explore</span><span class="s">Read-only search across the codebase</span></span><span class="end"><span class="stag">Built in</span><button class="link">View</button></span></div>
+                </div>
+              </div>
+              <div class="sec">
+                <div class="sec-h"><h4>Empty state, MCP servers</h4></div>
+                <div class="rows"><div class="r" style="min-height:72px"><span class="m"><span class="t" style="font-weight:500">No MCP servers yet.</span><span class="s">Servers give Ciao tools such as your calendar or a database.</span></span><span class="end"><button class="link">Add one</button></span></div></div>
+              </div>
+            </div>
+            <aside class="rail">
+              <h5>Subagents</h5>
+              <div class="rows"><div class="r"><span class="k">Custom</span><b>2</b></div><div class="r"><span class="k">Built in</span><b>1</b></div><div class="r"><span class="k">Claude Code</span><span class="swl"><span class="dot ok"></span>Synced</span></div><div class="r"><span class="k">opencode</span><span class="swl"><span class="dot ok"></span>Synced</span></div></div>
+              <p class="muted">Lives in <code>~/…/subagents/</code></p>
+            </aside>
+          </div>
+        </div>
+      </figure>
+    </div>
+    <ul class="changes">
+      <li><b>One list pattern for four tabs.</b> Heading, one neutral "New …" button, "Ask Ciao to write one" as a quiet link, then hairline rows with a squared Custom/Built in tag and Edit.</li>
+      <li><b>Rail with counts and sync state.</b> These tabs had an empty right side; the rail says how many exist and whether each runtime has picked them up.</li>
+      <li><b>Empty states that explain.</b> One sentence on what the thing is for and an "Add one" link, instead of "No subagents found."</li>
+      <li><b>Drop the "+" prefixes</b> in button labels, matching New chat and New workspace.</li>
+    </ul>
+    <p class="note">Skills rendered a blank pane against the e2e fixture (its <code>/api/skills</code> stub returns <code>{}</code>). Worth checking whether the real tab also goes blank when the response is empty or malformed, rather than showing an empty state.</p>
+  </section>
+
+  <!-- ═════════ 7. Memory tabs ═════════ -->
+  <section class="view" id="v-memory-tabs">
+    <div class="view-h"><span class="tag p2">P2</span><h2>Memory → Suggested, Notes to revisit, History</h2><span class="src">ProposalReviewPanel · VaultReviewPanel · ProposalHistoryList</span>
+      <div class="seg" role="group" aria-label="Compare"><button aria-pressed="true" data-m="both">Side by side</button><button data-m="now">Now</button><button data-m="new">New</button></div></div>
+    <div class="cmp" data-mode="both">
+      <figure class="now"><figcaption><span class="d"></span>Now: History, Notes to revisit, Suggested</figcaption><img src="missed-views/proposal-history.png" alt="Current history tab: lowercase pill filters with pink outline on the selected one" loading="lazy"><img src="missed-views/vault-review.png" alt="Current notes to revisit: inset content, lowercase refresh button" loading="lazy" style="margin-top:12px"><img src="missed-views/proposals.png" alt="Current suggested tab: pink Review button on each row and a dismiss-older-than form row" loading="lazy" style="margin-top:12px"></figure>
+      <figure class="new"><figcaption><span class="d"></span>New design system</figcaption>
+        <div class="pane">
+          <div class="ph"><h3>Memory</h3><div class="end"><span class="sg"><span class="on">Review</span><span>Map</span></span></div></div>
+          <div class="pg">
+            <div>
+              <div class="sec">
+                <div class="sec-h"><h4>Suggested</h4><span class="end"><button class="link quiet">Select</button><button class="ico" aria-label="More">⋯</button></span></div>
+                <p class="muted">Facts Ciao was not sure enough to save alone. <button class="link">How memory works</button></p>
+                <div class="rows">
+                  <div class="r top"><span class="m"><span class="s">Memory · from alpha first conversation</span><span class="t" style="font-weight:500">Synthetic proposal for the browser suite</span><span class="s">Kept as a standing fact for this workspace</span></span><span class="end"><button class="btn">Review</button><button class="link quiet">Dismiss</button></span></div>
+                </div>
+              </div>
+              <div class="sec">
+                <div class="sec-h"><h4>Notes to revisit</h4><span class="end"><button class="link">Refresh</button></span></div>
+                <p class="muted">Saved notes that may be out of date. Say whether each one still holds.</p>
+                <div class="rows"><div class="r"><span class="m"><span class="t" style="font-weight:500">Nothing to revisit.</span><span class="s">A note shows up here when it goes unchecked for a long time, nothing links to it, or it looks like a duplicate.</span></span></div></div>
+                <details class="dis"><summary>What each choice does</summary></details>
+              </div>
+              <div class="sec">
+                <div class="sec-h"><h4>History</h4></div>
+                <div class="toolbar"><span class="sg"><span class="on">All</span><span>Accepted</span><span>Dismissed</span></span><span class="sg"><span class="on">Anyone</span><span>You</span><span>Agent</span><span>Automatic</span></span></div>
+                <p class="muted">No decisions yet. Accepted and dismissed suggestions appear here.</p>
+              </div>
+            </div>
+            <aside class="rail">
+              <h5>Vault</h5>
+              <div class="rows"><div class="r"><span class="k">Notes</span><b>3</b></div><div class="r"><span class="k">Links</span><b>2</b></div><div class="r"><span class="k">Unverified</span><b style="color:var(--warning)">1</b></div></div>
+              <p class="muted">"Dismiss suggestions older than 30 days" lives in the ⋯ menu.</p>
+            </aside>
+          </div>
+        </div>
+      </figure>
+    </div>
+    <ul class="changes">
+      <li><b>Neutral per-row actions.</b> A pink Review on every suggestion competes with itself. Review becomes a neutral button, Dismiss a quiet link.</li>
+      <li><b>Bulk tools out of the way.</b> "Select all" becomes a Select link that turns on checkboxes; "Dismiss older than N days" moves into the section's "⋯" menu.</li>
+      <li><b>Notes to revisit loses its inset.</b> Content starts on the column edge like every other tab; the count becomes the tab badge; "refresh" becomes a Refresh link.</li>
+      <li><b>History filters become segmented controls</b> in sentence case, instead of lowercase pills with a pink outline.</li>
+      <li><b>Sidebar filters in sentence case.</b> "Kinds · all · memory" becomes "All kinds" and "Memory", like the Map sidebar's Categories.</li>
+    </ul>
+  </section>
+
+  <!-- ═════════ 8. Subagent ═════════ -->
+  <section class="view" id="v-subagent">
+    <div class="view-h"><span class="tag p2">P2</span><h2>Subagent transcript</h2><span class="src">SubagentChatView.vue</span>
+      <div class="seg" role="group" aria-label="Compare"><button aria-pressed="true" data-m="both">Side by side</button><button data-m="now">Now</button><button data-m="new">New</button></div></div>
+    <div class="cmp" data-mode="both">
+      <figure class="now"><figcaption><span class="d"></span>Now · click to enlarge</figcaption><img src="missed-views/subagent.png" alt="Current subagent view: arrow crammed against the chat title, an uppercase READ-ONLY pill, a strip with the agent id, italic empty text and a full-width disabled input" loading="lazy"></figure>
+      <figure class="new"><figcaption><span class="d"></span>New design system</figcaption>
+        <div class="pane">
+          <div class="ph"><button class="ico" aria-label="Back to alpha first conversation"><svg class="i" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></button><h3>researcher</h3><span class="crumb">in alpha first conversation</span><div class="end"><span class="stag">Read only</span></div></div>
+          <div class="pg">
+            <div class="empty" style="padding-top:40px">
+              <h4>Transcript not on this machine</h4>
+              <p class="muted">Finished subagents keep their steps in the parent chat's Activity. <button class="link">Open in the parent chat</button></p>
+            </div>
+            <aside class="rail">
+              <h5>Run</h5>
+              <div class="rows"><div class="r"><span class="k">Agent</span><b>researcher</b></div><div class="r"><span class="k">State</span><b>Finished</b></div><div class="r"><span class="k">Started</span><b>10:42</b></div><div class="r"><span class="k">Took</span><b>1 m 12 s</b></div></div>
+            </aside>
+          </div>
+          <div class="readonly"><svg class="i" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>Replies go to the parent chat.<span class="end"><button class="btn">Go to chat</button></span></div>
+        </div>
+      </figure>
+    </div>
+    <ul class="changes">
+      <li><b>Chat header shape.</b> Back icon button, the agent's name as the title, the parent chat as a muted crumb. The separate strip showing the raw id goes.</li>
+      <li><b>"Read only" as a squared tag</b> in sentence case, not an uppercase pill.</li>
+      <li><b>Chat empty state.</b> Heading, one muted line and a link, the same shape as "Start with a request". No italics.</li>
+      <li><b>Composer replaced by a note bar.</b> A disabled full-width input looks broken; a short line with Go to chat says what to do.</li>
+      <li><b>Rail with run facts</b> in the Work details vocabulary.</li>
+    </ul>
+  </section>
+
+  <!-- ═════════ 9. Model selector ═════════ -->
+  <section class="view" id="v-model-selector">
+    <div class="view-h"><span class="tag p2">P2</span><h2>Model picker popover</h2><span class="src">ModelSelector.vue</span>
+      <div class="seg" role="group" aria-label="Compare"><button aria-pressed="true" data-m="both">Side by side</button><button data-m="now">Now</button><button data-m="new">New</button></div></div>
+    <div class="cmp" data-mode="both">
+      <figure class="now"><figcaption><span class="d"></span>Now · click to enlarge</figcaption><img src="missed-views/model-selector.png" alt="Current model popover: uppercase monospace group labels, selected model filled pink, pill thinking chips with pink selection" loading="lazy"></figure>
+      <figure class="new"><figcaption><span class="d"></span>New design system</figcaption>
+        <div class="pane"><div class="stage">
+          <div class="pop" role="listbox" aria-label="Model">
+            <input class="field srch" id="ms-search" placeholder="Search models" style="width:calc(100% - 4px)">
+            <div class="grp">Claude</div>
+            <div class="opt sel" role="option" aria-selected="true"><span class="ck">✓</span>synthetic-model<span class="s">Workspace default</span></div>
+            <div class="opt" role="option"><span class="ck"></span>synthetic-model-fast</div>
+            <div class="grp">opencode</div>
+            <div class="opt" role="option"><span class="ck"></span>gpt-oss-120b</div>
+            <hr>
+            <div class="thk"><span>Thinking</span><span class="sg"><span class="on">Auto</span><span>Low</span><span>High</span></span></div>
+          </div>
+        </div></div>
+      </figure>
+    </div>
+    <ul class="changes">
+      <li><b>Group labels in sentence case</b> at 12px, provider name only. No uppercase monospace.</li>
+      <li><b>Selection by check and tint.</b> The selected model gets a check and the hover surface, not a solid pink fill that reads as a button.</li>
+      <li><b>Default is labelled.</b> "Workspace default" on the right says what Automatic means.</li>
+      <li><b>Thinking uses the shared segmented control</b> in sentence case, as in Settings → Models.</li>
+    </ul>
+  </section>
+
+  <!-- ═════════ 10. Notifications ═════════ -->
+  <section class="view" id="v-notifications">
+    <div class="view-h"><span class="tag">P3</span><h2>Settings → Notifications</h2><span class="src">settings/SettingsNotifications.vue</span>
+      <div class="seg" role="group" aria-label="Compare"><button aria-pressed="true" data-m="both">Side by side</button><button data-m="now">Now</button><button data-m="new">New</button></div></div>
+    <div class="cmp" data-mode="both">
+      <figure class="now"><figcaption><span class="d"></span>Now · click to enlarge</figcaption><img src="missed-views/s-notifications.png" alt="Current notifications tab: a boxed callout with an orange edge and nothing else" loading="lazy"></figure>
+      <figure class="new"><figcaption><span class="d"></span>New design system</figcaption>
+        <div class="pane">
+          <div class="ph"><h3>Settings</h3></div>
+          <div class="pg">
+            <div>
+              <div class="sec">
+                <div class="sec-h"><h4>Notifications</h4></div>
+                <p class="muted">Ciao notifies you when a chat replies and the app is in the background.</p>
+                <div class="rows">
+                  <div class="r top"><span class="k">Status</span><span class="v"><span class="swl" style="color:var(--fg)"><span class="dot warn"></span>Blocked by macOS</span><span class="s" style="display:block;color:var(--fg3);font-size:12px;margin-top:2px">Turn them on in System Settings → Notifications → Ciaobot.</span></span></div>
+                  <div class="r"><span class="k">Chat replies</span><span class="v"><span class="swl">On <span class="sw on" role="switch" aria-checked="true" aria-label="Chat replies"></span></span></span></div>
+                  <div class="r"><span class="k">Needs you</span><span class="v"><span class="swl">On <span class="sw on" role="switch" aria-checked="true" aria-label="Needs you"></span></span></span></div>
+                </div>
+              </div>
+            </div>
+            <aside class="rail"><h5>This device</h5><div class="rows"><div class="r"><span class="k">Permission</span><b style="color:var(--warning)">Blocked</b></div></div></aside>
+          </div>
+        </div>
+      </figure>
+    </div>
+    <ul class="changes">
+      <li><b>Status as a key/value row</b> with a warning dot and the fix on the line below, instead of a callout box that fills the page.</li>
+      <li><b>Show what can be controlled.</b> Rows for the kinds of notification make the tab useful when permission is granted. Only add these if the backend already distinguishes them; otherwise ship just the status row.</li>
+    </ul>
+  </section>
+
+  <!-- ═════════ 11. Device ═════════ -->
+  <section class="view" id="v-device">
+    <div class="view-h"><span class="tag">P3</span><h2>This device</h2><span class="src">DevicePanel.vue · /device</span>
+      <div class="seg" role="group" aria-label="Compare"><button aria-pressed="true" data-m="both">Side by side</button><button data-m="now">Now</button><button data-m="new">New</button></div></div>
+    <div class="cmp" data-mode="both">
+      <figure class="now"><figcaption><span class="d"></span>Now · click to enlarge</figcaption><img src="missed-views/device.png" alt="Current device page: bordered cards, lowercase monospace titles, orange 'unknown' badges, lowercase back to app button" loading="lazy"></figure>
+      <figure class="new"><figcaption><span class="d"></span>New design system</figcaption>
+        <div class="pane">
+          <div class="ph"><button class="link quiet">← Back to Ciaobot</button><h3 style="margin-left:8px">This device</h3></div>
+          <div class="pg">
+            <div>
+              <p class="muted">Everything here is about the computer in front of you.</p>
+              <div class="sec">
+                <div class="sec-h"><h4>Role</h4></div>
+                <div class="rows">
+                  <div class="r top"><span class="k">Current role</span><span class="v"><span class="swl" style="color:var(--fg)"><span class="dot warn"></span>Unknown</span><span class="s" style="display:block;color:var(--fg3);font-size:12px">The saved role could not be verified. Repair it before using host or client actions.</span></span></div>
+                </div>
+                <div class="foot" style="justify-content:flex-start"><button class="btn">Connect as client…</button><button class="btn danger">Make this the host…</button></div>
+              </div>
+              <div class="sec">
+                <div class="sec-h"><h4>Local app</h4><span class="end"><span class="muted" style="margin:0">Up to date</span></span></div>
+                <div class="rows"><div class="r"><span class="k">Installed</span><span class="v"><code>0.0.0-e2e</code></span></div><div class="r"><span class="k">Local engine</span><span class="v swl"><span class="dot ok"></span>Ready</span></div></div>
+              </div>
+            </div>
+            <aside class="rail"><h5>Why this page</h5><p class="muted" style="margin-top:0">It stays on this machine's own address, so it works even when the host is unreachable.</p></aside>
+          </div>
+        </div>
+      </figure>
+    </div>
+    <ul class="changes">
+      <li><b>Plain sections instead of cards.</b> Sentence-case "Role" and "Local app" headings with hairline rows.</li>
+      <li><b>State as text with a dot,</b> not orange badges repeated twice.</li>
+      <li><b>Clearer destructive wording.</b> "Force become host" becomes "Make this the host…", red outline, with a confirm step.</li>
+      <li><b>Same page grid,</b> even though the page lives outside the app shell. It stays on the loopback device origin (see <code>docs/REMOTE_BOUNDARY.md</code>); only styling changes.</li>
+    </ul>
+  </section>
+
+  <!-- ═════════ 12. Chrome ═════════ -->
+  <section class="view" id="v-chrome">
+    <div class="view-h"><span class="tag">P3</span><h2>Connection banner, sidebar footers, New chat picker</h2><span class="src">ChatLayout · ProjectSidebar · NewChatPicker</span>
+      <div class="seg" role="group" aria-label="Compare"><button aria-pressed="true" data-m="both">Side by side</button><button data-m="now">Now</button><button data-m="new">New</button></div></div>
+    <div class="cmp" data-mode="both">
+      <figure class="now"><figcaption><span class="d"></span>Now: banner and sidebar footer, New chat picker</figcaption><img src="missed-views/new-schedule.png" alt="Current top banner in monospace and the pink-outlined New Automation footer button in the sidebar" loading="lazy"><img src="missed-views/newchat-picker.png" alt="Current New chat picker with a pink-bordered selected row" loading="lazy" style="margin-top:12px"></figure>
+      <figure class="new"><figcaption><span class="d"></span>New design system</figcaption>
+        <div class="pane">
+          <div class="banner"><span class="dot warn"></span><span>Ciaobot can't tell whether this browser is on the host.</span><span class="end"><button class="link">Open This device</button><button class="btn">Switch to host</button></span></div>
+          <div class="mini">
+            <div class="sb">
+              <div class="it">Today</div><div class="it on">Automations</div><div class="it">Memory</div><div class="it">Settings</div>
+              <div class="lbl">Routines <button class="link">New</button></div>
+              <div class="it">Daily project briefing<span class="s">08:00</span></div>
+              <div class="lbl">Projects <button class="link">New</button></div>
+              <div class="it">General</div>
+            </div>
+            <div class="blank">
+              <div class="modal">
+                <h4>New chat</h4><p class="muted">Pick a project in Alpha. <kbd>1</kbd>–<kbd>9</kbd> switch workspace.</p>
+                <div class="pick sel"><span class="nm">General</span><span class="s">↵</span></div>
+                <div class="pick"><span class="nm">alpha-notes-a-very-long-unbreakable-project-name</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </figure>
+    </div>
+    <ul class="changes">
+      <li><b>Banner in the product voice.</b> Sans 13px on a light warning tint, plain sentence, one link and one neutral button. The monospace strip reads like a debug console.</li>
+      <li><b>Footer buttons move into section labels.</b> "+ New Project" and the pink-outlined "+ New Automation" at the sidebar bottom become a "New" link on the Projects and Routines labels. The archive icon joins the Projects label's menu.</li>
+      <li><b>Picker selection matches the sidebar.</b> Accent-tinted fill with a 2px inside edge, not a pink border box; ↵ shows on the selected row.</li>
+    </ul>
+  </section>
+</div>
+
+<script>
+  document.querySelectorAll('.view').forEach((v) => {
+    const cmp = v.querySelector('.cmp')
+    v.querySelectorAll('.seg button').forEach((b) => {
+      b.addEventListener('click', () => {
+        cmp.dataset.mode = b.dataset.m
+        v.querySelectorAll('.seg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)))
+      })
+    })
+    // Click a small screenshot to see it full width; click again to go back.
+    v.querySelectorAll('.now img').forEach((img) => img.addEventListener('click', () => {
+      const target = cmp.dataset.mode === 'now' ? 'both' : 'now'
+      v.querySelector(`.seg button[data-m="${target}"]`).click()
+    }))
+  })
+</script>

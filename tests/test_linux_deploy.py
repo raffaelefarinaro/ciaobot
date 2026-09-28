@@ -1,9 +1,11 @@
-"""Linux dev deploys must not attempt the macOS desktop rebuild.
+"""A dev deploy rebuilds the engine and the PWA, and nothing else.
 
-`admin_deploy` gated its desktop-shell stage on dev mode alone, so a Linux
-host with `CIAO_DEV_MODE=true` ran `needs_rebuild`/`build_and_stage` — a
-Tauri/macOS build that fails on Linux after git/pip/npm had already mutated
-the install, aborting before the restart. The stage is macOS-only now.
+`admin_deploy` used to add a desktop-shell stage that rebuilt and swapped the
+macOS app bundle. That tree is gone (#656) and the release is the engine, so
+the stage went with it: what a deploy reports now is the same on every
+platform. These tests keep the deploy path itself honest — a Linux dev deploy
+runs the snapshot/git/pip/npm/restart choreography to completion and offers no
+step that could shell out to a build of something that no longer exists.
 """
 
 from __future__ import annotations
@@ -38,7 +40,6 @@ async def _deploy(tmp_path, monkeypatch: pytest.MonkeyPatch, platform: str):
         dev_mode=True,
         workspace_root=tmp_path / "ws",
         app_repo=str(_repo(tmp_path)),
-        restart_exit_code=75,
     )
 
     async def ok_push(*args, **kwargs):
@@ -50,7 +51,7 @@ async def _deploy(tmp_path, monkeypatch: pytest.MonkeyPatch, platform: str):
     monkeypatch.setattr(routes_api, "_commit_and_push", ok_push)
     monkeypatch.setattr(routes_api, "_git_pull_with_retry", ok_pull)
     monkeypatch.setattr(routes_api, "_run_root_npm_install", lambda root: _completed())
-    monkeypatch.setattr(routes_api.desktop_build, "run_step", lambda *a, **k: _completed())
+    monkeypatch.setattr(routes_api, "run_step", lambda *a, **k: _completed())
 
     async def fake_json():
         return {}
@@ -71,31 +72,19 @@ async def _deploy(tmp_path, monkeypatch: pytest.MonkeyPatch, platform: str):
     return json.loads(response.body)
 
 
-async def test_linux_dev_deploy_skips_desktop_shell(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def no_desktop(*args, **kwargs):
-        raise AssertionError("desktop rebuild must not run on Linux")
-
-    monkeypatch.setattr(routes_api.desktop_build, "needs_rebuild", no_desktop)
-    monkeypatch.setattr(routes_api.desktop_build, "build_and_stage", no_desktop)
-
-    payload = await _deploy(tmp_path, monkeypatch, "linux")
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+async def test_dev_deploy_reports_the_same_steps_on_every_platform(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    payload = await _deploy(tmp_path, monkeypatch, platform)
 
     assert payload["ok"] is True
-    steps = {step["step"]: step for step in payload["steps"]}
-    assert steps["desktop app"]["ok"] is True
-    assert steps["desktop app"]["output"].startswith("skipped:")
-
-
-async def test_darwin_dev_deploy_still_consults_desktop_shell(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list = []
-
-    def fake_needs_rebuild(*args, **kwargs):
-        seen.append("needs_rebuild")
-        return (False, "fresh")
-
-    monkeypatch.setattr(routes_api.desktop_build, "needs_rebuild", fake_needs_rebuild)
-
-    payload = await _deploy(tmp_path, monkeypatch, "darwin")
-
-    assert payload["ok"] is True
-    assert seen == ["needs_rebuild"]
+    assert [step["step"] for step in payload["steps"]] == [
+        "locate checkout",
+        "snapshot",
+        "git pull",
+        "pip install",
+        "npm install (root)",
+        "npm build",
+        "restart",
+    ]

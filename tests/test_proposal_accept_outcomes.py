@@ -51,7 +51,9 @@ EXPECTED_KEYS: dict[str, list[str]] = {
     "region_failed": ["error", "ok", "region"],
     "people_no_name": ["error", "ok"],
     "people_written": ["destination", "ok"],
-    "people_exists": ["error", "ok"],
+    "people_folded": ["destination", "ok"],
+    "people_no_changes": ["error", "ok"],
+    "people_fold_raised": ["error", "ok"],
     "learnings_written": ["destination", "ok"],
     "project_no_target": ["error", "ok"],
     "project_missing_doc": ["error", "ok"],
@@ -231,14 +233,44 @@ def test_failed_keys(region, monkeypatch):
     assert payload["error"] == "could not write ciao:memory"
 
 
-def test_people_keys(tmp_path):
+def test_people_keys(tmp_path, monkeypatch):
     config = _config(tmp_path)
-    _assert_keys("people_no_name", proposal_service._accept_people_row(config, dict(ROW)))
+    run = asyncio.run
+    _assert_keys("people_no_name", run(proposal_service._accept_people_row(config, dict(ROW))))
     row = {**ROW, "kind": "people", "target": "Mo"}
-    payload = _assert_keys("people_written", proposal_service._accept_people_row(config, row))
+
+    async def unreachable(**kwargs: Any) -> bool:
+        raise AssertionError("a new note is created, not folded")
+
+    monkeypatch.setattr(project_doc_update, "fold_fact_into_person_note", unreachable)
+    payload = _assert_keys("people_written", run(proposal_service._accept_people_row(config, row)))
     assert payload["destination"] == "People/Mo.md"
-    # The second accept finds the note already there and keeps the row queued.
-    _assert_keys("people_exists", proposal_service._accept_people_row(config, row))
+
+    # The note now exists, so a second accept folds into it instead of refusing.
+    seen: dict[str, Any] = {}
+
+    async def wrote(**kwargs: Any) -> bool:
+        seen.update(kwargs)
+        return True
+
+    async def unchanged(**kwargs: Any) -> bool:
+        return False
+
+    async def failed(**kwargs: Any) -> bool:
+        kwargs["error_out"].append("TimeoutError: slow")
+        return False
+
+    monkeypatch.setattr(project_doc_update, "fold_fact_into_person_note", wrote)
+    payload = _assert_keys("people_folded", run(proposal_service._accept_people_row(config, row)))
+    assert payload["destination"] == "People/Mo.md"
+    assert seen["note_path"].name == "Mo.md"
+    assert seen["fact"] == row["text"]
+    monkeypatch.setattr(project_doc_update, "fold_fact_into_person_note", unchanged)
+    payload = _assert_keys("people_no_changes", run(proposal_service._accept_people_row(config, row)))
+    assert "no changes" in payload["error"]
+    monkeypatch.setattr(project_doc_update, "fold_fact_into_person_note", failed)
+    payload = _assert_keys("people_fold_raised", run(proposal_service._accept_people_row(config, row)))
+    assert payload["error"] == "fold failed: TimeoutError: slow"
 
 
 def test_learnings_keys(tmp_path):
@@ -248,6 +280,32 @@ def test_learnings_keys(tmp_path):
         proposal_service._accept_learnings_row(config, {**ROW, "kind": "learnings"}),
     )
     assert payload["destination"] == "Workspace/Learnings.md"
+
+
+def test_add_category_is_a_destination_not_a_rehome(tmp_path):
+    """`add_category` is a destination action, so the builder reports where the
+    category landed.
+
+    An action missing from `proposal_actions._DESTINATION_ACTIONS` falls through
+    to the re-home branch and reports `promoted=False` for a write that
+    succeeded — the row leaves the queue and the client is told the category was
+    not added.
+    """
+    from ciao import proposal_actions, proposal_kinds
+
+    accept = proposal_kinds.accept_for("category")
+    assert accept.action in proposal_actions._DESTINATION_ACTIONS
+    result = proposal_actions.build_accept_result(
+        "p1",
+        accept,
+        {"id": "p1", "kind": "category", "text": "Recipe Book"},
+        {"ok": True, "destination": "Recipe Books"},
+        include_usage=True,
+    )
+    payload = result.as_dict()
+    assert payload["promoted"] is True
+    assert payload["destination"] == "Recipe Books"
+    assert "justified" not in payload, "the re-home shape must not be reached"
 
 
 def test_project_keys(tmp_path, monkeypatch):

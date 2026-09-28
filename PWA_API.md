@@ -11,7 +11,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 - `GET /?setup=<token>` is the local first-launch shortcut path. It is accepted only on `localhost`, `127.0.0.1`, or `::1`; when the token matches `.runtime/setup-token`, the server sets the same signed `ciao_session` cookie, deletes the token file, and redirects to `/`.
 - Production cookies are `Secure`, `SameSite=Lax`, and host-only (scoped to the exact host that served them).
 - `POST /api/auth/logout` clears the same host-only cookie.
-- All `/api/*` routes except `POST /api/auth`, `GET /api/startup-status`, `GET /api/active-chats`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. (`GET /api/setup/inspect-folder` is not middleware-exempt, but it only answers in bootstrap mode, where protection is off anyway.) All `/ws/*` routes require the signed session cookie.
+- All `/api/*` routes except `POST /api/auth`, `GET /api/auth/check`, `GET /api/startup-status`, `GET /api/active-chats`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. (`GET /api/setup/inspect-folder` is not middleware-exempt, but it only answers in bootstrap mode, where protection is off anyway.) All `/ws/*` routes require the signed session cookie.
+- Node mode is gone: there is one engine per install and a browser either talks to it directly or not at all. There is no second origin, no local-control capability header, and no session bridge between origins. `docs/REMOTE_BOUNDARY.md` records what replaced the old model.
 - `POST /api/setup/finish` is only accepted in bootstrap mode from localhost with a matching browser origin/referer (off-localhost requests get a 403 pointing at `http://localhost:<port>`). Body: `workspace` (required — the root folder holding the vault plus app data), `vault_root` (optional, default `<workspace>/memory-vault`; absolute or `~` paths are honored for an existing notes folder elsewhere), `password` (required — the dashboard password, at least 4 characters; setup always enables protection), plus optional `vault_mode`, `workspace_name`, `push_contact`, `port`, `python`, `launch_agents_dir`, `app_dir`, and `restart`. It writes the real workspace config, ensures workspace and vault are (in) git repos, creates local launch artifacts, and asks the supervisor to restart into the configured workspace. When the chosen folder already contains nested workspace directories (`memory-vault/<name>/` with a `MEMORY.md` inside), those are adopted as the workspace registry and `workspace_name` is ignored.
 - `GET /api/setup/list-dirs`, `POST /api/setup/mkdir`, and `GET /api/setup/inspect-folder` back the setup wizard. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost). The folder picker (`list-dirs`, `mkdir`) lists directories only and never reads file contents. `inspect-folder?path=<dir>` returns `{mode: "scratch"|"existing", vault_root, existing_workspaces, has_env}` so the wizard can hide the "First Workspace" text field when nested workspaces are already present.
 - State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host. Missing headers are accepted for non-browser clients.
@@ -35,10 +36,10 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/projects/completed/restore` | Restore a completed project to active |
 | GET, POST | `/api/projects/{project_id}/chats` | List or create project chats |
 | GET, POST | `/api/projects/{project_id}/files` | List or upload project files |
-| POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant (local node only) |
+| POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant; returns bounded opaque file references |
 | GET | `/api/chats` | List all chats |
-| GET | `/api/menubar-chats` | Compact chat list for the `Ciaobot.app` tray |
-| GET | `/api/menubar-notifications` | Notification feed for the `Ciaobot.app` tray (`?after=<epoch>`, inclusive; includes read-clear controls and is proxied to the host in client mode) |
+| GET | `/api/menubar-chats` | Compact chat list for the loopback-only local feed (legacy route name, no native client) |
+| GET | `/api/menubar-notifications` | Notification feed for the loopback-only local feed (`?after=<epoch>`, inclusive; includes read-clear controls) |
 | POST | `/api/chats/read-all` | Mark all chats read |
 | PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
@@ -50,19 +51,16 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/unread` | Mark chat unread on purpose ("come back to this"); clears the read stamp and emits a cross-device `chat_unread` event |
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
 | POST | `/api/chats/{chat_id}/stop` | Stop an in-flight turn; HTTP fallback for the websocket `stop` message, for when that chat's socket is disconnected or mid-reconnect |
-| POST | `/api/chats/{chat_id}/retry-insights` | Retry unfinished post-archive steps for an archived chat: resumes whatever is still pending/failed on its archive-job manifest (insights when missing, plus project fold, trajectory and memory proposals after a crash). Returns `{status, chat_id, job}`; `status` is `started` / `running` / `complete` / `blocked` / `not_archived` / `no_archive` |
+| POST | `/api/chats/{chat_id}/retry-insights` | Retry the unfinished post-archive step for an archived chat: resumes whatever is still pending/failed on its archive-job manifest (the session trajectory). Returns `{status, chat_id, job}`; `status` is `started` / `running` / `complete` / `blocked` / `not_archived` / `no_archive` |
 | GET | `/api/chats/{chat_id}/archive-job` | The persisted post-archive manifest for an archived chat: per-stage statuses, `unfinished` list and any `blocked_reason` (or `{job:null}` when none exists) |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and report whether a live event subscriber received the navigation |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
 | GET | `/api/chats/{chat_id}/messages/part` | Fetch one full history row by absolute index (lazy expansion) |
-| GET | `/api/native/sessions` | List locally-running Claude Code CLI sessions for a workspace (handover warning) |
 | GET | `/api/chats/{chat_id}/subagents` | Load subagent transcripts. `?agent_id=` narrows to one agent (bare or `agent-`-prefixed) and skips reading the siblings — what the read-only subagent view polls |
 | GET | `/api/subagents/running` | Live subagents per working chat (metadata only), for the sidebar's subagent rows |
-| POST | `/api/chats/{chat_id}/voice` | Upload voice for transcription |
-| POST | `/api/chats/{chat_id}/speak` | Synthesize speech for a message; returns audio bytes |
 | POST | `/api/chats/{chat_id}/images` | Upload chat images |
-| POST | `/api/chats/{chat_id}/attachments` | Upload chat files; supported documents become Markdown in the active project folder |
+| POST | `/api/chats/{chat_id}/attachments` | Upload chat files; supported documents become Markdown in the active project folder; the browser receives bounded `file_refs`, not server paths |
 | GET | `/api/images/{ref}` | Read uploaded image blob |
 | GET | `/api/workspace-file` | Read allowed text file |
 | POST | `/api/workspace-file` | Write user-edited text file (allowlist + snapshot) |
@@ -84,7 +82,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/schedule-run/{schedule_id}` | Run now. 409 for an interval entry whose target chat has a turn in flight (refused, not queued) |
 | PATCH, DELETE | `/api/schedules/{schedule_id}` | Update, pause/resume (`{"enabled": bool}`), or delete |
 | GET | `/api/automation` | Background-job status (Settings → Automations): per job its trigger, last run, duration, model, errors, and bulk `sub_jobs`. Omits retired jobs and schedule-only jobs whose schedule is not installed. With `?include=outcomes` answers `{"jobs": [...], "proposal_outcomes": {"promoted": n, "dismissed": m, "by_workspace": {…}, "recent_30d": {…}}}` — the memory-proposal promoted-vs-dismissed tally shown beside the job stats; without it the response stays the bare list |
-| POST | `/api/automation/backfill-insights` | Run Session insights over every archived chat missing them. Optional `{"model": "<model-id>"}` runs this pass with a different model without changing the stored setting |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
 | GET | `/api/commands` | List slash commands |
 | GET | `/api/agent-assets` | List subagents, slash commands, and workspace health for Settings |
@@ -100,6 +97,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/housekeeping/{action_id}/run` | Perform one action's mechanical work, re-run detection, and return the fresh action list; unknown id is 404 |
 | POST | `/api/housekeeping/{action_id}/dismiss` | Record a "not now" for an ask-style action (e.g. the GitHub star nudge), re-run detection, and return the fresh action list; unknown id is 404 |
 | GET | `/api/models` | List configured models, plus `providers[]` (id, labels, capabilities) from the runtime-provider registry. `?refresh=1` bypasses the provider catalog caches |
+| GET, PATCH | `/api/memory/entity-types` | The vault's category list (`?workspace=` required) as `{workspace, vault, types}`, where each row is `{id, label, kind, folder, description, aliases, stale_after_days, enabled, builtin, note_count}`. `GET` returns every effective entry, disabled ones included; `note_count` is the notes carrying that `type:` (an alias counts for its category, drift under its own spelling). A `PATCH` sends the whole desired list as `{"types": [...]}` — a row whose `id` is a shipped one is a partial override of that category's default (an omitted field falls back to the shipped default; a custom row's omitted fields take the built-in defaults instead, so send the whole list), only rows that differ from the shipped default are written to `<agent vault root>/entity-types.yaml`, and the write regenerates `VOCABULARY.md` with a `## Categories` section. 400 for a malformed body, a duplicate id, two enabled categories sharing a folder, an alias that is another entry's id, a missing label, a negative `stale_after_days`, or a delete of a custom category whose notes still name it; 500 when the file cannot be written (the old file is left in place) |
 | GET, PATCH | `/api/status` | Read or update status |
 | GET | `/api/mcp/status` | Project MCP server inventory (env-key status + observed tools) and active-session counts (no credentials); Ciaobot's own surface is reported by `/api/agent/status` |
 | GET | `/api/mcp/usage` | Agent surface per-operation call/error counters, plus a `window` object naming the aggregation window (lifetime totals vs. the retained detail records behind them) (no credentials) |
@@ -109,14 +107,14 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | DELETE | `/api/mcp/servers/{name}` | Remove a project MCP server from `.mcp.json` |
 | GET | `/api/mcp/servers/{name}/tools` | Lazy tool discovery for one project MCP server (HTTP `tools/list` probe, or observed telemetry for stdio) |
 | GET | `/api/startup-status` | Read startup phase progress |
-| GET | `/api/active-chats` | List chat IDs with in-flight work (streaming or background subagents); drives the macOS menu bar spinner |
+| GET | `/api/active-chats` | List chat IDs with in-flight work (streaming or background subagents); guards a drain before an engine restart |
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
 | GET | `/api/package/status` | Read installed package version and best-effort latest GitHub release version |
 | GET | `/api/package/changelog` | List commits between the installed and latest release for the update prompt |
-| POST | `/api/package/update` | Return app-owned update guidance; production updates replace the signed Ciaobot.app bundle and restart |
-| GET | `/api/device/package-status` | Same as `/api/package/status`, but never proxied: in client mode this reports *this* machine's install while `/api/package/status` reports the host's |
-| GET | `/api/device/changelog` | Commits between this machine's installed version and the latest release (never proxied) |
-| POST | `/api/device/update` | Return app-owned update guidance for *this* machine, not the host it mirrors (never proxied) |
+| POST | `/api/package/update` | Return update guidance for the installed package; production engine updates go through the signed one-line installer or Settings → Home |
+| GET | `/api/update/status` | Installed-engine update job: install mode, whether it can update, and the persisted operation record; `error` carries a stage/apply that was refused before it could record one (unreachable latest release, already on that version), or a record that could not be read |
+| POST | `/api/update/stage` | Start staging a release for an installer-managed engine (background; poll status) |
+| POST | `/api/update/apply` | Apply the staged release: drain, detached swap, restart, rollback (background; poll status) |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
 | GET | `/api/setup/list-dirs` | List local subdirectories for the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/setup/inspect-folder` | Probe a candidate workspace folder for vault mode and any nested workspaces (bootstrap mode, localhost only) |
@@ -125,8 +123,11 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/agent/status` | Agent CLI surface status: `{ready, operations, telemetry_path, version}` for the Settings → Agent CLI panel |
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
-| DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
-| GET, PATCH | `/api/settings/providers` | Read or update provider/service key status; credentials are redacted |
+| POST | `/api/workspaces/{name}/archive` | Archive a workspace: unregister it, archive its chats, take its user schedules, and move its folder intact into `<install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/`. Refuses the primary or last workspace, a workspace with a running chat, and layouts it cannot move safely (409) |
+| DELETE | `/api/workspaces/{name}` | Alias of `POST /api/workspaces/{name}/archive`, kept for existing scripts; it no longer deletes anything |
+| GET | `/api/workspaces/archived` | List archived workspaces, newest first: `{archived: [{id, name, archived_at, path, layout, color, default_provider, gws_profile, disallowed_tools, allowed_mcp_servers, schedules, schedules_dropped, restorable, blocked_reason}]}`. The settings and `schedules` count are what a restore would apply after validation (`archive.json` syncs through git, so it is treated as untrusted); the PWA shows them in the restore confirmation |
+| POST | `/api/workspaces/archived/restore` | Restore an archived workspace (`{id}`): move its folder back, re-register it, and put its schedules back **paused**. Every registry field and schedule row is rebuilt from validated metadata: invalid schedules and system rows are dropped, restored ones are pinned to the workspace, and an unreadable MCP allowlist becomes `[]`. Refuses when the name or the folder is taken, or when the archive's vault location is not inside the restored folder (409). Response `restored: {id, name, path, schedules, schedules_paused, schedules_dropped}` |
+| GET | `/api/settings/providers` | Read each provider CLI's connection status |
 | POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or opencode CLI |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
 | POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
@@ -144,21 +145,18 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/push/unsubscribe` | Remove push subscription |
 | GET | `/api/push/status` | Read push setup status |
 | GET | `/api/push/subscription` | Check one subscription |
+| POST | `/api/push/test` | Send a test notification to the caller's own subscription (body `{endpoint}`; 10 s cooldown per subscription) |
 | GET | `/api/local/status` | Workspace git state: `git_repo`, current `branch` (nullable), dirty |
 | GET | `/api/local/preflight` | Git preflight check for dirty files, categories, blockers/warnings |
 | POST | `/api/local/handback` | Commit pending work, pull from origin, push the current branch |
 | POST | `/api/local/resync` | Merge `origin/<branch>` back into the checkout |
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
-| GET | `/api/node/addresses` | URLs this engine is reachable at (localhost, Bonjour `.local`, each LAN/VPN IPv4), each flagged `loopback` so the PWA can mark the ones a phone cannot use. Session-protected, unlike the loopback-public tray endpoints, because it enumerates LAN interfaces |
-| GET | `/api/node/status` | Read multi-device node failover status and role |
-| GET | `/api/node/connected-clients` | Live remote WebSocket clients connected to this host (excludes loopback) |
-| POST | `/api/node/connect` | Connect this node as a client tunnel to a remote host |
-| POST | `/api/node/demote` | Demote active node to standby |
-| POST | `/api/node/handover` | Handover active role to another node |
-| POST | `/api/node/peers` | Register or update node peer links |
+| GET | `/api/addresses` | Where other devices can open this engine: the configured trusted HTTPS URL first (`kind: trusted`, `secure: true`), then LAN/Bonjour HTTP URLs (`kind: lan`), then localhost (`kind: loopback`). Session-protected; URLs never carry a password or token |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
-| POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend (plus the desktop app in dev mode), and restart with latest code |
+| POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend, and restart with latest code (source checkout in dev mode only) |
 | POST | `/api/admin/restart` | Drain active chat work and restart the installed engine without pulling or rebuilding code (authenticated) |
+| POST | `/api/admin/drain` | Close admission for new turns ahead of an engine update; returns `{draining, active_chat_ids}` (loopback-only, no session; used by `ciao update apply`) |
+| POST | `/api/admin/drain/cancel` | Reopen admission after an update's drain timed out; returns `{draining: false}` (loopback-only, no session; used by `ciao update apply`) |
 | GET | `/api/admin/status` | Read admin/deploy status |
 | GET | `/api/admin/skills` | List skills labelled as custom or stock (merged across agent roots) |
 | POST | `/api/admin/skills/add` | Deprecated: returns 410, replaced by `/api/skills/import` |
@@ -190,12 +188,15 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 
 ## Agent recipes
 
-### Restart an installed Linux server
+### Restart an installed server
 
 `POST /api/admin/restart` uses the backend's existing chat-drain lifecycle and
-does not run git, pip, npm, or desktop builds. Linux production Settings chooses
-this action when `/api/local/status` reports `restart_only: true`. Development
-deploys retain `/api/admin/deploy`.
+does not run git, pip, npm, or frontend builds. Settings chooses this action when
+`/api/local/status` reports `restart_only: true`: Linux production, a legacy
+bundled-app install (whatever the dev mode), and any install that is not a
+deployable source checkout. Development deploys from a checkout retain
+`/api/admin/deploy`, which returns 400 up front on an installed (non-checkout)
+engine.
 
 ```sh
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/restart"
@@ -337,13 +338,16 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projec
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/projects/$PID"
 ```
 
-Project file uploads are limited to 50 MB per file. File-list responses use
-workspace-relative viewer paths when the vault is nested under the workspace
-and absolute viewer paths when `CIAO_VAULT_ROOT` points elsewhere. Successful
-upload entries also include `absolute_path`, which the chat composer uses after
-a client uploads a dropped file to the host's active project folder. Saved-page
-`.mht`/`.mhtml` files are accepted as binary project attachments and served as
-downloads rather than executable inline content.
+Project and chat uploads are limited to 50 MB per file, 100 files per request,
+and 512 MB total. Project-file list responses use workspace-relative viewer
+paths when the vault is nested under the workspace and absolute viewer paths
+when `CIAO_VAULT_ROOT` points elsewhere. The project upload response exposes
+only a bounded relative `path` plus metadata; chat attachment and native-drop
+responses expose bounded `file_refs` (`ciao-drop:drop_<32 hex>`), never an
+absolute path. The server expands a reference only while building the provider
+prompt, so the browser never needs the host path. Saved-page `.mht`/`.mhtml`
+files are accepted as binary project attachments and served as downloads rather
+than executable inline content.
 
 **Chats**
 
@@ -391,6 +395,7 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 
 # Subagent transcripts — one entry per subagent this chat's session ever
 # spawned: {agent_id, messages, description, subagent_type, status, turn_index}.
+# `status` is running, completed, failed, or the neutral terminal stopped state.
 # `messages` shares the /messages shape; both provider renderers omit
 # `timestamp` on these, so a reader must tolerate it being absent. The PWA's
 # read-only subagent view (/chat/{chat_id}/subagent/{agent_id}) reads this.
@@ -419,8 +424,7 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/read-all"
 
 # Read mutations also cancel the delayed push and emit a cross-device clear
-# control. Connected PWAs close the matching service-worker notification tag;
-# the macOS tray removes delivered Ciaobot banners for the chat.
+# control. Connected PWAs close the matching service-worker notification tag.
 
 # Deferred retry after provider/session quota errors. action ∈ {set, try_now, stop}.
 # `set` needs the user prompt to replay; automatic quota handling fills this itself.
@@ -478,7 +482,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 **Workspaces**
 
 ```bash
-# List — returns {workspaces, active, provider_options}.
+# List — returns {workspaces, active, primary, provider_options}.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
 # Upsert — body keys: name, default_provider,
@@ -498,8 +502,18 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/works
   -H 'content-type: application/json' \
   -d '{"disallowed_tools":"mcp__n8n_mcp"}'
 
-# Delete.
-curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/workspaces/client-a"
+# Archive. Nothing is deleted or merged into another workspace: the folder
+# moves intact to <install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/
+# beside an archive.json, its chats are archived, its user schedules leave with
+# it, and search and INDEX.md stop seeing its notes. The primary and the last
+# workspace are refused. DELETE /api/workspaces/{name} is an alias.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/client-a/archive"
+
+# List archived workspaces, then restore one by id (refused if the name is taken).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces/archived"
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/archived/restore" \
+  -H 'content-type: application/json' \
+  -d '{"id":"client-a-20260923-101500"}'
 ```
 
 **Schedules and ops**
@@ -545,11 +559,10 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/sched
   -H 'content-type: application/json' -d '{"enabled":false}'
 
 # Deploy: snapshot, pull, build, restart. Don't call from inside the live PWA session
-# (CLAUDE.md "Never restart the ciao service yourself"); ask the operator to hit Deploy.
+# (AGENTS.md "Never restart the ciao service yourself"); ask the operator to hit Deploy.
 # Steps run against CIAO_APP_REPO when set, else the directory holding the running
-# ciao package; a non-checkout returns 400 with a "locate checkout" step. With
-# CIAO_DEV_MODE and changed desktop/ sources it also rebuilds the Tauri app, then
-# quits and relaunches it just before the engine restart.
+# ciao package; a non-checkout returns 400 with a "locate checkout" step. An
+# installer-managed engine is refused up front: re-run install.sh to update it.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/deploy"
 ```
 
@@ -575,12 +588,14 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
   -H 'content-type: application/json' -d '{"profile":"personal"}'
 ```
 
-**Routine settings (Settings → Models tab)**
+**Routine settings (Settings → Models / Automations)**
 
 ```bash
-# Read internal-routine settings: insights and critique model overrides, the
-# per-provider default model / thinking / routine-model maps, and the effective
-# models after defaults.
+# Read internal-routine settings: the automatic-session-insights and trajectory
+# capture switches, insights and critique model overrides, the per-provider
+# default model / thinking / routine-model maps, and the effective models after
+# defaults. insights_enabled=false stops the memory pass; trajectories_enabled=false
+# stops trajectory records.
 #
 # insights_model_effective is the PRIMARY workspace's answer only. With no
 # override the insights routine resolves from the chat's own workspace, so
@@ -591,12 +606,15 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 
 # Update any subset. Persisted in .runtime/app_settings.json, applied to the
 # live config immediately (no restart). Empty string clears an override back
-# to the env default. "apple" routes a routine to the on-device Foundation
-# Model (insights_model). Per-provider defaults use the nested maps:
+# to the env default. A stored "apple"/"apfel" insights_model (from the retired
+# on-device option) reads as Automatic rather than reaching a provider as a
+# literal model id. Per-provider defaults use the nested maps:
 # provider_default_models, provider_default_thinking, provider_insights_models.
+# trusted_url is the HTTPS origin other devices should use (e.g. a Tailscale
+# Serve address); only a bare https origin is accepted and "" clears it.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
+  -d '{"insights_enabled":false,"trajectories_enabled":false,"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
 ```
 
 **Project MCP servers (Settings → MCP tab)**
@@ -721,8 +739,7 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 
 # Accept a region row, reconciling it against that region's CURRENT entries
 # first, so a fact that supersedes one already there replaces it (undo-logged)
-# instead of being appended beside it. This is the way out of an archive-time
-# deferral. Opt-in because it is one model call per row — the plain accept above
+# instead of being appended beside it. This is the way out of a deferral. Opt-in because it is one model call per row — the plain accept above
 # is a single synchronous write, and the batch endpoint deliberately never
 # reconciles (one timeout per row). `reconcile` accepts 1/true/yes.
 #
@@ -760,9 +777,9 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # dismissed, by whom (`via`: pwa | agent | auto), and where it landed
 # (`destination`). Reads the same per-workspace sidecar the accept/dismiss
 # routes above write to (Memory-Proposals.dismissed.jsonl), so it also shows
-# what the archive-time auto-promoter wrote or skipped ("outcome":
-# "suppressed"/"duplicate") overnight, and what the nightly curation agent
-# resolved via the CLI ("via": "agent"). Optional query params: workspace,
+# what the memory pass recorded on its own ("outcome":
+# "suppressed"/"duplicate"), and what the nightly curation agent resolved
+# via the CLI ("via": "agent"). Optional query params: workspace,
 # limit (default 200, max 1000), action (accepted|dismissed). The reply carries
 # {rows, total, truncated, limit, at_max}: `limit` is the clamped page size
 # actually served and `at_max` says the request asked for more than the cap, so
@@ -809,6 +826,28 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/memory/receipt
 # operation (undo would otherwise delete an unrelated later fact), 400 when the
 # receipt is unsupported/view-only, 404 when the id is unknown.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/memory/receipts/$RECEIPT_ID/undo"
+
+# The vault's category list. `?workspace=` is required, and it resolves the AGENT
+# vault root - the one that owns entity-types.yaml, INDEX.md and VOCABULARY.md -
+# not the workspace's notes root, so a pre-re-rooting install (one shared vault)
+# edits the same list from either workspace. Every effective row comes back,
+# disabled ones included, each with `builtin` and a `note_count`.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/memory/entity-types?workspace=personal"
+
+# Save the desired list. NOT a diff: the body is the whole list, and a row is a
+# partial override of the shipped category with that id, so
+#   {"types": [{"id": "person", "label": "Human"}]}
+# relabels a person and leaves its folder, aliases and staleness alone, and a
+# client that sends the GET's rows back unchanged writes nothing at all. Only
+# rows that differ from the shipped default reach the file, so an upgrade to a
+# default still lands; omitting a stock id is not deleting it (send
+# "enabled": false to turn one off), while omitting a CUSTOM id deletes it and is
+# refused with 400 while any note still carries that type. The reply is the same
+# body as the GET, and the write regenerates VOCABULARY.md's Categories section.
+curl -sS -b /tmp/ciao.jar -X PATCH \
+  -H 'Content-Type: application/json' \
+  -d "{\"types\": [{\"id\": \"person\", \"label\": \"Human\"}]}" \
+  "http://localhost:${PWA_PORT:-8443}/api/memory/entity-types?workspace=personal"
 ```
 
 
@@ -826,11 +865,12 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_title`: auto-title finished.
 - `chat_created`: a new chat was created (fresh or fork). Fields: `{chat: ChatInfo}`. The acting tab already pushes optimistically; this event is what makes other tabs/devices, or the acting tab after a racing `syncLatest` clobber, render the chat without waiting for the 15s poll. Without it a fork (which starts no streaming turn, so no `chat_result_ready` refetch) stayed invisible until a manual reload.
 - `chat_moved` / `chat_archived` / `chat_deleted`: project changes.
-- `chat_postprocess`: the post-archive pipeline reporting itself. Archiving a chat dispatches one task that extracts session insights, folds the project doc, writes a trajectory and files memory proposals (`ciao/insights.py:extract_and_append`); this event fires when the pipeline starts, as each step finishes, and when it settles. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{state: "running"|"done", step, expected: [job_id], steps: {job_id: {status, extra}}, started_at, updated_at, interrupted?}`. The same object is persisted on the chat and returned as `ChatInfo.postprocess`, so an archived chat can still report what was learned from it after a reload — the PWA renders it as a muted activity signal while `state` is `running` and as a settled one-line summary afterwards. `interrupted` marks a pipeline a restart killed mid-flight. The connect `snapshot` carries `postprocessing: [chat_id]` for pipelines already in flight, so a client that joins between the start and finish events still shows them.
+- `chat_postprocess`: the post-archive pipeline reporting itself. Archiving a chat dispatches one task that writes the session trajectory (`ciao/insights.py:run_archive_pipeline`); the vault work moved to the memory pass, a chat of the app's own, in #627. This event fires when the pipeline starts, as the step finishes, and when it settles. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{state: "running"|"done", step, expected: [job_id], steps: {job_id: {status, extra}}, started_at, updated_at, interrupted?}`. The same object is persisted on the chat and returned as `ChatInfo.postprocess`, so an archived chat can still report what was taken from it after a reload — the PWA renders it as a muted activity signal while `state` is `running` and as a settled one-line summary afterwards. `interrupted` marks a pipeline a restart killed mid-flight. The connect `snapshot` carries `postprocessing: [chat_id]` for pipelines already in flight, so a client that joins between the start and finish events still shows them.
+- `workspaces_changed`: a workspace was archived or restored (any tab or device). No payload; clients refetch `GET /api/workspaces` and `GET /api/projects`, so the sidebar and pickers stop offering an archived workspace without a reload.
 - `schedules_changed`: an automation was created, edited, paused, resumed, or deleted (REST route, Automations page, or the `schedule_*` MCP tools mid-turn). No payload; the client refetches `GET /api/schedules`, which is where the computed `next_run` / `missed` / `context_available` fields are assembled. Without it an automation created by the model stayed invisible (no chat banner, no sidebar `↻` marker) until a manual reload. The deprecated `loops_changed` alias was removed with the loop MCP tools (#441); existing clients listen for `schedules_changed`.
 - `server_restarting`: restart drain began (`{message}`). The connect `snapshot` also carries `restarting: true` when drain is already in progress so late clients show the overlay without waiting for a turn rejection.
 
-Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `model_capability_question`, `tool_denied`, `result`, `user_echo`, `queued`, `queue_state`, `steered`, `status`, `error`, `host_unreachable`, and `server_restarting`. A `message` frame that reaches the server always starts its turn: the stream is registered before any socket write, so a client that disconnects right after sending (mobile/webview suspension) still gets the turn, and the reconnecting socket replays the buffered `user_echo` from the broker. The client-mode proxy emits `host_unreachable` when it cannot open the remote host socket; the PWA treats it as one ephemeral reconnecting state with a force-become-host action, never as a chat error. `server_restarting` is likewise sent instead of `error` when a new turn is rejected because restart drain is in progress. Client messages include normal `message`, `stop`, `permission_response`, `question_response`, and `capability_response`; structured questions use `question_response {request_id, answers: {question_id: string[]}}`.
+Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `model_capability_question`, `tool_denied`, `result`, `user_echo`, `queued`, `queue_state`, `steered`, `status`, `error`, and `server_restarting`. Permission and native-form cards stay visible until the provider acknowledges the reply: the server emits `permission_response_result` / `question_response_result` for the requesting client and ephemeral `permission_resolved` / `question_resolved` controls to other attached subscribers. Results are correlated by `request_id` and optional `session_id`; the PWA keeps the complete response frame in memory and retries it after a closed socket, while the persisted `pending_permission` / `pending_question` snapshot reconciles tabs that missed the live control. A `message` frame that reaches the server always starts its turn: the stream is registered before any socket write, so a client that disconnects right after sending (mobile/webview suspension) still gets the turn, and the reconnecting socket replays the buffered `user_echo` from the broker. `server_restarting` is likewise sent instead of `error` when a new turn is rejected because restart drain is in progress. Client messages include normal `message`, `stop`, `permission_response`, `question_response`, and `capability_response`; structured questions use `question_response {request_id, session_id?, action: "reply"|"cancel", answers: {question_id: string[]}}`. `permission_response.approved` must be a JSON boolean, never a truthy string.
 
 **Image-capability pre-flight**: when a turn carries images and the selected model cannot see them, the server pauses before dispatch and emits `model_capability_question {request_id, missing: "image_input", current_model, candidates: [{id, label, supports_vision?, disabled?}], timeout_s: 30}`. `candidates` leads with the current model (disabled) followed by all same-backend vision models (for `opencode`, every catalog entry with `images is True`; other providers have no non-vision models today). The PWA renders the full provider-filtered `ModelSelector` inline — vision models only — with the current model shown disabled, so the user can pick any suitable model in one step. The client answers with `capability_response {request_id, action, model_id?}`: `switch` re-dispatches the turn on `model_id` (the chat model is persisted and a `model_changed` event is emitted) and `cancel` (or the 30s timeout) closes the turn with a `status` bubble telling the user the images were not sent. The `picker` action is retained only for old clients. The question is skipped entirely for text-only turns and for unattended (automation) turns, which close with the bubble instead of waiting.
 
@@ -904,7 +944,8 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/vaul
 ## State
 
 - Project and chat state: `.runtime/web_projects.json`. `.runtime/server.lock` prevents two backend processes from owning this registry, and `.runtime/web_projects.audit.jsonl` records append-only mutation IDs/revisions for repair without storing chat content. On-disk shape mirrors the `ProjectInfo` and `ChatInfo` dataclasses in `ciao/web/project_chats.py`; `to_dict()` on each defines the JSON fields. `ChatInfo.user_turn_timings` holds per-turn `{sent_at, completed_at, duration_ms}` keyed by user-turn index (as str); the matching `_turn_perf_started` map on `ProjectChatManager` is in-memory only.
-- `ChatInfo.pending_question` (string, in `to_dict()` so it rides every chat list / chat object): raw AskUserQuestion JSON (`{"questions": [...]}`) set when the model paused the chat on a question. When the headless CLI fires AskUserQuestion the server interrupts the live turn so the CLI cannot auto-answer it, persists this field, and clears it on the next user send. The PWA reads it on chat open to rebuild the interactive question picker after a reload. Empty string when no question is pending.
+- `ChatInfo.pending_question` (string, in `to_dict()` so it rides every chat list / chat object): raw AskUserQuestion JSON (`{"questions": [...], "request_id": ..., "session_id": ...}`) set when the model paused the chat on a question. Native V2 forms persist this field until the server acknowledges the matching `question_response` (including an explicit cancel); transport loss or a terminal stream frame is not an acknowledgement. The PWA reads it on chat open to rebuild the interactive question picker after a reload. Empty string when no question is pending.
+- `ChatInfo.pending_permission` (string): the same durable acknowledgement boundary for a native permission, with `{request_id, session_id, tool_name, message, tool_input}`. It is cleared only by a successful/authoritatively stale response, not merely because the SSE turn ended or the browser disconnected.
 - `ChatInfo.schedule_id` / `ChatInfo.schedule_title` (strings, in `to_dict()`): backlink to the schedule that created or drives the chat. Stamped in `prepare_schedule_chat` for both schedule branches (project-schedule new chat, fixed-chat reuse). Drives the automation banner in ChatPanel. Empty for interactive chats and for chats created before the field existed. See "Automation banner" above.
 - Schedule state: `.runtime/schedules.json`. Shape and field semantics in `ciao/schedules.py` (`ScheduleEntry`); the `schedule_create`/`schedule_update` MCP tools carry the field semantics in their own docstrings.
 - Automation state: `.runtime/schedules.json` (`ciao/schedules.py`, `ScheduleEntry`), every cadence in one store. A legacy `.runtime/loops.json` is imported once on startup as `frequency: "interval"` entries — the `loop-…` id is kept as the `schedule_id` so deep links still resolve — and renamed `loops.json.migrated`. Interval entries additionally carry `interval_minutes`; their `missed` is always false, since relative cadence has no expected slot to have missed. `last_status` (`""` | `running` | `ok` | `error` | `busy` | `missing-chat` | `skipped`) is carried by every cadence: it is stamped `running` at dispatch and replaced by the run's outcome, which is what lets a wall-clock slot tell a completed run apart from one whose turn died mid-flight. A wall-clock entry whose run for the expected slot ended in `error` reports `missed: true` so it can be re-run from the UI (issue #486). `last_status` describes one dispatch, not the entry's whole history: `last_dispatch_id` (`<slot-day>#<token>`) names the dispatch it belongs to, so a run superseded by an overlapping one — a manual "Run now" started just before the cron slot — no longer writes its result over the current run's, while `last_completed_on` records the occurrence a completed run served so an already-done slot is never replayed because a later run for it failed (issue #490).

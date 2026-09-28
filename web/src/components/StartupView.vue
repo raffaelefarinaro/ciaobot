@@ -80,7 +80,6 @@ const progressTrack = computed(() => {
 function phaseLabel(name: string): string {
   const labels: Record<string, string> = {
     connect_claude_code: 'connect_claude_code',
-    sync_workspace: 'sync_workspace',
     refresh_vault_index: 'refresh_vault_index',
     update_skills: 'update_skills',
     server_starting: 'server_starting',
@@ -284,6 +283,7 @@ function pad(n: number): string {
   animation: fadeIn 500ms var(--ease);
 }
 .startup-skip {
+  min-height: var(--touch);
   margin-left: auto;
   background: none;
   border: 1px solid var(--border);

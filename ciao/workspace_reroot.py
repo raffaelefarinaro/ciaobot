@@ -85,6 +85,14 @@ _REGENERATED_ROOT_NOTES: frozenset[str] = frozenset(
 _IGNORABLE_FILES: frozenset[str] = frozenset({".DS_Store"})
 
 
+def _unclassified_refusal_reasons(items: list[str]) -> list[str]:
+    return [
+        f"{item} is in the vault but the migration has no destination for it; "
+        "register it as a workspace or move it out of the vault"
+        for item in items
+    ]
+
+
 @dataclass(frozen=True, slots=True)
 class Move:
     """One source-to-destination move, both relative to the install root."""
@@ -126,7 +134,10 @@ class RerootPlan:
             "regenerated": list(self.regenerated),
             "ignored": list(self.ignored),
             "unclassified": list(self.unclassified),
-            "refusals": list(self.refusals),
+            "refusals": [
+                *self.refusals,
+                *_unclassified_refusal_reasons(self.unclassified),
+            ],
             "refused": self.refused,
         }
 
@@ -447,21 +458,11 @@ def apply(
     if result.refused or triage.refusals or history_refusal:
         payload["status"] = "refused"
         payload["refused"] = True
-        # `unclassified` is a refusal reason too — the plan refuses on it — but it
-        # was not part of `refusals`, so a run blocked solely by an unrecognised
-        # vault directory reported `status: refused` with an EMPTY reason list.
-        # That is what the blocking gate renders, so the operator was told to fix
-        # something and not told what.
-        unclassified = [
-            f"{item} is in the vault but the migration has no destination for it; "
-            "register it as a workspace or move it out of the vault"
-            for item in result.unclassified
-        ]
         payload["refusals"] = [
             *history_refusal,
             *result.refusals,
             *triage.refusals,
-            *unclassified,
+            *_unclassified_refusal_reasons(result.unclassified),
         ]
         payload["receipt_path"] = str(write_receipt(runtime_root, payload))
         return payload
@@ -1282,10 +1283,9 @@ def flag_stranded_sessions(runtime_root: Path) -> dict[str, Any]:
     than let the next turn silently forget: ``handover_context_pending`` is
     exactly the flag the fork and provider-switch paths already use for this.
 
-    "Handover" here is provider-SESSION context carry-over, not the multi-device
-    host/client role handover in ``ciao/node_state.py`` — the flag predates the
-    role rename and is persisted, so only the wording can be clarified, not the
-    key renamed.
+    "Handover" here is provider-SESSION context carry-over — the flag predates
+    it and is persisted, so only the wording can be clarified, not the key
+    renamed.
 
     Considered and rejected: symlinking the old ``~/.claude/projects/<slug>`` to
     the new one. It is an undocumented SDK layout outside the workspace, it would

@@ -361,7 +361,7 @@ def test_automation_default_payload_stays_a_bare_list() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert isinstance(payload, list)
-    assert any(item["job"] == "insights" for item in payload)
+    assert any(item["job"] == "trajectory" for item in payload)
 
 
 def test_automation_include_outcomes_serves_the_envelope() -> None:
@@ -371,7 +371,7 @@ def test_automation_include_outcomes_serves_the_envelope() -> None:
     payload = _automation_client().get("/api/automation?include=outcomes").json()
 
     assert isinstance(payload, dict)
-    assert {item["job"] for item in payload["jobs"]} >= {"insights"}
+    assert {item["job"] for item in payload["jobs"]} >= {"trajectory"}
     outcomes = payload["proposal_outcomes"]
     assert outcomes["promoted"] == 1
     assert outcomes["dismissed"] == 1

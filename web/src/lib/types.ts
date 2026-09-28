@@ -63,7 +63,35 @@ export interface WorkspaceInfo {
 export interface WorkspacesResponse {
   workspaces: WorkspaceInfo[]
   active: WorkspaceName | null
+  // The workspace that cannot be archived (the server refuses it).
+  primary?: WorkspaceName | null
   provider_options?: WorkspaceProviderOption[]
+}
+
+/** One archived workspace, from `GET /api/workspaces/archived`. */
+export interface ArchivedWorkspace {
+  id: string
+  name: WorkspaceName
+  archived_at: string
+  // Install-relative folder the archive lives in.
+  path: string
+  layout: string
+  color: string
+  default_provider: string
+  gws_profile: string
+  // What a restore applies, after server-side validation. `null` means unset:
+  // no MCP server is reachable, and the default tool deny-list applies.
+  disallowed_tools?: string[] | null
+  allowed_mcp_servers?: string[] | null
+  // Valid automations, all restored paused, and how many were rejected.
+  schedules: number
+  schedules_dropped?: number
+  restorable: boolean
+  blocked_reason: string
+}
+
+export interface ArchivedWorkspacesResponse {
+  archived: ArchivedWorkspace[]
 }
 
 export interface McpEnvKey {
@@ -139,6 +167,9 @@ export interface ProjectInfo {
   vault_doc_path?: string
   is_system?: boolean
   is_auto?: boolean
+  // 'memory' marks the app-owned per-workspace Memory project. The PWA hides
+  // it from the sidebar; a user project may legitimately be named "Memory".
+  kind?: string
 }
 
 export interface ChatInfo {
@@ -199,6 +230,17 @@ export interface ChatInfo {
     intent: 'resolve' | 'review'
     proposal_ids: string[]
     archive_policy: 'when_resolved' | 'manual'
+  } | {
+    // A memory pass: the background chat that distils an archived chat into
+    // memory. `state === 'attention'` means it ended unclean and needs the owner.
+    kind: 'memory_pass'
+    source_chat_id: string
+    archive_path: string
+    doc_path: string
+    source_title: string
+    source_project: string
+    state: 'queued' | 'running' | 'done' | 'attention'
+    archive_policy: 'when_clean'
   }
   // What the post-archive pipeline is doing, or did. Present only on archived
   // chats that ran it. Drives the greyed activity signal and the settled
@@ -227,7 +269,9 @@ export interface ArchiveJobView {
 
 /** One step of the post-archive pipeline, as reported by ciao/job_runs.py. */
 export interface ChatPostprocessStep {
-  status: 'ok' | 'error' | 'skipped'
+  // 'queued' | 'running' | 'attention' come from the memory-pass stages; the
+  // one-shot pipeline only ever settles a step to ok/error/skipped.
+  status: 'ok' | 'error' | 'skipped' | 'queued' | 'running' | 'attention'
   extra?: Record<string, unknown>
   /** Manifest projection: pending/running/blocked/ok/skipped/error. */
   manifest_status?: ArchiveJobStep['status']
@@ -260,6 +304,14 @@ export interface ChatRetryInfo {
   interval_seconds: number
 }
 
+/** One entity hint the context capsule carried: a vault note, by name. */
+export interface ContextEntity {
+  name: string
+  /** Vault-root-relative note path, e.g. `work/People/Mo.md`. */
+  path: string
+  category: string
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
@@ -278,6 +330,10 @@ export interface ChatMessage {
   // user_echo events replayed on WS reconnect against already-rendered
   // history or an optimistic local push. Only present on user messages.
   turn_index?: number
+  // Vault notes the entity matcher linked this user message to (links only;
+  // the note bodies are not sent). Read back from the stored context capsule
+  // on history loads, and set live by the `context_entities` event.
+  context_entities?: ContextEntity[]
   // Server-reported agent latency for the final assistant bubble of a turn,
   // in milliseconds. Drives the footer "· 7.3s" label.
   duration_ms?: number
@@ -314,7 +370,7 @@ export interface SubagentTranscript {
   description?: string
   subagent_type?: string
   is_async?: boolean
-  status?: 'running' | 'completed' | 'failed' | ''
+  status?: 'running' | 'completed' | 'failed' | 'stopped' | ''
   turn_index?: number
 }
 
@@ -356,6 +412,7 @@ export type WsEvent =
       tool_use_id?: string;
       parent_tool_use_id?: string;
       request_id?: string;
+      session_id?: string;
       // Set by the backend when the tool mutates a file on disk. The PWA
       // renders this as a standalone inline preview card instead of folding
       // it into the generic _activity row. Path may be workspace-relative
@@ -367,6 +424,9 @@ export type WsEvent =
   | { type: 'thinking'; text: string; parent_tool_use_id?: string }
   | { type: 'status'; message: string }
   | { type: 'model_changed'; model: string }
+  // The vault notes this turn's message was matched to; sent once per turn,
+  // right after its context capsule is built (an empty list included).
+  | { type: 'context_entities'; entities: ContextEntity[]; turn_index?: number }
   // Running token totals for the in-flight turn (cumulative, monotonic).
   // Emitted from partial stream events so the live trace can show a token
   // count as the model works; the authoritative totals still land on `result`.
@@ -375,7 +435,16 @@ export type WsEvent =
   // never carries it. The partial text still renders, but the turn is not an
   // answer, so it must not raise an unread badge on a backgrounded tab.
   | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; stopped?: boolean; fallback_final?: boolean; sent_at?: string; completed_at?: string; duration_ms?: number }
-  | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
+  | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string; session_id?: string }
+  | {
+      type: 'permission_response_result';
+      request_id: string;
+      session_id?: string;
+      ok: boolean;
+      error?: string;
+      retryable?: boolean;
+    }
+  | { type: 'permission_resolved'; request_id: string; session_id?: string }
   // The selected model cannot see the attached images; the engine asks the
   // user to pick a vision-capable model before dispatching. Answered via a
   // `capability_response` client message (action switch | picker | cancel).
@@ -398,13 +467,20 @@ export type WsEvent =
   // run). The call never executed, so any file card already painted for this
   // tool_use_id has to be retracted.
   | { type: 'tool_denied'; tool_use_id: string }
+  | {
+      type: 'question_response_result';
+      request_id: string;
+      session_id?: string;
+      ok: boolean;
+      state: 'answered' | 'cancelled' | 'rejected';
+      error?: string;
+      retryable?: boolean;
+    }
+  | { type: 'question_resolved'; request_id: string; session_id?: string }
   | { type: 'queued'; id?: string; text: string; images?: string[] }
   | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[] }> }
   | { type: 'error'; message: string }
-  // The local client proxy could not open the remote host socket. This is a
-  // connection state, not a chat/model failure, so the PWA renders one
-  // reconnecting card instead of appending an error to conversation history.
-  | { type: 'host_unreachable' }
+  | { type: 'auth_required'; message?: string }
   // Server is draining for restart; client should show RestartNotice, not
   // treat this as a chat failure.
   | { type: 'server_restarting'; message: string }
@@ -439,13 +515,14 @@ export type EventsWsMessage =
   // payload: the client refetches /api/schedules, which is the only place the
   // computed running/next_run fields are assembled.
   | { type: 'schedules_changed' }
+  // A workspace was archived or restored (here or on another device). No
+  // payload: the client refetches /api/workspaces.
+  | { type: 'workspaces_changed' }
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
+  | { type: 'server_restart_cancelled' }
   | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
-  // Client mode only: the local node proxy could not reach the host, so it
-  // emits this on the proxied socket and closes. Delivered on /ws/events too,
-  // which is the only socket open when no chat is on screen.
-  | { type: 'host_unreachable' }
+  | { type: 'auth_required'; message?: string }
 
 export interface InAppToast {
   id: number
@@ -481,19 +558,13 @@ export interface InAppToast {
 // at which point the client sends a `permission_response` on the chat WS.
 export interface PendingPermission {
   request_id: string
+  session_id?: string
   tool_name: string
   tool_input: string
   message: string
   // Epoch ms when the request arrived — used by the UI to grey out very old
   // pending prompts that were likely cancelled server-side on a stream end.
   received_at: number
-}
-
-// ── Voice ───────────────────────────────────────────────────────────────
-
-export interface VoiceResult {
-  text: string
-  cost: number
 }
 
 // ── Schedules ───────────────────────────────────────────────────────────
@@ -579,10 +650,15 @@ export interface ModelsResponse {
 }
 
 // GET/PATCH /api/settings/routines — internal-routine model overrides and
-// voice transcription engine (Settings → Models tab).
+// model overrides (Settings → Models tab).
 export interface RoutineSettings {
   // Overrides as stored; empty string = automatic default.
   insights_model: string
+  insights_enabled?: boolean
+  trajectories_enabled?: boolean
+  // The HTTPS origin other devices should use; empty/undefined = none.
+  trusted_url?: string
+  push_all_devices?: boolean
 
   critique_models: string
   // Per-provider default model for new chats; a missing entry = the provider's
@@ -602,27 +678,6 @@ export interface RoutineSettings {
   insights_model_by_workspace?: Record<string, string>
 
   critique_models_effective: string
-  // The "apple" insights option is hardware-gated: needs macOS 26+, the
-  // desktop app, and Apple Intelligence on. Nothing installable, so Settings
-  // shows the reason when the machine lacks it.
-  apple_model_available?: boolean
-  apple_model_unavailable_reason?: string
-  // Voice is on-device only: Apple dictation (macOS 26+) and
-  // AVSpeechSynthesizer, both via the bundled sidecar. There is no engine to
-  // choose any more, so the payload reports availability and a reason rather
-  // than a selection.
-  transcription: {
-    // BCP-47 language for the on-device engines.
-    locale: string
-    available: boolean
-    unavailable_reason: string
-  }
-  speech: {
-    // Empty = let macOS pick the best installed voice for the language.
-    local_voice: string
-    available: boolean
-    local_voices?: { id: string; name: string; locale: string; quality: string }[]
-  }
   model_options: {
     anthropic: string[]
   }
@@ -659,21 +714,7 @@ export interface ProviderConnection {
 }
 
 export interface ProviderConfigSettings {
-  keys: Record<string, {
-    label: string
-    description: string
-    configured: boolean
-    auth_method?: string
-  }>
-  service_keys?: Record<string, {
-    label: string
-    description: string
-    configured: boolean
-    auth_method?: string
-  }>
   connections?: Record<string, ProviderConnection>
-  requires_restart: boolean
-  env_path: string
 }
 
 export interface GwsIntegrationProfile {
@@ -917,13 +958,14 @@ export interface AutomationProcess {
   trigger?: string
   schedule_id?: string
   one_time?: boolean
-  // Bulk/manual variants of this job (Session insights carries the backfill),
-  // reported nested so the page keeps one row per automation.
+  // Bulk/manual variants of this job, reported nested so the page keeps one row
+  // per automation.
   sub_jobs?: AutomationProcess[]
   // Steps that run inside this job's task, on this job's trigger, in execution
   // order. A step is not an automation — it has no trigger of its own — so it is
-  // reported here rather than as a peer row. Session insights owns the four-step
-  // archive pipeline; everything else has none.
+  // reported here rather than as a peer row. No job owns one since the archive
+  // pipeline lost its stages in #627, but the shape is kept: a job that grows a
+  // multi-step task again should report it here, not as peer rows.
   steps?: AutomationProcess[]
   // Name of the whole pipeline, set only on the job that owns one
   // ("When you archive a chat"). The job keeps `label` for its own step.
@@ -938,46 +980,10 @@ export interface AutomationProcess {
   stats: AutomationStats
 }
 
-// ── Multi-device (host / client) ───────────────────────────────────────────
-export interface NodePeer {
-  node_id: string
-  url: string
-  last_seen: string
-  is_active: boolean
-}
-
-export interface NodeStatus {
-  node_id: string
-  role: 'host' | 'client' | 'active' | 'standby'
-  mode?: 'host' | 'client'
-  active_since: string | null
-  last_handover: string | null
-  host_url?: string | null
-  active_peer_url?: string | null
-  host_reachable?: boolean | null
-  active_peer_reachable?: boolean | null
-  // Name and version of the machine a client is mirroring. Only present when
-  // the host answered the reachability ping.
-  host_node_id?: string
-  host_version?: string
-  has_host_session?: boolean
-  peers: NodePeer[]
-  // From LocalSessionManager.status() on the host (ciao/local_session.py).
-  git?: LocalGitStatus
-}
-
-/** Workspace git state, as `/api/node/status` reports it under `git`. */
-export interface LocalGitStatus {
-  git_repo?: boolean
-  branch?: string
-  dirty?: boolean
-  dev_mode?: boolean
-}
-
 /**
- * What the small action endpoints answer with: `/api/device/update`,
- * `/api/node/connect`, `/api/node/handover`. Callers only branch on `ok` and
- * show `error`; the rest of the body is diagnostic, hence the index signature.
+ * What the small action endpoints answer with: `/api/package/update`.
+ * Callers only branch on `ok` and show `error`; the rest of the body is
+ * diagnostic, hence the index signature.
  */
 export interface ActionResult {
   ok?: boolean
@@ -988,8 +994,8 @@ export interface ActionResult {
 /**
  * `POST /api/chats/{id}/archive`.
  *
- * The fields are optional so a client talking to an older host (or through the
- * node proxy) degrades to "the chat I asked for" instead of breaking.
+ * The fields are optional so a client talking to an older engine degrades to
+ * "the chat I asked for" instead of breaking.
  */
 export interface ArchiveChatResponse {
   ok?: boolean
@@ -1003,7 +1009,7 @@ export interface ChangelogCommit {
   subject: string
 }
 
-/** `/api/package/changelog` and `/api/device/changelog`. */
+/** `/api/package/changelog`. */
 export interface PackageChangelog {
   commits: ChangelogCommit[]
   compare_url: string
@@ -1014,7 +1020,7 @@ export interface PackageChangelog {
   update_available?: boolean
 }
 
-/** `/api/package/update` and `/api/device/update`. */
+/** `/api/package/update`. */
 export interface PackageUpdateResult {
   ok?: boolean
   mode?: string
@@ -1088,6 +1094,30 @@ export interface PackageStatus {
   source?: string
 }
 
+/**
+ * One engine update run, as the coordinator persists it
+ * (`ciao/engine_update.py:Operation`). `phase` is one of `engine_update.PHASES`
+ * and `error` carries the reason when the run failed.
+ */
+export interface EngineUpdateOperation {
+  id: string
+  phase: string
+  from_version: string
+  to_version: string
+  started_at: string
+  updated_at: string
+  error?: string
+}
+
+/** `GET /api/update/status` — the engine update coordinator's persisted job. */
+export interface EngineUpdateStatus {
+  install_mode: string
+  can_update: boolean
+  operation: EngineUpdateOperation | null
+  /** A coordinator refusal that wrote no operation of its own. */
+  error?: string
+}
+
 /** One home-screen operator action (see `ciao/operator_actions.py`). */
 export interface OperatorAction {
   id: string
@@ -1109,6 +1139,9 @@ export interface OperatorAction {
   link_url?: string
   /** A "not now" button for ask-style actions; records a suppression receipt. */
   dismiss_label?: string
+  /** Which button leads the tile: "chat" makes the chat button the filled
+   *  primary and demotes the link to a chip. Empty keeps the default order. */
+  primary?: string
   /** A precondition the install cannot get past on its own: unmissable and not
    *  dismissible. Deliberately not an app-wide lock. */
   blocking: boolean
@@ -1264,7 +1297,10 @@ export interface ProposalPreview {
   text: string
   source: string
   action?: string
-  operation: 'add' | 'update' | 'move' | 'none' | ''
+  /** What the accept does to one destination. `add_category` is its own value
+   * because it writes no file body: it appends a category to the registry and
+   * retypes the notes the proposal was filed with, moving nothing. */
+  operation: 'add' | 'update' | 'move' | 'add_category' | 'none' | ''
   destination: string
   destination_path: string
   revision: string
@@ -1280,6 +1316,15 @@ export interface ProposalPreview {
   written?: string
   added?: string[]
   leak_warning?: boolean
+  /** Only on a `[category]` preview: the entry the accept would add and the
+   * notes it would retype, so the card can name both without a second call. */
+  category?: {
+    id: string
+    label: string
+    folder: string
+    description: string
+    notes: string[]
+  }
 }
 
 export interface ProposalPreviewResponse {
@@ -1402,6 +1447,35 @@ export interface VaultReviewEvidence {
    * Optional because a server older than this client does not send it; the
    * panel falls back to its lazy per-row fetch when it is absent. */
   excerpt?: string
+  /** Why an `unverified` candidate is due: how old its last check is, the
+   * limit for its type, and where that date came from. Optional (and null
+   * when the signal is absent) so an older server simply leaves it out. */
+  unverified?: VaultReviewUnverified | null
+  /** Where a `superseded_language` candidate says so: the 1-based line, the
+   * line itself, the phrase that matched, and the nearest line either side. */
+  superseded?: VaultReviewSuperseded | null
+}
+
+export interface VaultReviewUnverified {
+  age_days: number
+  threshold_days: number
+  /** `YYYY-MM-DD`. */
+  last_verified: string
+  /** `frontmatter` when read off the note's `updated:` field, `mtime` when the
+   * note has none and the file's modified date stood in. */
+  source: 'frontmatter' | 'mtime'
+}
+
+export interface VaultReviewQuotedLine {
+  line: number
+  text: string
+}
+
+export interface VaultReviewSuperseded extends VaultReviewQuotedLine {
+  match: string
+  where: 'frontmatter' | 'lead'
+  before: VaultReviewQuotedLine | null
+  after: VaultReviewQuotedLine | null
 }
 
 /** One stale-note retirement candidate from `GET /api/vault/review`. */

@@ -27,14 +27,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import uuid
 import warnings
 from dataclasses import dataclass
 import logging
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
-from urllib.parse import urlsplit
 from typing import Any, cast
 
 from claude_agent_sdk import (
@@ -147,8 +145,7 @@ def _is_connection_drop_text(text: str) -> bool:
 # A name-resolution / connect failure surfaces from the Claude CLI as a generic
 # "API Error: Unable to connect to API (ENOTFOUND)" with no host and no error
 # category, so an operator reading a failed schedule can't tell which endpoint
-# failed to resolve (the Anthropic API, a custom
-# ANTHROPIC_BASE_URL...) or whether it was DNS, a refused connection, a timeout,
+# failed to resolve or whether it was DNS, a refused connection, a timeout,
 # or auth. We know the endpoint the turn was pointed at, so annotate the error
 # with it and classify the failure. See issues #162 and #178. The annotation
 # Connection-error annotations are shared with the provider layer, so every
@@ -158,37 +155,16 @@ from ciao.providers.connect_errors import (  # noqa: E402
 )
 
 
-def _resolve_api_host(env: dict[str, str]) -> str:
-    """Hostname the spawned CLI will talk to for this turn.
-
-    Prefers the per-turn ``ANTHROPIC_BASE_URL`` override (a self-hosted gateway
-    routing) and falls back to the process env, then Anthropic's default.
-    """
-    base = (
-        env.get("ANTHROPIC_BASE_URL")
-        or os.environ.get("ANTHROPIC_BASE_URL")
-        or "https://api.anthropic.com"
-    )
-    try:
-        return urlsplit(base).hostname or ""
-    except ValueError:
-        return ""
+# Hostname named in connection-error annotations. Endpoint routing is Claude
+# Code's own configuration, so Ciaobot reports Anthropic's default.
+_API_HOST = "api.anthropic.com"
 
 # The claude-agent-sdk reads the CLI subprocess stdout into a bounded decode
 # buffer (default 1 MiB, ``_DEFAULT_MAX_BUFFER_SIZE``) and raises a fatal,
 # stream-killing error when a single JSON message exceeds it — typically a
 # large tool result or assistant content block. Raise the ceiling well above
-# the default so legitimately large messages don't abort the turn. Override
-# with ``CIAO_CLAUDE_MAX_BUFFER_BYTES`` for unusually large payloads.
-try:
-    _SDK_MAX_BUFFER_BYTES = (
-        int(os.environ.get("CIAO_CLAUDE_MAX_BUFFER_BYTES") or 0)
-        or 32 * 1024 * 1024
-    )
-    if _SDK_MAX_BUFFER_BYTES <= 0:
-        _SDK_MAX_BUFFER_BYTES = 32 * 1024 * 1024
-except ValueError:
-    _SDK_MAX_BUFFER_BYTES = 32 * 1024 * 1024
+# the default so legitimately large messages don't abort the turn.
+_SDK_MAX_BUFFER_BYTES = 32 * 1024 * 1024
 
 # Shown when even the raised buffer is exceeded (or any decode failure): the
 # SDK reader raises a fatal error that would otherwise kill the chat stream.
@@ -446,9 +422,8 @@ class ClaudeProvider(BaseSDKProvider):
         # the session is held by a background agent. The next connect
         # attempt re-resumes with ``--fork-session`` to branch a copy.
         self._fork_resume_next = False
-        # Hostname the CLI is pointed at for the in-flight turn, captured at
-        # connect time so a hostless connection error can name its endpoint.
-        self._api_host = ""
+        # Hostname a hostless connection error is annotated with.
+        self._api_host = _API_HOST
         # Runtime root: state_path.parent on CiaoConfig; fall back to
         # workspace_root/.runtime when config is absent (tests).
         runtime_root = Path(
@@ -477,9 +452,6 @@ class ClaudeProvider(BaseSDKProvider):
 
     async def _ensure_connected(self, request: AgentRequest) -> ClaudeSDKClient:
         requested_model = request.model
-        # Refresh every turn: a reused client can still change host if the
-        # chat's routing env changed, and errors annotate against this value.
-        self._api_host = _resolve_api_host(request.extra_env or {})
         if (
             self._client is not None
             and self._connected
@@ -893,9 +865,23 @@ class ClaudeProvider(BaseSDKProvider):
 
                 pending_result: ResultEvent | None = None
                 last_result_msg: ResultMessage | None = None
+                # The main agent's most recent model call. Its usage is the
+                # size of the context that call read, which is what the
+                # context % must measure. ResultMessage.usage sums every call
+                # in the turn and overstates it on tool-heavy turns.
+                last_main_msg: AssistantMessage | None = None
                 async for msg in client.receive_response():
                     if isinstance(msg, ResultMessage):
                         last_result_msg = msg
+                    elif (
+                        isinstance(msg, AssistantMessage)
+                        and msg.parent_tool_use_id is None
+                        and self._call_context_tokens(msg.usage) > 0
+                    ):
+                        # Zero-usage messages are synthetic (API error or
+                        # connection-drop notices, model "<synthetic>"); keep
+                        # the last real call rather than clobbering it.
+                        last_main_msg = msg
                     for event in self._convert_message(msg):
                         if isinstance(event, ResultEvent):
                             pending_result = event
@@ -904,7 +890,11 @@ class ClaudeProvider(BaseSDKProvider):
 
                 if pending_result is not None:
                     await self._augment_with_context_pct(
-                        client, pending_result, last_result_msg
+                        client,
+                        pending_result,
+                        last_result_msg,
+                        last_main_msg,
+                        requested_model=request.model,
                     )
                     # A mid-response connection drop is emitted by the CLI as
                     # assistant text and may come back as a *non-error* terminal
@@ -1019,14 +1009,17 @@ class ClaudeProvider(BaseSDKProvider):
         client: ClaudeSDKClient,
         event: ResultEvent,
         result_msg: ResultMessage | None = None,
+        last_main_msg: AssistantMessage | None = None,
+        *,
+        requested_model: str | None = None,
     ) -> None:
-        """Fetch accurate context-window % from the CLI and attach to usage.
+        """Attach the context-window occupancy after the turn to ``event.usage``.
 
-        Prefers the CLI's authoritative ``get_context_usage()`` (it counts
-        system prompt + tool defs + memory + autocompact buffer). On failure,
-        falls back to a best-effort estimate from ``ResultMessage.usage +
-        model_usage.contextWindow`` so the footer still shows something — the
-        same total/context math opencode uses.
+        Prefers the CLI's authoritative ``get_context_usage()``. When that is
+        unavailable, estimates from the main agent's last model call over the
+        chat model's window (see :meth:`_estimate_context_pct`). When neither
+        yields a trustworthy number, ``context_pct`` is left off: the footer
+        omits it rather than showing a wrong value.
         """
         try:
             usage = await client.get_context_usage()
@@ -1038,10 +1031,9 @@ class ClaudeProvider(BaseSDKProvider):
             logger.debug("get_context_usage raised unexpectedly", exc_info=True)
         if isinstance(usage, dict):
             pct = usage.get("percentage")
-            if isinstance(pct, (int, float)):
+            if isinstance(pct, (int, float)) and not isinstance(pct, bool):
                 event.usage = {**event.usage, "context_pct": f"{pct:.1f}%"}
                 return
-            # Also carry raw window sizes when the CLI exposes them
             total = usage.get("totalTokens")
             mx = usage.get("maxTokens") or usage.get("rawMaxTokens")
             if isinstance(total, (int, float)) and isinstance(mx, (int, float)) and mx > 0:
@@ -1050,46 +1042,129 @@ class ClaudeProvider(BaseSDKProvider):
                     "context_pct": f"{min(100.0, float(total) / float(mx) * 100):.1f}%",
                 }
                 return
-        # Fallback: total tokens from ResultMessage.usage over model_usage.contextWindow
-        if result_msg is not None and isinstance(result_msg.model_usage, dict):
-            context_window: int | None = None
-            for v in result_msg.model_usage.values():
-                if isinstance(v, dict):
-                    cw = v.get("contextWindow")
-                    if isinstance(cw, (int, float)) and cw > 0:
-                        context_window = int(cw)
-                        break
-            if context_window:
-                total = 0
-                raw_usage = result_msg.usage or {}
-                for k in (
-                    "input_tokens",
-                    "output_tokens",
-                    "cache_creation_input_tokens",
-                    "cache_read_input_tokens",
-                ):
-                    val = raw_usage.get(k)
-                    if isinstance(val, int):
-                        total += val
-                # Already computed string totals are in event.usage; use them if raw missing
-                if total == 0:
-                    for k in (
-                        "input_tokens",
-                        "output_tokens",
-                        "cache_creation_input_tokens",
-                        "cache_read_input_tokens",
-                    ):
-                        sval = event.usage.get(k)
-                        if sval is not None:
-                            try:
-                                total += int(sval)
-                            except (TypeError, ValueError):
-                                pass
-                if total > 0:
-                    event.usage = {
-                        **event.usage,
-                        "context_pct": f"{min(100.0, total / context_window * 100):.1f}%",
-                    }
+        estimate = ClaudeProvider._estimate_context_pct(
+            result_msg, last_main_msg, requested_model=requested_model
+        )
+        if estimate is not None:
+            event.usage = {**event.usage, "context_pct": f"{estimate:.1f}%"}
+
+    @staticmethod
+    def _estimate_context_pct(
+        result_msg: ResultMessage | None,
+        last_main_msg: AssistantMessage | None,
+        *,
+        requested_model: str | None = None,
+    ) -> float | None:
+        """Context % from the last model call, or None when it is not reliable.
+
+        The context a call occupies is the prompt it read: ``input_tokens +
+        cache_creation_input_tokens + cache_read_input_tokens`` of that one
+        call. The same sum the CLI uses for ``get_context_usage``. The turn's
+        ``ResultMessage.usage`` cannot stand in for it: it adds up every call
+        of the tool loop, each of which re-reads the cached prompt, so a
+        tool-heavy turn reports several windows' worth of tokens.
+
+        The window comes from the ``model_usage`` entry of the model that made
+        that call. ``model_usage`` also lists side calls (a haiku title or
+        classifier call with a 200k window), so the first entry is not the
+        chat model. ``requested_model`` is the id the chat asked the CLI for;
+        it tells the 200k and ``[1m]`` variants of one model apart.
+        """
+        call_usage: dict[str, Any] | None = None
+        call_model = ""
+        if last_main_msg is not None and isinstance(last_main_msg.usage, dict):
+            call_usage = last_main_msg.usage
+            call_model = last_main_msg.model or ""
+        elif result_msg is not None and isinstance(result_msg.usage, dict):
+            # ``usage.iterations`` breaks down the final API response; its last
+            # entry is that call's own usage, not a turn aggregate.
+            iterations = result_msg.usage.get("iterations")
+            if isinstance(iterations, list) and iterations and isinstance(iterations[-1], dict):
+                call_usage = iterations[-1]
+        if call_usage is None:
+            return None
+        if not call_model and result_msg is not None:
+            call_model = ClaudeProvider._extract_effective_model(result_msg)
+        context_tokens = ClaudeProvider._call_context_tokens(call_usage)
+        if context_tokens <= 0:
+            return None
+        window = ClaudeProvider._context_window_for_model(
+            result_msg.model_usage if result_msg is not None else None,
+            call_model,
+            requested_model,
+        )
+        if not window:
+            return None
+        pct = context_tokens / window * 100
+        # One call cannot read more than its window. A larger figure means the
+        # window was matched to the wrong model, so the number is not shown.
+        if pct > 100.0:
+            return None
+        return pct
+
+    @staticmethod
+    def _call_context_tokens(usage: Any) -> int:
+        """Prompt tokens one model call read (input + cache write + cache read)."""
+        if not isinstance(usage, dict):
+            return 0
+        total = 0
+        for key in (
+            "input_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        ):
+            value = usage.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                total += value
+        return total
+
+    @staticmethod
+    def _context_window_for_model(
+        model_usage: Any, model: str, requested_model: str | None = None
+    ) -> int | None:
+        """The ``contextWindow`` of ``model``'s entry in ``model_usage``.
+
+        Entries are keyed by the requested id (``claude-opus-5-5[1m]``) while
+        the assistant message names the served model (``claude-opus-5-5``), so
+        both the key and ``canonicalModel`` are compared with any ``[...]``
+        suffix removed. Without a model to match, only an unambiguous single
+        entry is used.
+
+        The assistant message drops the suffix, so when the standard and
+        ``[1m]`` variants of one model are both listed, the match alone cannot
+        say which window the call used. The requested id settles it when it
+        is one of the listed keys; otherwise disagreeing windows yield None.
+        """
+        if not isinstance(model_usage, dict):
+            return None
+
+        def _base(name: object) -> str:
+            return str(name or "").split("[", 1)[0].strip().lower()
+
+        windows: list[int] = []
+        matched: dict[str, int] = {}
+        target = _base(model)
+        for key, entry in model_usage.items():
+            if not isinstance(entry, dict):
+                continue
+            window = entry.get("contextWindow")
+            if not isinstance(window, (int, float)) or isinstance(window, bool) or window <= 0:
+                continue
+            if target and target in {_base(key), _base(entry.get("canonicalModel"))}:
+                windows.append(int(window))
+                matched[str(key).strip().lower()] = int(window)
+            elif not target:
+                windows.append(int(window))
+        if not target and len(windows) != 1:
+            return None
+        if len(set(windows)) > 1:
+            requested = (requested_model or "").strip().lower()
+            if requested in matched:
+                return matched[requested]
+            # Both variants were used this turn and the requested id is not
+            # one of them (an alias such as "opus"): the window is unknown.
+            return None
+        return windows[0] if windows else None
 
     def _convert_message(self, msg: Any) -> list[StreamEvent]:
         if isinstance(msg, SDKStreamEvent):

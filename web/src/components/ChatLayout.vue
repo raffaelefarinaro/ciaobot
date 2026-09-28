@@ -47,7 +47,7 @@
           />
           <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-            <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="home-boot-body">
               <!-- Skeleton of the home screen this will become (lane header
                    with the face+status row inside it, housekeeping tile, chat
@@ -80,7 +80,7 @@
                homepage behind it after closing a chat would just duplicate the
                same list. Hide the empty-state whenever the mobile sidebar is open. -->
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-            <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
               <!-- The glanceable status (face + summary) lives inside the active
                    workspace's lane header now (HomeRecentChats.vue), right under
@@ -107,19 +107,28 @@
                   </button>
                 </div>
               </div>
-              <HousekeepingStrip />
-              <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
-              <div v-if="showGlobalNewChatActions" class="empty-actions">
-                <button
-                  v-for="action in generalWorkspaceActions"
-                  :key="action.workspace"
-                  class="btn-primary"
-                  :data-workspace-color="action.color"
-                  :disabled="action.isCreating"
-                  @click="createWorkspaceChat(action)"
-                >
-                  {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
-                </button>
+              <div class="home-workbench">
+                <div class="home-main">
+                  <HomeIntake />
+                  <HousekeepingStrip />
+                  <HomeSetupCard />
+                  <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
+                  <div v-if="showGlobalNewChatActions" class="empty-actions">
+                    <button
+                      v-for="action in generalWorkspaceActions"
+                      :key="action.workspace"
+                      class="btn-primary"
+                      :data-workspace-color="action.color"
+                      :disabled="action.isCreating"
+                      @click="chooseNewChat(action.workspace)"
+                    >
+                      {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
+                    </button>
+                  </div>
+                </div>
+                <div class="home-rail">
+                  <HomeReviewSummary />
+                </div>
               </div>
             </div>
           </div>
@@ -130,14 +139,9 @@
           :class="{ 'is-dragging': isDraggingSplit }"
           @mousedown="startSplitDrag"
         />
-        <div
-          class="chat-split-side"
-          :style="{
-            width: isMobile ? '100%' : ((1 - chatSplitRatio) * 100) + '%',
-            flex: isMobile ? undefined : '0 0 auto',
-            transition: isDraggingSplit ? 'none' : undefined
-          }"
-        >
+        <!-- Takes whatever the chat pane and gutter leave, so the tile's inset
+             margin never pushes the pair past 100%. -->
+        <div class="chat-split-side">
           <PinnedFilePanel ref="pinnedFilePanelRef" :key="pinnedFilePath" :file-path="pinnedFilePath" @close="unpinCurrent" />
         </div>
       </template>
@@ -169,7 +173,7 @@
         />
         <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-          <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
           <div class="home-boot-body">
             <!-- Same skeleton as the split-view copy above; only one is ever
                  mounted, so the two must stay identical. -->
@@ -200,7 +204,7 @@
              homepage behind it after closing a chat would just duplicate the
              same list. Hide the empty-state whenever the mobile sidebar is open. -->
         <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-          <PaneHeader page-tag="home" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
           <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
             <!-- The glanceable status (face + summary) lives inside the active
                  workspace's lane header now (HomeRecentChats.vue), right under
@@ -227,21 +231,30 @@
                 </button>
               </div>
             </div>
-            <HousekeepingStrip />
-            <HomeRecentChats ref="homeRecentRef" @new-workspace-chat="createWorkspaceChat" />
-            <div v-if="showGlobalNewChatActions" class="empty-actions">
-              <button
-                v-for="action in generalWorkspaceActions"
-                :key="action.workspace"
-                class="btn-primary"
-                :data-workspace-color="action.color"
-                :disabled="action.isCreating"
-                @click="createWorkspaceChat(action)"
-              >
-                {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
-              </button>
+            <div class="home-workbench">
+              <div class="home-main">
+                <HomeIntake />
+                <HousekeepingStrip />
+                <HomeSetupCard />
+                <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
+                <div v-if="showGlobalNewChatActions" class="empty-actions">
+                  <button
+                    v-for="action in generalWorkspaceActions"
+                    :key="action.workspace"
+                    class="btn-primary"
+                    :data-workspace-color="action.color"
+                    :disabled="action.isCreating"
+                    @click="chooseNewChat(action.workspace)"
+                  >
+                    {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
+                  </button>
+                </div>
               </div>
-                      </div>
+              <div class="home-rail">
+                <HomeReviewSummary />
+              </div>
+            </div>
+          </div>
         </div>
       </template>
     </div>
@@ -253,7 +266,7 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
-import { pendingNewChat } from '../lib/newChat'
+import { openNewChatPicker, pendingNewChat } from '../lib/newChat'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskStore } from '../stores/tasks'
 import { useMemoryMapStore } from '../stores/memoryMap'
@@ -277,24 +290,26 @@ import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
+import HomeIntake from './HomeIntake.vue'
+import HomeReviewSummary from './HomeReviewSummary.vue'
 import HousekeepingStrip from './HousekeepingStrip.vue'
+import HomeSetupCard from './HomeSetupCard.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'
 import { pendingPrompt } from '../lib/prompt'
-import { isDesktopApp } from '../lib/desktop'
 import { FONT_SCALE_STEP, useFontScale } from '../composables/useFontScale'
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
 
 // Refs into the active ChatPanel, used by the global keyboard shortcuts to
-// reach composer-owned actions (dictation, archive).
+// reach composer-owned actions (archive).
 //
 // The template declares ChatPanel and HomeRecentChats twice, once under
 // `v-if="pinnedFilePath"` (split view) and once under the `v-else` (no pinned
 // file). Both copies must carry the ref: only one is ever mounted, so the ref
-// holds whichever that is, but tagging only the split-view copy left Cmd+D,
+// holds whichever that is, but tagging only the split-view copy left
 // Cmd+Backspace and the home arrow keys silently dead in the far more common
 // no-pinned-file layout.
 const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
@@ -321,6 +336,9 @@ const SIDEBAR_SNAP_THRESHOLD = 15 // px
 const DEFAULT_SPLIT_RATIO = 0.5
 const MIN_CHAT_PANE_WIDTH = 240
 const MIN_SIDE_PANE_WIDTH = 240
+// Gutter + the tile's right inset (both --space-2): width the docked file tile
+// occupies beyond its own box.
+const SIDE_TILE_CHROME = 16
 const SPLIT_SNAP_THRESHOLD = 15 // px
 const LATEST_STATUS_SYNC_MS = 15000
 
@@ -421,7 +439,7 @@ function handleSplitDrag(e: MouseEvent) {
   let newLeftWidth = clientX - dragContainerLeft
   
   const minLeft = MIN_CHAT_PANE_WIDTH
-  const maxLeft = dragContainerWidth - MIN_SIDE_PANE_WIDTH
+  const maxLeft = dragContainerWidth - MIN_SIDE_PANE_WIDTH - SIDE_TILE_CHROME
   
   if (maxLeft < minLeft) {
     chatSplitRatio.value = 0.5
@@ -620,19 +638,15 @@ if (typeof document !== 'undefined') {
   )
 }
 
-async function createWorkspaceChat(action: { workspace: string; projectId: string; isCreating: boolean }) {
-  if (!action.projectId || action.isCreating) return
-  await store.switchWorkspace(action.workspace)
-  await store.createChat(action.projectId)
+async function chooseNewChat(workspace = store.activeWorkspace, projectId?: string) {
+  const selectedProject = await openNewChatPicker({ workspace, projectId })
+  if (!selectedProject) return
+  await store.newChatInProject(selectedProject)
 }
 
-// Cmd+T (Desktop) / Option+N (Web/PWA): show the new-chat picker, which drills
-// workspace → project and resolves to the chosen project's id.
+// Option+N and every visible New action use the same project picker.
 async function handleNewChatShortcut() {
-  const { openNewChatPicker } = await import('../lib/newChat')
-  const projectId = await openNewChatPicker()
-  if (!projectId) return
-  await store.newChatInProject(projectId)
+  await chooseNewChat()
 }
 const activePinKey = computed(() => {
   return store.activeChatId || currentProjectId.value
@@ -743,15 +757,32 @@ function closeChat() {
 }
 
 // ── Global keyboard shortcuts ───────────────────────────────────────
-// Bound in both the PWA and the desktop app, but on different modifiers: the
-// Tauri webview owns Cmd+T / Cmd+D, while a browser tab has already spent
-// them on new-tab / bookmark, so the PWA uses Option instead. See
-// onShortcutKeydown for the pairs. Archive deliberately moved off Cmd+A
-// (which select-all owns inside text fields) to Cmd/Option+Backspace, which
-// fires everywhere including while typing.
+// A browser tab has already spent the Cmd chords on itself -- Cmd+T opens a
+// new tab, Cmd+S saves the page, Cmd+[ / Cmd+] are back/forward -- so every
+// single-key shortcut here binds Option (Alt) instead. Archive deliberately
+// moved off Cmd+A (which select-all owns inside text fields) to
+// Option+Backspace, which fires everywhere including while typing.
 function isTypingTarget(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false
   return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
+}
+
+// The PWA's Option/Alt chords match the physical key. On macOS, Option turns
+// `e.key` into the character the chord would type (⌥D is "∂", ⌥S "ß", ⌥M "µ",
+// ⌥= "≠", ⌥- "–", and ⌥N is a "Dead" key), so comparing `e.key` with ASCII
+// letters never matched on a Mac. `e.code` names the key position and is
+// unaffected by Option. When a browser or a synthetic event leaves `code`
+// empty, fall back to `e.key` so Windows/Linux Alt chords still match.
+//
+// Inside a text field the physical match is off: Option+letter is how a Mac
+// types accents and symbols (⌥N then N is ñ, ⌥D is ∂, ⌥M is µ), so a press
+// whose `key` is a produced character or "Dead" must reach the field. There
+// only the old `e.key` comparison applies, which still matches Windows/Linux
+// Alt chords and ⌥Backspace (Backspace produces no character).
+function optionChord(e: KeyboardEvent, codes: readonly string[], keys: readonly string[]): boolean {
+  if (isTypingTarget(e.target)) return keys.includes(e.key)
+  if (e.code) return codes.includes(e.code)
+  return keys.includes(e.key)
 }
 
 // Unmodified keys, which no browser reserves: number keys switch to the
@@ -760,10 +791,8 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // carrying a modifier stays in onShortcutKeydown.
 //
 // These must live in exactly ONE listener. They were previously handled here
-// AND again in onShortcutKeydown; in the desktop app both listeners are bound,
-// so a single arrow press ran onArrow twice and focus jumped two cards at a
-// time. The PWA, with only this listener, behaved correctly -- which is why the
-// breakage looked desktop-specific.
+// AND again in onShortcutKeydown, so a single arrow press ran onArrow twice
+// and focus jumped two cards at a time.
 function onUnreservedKeydown(e: KeyboardEvent) {
   // The new-chat picker is an aria-modal dialog: while it is open it owns the
   // keyboard, and nothing here may act on the page behind it. Without this,
@@ -773,15 +802,12 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // claims the keys it uses in the capture phase; this covers every chord it
   // does not.
   if (pendingNewChat.value) return
-  // Switch top-level sections (chat → schedules → memory → settings). Desktop
-  // uses Cmd+Arrow; the web PWA uses Option+Arrow, because the browser has
-  // already spent Cmd+Left/Right on back/forward. Never Tab: that stays the
-  // native focus traversal.
+  // Switch top-level sections (chat → schedules → memory → settings) with
+  // Option+Arrow, because the browser has already spent Cmd+Left/Right on
+  // back/forward. Never Tab: that stays the native focus traversal.
   const mod = e.metaKey || e.ctrlKey
   const alt = e.altKey
-  const desktopSection = isDesktopApp() && mod && !alt
-  const webSection = !isDesktopApp() && alt && !mod
-  const isSectionArrow = (desktopSection || webSection) && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')
+  const isSectionArrow = alt && !mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')
   if (isSectionArrow) {
     if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
     const sections = ['/', '/schedules', '/memory', '/settings']
@@ -956,14 +982,12 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // are meant to fire more than once per press: New Chat created a fresh
   // "New Chat" on every repeat (each POST racing the server's empty-chat
   // sweep against the one before it, so the panel kept snapping to a newer
-  // chat instead of opening directly), and dictation/sidebar/model-picker
+  // chat instead of opening directly), and sidebar/model-picker
   // would otherwise toggle back and forth for as long as the key was held.
   if (e.repeat) return
 
-  // Arrow keys and Esc are handled by onUnreservedKeydown, which is bound in
-  // both the PWA and the desktop app. Handling them here too made the desktop
-  // app run them twice.
-  const isDesktop = isDesktopApp()
+  // Arrow keys and Esc are handled by onUnreservedKeydown, which is always
+  // bound. Handling them here too ran them twice.
   const mod = e.metaKey || e.ctrlKey
   const alt = e.altKey
 
@@ -987,79 +1011,66 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
-  // New Chat: Cmd+T (Desktop) or Option+N (Web/PWA). Opens a small picker to
-  // choose the workspace the new chat should live in; Enter creates it in the
-  // active workspace's General project.
-  if ((isDesktop && mod && (e.key === 't' || e.key === 'T')) || (!isDesktop && alt && (e.key === 'n' || e.key === 'N'))) {
+  // New Chat: Option+N. Opens a small picker to choose the workspace the new
+  // chat should live in; Enter creates it in the active workspace's General
+  // project. Cmd+T is left alone: it is the browser's new tab.
+  if (alt && optionChord(e, ['KeyN'], ['n', 'N'])) {
     e.preventDefault()
     void handleNewChatShortcut()
     return
   }
 
-  // Dictation: Cmd+D (Desktop) or Option+D (Web/PWA).
-  if ((isDesktop && mod && (e.key === 'd' || e.key === 'D')) || (!isDesktop && alt && (e.key === 'd' || e.key === 'D'))) {
-    if (!store.activeChat) return
-    e.preventDefault()
-    chatPanelRef.value?.toggleDictation()
-    return
-  }
-
-  // Archive: Cmd+Backspace (Desktop) or Option+Backspace (Web/PWA). Unlike
-  // the old Cmd+A it also fires while a text field is focused — that is the
-  // point: archive from mid-thought without clicking out. The confirm dialog
-  // from archiveActiveChat is what makes this safe to fire while typing, and
-  // it gates on shortcutsActive anyway, so the dialog swallows further keys.
-  if ((isDesktop && mod && !alt && e.key === 'Backspace') || (!isDesktop && alt && !mod && e.key === 'Backspace')) {
+  // Archive: Option+Backspace. Unlike the old Cmd+A it also fires while a
+  // text field is focused — that is the point: archive from mid-thought
+  // without clicking out. The confirm dialog from archiveActiveChat is what
+  // makes this safe to fire while typing, and it gates on shortcutsActive
+  // anyway, so the dialog swallows further keys.
+  if (alt && !mod && optionChord(e, ['Backspace'], ['Backspace'])) {
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.archiveActiveChat()
     return
   }
 
-  // Sidebar: Cmd+S (Desktop) or Option+S (Web/PWA), where Cmd+S is the
-  // browser's Save Page. Skipped while typing for the same reason as archive:
-  // in a text field Option+S is how you type ß, and stealing it would break
-  // text entry for the sake of a view toggle.
-  if ((isDesktop && mod && (e.key === 's' || e.key === 'S')) || (!isDesktop && alt && (e.key === 's' || e.key === 'S'))) {
+  // Sidebar: Option+S, because Cmd+S is the browser's Save Page. Skipped while
+  // typing for the same reason as archive: in a text field Option+S is how you
+  // type ß, and stealing it would break text entry for the sake of a view
+  // toggle.
+  if (alt && optionChord(e, ['KeyS'], ['s', 'S'])) {
     if (isTypingTarget(e.target)) return
     e.preventDefault()
     sidebarCollapsed.value = !sidebarCollapsed.value
     return
   }
 
-  // Model picker: Cmd+Shift+M (Desktop) or Option+M (Web/PWA). Plain Cmd+M is
-  // reserved by macOS for Minimize Window and cannot be intercepted reliably.
-  // Not gated on the typing target, like dictation: opening the picker is the
-  // useful reading of the key even mid-compose, and the picker is a popover,
-  // not a text mutation.
-  if ((isDesktop && mod && e.shiftKey && !alt && (e.key === 'm' || e.key === 'M')) || (!isDesktop && alt && (e.key === 'm' || e.key === 'M'))) {
+  // Model picker: Option+M. Not gated on the typing target: opening the picker
+  // is the useful reading of the key even mid-compose, and the picker is a
+  // popover, not a text mutation.
+  if (alt && optionChord(e, ['KeyM'], ['m', 'M'])) {
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.toggleModelPicker()
     return
   }
 
-  // Font zoom: Cmd+Shift+= / Cmd+Shift+- in the desktop app, Option+= /
-  // Option+- in the PWA — the same split as every other modifier shortcut
-  // here, and for the same reason.
-  //
-  // Cmd+Shift+= cannot be used in a browser: on a US layout that chord *is*
+  // Font zoom: Option+= / Option+-, the same modifier as every other shortcut
+  // here. Cmd+Shift+= cannot be used instead: on a US layout that chord *is*
   // Cmd++, the browser's own zoom-in, which is handled above the page and
-  // ignores preventDefault. The page zoomed *and* the font grew, two steps at
-  // once, while Cmd+Shift+- (not a browser chord) moved one — so the two
-  // directions disagreed and browser zoom-in became unusable on its own.
+  // ignores preventDefault -- the page would zoom *and* the font would grow,
+  // two steps at once.
   //
   // Skipped while typing because Option+= / Option+- type ≠ and – on macOS.
   // Step, bounds and persistence come from useFontScale, shared with the
   // Settings +/- buttons.
-  const zoomModifier = isDesktop ? (mod && e.shiftKey && !alt) : (alt && !mod)
-  if (zoomModifier && !isTypingTarget(e.target)) {
-    if (e.key === '=' || e.key === '+') {
+  if (alt && !mod && !isTypingTarget(e.target)) {
+    const zoomIn = optionChord(e, ['Equal', 'NumpadAdd'], ['=', '+'])
+    const zoomOut = optionChord(e, ['Minus', 'NumpadSubtract'], ['-', '_'])
+    if (zoomIn) {
       e.preventDefault()
       fontScale.adjust(FONT_SCALE_STEP)
       return
     }
-    if (e.key === '-' || e.key === '_') {
+    if (zoomOut) {
       e.preventDefault()
       fontScale.adjust(-FONT_SCALE_STEP)
       return
@@ -1235,7 +1246,6 @@ onBeforeUnmount(() => {
   gap: var(--space-2);
   padding: var(--space-3);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--border-strong);
   border-radius: var(--radius);
 }
 
@@ -1338,7 +1348,15 @@ onBeforeUnmount(() => {
   align-items: stretch;
   justify-content: flex-start;
   padding-top: var(--space-2);
+  /* The workbench carries the page gutter itself (--page-gutter), so the
+     shell only keeps the device safe-area insets. */
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
   text-align: left;
+}
+
+.empty-state > .home-intake {
+  order: -1;
 }
 
 .empty-home-header {
@@ -1462,6 +1480,62 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
+/* Workbench composition (prototype A): the request column keeps the readable
+   measure, and the memory pulse sits in a quiet side rail on wide panes
+   instead of stacking another full-width band under the prompt. */
+.home-workbench {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto;
+  padding: 48px var(--page-gutter) 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--page-rail);
+  align-items: start;
+  gap: 48px;
+}
+
+.home-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.home-workbench .home-main > .home-intake,
+.home-workbench .home-main > .empty-actions {
+  width: 100%;
+  max-width: none;
+}
+
+.home-rail {
+  position: sticky;
+  top: var(--space-2);
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+
+/* Keyed to the pane, not the viewport: with the resizable sidebar open, a
+   1280px window leaves the pane well under 980px, and a viewport query kept
+   the rail beside a request column too narrow for its own chips. */
+@container chat-pane (max-width: 940px) {
+  .home-workbench {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 25px;
+    padding: var(--space-5) var(--page-gutter) var(--space-4);
+  }
+
+  .home-rail {
+    position: static;
+  }
+}
+
+@container chat-pane (max-width: 700px) {
+  .home-workbench {
+    padding-top: var(--space-3);
+  }
+}
+
 .sidebar-backdrop {
   position: fixed;
   inset: 0;
@@ -1489,15 +1563,30 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow: hidden;
 }
+/* The pinned file is a window docked inside the pane, not a second flat
+   column: inset from the pane edges, in the sidebar's tone (--bg2), so the
+   sidebar and the file read as one layer and the chat is the canvas between. */
 .chat-split-side {
-  width: 50%;
   flex: 1 1 0;
   min-width: 240px;
-  border-left: 1px solid var(--border);
+  margin: var(--space-2) var(--space-2) var(--space-2) 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--bg);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 32px -14px rgb(0 0 0 / 45%);
+  animation: chat-tile-in 180ms var(--ease);
+}
+:global(:root.theme-light) .chat-split-side {
+  box-shadow: 0 10px 28px -14px rgb(26 26 46 / 28%);
+}
+@keyframes chat-tile-in {
+  from { opacity: 0; transform: translateX(12px) scale(0.985); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-split-side { animation: none; }
 }
 
 .sidebar-resizer,
@@ -1526,6 +1615,22 @@ onBeforeUnmount(() => {
 .chat-split-resizer:hover::after,
 .chat-split-resizer.is-dragging::after {
   background-color: var(--accent);
+}
+/* Between the chat and the tile the resizer is the visible gap itself, with a
+   grip that shows on hover instead of a full-height accent line. */
+.chat-split-resizer {
+  flex: none;
+  width: var(--space-2);
+  margin: 0;
+}
+.chat-split-resizer::after {
+  top: 50%;
+  bottom: auto;
+  left: 50%;
+  width: 3px;
+  height: 36px;
+  border-radius: 2px;
+  transform: translate(-50%, -50%);
 }
 
 :global(body.is-dragging-layout) {

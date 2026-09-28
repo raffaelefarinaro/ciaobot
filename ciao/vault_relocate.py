@@ -369,21 +369,12 @@ def apply(
     runtime_root: Path,
     *,
     plan_result: RelocationPlan | None = None,
-    registry_authoritative: bool = True,
 ) -> dict[str, Any]:
     """Move one workspace's vault to its standard folder, and repoint the registry.
 
     Refuses before touching anything if the plan refuses, or a tracked file
     under the source has uncommitted changes (so ``git mv`` in reverse stays a
     working undo). On a mid-run failure, rolls back every move already made.
-
-    ``registry_authoritative`` must reflect whether ``workspaces.json`` is
-    actually what ``config`` sourced its workspaces from — this module has no
-    way to know that on its own. A caller building ``config`` with
-    ``CiaoConfig.from_env`` should pass ``not effective_config_source.get(
-    "CIAO_WORKSPACES", "").strip()``, using the SAME merged environment (env
-    plus any ``.env`` override) that built ``config``, not the raw ambient
-    process environment, which can disagree with it.
     """
     result = plan_result if plan_result is not None else plan(config, workspace)
     payload = result.as_dict()
@@ -417,17 +408,13 @@ def apply(
 
     # The move is about to happen; if the result cannot be persisted, refuse
     # before touching anything rather than moving files nothing can find
-    # again. A non-authoritative registry most often means this install's
-    # workspaces come from CIAO_WORKSPACES (an env var) rather than
-    # workspaces.json.
-    if not registry_authoritative or not _registry_has_workspace(runtime_root, workspace):
+    # again.
+    if not _registry_has_workspace(runtime_root, workspace):
         payload["status"] = "refused"
         payload["refusals"] = [
             f"no entry for '{workspace}' in the workspace registry "
             f"({registry_file(runtime_root)}); the new location could not be "
-            "recorded, so nothing was moved. If this install configures "
-            "workspaces via CIAO_WORKSPACES, repoint it by hand after moving "
-            "the vault yourself."
+            "recorded, so nothing was moved."
         ]
         payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
         return payload
@@ -658,15 +645,11 @@ def apply(
     return payload
 
 
-def undo(
-    config: Any, workspace: str, runtime_root: Path, *, registry_authoritative: bool = True
-) -> dict[str, Any]:
+def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
     """Reverse the last completed relocation for one workspace, exactly.
 
     CLI only, same as ``workspace_reroot.undo``: there is no housekeeping
     button for this, only a receipt-driven reverse.
-
-    See :func:`apply` for what ``registry_authoritative`` must reflect.
     """
     path = receipt_path(runtime_root, workspace)
     if not path.is_file():
@@ -681,8 +664,7 @@ def undo(
     install_root = Path(config.workspace_root).resolve()
     current_registry = _read_registry(runtime_root)
     if (
-        not registry_authoritative
-        or current_registry is None
+        current_registry is None
         or not any(
             isinstance(entry, dict) and str(entry.get("name", "")) == workspace
             for entry in current_registry
@@ -690,7 +672,7 @@ def undo(
     ):
         return {
             "status": "refused",
-            "reason": "the current workspace registry is missing, corrupt, or environment-authoritative; nothing was undone",
+            "reason": "the current workspace registry is missing or corrupt; nothing was undone",
         }
     registry_before_undo = json.loads(json.dumps(current_registry))
     reversed_moves: list[str] = []

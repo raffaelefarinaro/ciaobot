@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ciao import cli_envelopes, subagent_tracking
+from ciao.context.entity_tagger import context_entities
 from ciao.models import ChatContext
 from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.opencode import (
@@ -53,11 +54,6 @@ from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_path
 
 logger = logging.getLogger(__name__)
 
-
-_CONTEXT_BLOCK_RE = re.compile(
-    r"^\[CIAO_CONTEXT_BEGIN\]\n.*?\n\[CIAO_CONTEXT_END\]\n\n",
-    re.DOTALL,
-)
 
 # `build_prompt()` in ciao/providers/base.py appends an image manifest block
 # (`[INCOMING IMAGES]\n1. filename.png\n2. other.jpg - caption: ...`) to the
@@ -320,14 +316,7 @@ def _strip_image_manifest(content: str) -> str:
 
 
 def _strip_injected_context(content: str) -> str:
-    # A continuation / handover turn can stack two [CIAO_CONTEXT_BEGIN] blocks
-    # (e.g. stable context + today). Strip them all, not just the first one.
-    stripped = content
-    while True:
-        nxt = _CONTEXT_BLOCK_RE.sub("", stripped, count=1)
-        if nxt == stripped:
-            break
-        stripped = nxt
+    stripped = cli_envelopes.strip_injected_context(content)
     if stripped != content:
         return _strip_image_manifest(stripped).strip() or content
     legacy = _strip_legacy_context_prefix(content)
@@ -739,7 +728,8 @@ def _render_opencode_thread(
                 for part in parts
                 if part.get("type") == "text" and not part.get("synthetic")
             ]
-            content = _strip_injected_context("\n".join(texts)).strip()
+            raw_prompt = "\n".join(texts)
+            content = _strip_injected_context(raw_prompt).strip()
             if not content:
                 continue
             entry: dict = {
@@ -747,6 +737,9 @@ def _render_opencode_thread(
                 "content": content,
                 "turn_index": user_idx,
             }
+            entities = context_entities(raw_prompt)
+            if entities:
+                entry["context_entities"] = entities
             if metadata:
                 refs = chat.user_turn_images.get(str(user_idx))
                 if refs:
@@ -815,30 +808,50 @@ def _render_opencode_thread(
     return result
 
 
-def _opencode_child_status(messages: list) -> str:
-    """A child session's lifecycle state, read from its own messages.
+def _opencode_child_status(
+    messages: list,
+    info: dict | None = None,
+    active: bool | None = None,
+) -> str:
+    """A V2 child session's lifecycle state.
 
-    opencode's session objects carry no status field, but the last assistant
-    message does: an ``error`` payload marks a failure, and a ``time`` record
-    without ``completed`` marks a turn still in flight.
+    ``/api/session/active`` is authoritative for the current execution;
+    ``Session.Info.outcome`` describes only the previous completed execution.
+    Normalized projected messages remain a defensive fallback for sparse data.
     """
+    if active is True:
+        return "running"
     last: dict | None = None
     for message in messages:
         if not isinstance(message, dict):
             continue
-        info = message.get("info")
-        if isinstance(info, dict) and info.get("role") == "assistant":
-            last = info
-    if last is None:
+        message_info = message.get("info")
+        if isinstance(message_info, dict) and message_info.get("role") == "assistant":
+            last = message_info
+    if last is not None:
+        if last.get("error"):
+            return "failed"
+        time_info = last.get("time")
+        if (
+            isinstance(time_info, dict)
+            and time_info.get("created")
+            and not time_info.get("completed")
+        ):
+            return "running"
+    if isinstance(info, dict):
+        outcome = str(info.get("outcome") or "")
+        if outcome == "failed":
+            return "failed"
+        if outcome in {"succeeded", "interrupted"}:
+            return "completed"
+        if active is None:
+            # A read from a different OpenCode process cannot establish
+            # inactivity. Keep an unobserved child visible/running rather than
+            # allowing an archive or schedule waiter to settle it early.
+            return "running"
+    if active is False:
         return "completed"
-    if last.get("error"):
-        return "failed"
-    time_info = last.get("time")
-    if (
-        isinstance(time_info, dict)
-        and time_info.get("created")
-        and not time_info.get("completed")
-    ):
+    if active is None and isinstance(info, dict):
         return "running"
     return "completed"
 
@@ -1275,6 +1288,7 @@ async def _assemble_chat_messages(
             continue
 
         content = _extract_text_content(m.message)
+        raw_prompt = content
         if m.type == "user":
             content = _strip_injected_context(content)
         content = content.strip()
@@ -1330,10 +1344,7 @@ async def _assemble_chat_messages(
             if subagent_tracking.is_synthesis_nudge(content):
                 result.append({"role": "system", "content": _SYNTHESIS_NUDGE_LABEL})
                 continue
-            is_compact = (
-                isinstance(m.message, dict) and bool(m.message.get("isCompactSummary"))
-            ) or content.startswith("This session is being continued from a previous conversation")
-            if is_compact:
+            if cli_envelopes.is_compact_summary(m, content):
                 result.append({"role": "system", "content": content})
                 continue
         entry: dict = {
@@ -1360,6 +1371,9 @@ async def _assemble_chat_messages(
             # Surface the user-turn index so the client can dedup replayed
             # user_echo events against history it already loaded.
             entry["turn_index"] = user_idx
+            entities = context_entities(raw_prompt)
+            if entities:
+                entry["context_entities"] = entities
             # Attach the persisted send time so the UI footer can show it on
             # reload. Missing for pre-feature chats: the frontend treats an
             # empty string as "no timestamp".

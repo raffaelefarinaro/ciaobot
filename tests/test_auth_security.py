@@ -10,7 +10,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
+from ciao.web.auth import AuthMiddleware, SESSION_COOKIE, make_serializer
 from ciao.web.routes_auth import auth_login, auth_logout
 
 
@@ -61,12 +61,10 @@ def test_safe_request_does_not_require_origin() -> None:
     assert resp.status_code == 200
 
 
-def _origin_req(headers: dict[str, str], allowed: tuple[str, ...] = ()) -> object:
-    cfg = SimpleNamespace(pwa_allowed_origins=allowed)
+def _origin_req(headers: dict[str, str]) -> object:
     return SimpleNamespace(
         headers={k.lower(): v for k, v in headers.items()},
         url=SimpleNamespace(hostname=None, port=None),
-        app=SimpleNamespace(state=SimpleNamespace(config=cfg)),
     )
 
 
@@ -84,6 +82,14 @@ def test_same_origin_rejects_cross_origin() -> None:
     assert _same_origin(req, "https://evil.example") is False
 
 
+def test_same_origin_rejects_an_explicit_port_mismatch() -> None:
+    from ciao.web.auth import _same_origin
+
+    req = _origin_req({"host": "ciao.example"})
+    assert _same_origin(req, "https://ciao.example:444") is False
+    assert _same_origin(req, "https://ciao.example") is True
+
+
 def test_same_origin_accepts_proxy_forwarded_host() -> None:
     """Behind a proxy the bound Host differs from the browser origin; the
     proxy-declared X-Forwarded-Host makes the WS/state-change handshake pass."""
@@ -93,14 +99,6 @@ def test_same_origin_accepts_proxy_forwarded_host() -> None:
     assert _same_origin(req, "https://app.example") is True
     # A genuine cross-origin still fails even with the forwarded host present.
     assert _same_origin(req, "https://evil.example") is False
-
-
-def test_same_origin_accepts_configured_allowlist() -> None:
-    from ciao.web.auth import _same_origin
-
-    req = _origin_req({"host": "localhost"}, allowed=("app.example",))
-    assert _same_origin(req, "https://app.example") is True
-    assert _same_origin(req, "https://other.example") is False
 
 
 def _auth_client() -> TestClient:
@@ -223,101 +221,6 @@ def test_setup_token_rejects_invalid_token(tmp_path) -> None:
     assert token_path.exists()
 
 
-def _handover_app(host_url: str = "http://100.1.2.3:8443", host_session=None):
-    """App exposing /api/node/handover over a stubbed NodeStateManager."""
-    from ciao.node_state import NodeStateManager
-    from ciao.web.routes_node import node_handover_endpoint
-
-    serializer = URLSafeTimedSerializer("test-secret")
-    app = Starlette(
-        routes=[Route("/api/node/handover", node_handover_endpoint, methods=["POST"])],
-        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
-    )
-    app.state.serializer = serializer
-    app.state.config = SimpleNamespace(pwa_auth_required=True, pwa_auth_token="x")
-    node_mgr = NodeStateManager.__new__(NodeStateManager)
-    state = {"role": "client", "host_url": host_url, "host_session": host_session}
-
-    def promote():
-        state["role"] = "host"
-        state["host_url"] = None
-        state["host_session"] = None
-        return {"role": "host", "host_url": None}
-
-    node_mgr.get_host_url = lambda: state["host_url"]  # type: ignore[method-assign]
-    node_mgr.get_host_session = lambda: state["host_session"]  # type: ignore[method-assign]
-    node_mgr.promote = promote  # type: ignore[method-assign]
-    app.state.node_state_manager = node_mgr
-    app.state.local_session_manager = None
-    return app, state
-
-
-def test_node_handover_bailout_allowed_from_loopback_without_session() -> None:
-    """Stuck clients on /login must force-promote without a host session."""
-    app, state = _handover_app()
-
-    client = TestClient(app, base_url="https://ciao.example", client=("127.0.0.1", 5555))
-    resp = client.post(
-        "/api/node/handover",
-        json={"force": True},
-        headers={"Origin": "https://ciao.example"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    assert state["role"] == "host"
-
-
-def test_node_handover_rejects_remote_peer_without_session() -> None:
-    """Force-promote is identity-less, so the network must not reach it."""
-    app, state = _handover_app()
-
-    client = TestClient(app, base_url="https://ciao.example", client=("10.0.0.9", 5555))
-    resp = client.post(
-        "/api/node/handover",
-        json={"force": True},
-        headers={"Origin": "https://ciao.example"},
-    )
-    assert resp.status_code == 401
-    assert state["role"] == "client"
-
-
-def test_node_handover_ignores_a_spoofed_localhost_host_header() -> None:
-    """The gate reads the peer address, not the caller-supplied Host header."""
-    app, state = _handover_app()
-
-    client = TestClient(app, base_url="http://10.0.0.9:8443", client=("10.0.0.9", 5555))
-    resp = client.post("/api/node/handover", json={"force": True}, headers={"Host": "localhost"})
-    assert resp.status_code == 401
-    assert state["role"] == "client"
-
-
-def test_node_handover_rejects_target_url_other_than_the_connected_host() -> None:
-    """The demote call carries the host session, so the URL must not be free-form."""
-    app, state = _handover_app(host_session="host-cookie")
-
-    client = TestClient(app, base_url="https://ciao.example", client=("127.0.0.1", 5555))
-    resp = client.post(
-        "/api/node/handover",
-        json={"target_node_url": "http://attacker.example.com", "force": False},
-        headers={"Origin": "https://ciao.example"},
-    )
-    assert resp.status_code == 400
-    assert "connected host" in resp.json()["error"]
-    assert state["role"] == "client"
-
-
-def test_node_handover_bailout_rejects_cross_origin() -> None:
-    app, _state = _handover_app()
-
-    client = TestClient(app, base_url="https://ciao.example", client=("127.0.0.1", 5555))
-    resp = client.post(
-        "/api/node/handover",
-        json={"force": True},
-        headers={"Origin": "https://evil.example"},
-    )
-    assert resp.status_code == 403
-
-
 def test_menubar_chats_requires_loopback_or_session() -> None:
     """Titles and workspace names must not be readable from the network."""
 
@@ -342,9 +245,6 @@ def test_menubar_chats_requires_loopback_or_session() -> None:
 def test_menubar_notifications_requires_loopback_or_session() -> None:
     """Notification bodies are message snippets, so the tray's feed is gated the
     same way as the chat list: loopback without a session, session otherwise.
-
-    A client node reaches the host's copy through the proxy, which presents the
-    stored host session, so this staying loopback-only does not break it.
     """
 
     async def stub(request):

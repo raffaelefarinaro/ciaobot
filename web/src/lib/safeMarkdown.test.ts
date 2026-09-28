@@ -230,3 +230,32 @@ describe('chat markdown file links', () => {
     expect(renderMarkdown('[ignore](.gitignore)')).toContain('data-file-path=".gitignore"')
   })
 })
+
+describe('chat code blocks and long links', () => {
+  it('gives a fenced block a header with its language and the copy button', () => {
+    const html = renderMarkdown('```json\n{"a": 1}\n```')
+    const host = document.createElement('div')
+    host.innerHTML = html
+    expect(host.querySelector('.code-block .code-block-head .code-block-lang')?.textContent).toBe('json')
+    expect(host.querySelector('.code-block .code-block-head .code-copy-btn')).not.toBeNull()
+    expect(host.querySelector('.code-block pre code')?.textContent).toContain('"a": 1')
+  })
+
+  it('never lets the fence info string inject markup', () => {
+    const host = document.createElement('div')
+    host.innerHTML = renderMarkdown('```<img/onerror=alert(1)>\nx\n```')
+    expect(host.querySelector('img')).toBeNull()
+    expect(host.querySelector('.code-block-lang')?.textContent).toBe('imgonerroralert1')
+  })
+
+  it('shortens the label of a long bare URL and keeps the full href', () => {
+    const url = 'https://github.com/raffaelefarinaro/ciaobot/issues/new?title=Backfill%20fails&body=' + 'a%20'.repeat(40)
+    const host = document.createElement('div')
+    host.innerHTML = renderMarkdown(url)
+    const link = host.querySelector('a')!
+    expect(link.getAttribute('href')).toBe(url)
+    expect(link.getAttribute('title')).toBe(url)
+    expect(link.textContent!.length).toBeLessThan(60)
+    expect(link.textContent).toMatch(/^github\.com\/raffaelefarinaro\/ciaobot/)
+  })
+})

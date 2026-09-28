@@ -13,7 +13,7 @@ Before changing configuration or workspace files:
 
 Useful local files:
 - `.env`: server, provider, workspace, and integration config.
-- `.runtime/workspaces.json`: logical workspace registry when `CIAO_WORKSPACES` is not set.
+- `.runtime/workspaces.json`: logical workspace registry, managed from Settings → Workspaces.
 - `.runtime/server_errors.log`: rotating server error log for Ciaobot runtime failures.
 - `.runtime/job_runs.jsonl`: recent background automation runs, including failed jobs.
 - `.runtime/ciao.stderr.log` and `.runtime/ciao.stdout.log`: macOS LaunchAgent service logs when present.

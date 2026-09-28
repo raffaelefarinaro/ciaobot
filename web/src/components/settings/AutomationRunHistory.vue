@@ -57,10 +57,8 @@ function badgeClass(status: string | undefined): string {
 .history-title {
   margin: 0;
   font-weight: 600;
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   color: var(--fg2);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .empty-history {
@@ -85,8 +83,6 @@ function badgeClass(status: string | undefined): string {
   color: var(--fg3);
   font-weight: 600;
   border-bottom: 1px solid var(--border);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .history-table td {

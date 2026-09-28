@@ -13,7 +13,11 @@ from urllib.parse import unquote, urlsplit
 
 import yaml
 
+# The one direction the dependency runs: `entity_types` imports no `ciao` module,
+# and `vault_index` below already imports it, so this costs nothing at import.
+from ciao.entity_types import EntityTypeRegistry, load_entity_types
 from ciao.vault_index import (
+    ARCHIVED_WORKSPACES_DIR,
     canonical_type,
     is_generated_vault_file,
     is_reserved_bookkeeping,
@@ -80,7 +84,7 @@ def duplicate_key(stem: str) -> str:
 # Directories that aren't vault content: app state, generated projections, tool
 # caches, and any venv/node_modules checked out inside the vault root (#129).
 EXCLUDE_DIRS = {
-    "Logs", "Templates", ".obsidian", ".vault-trash",
+    "Logs", "Templates", ".obsidian", ".vault-trash", ARCHIVED_WORKSPACES_DIR,
     ".venv", "venv", "node_modules", ".git",
     ".claude", ".agents", ".codex", ".opencode", "__pycache__",
 }
@@ -192,7 +196,19 @@ def is_template_stem(stem: str) -> bool:
     return "template" in stem.lower()
 
 
-def _frontmatter_error(file: _VaultFile) -> dict[str, str] | None:
+def _frontmatter_error(
+    file: _VaultFile, *, registry: EntityTypeRegistry | None = None
+) -> dict[str, str] | None:
+    """The one frontmatter problem with *file*, or None.
+
+    ``registry`` is the vault's category list, and it is optional because this
+    function holds only a ``_VaultFile`` and never a vault root: a caller that
+    knows its registry passes it, and a caller with no vault in hand — the unit
+    seam the tests lint through — keeps the shipped closed set. That is the same
+    argument for the same reason as the optional ``registry`` everywhere else in
+    this change: nothing here can load a registry for itself, and a hidden
+    global would have one vault's categories answer for another's notes.
+    """
     if file.relative.name.lower() in _FRONTMATTER_EXEMPT:
         return None
 
@@ -237,7 +253,7 @@ def _frontmatter_error(file: _VaultFile) -> dict[str, str] | None:
     # `type:` is a closed vocabulary. Without this the index grows one section
     # per synonym and the agent has no reason to reuse an existing category.
     # An aliased value names its target so the fix is a rename, not a decision.
-    canonical = canonical_type(page_type)
+    canonical = canonical_type(page_type, registry=registry)
     if canonical != page_type.strip():
         suggestion = f"; use '{canonical}'" if canonical else ""
         return {
@@ -581,7 +597,12 @@ def _is_non_local_decoded_path(path: str) -> bool:
     return windows_path.is_absolute() or bool(windows_path.root)
 
 
-def run_validation(vault_root: Path, *, install_root: Path | None = None) -> dict:
+def run_validation(
+    vault_root: Path,
+    *,
+    install_root: Path | None = None,
+    registry: EntityTypeRegistry | None = None,
+) -> dict:
     """Read-only scan for four vault health result lists.
 
     The returned keys are ``orphans``, ``duplicates``, ``frontmatter_errors``,
@@ -593,6 +614,13 @@ def run_validation(vault_root: Path, *, install_root: Path | None = None) -> dic
     markdown link — already found by ``_markdown_link_error`` over every file,
     with a resolved path and a kind. Two buckets for one condition could only
     disagree.
+
+    ``registry`` is the vault's category list and it is optional: omitted, it is
+    loaded from the root this call was given (resolved, so the loader's cache
+    key is the same root a caller passing a resolved path would produce), and
+    the loaded list decides both which folders are watched for orphans and what
+    a ``type:`` is allowed to be. With no vault file the loaded list is the
+    shipped one, which reproduces the hardcoded behaviour exactly.
     """
     issues: dict[str, list[Any]] = {
         "orphans": [],
@@ -602,6 +630,8 @@ def run_validation(vault_root: Path, *, install_root: Path | None = None) -> dic
     }
 
     discovered = _discover_paths(vault_root)
+    if registry is None:
+        registry = load_entity_types(Path(vault_root).resolve())
     valid_paths = {relative.as_posix() for _, relative in discovered}
     valid_paths.add(Path(".").as_posix())
     vault_files: list[_VaultFile] = []
@@ -613,7 +643,7 @@ def run_validation(vault_root: Path, *, install_root: Path | None = None) -> dic
         vault_files.append(_VaultFile(path=path, relative=rel, content=content))
 
     for file in vault_files:
-        error = _frontmatter_error(file)
+        error = _frontmatter_error(file, registry=registry)
         if error is not None:
             issues["frontmatter_errors"].append(error)
 
@@ -698,7 +728,11 @@ def run_validation(vault_root: Path, *, install_root: Path | None = None) -> dic
             if target:
                 memory_links.add(target)
 
-    orphan_candidate_dirs = {"People", "Projects", "Ideas", "Resources", "Places", "projects", "references"}
+    # The entity categories' own folders, plus the lower-case names an entry
+    # cannot express. A category the owner added joins this set, so a note in
+    # its folder is linted for orphans like any other entity's; a disabled one
+    # does not.
+    orphan_candidate_dirs = registry.orphan_dirs()
 
     for file in files_to_scan:
         rel_path = file.relative

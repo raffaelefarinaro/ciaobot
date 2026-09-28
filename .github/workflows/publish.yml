@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-desktop:
+  build-engine:
     runs-on: macos-latest
     if: github.event_name == 'release'
     permissions:
@@ -17,103 +17,80 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: desktop/package-lock.json
-      - uses: dtolnay/rust-toolchain@1.90.0
-        with:
-          targets: aarch64-apple-darwin
-      - name: Select newest Xcode
-        run: |
-          newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
-          test -n "$newest"
-          sudo xcode-select -s "$newest"
-          xcodebuild -version
-          swiftc --version
+          cache-dependency-path: web/package-lock.json
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
-      - name: Install desktop dependencies
-        working-directory: desktop
-        run: npm ci
       - name: Build PWA assets
         working-directory: web
         run: |
           npm ci
           npm run build
-      - name: Resolve pinned Python runtimes
-        id: python-runtime
-        shell: bash
+      - name: Build engine wheel
+        run: uv build --wheel --out-dir dist
+      - name: Verify engine wheel in a clean environment
         run: |
           set -euo pipefail
-          . scripts/pinned-python-runtime.env
-          {
-            echo "arm64_url=$CIAO_PYTHON_ARM64_URL"
-            echo "arm64_sha256=$CIAO_PYTHON_ARM64_SHA256"
-          } >> "$GITHUB_OUTPUT"
-      - name: Build embedded Ciaobot runtime
-        env:
-          CIAO_PYTHON_ARM64_URL: ${{ steps.python-runtime.outputs.arm64_url }}
-          CIAO_PYTHON_ARM64_SHA256: ${{ steps.python-runtime.outputs.arm64_sha256 }}
-        run: ./scripts/build-bundled-runtime.sh desktop/runtime
-      - name: Build signed aarch64 desktop app
-        working-directory: desktop
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri build -- --target aarch64-apple-darwin
-      - name: Build aarch64 installer verifier
-        working-directory: desktop/installer-verify
-        run: |
-          cargo build --release --target aarch64-apple-darwin
-          cp target/aarch64-apple-darwin/release/ciaobot-installer-verify \
-            target/ciaobot-installer-verify_aarch64
+          uv venv --python 3.13 "$RUNNER_TEMP/engine-check"
+          uv pip install --python "$RUNNER_TEMP/engine-check/bin/python" dist/ciaobot-*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/engine-check/bin/python" -m ciao.release_manifest check-static
       - name: Prepare release assets
+        run: |
+          set -euo pipefail
+          # install.sh is the engine installer, and the public install command
+          # keeps that name (#651): every README, site page and stale external
+          # link already points at it, so a new user gets the engine without any
+          # link having to change, and nobody can install the app a second time.
+          # install-engine.sh is the same file under a second name, because the
+          # already-merged transition app (#604) fetches that exact asset for its
+          # Move action. That asset is scripts/install-engine.sh itself, uploaded
+          # verbatim below, so the two names are the same bytes.
+          cp scripts/install-engine.sh install.sh
+          chmod 755 install.sh
+      - name: Write and sign engine manifest
         env:
           VERSION: ${{ github.event.release.tag_name }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           version="${VERSION#v}"
-          bundle="desktop/src-tauri/target/aarch64-apple-darwin/release/bundle"
-          updater="$(find "$bundle" -name '*.app.tar.gz' -type f -print -quit)"
-          signature="${updater}.sig"
-          verifier="desktop/installer-verify/target/ciaobot-installer-verify_aarch64"
-          test -n "$updater" -a -f "$signature" -a -x "$verifier"
-          updater_name="Ciaobot_${version}_aarch64.app.tar.gz"
-          verifier_name="ciaobot-installer-verify_aarch64"
-          cp "$updater" "$updater_name"
-          cp "$signature" "${updater_name}.sig"
-          cp "$verifier" "$verifier_name"
-          chmod 755 "$verifier_name"
-          verifier_sha256="$(shasum -a 256 "$verifier_name" | awk '{print $1}')"
-          sed "s/__VERIFIER_SHA256__/${verifier_sha256}/g" scripts/install.sh > install.sh
-          chmod 755 install.sh
-          signature_value="$(cat "${updater_name}.sig")"
-          download="https://github.com/raffaelefarinaro/ciaobot/releases/download/v${version}/${updater_name}"
-          # arm64 only. A true Intel Mac (or an x86_64 slice under Rosetta)
-          # selects darwin-x86_64 at compile time and must not be handed the
-          # arm64 artifact it cannot run; such installs simply get no in-app
-          # update and can reinstall through the arm64 installer.
-          jq -n \
-            --arg version "$version" \
-            --arg notes "Ciaobot v${version}" \
-            --arg pub_date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            --arg url "$download" \
-            --arg signature "$signature_value" \
-            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {"darwin-aarch64": {signature: $signature, url: $url}}}' \
-            > latest.json
+          py="$RUNNER_TEMP/engine-check/bin/python"
+          ws="$GITHUB_WORKSPACE"
+          (cd "$RUNNER_TEMP" && "$py" -m ciao.release_manifest build --version "$version" --out "$ws/ciaobot-engine-manifest.json" "$ws"/dist/ciaobot-*.whl)
+          # The manifest is signed by the same minisign key the installer
+          # embeds, but the signer must not live under desktop/ any more or
+          # #579b would break the release. `signer sign <path>` needs no Tauri
+          # project, so @tauri-apps/cli runs standalone at the version
+          # desktop/package.json pinned, and writes the same base64 minisign .sig
+          # ciao.release_manifest already verifies - the step below is the gate.
+          (cd "$ws" && npx --yes @tauri-apps/cli@2.11.4 signer sign ciaobot-engine-manifest.json)
+          (cd "$RUNNER_TEMP" && "$py" -m ciao.release_manifest verify "$ws/ciaobot-engine-manifest.json" "$ws/ciaobot-engine-manifest.json.sig")
       - name: Attach release assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
+          # Exactly five engine assets: the installer under both names, the
+          # wheel, and the signed manifest beside it. No app archive, no
+          # latest.json feed, no verifier, no bundled runtime (#653).
           gh release upload "$TAG" \
             install.sh \
-            ciaobot-installer-verify_aarch64 \
-            Ciaobot_*_aarch64.app.tar.gz \
-            Ciaobot_*_aarch64.app.tar.gz.sig \
-            latest.json \
+            scripts/install-engine.sh \
+            dist/ciaobot-*.whl \
+            ciaobot-engine-manifest.json \
+            ciaobot-engine-manifest.json.sig \
             --clobber
+          # The transition release hands the engine over by downloading
+          # install-engine.sh at its own tag (#604), and a first-time user runs
+          # install.sh; both names have to be on the release or a documented
+          # install path is dead. Checked here, where the tag is still known.
+          assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+          printf '%s\n' "$assets" | grep -qx install.sh
+          printf '%s\n' "$assets" | grep -qx install-engine.sh
 
   release-smoke:
-    needs: build-desktop
+    needs: build-engine
     if: github.event_name == 'release'
     uses: ./.github/workflows/release-smoke.yml
     permissions:

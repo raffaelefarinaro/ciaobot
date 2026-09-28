@@ -22,7 +22,7 @@ describe('formatDocumentTitle', () => {
 describe('settingsTabTitle', () => {
   it('maps settings tabs to lowercase titles', () => {
     expect(settingsTabTitle(undefined)).toBe('settings')
-    expect(settingsTabTitle('providers')).toBe('providers')
+    expect(settingsTabTitle('models')).toBe('models & providers')
     expect(settingsTabTitle('skills')).toBe('agent assets')
   })
 })

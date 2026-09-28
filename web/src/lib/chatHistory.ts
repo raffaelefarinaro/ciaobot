@@ -7,7 +7,7 @@
 
 import { isPlausibleFilePath } from './filePaths'
 import { isHostConnectionUnavailableMessage } from './chatWs'
-import type { ChatMessage } from './types'
+import type { ChatMessage, ContextEntity } from './types'
 
 export function stripLegacyContextPrefix(content: string): string {
   const lines = content.split('\n')
@@ -223,7 +223,7 @@ export function mergeMetadata(server: ChatMessage[], local: ChatMessage[]): Chat
   return mergedMessages
 }
 
-export type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string }
+export type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; context_entities?: ContextEntity[]; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string }
 
 export const toChatMessage = (m: ServerRow) => ({
   role: m.role as 'user' | 'assistant' | 'system',
@@ -247,6 +247,9 @@ export const toChatMessage = (m: ServerRow) => ({
   // send time; without mapping it here a reload made automated turns
   // read as user-authored.
   unattended: m.unattended || undefined,
+  // Notes the entity matcher linked this message to, read back from its
+  // stored context capsule. Only on user rows; feeds Work details.
+  context_entities: m.context_entities,
   // _filecard fields. Empty/undefined for non-file rows.
   file_path: m.file_path,
   action: m.action,

@@ -142,9 +142,6 @@ def validate_skill_zip(
             # That would imply not in a folder; we will error later.
         # Remove empty and handle entries like "__MACOSX"
         # But strictly: must be exactly one top-level folder
-        # Filter out files that are directly at root (no slash) – they indicate missing wrapper folder
-        # If any entry has no slash and is not a directory, then it's a file at root
-        has_root_file = any("/" not in n.rstrip("/") and not n.endswith("/") for n in names if n.strip("/"))
         # For validation, we require exactly one top-level folder
         # Exclude hidden __MACOSX entries from count? Plan says exactly one top-level folder, so be strict
         # But ignore __MACOSX folders for tolerance

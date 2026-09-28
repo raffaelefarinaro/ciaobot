@@ -18,3 +18,17 @@ def test_new_vault_notes_require_frontmatter() -> None:
 def test_rewrites_preserve_frontmatter() -> None:
     text = _system_instructions()
     assert "preserves that block and refreshes `updated:` to today" in text
+
+
+def test_notes_are_typed_from_the_vocabularys_categories_block() -> None:
+    """The frontmatter rule is only half a contract without the vocabulary.
+
+    A `type:` is only writable if the agent knows which list to read it comes
+    from, and a category the owner added only reaches its own folder if the
+    no-fit case is a question for the owner rather than a coined type. The
+    core prompt only has to point at the block: the folder each category uses is
+    named there, and the surfaces that write notes say so in full.
+    """
+    text = _system_instructions()
+    assert "**Categories** section of `VOCABULARY.md`" in text
+    assert "a note that fits none is a new-category question" in text

@@ -1,41 +1,66 @@
 <template>
-  <div
-    v-if="picker"
-    class="newchat-backdrop"
-    role="dialog"
-    aria-modal="true"
-    aria-label="New chat"
-    @click.self="cancel"
+  <DialogRoot
+    :open="picker !== null"
+    modal
+    @update:open="onOpenChange"
   >
-    <div class="newchat-card" role="listbox" aria-label="Choose a project for the new chat">
-      <p class="newchat-title">New chat</p>
-      <p class="newchat-hint">{{ hint }}</p>
-      <button
-        v-for="item in projectItems"
-        :key="item.id"
-        type="button"
-        ref="itemButtons"
-        class="newchat-option"
-        :class="{ 'newchat-option--active': selected === item.id }"
-        :data-workspace-color="item.color"
-        role="option"
-        :aria-selected="selected === item.id"
-        @click="choose(item.id)"
-        @mouseenter="selected = item.id"
-      >
-        <span class="newchat-name">{{ item.label }}</span>
-        <span v-if="item.badge" class="newchat-badge">{{ item.badge }}</span>
-      </button>
-    </div>
-  </div>
+    <DialogOverlay as-child>
+      <div class="newchat-backdrop">
+        <DialogContent
+          class="newchat-card"
+          aria-modal="true"
+          @open-auto-focus="onOpenAutoFocus"
+          @escape-key-down="onEscapeKeyDown"
+        >
+          <DialogTitle as="p" class="newchat-title">New chat</DialogTitle>
+          <DialogDescription as="p" class="newchat-hint">
+            Pick a project in {{ workspaceName }}.
+            <kbd>1</kbd>–<kbd>9</kbd> switch workspace.
+          </DialogDescription>
+          <div
+            class="newchat-options"
+            role="listbox"
+            aria-label="Choose a project for the new chat"
+          >
+            <button
+              v-for="item in projectItems"
+              :key="item.id"
+              type="button"
+              ref="itemButtons"
+              class="newchat-option"
+              :class="{ 'newchat-option--active': selected === item.id }"
+              :data-workspace-color="item.color"
+              role="option"
+              :aria-selected="selected === item.id"
+              @click="choose(item.id)"
+              @mouseenter="selected = item.id"
+            >
+              <span class="newchat-name">{{ item.label }}</span>
+              <span v-if="item.badge" class="newchat-badge">{{ item.badge }}</span>
+              <span v-if="selected === item.id" class="newchat-enter" aria-hidden="true">↵</span>
+            </button>
+          </div>
+        </DialogContent>
+      </div>
+    </DialogOverlay>
+  </DialogRoot>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  DialogContent,
+  DialogDescription,
+  DialogOverlay,
+  DialogRoot,
+  DialogTitle,
+} from 'reka-ui'
+import { useEventListener } from '@vueuse/core'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { pendingNewChat } from '../lib/newChat'
 import { useProjectStore } from '../stores/projects'
 import { workspaceLabel } from '../lib/workspaceLabel'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
+import { isMemoryProject } from '../lib/memoryPass'
 
 interface PickerItem {
   id: string
@@ -60,6 +85,13 @@ const previewWorkspace = ref<string>(store.activeWorkspace)
 const projectItems = computed<PickerItem[]>(() => {
   return store.projects
     .filter(p => p.workspace === previewWorkspace.value)
+    // The Memory project is app-owned and hidden from the sidebar, so it must
+    // not reappear here: this picker is the chooser behind Home's composer chip,
+    // both "+ new" affordances, Cmd+T and Option+N, and a chat started there
+    // would sit in a project the user cannot then find or move out of. Mirrors
+    // the `workspaceProjects` filter rather than reading it, because the picker
+    // previews a workspace the app is not in.
+    .filter(p => !isMemoryProject(p))
     .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
     .map(p => ({
       id: p.project_id,
@@ -72,9 +104,7 @@ const projectItems = computed<PickerItem[]>(() => {
 const selected = ref<string>('')
 const itemButtons = ref<HTMLButtonElement[]>([])
 
-const hint = computed(() =>
-  `Projects in ${workspaceLabel(previewWorkspace.value)} — press 1-9 to switch workspace.`,
-)
+const workspaceName = computed(() => workspaceLabel(previewWorkspace.value))
 
 function currentIndex(): number {
   return Math.max(0, projectItems.value.findIndex(o => o.id === selected.value))
@@ -88,10 +118,24 @@ function cancel() {
   picker.value?.resolve(null)
 }
 
+function onOpenChange(open: boolean) {
+  if (!open) cancel()
+}
+
 function focusItem(index: number) {
   nextTick(() => {
     itemButtons.value[index]?.focus()
   })
+}
+
+function onOpenAutoFocus(event: Event) {
+  event.preventDefault()
+  focusItem(0)
+}
+
+function onEscapeKeyDown(event: KeyboardEvent) {
+  event.preventDefault()
+  cancel()
 }
 
 // Every key the picker consumes is taken here and taken completely: the
@@ -155,6 +199,8 @@ function onKeydown(event: KeyboardEvent) {
   }
 }
 
+useEventListener(window, 'keydown', onKeydown, { capture: true })
+
 watch(projectItems, () => {
   const current = projectItems.value.find(o => o.id === selected.value)
   if (!current) selected.value = projectItems.value[0]?.id ?? ''
@@ -162,17 +208,23 @@ watch(projectItems, () => {
 
 watch(picker, async value => {
   if (!value) return
-  // Every open starts from where the user actually is, not from whatever
-  // workspace the previous open happened to end on.
-  previewWorkspace.value = store.activeWorkspace
-  selected.value = projectItems.value[0]?.id ?? ''
+  // Every open starts from the caller's intended context, not from whatever
+  // workspace/project the previous open happened to end on. A project-scoped
+  // New still opens the shared picker, but that project is preselected.
+  const requestedProject = value.options.projectId
+  const requestedWorkspace = value.options.workspace
+  previewWorkspace.value = requestedWorkspace || store.activeWorkspace
+  selected.value = projectItems.value.some(item => item.id === requestedProject)
+    ? requestedProject!
+    : projectItems.value[0]?.id ?? ''
   await nextTick()
-  itemButtons.value[0]?.focus()
+  // Focus the requested project, not always the first row: a project-scoped New
+  // still opens the shared picker, but its own project is what Enter confirms.
+  const selectedIndex = projectItems.value.findIndex(item => item.id === selected.value)
+  itemButtons.value[selectedIndex >= 0 ? selectedIndex : 0]?.focus()
 })
 
-onMounted(() => window.addEventListener('keydown', onKeydown, true))
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onKeydown, true)
   picker.value?.resolve(null)
 })
 </script>
@@ -208,8 +260,21 @@ onBeforeUnmount(() => {
 }
 .newchat-hint {
   margin: 0 0 var(--space-1);
-  color: var(--fg2);
+  color: var(--fg3);
   font-size: var(--text-sm);
+}
+.newchat-hint kbd {
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg2);
+}
+.newchat-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .newchat-option {
   display: flex;
@@ -217,35 +282,43 @@ onBeforeUnmount(() => {
   gap: var(--space-2);
   min-height: var(--touch);
   padding: 0 var(--space-3);
-  border: 1px solid transparent;
-  border-radius: var(--radius);
+  border: 0;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--fg);
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background 120ms var(--ease), border-color 120ms var(--ease);
+  transition: background 120ms var(--ease), box-shadow 120ms var(--ease);
 }
 .newchat-option:hover {
   background: var(--bg3);
 }
-.newchat-option--active {
-  background: var(--bg3);
-  border-color: var(--accent);
+/* Same current-item treatment as the sidebar: accent-tinted fill and a slim
+   accent edge, not a bordered box. */
+.newchat-option--active,
+.newchat-option--active:hover {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .newchat-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .newchat-badge {
   margin-left: auto;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 600;
+  font-size: var(--text-sm);
   color: var(--fg3);
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
   flex: 0 0 auto;
 }
+.newchat-enter {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg3);
+  flex: 0 0 auto;
+}
+.newchat-badge + .newchat-enter { margin-left: var(--space-2); }
 </style>

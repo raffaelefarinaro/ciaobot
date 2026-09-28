@@ -44,7 +44,6 @@ const CommentPopoverStub = vi.hoisted(() => ({
   },
 }))
 vi.mock('../PaneHeader.vue', () => ({ default: NoopStub }))
-vi.mock('../VoiceRecorder.vue', () => ({ default: NoopStub }))
 vi.mock('../SubagentPanel.vue', () => ({ default: NoopStub }))
 const ModelSelectorStub = vi.hoisted(() => ({
   name: 'ModelSelector',

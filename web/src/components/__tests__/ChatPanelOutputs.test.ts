@@ -122,7 +122,6 @@ async function mountPanel(): Promise<{
       stubs: {
         PaneHeader: PaneHeaderStub,
         ModelSelector: ChildStub,
-        VoiceRecorder: ChildStub,
         SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
@@ -240,6 +239,83 @@ describe('ChatPanel Outputs section', () => {
     await summary.trigger('click')
     expect(summary.attributes('aria-expanded')).toBe('false')
     expect(wrapper.find('.outputs-list').exists()).toBe(false)
+  })
+
+  it('links an archived source chat to its memory pass', async () => {
+    const { wrapper, store } = await mountPanel()
+    // The pass runs in a project the sidebar hides, so the archived chat is the
+    // durable way back to it.
+    const chat = store.chats[0]
+    chat.archived = true
+    chat.postprocess = {
+      state: 'done',
+      steps: { memory_pass: { status: 'ok', extra: { chat_id: 'pass-1' } } },
+    }
+    await flushPromises()
+
+    const button = wrapper.find('.archive-memory-pass-btn')
+    expect(button.exists()).toBe(true)
+    expect(button.text()).toBe('Open memory pass')
+
+    const switchChat = vi.spyOn(store, 'switchChat').mockResolvedValue(undefined)
+    await button.trigger('click')
+    expect(switchChat).toHaveBeenCalledWith('pass-1')
+  })
+
+  it('offers no memory pass link on an archived chat that spawned none', async () => {
+    const { wrapper, store } = await mountPanel()
+    const chat = store.chats[0]
+    chat.archived = true
+    chat.postprocess = { state: 'done', steps: { insights: { status: 'ok', extra: {} } } }
+    await flushPromises()
+
+    expect(wrapper.find('.archive-memory-pass-btn').exists()).toBe(false)
+
+    // A record that is not even a chat id must not become a navigation target.
+    chat.postprocess = { state: 'done', steps: { memory_pass: { status: 'queued', extra: { chat_id: 7 } } } } as never
+    await flushPromises()
+    expect(wrapper.find('.archive-memory-pass-btn').exists()).toBe(false)
+  })
+
+  it('renders the archived notice and no composer for an archived chat', async () => {
+    // #619: the panel already had an archived branch, but nothing could ever
+    // reach it — a deep link to an archived chat resolved to no active chat, so
+    // ChatLayout mounted no panel at all and this footer was unreachable. Now
+    // that the store can select one, what renders here is the whole contract:
+    // read-only, with a way forward and no way to type.
+    const { wrapper, store } = await mountPanel()
+    store.chats[0].archived = true
+    store.chats[0].archive_path = 'archive/chat-1.jsonl'
+    await flushPromises()
+
+    const notice = wrapper.find('.archived-notice')
+    expect(notice.exists()).toBe(true)
+    expect(notice.text()).toContain('This chat is archived.')
+    expect(notice.find('.continue-chat-btn').text()).toBe('Continue in new chat')
+    expect(wrapper.find('textarea.chat-input').exists()).toBe(false)
+  })
+
+  it('deduplicates repeated action/path pairs in the Work inspector', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      ...turnWithOutputs(),
+      {
+        role: 'system' as const,
+        tool_name: '_filecard',
+        content: 'Workspace/cover-letter.md',
+        file_path: 'Workspace/cover-letter.md',
+        action: 'edited',
+        timestamp: '2026-09-20T09:01:00Z',
+      },
+    ]
+    await flushPromises()
+
+    await wrapper.get('.work-inspector-trigger').trigger('click')
+    await wrapper.get('#work-tab-output').trigger('click')
+    const rows = wrapper.findAll('.chat-work-output')
+    expect(rows).toHaveLength(2)
+    expect(new Set(rows.map(row => row.get('.chat-work-output-action').text())).size).toBe(2)
+    wrapper.unmount()
   })
 
   it('opens the file viewer from a row link, as the old pill did', async () => {

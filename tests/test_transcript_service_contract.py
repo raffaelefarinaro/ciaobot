@@ -412,6 +412,14 @@ def test_opencode_child_status_reads_the_last_assistant_message() -> None:
         == "running"
     )
     assert transcript_service._opencode_child_status([]) == "completed"
+    # The active map describes the current execution, not Session.Info.outcome
+    # from the previous completed turn.
+    assert transcript_service._opencode_child_status(
+        [], {"outcome": "failed"}, active=True
+    ) == "running"
+    assert transcript_service._opencode_child_status(
+        [], {"outcome": "succeeded"}, active=False
+    ) == "completed"
 
 
 def test_prune_rows_for_wire_only_truncates_oversized_thinking() -> None:

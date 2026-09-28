@@ -20,9 +20,9 @@ every existing test stays green. This module closes that gap in two halves:
   each synthetic scenario to one provider/model and asks for a structured
   behavior record (tools, writes, answer, deferrals). It is bounded by a
   declared call and cost ceiling (``EvalBudget``) and records the sha256 of the
-  core prompt, guide fixture, extraction prompts, provider, model, and tool
-  catalog with every report, so a baseline and a candidate are comparable and
-  reproducible.
+  core prompt, guide fixture, memory region-reconcile prompt, provider, model,
+  and tool catalog with every report, so a baseline and a candidate are
+  comparable and reproducible.
 
 Everything here is synthetic. There is no ``--vault-root`` and no path that
 reads a live vault: the scenarios in ``ciao/stock/evals/scenarios.json`` are
@@ -542,20 +542,25 @@ def code_revision(repo_root: Path | None = None) -> str:
 
 
 def extraction_prompt_sha256() -> str:
-    """Hash of the shipped extraction prompts, or ``""`` when unavailable.
+    """Hash of the shipped memory region-reconcile prompt, or ``""`` when unavailable.
 
-    All three prompt variants (JSONL insights, rendered text, region reconcile)
-    are hashed as one value, so any of them changing moves the provenance.
+    One value over every prompt that shapes what gets written to the vault, so
+    any of them changing moves the provenance. The two one-shot extraction
+    prompts (JSONL insights, rendered text) were deleted in #627 with the
+    one-shot pipeline itself; ``memory_proposals._RECONCILE_SYSTEM_PROMPT`` is
+    what remains, and the field keeps its old name on purpose so existing
+    reports stay comparable.
     """
     try:
-        from ciao import insights, memory_proposals
+        from ciao import memory_proposals
 
-        parts = [
-            getattr(insights, "_INSIGHTS_SYSTEM_PROMPT", ""),
-            getattr(insights, "_TEXT_MODE_SYSTEM_PROMPT", ""),
-            getattr(memory_proposals, "_RECONCILE_SYSTEM_PROMPT", ""),
-        ]
+        parts = [getattr(memory_proposals, "_RECONCILE_SYSTEM_PROMPT", "")]
     except Exception:  # noqa: BLE001
+        return ""
+    if not any(parts):
+        # Every prompt this field covered is gone. Hashing the empty join would
+        # report a stable provenance for a pipeline that no longer exists, which
+        # reads as "the prompts did not change" — the one wrong answer here.
         return ""
     return _sha256_text("\x00".join(str(part) for part in parts))
 
@@ -2390,34 +2395,24 @@ def _claude_allowed_tools() -> set[str]:
 
 
 def _opencode_bash_rules() -> set[str]:
-    """``ciao …`` bash commands whose *effective* action in opencode auto is allow.
-
-    OpenCode resolves permissions last-match-wins over the session ruleset
-    (``mode_settings``), where auto starts with a ``("*", "allow")`` wildcard and
-    a later ``("bash", "ask")`` row. Simulate that resolution for a few
-    representative ``ciao`` commands so a missing or misordered ``bash: ask``
-    row — which would let every Bash command, including ``ciao …``, through the
-    wildcard — is caught rather than filtered away as "no explicit ciao allow".
-    """
+    """``ciao …`` shell commands effectively allowed by OpenCode auto mode."""
     from ciao.providers.opencode import mode_settings
 
     try:
         _agent, rules = mode_settings("auto")  # type: ignore[arg-type]
     except Exception:  # noqa: BLE001
         return set()
-    bash_rules = [r for r in rules if r.get("permission") == "bash"]
+    shell_rules = [r for r in rules if r.get("action") == "shell"]
     samples = {"ciao memory status", "ciao chat delete", "ciao run start"}
 
     def effective(cmd: str) -> str | None:
-        for rule in reversed(bash_rules):
-            pattern = str(rule.get("pattern") or "")
-            if _glob_matches(pattern, cmd):
-                return str(rule.get("action") or "")
+        for rule in reversed(shell_rules):
+            resource = str(rule.get("resource") or "")
+            if _glob_matches(resource, cmd):
+                return str(rule.get("effect") or "")
         return None
 
     allowed = {cmd for cmd in samples if effective(cmd) == "allow"}
-    # A bash command that matches no bash rule falls through to the wildcard
-    # `*` allow in auto — that is an allow too.
     for cmd in samples:
         if effective(cmd) is None:
             allowed.add(cmd)

@@ -12,6 +12,7 @@ disk under the old session_id — unless `/messages` walks the full
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -207,7 +208,7 @@ async def test_get_session_messages_full_traverses_logical_parent_uuid(
             "sessionId": session_id,
             "message": {
                 "role": "user",
-                "content": "This session is being continued from a previous conversation that ran out of context. Summary: test",
+                "content": "A continuation recap with a different opening.",
             },
         },
         {
@@ -229,8 +230,9 @@ async def test_get_session_messages_full_traverses_logical_parent_uuid(
     ]
     assert contents[0] == "pre-compact question"
     assert contents[1] == "pre-compact answer"
-    assert "This session is being continued" in contents[2]
+    assert contents[2] == "A continuation recap with a different opening."
     assert contents[3] == "post-compact answer"
+    assert messages[2].message["isCompactSummary"] is True
 
     # Test /messages endpoint rendering
     pcm = _make_manager(tmp_path)
@@ -245,12 +247,86 @@ async def test_get_session_messages_full_traverses_logical_parent_uuid(
     # Pre-compact, summary (as system), and post-compact items must all be present
     assert "pre-compact question" in payload
     assert "pre-compact answer" in payload
-    assert "This session is being continued" in payload
+    assert "A continuation recap with a different opening." in payload
     assert "post-compact answer" in payload
 
     # Verify positions: pre-compact < summary < post-compact
     pos_pre = payload.index("pre-compact question")
-    pos_sum = payload.index("This session is being continued")
+    pos_sum = payload.index("A continuation recap with a different opening.")
     pos_post = payload.index("post-compact answer")
     assert pos_pre < pos_sum < pos_post
+
+
+@pytest.mark.asyncio
+async def test_flagged_compact_recap_is_hidden_on_the_sdk_fallback_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import claude_agent_sdk._internal.sessions as sdk_sessions
+    from claude_agent_sdk._internal.sessions import project_key_for_directory
+    import ciao.transcripts as transcripts
+
+    session_id = "11111111-2222-3333-4444-555555555555"
+    project_dir = tmp_path / ".claude" / "projects" / project_key_for_directory(str(tmp_path))
+    project_dir.mkdir(parents=True, exist_ok=True)
+    entries = [
+        {
+            "type": "user",
+            "uuid": "u1",
+            "parentUuid": None,
+            "sessionId": session_id,
+            "message": {"role": "user", "content": "before compact"},
+        },
+        {
+            "type": "user",
+            "uuid": "u2",
+            "parentUuid": "u1",
+            "sessionId": session_id,
+            "isCompactSummary": True,
+            "message": {"role": "user", "content": "A recap with a new opening."},
+        },
+        {
+            "type": "user",
+            "uuid": "u3",
+            "parentUuid": "u2",
+            "sessionId": session_id,
+            "message": {"role": "user", "content": "after compact"},
+        },
+    ]
+    (project_dir / f"{session_id}.jsonl").write_text(
+        "\n".join(json.dumps(entry) for entry in entries) + "\n",
+        encoding="utf-8",
+    )
+
+    fallback_messages = [
+        SimpleNamespace(type="user", uuid=entry["uuid"], message=entry["message"])
+        for entry in entries
+    ]
+    monkeypatch.setattr(
+        sdk_sessions,
+        "_get_projects_dir",
+        lambda: tmp_path / ".claude" / "projects",
+    )
+    monkeypatch.setattr(
+        transcripts,
+        "get_session_messages",
+        lambda _sid, directory=None: fallback_messages,
+    )
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Compact fallback", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="compact-fallback")
+    chat.session_id = session_id
+    pcm._save()
+
+    response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
+    rows = json.loads(response.body)
+    user_rows = [row for row in rows if row.get("role") == "user"]
+    assert [(row["content"], row["turn_index"]) for row in user_rows] == [
+        ("before compact", 0),
+        ("after compact", 1),
+    ]
+    assert any(
+        row.get("role") == "system" and row.get("content") == "A recap with a new opening."
+        for row in rows
+    )
 

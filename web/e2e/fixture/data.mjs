@@ -37,7 +37,7 @@ export const PROJECTS = WORKSPACES.flatMap((workspace, wi) => ([
   },
 ]))
 
-function chat(workspace, n, projectId, title) {
+function chat(workspace, n, projectId, title, extra = {}) {
   return {
     chat_id: `${workspace}-chat-${n}`,
     project_id: projectId,
@@ -67,13 +67,168 @@ function chat(workspace, n, projectId, title) {
     helper: {},
     retry: null,
     local: true,
+    ...extra,
   }
 }
 
 export const CHATS = WORKSPACES.flatMap((workspace) => ([
   chat(workspace.name, 1, `${workspace.name}-general`, `${workspace.name} first conversation`),
   chat(workspace.name, 2, `${workspace.name}-notes`, `${workspace.name} second conversation`),
+  // Archived, and only in the first workspace: the sidebar hides it, so every
+  // other spec sees the same rows it saw before, while a deep link to its id
+  // has something to open. `archive_path` is what a real archive carries (the
+  // chat is viewable with or without it), and the settled `memory_pass` step
+  // puts both post-archive affordances on screen — the summary and the "Open
+  // memory pass" link from #618, unreachable for the same reason.
+  ...(workspace === WORKSPACES[0]
+    ? [chat(workspace.name, 3, `${workspace.name}-general`, `${workspace.name} archived conversation`, {
+        archived: true,
+        archive_path: '/synthetic/alpha/archive/alpha-chat-3.jsonl',
+        postprocess: { state: 'done', steps: { memory_pass: { status: 'ok', extra: { chat_id: 'alpha-chat-2' } } } },
+      })]
+    : []),
 ]))
+
+export const SCHEDULES = [
+  {
+    schedule_id: 'alpha-daily-brief',
+    title: 'Daily project briefing',
+    description: 'Summarize movement, decisions, and anything that needs attention.',
+    prompt: 'Review the latest project activity and write a concise briefing.',
+    daily_time_utc: '08:00',
+    chat_id: 0,
+    created_at: '2026-09-01T08:00:00Z',
+    timezone_name: 'UTC',
+    last_triggered_on: '2026-09-24',
+    last_status: 'ok',
+    days_of_week: null,
+    thread_id: null,
+    context_label: 'General',
+    context_available: true,
+    frequency: 'daily',
+    interval_minutes: 0,
+    day_of_month: null,
+    run_at_date: null,
+    web_chat_id: null,
+    web_project_id: 'alpha-general',
+    workspace: 'alpha',
+    model: 'synthetic-model',
+    provider: 'claude',
+    next_run: '2026-09-25T08:00:00Z',
+    last_expected_run: '2026-09-24T08:00:00Z',
+    missed: false,
+    enabled: true,
+    archive_policy: 'auto',
+  },
+]
+
+export const MEMORY_NODES = [
+  {
+    id: 'memory-vault/alpha/Projects/Launch.md',
+    title: 'Launch decision',
+    type: 'project',
+    tags: ['launch', 'decision'],
+    aliases: [],
+    description: 'The current launch outcome, constraints, and accepted trade-offs.',
+    workspace: 'alpha',
+    degree: 2,
+    mtime: 1780000000,
+    updated: '2026-09-20',
+    stale: false,
+    ageDays: 4,
+  },
+  {
+    id: 'memory-vault/alpha/People/Team.md',
+    title: 'Team working agreements',
+    type: 'person-colleague',
+    tags: ['team'],
+    aliases: [],
+    description: 'How the team reviews, decides, and hands work across time zones.',
+    workspace: 'alpha',
+    degree: 1,
+    mtime: 1779000000,
+    updated: '2026-08-14',
+    stale: true,
+    ageDays: 41,
+  },
+  {
+    id: 'memory-vault/alpha/Ideas/Positioning.md',
+    title: 'Product positioning',
+    type: 'idea',
+    tags: ['positioning', 'launch'],
+    aliases: [],
+    description: 'The product promise and the evidence that supports it.',
+    workspace: 'alpha',
+    degree: 1,
+    mtime: 1780100000,
+    updated: '2026-09-22',
+    stale: false,
+    ageDays: 2,
+  },
+]
+
+export const MEMORY_EDGES = [
+  { source: MEMORY_NODES[0].id, target: MEMORY_NODES[1].id },
+  { source: MEMORY_NODES[0].id, target: MEMORY_NODES[2].id },
+]
+
+/**
+ * The vault's category list, in the shape `/api/memory/entity-types` serves it.
+ *
+ * One builtin, one disabled one and one custom, because those are the three
+ * things the Categories panel renders differently and a fixture holding only
+ * shipped-and-enabled rows would leave two of them unmeasured.
+ */
+export const MEMORY_CATEGORIES = [
+  {
+    id: 'person',
+    label: 'Person',
+    kind: 'entity',
+    folder: 'People',
+    description: 'A human the user knows or works with.',
+    aliases: [],
+    stale_after_days: 90,
+    enabled: true,
+    builtin: true,
+    note_count: 1,
+  },
+  {
+    id: 'project',
+    label: 'Project',
+    kind: 'entity',
+    folder: 'Projects',
+    description: 'Something with an outcome and a finish line.',
+    aliases: [],
+    stale_after_days: 30,
+    enabled: true,
+    builtin: true,
+    note_count: 1,
+  },
+  {
+    id: 'idea',
+    label: 'Idea',
+    kind: 'entity',
+    folder: 'Ideas',
+    description: 'A position worth testing, not yet a decision.',
+    aliases: [],
+    stale_after_days: 0,
+    enabled: false,
+    builtin: true,
+    note_count: 1,
+  },
+  {
+    id: 'customer',
+    label: 'Customer',
+    kind: 'entity',
+    folder: 'Customers',
+    description: 'A person or company the user does business with.',
+    aliases: ['client'],
+    stale_after_days: 0,
+    enabled: true,
+    builtin: false,
+    note_count: 0,
+  },
+]
 
 /** One pending row, so the review queue renders something to tab onto. */
 export const PROPOSALS = [

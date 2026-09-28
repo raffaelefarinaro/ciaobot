@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import SettingsAutomation from '../settings/SettingsAutomation.vue'
-import type { AutomationProcess, ProposalOutcomes } from '../../lib/types'
+import type { AutomationProcess, ProposalOutcomes, RoutineSettings } from '../../lib/types'
 
 function item(overrides: Partial<AutomationProcess> = {}): AutomationProcess {
   return {
@@ -37,8 +37,8 @@ const baseProps = {
   notifySaved: vi.fn(),
   notifyFailed: vi.fn(),
   routines: null,
-  providerModels: undefined,
-  providerLabels: {},
+  routinesSaving: false,
+  saveRoutines: vi.fn(() => Promise.resolve()),
 }
 
 let wrapper: VueWrapper | null = null
@@ -53,6 +53,7 @@ function mountPanel(props: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   setActivePinia(createPinia())
+  vi.clearAllMocks()
 })
 
 afterEach(() => {
@@ -115,5 +116,42 @@ describe('SettingsAutomation proposal outcomes line', () => {
     delete partial.recent_30d
     const view = mountPanel({ proposalOutcomes: partial as ProposalOutcomes })
     expect(view.find('.automation-proposals').text()).toContain('3 promoted')
+  })
+})
+
+describe('SettingsAutomation insights privacy toggle', () => {
+  it('shows the persisted state and saves the inverse', async () => {
+    const saveRoutines = vi.fn(() => Promise.resolve())
+    const routines = { insights_enabled: true } as RoutineSettings
+    const view = mountPanel({ routines, saveRoutines })
+    const toggle = view.find('.insights-toggle')
+
+    expect(toggle.text()).toBe('On')
+    expect(toggle.attributes('role')).toBe('switch')
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    await toggle.trigger('click')
+
+    expect(saveRoutines).toHaveBeenCalledWith({ insights_enabled: false })
+  })
+
+  it('shows off with a plain-language privacy explanation', () => {
+    const routines = { insights_enabled: false } as RoutineSettings
+    const view = mountPanel({ routines })
+
+    expect(view.find('.insights-toggle').text()).toBe('Off')
+    expect(view.find('.insights-control').text()).toContain('Off stops the model pass')
+  })
+
+  it('shows and saves the trajectory capture state', async () => {
+    const saveRoutines = vi.fn(() => Promise.resolve())
+    const routines = { trajectories_enabled: true } as RoutineSettings
+    const view = mountPanel({ routines, saveRoutines })
+    const toggles = view.findAll('.insights-toggle')
+
+    expect(toggles).toHaveLength(2)
+    expect(toggles[1].text()).toBe('On')
+    await toggles[1].trigger('click')
+
+    expect(saveRoutines).toHaveBeenCalledWith({ trajectories_enabled: false })
   })
 })

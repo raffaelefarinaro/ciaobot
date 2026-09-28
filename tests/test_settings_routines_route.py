@@ -15,17 +15,6 @@ from ciao.config import CiaoConfig
 from ciao.web.routes_api import settings_routines
 
 
-@pytest.fixture(autouse=True)
-def reset_native_sidecar():
-    """Keep the cached probe (and latched model availability) from leaking
-    between route tests."""
-    from ciao import native_sidecar
-
-    native_sidecar.reset_probe_cache()
-    yield
-    native_sidecar.reset_probe_cache()
-
-
 def _make_client(tmp_path, env_extra: dict[str, str] | None = None):
     env = {
         "PWA_AUTH_TOKEN": "t",
@@ -56,8 +45,10 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     data = client.get("/api/settings/routines").json()
     # Automatic resolves to the workspace's default model.
     assert data["insights_model_effective"] == config.claude_default_model
+    assert data["insights_enabled"] is True
+    assert data["trajectories_enabled"] is True
     # The Claude model list is the vocabulary the selectors offer.
-    assert data["model_options"]["anthropic"] == list(config.claude_models)
+    assert data["model_options"]["anthropic"] == ["opus", "sonnet", "haiku", "fable"]
     assert data["backends"] == {"anthropic": True}
     assert data["workspace_context"] == {
         "workspace_root": str(config.workspace_root),
@@ -69,37 +60,38 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
             {"workspace": "", "path": str(config.vault_root)},
         ],
     }
-    # Voice is on-device only: availability and a reason, no engine to pick.
-    assert data["transcription"]["locale"] == "en-US"
-    assert isinstance(data["transcription"]["available"], bool)
-    assert isinstance(data["transcription"]["unavailable_reason"], str)
-    assert isinstance(data["speech"]["available"], bool)
-    # Empty local voice = "best installed voice for the locale"; the picker is
-    # populated from the machine rather than a hardcoded default.
-    assert data["speech"]["local_voice"] == ""
-    assert isinstance(data["speech"]["local_voices"], list)
 
 
-def test_get_insights_effective_is_default_not_apfel_when_no_override(
-    monkeypatch, tmp_path,
+@pytest.mark.parametrize("sentinel", ["apple", "apfel", "Apple"])
+def test_patching_the_retired_on_device_model_reads_as_automatic(
+    monkeypatch, tmp_path, sentinel,
 ):
-    # Apple Intelligence is an explicit option, never the Automatic default.
     monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
-    data = client.get("/api/settings/routines").json()
+    resp = client.patch("/api/settings/routines", json={"insights_model": sentinel})
+    assert resp.status_code == 200
+    data = resp.json()
     assert data["insights_model"] == ""
-    assert data["insights_model_effective"] != "apfel"
     assert data["insights_model_effective"] == config.claude_default_model
 
 
-def test_get_insights_effective_is_apfel_when_explicitly_chosen(
-    monkeypatch, tmp_path,
-):
-    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
+def test_a_stored_on_device_model_is_dropped_on_load(tmp_path):
+    """An install that picked Apple Intelligence before it was removed must not
+    send the sentinel upstream as a literal model id."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "app_settings.json").write_text(
+        json.dumps({
+            "insights_model": "apple",
+            "provider_insights_models": {"claude": "apfel", "opencode": "x/y"},
+        }),
+        encoding="utf-8",
+    )
     client, config = _make_client(tmp_path)
-    resp = client.patch("/api/settings/routines", json={"insights_model": "apfel"})
-    assert resp.status_code == 200
-    assert resp.json()["insights_model_effective"] == "apfel"
+    data = client.get("/api/settings/routines").json()
+    assert data["insights_model"] == ""
+    assert config.insights_model_override == ""
+    assert data["provider_insights_models"] == {"opencode": "x/y"}
 
 
 def test_patch_applies_to_live_config_and_persists(tmp_path):
@@ -116,6 +108,89 @@ def test_patch_applies_to_live_config_and_persists(tmp_path):
     # Persisted: a fresh store sees the values.
     fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
     assert fresh.settings.insights_model == "haiku"
+
+
+def test_patch_toggles_insights_enabled(tmp_path):
+    client, config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"insights_enabled": False},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["insights_enabled"] is False
+    assert config.insights_enabled is False
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.settings.insights_enabled is False
+
+
+def test_patch_rejects_non_boolean_insights_enabled(tmp_path):
+    client, _config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"insights_enabled": "false"},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_toggles_trajectories_enabled(tmp_path):
+    client, config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"trajectories_enabled": False},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["trajectories_enabled"] is False
+    assert config.trajectories_enabled is False
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.settings.trajectories_enabled is False
+
+
+def test_patch_rejects_non_boolean_trajectories_enabled(tmp_path):
+    client, _config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"trajectories_enabled": "false"},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_sets_trusted_url(tmp_path):
+    client, _config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"trusted_url": "https://mini.ts.net"},
+    )
+
+    assert resp.status_code == 200
+    # The response carries the normalized origin, not what was typed.
+    assert resp.json()["trusted_url"] == "https://mini.ts.net/"
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.settings.trusted_url == "https://mini.ts.net/"
+
+    # Only an HTTPS origin is a secure context, so a bad one is a 400 and
+    # nothing is persisted.
+    bad = client.patch(
+        "/api/settings/routines",
+        json={"trusted_url": "http://x"},
+    )
+    assert bad.status_code == 400
+
+
+def test_patch_toggles_push_all_devices(tmp_path):
+    client, _config = _make_client(tmp_path)
+    assert client.get("/api/settings/routines").json()["push_all_devices"] is False
+
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"push_all_devices": True},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["push_all_devices"] is True
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.settings.push_all_devices is True
 
 
 def test_patch_applies_provider_default_models(tmp_path):
@@ -221,28 +296,8 @@ def test_an_override_clears_the_per_workspace_maps(monkeypatch, tmp_path):
     assert data["insights_model_by_workspace"] == {}
 
 
-def test_patch_persists_the_voice_locale_and_voice(tmp_path):
-    """What is left to configure once the engine choice is gone: the language
-    the on-device engines use, and which installed voice reads aloud."""
-    client, config = _make_client(tmp_path)
-    resp = client.patch(
-        "/api/settings/routines",
-        json={"transcription_locale": "it-IT", "tts_local_voice": "com.apple.voice.x"},
-    )
-    assert resp.status_code == 200
-    assert config.transcription_locale == "it-IT"
-    assert config.tts_local_voice == "com.apple.voice.x"
-    assert not hasattr(config, "transcription_engine")
-    assert not hasattr(config, "tts_engine")
-
-
-def test_routines_reports_apple_model_availability_without_a_beta_flag(tmp_path):
-    """GET reports whether the machine can run the on-device model; there is
-    no app-side beta opt-in flag any more."""
+def test_routines_no_longer_reports_the_on_device_model(tmp_path):
     client, _config = _make_client(tmp_path)
     data = client.get("/api/settings/routines").json()
-    assert "apple_intelligence_beta" not in data
-    assert "apple_intelligence_enabled" not in data
-    # Availability is a machine report, present regardless of the answer.
-    assert "apple_model_available" in data
-    assert "apple_model_unavailable_reason" in data
+    assert "apple_model_available" not in data
+    assert "apple_model_unavailable_reason" not in data

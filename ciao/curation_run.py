@@ -15,8 +15,8 @@ This module answers those questions in code. Three things come out of it:
 * a **budget**: a run takes at most ``max_items`` keys and lives at most
   ``max_seconds``. What the budget leaves behind is recorded, so the next run
   resumes instead of starting over at the top of pass 1;
-* a **lease**: one curation run per vault at a time, and archive-time memory
-  writes stand down while it is held.
+* a **lease**: one curation run per vault at a time, so two runs cannot
+  consolidate the same regions in each other's half-light.
 
 Why a lease rather than a lock held for the run's duration: a curation run is
 an agent turn spread over many separate CLI processes, so no single process
@@ -45,6 +45,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
+from ciao.entity_types import EntityTypeRegistry
+
 logger = logging.getLogger(__name__)
 
 
@@ -71,6 +73,7 @@ LEARNING_PRUNE_DAYS = 30
 PASS_PROPOSALS = "proposals"
 PASS_REGIONS = "regions"
 PASS_AUDIT = "audit"
+PASS_CATEGORIES = "categories"
 PASS_LEARNINGS = "learnings"
 PASS_HYGIENE = "hygiene"
 PASS_GUIDE = "guide"
@@ -81,6 +84,7 @@ PASS_ORDER: tuple[str, ...] = (
     PASS_PROPOSALS,
     PASS_REGIONS,
     PASS_AUDIT,
+    PASS_CATEGORIES,
     PASS_LEARNINGS,
     PASS_HYGIENE,
     PASS_GUIDE,
@@ -391,6 +395,58 @@ def _learning_items(vault_root: Path, *, today: date) -> list[WorklistItem]:
     ]
 
 
+def _category_cluster_items(
+    vault_root: Path, *, registry: EntityTypeRegistry
+) -> list[WorklistItem]:
+    """File a ``[category]`` proposal per unlisted ``type:`` with a cluster.
+
+    The one pass here that WRITES rather than reads, and that is the point: the
+    trigger is a count over the notes on disk, so nothing about it needs a model
+    and the queue is where the decision belongs. The skill's "do not touch
+    vocabulary proposals" clause therefore stays true for the agent — this is
+    the vault asking, not the agent noticing.
+
+    Keys are the category ids, so a cluster that resolves the same way two
+    nights running is one item rather than a new one each time, and a cluster
+    the owner resolves makes its item disappear from the next worklist.
+
+    ``registry`` is the AGENT vault root's category list, not one loaded from
+    *vault_root*: on an install that has not re-rooted, ``entity-types.yaml`` is
+    a different directory from the notes, and reading the notes root left every
+    category the owner had just accepted looking unlisted — queued again the next
+    night, then refused as a duplicate on accept. It arrives from
+    :func:`build_worklist` rather than being loaded here for the same reason the
+    accept resolves its root through the config.
+    """
+    from ciao.vocabulary_proposals import (
+        CATEGORY_CLUSTER_THRESHOLD,
+        generate_category_proposals,
+    )
+
+    root = Path(vault_root)
+    try:
+        queued = generate_category_proposals(root, registry=registry)
+    except Exception:  # noqa: BLE001 — an advisory pass must not fail the plan
+        logger.warning("curation: category cluster scan failed", exc_info=True)
+        return []
+    if not queued:
+        return []
+    return [
+        WorklistItem(
+            pass_id=PASS_CATEGORIES,
+            label="Propose categories for the note clusters the vault is using",
+            reason=(
+                f"{len(queued)} unlisted type(s) used by "
+                f"{CATEGORY_CLUSTER_THRESHOLD} or more notes"
+            ),
+            keys=tuple(
+                item_key(PASS_CATEGORIES, candidate["type_id_suggestion"])
+                for candidate in queued
+            ),
+        )
+    ]
+
+
 def _hygiene_items(*, weekly_due: bool) -> list[WorklistItem]:
     if not weekly_due:
         return []
@@ -473,6 +529,7 @@ def build_worklist(
     *,
     vault_root: Path,
     guide_path: Path,
+    category_registry: EntityTypeRegistry,
     workspace_dir: Path | None = None,
     today: date | None = None,
     done_keys: frozenset[str] | set[str] | None = None,
@@ -480,6 +537,13 @@ def build_worklist(
     user_char_limit: int | None = None,
 ) -> Worklist:
     """Compute tonight's work from files alone.
+
+    ``category_registry`` is the category list the cluster pass measures the
+    notes against, and it is required rather than loaded from ``vault_root``
+    because the two are not the same directory: the registry belongs to the
+    agent vault root, the notes to this workspace's root. The caller resolves it
+    through the config (the CLI does) so a category the owner accepted cannot be
+    re-proposed as unlisted.
 
     ``done_keys`` are the keys an earlier run of the same night already
     finished; they are removed here rather than at plan time so a pass whose
@@ -503,6 +567,11 @@ def build_worklist(
         notes.append("no usable last_full_pass marker; the weekly pass counts as due")
 
     collected: list[WorklistItem] = []
+    # Collected FIRST because it is the one pass that writes: the bullets it
+    # files have to be on disk before `_proposal_items` reads the queue, or the
+    # run that proposes a category would not count the row it just proposed. The
+    # order the worklist is PRESENTED in is :data:`PASS_ORDER` either way.
+    collected.extend(_category_cluster_items(vault_root, registry=category_registry))
     collected.extend(_proposal_items(vault_root))
     collected.extend(
         _region_items(
@@ -755,22 +824,6 @@ def _live_lease(state: CurationState, now: datetime) -> dict[str, Any] | None:
 def active_lease(vault_root: Path, *, now: datetime | None = None) -> dict[str, Any] | None:
     """The live lease on this vault, or None. Read-only and lock-free."""
     return _live_lease(load_state(vault_root), now or datetime.now(UTC))
-
-
-def curation_in_progress(vault_root: Path, *, now: datetime | None = None) -> bool:
-    """Whether a curation run currently owns this vault's memory.
-
-    Archive-time auto-apply calls this and stands down while it is true: the
-    run is mid-consolidation, holding region text it read minutes ago, and an
-    append landing underneath it is either lost to the rewrite or duplicated by
-    it. The fact is not dropped — it is queued as an ordinary proposal, which
-    is the path uncertain facts already take.
-    """
-    try:
-        return active_lease(vault_root, now=now) is not None
-    except Exception:  # noqa: BLE001 — a gate that fails must not break archiving
-        logger.exception("curation lease check failed for %s", vault_root)
-        return False
 
 
 def begin_run(

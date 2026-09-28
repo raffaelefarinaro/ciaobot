@@ -14,9 +14,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Literal
 
-from ciao.config import CiaoConfig
-from ciao.git_sync import sync_workspace
-from ciao.models import ChatContext
+from ciao.config import RESTART_EXIT_CODE, CiaoConfig
+from ciao.legacy_node_state import (
+    LegacyNodeState,
+    STATE_FILENAME as LEGACY_STATE_FILENAME,
+)
+from ciao.legacy_node_state import detect as detect_legacy_node_state
+from ciao.legacy_node_state import writers_armed
 from ciao.schedules import (
     ScheduleManager,
     ScheduleStore,
@@ -151,28 +155,55 @@ def _refresh_vault_index(
         return False
 
 
-# Web Push (RFC 8292) requires a VAPID "sub" contact URI, but the push
-# service never verifies or contacts it. For a localhost/personal app there's
-# no reason to make the user supply a real email, so default to a placeholder
-# and let CIAO_PUSH_CONTACT override it. This keeps web-push notifications
-# working out of the box (previously an unset contact silently disabled them).
-DEFAULT_PUSH_SUBJECT = "mailto:ciaobot@localhost"
+# Fail-closed legacy node-state gate (#636). A Mac that was a client of
+# another host, or whose `node_state.json` cannot be understood, must not come
+# up as a local writer: node mode's own refusal is what kept two writers off
+# one runtime root, and #577 removes the proxy that used to carry the rest of
+# that behavior. The verdict comes from `ciao.legacy_node_state`, a leaf module
+# that reads the file raw and imports nothing from `ciao`, so it outlives the
+# `NodeStateManager` that is now gone.
+def guard_legacy_writers(runtime_root: Path) -> tuple[LegacyNodeState, bool]:
+    """Classify `runtime_root` once and say whether the writers may arm.
 
-
-def _push_subject_from_env(env: dict[str, str] | None = None) -> str:
-    """Web Push VAPID subject; falls back to the localhost placeholder.
-
-    A real contact is optional (set CIAO_PUSH_CONTACT to override); the push
-    service only needs a syntactically valid mailto/https URI.
+    Returns the classification (also published as `app.state.legacy_node_state`
+    so routes and tests can read the same verdict) and whether this boot is
+    allowed to run schedules and the backup push. Refusing is not failing: an
+    existing client Mac still starts and still serves, it just does not write,
+    which is exactly what client mode did before the proxy.
     """
-    source = env if env is not None else os.environ
-    return source.get("CIAO_PUSH_CONTACT", "").strip() or DEFAULT_PUSH_SUBJECT
+    legacy = detect_legacy_node_state(runtime_root)
+    if writers_armed(legacy):
+        return legacy, True
+    if legacy.kind == "client":
+        logger.warning(
+            "Legacy node state: %s was a client of %s, so Ciaobot will not run "
+            "its writers (schedules, backup push) on this boot. Serve the PWA "
+            "from the host, or remove %s to make this Mac a host again.",
+            runtime_root,
+            legacy.host_url,
+            Path(runtime_root) / LEGACY_STATE_FILENAME,
+        )
+    else:
+        logger.warning(
+            "Legacy node state: %s is invalid — it could not be read as a host "
+            "or a client, so Ciaobot will not run its writers (schedules, backup "
+            "push) on this boot rather than guess. Fix or remove %s to arm "
+            "them again.",
+            runtime_root,
+            Path(runtime_root) / LEGACY_STATE_FILENAME,
+        )
+    return legacy, False
+
+
+# Web Push (RFC 8292) requires a VAPID "sub" contact URI, but the push
+# service never verifies or contacts it, so a fixed placeholder is enough.
+DEFAULT_PUSH_SUBJECT = "mailto:ciaobot@localhost"
 
 
 def _push_subject_for_config(config: CiaoConfig) -> str:
     if getattr(config, "bootstrap_mode", False):
         return "mailto:bootstrap@localhost"
-    return _push_subject_from_env()
+    return DEFAULT_PUSH_SUBJECT
 
 
 def _open_browser_when_ready(url: str) -> None:
@@ -246,8 +277,8 @@ def _ensure_tool_dirs_on_path() -> None:
     FileNotFoundError. Two things depend on this being fixed up before anything
     else runs: the subprocess steps themselves, and ``ciao/cli.py``, which bakes
     this process's PATH into ``{{CIAO_PATH}}`` of ``com.ciao.server.plist`` - so
-    when desktop onboarding spawns bootstrap as a child of the Tauri app,
-    dropping this wrote the minimal PATH into the LaunchAgent permanently.
+    when onboarding spawned bootstrap as a child of the app shell, dropping this
+    wrote the minimal PATH into the LaunchAgent permanently.
 
     The directory list comes from ``tool_path``, which already curates it for
     this exact problem and includes what a hardcoded Homebrew pair misses -
@@ -287,10 +318,11 @@ async def _async_main() -> int:
         port=config.pwa_port,
     )
     with lock:
-        if (
-            config._workspace_registry_changed
-            and not os.environ.get("CIAO_WORKSPACES", "").strip()
-        ):
+        # One-time import of the retired CIAO_WORKSPACES variable; it writes
+        # the registry, so it runs under the lock like the persist below.
+        config.import_legacy_workspaces_env()
+        config.import_legacy_gws_profile_env()
+        if config._workspace_registry_changed:
             config.persist_workspace_registry()
         return await _run_server_locked(config)
 
@@ -320,6 +352,12 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     from ciao.app_settings import AppSettingsStore
 
     app_settings = AppSettingsStore(config.state_path.parent / "app_settings.json")
+    app_settings.migrate_legacy_insights_enabled(
+        getattr(config, "legacy_insights_disabled", None)
+    )
+    app_settings.migrate_legacy_trajectories_enabled(
+        getattr(config, "legacy_trajectories_disabled", None)
+    )
     app_settings.apply_to_config(config)
 
     # Pin the job-run recorder to the same .runtime the config uses, then
@@ -397,16 +435,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             continue
         _start_provider_check(descriptor)
 
-    # Sync workspace before anything else
-    if config.auto_sync_on_start:
-        tracker.start("sync_workspace")
-        try:
-            await sync_workspace(config.workspace_root)
-            tracker.done("sync_workspace")
-        except Exception:
-            tracker.fail("sync_workspace", "git sync failed")
-            logger.exception("Workspace sync failed")
-
     # Rename each root's legacy CLAUDE.md onto AGENTS.md, once. Both providers
     # discover AGENTS.md natively now, but Claude Code only falls back to it
     # when no CLAUDE.md is present, so the old name has to go for the new one
@@ -448,7 +476,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             # only `server.serve()`, and this happens long before that. The exit
             # code is the same one that path returns, so the supervisor restarts
             # us identically.
-            return config.restart_exit_code
+            return RESTART_EXIT_CODE
         elif status == "refused":
             # Surfaced by the `workspace-unmigrated` action, which reads the
             # refusal back out of the receipt and offers the retry.
@@ -459,20 +487,19 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         tracker.fail("reroot_workspaces", "re-root check failed")
         logger.exception("Workspace re-root check failed")
 
-    # Refresh vault index after git pull so INDEX.md reflects any remote changes
-    if config.auto_vault_index:
-        tracker.start("refresh_vault_index")
-        try:
-            await asyncio.to_thread(
-                _refresh_vault_index,
-                config.workspace_root,
-                config.vault_root,
-                config.vault_scan_targets(),
-            )
-            tracker.done("refresh_vault_index")
-        except Exception:
-            tracker.fail("refresh_vault_index", "index refresh failed")
-            logger.exception("Vault index refresh failed")
+    # Refresh vault index so INDEX.md reflects the current tree
+    tracker.start("refresh_vault_index")
+    try:
+        await asyncio.to_thread(
+            _refresh_vault_index,
+            config.workspace_root,
+            config.vault_root,
+            config.vault_scan_targets(),
+        )
+        tracker.done("refresh_vault_index")
+    except Exception:
+        tracker.fail("refresh_vault_index", "index refresh failed")
+        logger.exception("Vault index refresh failed")
 
     # Reconcile any memory receipt interrupted between its prepared row and its
     # terminal state. Runs after the re-rooting so the journals it reads are the
@@ -491,6 +518,50 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     except Exception:
         tracker.fail("recover_memory_receipts", "receipt recovery failed")
         logger.exception("Memory receipt recovery failed")
+
+    # An engine update interrupted by a reboot, a logout or a killed updater job
+    # leaves its record in a post-move phase with the env moved aside and
+    # nothing resuming it: the `ciao` shim and the LaunchAgent can point into a
+    # half-installed env, and launchd's `KeepAlive` on `com.ciao.server` will
+    # start it anyway. `apply_update` installs a durable `com.ciao.recover`
+    # LaunchAgent for exactly that reason, which is the half that works when
+    # this step cannot run at all — the crash window where the live env is
+    # renamed aside leaves the engine's own program missing, so launchd cannot
+    # get far enough to reach this line. This is the fast path for the cases
+    # where the engine *does* come back: a clean reboot after a rollback
+    # started, or a crash in a post-move phase the new env can still boot from.
+    # It only *bootstraps* the detached `com.ciao.updater` job that does the
+    # rollback — this process cannot: it is the engine being booted out, and
+    # moving the env it is running out of from under itself is how a recovery
+    # turns into a second outage. So this never waits on the recovery, only on
+    # the job launch. macOS-only because the swap is launchd's; the state dir is
+    # absent elsewhere, and the call is then a cheap no-op.
+    if sys.platform == "darwin":
+        tracker.start("recover_engine_update")
+        try:
+            from ciao.engine_update import recover_interrupted_apply
+
+            recovered = await asyncio.to_thread(recover_interrupted_apply)
+            if recovered is None:
+                tracker.done("recover_engine_update")
+            else:
+                # Deliberately not "handed to a recovery job": returning a record
+                # is not the same thing as scheduling one. A `com.ciao.updater`
+                # that is still running means a live swap owns that record, and
+                # recovery stood down for it — announcing a handoff that did not
+                # happen sends an operator looking for a job that was never
+                # loaded. `recover_interrupted_apply` logs which of the three
+                # answers it took (job bootstrapped, job that would not load,
+                # stood down for a live swap) at the same level.
+                logger.warning(
+                    "Interrupted engine update %s found at startup in phase %s",
+                    recovered.id,
+                    recovered.phase,
+                )
+                tracker.done("recover_engine_update", recovered.phase)
+        except Exception:
+            tracker.fail("recover_engine_update", "engine update recovery failed")
+            logger.exception("Engine update recovery failed")
 
     # The PWA ships pre-built in the installed package; workspaces never
     # contain app source, so there is no frontend rebuild at startup.
@@ -513,19 +584,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
     tracker.start("update_skills")
     asyncio.create_task(asyncio.to_thread(_skills_task))
-
-    if config.insights_backfill_on_startup:
-        tracker.start("backfill_insights")
-        async def _backfill_task():
-            try:
-                from ciao.insights import backfill_insights_task
-                from ciao.insights import format_backfill_summary
-                result = await backfill_insights_task(config)
-                tracker.done("backfill_insights", format_backfill_summary(result))
-            except Exception:
-                tracker.fail("backfill_insights", "backfill failed")
-                logger.exception("Insights backfill failed")
-        asyncio.create_task(_backfill_task())
 
     # Initialize stores
     state = StateStore(
@@ -610,7 +668,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     def _resolve_schedule_target(entry):
         # Empty entry.model / entry.mode means "use the current default".
         # The mode default is the operator's pin for the provider this run
-        # actually resolves to (Settings -> Providers -> permission mode), so a
+        # actually resolves to (Settings -> Models & providers -> permission mode), so a
         # routine obeys the same setting a hand-opened chat on that provider
         # does. It used to fall back to the Telegram context's mode, which is a
         # different surface's state and belongs to no workspace.
@@ -618,8 +676,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         mode = entry.mode or config.default_mode_for_provider(provider)
         return ("claude", model, mode, provider)
 
-    from ciao.node_state import NodeStateManager
-    node_state_manager = NodeStateManager(config.state_path.parent)
+    # Classified before anything else touches the runtime root, because the
+    # detector reads the file raw and never writes it: "no state yet" has to
+    # stay "no state yet". The verdict is the boot's answer, published as
+    # `app.state.legacy_node_state`, and both writer sites ask it.
+    legacy_node_state, legacy_writers_armed = guard_legacy_writers(
+        config.state_path.parent
+    )
 
     # An interval schedule bound to an existing chat can only dispatch into a
     # live, non-archived one. Treat an archived (or deleted) target as
@@ -641,7 +704,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         resolve_target=_resolve_schedule_target,
         dispatch_to_web=_dispatch_to_web,
         prepare_chat=_prepare_chat,
-        is_node_active=node_state_manager.is_active,
+        is_node_active=lambda: legacy_writers_armed,
         chat_busy=pcm.chat_stream_active,
         chat_dispatchable=_interval_target_dispatchable,
     )
@@ -691,9 +754,12 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     control_plane = None
     if not getattr(config, "bootstrap_mode", False):
         mcp_service = CiaoMcpService(config)
+
     app = create_app(config, app_settings=app_settings, mcp_service=mcp_service)
     app.state.startup_tracker = tracker
-    app.state.node_state_manager = node_state_manager
+    # The startup gate's own verdict, so routes and tests read the same answer
+    # the writers were armed from instead of re-deriving it from the state file.
+    app.state.legacy_node_state = legacy_node_state
     # Stamp the target project's name on schedules that only recorded its id,
     # while those ids still resolve. After a fresh init they would not, and the
     # run would fall back to General with the user's choice lost.
@@ -755,12 +821,11 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         pcm._mcp_service = mcp_service
         app.state.control_plane = control_plane
     push_subject = _push_subject_for_config(config)
-    if not push_subject:
-        logger.info(
-            "CIAO_PUSH_CONTACT is not set; Web Push notifications stay "
-            "disabled until a contact is configured in Settings."
-        )
-    app.state.push_manager = PushManager(config.state_path.parent, subject=push_subject)
+    app.state.push_manager = PushManager(
+        config.state_path.parent,
+        subject=push_subject,
+        push_all=lambda: app_settings.settings.push_all_devices,
+    )
     app.state.focused_chats = {}
 
     # A read mutation is already broadcast to every connected PWA. Fan the
@@ -937,6 +1002,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         except Exception:
             logger.exception("Archive job resume failed")
 
+        # The memory-pass queue is durable on the memory chats' helpers, so a
+        # restart picks it back up: a pass that was running died with the old
+        # process and is surfaced for attention, and anything still queued is
+        # pumped again.
+        try:
+            from ciao.web import memory_pass
+
+            if memory_pass.MEMORY_PASS_CHATS:
+                await pcm.resume_memory_passes()
+        except Exception:
+            logger.exception("Memory pass resume failed")
+
         # Fire each schedule once when its latest expected occurrence was missed
         # (for example while the server was down). This does not replay every
         # skipped interval. Runs asynchronously so it doesn't block uvicorn from
@@ -1025,8 +1102,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                     "branch_backup", "Branch backup",
                     category="system", extra={"branch": branch},
                 ) as run:
-                    if not node_state_manager.is_active():
-                        run.skip("client mode — host owns backup push")
+                    if not legacy_writers_armed:
+                        # The same verdict the scheduler asks, and for the
+                        # same reason: an `invalid` state lands here as surely
+                        # as a client does. Pushing from a Mac that may already
+                        # be a second writer on this root is the failure the
+                        # gate exists to prevent, so the kind is named and the
+                        # skip says plainly who does push instead.
+                        run.skip(
+                            "this Mac is not the host (legacy node state: "
+                            f"{legacy_node_state.kind}) — the host owns backup "
+                            "push"
+                        )
                         continue
                     ok, detail = await push_branch(git_sync_root, branch=branch)
                     if ok:
@@ -1122,15 +1209,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # plus an in-app status event (debounced until the token recovers), so
     # GWS-dependent schedules don't fail silently (issue #145). The credential
     # files are never read into logs; only the boolean validity is surfaced.
-    try:
-        _gws_health_interval = int(os.environ.get("CIAO_GWS_HEALTH_INTERVAL", "900"))
-    except ValueError:
-        _gws_health_interval = 900
+    _gws_health_interval = 900
 
     async def _gws_health_loop() -> None:
-        if _gws_health_interval <= 0:
-            logger.info("GWS token health checks disabled (CIAO_GWS_HEALTH_INTERVAL=0).")
-            return
         monitor = app.state.gws_health_monitor
         # Small initial delay so a fresh boot settles before the first probe.
         await asyncio.sleep(30)
@@ -1229,6 +1310,11 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                     "Cleanup did not finish; re-execing for the requested restart"
                 )
                 try:
+                    # Same as ciao.cli._run_server: let the fresh process
+                    # reload the workspace .env instead of inheriting it.
+                    from ciao.config import reset_exported_dotenv
+
+                    reset_exported_dotenv()
                     os.execv(
                         sys.executable,
                         [sys.executable, "-m", "ciao.cli", *sys.argv[1:]],
@@ -1282,7 +1368,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                 logger.warning(
                     "%s; requesting restart onto the current version.", reason
                 )
-                request_restart(config.restart_exit_code)
+                request_restart(RESTART_EXIT_CODE)
                 return
 
     asyncio.create_task(_watch_installed_version())
@@ -1341,7 +1427,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     try:
         await server.serve()
     except RestartRequested as exc:
-        return int(exc.args[0]) if exc.args else config.restart_exit_code
+        return int(exc.args[0]) if exc.args else RESTART_EXIT_CODE
     if restart_flag[0] is not None:
         return restart_flag[0]
     return 0

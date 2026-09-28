@@ -22,7 +22,6 @@ import logging
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from ciao.node_proxy import get_proxy_target_url, proxy_websocket
 from ciao.web.auth import authorize_websocket
 from ciao.web.chat_broker import ChatStream
 from ciao.web.connection_tracker import ConnectionTracker
@@ -75,11 +74,6 @@ async def _attach_streams(websocket: WebSocket, pcm, chat_id: str) -> None:
 async def ws_chat(websocket: WebSocket) -> None:
     """Per-chat streaming WebSocket."""
     if not await authorize_websocket(websocket):
-        return
-
-    target_peer = get_proxy_target_url(websocket)
-    if target_peer:
-        await proxy_websocket(websocket, target_peer)
         return
 
     await websocket.accept()
@@ -145,23 +139,53 @@ async def ws_chat(websocket: WebSocket) -> None:
 
             if msg_type == "permission_response":
                 # Approve/deny reply to a prior ``permission_request``. The
-                # server silently drops stale request ids (chat has no
-                # provider yet, or the turn already ended); the UI is
-                # expected to clear the prompt optimistically on click.
+                # provider acknowledgement is sent back as a result event; the
+                # client keeps the card retryable until that acknowledgement.
                 request_id = str(msg.get("request_id", ""))
-                approved = bool(msg.get("approved", False))
+                raw_approved = msg.get("approved")
+                session_id = str(msg.get("session_id") or "").strip()
                 reason = str(msg.get("reason", ""))
+                if request_id and not isinstance(raw_approved, bool):
+                    try:
+                        await websocket.send_json({
+                            "type": "permission_response_result",
+                            "request_id": request_id,
+                            **({"session_id": session_id} if session_id else {}),
+                            "ok": False,
+                            "error": "Permission approval must be a JSON boolean.",
+                            "retryable": False,
+                        })
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
+                    continue
                 if request_id:
-                    pcm.respond_permission(
+                    permission_payload = {
+                        "request_id": request_id,
+                        "approved": bool(raw_approved),
+                        "reason": reason,
+                    }
+                    if session_id:
+                        permission_payload["session_id"] = session_id
+                    result = await pcm.respond_permission(
                         chat_id,
-                        request_id=request_id,
-                        approved=approved,
-                        reason=reason,
+                        **permission_payload,
                     )
+                    try:
+                        await websocket.send_json({
+                            "type": "permission_response_result",
+                            "request_id": request_id,
+                            "session_id": session_id,
+                            "ok": result.ok,
+                            "error": result.error,
+                            "retryable": result.retryable,
+                        })
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
                 continue
 
             if msg_type == "question_response":
                 request_id = str(msg.get("request_id", "")).strip()
+                session_id = str(msg.get("session_id") or "").strip()
                 raw_answers = msg.get("answers")
                 answers: dict[str, list[str]] = {}
                 if isinstance(raw_answers, dict):
@@ -170,14 +194,45 @@ async def ws_chat(websocket: WebSocket) -> None:
                             answers[str(question_id)] = [
                                 str(value) for value in values
                             ]
-                        elif values is not None:
-                            answers[str(question_id)] = [str(values)]
+                action = str(msg.get("action") or "").strip().lower()
+                if request_id and action not in {"reply", "cancel"}:
+                    try:
+                        await websocket.send_json({
+                            "type": "question_response_result",
+                            "request_id": request_id,
+                            **({"session_id": session_id} if session_id else {}),
+                            "ok": False,
+                            "state": "rejected",
+                            "error": "Question action must be reply or cancel.",
+                            "retryable": False,
+                        })
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
+                    continue
                 if request_id:
-                    pcm.respond_question(
+                    question_payload = {
+                        "request_id": request_id,
+                        "answers": answers,
+                        "action": action,
+                    }
+                    if session_id:
+                        question_payload["session_id"] = session_id
+                    result = await pcm.respond_question(
                         chat_id,
-                        request_id=request_id,
-                        answers=answers,
+                        **question_payload,
                     )
+                    try:
+                        await websocket.send_json({
+                            "type": "question_response_result",
+                            "request_id": request_id,
+                            **({"session_id": session_id} if session_id else {}),
+                            "ok": result.ok,
+                            "state": "cancelled" if action == "cancel" else "answered",
+                            "error": result.error,
+                            "retryable": result.retryable,
+                        })
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
                 continue
 
             if msg_type == "capability_response":
@@ -343,11 +398,6 @@ async def ws_events(websocket: WebSocket) -> None:
     can paint sidebar indicators without waiting for the next event.
     """
     if not await authorize_websocket(websocket):
-        return
-
-    target_peer = get_proxy_target_url(websocket)
-    if target_peer:
-        await proxy_websocket(websocket, target_peer)
         return
 
     await websocket.accept()

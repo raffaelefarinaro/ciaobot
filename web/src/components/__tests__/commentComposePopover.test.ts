@@ -1,11 +1,9 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createPinia, setActivePinia } from 'pinia'
 import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import CommentComposePopover from '../CommentComposePopover.vue'
-import { useProjectStore } from '../../stores/projects'
 
 const FULL_HEIGHT = 932
 const KEYBOARD_HEIGHT = 596
@@ -33,23 +31,7 @@ function composeTop(): number {
   return parseFloat(el.style.top)
 }
 
-// CommentComposePopover now includes a VoiceRecorder that touches the project
-// store for transcription. Stub the recorder so the tests stay focused on the
-// compose popover, and set up a store so setup() doesn't crash.
-vi.mock('../VoiceRecorder.vue', () => ({
-  default: {
-    name: 'VoiceRecorderStub',
-    setup() {
-      return {}
-    },
-    render: () => null,
-  },
-}))
-
 function mountCompose(props: { anchor?: { top: number; left: number } | null; modelValue?: string; images?: string[] } = {}) {
-  setActivePinia(createPinia())
-  const store = useProjectStore()
-  store.activeChatId = 'chat-1'
   return mount(CommentComposePopover, {
     props: {
       anchor: props.anchor === undefined ? { top: 40, left: 80 } : props.anchor,
@@ -81,6 +63,23 @@ describe('CommentComposePopover', () => {
     wrapper.unmount()
   })
 
+  it('exposes dialog semantics and keeps keyboard focus in the composer', async () => {
+    const wrapper = mountCompose({ modelValue: 'note' })
+    await nextTick()
+
+    const dialog = document.body.querySelector<HTMLElement>('.compose')
+    const input = dialog?.querySelector<HTMLTextAreaElement>('.compose-input')
+    const save = dialog?.querySelector<HTMLButtonElement>('.compose-btn.primary')
+    expect(dialog?.getAttribute('role')).toBe('dialog')
+    expect(dialog?.getAttribute('aria-label')).toBe('Add comment')
+    expect(document.activeElement).toBe(input)
+
+    save?.focus()
+    save?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }))
+    expect(document.activeElement).toBe(input)
+    wrapper.unmount()
+  })
+
   it('emits save on Cmd+Enter and cancel on Escape', async () => {
     const wrapper = mountCompose({ anchor: { top: 10, left: 10 }, modelValue: 'note' })
     await nextTick()
@@ -91,6 +90,17 @@ describe('CommentComposePopover', () => {
 
     await input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     expect(wrapper.emitted('cancel')).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('cancels on Escape from an action button', async () => {
+    const wrapper = mountCompose({ modelValue: 'note' })
+    await nextTick()
+    const cancel = document.body.querySelector<HTMLButtonElement>('.compose-btn')
+    cancel?.focus()
+    cancel?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+
+    expect(wrapper.emitted('cancel')).toHaveLength(1)
     wrapper.unmount()
   })
 
@@ -113,6 +123,17 @@ describe('CommentComposePopover', () => {
     wrapper.unmount()
   })
 
+  it('remeasures the rendered composer instead of relying on the fallback height', async () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(300)
+    const wrapper = mountCompose({ anchor: null, modelValue: 'note' })
+    await wrapper.setProps({ anchor: { top: 700, left: 20 } })
+    await nextTick()
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+
+    expect(composeTop()).toBe(FULL_HEIGHT - 300)
+    wrapper.unmount()
+  })
+
   it('leaves a popover that the keyboard does not reach where it is', async () => {
     const wrapper = mountCompose({ anchor: { top: 60, left: 20 }, modelValue: 'note' })
     await nextTick()
@@ -130,88 +151,5 @@ describe('CommentComposePopover', () => {
     wrapper.unmount()
   })
 
-  it('shows a voice recorder button in the action row', async () => {
-    const wrapper = mountCompose({ modelValue: '' })
-    await nextTick()
-    expect(document.body.querySelector('.compose-voice')).not.toBeNull()
-    wrapper.unmount()
-  })
 
-  it('inserts transcribed voice text at the cursor', async () => {
-    const wrapper = mountCompose({ modelValue: 'before ' })
-    await nextTick()
-
-    const store = useProjectStore()
-    store.transcribeVoice = vi.fn(async () => 'after')
-
-    const input = document.body.querySelector('.compose-input') as HTMLTextAreaElement
-    input.focus()
-    input.setSelectionRange(7, 7)
-
-    // Simulate a recorded blob by invoking the internal handler through the
-    // exposed ref (the VoiceRecorder stub never emits). We emit the event
-    // directly on the wrapper's vm because the handler is internal to setup.
-    // Instead, use the component's exposed toggleDictation + recorded handler
-    // is private; call it via the recorded event on a recreated stub path.
-    // Simpler: invoke the recorded handler through the template-bound listener.
-    await wrapper.findComponent({ name: 'VoiceRecorderStub' }).vm.$emit('recorded', new Blob(['x'], { type: 'audio/webm' }))
-    await flushPromises()
-    await nextTick()
-
-    expect(store.transcribeVoice).toHaveBeenCalledWith('chat-1', expect.any(Blob))
-    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual(['before after'])
-    wrapper.unmount()
-  })
-
-  it('shows a spinner while transcribing and hides the recorder', async () => {
-    const wrapper = mountCompose({ modelValue: '' })
-    await nextTick()
-
-    const store = useProjectStore()
-    let resolveTranscribe: (text: string) => void = () => {}
-    store.transcribeVoice = vi.fn(() => new Promise<string>((resolve) => { resolveTranscribe = resolve }))
-
-    await wrapper.findComponent({ name: 'VoiceRecorderStub' }).vm.$emit('recorded', new Blob(['x'], { type: 'audio/webm' }))
-    await nextTick()
-
-    expect(document.body.querySelector('.voice-transcribing')).not.toBeNull()
-    expect(document.body.querySelector('.compose-voice')).not.toBeNull()
-
-    resolveTranscribe('done')
-    await flushPromises()
-    await nextTick()
-
-    expect(document.body.querySelector('.voice-transcribing')).toBeNull()
-    wrapper.unmount()
-  })
-
-  it('surfaces transcription errors as a store toast', async () => {
-    const wrapper = mountCompose({ modelValue: '' })
-    await nextTick()
-
-    const store = useProjectStore()
-    store.transcribeVoice = vi.fn(async () => { throw new Error('mic broken') })
-    const pushError = vi.spyOn(store, 'pushErrorToast')
-
-    await wrapper.findComponent({ name: 'VoiceRecorderStub' }).vm.$emit('recorded', new Blob(['x'], { type: 'audio/webm' }))
-    await flushPromises()
-    await nextTick()
-
-    expect(pushError).toHaveBeenCalledWith('Voice transcription failed', expect.stringContaining('mic broken'))
-    wrapper.unmount()
-  })
-
-  it('surfaces voice recorder errors as a store toast', async () => {
-    const wrapper = mountCompose({ modelValue: '' })
-    await nextTick()
-
-    const store = useProjectStore()
-    const pushError = vi.spyOn(store, 'pushErrorToast')
-
-    await wrapper.findComponent({ name: 'VoiceRecorderStub' }).vm.$emit('error', 'permission denied')
-    await nextTick()
-
-    expect(pushError).toHaveBeenCalledWith('Voice dictation unavailable', 'permission denied')
-    wrapper.unmount()
-  })
 })

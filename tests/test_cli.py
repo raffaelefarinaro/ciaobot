@@ -38,12 +38,31 @@ def test_run_relaunches_on_restart_exit_code(
     execs: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(ciao.main, "main", _raise_system_exit(75))
     monkeypatch.setattr(cli.os, "execv", lambda exe, argv: execs.append((exe, argv)))
-    monkeypatch.delenv("CIAO_RESTART_EXIT_CODE", raising=False)
 
     assert cli._run_server() == 75
 
     assert execs == [(cli.sys.executable, [cli.sys.executable, "-m", "ciao.cli", *cli.sys.argv[1:]])]
     assert "Restart requested — relaunching Ciaobot" in capsys.readouterr().err
+
+
+def test_run_relaunch_drops_dotenv_exports_so_the_new_process_rereads_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """load_dotenv never overrides an inherited key, so a stale export would
+    shadow a value edited in the workspace .env across the restart."""
+    import ciao.main
+    from ciao import config as ciao_config
+
+    seen: list[str | None] = []
+    monkeypatch.setattr(ciao.main, "main", _raise_system_exit(75))
+    monkeypatch.setattr(
+        cli.os, "execv", lambda exe, argv: seen.append(cli.os.environ.get("CIAO_TEST_DOTENV_KEY"))
+    )
+    monkeypatch.setenv("CIAO_TEST_DOTENV_KEY", "stale")
+    monkeypatch.setattr(ciao_config, "_EXPORTED_DOTENV_KEYS", {"CIAO_TEST_DOTENV_KEY"})
+
+    assert cli._run_server() == 75
+    assert seen == [None]
 
 
 def test_run_propagates_other_exit_codes_without_relaunch(
@@ -58,21 +77,6 @@ def test_run_propagates_other_exit_codes_without_relaunch(
     monkeypatch.setattr(cli.os, "execv", fail_execv)
 
     assert cli._run_server() == 3
-
-
-def test_run_restart_exit_code_honors_env_override(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import ciao.main
-
-    execs: list[list[str]] = []
-    monkeypatch.setattr(ciao.main, "main", _raise_system_exit(42))
-    monkeypatch.setattr(cli.os, "execv", lambda exe, argv: execs.append(argv))
-    monkeypatch.setenv("CIAO_RESTART_EXIT_CODE", "42")
-
-    assert cli._run_server() == 42
-
-    assert len(execs) == 1
 
 
 def test_cli_public_preflight_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -426,8 +430,6 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
             "research",
             "--auth-token",
             "test-token",
-            "--push-contact",
-            "mailto:owner@example.com",
             "--launch-agents-dir",
             str(launch_agents),
             "--app-dir",
@@ -440,12 +442,11 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     )
 
     assert rc == 0
-    assert (workspace / ".env").read_text(encoding="utf-8").splitlines()[:3] == [
+    assert (workspace / ".env").read_text(encoding="utf-8").splitlines()[:2] == [
         "PWA_AUTH_TOKEN=test-token",
         # Password protection is the default and is pinned explicitly, so an
         # unset value never has to be guessed at on the next start.
         "PWA_AUTH_REQUIRED=true",
-        "CIAO_PUSH_CONTACT=mailto:owner@example.com",
     ]
     # Agent assets belong to the WORKSPACE root, not the install root: a fresh
     # setup now builds the per-workspace layout directly instead of the shared one
@@ -549,9 +550,7 @@ def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
         plist = plistlib.load(handle)
     assert plist["ProgramArguments"][0] == engine
     assert plist["ProgramArguments"][1:] == ["run"]
-    assert plist["EnvironmentVariables"]["CIAO_NATIVE_SIDECAR"] == (
-        "/Applications/Ciaobot.app/Contents/MacOS/ciaobot-native"
-    )
+    assert "CIAO_NATIVE_SIDECAR" not in plist["EnvironmentVariables"]
 
 
 def test_setup_uses_python_module_invocation_for_python_path(tmp_path: Path) -> None:
@@ -566,11 +565,10 @@ def test_setup_uses_python_module_invocation_for_python_path(tmp_path: Path) -> 
     with (launch_agents / "com.ciao.server.plist").open("rb") as handle:
         plist = plistlib.load(handle)
     assert plist["ProgramArguments"][1:] == ["-m", "ciao.cli", "run"]
-    assert plist["EnvironmentVariables"]["CIAO_NATIVE_SIDECAR"] == ""
 
 
 def _write_desktop_app(app_dir: Path) -> Path:
-    """Materialize the Tauri cask's ``Ciaobot.app``, bundle id and all."""
+    """Materialize a legacy ``Ciaobot.app``, bundle id and all."""
 
     app_root = app_dir / "Ciaobot.app"
     macos = app_root / "Contents" / "MacOS"
@@ -582,12 +580,12 @@ def _write_desktop_app(app_dir: Path) -> Path:
     return app_root
 
 
-def test_is_our_app_bundle_rejects_the_tauri_desktop_app(tmp_path: Path) -> None:
+def test_is_our_app_bundle_rejects_the_legacy_app_bundle(tmp_path: Path) -> None:
     # Same bundle id as our pre-rename launcher; only the executable differs.
     assert cli._is_our_app_bundle(_write_desktop_app(tmp_path)) is False
 
 
-def test_remove_legacy_app_shortcuts_keeps_the_tauri_desktop_app(tmp_path: Path) -> None:
+def test_remove_legacy_app_shortcuts_keeps_the_legacy_app_bundle(tmp_path: Path) -> None:
     app_root = _write_desktop_app(tmp_path)
 
     assert cli._remove_legacy_app_shortcuts(tmp_path) is False
@@ -814,7 +812,7 @@ def test_setup_keeps_browser_pwa_named_ciaobot_app(tmp_path: Path) -> None:
     assert not (apps / "Ciaobot Server.app").exists()
 
 
-def test_setup_skips_legacy_companion_when_tauri_app_is_installed(
+def test_setup_skips_legacy_companion_when_the_app_is_installed(
     tmp_path: Path,
 ) -> None:
     apps = tmp_path / "Applications"
@@ -1327,11 +1325,11 @@ def test_cli_vault_search_never_returns_a_sibling_agent_roots_notes(
 def test_critique_is_reachable_through_the_ciao_entry_point(monkeypatch):
     """`/critique` must not depend on an external `python3`.
 
-    The bundled runtime puts only a `ciao` wrapper on PATH
-    (`scripts/build-bundled-runtime.sh` writes `$output/bin/ciao` and nothing
-    else), so `python3 -m ciao.critique` resolves whatever interpreter the
-    user's shell has — one with neither `ciao` nor its dependencies. The
-    command doc therefore names `ciao critique`, and this pins that it works.
+    An install puts only a `ciao` entry point on PATH and no bare `python3`
+    from the same tree, so `python3 -m ciao.critique` resolves whatever
+    interpreter the user's shell has — one with neither `ciao` nor its
+    dependencies. The command doc therefore names `ciao critique`, and this
+    pins that it works.
     """
     from ciao import cli
 

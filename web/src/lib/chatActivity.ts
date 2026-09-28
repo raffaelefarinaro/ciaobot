@@ -1,4 +1,5 @@
 import type { ChatMessage, SubagentTranscript } from './types'
+import { formatConnectorLabel } from './mcpLabels'
 import { isPlausibleFilePath } from './filePaths'
 
 export type TraceOutput = { file_path: string; action?: string }
@@ -107,6 +108,59 @@ export function collectTraceOutputs(
     })
   }
   return outputs
+}
+
+/** One list of files for a whole chat, from each turn's outputs: the same
+ *  file across turns (or spelled absolute vs relative) is one row, keeping
+ *  the first spelling and the most telling action. */
+export function mergeTraceOutputs(lists: Iterable<TraceOutput[] | undefined>): TraceOutput[] {
+  const keys: string[] = []
+  const merged: TraceOutput[] = []
+  for (const list of lists) {
+    for (const output of list ?? []) {
+      const key = normalizeOutputPath(output.file_path)
+      if (!key) continue
+      const at = keys.findIndex(k => isSameOutputFile(k, key))
+      if (at >= 0) {
+        if (output.action && outputActionRank(output.action) > outputActionRank(merged[at].action)) {
+          merged[at] = { ...merged[at], action: output.action }
+        }
+        continue
+      }
+      keys.push(key)
+      merged.push({ ...output })
+    }
+  }
+  return merged
+}
+
+/** One row per file name. The same note appears under several spellings
+ *  (relative, workspace-prefixed, before and after a move); keep the most
+ *  specific path (most folders) as the one to open, and the most telling
+ *  action across all of them. */
+export function collapseOutputsByName(outputs: TraceOutput[]): TraceOutput[] {
+  const byName = new Map<string, TraceOutput>()
+  for (const output of outputs) {
+    const name = fileCardBasename(output.file_path)
+    const existing = byName.get(name)
+    if (!existing) {
+      byName.set(name, { ...output })
+      continue
+    }
+    const depth = (path: string) => normalizeOutputPath(path).split('/').length
+    const path = depth(output.file_path) > depth(existing.file_path) ? output.file_path : existing.file_path
+    const action = outputActionRank(output.action) > outputActionRank(existing.action) ? output.action : existing.action
+    byName.set(name, { file_path: path, ...(action ? { action } : {}) })
+  }
+  return [...byName.values()]
+}
+
+/** The last two folders of a path, for a compact label (full path on hover). */
+export function shortDirname(filePath: string): string {
+  const parts = normalizeOutputPath(filePath).split('/').filter(Boolean)
+  parts.pop()
+  if (!parts.length) return ''
+  return (parts.length > 2 ? '…/' : '') + parts.slice(-2).join('/')
 }
 
 export function formatTokenUsage(usage?: Record<string, unknown>): string {
@@ -407,4 +461,160 @@ export function fileCardIcon(filePath: string): FileCardIcon {
   if (/\.(md|markdown|txt)$/i.test(filePath)) return 'doc'
   if (/\.(pdf|docx?|xlsx?|pptx?)$/i.test(filePath)) return 'doc'
   return 'file'
+}
+
+
+/* ------------------------------------------------------------------ *
+ * Tool usage for the chat's Work details rail: which skills and MCP
+ * tools a chat's turns called, read from the same activity lines the
+ * trace renders ("<icon> <ToolName> <summary>", subagent lines prefixed
+ * with ↳). Both providers write that shape; they differ in naming:
+ *   Claude Code  Skill <name>          mcp__<server>__<tool>
+ *   opencode     skill {"name": ...}   <server>_<tool> (no fixed separator)
+ * opencode's MCP names cannot be split into server and tool reliably, so
+ * they are reported by their full tool name.
+ * ------------------------------------------------------------------ */
+
+export interface UsageEntry {
+  name: string
+  count: number
+  /** For an MCP server: the tools it was called with, most used first. */
+  tools?: string[]
+}
+
+export interface ToolUsage {
+  skills: UsageEntry[]
+  mcp: UsageEntry[]
+}
+
+// opencode's own tools. Anything else with an underscore is an MCP tool.
+const OPENCODE_BUILTIN_TOOLS = new Set([
+  'read', 'write', 'edit', 'multiedit', 'patch', 'bash', 'grep', 'glob', 'list',
+  'webfetch', 'websearch', 'codesearch', 'todowrite', 'todoread', 'task',
+  'skill', 'lsp', 'question', 'invalid', 'batch',
+])
+
+function parseToolLine(line: string): { name: string; summary: string } | null {
+  const tokens = line.trim().replace(/^↳\s*/, '').split(/\s+/)
+  const at = tokens.findIndex(token => /^[A-Za-z_][\w.:-]*$/.test(token))
+  if (at < 0) return null
+  return { name: tokens[at], summary: tokens.slice(at + 1).join(' ').trim() }
+}
+
+function skillNameFrom(summary: string): string {
+  if (!summary) return ''
+  if (summary.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(summary) as Record<string, unknown>
+      const name = parsed.name ?? parsed.skill
+      return typeof name === 'string' ? name.trim() : ''
+    } catch {
+      return ''
+    }
+  }
+  return summary.split(/\s+/)[0] ?? ''
+}
+
+function bump(map: Map<string, number>, key: string): void {
+  if (key) map.set(key, (map.get(key) ?? 0) + 1)
+}
+
+export function collectToolUsage(lines: Iterable<string>): ToolUsage {
+  const skills = new Map<string, number>()
+  const mcp = new Map<string, number>()
+  const mcpTools = new Map<string, Map<string, number>>()
+  const bumpTool = (server: string, tool: string) => {
+    const label = formatConnectorLabel(server)
+    bump(mcp, label)
+    const tools = mcpTools.get(label) ?? new Map<string, number>()
+    bump(tools, tool)
+    mcpTools.set(label, tools)
+  }
+  for (const raw of lines) {
+    const parsed = parseToolLine(raw)
+    if (!parsed) continue
+    const { name, summary } = parsed
+    if (name === 'Skill' || name === 'skill') {
+      bump(skills, skillNameFrom(summary))
+      continue
+    }
+    // Grouped per server: which connector was used is the useful fact; the
+    // individual tools are detail, kept for the row's tooltip.
+    const claudeMcp = /^mcp__(.+?)__(.+)$/.exec(name)
+    if (claudeMcp) {
+      bumpTool(claudeMcp[1], claudeMcp[2])
+      continue
+    }
+    if (name.includes('_') && name === name.toLowerCase() && !OPENCODE_BUILTIN_TOOLS.has(name)) {
+      // opencode's `<server>_<tool>` has no fixed separator; the first
+      // segment is the best available server name.
+      const cut = name.indexOf('_')
+      bumpTool(name.slice(0, cut), name.slice(cut + 1))
+    }
+  }
+  const toEntries = (map: Map<string, number>): UsageEntry[] =>
+    [...map.entries()]
+      .map(([entryName, count]) => ({ name: entryName, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+  return {
+    skills: toEntries(skills),
+    mcp: toEntries(mcp).map(entry => ({
+      ...entry,
+      tools: toEntries(mcpTools.get(entry.name) ?? new Map()).map(tool => tool.name),
+    })),
+  }
+}
+
+/**
+ * Workspace paths a reply names in `code` or as a markdown link target.
+ * A delegate or a shell command can write a file the parent turn never
+ * records as a file card, and the reply then says where it went; this lets
+ * the rail list it as "mentioned" instead of claiming no files exist.
+ */
+export function mentionedFilePaths(text: string): string[] {
+  const found: string[] = []
+  const push = (candidate: string) => {
+    const value = candidate.trim().replace(/[.,;:]+$/, '')
+    if (!value || /^[a-z]+:\/\//i.test(value) || value.startsWith('#')) return
+    if (!value.includes('/') || !/\.\w{1,8}$/.test(value)) return
+    if (/\s/.test(value)) return
+    if (!found.includes(value)) found.push(value)
+  }
+  for (const match of text.matchAll(/`([^`\n]+)`/g)) push(match[1])
+  for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) push(match[1])
+  return found
+}
+
+
+/**
+ * A live step in words, from its activity line ("<icon> <Tool> <summary>"),
+ * for the in-flight turn's summary row. Covers both providers' tool names;
+ * anything unknown falls back to "<Tool> <summary>".
+ */
+export function describeToolStep(line: string): string {
+  const parsed = parseToolLine(line.replace(/[`*]/g, ''))
+  if (!parsed) return ''
+  const { name, summary } = parsed
+  const lower = name.toLowerCase()
+  const base = (value: string) => value.split(/[\\/]/).filter(Boolean).pop() || value
+  const first = summary.split(/\s+/)[0] || ''
+  if (lower === 'read') return first ? `Reading ${base(first)}` : 'Reading a file'
+  if (['write', 'edit', 'multiedit', 'patch', 'notebookedit'].includes(lower)) {
+    return first ? `Editing ${base(first)}` : 'Editing a file'
+  }
+  if (lower === 'grep' || lower === 'glob' || lower === 'codesearch') return summary ? `Searching ${summary}` : 'Searching'
+  if (lower === 'websearch') return summary ? `Searching the web for ${summary}` : 'Searching the web'
+  if (lower === 'webfetch') return summary ? `Reading ${summary}` : 'Reading a web page'
+  if (lower === 'bash') return summary || 'Running a command'
+  if (lower === 'agent' || lower === 'task') return summary ? `Delegating: ${summary}` : 'Delegating to an agent'
+  if (lower === 'skill') {
+    const skill = skillNameFrom(summary)
+    return skill ? `Using the ${skill} skill` : 'Using a skill'
+  }
+  if (lower === 'todowrite' || lower === 'taskcreate' || lower === 'taskupdate') return 'Updating the plan'
+  // Claude Code's deferred-tool loader: plumbing, not a step worth naming.
+  if (lower === 'toolsearch') return 'Loading tools'
+  const mcp = /^mcp__(.+?)__(.+)$/.exec(name)
+  if (mcp) return `${mcp[1]} · ${mcp[2].replace(/_/g, ' ')}`
+  return summary ? `${name} ${summary}` : name
 }

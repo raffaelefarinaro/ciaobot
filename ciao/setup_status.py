@@ -342,7 +342,7 @@ def discover_claude_mcps(
 
     Served stale-while-revalidate: ``claude mcp list`` health-checks every
     connector and measures ~12s on a real install, and discovery is on the
-    Settings -> Providers load path, so a plain TTL made every visit after the
+    Settings -> Models & providers load path, so a plain TTL made every visit after the
     window pay the full cost. An expired entry is returned immediately and
     refreshed on a background thread, so only the first call after startup ever
     waits. Empty results expire fast (see ``_CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS``)
@@ -411,7 +411,7 @@ def _claude_config_path_from_env(source: Mapping[str, str] | None = None) -> Pat
     """The Claude config file the provider payload would read.
 
     Honors ``CLAUDE_CONFIG_PATH`` so the startup warm-up probes the same
-    connector set the Settings -> Providers route will report.
+    connector set the Settings -> Models & providers route will report.
     """
     src = source if source is not None else os.environ
     raw = str(src.get("CLAUDE_CONFIG_PATH", "")).strip()
@@ -426,7 +426,7 @@ def warm_claude_discovery_cache(
     """Pre-populate the Claude MCP/skill caches off the request path.
 
     ``claude mcp list`` health-checks every connector (~12s on a real install),
-    so run it at app startup instead of letting the first Settings -> Providers
+    so run it at app startup instead of letting the first Settings -> Models & providers
     visit block on it. ``config_path`` defaults to the same ``CLAUDE_CONFIG_PATH``
     derivation the payload uses, so the warmed cache cannot disagree with what
     the route would report. Fire-and-forget: a failure just leaves the cache
@@ -570,7 +570,7 @@ def _discover_claude_mcps_uncached(
 ) -> list[str]:
     connected: list[str] = []
     # Workspace project MCPs live in .mcp.json and are shown under MCP status,
-    # not as Claude Code platform connectors on the Providers tab.
+    # not as Claude Code platform connectors on the Models & providers tab.
     excluded = {"n8n_mcp", "notion", "ciaobot", "ciaobot-fastmcp"}
     disabled = _disabled_claude_mcp_names(
         workspace_root=workspace_root,
@@ -625,7 +625,7 @@ def opencode_status_probe(
 ) -> dict[str, Any]:
     from ciao.providers.opencode import opencode_login_status
 
-    return opencode_login_status(env)
+    return opencode_login_status()
 
 
 # Where the wizard sends someone who has no Claude Code at all. Kept as a
@@ -886,7 +886,7 @@ def _claude_status(
         "Claude Desktop uses an app-private login. Sign in once via "
         f"`{auth_command}`; no separate CLI install is needed."
         if app_path
-        else "Run Claude OAuth or set ANTHROPIC_API_KEY."
+        else "Run Claude OAuth."
     )
     return _provider(
         name="claude",
@@ -1057,14 +1057,6 @@ def setup_status(
             label="PWA auth token",
             ok=bool(getattr(config, "pwa_auth_token", "")),
             required=True,
-        ),
-        _check(
-            check_id="push_contact",
-            label="Push contact",
-            ok=bool(source.get("CIAO_PUSH_CONTACT", "").strip()),
-            # Optional: without it Web Push stays disabled, nothing else breaks.
-            required=False,
-            detail="CIAO_PUSH_CONTACT",
         ),
     ]
     providers = {

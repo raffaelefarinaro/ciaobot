@@ -70,3 +70,56 @@ def is_loopback_url(url: str) -> bool:
     """
 
     return "//localhost:" in url or "//127." in url
+
+
+def normalize_trusted_url(raw: str) -> str:
+    """Validate a trusted HTTPS origin for other devices; "" clears it.
+
+    Only an origin is accepted (scheme + host[:port]) so a copied URL can
+    never smuggle a path, query token or credentials into a QR code.
+    Raises ValueError with a user-facing message.
+    """
+    from urllib.parse import urlsplit
+
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    parts = urlsplit(text)
+    if parts.scheme.lower() != "https":
+        raise ValueError("trusted_url must start with https://")
+    if not parts.hostname:
+        raise ValueError("trusted_url needs a host name")
+    # urlsplit is permissive: a backslash, a space, an angle bracket or a comma
+    # all survive as part of the host, and a browser reads "\" as "/", so such a
+    # value would be stored and put in a QR code pointing somewhere else. Allow
+    # only what a real host name is made of, and accept a bracketed IPv6 literal
+    # (urlsplit has already stripped the brackets) on its own terms. A
+    # non-numeric port also survives parsing, so it gets a message of our own
+    # rather than leaking Python's port ValueError.
+    host_raw = parts.hostname
+    if ":" in host_raw:
+        import ipaddress
+
+        try:
+            ipaddress.IPv6Address(host_raw)
+        except ValueError:
+            raise ValueError("trusted_url has an invalid IPv6 address") from None
+    elif not re.fullmatch(r"[A-Za-z0-9.-]+", host_raw):
+        raise ValueError(
+            "trusted_url host name may only contain letters, digits, dots and hyphens"
+        )
+    try:
+        port_num = parts.port
+    except ValueError:
+        raise ValueError("trusted_url has an invalid port") from None
+    if parts.username or parts.password:
+        raise ValueError("trusted_url must not contain a user name or password")
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        raise ValueError("trusted_url must be just the address, without a path or query")
+    host = parts.hostname.lower()
+    # urlsplit strips the brackets off an IPv6 literal, which would otherwise
+    # rebuild an unparseable "https://fd7a::1:8443/".
+    if ":" in host:
+        host = f"[{host}]"
+    port = f":{port_num}" if port_num else ""
+    return f"https://{host}{port}/"

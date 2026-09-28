@@ -28,6 +28,7 @@ from ciao.web.routes_api import (
     dismiss_older_than,
     list_proposals,
     proposal_action,
+    proposal_preview,
     proposals_batch,
     proposals_history,
 )
@@ -70,6 +71,7 @@ def _client(config: CiaoConfig) -> TestClient:
         routes=[
             Route("/api/proposals", list_proposals, methods=["GET"]),
             Route("/api/proposals/history", proposals_history, methods=["GET"]),
+            Route("/api/proposals/{id}/preview", proposal_preview, methods=["POST"]),
             Route("/api/proposals/{id}/{action}", proposal_action, methods=["POST"]),
             Route("/api/proposals/batch", proposals_batch, methods=["POST"]),
             Route("/api/proposals/dismiss-older-than", dismiss_older_than, methods=["POST"]),
@@ -507,11 +509,10 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
 def _region_entries(config, workspace: str, region: str) -> list[str]:
     """A region's entries with their learned-at stamps removed.
 
-    Accepting a fact goes through the same guarded write as an archive-time
-    promotion, which appends `[YYYY-MM-DD]` — the stamp the aging audit reads to
-    surface facts that have not been re-verified. Stripping it here is the same
-    normalisation the production dedupe does, and keeps these assertions from
-    depending on today's date.
+    Accepting a fact appends a learned-at `[YYYY-MM-DD]` stamp — the stamp the
+    aging audit reads to surface facts that have not been re-verified.
+    Stripping it here is the same normalisation the production dedupe does, and
+    keeps these assertions from depending on today's date.
     """
     from ciao.memory_audit import strip_learned_stamp
     from ciao.memory_tool import read_region
@@ -534,6 +535,86 @@ def test_accept_writes_the_fact_into_the_region(tmp_path: Path) -> None:
     assert row["text"] in _region_entries(config, row["workspace"], "memory")
     # And the bullet is gone, in that order.
     assert row["id"] not in {r["id"] for r in client.get("/api/proposals").json()["rows"]}
+
+
+def test_accepting_a_people_row_writes_a_typed_note(tmp_path: Path) -> None:
+    """A `[people]` accept files the note the category registry names, typed.
+
+    The writer used to emit `tags: [person]` and no `type:` at all, so the note
+    it created was one `ciao vault-lint` reports as untyped. Destination and
+    content both come from the registry now, and this pins the whole accept:
+    the row leaves the queue and a note with `type: person` is in `People/`.
+    """
+    config = _default_vault(tmp_path)
+    _write_queue(
+        config,
+        "personal",
+        "## 2026-08-19 curation pass (this pass)\n\n"
+        "- [people Mo] Leads the pilot.  _(from: Decisions)_\n",
+    )
+    client = _client(config)
+    row = _accept_kind_row(client, "people")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+    assert resp.status_code == 200
+    result = resp.json()["result"]
+    assert result["action"] == "write_people_note"
+    assert result["destination"] == "People/Mo.md"
+
+    note = config.workspace_vault_root(row["workspace"]) / "People" / "Mo.md"
+    text = note.read_text(encoding="utf-8")
+    assert "type: person" in text
+    assert "tags: [person]" in text
+    assert re.search(r"^updated: \d{4}-\d{2}-\d{2}$", text, re.MULTILINE), text
+    assert row["text"] in text
+    assert row["id"] not in {r["id"] for r in client.get("/api/proposals").json()["rows"]}
+
+
+def test_accepting_a_people_row_honours_an_edited_category_folder(
+    tmp_path: Path,
+) -> None:
+    """The accept files the note in the folder the owner's edit names.
+
+    The registry is read at the agent vault root — the one holding
+    `entity-types.yaml` beside `VOCABULARY.md`, the file
+    `PATCH /api/memory/entity-types` writes — while the note is written under
+    the workspace's notes root. Reading the category from the notes root instead
+    is what made an owner's `person.folder: Humans` invisible here: the accept
+    went on writing `People/Mo.md` beside the very file that renamed it, on the
+    default pre-re-rooting install where those two roots differ. This is that
+    install: `agent_vault_root` is the shared vault, `workspace_vault_root` the
+    `personal` subtree under it.
+    """
+    config = _default_vault(tmp_path)
+    agent_root = config.agent_vault_root("personal")
+    assert agent_root != config.workspace_vault_root("personal")
+    (agent_root / "entity-types.yaml").write_text(
+        "- id: person\n  folder: Humans\n", encoding="utf-8"
+    )
+    _write_queue(
+        config,
+        "personal",
+        "## 2026-08-19 curation pass (this pass)\n\n"
+        "- [people Mo] Leads the pilot.  _(from: Decisions)_\n",
+    )
+    client = _client(config)
+    row = _accept_kind_row(client, "people")
+
+    # The review card resolves the same destination, or the card would show a
+    # folder the accept does not write to.
+    preview = proposal_service._people_preview(config, row, str(row.get("text") or ""))
+    assert preview["destination"] == "Humans/Mo.md", preview
+    assert preview["can_accept"] is True, preview
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+    assert resp.status_code == 200
+    result = resp.json()["result"]
+    assert result["action"] == "write_people_note"
+    assert result["destination"] == "Humans/Mo.md", result
+
+    notes_root = config.workspace_vault_root(row["workspace"])
+    assert (notes_root / "Humans" / "Mo.md").is_file()
+    assert not (notes_root / "People").exists(), "the stock folder, not the owner's"
 
 
 def test_accept_persists_the_text_against_refiling(tmp_path: Path) -> None:
@@ -1540,6 +1621,524 @@ def _learnings_count(config: CiaoConfig) -> int:
         return 0
     match = re.search(r"\(x(\d+)\)", path.read_text(encoding="utf-8"))
     return int(match.group(1)) if match else 0
+
+
+# ---- Category proposals (issue #647) ----------------------------------------
+#
+# The notes carry the RAW spelling the cluster was detected under and the sidecar
+# carries the id derived from it, so a retype is a real change of bytes rather
+# than a rewrite of a value to itself.
+
+_RAW_TYPE = "Recipe Book"
+_CATEGORY_ID = "recipe-book"
+
+
+def _category_vault(
+    tmp_path: Path,
+    *,
+    folder: str = "Recipes",
+    ticked: tuple[str, ...] = ("One.md", "Two.md", "Three.md"),
+    declared: str | None = _RAW_TYPE,
+) -> CiaoConfig:
+    """A workspace whose queue holds one `[category]` row over a note cluster.
+
+    ``ticked`` is the note list the sidecar carries — the rows the owner ticked
+    in the drawer — and ``declared`` is what each of those notes currently says.
+    A test for drift passes a different type, and one for a frontmatter-less
+    note passes ``None``.
+
+    The sidecar's paths are rendered ``Entry.path`` values: a vault directory
+    name followed by the note's path inside the vault that was scanned, which is
+    what ``vault_migration`` strips the same way when it retypes a note.
+    """
+    from ciao.memory_proposals import MemoryProposal, append_proposals
+    from ciao.vocabulary_proposals import write_category_sidecar
+
+    config = _config(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    notes = vault / "Journals"
+    notes.mkdir(parents=True, exist_ok=True)
+    for name in ticked:
+        frontmatter = f"type: {declared}\n" if declared else ""
+        (notes / name).write_text(
+            f"---\n{frontmatter}---\n# {Path(name).stem}\n", encoding="utf-8"
+        )
+    write_category_sidecar(
+        vault,
+        {
+            "id": _CATEGORY_ID,
+            "label": "Recipe book",
+            "folder": folder,
+            "description": f"Proposed from {len(ticked)} notes already typed {_RAW_TYPE}.",
+            "source_type": _RAW_TYPE,
+            "paths": [f"memory-vault/Journals/{name}" for name in ticked],
+            "declined": False,
+        },
+    )
+    append_proposals(
+        [
+            MemoryProposal(
+                target="category",
+                payload=_CATEGORY_ID,
+                text=(
+                    f"Recipe book → {folder}: Proposed from {len(ticked)} notes "
+                    f"already typed {_RAW_TYPE}."
+                ),
+                source_section=f"{len(ticked)} notes typed {_RAW_TYPE}",
+            )
+        ],
+        vault,
+    )
+    return config
+
+
+def _registry_ids(config: CiaoConfig) -> list[str]:
+    from ciao import entity_types
+
+    registry = entity_types.load_entity_types(config.agent_vault_root("personal"))
+    return [entry.id for entry in registry.entries()]
+
+
+def test_accepting_a_category_adds_it_and_retypes_the_ticked_notes(
+    tmp_path: Path,
+) -> None:
+    """Nothing is moved: every note stays in the same file and only its
+    frontmatter ``type:`` changes."""
+    config = _category_vault(tmp_path)
+    journals = config.workspace_vault_root("personal") / "Journals"
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 200, resp.json()
+    result = resp.json()["result"]
+    assert result["action"] == "add_category"
+    assert result["promoted"] is True
+    assert result["destination"] == "Recipes"
+    assert _CATEGORY_ID in _registry_ids(config)
+    assert sorted(p.name for p in journals.iterdir()) == ["One.md", "Three.md", "Two.md"]
+    for note in journals.iterdir():
+        # The body and the file are untouched; only the type line moved.
+        assert note.read_text(encoding="utf-8") == (
+            f"---\ntype: {_CATEGORY_ID}\n---\n# {note.stem}\n"
+        )
+    # The row is gone, and the registry file names the new category.
+    assert client.get("/api/proposals").json()["rows"] == []
+    yaml = (config.agent_vault_root("personal") / "entity-types.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert f"id: {_CATEGORY_ID}" in yaml
+    assert "folder: Recipes" in yaml
+
+
+def test_accepting_a_category_leaves_an_unticked_note_alone(tmp_path: Path) -> None:
+    """The sidecar is the note list, so a note the owner left unticked keeps
+    the type it had."""
+    config = _category_vault(tmp_path, ticked=("One.md", "Two.md"))
+    journals = config.workspace_vault_root("personal") / "Journals"
+    (journals / "Three.md").write_text(
+        f"---\ntype: {_RAW_TYPE}\n---\n# Three\n", encoding="utf-8"
+    )
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+
+    assert (journals / "One.md").read_text(encoding="utf-8") == (
+        f"---\ntype: {_CATEGORY_ID}\n---\n# One\n"
+    )
+    assert (journals / "Three.md").read_text(encoding="utf-8") == (
+        f"---\ntype: {_RAW_TYPE}\n---\n# Three\n"
+    )
+
+
+def test_accepting_a_category_retypes_a_note_with_no_frontmatter(
+    tmp_path: Path,
+) -> None:
+    """A note that never said what it was has no type anybody could have
+    changed, so it is retyped rather than reported as drifted."""
+    config = _category_vault(tmp_path, ticked=("One.md",), declared=None)
+    journals = config.workspace_vault_root("personal") / "Journals"
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+
+    assert (journals / "One.md").read_text(encoding="utf-8") == (
+        f"---\ntype: {_CATEGORY_ID}\n---\n# One\n"
+    )
+
+
+def test_a_category_whose_folder_is_taken_keeps_the_bullet(tmp_path: Path) -> None:
+    """`Recipes` is not a collision, `People` is. The registry's own validator
+    refuses it, the row survives, and the refusal is a 400 the owner can act on
+    rather than a retry of the same request."""
+    config = _category_vault(tmp_path, folder="People")
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 400, resp.json()
+    assert "People" in resp.json()["error"]
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+    assert _CATEGORY_ID not in _registry_ids(config)
+
+
+def test_a_note_retyped_since_the_proposal_keeps_the_bullet(tmp_path: Path) -> None:
+    """The cluster the operator read is not the cluster on disk, so nothing is
+    written — not the registry, and not the notes that were fine."""
+    config = _category_vault(tmp_path)
+    journals = config.workspace_vault_root("personal") / "Journals"
+    (journals / "Two.md").write_text("---\ntype: document\n---\n# Two\n", encoding="utf-8")
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409, resp.json()
+    assert "Two.md" in resp.json()["error"]
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+    assert _CATEGORY_ID not in _registry_ids(config)
+    assert (journals / "One.md").read_text(encoding="utf-8") == (
+        f"---\ntype: {_RAW_TYPE}\n---\n# One\n"
+    )
+
+
+def test_dismissing_a_category_records_the_refusal_by_id(tmp_path: Path) -> None:
+    """The queue bullet is gone but the cluster it described is still in the
+    vault. A text-keyed decision has nothing left to match once the row is
+    removed, so the id is what stops the same category coming back."""
+    from ciao.vocabulary_proposals import declined_category_ids, read_category_sidecar
+
+    config = _category_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    assert client.post(f"/api/proposals/{row['id']}/dismiss").status_code == 200
+
+    assert client.get("/api/proposals").json()["rows"] == []
+    assert declined_category_ids(vault) == {_CATEGORY_ID}
+    # The rest of the sidecar survives: a refusal is not a deletion.
+    assert read_category_sidecar(vault, _CATEGORY_ID)["paths"]
+
+
+def test_a_batch_dismiss_records_the_refusal_too(tmp_path: Path) -> None:
+    """The batch path records the id before the rewrite too, or a bulk "reject
+    these" would bring the whole cluster back the next night."""
+    from ciao.vocabulary_proposals import declined_category_ids
+
+    config = _category_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(
+        "/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]}
+    )
+
+    assert resp.status_code == 200, resp.json()
+    assert client.get("/api/proposals").json()["rows"] == []
+    assert declined_category_ids(vault) == {_CATEGORY_ID}
+
+
+def test_a_category_refusal_that_cannot_be_recorded_keeps_the_bullet(
+    tmp_path: Path,
+) -> None:
+    """The sidecar is the only record of the note list, so a dismiss without one
+    has nothing to refuse: the row survives rather than being resolved into a
+    decision that was not made."""
+    from ciao.vocabulary_proposals import category_sidecar_path
+
+    config = _category_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    category_sidecar_path(vault, _CATEGORY_ID).unlink()
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(f"/api/proposals/{row['id']}/dismiss")
+
+    assert resp.status_code == 409, resp.json()
+    assert _CATEGORY_ID in resp.json()["error"]
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+
+
+def test_a_category_preview_names_the_notes_it_would_retype(tmp_path: Path) -> None:
+    """The card must not fall through to the review row's "no destination yet"
+    wording: a category has a destination and the whole list of notes it moves
+    onto, and both are known before the click."""
+    config = _category_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(f"/api/proposals/{row['id']}/preview")
+
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()["preview"]
+    assert body["action"] == "add_category"
+    assert body["can_accept"] is True
+    assert body["exact"] is True
+    assert body["category"]["id"] == _CATEGORY_ID
+    assert body["category"]["folder"] == "Recipes"
+    assert len(body["category"]["notes"]) == 3
+
+
+def test_batch_accept_covers_a_category_row(tmp_path: Path) -> None:
+    config = _category_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(
+        "/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]}
+    )
+
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["results"][0]["promoted"] is True
+    assert _CATEGORY_ID in _registry_ids(config)
+
+
+def _undo_client(config: CiaoConfig) -> TestClient:
+    """A client that also serves the undo the History card calls.
+
+    The accept and the undo are two routes on the same decision, so a test that
+    drove one over HTTP and the other as a function would not prove the pair
+    works: the receipt is the only thing between them.
+    """
+    from ciao.web.routes_api import memory_receipt_undo
+
+    app = Starlette(
+        routes=[
+            Route("/api/proposals", list_proposals, methods=["GET"]),
+            Route("/api/proposals/{id}/{action}", proposal_action, methods=["POST"]),
+            Route(
+                "/api/memory/receipts/{id}/undo", memory_receipt_undo, methods=["POST"]
+            ),
+        ]
+    )
+    app.state.config = config
+    return TestClient(app)
+
+
+def test_undoing_an_accepted_category_restores_the_yaml_and_every_note(
+    tmp_path: Path,
+) -> None:
+    """Acceptance: the receipt undoes the registry entry AND every retyped note.
+
+    Driven through the two routes, over the real cluster: the notes carry
+    ``type: Recipe Book`` and the id derived from it is ``recipe-book``, so each
+    retype is a real change of bytes and the restore is observed rather than
+    asserted against files that never moved. A receipt that recorded no image of
+    what the retype left behind could not tell an unrelated later edit from its
+    own work, and would refuse the undo of every category it had just applied.
+    """
+    from ciao.memory_receipts import journal_path, read_receipts
+
+    config = _category_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    journals = vault / "Journals"
+    registry = config.agent_vault_root("personal") / "entity-types.yaml"
+    before = {note.name: note.read_text(encoding="utf-8") for note in journals.iterdir()}
+    assert not registry.exists(), "the fixture must start with no category file"
+    client = _undo_client(config)
+    row = _accept_kind_row(client, "category")
+
+    accepted = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert accepted.status_code == 200, accepted.json()
+    assert registry.exists()
+    receipt = [
+        r
+        for r in read_receipts(journal_path(vault, None))
+        if r["kind"] == "category_apply"
+    ][-1]
+    # Every note really changed, and every note's after-image says so.
+    images = {
+        entry["path"]: entry["after"] for entry in receipt["category_notes"]
+    }
+    assert set(images) == {str(note) for note in journals.iterdir()}
+    for note in journals.iterdir():
+        assert note.read_text(encoding="utf-8") != before[note.name]
+        assert images[str(note)] == note.read_text(encoding="utf-8")
+
+    undo = client.post(
+        f"/api/memory/receipts/{receipt['id']}/undo", params={"workspace": "personal"}
+    )
+
+    assert undo.status_code == 200, undo.json()
+    # The vault had no category file before, so the undo leaves none behind.
+    assert not registry.exists()
+    for name, text in before.items():
+        assert (journals / name).read_text(encoding="utf-8") == text
+
+
+def test_an_accepted_category_is_not_offered_again(tmp_path: Path) -> None:
+    """The accepted id is canonical, so the cluster it came from is not drift.
+
+    The accept writes ``entity-types.yaml`` at the AGENT vault root — the same
+    file ``GET``/``PATCH /api/memory/entity-types`` reads, and a different
+    directory from the notes on an install that has not re-rooted. A pass that
+    measured the notes against the registry under the notes root would keep
+    seeing drift: the bullet comes back, and accepting it 400s on a duplicate id
+    and a duplicate folder that no owner edit can resolve.
+    """
+    from ciao import entity_types
+    from ciao import curation_run as cr
+    from ciao.memory_tool import ensure_regions
+
+    config = _category_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+    # A fourth note, already carrying the accepted id: the cluster is intact and
+    # every note in it is canonical.
+    (vault / "Journals" / "Four.md").write_text(
+        f"---\ntype: {_CATEGORY_ID}\n---\n# Four\n", encoding="utf-8"
+    )
+    guide = config.agent_root("personal") / "CLAUDE.md"
+    guide.parent.mkdir(parents=True, exist_ok=True)
+    ensure_regions(guide)
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=entity_types.load_entity_types(
+            config.agent_vault_root("personal")
+        ),
+        workspace_dir=config.workspace_root,
+    )
+
+    assert cr.PASS_CATEGORIES not in {item.pass_id for item in worklist.items}
+    queue = (vault / "Workspace" / "Memory-Proposals.md").read_text(encoding="utf-8")
+    assert "[category" not in queue
+
+
+def _append_category_row(
+    config: CiaoConfig,
+    *,
+    category_id: str,
+    raw_type: str,
+    folder: str,
+    names: tuple[str, str, str],
+) -> None:
+    """A second ``[category]`` row over its own cluster, in the same queue."""
+    from ciao.memory_proposals import MemoryProposal, append_proposals
+    from ciao.vocabulary_proposals import write_category_sidecar
+
+    vault = config.workspace_vault_root("personal")
+    journals = vault / "Journals"
+    for name in names:
+        (journals / name).write_text(
+            f"---\ntype: {raw_type}\n---\n# {Path(name).stem}\n", encoding="utf-8"
+        )
+    write_category_sidecar(
+        vault,
+        {
+            "id": category_id,
+            "label": category_id.replace("-", " ").title(),
+            "folder": folder,
+            "description": f"Proposed from {len(names)} notes already typed {raw_type}.",
+            "source_type": raw_type,
+            "paths": [f"memory-vault/Journals/{name}" for name in names],
+            "declined": False,
+        },
+    )
+    append_proposals(
+        [
+            MemoryProposal(
+                target="category",
+                payload=category_id,
+                text=(
+                    f"{category_id.replace('-', ' ').title()} → {folder}: "
+                    f"Proposed from {len(names)} notes already typed {raw_type}."
+                ),
+                source_section=f"{len(names)} notes typed {raw_type}",
+            )
+        ],
+        vault,
+    )
+
+
+def test_two_category_accepts_both_persist(tmp_path: Path) -> None:
+    """Two clusters accepted one after the other: both categories are on disk.
+
+    Each accept appends to the same registry file, so this is the case where a
+    second write built from a stale snapshot drops the first entry — silently,
+    with the second accept still reporting success.
+    """
+    config = _category_vault(tmp_path)
+    _append_category_row(
+        config,
+        category_id="cook-book",
+        raw_type="Cook Book",
+        folder="Cook Books",
+        names=("Four.md", "Five.md", "Six.md"),
+    )
+    client = _client(config)
+    first = _accept_kind_row(client, "category")
+    assert client.post(f"/api/proposals/{first['id']}/accept").status_code == 200
+    second = _accept_kind_row(client, "category")
+    assert client.post(f"/api/proposals/{second['id']}/accept").status_code == 200
+
+    ids = _registry_ids(config)
+    assert _CATEGORY_ID in ids
+    assert "cook-book" in ids
+    assert client.get("/api/proposals").json()["rows"] == []
+
+
+def test_the_registry_is_read_inside_the_lock_that_writes_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The read, the append and the write are one transaction.
+
+    Loaded before the lock was taken, two accepts could both read the list before
+    either wrote, append to the same snapshot, and the second write would replace
+    the first — one category lost with no error anywhere. The lock is the whole
+    fix, so the test holds it from here and watches the accept refuse to read
+    until it is released. The ``started`` event is what makes that a claim about
+    the ordering rather than about how fast the thread happened to start.
+    """
+    from ciao import entity_types
+    from ciao.memory_receipts import queue_lock
+
+    config = _category_vault(tmp_path)
+    registry = config.agent_vault_root("personal") / "entity-types.yaml"
+    first, second = _client(config), _client(config)
+    row = _accept_kind_row(first, "category")
+    started, read_registry = threading.Event(), threading.Event()
+    real_accept = proposal_service._accept_category_row
+    real_load = entity_types.load_entity_types
+
+    def announce(cfg, accepted_row):
+        started.set()
+        return real_accept(cfg, accepted_row)
+
+    def watched_load(vault):
+        read_registry.set()
+        return real_load(vault)
+
+    monkeypatch.setattr(proposal_service, "_accept_category_row", announce)
+    monkeypatch.setattr(entity_types, "load_entity_types", watched_load)
+    accepted: dict[str, Any] = {}
+
+    def accept() -> None:
+        accepted["resp"] = second.post(f"/api/proposals/{row['id']}/accept")
+
+    thread = threading.Thread(target=accept)
+    with queue_lock(registry):
+        thread.start()
+        assert started.wait(10), "the accept never reached its category handler"
+        # The lock is held here, so the accept is parked before it reads the
+        # list it is about to append to.
+        assert not read_registry.wait(2), "the registry was read outside the lock"
+    thread.join(20)
+
+    assert read_registry.is_set()
+    assert accepted["resp"].status_code == 200, accepted["resp"].json()
+    assert _CATEGORY_ID in _registry_ids(config)
 
 
 def test_batch_accept_does_not_promote_before_the_receipt_can_be_written(

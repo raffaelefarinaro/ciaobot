@@ -41,12 +41,39 @@ describe('NewChatPicker', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key, cancelable: true }))
   }
 
+  async function settleMount() {
+    await nextTick()
+    await nextTick()
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+  }
+
   async function settle(answer: Promise<string | null>): Promise<string | null | 'TIMEOUT'> {
     return Promise.race([
       answer,
       new Promise<'TIMEOUT'>(resolve => setTimeout(() => resolve('TIMEOUT'), 100)),
     ])
   }
+
+  it('renders labelled dialog and listbox semantics with the first project focused', async () => {
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
+    const answer = openNewChatPicker()
+    await settleMount()
+
+    const dialog = wrapper.get<HTMLElement>('[role="dialog"]')
+    const title = wrapper.get<HTMLElement>('.newchat-title')
+    const description = wrapper.get<HTMLElement>('.newchat-hint')
+    const listbox = wrapper.get<HTMLElement>('[role="listbox"]')
+    const first = wrapper.get<HTMLButtonElement>('.newchat-option')
+
+    expect(dialog.attributes('aria-modal')).toBe('true')
+    expect(dialog.attributes('aria-labelledby')).toBe(title.attributes('id'))
+    expect(dialog.attributes('aria-describedby')).toBe(description.attributes('id'))
+    expect(listbox.attributes('aria-label')).toBe('Choose a project for the new chat')
+    expect(document.activeElement).toBe(first.element)
+
+    press('Escape')
+    expect(await settle(answer)).toBeNull()
+  })
 
   it('opens directly on the active workspace\u2019s projects', async () => {
     wrapper = mount(NewChatPicker, { attachTo: document.body })
@@ -100,6 +127,27 @@ describe('NewChatPicker', () => {
 
     press('Escape')
     expect(await settle(answer)).toBeNull()
+  })
+
+  it('cancels on backdrop press and returns focus to the opener', async () => {
+    const trigger = document.createElement('button')
+    trigger.type = 'button'
+    document.body.appendChild(trigger)
+    trigger.focus()
+
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
+    const answer = openNewChatPicker()
+    await settleMount()
+    wrapper.get<HTMLElement>('.newchat-backdrop').element.dispatchEvent(new MouseEvent('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(await settle(answer)).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+    trigger.remove()
   })
 
   it('browsing workspaces with 1-9 does not move the app', async () => {
@@ -182,6 +230,28 @@ describe('NewChatPicker', () => {
     expect(await settle(answer)).toBe('p-shipping')
   })
 
+  it('wraps reverse Tab inside the project list', async () => {
+    store.activeWorkspace = 'client'
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
+    const answer = openNewChatPicker()
+    await settleMount()
+
+    const options = wrapper.findAll<HTMLButtonElement>('.newchat-option')
+    options[0].element.focus()
+    press('Tab')
+    await nextTick()
+    window.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Tab',
+      shiftKey: true,
+      cancelable: true,
+    }))
+    await nextTick()
+
+    expect(document.activeElement).toBe(options[0].element)
+    press('Escape')
+    expect(await settle(answer)).toBeNull()
+  })
+
   it('reopening starts from the workspace the user is actually in', async () => {
     wrapper = mount(NewChatPicker, { attachTo: document.body })
     const first = openNewChatPicker()
@@ -198,5 +268,52 @@ describe('NewChatPicker', () => {
     expect(labels()).toEqual(['General'])
     press('Escape')
     expect(await settle(second)).toBeNull()
+  })
+
+  it('never offers the app-owned Memory project as a new-chat target', async () => {
+    // The sidebar hides the Memory project, so listing it here would hand out a
+    // target the user cannot then find or move the chat out of. This picker is
+    // the chooser behind Home's composer chip, both "+ new" affordances, Cmd+T
+    // and Option+N, so it needs its own filter rather than inheriting
+    // `workspaceProjects` (it also previews workspaces the app is not in).
+    store.projects = [
+      ...store.projects,
+      { project_id: 'p-mem', name: 'Memory', workspace: 'home', kind: 'memory', context: '', created_at: '', order: 2, vault_folder: '' },
+      { project_id: 'p-mem-c', name: 'Memory', workspace: 'client', kind: 'memory', context: '', created_at: '', order: 2, vault_folder: '' },
+    ]
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
+    const answer = openNewChatPicker()
+    await nextTick()
+    await nextTick()
+
+    expect(labels()).toEqual(['General'])
+
+    // The same holds in a previewed workspace, not just the active one.
+    press('2')
+    await nextTick()
+    expect(labels()).toEqual(['General', 'Shipping'])
+
+    press('Escape')
+    expect(await settle(answer)).toBeNull()
+  })
+
+  it('still offers a user project that merely happens to be named Memory', async () => {
+    // Only `kind` discriminates: the app-owned project is the one with
+    // `kind: 'memory'`, so a user project sharing the name stays a valid
+    // target.
+    store.projects = [
+      ...store.projects,
+      { project_id: 'p-mine', name: 'Memory', workspace: 'home', context: '', created_at: '', order: 2, vault_folder: '' },
+    ]
+    wrapper = mount(NewChatPicker, { attachTo: document.body })
+    const answer = openNewChatPicker()
+    await nextTick()
+    await nextTick()
+
+    expect(labels()).toEqual(['General', 'Memory'])
+    press('ArrowDown')
+    await nextTick()
+    press('Enter')
+    expect(await settle(answer)).toBe('p-mine')
   })
 })

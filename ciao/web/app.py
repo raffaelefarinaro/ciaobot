@@ -12,7 +12,6 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.responses import FileResponse, Response
 
-from ciao.node_proxy import StandbyProxyMiddleware
 from ciao.package_version import make_cached_package_status
 from ciao.web.routes_agent import agent_dispatch_endpoint, agent_status_endpoint
 from ciao.web.routes_mcp import (
@@ -45,8 +44,11 @@ from ciao.web.routes_auth import (
     auth_settings_update,
 )
 from ciao.web.routes_api import (
+    addresses_endpoint,
     admin_add_skill,
     admin_deploy,
+    admin_drain,
+    admin_drain_cancel,
     admin_restart,
     admin_snapshot,
     admin_skills,
@@ -71,8 +73,6 @@ from ciao.web.routes_api import (
     chat_new_session,
     chat_subagents,
     running_subagents,
-    chat_speak,
-    chat_voice,
     chats_mark_all_read,
     cli_stats,
     file_content,
@@ -89,10 +89,11 @@ from ciao.web.routes_api import (
     local_preflight,
     local_resync,
     local_status,
-    native_sessions,
     list_all_chats,
     list_models,
-    delete_workspace_setting,
+    archive_workspace_setting,
+    list_archived_workspaces,
+    restore_archived_workspace,
     gws_integration_settings,
     gws_save_client_secret,
     gws_auth_url,
@@ -112,7 +113,6 @@ from ciao.web.routes_api import (
     setup_mkdir_endpoint,
     setup_status_endpoint,
     list_automation,
-    trigger_backfill_insights,
     list_completed_projects,
     list_projects,
     list_proposals,
@@ -133,6 +133,7 @@ from ciao.web.routes_api import (
     memory_receipt_undo,
     memory_receipt_detail,
     memory_receipts,
+    memory_entity_types,
     proposal_action,
     proposal_preview,
     proposals_batch,
@@ -159,16 +160,12 @@ from ciao.web.routes_api import (
 )
 from ciao.web.routes_chat import ws_chat, ws_events
 from ciao.web.routes_node import (
-    node_addresses_endpoint,
-    node_connected_clients_endpoint,
-    node_connect_endpoint,
-    node_demote_endpoint,
-    node_handover_endpoint,
-    node_peers_endpoint,
-    node_status_endpoint,
     package_changelog_endpoint,
     package_status_endpoint,
     package_update_endpoint,
+    update_apply_endpoint,
+    update_stage_endpoint,
+    update_status_endpoint,
 )
 from ciao.web.routes_push import (
     push_notification_feed,
@@ -176,6 +173,7 @@ from ciao.web.routes_push import (
     push_status,
     push_subscribe,
     push_subscription_check,
+    push_test,
     push_unsubscribe,
 )
 from ciao.web.security import SecurityHeadersMiddleware
@@ -234,7 +232,16 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/workspaces", list_workspaces, methods=["GET"]),
         Route("/api/workspaces", upsert_workspace_setting, methods=["POST"]),
         Route("/api/workspaces/{name}", upsert_workspace_setting, methods=["PATCH"]),
-        Route("/api/workspaces/{name}", delete_workspace_setting, methods=["DELETE"]),
+        # Literal `archived` paths precede the {name} pattern. DELETE is kept as
+        # an alias of archive for existing scripts: it no longer deletes.
+        Route("/api/workspaces/archived", list_archived_workspaces, methods=["GET"]),
+        Route(
+            "/api/workspaces/archived/restore",
+            restore_archived_workspace,
+            methods=["POST"],
+        ),
+        Route("/api/workspaces/{name}/archive", archive_workspace_setting, methods=["POST"]),
+        Route("/api/workspaces/{name}", archive_workspace_setting, methods=["DELETE"]),
         Route("/api/projects", list_projects, methods=["GET"]),
         Route("/api/projects", create_project, methods=["POST"]),
         # Literal `completed` paths must precede the {project_id} pattern so
@@ -268,11 +275,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats/{chat_id}/prompt", chat_prompt, methods=["POST"]),
         Route("/api/chats/{chat_id}/messages", chat_messages, methods=["GET"]),
         Route("/api/chats/{chat_id}/messages/part", chat_message_part, methods=["GET"]),
-        Route("/api/native/sessions", native_sessions, methods=["GET"]),
         Route("/api/chats/{chat_id}/subagents", chat_subagents, methods=["GET"]),
         Route("/api/subagents/running", running_subagents, methods=["GET"]),
-        Route("/api/chats/{chat_id}/voice", chat_voice, methods=["POST"]),
-        Route("/api/chats/{chat_id}/speak", chat_speak, methods=["POST"]),
         Route("/api/chats/{chat_id}/images", chat_images, methods=["POST"]),
         Route("/api/chats/{chat_id}/attachments", chat_attachments_upload, methods=["POST"]),
         Route("/api/images/{ref}", image_blob, methods=["GET"]),
@@ -303,7 +307,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/schedules/{schedule_id}", schedule_detail, methods=["PATCH", "DELETE"]),
         # Automation status (read-only) — Settings → Automation page
         Route("/api/automation", list_automation, methods=["GET"]),
-        Route("/api/automation/backfill-insights", trigger_backfill_insights, methods=["POST"]),
         # Runtime issue report (dev mode only) — Settings → Debug card
         Route("/api/debug/issues", debug_issues, methods=["GET"]),
         # Slash commands (project + user level)
@@ -320,6 +323,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/memory/receipts", memory_receipts, methods=["GET"]),
         Route("/api/memory/receipts/{id}", memory_receipt_detail, methods=["GET"]),
         Route("/api/memory/receipts/{id}/undo", memory_receipt_undo, methods=["POST"]),
+        Route("/api/memory/entity-types", memory_entity_types, methods=["GET", "PATCH"]),
         Route("/api/workspace-health", workspace_health_endpoint, methods=["GET"]),
         Route("/api/workspace-health/fix", workspace_health_fix_endpoint, methods=["POST"]),
         # Home-screen operator-action strip.
@@ -337,7 +341,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Models & Status
         Route("/api/models", list_models, methods=["GET"]),
         Route("/api/settings/routines", settings_routines, methods=["GET", "PATCH"]),
-        Route("/api/settings/providers", provider_config_settings, methods=["GET", "PATCH"]),
+        Route("/api/settings/providers", provider_config_settings, methods=["GET"]),
         Route(
             "/api/settings/providers/{provider}/{action}",
             provider_connection_action,
@@ -359,23 +363,18 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/menubar-chats", menubar_chats_endpoint, methods=["GET"]),
         Route("/api/open-chat/{chat_id}", open_chat_endpoint, methods=["GET"]),
         Route("/api/setup-status", setup_status_endpoint, methods=["GET"]),
-        Route("/api/node/addresses", node_addresses_endpoint, methods=["GET"]),
+        Route("/api/addresses", addresses_endpoint, methods=["GET"]),
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
         Route("/api/package/changelog", package_changelog_endpoint, methods=["GET"]),
         Route("/api/package/update", package_update_endpoint, methods=["POST"]),
-        # Device-scoped copies of the package routes. In client mode /api/package/*
-        # is tunneled (it reports and updates the host), so the Device panel needs
-        # its own never-proxied path to see and update *this* machine's install.
-        Route("/api/device/package-status", package_status_endpoint, methods=["GET"]),
-        Route("/api/device/changelog", package_changelog_endpoint, methods=["GET"]),
-        Route("/api/device/update", package_update_endpoint, methods=["POST"]),
-        # Node & Handover (Multi-device Active-Standby)
-        Route("/api/node/status", node_status_endpoint, methods=["GET"]),
-        Route("/api/node/connect", node_connect_endpoint, methods=["POST"]),
-        Route("/api/node/handover", node_handover_endpoint, methods=["POST"]),
-        Route("/api/node/demote", node_demote_endpoint, methods=["POST"]),
-        Route("/api/node/peers", node_peers_endpoint, methods=["POST"]),
-        Route("/api/node/connected-clients", node_connected_clients_endpoint, methods=["GET"]),
+        # The Settings update card driving the installer-only engine update job.
+        # Session-protected rather than loopback-only: a logged-in operator may
+        # start an update from a browser, exactly as they may
+        # POST /api/admin/restart. Both halves run in the background; the card
+        # polls the status route.
+        Route("/api/update/status", update_status_endpoint, methods=["GET"]),
+        Route("/api/update/stage", update_stage_endpoint, methods=["POST"]),
+        Route("/api/update/apply", update_apply_endpoint, methods=["POST"]),
         Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"]),
         Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
         Route("/api/setup/inspect-folder", setup_inspect_folder_endpoint, methods=["GET"]),
@@ -394,6 +393,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/push/unsubscribe", push_unsubscribe, methods=["POST"]),
         Route("/api/push/status", push_status, methods=["GET"]),
         Route("/api/push/subscription", push_subscription_check, methods=["GET"]),
+        Route("/api/push/test", push_test, methods=["POST"]),
         Route("/api/menubar-notifications", push_notification_feed, methods=["GET"]),
         # Per-device working-branch flow: commit-to-main + agent-merged handover
         Route("/api/local/status", local_status, methods=["GET"]),
@@ -405,6 +405,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/admin/snapshot", admin_snapshot, methods=["POST"]),
         Route("/api/admin/deploy", admin_deploy, methods=["POST"]),
         Route("/api/admin/restart", admin_restart, methods=["POST"]),
+        Route("/api/admin/drain", admin_drain, methods=["POST"]),
+        Route("/api/admin/drain/cancel", admin_drain_cancel, methods=["POST"]),
         Route("/api/admin/status", admin_status, methods=["GET"]),
         Route("/api/admin/skills", admin_skills, methods=["GET"]),
         Route("/api/admin/skills/add", admin_add_skill, methods=["POST"]),
@@ -431,16 +433,14 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     middleware = [
         Middleware(SecurityHeadersMiddleware),
         Middleware(AuthMiddleware, serializer=serializer, auth_required=config.pwa_auth_required),
-        Middleware(StandbyProxyMiddleware),
     ]
 
     @asynccontextmanager
     async def _lifespan(_app):
-        from ciao.node_proxy import close_shared_client
         from ciao.setup_status import warm_claude_discovery_cache
 
         # `claude mcp list` health-checks every connector and can take ~12s;
-        # warm the discovery cache at startup so the first Settings -> Providers
+        # warm the discovery cache at startup so the first Settings -> Models & providers
         # visit serves a populated list instead of blocking on the probe.
         warm_claude_discovery_cache(getattr(config, "workspace_root", None))
 
@@ -452,18 +452,14 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
             # subprocesses and background runs are not leaked across an
             # abnormal restart.
             for callback in getattr(_app.state, "shutdown_callbacks", ()):
-                # One failing callback must not skip the ones after it, nor the
-                # client pool below. Shutdown is the last chance to terminate
-                # provider subprocesses and background runs; leaking them
-                # because an earlier hook raised is how a restart ends up with
-                # orphan processes.
+                # One failing callback must not skip the ones after it. Shutdown
+                # is the last chance to terminate provider subprocesses and
+                # background runs; leaking them because an earlier hook raised is
+                # how a restart ends up with orphan processes.
                 try:
                     await callback()
                 except Exception:
                     logger.exception("Shutdown callback failed")
-            # Release the client-mode keep-alive pool. A no-op on a host node,
-            # which never opens it.
-            await close_shared_client()
 
     lifespan = _lifespan
 

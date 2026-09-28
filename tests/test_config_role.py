@@ -5,7 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ciao.config import CiaoConfig, _DEFAULT_HARNESS_DISALLOWED_TOOLS
+from ciao.config import (
+    CiaoConfig,
+    _DEFAULT_HARNESS_DISALLOWED_TOOLS,
+    _WORKSPACE_EVIDENCE_DIRS,
+    _WORKSPACE_EVIDENCE_EXTRA_DIRS,
+)
+from ciao.entity_types import load_entity_types, stock_entity_type_registry
 from ciao.execution_modes import (
     HARNESS_DISABLED_SKILLS,
     credential_path_deny_rules,
@@ -31,6 +37,33 @@ def _config(**overrides: str) -> CiaoConfig:
     env = {"PWA_AUTH_TOKEN": "test-token"}
     env.update(overrides)
     return CiaoConfig.from_env(env)
+
+
+def test_legacy_insights_opt_out_is_captured_for_settings_migration(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        CIAO_WORKSPACE=str(tmp_path),
+        CIAO_RUNTIME_ROOT=str(tmp_path / ".runtime"),
+        CIAO_INSIGHTS_DISABLED="true",
+    )
+    assert config.insights_enabled is True
+    assert config.legacy_insights_disabled is True
+
+    enabled = _config(
+        CIAO_WORKSPACE=str(tmp_path),
+        CIAO_RUNTIME_ROOT=str(tmp_path / ".runtime"),
+        CIAO_INSIGHTS_DISABLED="false",
+    )
+    assert enabled.legacy_insights_disabled is False
+
+    trajectories = _config(
+        CIAO_WORKSPACE=str(tmp_path),
+        CIAO_RUNTIME_ROOT=str(tmp_path / ".runtime"),
+        CIAO_TRAJECTORIES_DISABLED="true",
+    )
+    assert trajectories.trajectories_enabled is True
+    assert trajectories.legacy_trajectories_disabled is True
 
 
 def test_vault_root_defaults_under_workspace_root(tmp_path: Path) -> None:
@@ -109,7 +142,58 @@ def test_a_note_folder_is_not_mistaken_for_a_workspace(tmp_path: Path) -> None:
 
     assert list(config.workspaces) == ["personal"]
 
-def test_ciao_workspaces_json_defines_named_workspaces(tmp_path: Path) -> None:
+
+def test_the_workspace_evidence_set_is_the_shipped_registry_and_only_that(
+    tmp_path: Path,
+) -> None:
+    """Bootstrap reads the stock categories, and cannot read a vault's.
+
+    `_WORKSPACE_EVIDENCE_DIRS` is the entity categories' own folders — taken from
+    the shipped registry, so a category is added here the way it is added to the
+    indexer and the linter — plus the three names a containment test cannot
+    express (`Workspace`, `journal`, the lower-case `projects`).
+
+    It is built ONCE, at import, and that is the documented half of the deal:
+    `_bootstrap_registry` runs inside `CiaoConfig.__post_init__`, before any
+    workspace has been discovered, so the `<vault>/entity-types.yaml` that could
+    answer a better question is itself inside a directory the scan has not found
+    yet. The second half is pinned below: a vault that names a new entity folder
+    does NOT get that folder claimed as evidence, which is the difference between
+    "a note folder" and "a workspace named after a note type".
+
+    The set is asserted against the literal it replaced, so a stock edit that
+    widened it has to be a decision somebody makes in this file.
+    """
+    assert _WORKSPACE_EVIDENCE_DIRS == frozenset(
+        {"People", "Projects", "Places", "Ideas", "Resources", "Workspace", "journal", "projects"}
+    )
+    assert _WORKSPACE_EVIDENCE_DIRS == (
+        frozenset(stock_entity_type_registry().entity_folders())
+        | _WORKSPACE_EVIDENCE_EXTRA_DIRS
+    )
+
+    (tmp_path / "memory-vault" / "Clients").mkdir(parents=True)
+    (tmp_path / "memory-vault" / "Clients" / "Acme.md").write_text(
+        "---\ntype: client\n---\n# Acme\n", encoding="utf-8"
+    )
+    (tmp_path / "memory-vault" / "entity-types.yaml").write_text(
+        "- id: client\n  label: Client\n  kind: entity\n  folder: Clients\n",
+        encoding="utf-8",
+    )
+
+    config = _config(
+        CIAO_WORKSPACE=str(tmp_path),
+        CIAO_RUNTIME_ROOT=str(tmp_path / ".runtime"),
+    )
+
+    assert load_entity_types(Path(config.vault_root)).dir_type_map()["Clients"] == "client"
+    assert _WORKSPACE_EVIDENCE_DIRS == frozenset(
+        {"People", "Projects", "Places", "Ideas", "Resources", "Workspace", "journal", "projects"}
+    )
+    assert list(config.workspaces) == ["personal"], "a category folder is not a workspace"
+
+
+def test_workspace_registry_file_defines_named_workspaces(tmp_path: Path) -> None:
     raw = json.dumps(
         [
             {
@@ -128,7 +212,9 @@ def test_ciao_workspaces_json_defines_named_workspaces(tmp_path: Path) -> None:
         ]
     )
 
-    config = _config(CIAO_WORKSPACE=str(tmp_path), CIAO_WORKSPACES=raw)
+    (tmp_path / ".runtime").mkdir(exist_ok=True)
+    (tmp_path / ".runtime" / "workspaces.json").write_text(raw, encoding="utf-8")
+    config = _config(CIAO_WORKSPACE=str(tmp_path))
 
     assert list(config.workspaces) == ["home", "client"]
     assert config.workspace_names() == ["home", "client"]
@@ -177,10 +263,10 @@ def test_runtime_workspaces_json_is_used_when_env_is_absent(tmp_path: Path) -> N
 
 
 def test_unknown_workspace_uses_global_defaults(tmp_path: Path) -> None:
-    config = _config(CIAO_WORKSPACE=str(tmp_path), CLAUDE_MODELS="sonnet,haiku")
+    config = _config(CIAO_WORKSPACE=str(tmp_path))
 
     assert config.workspace("missing") is None
-    assert config.default_model_for_workspace("missing") == "sonnet"
+    assert config.default_model_for_workspace("missing") == "opus"
     # A stale or renamed workspace name still gets the harness denies. Returning
     # [] made it the one input that reached the model with nothing denied.
     assert _policy_denies(config, config.disallowed_tools_for_workspace("missing")) == list(
@@ -194,7 +280,6 @@ def test_missing_auth_token_enters_bootstrap_mode_with_persisted_token(tmp_path:
     config = CiaoConfig.from_env(
         {
             "CIAO_BOOTSTRAP_WORKSPACE": str(bootstrap),
-            "CIAO_PUSH_CONTACT": "",
         }
     )
 
