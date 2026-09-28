@@ -116,7 +116,8 @@ the URL is checked with the classifier's own rule (scheme, host name, no
 credentials or whitespace), so an override like `https://` is refused before a
 single label or file is touched rather than after this Mac has given up its own
 engine. The migration receipt in `~/.local/state/ciaobot/migration/` (`schema`,
-`phase`, `before` block, `version`, `retiring_desktop`, `started_at`) is what
+`phase`, `before` block, `version`, `retiring_desktop`, `app_bundle`,
+`started_at`) is what
 makes the whole thing
 resumable: a retry reuses those originals rather than snapshotting the tool the
 previous attempt installed, and only a receipt that parses, records all five
@@ -147,7 +148,16 @@ whose workspace could not be recovered has to name an existing one rather than
 get a fresh `~/Ciaobot`. Taking a different workspace would start a second engine
 with a fresh password and a fresh runtime root next to the real ones, retire the
 app's agent, and leave the original and every chat in it behind while the receipt
-still named the original. The ordinary, non-`--migrate` path is unchanged: there
+still named the original. A hand-over that reaches `migrated` also removes the
+retired `Ciaobot.app` — the bundle the classifier named, guarded to a `.app`
+directory, deleted only after the app's own agent is gone, and reported rather
+than fatal if it would not go (`ciao desktop uninstall` is the manual fallback).
+Nothing before that removes it: `--no-start` leaves the app's agent loaded, a
+client gets somebody else's engine, and every rollback needs the bundle because
+the engine it hands back runs out of it. The bundle is recorded in the receipt
+(`app_bundle`) because a resumed run can no longer read it from the engine plist,
+which the first run already repointed. The ordinary, non-`--migrate` path is
+unchanged: there
 `--workspace` is how a workspace is named, and it is created. The workflow
 attaches it as the `install-engine.sh` release asset, and again as `install.sh`.
 
