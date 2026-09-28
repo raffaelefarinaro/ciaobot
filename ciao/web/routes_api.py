@@ -44,6 +44,7 @@ from ciao import proposal_outcomes
 from ciao import subagent_tracking
 from ciao import entity_types
 from ciao import provider_registry
+from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.web.auth import is_loopback_client
@@ -5580,7 +5581,22 @@ async def setup_mkdir_endpoint(request: Request) -> JSONResponse:
 # ── Admin ────────────────────────────────────────────────────────────────
 
 async def admin_snapshot(request: Request) -> JSONResponse:
-    """Trigger a git snapshot (add, commit, push)."""
+    """Trigger a git snapshot (add, commit, push).
+
+    The whole add/status/commit/push transaction runs inside
+    ``git_mutation.repository_mutation`` for ``config.workspace_root``. This
+    route is a fourth writer in one checkout — manual sync, the post-conflict
+    resync and the background backup are the other three — and a snapshot that
+    interleaves its git commands with one of theirs races the same index, so
+    the lock is taken before the preflight gate (what was checked is what gets
+    committed) and held through the response.
+
+    A failed step is a failure. ``git status`` exiting nonzero used to read as
+    "nothing to commit", because git writes an error to stderr and leaves
+    stdout empty, and the ``git commit`` return code was never looked at, so a
+    snapshot that captured nothing answered 200 and went on to push. Both now
+    return 500, and a failed commit never reaches the push.
+    """
     mgr = getattr(request.app.state, "local_session_manager", None)
     confirm_warnings = False
     try:
@@ -5589,59 +5605,78 @@ async def admin_snapshot(request: Request) -> JSONResponse:
     except ValueError:
         pass
 
-    if mgr is not None:
-        preflight = await mgr.preflight()
-        if preflight["blockers"]:
-            return JSONResponse(
-                {"ok": False, "error": "Blocked by secrets check", "blockers": preflight["blockers"]},
-                status_code=400
-            )
-        if preflight["warnings"] and not confirm_warnings:
-            return JSONResponse(
-                {"ok": False, "error": "Warnings exist, require confirmation", "warnings": preflight["warnings"]},
-                status_code=400
-            )
-
     config = request.app.state.config
     ws = config.workspace_root
 
-    try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            ["git", "add", "-A"],
-            cwd=str(ws), capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode != 0:
-            return JSONResponse({"error": f"git add failed: {result.stderr}"}, status_code=500)
+    async with repository_mutation(ws):
+        if mgr is not None:
+            preflight = await mgr.preflight()
+            if preflight["blockers"]:
+                return JSONResponse(
+                    {"ok": False, "error": "Blocked by secrets check", "blockers": preflight["blockers"]},
+                    status_code=400
+                )
+            if preflight["warnings"] and not confirm_warnings:
+                return JSONResponse(
+                    {"ok": False, "error": "Warnings exist, require confirmation", "warnings": preflight["warnings"]},
+                    status_code=400
+                )
 
-        status = await asyncio.to_thread(
-            subprocess.run,
-            ["git", "status", "--porcelain"],
-            cwd=str(ws), capture_output=True, text=True, timeout=10,
-        )
-        if not status.stdout.strip():
-            return JSONResponse({"ok": True, "message": "Nothing to commit"})
+        # A git operation Ciaobot did not start belongs to whoever started it.
+        # A stale-looking index.lock may be a real commit on another machine
+        # path, so the refusal is reported, never worked around by removing it.
+        try:
+            await asyncio.to_thread(ensure_mutable, ws)
+        except RepositoryBusyError as exc:
+            return JSONResponse({"error": exc.detail}, status_code=500)
 
-        from datetime import UTC, datetime
-        ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%SZ")
-        await asyncio.to_thread(
-            subprocess.run,
-            ["git", "commit", "-m", f"pwa snapshot {ts}"],
-            cwd=str(ws), capture_output=True, text=True, timeout=30,
-        )
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "add", "-A"],
+                cwd=str(ws), capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                return JSONResponse({"error": f"git add failed: {result.stderr}"}, status_code=500)
 
-        push = await asyncio.to_thread(
-            subprocess.run,
-            ["git", "push"],
-            cwd=str(ws), capture_output=True, text=True, timeout=60,
-        )
+            status = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "status", "--porcelain"],
+                cwd=str(ws), capture_output=True, text=True, timeout=10,
+            )
+            # Checked before the emptiness test: a failing status is empty
+            # stdout, and reading that as a clean tree is how a snapshot
+            # reported "nothing to commit" while git had refused outright.
+            if status.returncode != 0:
+                return JSONResponse({"error": f"git status failed: {status.stderr}"}, status_code=500)
+            if not status.stdout.strip():
+                return JSONResponse({"ok": True, "message": "Nothing to commit"})
 
-        return JSONResponse({
-            "ok": True,
-            "message": f"Snapshot committed and {'pushed' if push.returncode == 0 else 'push failed'}",
-        })
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+            from datetime import UTC, datetime
+            ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%SZ")
+            commit = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "commit", "-m", f"pwa snapshot {ts}"],
+                cwd=str(ws), capture_output=True, text=True, timeout=30,
+            )
+            # No push after a failed commit: a rejected commit (no identity, a
+            # full disk, a pre-commit hook) leaves nothing recorded, and
+            # pushing then reported a snapshot that does not exist.
+            if commit.returncode != 0:
+                return JSONResponse({"error": f"git commit failed: {commit.stderr}"}, status_code=500)
+
+            push = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "push"],
+                cwd=str(ws), capture_output=True, text=True, timeout=60,
+            )
+
+            return JSONResponse({
+                "ok": True,
+                "message": f"Snapshot committed and {'pushed' if push.returncode == 0 else 'push failed'}",
+            })
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 
