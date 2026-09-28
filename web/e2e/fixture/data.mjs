@@ -37,7 +37,7 @@ export const PROJECTS = WORKSPACES.flatMap((workspace, wi) => ([
   },
 ]))
 
-function chat(workspace, n, projectId, title) {
+function chat(workspace, n, projectId, title, extra = {}) {
   return {
     chat_id: `${workspace}-chat-${n}`,
     project_id: projectId,
@@ -67,12 +67,26 @@ function chat(workspace, n, projectId, title) {
     helper: {},
     retry: null,
     local: true,
+    ...extra,
   }
 }
 
 export const CHATS = WORKSPACES.flatMap((workspace) => ([
   chat(workspace.name, 1, `${workspace.name}-general`, `${workspace.name} first conversation`),
   chat(workspace.name, 2, `${workspace.name}-notes`, `${workspace.name} second conversation`),
+  // Archived, and only in the first workspace: the sidebar hides it, so every
+  // other spec sees the same rows it saw before, while a deep link to its id
+  // has something to open. `archive_path` is what a real archive carries (the
+  // chat is viewable with or without it), and the settled `memory_pass` step
+  // puts both post-archive affordances on screen — the summary and the "Open
+  // memory pass" link from #618, unreachable for the same reason.
+  ...(workspace === WORKSPACES[0]
+    ? [chat(workspace.name, 3, `${workspace.name}-general`, `${workspace.name} archived conversation`, {
+        archived: true,
+        archive_path: '/synthetic/alpha/archive/alpha-chat-3.jsonl',
+        postprocess: { state: 'done', steps: { memory_pass: { status: 'ok', extra: { chat_id: 'alpha-chat-2' } } } },
+      })]
+    : []),
 ]))
 
 export const SCHEDULES = [
