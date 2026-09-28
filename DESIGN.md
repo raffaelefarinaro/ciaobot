@@ -120,11 +120,14 @@ The home screen (**Home**) is the primary entry point and uses the Workbench com
 Core product work follows one visible model: **request → run → output → durable knowledge**. The transcript remains the reasoning surface. A conditional Work details drawer adds Context, Activity, and Output without forcing a permanent multi-column IDE layout. The chat header holds only close, the title, and **Archive** as a filled primary button with its label (it is the header's one action). Work details is not toggled from the header: an info (ⓘ) button at the right end of the rail's heading hides the rail, and while it is hidden (or the pane is too narrow for a rail) the same ⓘ sits as a small bordered tab at the chat body's top right and brings it back, opening the drawer on narrow panes. Project is the context envelope; Memory's Suggested and To revisit sections are the durable-knowledge inbox; its Map (Graph/List) is the deeper exploration mode. Memory lists its sections in the sidebar exactly as Settings lists its tabs — grouped *To decide* (Suggested, To revisit), *Explore* (Map) and *Records* (Retired, History), each a route with a quiet count at the row's end (accent on the two queues) — so the page header only names the section ("Memory · To revisit") and carries no mode switch or tab row. The map's search and category filters sit under that list only while Map is showing. Suggested and To revisit share one row shape: a 16px heading and one muted sentence, violet-tinted filter chips (by change type; by reason) with counts and no zero chips, then hairline rows with a fixed-width action column of neutral bordered buttons and a text link — no pink primary on a row, since every row is the same routine choice. A suggestion names its change before it is opened: a bordered tag with a drawn icon (*New note*, *Add to a note*, *Merge into a note*, *Update a line*, *Move a note*, *Already saved*), the destination in mono, and a compact numbered diff; its button is the verb (*Create note*, *Add line*, *Merge*) and accepts against the previewed revision. A note to revisit shows *type · reason · backlinks*, and each reason is a disclosure for its evidence (the quoted line with the match marked, or the check date and where it came from).
 
 There is no native shell: the engine serves the PWA, and every one of these
-states is a page in it. The PWA's update overlay mirrors the boot screen's
-terminal aesthetic (indigo canvas, pink accent, monospace progress bar and log
-rows), so the PWA update overlay and the PWA boot screen read as one consistent
-surface; the update overlay is the only place a package update is reported, and
-it says a restart is pending until the new engine answers. In the PWA, an
+states is a page in it. Before the engine reports startup phases, the connecting
+screen states that it is checking the connection, with indeterminate motion rather
+than an invented 0% boot progress. When the engine reports phases, it shows their
+real status in plain-language rows. This screen shares the calm indigo canvas,
+type hierarchy and restrained accent of the engine recovery curtain; neither
+pretends the browser is booting the host. The update overlay remains the only
+place a package update is reported, and it says a restart is pending until the
+new engine answers. In the PWA, an
 engine that stops answering shows a full-screen recovery curtain over the kept
 route. It uses the boot-screen language: a plain title, `ciao service
 start|status` on this computer, Retry, and automatic reconnect. It is modal
