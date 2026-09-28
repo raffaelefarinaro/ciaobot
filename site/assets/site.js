@@ -34,6 +34,29 @@
   });
 })();
 
+// A visitor-controlled example of conversation → note → recall on the home page.
+(function () {
+  var board = document.querySelector('[data-memory-demo]');
+  if (!board) return;
+  var action = board.querySelector('.memory-action');
+  var count = board.querySelector('.memory-board-count');
+  var status = board.querySelector('.memory-board-status');
+  var steps = [
+    { count: '01 / 03', status: 'Start with a conversation. Finish it to save what matters.', action: 'Finish the chat' },
+    { count: '02 / 03', status: 'The detail is now in a project note you can read and edit.', action: 'Ask again later' },
+    { count: '03 / 03', status: 'The next conversation can use that saved context.', action: 'Play again' }
+  ];
+  var step = 0;
+  action.addEventListener('click', function () {
+    step = (step + 1) % steps.length;
+    board.dataset.step = String(step);
+    count.textContent = steps[step].count;
+    status.textContent = steps[step].status;
+    action.firstChild.textContent = steps[step].action + ' ';
+    action.querySelector('[aria-hidden]').textContent = step === 2 ? '↺' : '→';
+  });
+})();
+
 // Live GitHub stars and app downloads. Unauthenticated API (60 requests/hour
 // per visitor), so results are cached for ten minutes in sessionStorage.
 (function () {
