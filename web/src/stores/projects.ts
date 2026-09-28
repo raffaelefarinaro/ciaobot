@@ -53,6 +53,7 @@ import {
   dropSupersededLiveTail,
   historySignature,
   isLiveTraceRow,
+  isSettledHistoryRow,
   mergeMessageFields,
   mergeMetadata,
   normalizeMessages,
@@ -1370,7 +1371,6 @@ export const useProjectStore = defineStore('projects', () => {
   // the project could not be found.
   async function newChatInProject(
     projectId: string,
-    initialText = '',
     title = DEFAULT_CHAT_TITLE,
     runtime?: NewChatRuntime,
   ): Promise<ChatInfo | undefined> {
@@ -1388,10 +1388,7 @@ export const useProjectStore = defineStore('projects', () => {
     activeWorkspace.value = project.workspace
     persistState()
     try {
-      if (runtime) return await createChat(project.project_id, title, initialText || undefined, runtime)
-      return initialText
-        ? await createChat(project.project_id, title, initialText)
-        : await createChat(project.project_id)
+      return await createChat(project.project_id, title, undefined, runtime)
     } catch (err) {
       // The switch is committed before the POST, so a rejected creation used
       // to leave the app scoped to the new workspace while still showing (and
@@ -1927,8 +1924,9 @@ export const useProjectStore = defineStore('projects', () => {
       // transcript with the server idle can only mean the turn is over.
       return true
     }
-    if (last.role === 'assistant') return true
-    return last.role === 'system' && last.tool_name !== '_activity'
+    // A trailing trace row (commentary, thinking, activity, file card) is the
+    // turn still being written, not its answer.
+    return isSettledHistoryRow(last)
   }
 
   function clearStreamingState(chatId: string) {
@@ -2681,7 +2679,12 @@ export const useProjectStore = defineStore('projects', () => {
       await loadMessagesFromServer(chatId)
       if (opts?.waitForSettledReply && !opts?.background) {
         const last = (messages.value[chatId] || []).at(-1)
-        const awaitingReply = last?.role === 'user'
+        // Anything that is not a settled row leaves the turn's answer missing:
+        // the trailing user bubble of an unanswered question, or a trace-only
+        // tail (commentary, thinking, activity, file card) the session file had
+        // already written by the time this response was built.
+        const awaitingReply = Boolean(last)
+          && !isSettledHistoryRow(last)
           && !streaming.value[chatId]
           && !projectStreaming.value[chatId]
         if (awaitingReply) {
@@ -2746,7 +2749,7 @@ export const useProjectStore = defineStore('projects', () => {
           const lastServer = windowRows[windowRows.length - 1]
           const serverTurnSettled = Boolean(
             lastServer
-            && lastServer.role === 'assistant'
+            && isSettledHistoryRow(lastServer)
             && !lastServer.is_error
             && lastServer.timestamp,
           )
@@ -2928,14 +2931,15 @@ export const useProjectStore = defineStore('projects', () => {
           messages.value[chatId] = dropSupersededLiveTail(merged, tailStart, firstAppendPos)
         }
         persistMessages()
-        if (streaming.value[chatId]
+        // Same rule the flat branch below applies, through the same predicate:
+        // a trace-only tail is the turn still being written, not its end.
+        if (
+          streaming.value[chatId]
           && !projectStreaming.value[chatId]
           && !queuedMessages.value[chatId]?.length
+          && hasSettledHistory(chatId)
         ) {
-          const last = messages.value[chatId]?.at(-1)
-          if (last && ((last.role === 'assistant' && !last.is_error) || (last.role === 'system' && last.tool_name !== '_activity'))) {
-            clearStreamingState(chatId)
-          }
+          clearStreamingState(chatId)
         }
         reconcileQueuedWithMessages(chatId)
         return
@@ -2959,10 +2963,10 @@ export const useProjectStore = defineStore('projects', () => {
       if (projectStreaming.value[chatId]) {
         const lastServer = normalizedServer[normalizedServer.length - 1]
         const serverTurnSettled = Boolean(
-          lastServer &&
-          lastServer.role === 'assistant' &&
-          !lastServer.is_error &&
-          lastServer.timestamp,
+          lastServer
+          && isSettledHistoryRow(lastServer)
+          && !lastServer.is_error
+          && lastServer.timestamp,
         )
         if (!serverTurnSettled) {
           const localMsgs = messages.value[chatId] || []
@@ -3163,8 +3167,8 @@ export const useProjectStore = defineStore('projects', () => {
 
   // Post-result reconciliation: the SDK session file is sometimes a beat
   // behind the result event (buffered writes, WS reconnect races). Retry
-  // loadMessages until the server's history ends with a final assistant
-  // reply, so the bubble lands without needing a manual close/reopen.
+  // loadMessages until the server's history ends with a settled row, so the
+  // bubble lands without needing a manual close/reopen.
   // Background: this fires on every turn while the chat is already open and
   // rendered, so it must not flash the "Updating conversation…" indicator on
   // each of its up-to-6 retries.
@@ -3173,29 +3177,28 @@ export const useProjectStore = defineStore('projects', () => {
     for (const delay of delays) {
       if (delay) await new Promise(r => setTimeout(r, delay))
       await loadMessages(chatId, { background: true })
+      // The events socket owns `projectStreaming`, and it can flip back on
+      // while this loop is awaiting: a new turn has started. Nothing read from
+      // history before that moment describes it, so end here rather than
+      // clearing the live turn's buffers. Its own result frame reconciles it.
+      if (projectStreaming.value[chatId]) return
       const msgs = messages.value[chatId] || []
       const last = msgs[msgs.length - 1]
-      // Stop once the turn is capped by a non-error assistant reply or an
-      // explicit error/system note — anything that isn't a trailing user msg
-      // or tool-activity entry means the final state is rendered.
       if (!last) {
         // A turn can legitimately end with nothing on the transcript (the
         // image-capability pre-flight aborts before dispatch, so /messages
         // stays empty). Retrying cannot change that: clear the stale spinner
         // instead of running out the retry budget with "Thinking…" on screen.
-        if (!projectStreaming.value[chatId]) {
-          clearStreamingState(chatId)
-          void loadSubagents(chatId)
-          return
-        }
-        continue
-      }
-      if (last.role === 'assistant' && !last.is_error) {
         clearStreamingState(chatId)
         void loadSubagents(chatId)
         return
       }
-      if (last.role === 'system' && last.tool_name !== '_activity') {
+      // Stop once the turn is capped by an answer, an explicit error, or a
+      // system notice. A trace-only tail — commentary, thinking, activity, a
+      // file card — is the turn still being written, so keep retrying: settling
+      // on one is what left the answer unrendered until the user opened
+      // Activity.
+      if (isSettledHistoryRow(last)) {
         clearStreamingState(chatId)
         void loadSubagents(chatId)
         return
@@ -4014,7 +4017,10 @@ export const useProjectStore = defineStore('projects', () => {
         if (msg.chat_id === activeChatId.value) {
           const localMsgs = messages.value[msg.chat_id]
           const last = localMsgs && localMsgs.length > 0 ? localMsgs[localMsgs.length - 1] : null
-          const turnSettled = last !== null && last.role === 'assistant' && !last.is_error
+          // A trailing trace row is not the turn's answer: with the spinner
+          // already down, skipping reconciliation here is what left the reply
+          // blank until the user opened Activity to force a refetch.
+          const turnSettled = last !== null && !last.is_error && isSettledHistoryRow(last)
           if (!turnSettled || streaming.value[msg.chat_id]) {
             void reconcileAfterResult(msg.chat_id)
           }

@@ -22,14 +22,13 @@ describe('HomeIntake', () => {
     vi.restoreAllMocks()
   })
 
-  it('opens the shared project picker and starts work in the selected project', async () => {
+  it('sends straight into the chip project without asking again', async () => {
     const store = useProjectStore()
     store.projects = [
       { project_id: 'general', name: 'General', workspace: 'personal', order: 0 },
       { project_id: 'launch', name: 'Launch', workspace: 'personal', order: 1 },
     ] as unknown as typeof store.projects
     store.activeWorkspace = 'personal'
-    openPicker.mockResolvedValue('launch')
 
     const chat = { chat_id: 'new-chat' } as ChatInfo
     const create = vi.spyOn(store, 'newChatInProject').mockResolvedValue(chat)
@@ -41,12 +40,9 @@ describe('HomeIntake', () => {
     await wrapper.get('form').trigger('submit')
     await flushPromises()
 
-    expect(openPicker).toHaveBeenCalledWith({ workspace: 'personal', projectId: 'general' })
-    expect(create).toHaveBeenCalledWith(
-      'launch',
-      'Turn the research notes into a decision brief',
-      'Turn the research notes into a decision brief',
-    )
+    expect(openPicker).not.toHaveBeenCalled()
+    // Title only: the prompt is sent, never seeded as the new chat's draft.
+    expect(create).toHaveBeenCalledWith('general', 'Turn the research notes into a decision brief', undefined)
     expect(send).toHaveBeenCalledWith('new-chat', 'Turn the research notes into a decision brief')
     expect(wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').element.value).toBe('')
     wrapper.unmount()
@@ -132,7 +128,8 @@ describe('HomeIntake', () => {
     await wrapper.get('form').trigger('submit')
     await flushPromises()
 
-    expect(create).toHaveBeenCalledWith('launch', 'Ship it', 'Ship it')
+    expect(openPicker).toHaveBeenCalledTimes(1)
+    expect(create).toHaveBeenCalledWith('launch', 'Ship it', undefined)
     wrapper.unmount()
   })
 
@@ -143,7 +140,6 @@ describe('HomeIntake', () => {
       { project_id: 'work-general', name: 'General', workspace: 'work', order: 0 },
     ] as unknown as typeof store.projects
     store.activeWorkspace = 'personal'
-    openPicker.mockResolvedValue('work-general')
     vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'work-chat' } as ChatInfo)
     vi.spyOn(store, 'sendMessage').mockReturnValue(true)
 
@@ -158,12 +154,8 @@ describe('HomeIntake', () => {
     await input.setValue('Work planning brief')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
-    expect(openPicker).toHaveBeenCalledWith({ workspace: 'work', projectId: 'work-general' })
-    expect(store.newChatInProject).toHaveBeenCalledWith(
-      'work-general',
-      'Work planning brief',
-      'Work planning brief',
-    )
+    expect(openPicker).not.toHaveBeenCalled()
+    expect(store.newChatInProject).toHaveBeenCalledWith('work-general', 'Work planning brief', undefined)
 
     store.activeWorkspace = 'personal'
     await nextTick()
@@ -177,7 +169,6 @@ describe('HomeIntake', () => {
       { project_id: 'general', name: 'General', workspace: 'personal', order: 0 },
     ] as unknown as typeof store.projects
     store.activeWorkspace = 'personal'
-    openPicker.mockResolvedValue('general')
     const create = vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'empty' } as ChatInfo)
 
     const wrapper = mount(HomeIntake)
@@ -194,7 +185,6 @@ describe('HomeIntake', () => {
       { project_id: 'general', name: 'General', workspace: 'personal', order: 0 },
     ] as unknown as typeof store.projects
     store.activeWorkspace = 'personal'
-    openPicker.mockResolvedValue('general')
     vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'x' } as ChatInfo)
     vi.spyOn(store, 'sendMessage').mockReturnValue(true)
 
@@ -203,12 +193,11 @@ describe('HomeIntake', () => {
     await input.setValue('Draft the plan')
     await input.trigger('keydown', { key: 'Enter' })
     await flushPromises()
-    expect(openPicker).not.toHaveBeenCalled()
+    expect(store.newChatInProject).not.toHaveBeenCalled()
 
     await input.trigger('keydown', { key: 'Enter', ctrlKey: true })
     await flushPromises()
-    expect(openPicker).toHaveBeenCalledTimes(1)
-    expect(store.newChatInProject).toHaveBeenCalledWith('general', 'Draft the plan', 'Draft the plan')
+    expect(store.newChatInProject).toHaveBeenCalledWith('general', 'Draft the plan', undefined)
     wrapper.unmount()
   })
 
@@ -232,7 +221,6 @@ describe('HomeIntake', () => {
       provider_defaults: { claude: 'opus', opencode: 'openai/gpt-5.2' },
       opencode_models: ['openai/gpt-5.2'],
     }
-    openPicker.mockResolvedValue('general')
     const create = vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'x' } as ChatInfo)
     vi.spyOn(store, 'sendMessage').mockReturnValue(true)
 
@@ -253,7 +241,7 @@ describe('HomeIntake', () => {
     await wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').setValue('Plan the week')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
-    expect(create).toHaveBeenCalledWith('general', 'Plan the week', 'Plan the week', { model: 'sonnet', provider: 'claude' })
+    expect(create).toHaveBeenCalledWith('general', 'Plan the week', { model: 'sonnet', provider: 'claude' })
 
     // A workspace switch drops the override: the other workspace has its
     // own default.
@@ -269,7 +257,6 @@ describe('HomeIntake', () => {
       { project_id: 'general', name: 'General', workspace: 'personal', order: 0, vault_folder: 'Projects/General' },
     ] as unknown as typeof store.projects
     store.activeWorkspace = 'personal'
-    openPicker.mockResolvedValue('general')
     vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'fresh' } as ChatInfo)
     const uploadImages = vi.spyOn(store, 'uploadImages').mockResolvedValue(['img_1'])
     const send = vi.spyOn(store, 'sendMessage').mockReturnValue(true)
@@ -296,5 +283,24 @@ describe('HomeIntake', () => {
     vi.unstubAllGlobals()
     wrapper.unmount()
   })
-})
 
+  it('asks for a project only when the chip has none to name', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'mem', name: 'Memory', workspace: 'personal', kind: 'memory', order: 0 },
+    ] as unknown as typeof store.projects
+    store.activeWorkspace = 'personal'
+    openPicker.mockResolvedValue(null)
+    const create = vi.spyOn(store, 'newChatInProject')
+
+    const wrapper = mount(HomeIntake)
+    await wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').setValue('Where does this go')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(openPicker).toHaveBeenCalledWith({ workspace: 'personal', projectId: undefined })
+    expect(create).not.toHaveBeenCalled()
+    expect(wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').element.value).toBe('Where does this go')
+    wrapper.unmount()
+  })
+})

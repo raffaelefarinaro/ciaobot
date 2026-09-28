@@ -220,6 +220,19 @@ def _bash_command_text(tool_input: object) -> str:
     return ""
 
 
+# `2>/dev/null`, `>log`, `<in`: a redirection, not an argument. shlex keeps it
+# in the token list, so a `cp a b 2>/dev/null` would otherwise take the
+# redirect as the destination.
+_SHELL_REDIRECT_TOKEN_RE = re.compile(r"^\d*(?:[<>]|&>)")
+
+
+def _argv_before_redirect(tokens: list[str]) -> list[str]:
+    for i, token in enumerate(tokens):
+        if _SHELL_REDIRECT_TOKEN_RE.match(token):
+            return tokens[:i]
+    return tokens
+
+
 def _paths_from_shell_command(command: str) -> list[dict]:
     """Best-effort paths a shell command creates or overwrites."""
     results: list[dict] = []
@@ -238,7 +251,7 @@ def _paths_from_shell_command(command: str) -> list[dict]:
         add(match.group(2), "created" if match.group(1) == ">" else "written")
     for match in _SHELL_TOUCH_RE.finditer(command):
         try:
-            tokens = shlex.split(match.group(1))
+            tokens = _argv_before_redirect(shlex.split(match.group(1)))
         except ValueError:
             continue
         for token in tokens:
@@ -249,7 +262,8 @@ def _paths_from_shell_command(command: str) -> list[dict]:
         add(match.group(2), "written" if match.group(1) else "created")
     for match in _SHELL_COPY_RE.finditer(command):
         try:
-            tokens = [t for t in shlex.split(match.group(1)) if not t.startswith("-")]
+            argv = _argv_before_redirect(shlex.split(match.group(1)))
+            tokens = [t for t in argv if not t.startswith("-")]
         except ValueError:
             continue
         if len(tokens) >= 2:

@@ -61,13 +61,13 @@
              top right of the chat body and hides from its own heading. -->
         <button
           type="button"
-          class="btn-primary chat-archive-btn"
+          class="btn-icon chat-archive-btn"
           :title="ARCHIVE_ACTION_LABEL"
           :aria-label="ARCHIVE_ACTION_LABEL"
           @click="doArchive"
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
-          <span>Archive</span>
+          <span class="chat-archive-label">Archive</span>
         </button>
       </template>
     </PaneHeader>
@@ -1365,6 +1365,7 @@ import {
   findFinalAnswerIndex,
   formatTokenUsage,
   isImageFilePath,
+  isScratchPath,
   isSubagentLine,
   mentionedFilePaths,
   mergeTraceOutputs,
@@ -1959,9 +1960,11 @@ const inspectorTabs = [
 // One row per file name: the same note shows up under several spellings
 // (relative, workspace-prefixed, before and after a move), and the reader
 // thinks of it as one file.
+// Temp-dir files are the agent's scratch work; the inline cards still show
+// them, but the chat's file list is what it made for the user.
 const inspectorOutputs = computed<TraceOutput[]>(() => collapseOutputsByName(mergeTraceOutputs(
   renderItems.value.map(item => (item.kind === 'trace' || item.kind === 'assistant' ? item.outputs : undefined)),
-)))
+).filter(output => !isScratchPath(output.file_path))))
 // Every activity line this chat has produced: its turns, the subagents they
 // ran, and the turn in flight. The rail reads skills and MCP tools from it.
 const chatActivityLines = computed<string[]>(() => {
@@ -1992,6 +1995,7 @@ const mentionedFiles = computed<string[]>(() => {
   for (const item of renderItems.value) {
     if (item.kind !== 'assistant' || !item.msg.content) continue
     for (const path of mentionedFilePaths(item.msg.content)) {
+      if (isScratchPath(path)) continue
       const name = fileCardBasename(path)
       if (produced.has(name) || found.some(p => fileCardBasename(p) === name)) continue
       found.push(path)
@@ -7037,6 +7041,25 @@ details[open] > .activity-summary::before {
   }
   :deep(.header-title) { text-align: left; min-width: 0; }
   .header-left { min-width: 0; }
+  .header-breadcrumb {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    row-gap: 2px;
+  }
+  .header-breadcrumb .chat-title {
+    flex: 0 1 auto;
+    width: 100%;
+  }
+  .breadcrumb-scope {
+    max-width: 100%;
+    align-self: flex-start;
+  }
+  .chat-archive-btn {
+    color: var(--fg2);
+  }
+  .chat-archive-btn:hover { color: var(--fg); }
+  .chat-archive-label { display: none; }
   /* The scope/title stack is the base layout now, so this block only carries
      what a narrow header changes about it. */
   /* PaneHeader drops every pane title to --text-sm on narrow screens, which is

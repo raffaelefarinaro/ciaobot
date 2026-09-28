@@ -364,6 +364,30 @@ export function dropSupersededLiveTail(
   return kept
 }
 
+/**
+ * True when a history row can stand as the end of a turn: real answer or
+ * error output, which is what the user reads in the transcript.
+ *
+ * The session file is written as the turn runs, so a `/messages` response can
+ * still end on a trace row — provider `phase: commentary` narration, or a
+ * tool-backed system row (`_activity`, `_thinking`, `_filecard`, any other
+ * tool name). Those render from the live stream, not from history, and they
+ * land before the final answer is written. Settling on one ended the
+ * post-result retries early and left the reply blank until Activity forced a
+ * refetch (#630).
+ *
+ * Whether an empty transcript counts as settled, and whether the server still
+ * owns the turn, stay with the callers: this only reads the row.
+ */
+export function isSettledHistoryRow(row: ChatMessage | undefined): boolean {
+  if (!row) return false
+  if (!(row.content || '').trim()) return false
+  if (row.role === 'assistant') return row.phase !== 'commentary'
+  // A system row with a tool_name is a trace step; without one it is a
+  // client-side notice (an error the turn ended on, say).
+  return row.role === 'system' && !row.tool_name
+}
+
 /** Emoji shown beside a tool name in the activity trace. */
 export function toolIcon(name: string): string {
   const icons: Record<string, string> = {

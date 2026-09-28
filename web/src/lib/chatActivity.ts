@@ -155,6 +155,16 @@ export function collapseOutputsByName(outputs: TraceOutput[]): TraceOutput[] {
   return [...byName.values()]
 }
 
+// System temp roots (macOS resolves /tmp and /var/folders under /private).
+const SCRATCH_ROOTS = ['/tmp/', '/private/tmp/', '/var/tmp/', '/private/var/tmp/', '/var/folders/', '/private/var/folders/']
+
+/** True for a file under a system temp directory: an agent's scratch work,
+ *  not something the chat produced for the user. */
+export function isScratchPath(filePath: string): boolean {
+  const path = normalizeOutputPath(filePath)
+  return SCRATCH_ROOTS.some(root => path.startsWith(root))
+}
+
 /** The last two folders of a path, for a compact label (full path on hover). */
 export function shortDirname(filePath: string): string {
   const parts = normalizeOutputPath(filePath).split('/').filter(Boolean)
