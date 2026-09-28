@@ -190,6 +190,27 @@ def test_a_legacy_file_parses_into_a_pending_record_without_a_rewrite(
     assert path.read_bytes() == before
 
 
+def test_a_legacy_file_is_still_listed_as_pending(tmp_path: Path) -> None:
+    """The queue, not just the parser.
+
+    The old writer is gone for good — the weekly skill-evolution pass that
+    produced these files was retired in #697 — so every loose file left in a
+    user's queue is permanent. If `read_queue` stopped listing one, the review
+    page and the nightly curation worklist would both silently lose a finding
+    the user is still being asked about. It has to keep reading, and it has to
+    keep reading it as open.
+    """
+    config = _config(tmp_path)
+    _write(sp.queue_dir(config, "personal") / "2026-05-20-defuddle.md", LEGACY_FILE)
+    sp.upsert_proposal(config, _proposal(skill="web-research"))
+
+    queued = sp.read_queue(config, "personal")
+
+    assert [item.skill for item in queued] == ["2026-05-20-defuddle", "web-research"]
+    assert all(item.lifecycle == sp.PENDING for item in queued)
+    assert queued[0].id == sp.proposal_id("personal", "2026-05-20-defuddle")
+
+
 def test_a_legacy_file_keeps_the_words_it_had_no_field_for(tmp_path: Path) -> None:
     """The acceptance test for a readable legacy record: merging into one loses
     none of the words the old file had no field for. The preamble and the

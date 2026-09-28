@@ -5,6 +5,9 @@ answers "what is installed", as labels for the Settings list.
 :func:`resolve_owned_skill` and :func:`eligible_owned_skills` answer "which of
 those may a pass edit", which no label can carry: see the workspace-owned
 sources section at the foot of the module.
+
+:data:`MAX_SKILL_BYTES` lives here for the same reason: a budget for one
+``SKILL.md`` is a fact about skills, and this is the module that owns them.
 """
 
 from __future__ import annotations
@@ -23,6 +26,15 @@ if TYPE_CHECKING:
 # disappears from the package and an unshadowed one is refreshed on every sync.
 # The same marker is what tells an owned source from a generated copy.
 STOCK_SKILL_MARKER = ".ciao-stock-skill"
+
+# The context budget for one ``SKILL.md``. A skill loads in full every time it
+# triggers, so this is what the engine pays for it, not a validity rule: an
+# import warns past it (``ciao.skill_import``) and ``os_audit`` reports a skill
+# as over budget, but neither refuses the file. It used to live in the retired
+# weekly skill-evolution pass; the memory pass replaced that pass as the sole
+# producer, and nothing but the import reads this name, so it lives here with
+# the other skill constants rather than in a module that has no callers.
+MAX_SKILL_BYTES = 15 * 1024
 
 
 def build_skill_inventory(

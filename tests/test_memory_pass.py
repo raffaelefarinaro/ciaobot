@@ -21,7 +21,7 @@ import pytest
 
 from ciao import archive_jobs as aj
 from ciao.config import CiaoConfig
-from ciao.models import AgentRequest, ResultEvent, StreamEvent
+from ciao.models import AgentRequest, ChatContext, ResultEvent, StreamEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web import chat_service, memory_pass
@@ -114,6 +114,74 @@ def _archive_file(tmp_path: Path) -> Path:
     archive.parent.mkdir(parents=True, exist_ok=True)
     archive.write_text("# Pricing rework\n", encoding="utf-8")
     return archive
+
+
+def _register_work_workspace(tmp_path: Path) -> None:
+    """Put a ``work`` workspace in the vault so the registry holds one.
+
+    The config is built from the vault, so a manager built before this exists
+    knows no workspace at all — and a workspace the registry does not hold owns
+    no catalog, which is the whole of the skill-review section's precondition.
+    """
+    (tmp_path / "memory-vault" / "work" / "Workspace").mkdir(parents=True)
+
+
+def _write_owned_skill(root: Path, name: str) -> Path:
+    """The canonical owned source ``<root>/skills/<name>/SKILL.md``."""
+    skill_md = root / "skills" / name / "SKILL.md"
+    skill_md.parent.mkdir(parents=True, exist_ok=True)
+    skill_md.write_text(
+        f"---\nname: {name}\ndescription: Owned skill\n---\n\n# {name}\n",
+        encoding="utf-8",
+    )
+    return skill_md
+
+
+def _installed_stock_copy(root: Path, name: str) -> Path:
+    """A sync-generated copy under ``.claude/skills``, which no pass may edit."""
+    skill_dir = root / ".claude" / "skills" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / ".ciao-stock-skill").write_text("stock\n", encoding="utf-8")
+    skill_md = skill_dir / "SKILL.md"
+    skill_md.write_text(f"# {name}\n", encoding="utf-8")
+    return skill_md
+
+
+def _archive_using(tmp_path: Path, skill: str) -> Path:
+    """A real archived transcript whose single turn used ``skill``.
+
+    Rendered by the store rather than handwritten, because the pass cites what
+    the archive retains: a hand-written ``- Skills:`` line here would keep this
+    test green after the renderer stopped writing one.
+    """
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "memory-vault")
+    ctx = ChatContext(chat_id=0, key_override="src")
+    store.record_turn(
+        AgentRequest(
+            prompt="File the notes",
+            model="sonnet",
+            mode="bypass",
+            resume_session=None,
+            images=[],
+        ),
+        ctx=ctx,
+        response_text="Filed them.",
+        effective_model="sonnet",
+        session_id="sess-skill",
+        usage={},
+        quota={},
+        input_kind="text",
+        context_label="Pricing rework",
+        tool_events=[{"id": "t1", "name": "Skill", "input": {"summary": skill}}],
+    )
+    archived = store.archive_session(
+        ctx=ctx,
+        active_model="sonnet",
+        last_effective_model="sonnet",
+        session_id="sess-skill",
+    )
+    assert archived is not None
+    return archived
 
 
 def _source(
@@ -238,6 +306,127 @@ def test_prompt_still_formats_every_placeholder() -> None:
     ):
         assert filled in rendered
     assert "{" not in rendered and "}" not in rendered
+
+
+def test_skill_review_section_formats_every_placeholder() -> None:
+    """Same contract for the appended section: the skill list is its one field.
+
+    A JSON example spelled out in the section would be read as a field here,
+    which is why the keys are named in prose instead.
+    """
+    rendered = memory_pass.SKILL_REVIEW_PROMPT.format(skills="notes, web-research")
+    assert "notes, web-research" in rendered
+    assert "{" not in rendered and "}" not in rendered
+
+
+def test_pass_reviews_the_owned_skills_the_conversation_used(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    """The skill section is appended, and the memory work is untouched by it.
+
+    Both halves matter: a pass that stopped filing memory notes because a skill
+    review was added, or one that reviews the whole catalog instead of what the
+    conversation used, is the failure this section must not introduce.
+    """
+    _register_work_workspace(tmp_path)
+    _write_owned_skill(tmp_path, "notes")
+    _write_owned_skill(tmp_path, "unused-skill")
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    archive = _archive_using(tmp_path, "notes")
+
+    manager.enqueue_memory_pass(
+        source, manager.get_project(source.project_id), archive, ""
+    )
+
+    prompt = str(streams.calls[0]["prompt"])
+    # The memory pass is still the memory pass.
+    assert "**Categories** section of the vault's `VOCABULARY.md`" in prompt
+    assert "marked as automated (unattended) are not the user's" in prompt
+    assert "Finish with a short list of what you changed." in prompt
+    # The candidates are the skills the turn used, resolved against the
+    # workspace's own catalog: `unused-skill` is owned but was not used.
+    assert "own skills in use: notes." in prompt
+    assert "unused-skill" not in prompt
+    # The rules the section exists to state.
+    # Positional, because that is what the parser takes: naming a `--skill`
+    # flag the parser has never heard of exits 2 and files nothing.
+    assert "ciao skill-proposal-add NAME --input-file FILE" in prompt
+    assert "Never edit a skill" in prompt
+    assert "filing none is a valid result" in prompt
+    # And the evidence the proposal has to carry.
+    for field in ("`turn`", "`excerpt`", "`sources`", "`change`"):
+        assert field in prompt
+
+
+def test_pass_asks_for_no_skill_review_when_the_conversation_used_no_skill(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    """A conversation that used no skill gets no section to satisfy.
+
+    The section is the expensive half of the prompt and the one that can be
+    wrong, so it is only ever rendered when there is a candidate — and a
+    candidate is decided here, not by the model declining to look. The workspace
+    owns a skill here: ownership alone is not the trigger, use is.
+    """
+    _register_work_workspace(tmp_path)
+    _write_owned_skill(tmp_path, "notes")
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    archive = _archive_file(tmp_path)
+
+    manager.enqueue_memory_pass(
+        source, manager.get_project(source.project_id), archive, ""
+    )
+
+    prompt = str(streams.calls[0]["prompt"])
+    assert "own skills in use" not in prompt
+    assert "skill-proposal-add" not in prompt
+    assert "Finish with a short list of what you changed." in prompt
+
+
+def test_pass_refuses_an_installed_stock_copy_as_a_candidate(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    """A used skill the workspace does not own is not a candidate at all.
+
+    The conversation genuinely used ``web-research``, and a pass that filed a
+    proposal against it would be asking for an edit to a copy sync refreshes on
+    every run. The exclusion is the resolver's, computed before the prompt is
+    built: a model-supplied flag is not a boundary.
+    """
+    _register_work_workspace(tmp_path)
+    _installed_stock_copy(tmp_path, "web-research")
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    archive = _archive_using(tmp_path, "web-research")
+
+    manager.enqueue_memory_pass(
+        source, manager.get_project(source.project_id), archive, ""
+    )
+
+    prompt = str(streams.calls[0]["prompt"])
+    assert "web-research" not in prompt
+    assert "skill-proposal-add" not in prompt
+
+
+def test_pass_does_not_walk_the_catalog_when_the_workspace_owns_nothing(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    """An unregistered workspace owns no catalog, so nothing is reviewable."""
+    _write_owned_skill(tmp_path, "notes")
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    archive = _archive_using(tmp_path, "notes")
+
+    # `_source` creates its project in the `work` workspace, so this is the one
+    # case that must not raise: the registry holds no `work` at all.
+    assert manager._config.workspace("work") is None
+    manager.enqueue_memory_pass(
+        source, manager.get_project(source.project_id), archive, ""
+    )
+
+    assert "own skills in use" not in str(streams.calls[0]["prompt"])
 
 
 # ── Helper normalisation ──────────────────────────────────────────────────

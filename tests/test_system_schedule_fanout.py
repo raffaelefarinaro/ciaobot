@@ -5,9 +5,10 @@ a real workspace: the resolver fell through it to the primary one, so exactly
 one vault was ever curated and every work contact was filed under
 `personal/People/`.
 
-Both shipped routines are partitioned per workspace: Workspace care owns that
-workspace's vault, while Skill reflection reads that workspace's trajectories
-and canonical user-owned skills.
+Both shipped routines were partitioned per workspace: Workspace care owns that
+workspace's vault, while Skill reflection read that workspace's trajectories
+and canonical user-owned skills. Skill reflection was retired in #697 — the
+retirement tests at the foot of this file cover how its persisted rows go.
 
 The set is derived on every read, not persisted: `list_entries` drops runtime
 rows with `scope == "system"`, so it cannot be extended by writing to
@@ -21,7 +22,8 @@ from pathlib import Path
 
 import pytest
 
-from ciao.job_runs import automation_summary
+from ciao import job_runs
+from ciao.job_runs import JobSpec, automation_summary
 from ciao.schedules import (
     ScheduleStore,
     system_base_id,
@@ -47,6 +49,10 @@ def _ids(store: ScheduleStore) -> list[str]:
 
 def test_base_id_survives_fan_out() -> None:
     assert system_base_id("system-memory-curation@work") == "system-memory-curation"
+    # Purely lexical, so a retired routine's persisted ids still resolve to the
+    # base id they were written under. That is what makes its retirement exact:
+    # the row stops being read because the definition is gone, not because its
+    # name stopped matching.
     assert system_base_id("system-skill-evolution@work") == "system-skill-evolution"
     assert system_base_id("") == ""
 
@@ -78,14 +84,6 @@ def test_curation_becomes_one_entry_per_workspace(tmp_path: Path) -> None:
     assert "system-memory-curation@personal" in ids
     assert "system-memory-curation@work" in ids
     assert "system-memory-curation" not in ids
-
-
-def test_skill_reflection_is_fanned_out_per_workspace(tmp_path: Path) -> None:
-    ids = _ids(_store(tmp_path, "personal", "work"))
-
-    assert "system-skill-evolution@personal" in ids
-    assert "system-skill-evolution@work" in ids
-    assert "system-skill-evolution" not in ids
 
 
 def test_each_fanned_out_row_carries_its_own_workspace(tmp_path: Path) -> None:
@@ -218,7 +216,6 @@ def test_a_stale_workspace_in_the_overlay_no_longer_shadows_the_definition(
         tmp_path,
         {
             "system-memory-curation": {"enabled": True, "workspace": "default"},
-            "system-skill-evolution": {"enabled": True, "workspace": "default"},
         },
     )
 
@@ -327,25 +324,157 @@ def test_a_case_only_workspace_difference_is_not_a_move(tmp_path: Path) -> None:
 # ---- consumers of the literal ids -----------------------------------------
 
 
-def test_schedule_only_job_is_found_through_a_fanned_out_id() -> None:
-    """A `schedule_only` job is hidden when its schedule is not installed, and
-    the check compared literal ids. Only the fanned-out form is present here, so
-    an exact-match check hides the row even though the routine is installed.
+@pytest.fixture
+def schedule_only_spec(monkeypatch: pytest.MonkeyPatch) -> JobSpec:
+    """A `schedule_only` job bound to a per-workspace system routine.
 
-    No shipped `schedule_only` job maps to a per-workspace routine *yet* — this
-    pins the resolution so marking one `per_workspace` later cannot silently
-    make its row disappear.
+    The skill-evolution job was the only shipped one, and it went in #697, so
+    the resolution it exercised is pinned here on a synthetic spec instead: a
+    `schedule_only` job is hidden when its schedule is not installed here, and
+    the check compares base ids because the fan-out makes the stored id
+    workspace-qualified. Marking a real one `per_workspace` later must not be
+    able to make its row silently disappear.
     """
-    rows = automation_summary(installed_schedules={"system-skill-evolution@work"})
+    spec = JobSpec(
+        "probe_job",
+        "Probe",
+        "content",
+        schedule_id="system-memory-curation",
+        schedule_only=True,
+    )
+    monkeypatch.setattr(job_runs, "REGISTRY", (spec,))
+    return spec
 
-    assert "skill_evolution" in {row["job"] for row in _flatten(rows)}
+
+def test_schedule_only_job_is_found_through_a_fanned_out_id(
+    schedule_only_spec: JobSpec,
+) -> None:
+    """Only the fanned-out form is present here, so an exact-match check hides
+    the row even though the routine is installed."""
+    rows = automation_summary(installed_schedules={"system-memory-curation@work"})
+
+    assert "probe_job" in {row["job"] for row in _flatten(rows)}
 
 
-def test_schedule_only_job_is_still_hidden_when_nothing_installs_it() -> None:
+def test_schedule_only_job_is_still_hidden_when_nothing_installs_it(
+    schedule_only_spec: JobSpec,
+) -> None:
     """The other half: base-id resolution must not make the check vacuous."""
     rows = automation_summary(installed_schedules=set())
 
-    assert "skill_evolution" not in {row["job"] for row in _flatten(rows)}
+    assert "probe_job" not in {row["job"] for row in _flatten(rows)}
+
+
+# ---- retirement of the skill-reflection routine (#697) ---------------------
+
+
+def test_a_persisted_skill_reflection_row_is_retired(tmp_path: Path) -> None:
+    """The upgrade an existing install takes.
+
+    System rows are derived from the packaged definitions on every read, so
+    dropping the definition retires the row with no migration and nothing to
+    reconcile: the `<base>@<workspace>` id stops being produced, and the
+    overlay key it was stored under is simply never read again.
+    """
+    _write_state(
+        tmp_path,
+        {
+            "system-skill-evolution": {"enabled": False},
+            system_schedule_id("system-skill-evolution", "work"): {"enabled": False},
+        },
+    )
+
+    ids = _ids(_store(tmp_path, "personal", "work"))
+
+    assert "system-memory-curation@work" in ids
+    assert not any(item.startswith("system-skill-evolution") for item in ids)
+
+
+def test_a_persisted_skill_reflection_row_cannot_come_back(tmp_path: Path) -> None:
+    """The direction of the bug a retirement has to avoid.
+
+    A routine the user switched off coming back enabled is the one failure a
+    user cannot notice until the run they switched off happens again. It
+    happened once already, when the overlay key changed under a shipped
+    definition. Here the row is gone outright, so there is nothing to re-enable.
+    """
+    _write_state(tmp_path, {"system-skill-evolution@work": {"enabled": True}})
+
+    rows = {
+        entry.schedule_id: entry
+        for entry in _store(tmp_path, "personal", "work").list_entries()
+    }
+
+    assert set(rows) == {
+        "system-memory-curation@personal",
+        "system-memory-curation@work",
+    }
+
+
+def test_a_user_schedule_named_like_the_retired_routine_survives(
+    tmp_path: Path,
+) -> None:
+    """Retirement is by owned definition, never by name or by id substring.
+
+    The packaged row stops because its definition is gone. Nothing in the
+    store walks the user rows looking for that id: a routine the user titled
+    "Skill reflection (mine)" is untouched, and so is a row that literally
+    carries the retired id in the user file. A cleanup that dropped either —
+    by fuzzy title match or by id substring — would take a user-authored
+    automation with it, and the archive path would not put it back.
+    """
+    _write_state(
+        tmp_path,
+        {system_schedule_id("system-skill-evolution", "work"): {"enabled": True}},
+    )
+    (tmp_path / "schedules.json").write_text(
+        json.dumps(
+            {
+                "schedules": [
+                    {
+                        "schedule_id": "sched-skill-reflection",
+                        "title": "Skill reflection (mine)",
+                        "prompt": "do my thing",
+                        "model": "",
+                        "mode": "cli",
+                        "chat_id": 1,
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "frequency": "weekly",
+                        "daily_time_utc": "00:31",
+                        "days_of_week": ["sun"],
+                        "timezone_name": "UTC",
+                    },
+                    {
+                        "schedule_id": "system-skill-evolution-mine",
+                        "title": "Hand-written",
+                        "prompt": "also mine",
+                        "model": "",
+                        "mode": "cli",
+                        "chat_id": 2,
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "frequency": "daily",
+                        "daily_time_utc": "01:00",
+                        "timezone_name": "UTC",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rows = {
+        entry.schedule_id: entry
+        for entry in _store(tmp_path, "personal", "work").list_entries()
+    }
+
+    mine = rows["sched-skill-reflection"]
+    assert mine.title == "Skill reflection (mine)"
+    assert mine.prompt == "do my thing"
+    assert mine.scope == "user"
+    # A user row carrying the retired id, or a prefix of it, is not swept up.
+    colliding = rows["system-skill-evolution-mine"]
+    assert colliding.prompt == "also mine"
+    assert colliding.scope == "user"
 
 
 def _flatten(rows: object) -> list[dict]:

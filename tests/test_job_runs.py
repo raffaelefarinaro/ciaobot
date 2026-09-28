@@ -194,8 +194,8 @@ def test_summary_includes_never_run_jobs(tmp_path: Path) -> None:
             assert spec.job in summary
     assert summary["trajectory"]["last_run"]["status"] == "ok"
     # a job that never ran has empty stats
-    assert summary["skill_evolution"]["last_run"] is None
-    assert summary["skill_evolution"]["stats"]["total_runs"] == 0
+    assert summary["gws_health"]["last_run"] is None
+    assert summary["gws_health"]["stats"]["total_runs"] == 0
     # categories carried through
     assert summary["vault_index"]["category"] == "system"
     assert summary["trajectory"]["uses_model"] is False
@@ -225,16 +225,44 @@ def test_summary_hides_retired_jobs(tmp_path: Path, retired: str) -> None:
     assert retired in jr.load_runs(keep_retired=True)
 
 
-def test_summary_hides_jobs_whose_only_schedule_is_not_installed(tmp_path: Path) -> None:
-    installed = {"system-skill-evolution"}
+def test_a_retired_job_leaves_no_stale_latest_row(tmp_path: Path) -> None:
+    """`job_runs_latest.json` keeps a job's last run forever.
+
+    Dropping a job from the registry without retiring its id leaves that row
+    visible on the Automation page with a badge describing a run that can never
+    happen again — the skill-evolution job and its `system-skill-evolution`
+    schedule went together in #697, and this is the other half of that.
+    """
+    jr.record_run(jr.JobRun(job="skill_evolution", label="Skill reflection",
+                            status="ok", duration_ms=5))
+    assert "skill_evolution" in json.loads(
+        (tmp_path / jr.JOB_RUNS_LATEST_NAME).read_text()
+    )
+
+    assert "skill_evolution" not in jr.load_runs()
+    assert "skill_evolution" in jr.load_runs(keep_retired=True)
+    assert "skill_evolution" not in {item["job"] for item in jr.automation_summary()}
+
+
+def test_a_job_with_another_trigger_stays_visible_without_its_schedule(
+    tmp_path: Path,
+) -> None:
+    """`installed_schedules` may only hide what the schedule is the sole trigger of.
+
+    `vault_index` names `system-memory-curation` but also runs on startup and
+    during the full Workspace care pass, so passing an installed set that
+    contains no schedule at all must still leave its row up. The half of the
+    rule that hides a `schedule_only` job is pinned against a synthetic spec in
+    `tests/test_system_schedule_fanout.py`: no shipped job is `schedule_only`
+    since the skill-evolution row went in #697.
+    """
     summary = {
-        item["job"]: item
-        for item in jr.automation_summary(installed_schedules=installed)
+        item["job"]: item for item in jr.automation_summary(installed_schedules=set())
     }
-    assert "skill_evolution" in summary
-    # jobs with another trigger stay visible even without their schedule
+    assert "vault_index" in summary
     assert "trajectory" in summary
-    assert "vault_index" in summary  # also runs on startup
+    # And nothing claims the retired producer's row back.
+    assert "skill_evolution" not in summary
 
 
 # ── Live state: in-flight registry + publisher ────────────────────────────
@@ -316,4 +344,4 @@ def test_summary_marks_a_running_job(tmp_path: Path) -> None:
     with jr.track_sync("trajectory", "Trajectory capture"):
         summary = {item["job"]: item for item in jr.automation_summary()}
         assert summary["trajectory"]["running"] is True
-        assert summary["skill_evolution"]["running"] is False
+        assert summary["gws_health"]["running"] is False
