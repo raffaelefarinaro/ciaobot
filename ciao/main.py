@@ -1045,163 +1045,31 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
         asyncio.create_task(_run_catch_up())
 
-    # ── Branch backup ────────────────────────────────────────
+    # ── Memory backup ────────────────────────────────────────
     # Backs up the same repo the sync flow targets (the repo containing the
-    # vault root, falling back to the workspace root). Every instance works on
-    # whatever branch that checkout is on; Ciaobot never creates or switches
-    # branches. A background loop pushes the branch for backup. Non-git roots
-    # (fresh `ciao setup` without a remote) and repos without an `origin`
-    # remote skip this gracefully.
-    from ciao.local_session import (
-        BACKUP_PUSH_INTERVAL,
-        backoff_reason,
-        has_origin_remote,
-        is_diverged_backup,
-        push_branch,
-        workspace_branch,
+    # vault root, falling back to the workspace root) every five minutes:
+    # commits the durable-data scope through `local_session.commit_scoped`, then
+    # pushes what is not on the remote yet. Every tick re-reads root, branch and
+    # remote, so an install configured later becomes ready without a restart and
+    # a non-git root (a fresh `ciao setup` with no remote yet) simply reports
+    # `not_configured` and is re-checked.
+    #
+    # It also refuses to run on a Mac that is not the host — the same startup
+    # verdict the scheduler asks, published as `app.state.legacy_node_state` —
+    # because a second writer on the same runtime root is exactly the failure
+    # that gate exists to prevent. The `stop` event is what the service's loop
+    # waits on instead of a bare sleep, so a shutdown never sits out the
+    # interval (or the hour a backoff buys).
+    from ciao.backup_service import BackupService
+
+    backup_stop = asyncio.Event()
+    app.state.backup_service = BackupService(
+        config,
+        app_settings,
+        node_state=lambda: legacy_node_state,
     )
-
-    async def _branch_backup_loop() -> None:
-        branch = await asyncio.to_thread(workspace_branch, git_sync_root)
-        if branch is None:
-            logger.info(
-                "Sync root %s is not a git repository (or is on a detached HEAD); "
-                "skipping branch backup.", git_sync_root,
-            )
-            return
-        if not await asyncio.to_thread(has_origin_remote, git_sync_root):
-            logger.info(
-                "Sync root has no 'origin' remote; skipping branch backup.",
-            )
-            return
-        logger.info("Working on branch '%s'", branch)
-        backoff_multiplier = 12
-        last_failure_detail: str | None = None
-        repeated_failures = 0
-        # Set when the failure cannot self-heal at the normal cadence: bad
-        # credentials, or a remote that is simply unreachable. Both back off to
-        # the hourly multiplier; only a successful push clears it.
-        failure_backoff = False
-        last_loop_error: str | None = None
-        repeated_loop_errors = 0
-        # Set once push_branch falls back to a per-commit backup ref because
-        # the shared branch has a real merge conflict with origin. Backs off
-        # the cadence the same way failure_backoff does: retrying a merge that
-        # will conflict the same way every 30s is pure waste, and the backup
-        # ref push is idempotent (its name is derived from the HEAD sha), so
-        # slower retries do not lose any coverage — only a fast-forwardable
-        # recovery (the shared push succeeding again) clears it.
-        diverged_backoff = False
-        while True:
-            try:
-                await asyncio.sleep(
-                    BACKUP_PUSH_INTERVAL
-                    * (backoff_multiplier if (failure_backoff or diverged_backoff) else 1)
-                )
-                async with job_runs.track(
-                    "branch_backup", "Branch backup",
-                    category="system", extra={"branch": branch},
-                ) as run:
-                    if not legacy_writers_armed:
-                        # The same verdict the scheduler asks, and for the
-                        # same reason: an `invalid` state lands here as surely
-                        # as a client does. Pushing from a Mac that may already
-                        # be a second writer on this root is the failure the
-                        # gate exists to prevent, so the kind is named and the
-                        # skip says plainly who does push instead.
-                        run.skip(
-                            "this Mac is not the host (legacy node state: "
-                            f"{legacy_node_state.kind}) — the host owns backup "
-                            "push"
-                        )
-                        continue
-                    ok, detail = await push_branch(git_sync_root, branch=branch)
-                    if ok:
-                        if is_diverged_backup(detail):
-                            if not diverged_backoff:
-                                diverged_backoff = True
-                                logger.warning(
-                                    "Branch backup: %s has a real merge "
-                                    "conflict with origin; backing off and "
-                                    "backing up to a per-commit ref instead "
-                                    "until a human resolves it. %s",
-                                    branch, detail,
-                                )
-                            run.extra["shared_branch_diverged"] = True
-                            run.extra["detail"] = detail
-                            last_failure_detail = None
-                            repeated_failures = 0
-                            continue
-                        if diverged_backoff:
-                            logger.info(
-                                "Branch backup: %s push to origin recovered; "
-                                "resuming normal cadence.", branch,
-                            )
-                            diverged_backoff = False
-                        if last_failure_detail is not None:
-                            logger.info("Branch backup push recovered.")
-                        last_failure_detail = None
-                        repeated_failures = 0
-                        failure_backoff = False
-                        # A success closes any open exception episode too: without
-                        # this, the same fault recurring later is logged at debug
-                        # as a continuation of the pre-success sequence instead
-                        # of a fresh traceback.
-                        last_loop_error = None
-                        repeated_loop_errors = 0
-                        continue
-                    if detail == last_failure_detail:
-                        repeated_failures += 1
-                        run.skip("same failure as previous backup attempt")
-                        run.extra["repeat_count"] = repeated_failures
-                        reason = backoff_reason(detail)
-                        if reason and repeated_failures >= 3 and not failure_backoff:
-                            failure_backoff = True
-                            if reason == "auth":
-                                logger.warning(
-                                    "Branch backup authentication keeps failing; "
-                                    "retrying hourly instead. Store credentials to "
-                                    "resume (e.g. `gh auth setup-git`, or switch "
-                                    "the remote to SSH).",
-                                )
-                            else:
-                                logger.warning(
-                                    "Branch backup keeps timing out; origin looks "
-                                    "unreachable. Retrying hourly until it answers.",
-                                )
-                        logger.debug("Branch backup push still failing: %s", detail)
-                        continue
-                    last_failure_detail = detail
-                    repeated_failures = 1
-                    failure_backoff = False
-                    run.status = "error"
-                    run.error = detail
-                    logger.warning("Branch backup push failed: %s", detail)
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                # One persistent fault fires every tick. Logging a full
-                # traceback each time buried the real signal under megabytes of
-                # identical frames (issue #470 reported 1387 copies over two
-                # days), so an unchanged error is counted, not re-dumped.
-                signature = f"{type(exc).__name__}: {exc}"
-                if signature == last_loop_error:
-                    repeated_loop_errors += 1
-                    logger.debug(
-                        "Branch backup push failed again (%dx): %s",
-                        repeated_loop_errors, signature,
-                    )
-                else:
-                    if repeated_loop_errors > 1:
-                        logger.warning(
-                            "Previous branch backup error repeated %d times.",
-                            repeated_loop_errors,
-                        )
-                    last_loop_error = signature
-                    repeated_loop_errors = 1
-                    logger.exception("Branch backup push failed")
-
-    asyncio.create_task(_branch_backup_loop())
+    app.state.backup_stop = backup_stop
+    asyncio.create_task(app.state.backup_service.backup_loop(stop=backup_stop))
 
     # ── Google Workspace token health ────────────────────────
     # Cheap periodic `auth status` ping per configured GWS profile. When a
@@ -1418,10 +1286,19 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
         await asyncio.to_thread(shutdown_vault_read_executor)
 
+    async def _shutdown_backup() -> None:
+        # Wake the backup loop out of its wait, so the task ends on this boot's
+        # shutdown instead of holding the loop open for the rest of the interval
+        # (an hour while a backoff is in force). The flag is checked before a
+        # run starts, so this never abandons a backup mid-flight; one already
+        # running finishes on its own.
+        backup_stop.set()
+
     app.state.shutdown_callbacks = [
         _shutdown_providers,
         _shutdown_background_runs,
         _shutdown_vault_reads,
+        _shutdown_backup,
     ]
 
     try:

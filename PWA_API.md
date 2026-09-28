@@ -150,6 +150,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/local/preflight` | Git preflight check for dirty files, categories, blockers/warnings |
 | POST | `/api/local/handback` | Commit pending work, pull from origin, push the current branch |
 | POST | `/api/local/resync` | Merge `origin/<branch>` back into the checkout |
+| GET | `/api/local/backup` | Memory-backup status: `state`, `scope`, `branch`, sanitized `remote`, `enabled`, `interval_s`, last attempt/success, `pending_changes`, `pending_commits`, `reason` (read-only) |
+| PATCH | `/api/local/backup` | Turn the memory backup off/on (`enabled`) or pause/resume it (`paused`); persists across a restart |
+| POST | `/api/local/backup/run` | Back up now, through the same serialized path the five-minute loop uses |
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
 | GET | `/api/addresses` | Where other devices can open this engine: the configured trusted HTTPS URL first (`kind: trusted`, `secure: true`), then LAN/Bonjour HTTP URLs (`kind: lan`), then localhost (`kind: loopback`). Session-protected; URLs never carry a password or token |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
@@ -680,6 +683,53 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/local/
 # Open an interactive conflict-resolution chat for a branch by hand (also used on conflict).
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/handover/merge" \
   -H 'content-type: application/json' -d '{"branch":"main"}'
+```
+
+**Unattended memory backup**
+
+Routes: `GET /api/local/backup`, `PATCH /api/local/backup`, `POST /api/local/backup/run`.
+
+The engine commits the durable-data scope (`memory-vault/`, `skills/`, `subagents/`,
+`commands/`, the `AGENTS.md` guide and archived workspaces — never credentials, runtime
+state, caches, the transcript archive or application source) and pushes it every five
+minutes. This is a different path from "Sync with Remote" above: it is unattended, it
+commits only what the scope allows, and it never creates a commit or a push when there is
+nothing pending.
+
+`GET` is read-only and always 200 — a repository with no remote is a state it reports, not
+a failure of the endpoint. `state` is one of:
+
+| `state` | meaning |
+| --- | --- |
+| `ready` | committed and pushed; `reason` says what the last run did |
+| `pending` | a scoped change to commit, or a commit that never reached origin |
+| `running` | a run is in flight right now |
+| `paused` | this boot will not run one: `enabled:false`, `paused:true`, or not the host |
+| `offline` | the commit is safe locally and origin did not answer; retried on the slow cadence |
+| `needs_attention` | only the owner can fix it: a credential in the scope, a repository another git operation holds, a branch that diverged from origin (the commit is on a per-commit backup ref) |
+| `not_configured` | the data root is not a repository, is on a detached HEAD, or has no `origin` — re-checked every tick, so adding a remote needs no restart |
+
+`last_success_commit` is a commit known to exist on the remote: it is written only by a push
+that landed, never by a local commit. A failed push keeps the local commit untouched — no
+reset, no force-push — and the remote URL is always reported with any credential removed.
+`POST /api/local/backup/run` is the manual trigger; it takes the same lock as the scheduled
+tick, so the two can never interleave. 200 when the run left the repository in a state that
+needs nothing from you, 400 when it could not do its job (no repository, no remote, refused
+credentials, unreachable remote) — the body is the same status object either way.
+
+```bash
+# What the backup service knows: {state, scope, branch, remote, enabled, interval_s,
+# last_attempt_at, last_success_at, last_success_commit, pending_changes, pending_commits, reason}.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/local/backup"
+
+# Pause backups, or turn them off entirely. Both survive a restart.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/local/backup" \
+  -H 'content-type: application/json' -d '{"paused":true}'
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/local/backup" \
+  -H 'content-type: application/json' -d '{"enabled":false}'
+
+# Back up now, through the same serialized path the five-minute loop uses.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/local/backup/run"
 ```
 
 **Proposal queue**

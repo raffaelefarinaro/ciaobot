@@ -344,10 +344,16 @@ def test_main_wires_the_gate_into_both_writer_sites() -> None:
 
     assert "guard_legacy_writers(" in source
     # Both sites read the boot verdict rather than anything derived from it, so
-    # the scheduler and the backup push alike stay shut on a refused boot.
+    # the scheduler and the memory backup alike stay shut on a refused boot.
     assert "is_node_active=lambda: legacy_writers_armed" in source
-    assert "if not legacy_writers_armed:" in source
     assert "app.state.legacy_node_state = legacy_node_state" in source
+    # The backup site is handed the verdict object rather than a bool captured
+    # here, and asks it per tick (`BackupService._gate_reason` calls
+    # `writers_armed`), which is what lets a Mac that only becomes the host
+    # later start backing up without a restart. The refusal itself is covered
+    # behaviourally in tests/test_backup_service.py, on both `client` and
+    # `invalid`.
+    assert "node_state=lambda: legacy_node_state" in source
 
     # The manager that used to be the second term is not reconstructed, and no
     # live re-read replaces the verdict: the gate is the file, once.
