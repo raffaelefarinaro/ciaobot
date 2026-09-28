@@ -142,6 +142,79 @@ def test_structural_log_and_index_files_are_not_matchable(tmp_path: Path) -> Non
     assert find_entities("check the log and the index", tmp_path, workspace="personal") == []
 
 
+def test_automation_working_files_are_not_matchable(tmp_path: Path) -> None:
+    # An automation is its folder's README. Its run data (`raw/*/report`,
+    # `PROMPT`) matched every message that said "report", once per file.
+    _write_index(tmp_path, """# Vault Index
+
+- [automations/adoption-report/README](./automations/adoption-report/README.md) (tags: automation)
+- [automations/adoption-report/PROMPT](./automations/adoption-report/PROMPT.md)
+- [automations/adoption-report/raw/sparkscan/report](./automations/adoption-report/raw/sparkscan/report.md)
+- [automations/adoption-report/report_text_sparkscan](./automations/adoption-report/report_text_sparkscan.md)
+""")
+    hits = find_entities(
+        "run the adoption-report prompt and send the report",
+        tmp_path, workspace="work", index_owns_workspace=True,
+    )
+    assert [e.path for e in hits] == ["automations/adoption-report/README"]
+
+
+def test_a_file_name_several_notes_share_is_not_a_name(tmp_path: Path) -> None:
+    # `slides` in two project folders is a naming convention; a name a folder
+    # note also carries is one entity under two paths and still matches.
+    _write_index(tmp_path, """# Vault Index
+
+- [projects/active/maf-pilot/slides](./projects/active/maf-pilot/slides.md)
+- [projects/completed/ahm/slides](./projects/completed/ahm/slides.md)
+- [projects/active/general/README](./projects/active/general/README.md)
+- [projects/active/general/general](./projects/active/general/general.md)
+""")
+    hits = find_entities(
+        "fix the slides for general", tmp_path, workspace="work", index_owns_workspace=True,
+    )
+    assert sorted(e.path for e in hits) == [
+        "projects/active/general/README", "projects/active/general/general",
+    ]
+
+
+def test_the_same_name_in_two_workspaces_of_a_shared_index_still_matches(tmp_path: Path) -> None:
+    _write_index(tmp_path, """# Vault Index
+
+- [work/People/Alex](./work/People/Alex.md) (tags: person)
+- [personal/People/Alex](./personal/People/Alex.md) (tags: person)
+""")
+    hits = find_entities("ask Alex", tmp_path, workspace="work")
+    assert [e.path for e in hits] == ["work/People/Alex"]
+
+
+def test_automation_run_files_do_not_cancel_a_real_note_of_the_same_name(
+    tmp_path: Path,
+) -> None:
+    # Run data is often named after what it processed; skipped files must not
+    # count toward the shared-name rule and knock the real note out.
+    _write_index(tmp_path, """# Vault Index
+
+- [work/Clients/acme](./work/Clients/acme.md)
+- [work/automations/crm-sync/raw/acme](./work/automations/crm-sync/raw/acme.md)
+""")
+    hits = find_entities("call acme", tmp_path, workspace="work")
+    assert [e.path for e in hits] == ["work/Clients/acme"]
+
+
+def test_a_project_called_automations_is_still_matchable(tmp_path: Path) -> None:
+    _write_index(tmp_path, """# Vault Index
+
+- [projects/active/automations/README](./projects/active/automations/README.md)
+- [projects/active/automations/roadmap](./projects/active/automations/roadmap.md)
+""")
+    hits = find_entities(
+        "update the automations roadmap", tmp_path, workspace="work", index_owns_workspace=True,
+    )
+    assert sorted(e.path for e in hits) == [
+        "projects/active/automations/README", "projects/active/automations/roadmap",
+    ]
+
+
 def test_handles_missing_index(tmp_path: Path) -> None:
     assert find_entities("anything", tmp_path) == []
 

@@ -161,4 +161,37 @@ describe('SettingsDevices', () => {
     expect(wrapper.text()).not.toContain('Looking up addresses')
     expect(wrapper.find('.device-qr').exists()).toBe(true)
   })
+
+  it('marks a Tailscale Serve address and stops asking to paste it', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      port: 9443,
+      trusted_url: null,
+      addresses: [
+        {
+          url: 'https://mini.tail1.ts.net/',
+          kind: 'trusted',
+          source: 'tailscale',
+          secure: true,
+          loopback: false,
+        },
+        ADDRESSES.addresses[1],
+      ],
+    } as never)
+    const wrapper = await mountCard()
+
+    const first = wrapper.findAll('.device-row')[0]
+    expect(first.text()).toContain('Full app')
+    expect(first.text()).toContain('via Tailscale Serve')
+    expect(wrapper.text()).toContain('Tailscale Serve address found automatically')
+    expect(wrapper.text()).not.toContain('tailscale serve --bg')
+    // The detected name is not a typed value, so the field stays empty.
+    expect((wrapper.find('#trusted-url').element as HTMLInputElement).value).toBe('')
+  })
+
+  it('tells how to get an automatic address when Tailscale Serve is not set up', async () => {
+    const wrapper = await mountCard()
+    expect(wrapper.text()).toContain('tailscale serve --bg 9443')
+    expect(wrapper.text()).toContain('finds the address on its own')
+    expect(wrapper.text()).not.toContain('via Tailscale Serve')
+  })
 })

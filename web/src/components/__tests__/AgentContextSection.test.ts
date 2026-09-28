@@ -40,11 +40,21 @@ describe('AgentContextSection', () => {
     expect(rows[0].text()).toContain('AGENTS.md')
     expect(rows[0].text()).toContain('1k tokens')
     expect(rows[1].text()).toContain('Launch')
-    expect(rows[1].text()).toContain('launch.md')
-    expect(rows[1].text()).toContain('Public beta launch planning.')
+    expect(rows[1].get('pre').text()).toBe(
+      'project="Launch"\nproject_context=Public beta launch planning.\ncanonical_doc=work/memory-vault/projects/launch.md',
+    )
+    await rows[1].get('pre button').trigger('click')
+    expect(wrapper.emitted('open-file')?.[0]).toEqual(['work/memory-vault/projects/launch.md'])
     expect(wrapper.getComponent(RouterLinkStub).props('to')).toBe('/project/p1')
     await rows[0].trigger('click')
-    expect(wrapper.emitted('open-file')?.[0]).toEqual(['work/AGENTS.md'])
+    expect(wrapper.emitted('open-file')?.[1]).toEqual(['work/AGENTS.md'])
+  })
+
+  it('drops the brief row when General sends no brief', async () => {
+    const wrapper = await mountSection({
+      project: { project_id: 'g', name: 'General', workspace: 'work' } as unknown as ProjectInfo,
+    })
+    expect(wrapper.find('.agent-context-brief').exists()).toBe(false)
   })
 
   it('shows the context used from a string percentage', async () => {
@@ -63,9 +73,11 @@ describe('AgentContextSection', () => {
     expect(wrapper.emitted('open-file')?.[0]).toEqual(['work/memory-vault/People/Mo.md'])
   })
 
-  it('says None when the last message matched nothing', async () => {
-    const wrapper = await mountSection({ entities: [] })
-    expect(wrapper.text()).toContain('None.')
+  it('hides the notes section when nothing matched', async () => {
+    for (const entities of [undefined, []]) {
+      const wrapper = await mountSection({ entities })
+      expect(wrapper.find('[aria-labelledby="agent-context-notes-label"]').exists()).toBe(false)
+    }
   })
 
   it('says the guide could not be read, with a retry, instead of dropping the row', async () => {

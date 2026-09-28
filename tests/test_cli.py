@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import plistlib
 import sqlite3
@@ -1172,9 +1173,15 @@ def _skill_proposal_workspace(root: Path, name: str = "2026-08-09-defuddle") -> 
     return source
 
 
-def test_cli_skill_proposal_remove_deletes_the_file(
+def test_cli_skill_proposal_remove_settles_the_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The agent-driven path the curation schedule uses. It used to unlink the
+    file, which left no record that a decision had been made: the next evolution
+    pass that saw the same evidence filed the same proposal again as a new file,
+    with no way to know anyone had already answered it."""
+    from ciao import skill_proposals
+
     workspace = tmp_path / "workspace"
     source = _skill_proposal_workspace(workspace)
     monkeypatch.chdir(tmp_path)
@@ -1183,8 +1190,34 @@ def test_cli_skill_proposal_remove_deletes_the_file(
 
     assert cli.main(["skill-proposal-remove", "defuddle"]) == 0
 
-    assert not source.exists()
-    assert "Removed skill proposal 2026-08-09-defuddle" in capsys.readouterr().out
+    assert source.is_file()
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.DISMISSED
+    assert "Settled skill proposal 2026-08-09-defuddle" in capsys.readouterr().out
+
+
+def test_cli_skill_proposal_remove_records_the_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Settled through the CLI is still a decision on record, keyed the same way
+    the PWA's is, so the queue and the pass agree on what was answered."""
+    from ciao.memory_proposals import read_decisions
+
+    workspace = tmp_path / "workspace"
+    _skill_proposal_workspace(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "defuddle"]) == 0
+
+    rows = read_decisions(
+        workspace / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    )
+    assert [row["text"] for row in rows] == ["skill:2026-08-09-defuddle"]
+    assert rows[0]["via"] == "cli"
+    assert rows[0]["action"] == "dismissed"
 
 
 def test_cli_skill_proposal_remove_json_output(
@@ -1198,9 +1231,14 @@ def test_cli_skill_proposal_remove_json_output(
 
     assert cli.main(["skill-proposal-remove", "2026-08-09-defuddle", "--json"]) == 0
 
-    assert not source.exists()
+    assert source.is_file()
     result = json.loads(capsys.readouterr().out)
-    assert result == {"removed": True, "name": "2026-08-09-defuddle", "workspace": "personal"}
+    assert result == {
+        "settled": True,
+        "name": "2026-08-09-defuddle",
+        "workspace": "personal",
+        "lifecycle": "dismissed",
+    }
 
 
 def test_cli_skill_proposal_remove_refuses_ambiguous_match(
@@ -1217,9 +1255,475 @@ def test_cli_skill_proposal_remove_refuses_ambiguous_match(
 
     err = capsys.readouterr().err
     assert "more than one" in err
-    # Nothing was deleted.
+    # Nothing was settled.
     queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
     assert len(list(queue.glob("*.md"))) == 2
+
+
+def _accepted_skill_proposal(
+    root: Path, name: str = "2026-08-09-defuddle"
+) -> Path:
+    """A proposal a chat has been given, which is what an outcome records."""
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig
+
+    source = _skill_proposal_workspace(root, name)
+    config = CiaoConfig.from_env({
+        "CIAO_WORKSPACE": str(root),
+        "CIAO_VAULT_ROOT": "memory-vault",
+        "PWA_AUTH_TOKEN": "test",
+    })
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    skill_proposals.mark_implementing(config, record.id, "chat-1")
+    return source
+
+
+def test_cli_skill_proposal_remove_applied_records_a_promotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`applied` and `dismissed` are the same shape to a reader and opposite
+    facts: one says the change landed, the other that it will not. Only the
+    caller that checked the skill may assert the first."""
+    from ciao import skill_proposals
+    from ciao.memory_proposals import read_decisions
+
+    workspace = tmp_path / "workspace"
+    source = _accepted_skill_proposal(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(
+        ["skill-proposal-remove", "defuddle", "--applied", "--reason", "verified"]
+    ) == 0
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.APPLIED
+    assert record.chat_id == "chat-1"
+    rows = read_decisions(
+        workspace / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    )
+    assert [row["action"] for row in rows] == ["accepted"]
+    assert rows[0]["outcome"] == "verified"
+
+
+def test_cli_skill_proposal_remove_interrupted_leaves_the_proposal_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An implementation that stopped is not an answer. Recording it as a
+    dismissal would archive unfinished work as though a person had rejected it,
+    and the queue would never ask again."""
+    from ciao import skill_proposals
+    from ciao.memory_proposals import read_decisions
+
+    workspace = tmp_path / "workspace"
+    source = _accepted_skill_proposal(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "defuddle", "--interrupted"]) == 0
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.INTERRUPTED
+    assert record.chat_id == "chat-1"
+    assert read_decisions(
+        workspace / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    ) == []
+    assert "stays queued" in capsys.readouterr().out
+
+
+def test_cli_skill_proposal_remove_refuses_interrupting_work_that_never_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """There is no implementation to interrupt, so the flag would be a no-op
+    dressed as a record. Say so instead."""
+    workspace = tmp_path / "workspace"
+    source = _skill_proposal_workspace(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "defuddle", "--interrupted"]) == 1
+
+    assert "no implementing chat" in capsys.readouterr().err
+    from ciao import skill_proposals
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.PENDING
+
+
+def test_cli_skill_proposal_remove_refuses_two_opposite_outcomes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = _accepted_skill_proposal(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(
+        ["skill-proposal-remove", "defuddle", "--applied", "--interrupted"]
+    ) == 2
+
+    assert "opposite outcomes" in capsys.readouterr().err
+    from ciao import skill_proposals
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.IMPLEMENTING
+
+
+def test_cli_skill_proposal_remove_not_applicable_is_a_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finding that no longer holds is a decision, and the chat implementing it
+    has to be able to record one.
+
+    `render_improvement_prompt` tells the implementation chat to settle the
+    proposal that way when the skill no longer reads the way the reviewer saw it.
+    Without a flag for it the prompt asked for a resolution the command could not
+    express, and the branch where a chat concludes an edit is unwarranted had no
+    way to answer for itself — so the queue kept asking.
+    """
+    from ciao import skill_proposals
+    from ciao.memory_proposals import read_decisions
+
+    workspace = tmp_path / "workspace"
+    source = _accepted_skill_proposal(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(
+        [
+            "skill-proposal-remove",
+            "defuddle",
+            "--not-applicable",
+            "--reason",
+            "the fallback landed already",
+            "--json",
+        ]
+    ) == 0
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.NOT_APPLICABLE
+    assert record.chat_id == "chat-1"
+    rows = read_decisions(
+        workspace / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    )
+    # A dismissal, not a promotion: nothing improved the skill.
+    assert [row["action"] for row in rows] == ["dismissed"]
+    assert rows[0]["outcome"] == "the fallback landed already"
+
+
+def test_cli_skill_proposal_remove_refuses_not_applicable_with_another_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It is a third outcome, not a modifier. `--not-applicable --applied` would
+    otherwise be a contradiction resolved by flag order rather than refused."""
+    workspace = tmp_path / "workspace"
+    source = _accepted_skill_proposal(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(
+        ["skill-proposal-remove", "defuddle", "--not-applicable", "--applied"]
+    ) == 2
+
+    assert "third outcome" in capsys.readouterr().err
+    from ciao import skill_proposals
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.IMPLEMENTING
+
+
+# -- skill-proposal-add ------------------------------------------------------
+
+
+def _owned_skill_install(root: Path, name: str) -> Path:
+    """A workspace whose vault registers `personal` and owns one skill source.
+
+    The canonical owned source is ``<install>/skills/<name>/SKILL.md``: an
+    install that has not re-rooted answers every workspace with the install
+    root, and one owner is what makes the catalog this workspace's own.
+    """
+    (root / "memory-vault" / "personal" / "Workspace").mkdir(parents=True, exist_ok=True)
+    skill_md = root / "skills" / name / "SKILL.md"
+    skill_md.parent.mkdir(parents=True, exist_ok=True)
+    skill_md.write_text(f"---\nname: {name}\n---\n\n# {name}\n", encoding="utf-8")
+    return skill_md
+
+
+def _finding(
+    tmp_path: Path,
+    *,
+    name: str = "finding",
+    sources: list[dict] | None = None,
+) -> str:
+    """Write one structured finding, as a pass or a person would, and return it."""
+    path = tmp_path / f"{name}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "title": "notes: read the categories block first",
+                "problem": "The user corrected the note type twice.",
+                "change": "Add a step: read the Categories block before a type.",
+                "rationale": "The correction repeated, so it is reusable.",
+                "sources": sources
+                if sources is not None
+                else [
+                    {
+                        "chat_id": "chat-7",
+                        "archive": "memory-vault/personal/logs/x.md",
+                        "turn": "3",
+                        "excerpt": "no, that's a person, not a project",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def test_cli_skill_proposal_add_files_through_the_validated_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One record per skill, with the resolved path and revision on it.
+
+    The pass files what it found in a conversation, and a person can hand-author
+    the same thing; both land through ``upsert_proposal``, so the review queue
+    sees one identity per skill rather than a file per run. The canonical path
+    and revision are the resolver's answers, not the caller's — a reviewer can
+    then tell which bytes the proposal was written against.
+    """
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    skill_md = _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path)
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 0
+
+    record_path = (
+        workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals" / "notes.md"
+    )
+    record = skill_proposals.parse_proposal(record_path, "personal")
+    assert record is not None
+    assert record.id == skill_proposals.proposal_id("personal", "notes")
+    assert record.lifecycle == skill_proposals.PENDING
+    assert record.canonical_path == str(skill_md)
+    assert record.reviewed_revision == hashlib.sha256(skill_md.read_bytes()).hexdigest()
+    assert record.problem.startswith("The user corrected")
+    assert record.change.startswith("Add a step")
+    assert record.sources == (
+        skill_proposals.SkillEvidence(
+            chat_id="chat-7",
+            archive="memory-vault/personal/logs/x.md",
+            turn="3",
+            excerpt="no, that's a person, not a project",
+        ),
+    )
+    assert "Filed skill proposal for notes in personal" in capsys.readouterr().out
+
+
+def test_cli_skill_proposal_add_refuses_a_skill_the_workspace_does_not_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A stock copy, a mirror and an unknown name are all refused by name.
+
+    The only source an improvement may be written against is the workspace's
+    own canonical one. Resolving it here is what makes that true: the caller
+    supplies a name, never a path, so nothing it says can aim the writer at an
+    installed copy that sync overwrites.
+    """
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    stock = workspace / ".claude" / "skills" / "web-research"
+    stock.mkdir(parents=True)
+    (stock / ".ciao-stock-skill").write_text("stock\n", encoding="utf-8")
+    (stock / "SKILL.md").write_text("# web-research\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path)
+
+    assert cli.main(["skill-proposal-add", "web-research", "--input-file", finding]) == 1
+    assert cli.main(["skill-proposal-add", "nonesuch", "--input-file", finding]) == 1
+
+    err = capsys.readouterr().err
+    assert "web-research" in err and "nonesuch" in err
+    queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    assert not queue.is_dir() or list(queue.glob("*.md")) == []
+
+
+def test_cli_skill_proposal_add_refuses_a_finding_with_no_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A proposal nobody can check is not filed, whatever its prose says.
+
+    Evidence is the record's whole claim: which session, which turn, which
+    words. A finding without it would be indistinguishable from an invention,
+    and the review surface has no way to show it is unsupported.
+    """
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path, sources=[])
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 2
+
+    assert "sources" in capsys.readouterr().err
+    queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    assert not queue.is_dir() or list(queue.glob("*.md")) == []
+
+
+def test_cli_skill_proposal_add_reads_the_finding_from_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Shell metacharacters in the finding survive, because none of it is argv.
+
+    Every field is text out of a conversation, so `$()`, backticks and quotes
+    arrive in a file. A finding whose excerpt says "run $(rm -rf /)" has to
+    reach the record as those characters, not as a command.
+    """
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    excerpt = 'never pipe into `sh -c` and never run $(whoami) here'
+    finding = _finding(
+        tmp_path,
+        sources=[
+            {"chat_id": "chat-7", "archive": "x.md", "turn": "2", "excerpt": excerpt}
+        ],
+    )
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding, "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["filed"] is True
+    assert payload["skill"] == "notes"
+    assert payload["lifecycle"] == "pending"
+    assert payload["evidence"] == 1
+    body = (
+        workspace
+        / "memory-vault"
+        / "personal"
+        / "Workspace"
+        / "Skill-Proposals"
+        / "notes.md"
+    ).read_text(encoding="utf-8")
+    assert excerpt in body
+
+
+def test_cli_skill_proposal_add_merges_new_evidence_into_one_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second finding for the same skill updates the row rather than forking it.
+
+    This is what makes the queue reviewable: the file is named after the skill,
+    so two passes seeing the same skill cannot produce two rows a reviewer has
+    to group to read as one.
+    """
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    first = _finding(
+        tmp_path,
+        name="first",
+        sources=[{"chat_id": "chat-1", "archive": "a.md", "turn": "1", "excerpt": "one"}],
+    )
+    second = _finding(
+        tmp_path,
+        name="second",
+        sources=[{"chat_id": "chat-2", "archive": "b.md", "turn": "4", "excerpt": "two"}],
+    )
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", first]) == 0
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", second]) == 0
+
+    queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    assert [path.name for path in sorted(queue.glob("*.md"))] == ["notes.md"]
+    body = (queue / "notes.md").read_text(encoding="utf-8")
+    assert "one" in body and "two" in body
+
+
+def test_cli_skill_proposal_add_does_not_reopen_a_settled_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A decision stands; the finding only adds evidence to it.
+
+    Re-filing is the pass's ordinary move — the same conversation can be
+    archived again — so a proposal the owner already answered must not walk
+    back into the queue because the skill was used once more.
+    """
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path)
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 0
+    assert cli.main(["skill-proposal-remove", "notes"]) == 0
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 0
+
+    record_path = (
+        workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals" / "notes.md"
+    )
+    record = skill_proposals.parse_proposal(record_path, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.DISMISSED
+    assert "already dismissed" in capsys.readouterr().out
+
+
+def test_cli_skill_proposal_add_reports_an_unreadable_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    broken = tmp_path / "broken.json"
+    broken.write_text("not json at all", encoding="utf-8")
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", str(broken)]) == 2
+    assert "not valid JSON" in capsys.readouterr().err
+
+
+def test_cli_skill_proposal_add_requires_the_input_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """There is no other door: a finding cannot be typed as an argument."""
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["skill-proposal-add", "notes"])
+    assert excinfo.value.code == 2
 
 
 def _search_note(vault: Path, name: str) -> None:

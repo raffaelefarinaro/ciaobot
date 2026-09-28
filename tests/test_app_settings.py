@@ -156,6 +156,8 @@ def test_both_legacy_privacy_opt_outs_migrate_together(tmp_path):
         "insights_enabled": False,
         "trajectories_enabled": False,
         "push_all_devices": False,
+        "backup_enabled": True,
+        "backup_paused": False,
     }
 
 
@@ -191,6 +193,8 @@ def test_update_persists_and_roundtrips(tmp_path):
         "insights_enabled": True,
         "trajectories_enabled": True,
         "push_all_devices": False,
+        "backup_enabled": True,
+        "backup_paused": False,
         "insights_model": "gemma4:12b-it-qat",
     }
     # Fresh instance sees the persisted value.
@@ -257,6 +261,8 @@ def test_provider_routine_models_persist_and_apply(tmp_path):
         "insights_enabled": True,
         "trajectories_enabled": True,
         "push_all_devices": False,
+        "backup_enabled": True,
+        "backup_paused": False,
         "provider_insights_models": {"opencode": "anthropic/claude-sonnet-4-6"},
         "provider_default_thinking": {"claude": "high"},
     }

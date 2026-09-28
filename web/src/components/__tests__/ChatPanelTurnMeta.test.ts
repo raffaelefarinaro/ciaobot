@@ -128,15 +128,24 @@ async function mountPanel(): Promise<{
 }
 
 describe('ChatPanel turn footer placement', () => {
+  // jsdom implements neither Element.scrollTo nor any layout, so selecting a
+  // message (which scrolls the transcript when the new footer would fall below
+  // it) throws an unhandled rejection out of the component's nextTick. Stub it,
+  // as ChatPanelWorkbench.test.ts does for the same reason.
+  const scrollProto = Element.prototype as unknown as { scrollTo?: unknown }
+  const originalScrollTo = scrollProto.scrollTo
+
   beforeEach(() => {
     Object.defineProperty(globalThis, 'localStorage', {
       configurable: true,
       value: new MemoryStorage(),
     })
     localStorage.clear()
+    scrollProto.scrollTo = function scrollTo() {}
   })
 
   afterEach(() => {
+    scrollProto.scrollTo = originalScrollTo
     vi.restoreAllMocks()
     localStorage.clear()
   })
@@ -171,11 +180,13 @@ describe('ChatPanel turn footer placement', () => {
 
     const footer = bubbles[1].find('.message-meta')
     expect(footer.exists()).toBe(true)
-    // Every fact the turn produced, on the bubble that closes it.
+    // Every fact the turn produced, on the bubble that closes it — except the
+    // context-window occupancy, which the Work details rail states as a meter
+    // against the window's size. The footer reports cost, not occupancy.
     expect(footer.text()).toContain('openai/gpt-5.6-luna')
     expect(footer.text()).toContain('23s')
     expect(footer.html()).toContain('10,007')
-    expect(footer.html()).toContain('13.2%')
+    expect(footer.text()).not.toContain('13.2%')
   })
 
   it('shows one footer when a system notice splits the turn', async () => {
@@ -229,5 +240,19 @@ describe('ChatPanel turn footer placement', () => {
     const bubbles = wrapper.findAll('.message-wrap.assistant')
     expect(bubbles.length).toBe(1)
     expect(bubbles[0].find('.message-meta').html()).toContain('sonnet')
+  })
+
+  it('shows a user message time only once the message is selected', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'hi', timestamp: '2026-08-30T13:23:00Z', turn_index: 0 },
+    ]
+    await flushPromises()
+
+    const bubble = () => wrapper.get('.message-wrap.user')
+    expect(bubble().find('.message-meta').exists()).toBe(false)
+    await bubble().get('.message-row').trigger('click')
+    expect(bubble().classes()).toContain('message-wrap--selected')
+    expect(bubble().find('.message-meta').exists()).toBe(true)
   })
 })

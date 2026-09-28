@@ -101,7 +101,7 @@ function matchesSearch(n: MemoryGraphNode, term: string): boolean {
  * component triggered it.
  */
 /** The memory page's sections, in sidebar order. */
-export const MEMORY_SECTIONS = ['suggested', 'revisit', 'map', 'categories', 'retired', 'history'] as const
+export const MEMORY_SECTIONS = ['review', 'map', 'categories', 'retired', 'history'] as const
 export type MemorySection = typeof MEMORY_SECTIONS[number]
 export function isMemorySection(value: unknown): value is MemorySection {
   return typeof value === 'string' && (MEMORY_SECTIONS as readonly string[]).includes(value)
@@ -109,6 +109,21 @@ export function isMemorySection(value: unknown): value is MemorySection {
 /** Where a section lives. */
 export function memorySectionPath(section: MemorySection): string {
   return `/memory/${section}`
+}
+/**
+ * The two queues To decide shows, and the filter that narrows it to one. The
+ * suggestions and the notes to revisit are the same job — a list of routine
+ * choices — so they share one page with a filter instead of one page each.
+ */
+export const REVIEW_FILTERS = ['all', 'suggested', 'revisit'] as const
+export type ReviewFilter = typeof REVIEW_FILTERS[number]
+export function isReviewFilter(value: unknown): value is ReviewFilter {
+  return typeof value === 'string' && (REVIEW_FILTERS as readonly string[]).includes(value)
+}
+/** To decide, narrowed to one queue. The filter rides in `?show=` so Home's
+ * and the map's links land on the queue they name. */
+export function reviewPath(filter: ReviewFilter = 'all'): string {
+  return filter === 'all' ? memorySectionPath('review') : `${memorySectionPath('review')}?show=${filter}`
 }
 
 export const useMemoryMapStore = defineStore('memoryMap', () => {
@@ -147,36 +162,17 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
    */
   const mapView = ref<'graph' | 'list'>('graph')
   /**
-   * Which pane the Review surface shows: the agent-proposal queue or the
-   * stale-note retirement queue. Defaults to proposals; entry points that
-   * are about retiring a note (the sidebar's "Needs review" list, a stale
-   * note's detail panel) select retirement directly.
-   */
-  const reviewTab = ref<'proposals' | 'retirement'>('proposals')
-  /**
-   * Which half of the retirement queue is on screen. The trash used to be a
-   * section pinned under the candidate list in the same scroll, so a full
-   * queue put thirty rows between you and the note you had just retired.
-   */
-  const retirementTab = ref<'candidates' | 'trash'>('candidates')
-  /**
-   * Which of the memory page's six sections is on screen. The sidebar lists
+   * Which of the memory page's five sections is on screen. The sidebar lists
    * them the way it lists Settings' tabs, and each one is a route
    * (`/memory/<section>`), so back/forward and deep links land on the same
-   * place. `view`, `reviewTab` and `retirementTab` stay as the panels' own
-   * state; `setSection` is the one writer that keeps them in step.
+   * place. `view` stays as the map's own state; `setSection` keeps it in step.
    */
-  const section = ref<MemorySection>('suggested')
+  const section = ref<MemorySection>('review')
+  /** Which queue To decide shows; the route's `?show=` owns it. */
+  const reviewFilter = ref<ReviewFilter>('all')
   function setSection(next: MemorySection) {
     section.value = next
-    if (next === 'map') {
-      view.value = mapView.value
-      return
-    }
-    view.value = 'review'
-    reviewTab.value = next === 'revisit' || next === 'retired' ? 'retirement' : 'proposals'
-    if (next === 'revisit') retirementTab.value = 'candidates'
-    if (next === 'retired') retirementTab.value = 'trash'
+    view.value = next === 'map' ? mapView.value : 'review'
   }
   // Bumped whenever something outside the canvas (the sidebar's "most
   // connected" list, a neighbor link) asks the canvas to pan/zoom onto a
@@ -553,7 +549,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   return {
     nodes, edges, loading, loadError, search, activeCats, selectedId, focusSignal, loadedWorkspace,
     pendingFocus,
-    hideOrphans, orphanFilter, view, mapView, reviewTab, retirementTab, section, setSection,
+    hideOrphans, orphanFilter, view, mapView, section, reviewFilter, setSection,
     nodesById, adjacency, categoryList, visibleNodes, visibleIds, visibleEdgeCount, orphanCount,
     mostConnected, selectedNode,
     orphanNotes, recentNotes, staleNotes, ageLabelOf,

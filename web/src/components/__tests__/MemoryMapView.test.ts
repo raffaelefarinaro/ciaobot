@@ -592,24 +592,47 @@ describe('MemoryMapView sections', () => {
   }
 
   it('has no tab row and no mode switch; the header names the section', async () => {
-    const { wrapper } = await mountSection('revisit')
+    const { wrapper } = await mountSection('review')
     expect(wrapper.findAll('[role="tablist"]')).toHaveLength(0)
     const header = wrapper.get('.pane-header')
     expect(header.find('.memory-mode-actions').exists()).toBe(false)
-    expect(header.text()).toContain('Memory · To revisit')
+    expect(header.text()).toContain('Memory · To decide')
     wrapper.unmount()
   })
 
-  it('shows the notes to revisit on /memory/revisit', async () => {
-    const { wrapper, mm } = await mountSection('revisit')
-    expect([mm.section, mm.reviewTab, mm.retirementTab]).toEqual(['revisit', 'retirement', 'candidates'])
-    expect(wrapper.text()).toContain('Mo')
+  it('shows both queues on To decide, with a filter for each', async () => {
+    const { wrapper, mm } = await mountSection('review')
+    expect([mm.section, mm.reviewFilter]).toEqual(['review', 'all'])
+    const chips = wrapper.get('.mm-decide-chips').findAll('.mr-chip')
+    expect(chips.map(c => c.text())).toEqual(['All 2', 'Suggested 1', 'To revisit 1'])
+    const suggested = wrapper.get('.proposal-review')
+    const revisit = wrapper.get('.vault-review')
+    expect(suggested.isVisible()).toBe(true)
+    expect(revisit.isVisible()).toBe(true)
+    expect(suggested.text()).toContain('A queued fact')
+    expect(revisit.text()).toContain('Mo')
+
+    await chips[2]!.trigger('click')
+    await flushPromises()
+    expect(wrapper.router.currentRoute.value.fullPath).toBe('/memory/review?show=revisit')
+    expect(mm.reviewFilter).toBe('revisit')
+    // Hidden, not unmounted: flipping back must not refetch the queue.
+    expect(wrapper.get('.proposal-review').isVisible()).toBe(false)
+    expect(wrapper.get('.vault-review').isVisible()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('lands a deep link on the queue it names', async () => {
+    const { wrapper, mm } = await mountSection('review?show=suggested')
+    expect(mm.reviewFilter).toBe('suggested')
+    expect(wrapper.get('.vault-review').isVisible()).toBe(false)
+    expect(wrapper.get('.proposal-review').isVisible()).toBe(true)
     wrapper.unmount()
   })
 
   it('reaches the retired notes at their own address', async () => {
     const { wrapper, mm } = await mountSection('retired')
-    expect(mm.retirementTab).toBe('trash')
+    expect(mm.section).toBe('retired')
     expect(wrapper.text()).toContain('Old')
     wrapper.unmount()
   })
@@ -635,7 +658,7 @@ describe('MemoryMapView sections', () => {
   })
 
   it('follows the route when the sidebar moves to another section', async () => {
-    const { wrapper, mm } = await mountSection('suggested')
+    const { wrapper, mm } = await mountSection('review')
     await wrapper.router.push('/memory/map')
     await flushPromises()
     expect(mm.section).toBe('map')
@@ -654,7 +677,7 @@ describe('MemoryMapView sections', () => {
   })
 
   it('names the workspace only in the sidebar scope, not in the review body', async () => {
-    const { wrapper } = await mountSection('suggested')
+    const { wrapper } = await mountSection('review')
     const body = wrapper.get('.mm-review-wrap .page-main').text()
     expect(body).not.toContain('to decide in')
     expect(body.toLowerCase()).not.toContain('personal')
@@ -669,7 +692,7 @@ describe('MemoryMapView sections', () => {
         ? { ok: true, status: 200, text: async () => guide } as unknown as Response
         : { ok: false, status: 404, text: async () => '' } as unknown as Response
     }))
-    const { wrapper } = await mountSection('suggested')
+    const { wrapper } = await mountSection('review')
     await flushPromises()
 
     const rail = wrapper.get('.mm-review-rail')

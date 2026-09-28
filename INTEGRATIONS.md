@@ -10,25 +10,26 @@ SDK-level wiring notes (fallback_model, hooks, setting_sources) live in the modu
 
 v1.0.0 retires the macOS `Ciaobot.app`; the PWA is now served by the engine.
 There is no data migration and no vault change. If you still run the app, run
-the installer with `--migrate`, which hands the engine the app currently manages
-over to the terminal installer and keeps your workspace, password, chats,
-schedules and push subscriptions, then run `ciao desktop uninstall` once to
-remove the old bundle:
+the installer with `--migrate`: it hands the engine the app currently manages
+over to the terminal installer, keeps your workspace, password, chats,
+schedules and push subscriptions, and removes the old `Ciaobot.app` bundle.
 
 ```bash
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh -s -- --migrate
-ciao desktop uninstall
 ```
 
 If the installer cannot tell whether your Mac is the host or a client, it says
 so and asks for `--as-host` or `--as-client <url>`.
 
-`ciao desktop uninstall` removes the bundle (`~/Applications`, or
-`/Applications` for older installs; `--app-dir` points elsewhere) with its
-LaunchAgents and any `~/.local/bin/ciao` shim that pointed inside it. Your
-workspace folder and its notes are kept. Updates after that are the same
-one-liner again, or **Settings → Home** in the PWA, which stages and applies
-the engine package update in the background; there is no in-app app updater.
+Should the automatic removal not be able to run — a `/Applications` install the
+account cannot write, for instance — the installer says so and leaves the bundle
+alone, and `ciao desktop uninstall` removes it by hand. That command takes the
+bundle (`~/Applications`, or `/Applications` for older installs; `--app-dir`
+points elsewhere) with its LaunchAgents and any `~/.local/bin/ciao` shim that
+pointed inside it. Your workspace folder and its notes are kept. Updates after
+that are the same one-liner again, or **Settings → Home** in the PWA, which
+stages and applies the engine package update in the background; there is no
+in-app app updater.
 
 ## CLI Tools
 

@@ -2,11 +2,20 @@
 
 The env-backed :class:`ciao.config.CiaoConfig` stays the source of
 defaults; this store holds the small set of knobs the PWA Settings →
-Models tab can change at runtime (internal-routine models).
-Values are applied as an overlay onto the live
+Models tab can change at runtime (internal-routine models), plus the
+durable operational state of the unattended backup service
+(:mod:`ciao.backup_service`) — whether it is on or paused, and what it has
+already pushed. Values are applied as an overlay onto the live
 config object so call sites keep reading ``config.*`` and PATCHes take
 effect without a restart. Empty string means "no override, use the
 config/env default".
+
+The backup fields are the one part of this file that no env var and no
+`CiaoConfig` attribute backs: the cadence is a named constant, and
+whether a given machine backs up, and what it last managed to push, is
+only knowable at runtime. They are read on every gate check rather than
+cached, which is what lets a pause survive a restart and a resume take
+effect on the next tick.
 """
 
 from __future__ import annotations
@@ -67,7 +76,13 @@ _NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
     "provider_insights_models": _clean_provider_map,
     "provider_default_modes": _clean_default_modes,
 }
-_BOOLEAN_FIELDS = {"insights_enabled", "trajectories_enabled", "push_all_devices"}
+_BOOLEAN_FIELDS = {
+    "insights_enabled",
+    "trajectories_enabled",
+    "push_all_devices",
+    "backup_enabled",
+    "backup_paused",
+}
 
 # Apple's on-device model used to be an insights option. It is gone, so a
 # stored sentinel reads as Automatic instead of reaching a provider as a
@@ -120,6 +135,23 @@ class AppSettings:
     insights_model: str = ""
     # HTTPS origin other devices should use (e.g. Tailscale Serve); "" = none.
     trusted_url: str = ""
+
+    # The unattended backup service (ciao/backup_service.py). `backup_enabled`
+    # is the owner's standing decision and defaults on, so an existing install
+    # keeps the branch push it has always had, and a fresh one is backed up
+    # without anybody configuring anything; `backup_paused` is a hold they can
+    # lift. The three timestamps/commit below are the service's own record of
+    # what it has already done.
+    #
+    # Operational metadata only — never a note, a path inside the vault, or any
+    # other content. The vault is the user's; this file is a dotfile next to the
+    # lock, so the one thing it may not become is a second copy of their data.
+    backup_enabled: bool = True
+    backup_paused: bool = False
+    backup_last_attempt_at: str = ""
+    backup_last_success_at: str = ""
+    backup_last_success_commit: str = ""
+    backup_remote: str = ""
 
     # Comma-separated list of models for the adversarial_review MCP tool.
     critique_models: str = ""

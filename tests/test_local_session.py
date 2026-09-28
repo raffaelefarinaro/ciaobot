@@ -5,21 +5,37 @@ the workspace checkout is on and syncs it via ``sync_branch`` (commit + pull +
 push; conflict -> hand off to a chat). Non-git workspaces skip gracefully. The
 safety rule the tests pin down: never discard local work, never touch other
 branches.
+
+The last section covers the unattended path — ``commit_scoped`` and
+``preflight_scoped`` — which shares every one of those rules and adds one of
+its own: it commits a named scope, so an unrelated change the user had staged
+must survive it untouched.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import subprocess
 from pathlib import Path
 
 from types import SimpleNamespace
 
+import pytest
+
+from ciao.config import CiaoConfig, reset_reroot_cache
 from ciao.git_proc import GIT_TIMEOUT_DETAIL
+from ciao.workspace_reroot import mark_born_per_root
 from ciao.local_session import (
+    PREFLIGHT_STEP,
+    GitOperationError,
     LocalSessionManager,
     backoff_reason,
+    commit_pending,
+    commit_scoped,
     has_origin_remote,
     is_git_repo,
+    preflight_scoped,
     repo_toplevel,
     resync_branch,
     sync_branch,
@@ -328,6 +344,224 @@ async def test_resync_ok_when_branch_missing_on_origin(tmp_path: Path) -> None:
     assert "no remote branch" in detail
 
 
+# ── failed steps are reported as failures (issue #674) ──────────────────────
+#
+# commit_pending used to discard every return code, so a failed add/commit read
+# as "a commit was created" and sync went on to push. Each case below asserts
+# both halves of the fix: the right step is named, and nothing after the
+# failure is attempted.
+
+
+def _record_git(monkeypatch, *, fail: dict[str, tuple[int, str, str]] | None = None) -> list[tuple[str, ...]]:
+    """Record every git verb the flow runs, optionally failing chosen verbs."""
+    import ciao.local_session
+
+    calls: list[tuple[str, ...]] = []
+    orig_git = ciao.local_session._git
+
+    async def mock_git(workspace, *args, **kwargs):
+        calls.append(args)
+        if fail and args[0] in fail:
+            return fail[args[0]]
+        return await orig_git(workspace, *args, **kwargs)
+
+    monkeypatch.setattr(ciao.local_session, "_git", mock_git)
+    return calls
+
+
+def _verbs(calls: list[tuple[str, ...]]) -> list[str]:
+    return [args[0] for args in calls]
+
+
+async def test_sync_branch_reports_a_failed_add_and_stops(tmp_path: Path, monkeypatch) -> None:
+    local, _ = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+    calls = _record_git(monkeypatch, fail={"add": (128, "", "fatal: unable to create index.lock")})
+
+    result = await sync_branch(local, branch="main")
+
+    assert result["ok"] is False
+    assert result["step"] == "add"
+    assert "index.lock" in result["error"]
+    # Nothing that mutates further may run after the staging failure.
+    assert _verbs(calls) == ["add"]
+    assert _git(local, "status", "--porcelain") != ""
+
+
+async def test_sync_branch_reports_a_failed_status_check(tmp_path: Path, monkeypatch) -> None:
+    """``git diff --cached --quiet`` exits >1 on a real error, which is not the
+    same as "nothing to commit" and must not commit on."""
+    local, _ = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+    calls = _record_git(monkeypatch, fail={"diff": (128, "", "fatal: bad object HEAD")})
+
+    result = await sync_branch(local, branch="main")
+
+    assert result["ok"] is False
+    assert result["step"] == "status"
+    assert "bad object" in result["error"]
+    assert _verbs(calls) == ["add", "diff"]
+
+
+async def test_sync_branch_reports_a_failed_commit_and_never_pushes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    local, origin = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+    remote_before = _git(origin, "rev-parse", "main")
+    calls = _record_git(monkeypatch, fail={"commit": (1, "", "fatal: empty commit message")})
+
+    result = await sync_branch(local, branch="main")
+
+    assert result["ok"] is False
+    assert result["step"] == "commit"
+    assert "empty commit" in result["error"]
+    # No fetch, no pull, no push: the uncommitted work must stay local and
+    # retryable, not be reported as synced.
+    assert "push" not in _verbs(calls)
+    assert _git(origin, "rev-parse", "main") == remote_before
+
+
+async def test_sync_branch_reports_a_failed_fetch_before_pulling(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A pull against a fetch that never landed merges a stale origin ref."""
+    local, _ = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+    calls = _record_git(monkeypatch, fail={"fetch": (1, "", "fatal: could not read from remote")})
+
+    result = await sync_branch(local, branch="main")
+
+    assert result["ok"] is False
+    assert result["step"] == "fetch"
+    assert "could not read" in result["error"]
+    assert "pull" not in _verbs(calls)
+    assert "push" not in _verbs(calls)
+
+
+async def test_sync_branch_refuses_a_preexisting_index_lock(tmp_path: Path) -> None:
+    """A foreign lock is an explicit failure, not a race and not a deletion."""
+    local, _ = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+    lock_file = local / ".git" / "index.lock"
+    lock_file.write_text("", encoding="utf-8")
+
+    result = await sync_branch(local, branch="main")
+
+    assert result["ok"] is False
+    assert result["step"] == "preflight"
+    assert "index lock" in result["error"]
+    assert lock_file.exists()
+
+
+async def test_resync_reports_a_failed_commit_without_merging(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Merging origin on top of an uncommitted tree is not what was asked."""
+    local, origin = _make_world(tmp_path)
+    _advance_origin(tmp_path, origin, "remote-only")
+    _write(local / "local.md", "local\n")
+    calls = _record_git(monkeypatch, fail={"commit": (1, "", "fatal: identity unknown")})
+
+    ok, detail = await resync_branch(local, branch="main")
+
+    assert ok is False
+    assert detail.startswith("commit failed:")
+    assert "identity unknown" in detail
+    assert "merge" not in _verbs(calls)
+    assert not (local / "remote-only.md").exists()
+    assert _git(local, "status", "--porcelain") != ""
+
+
+async def test_resync_refuses_an_in_progress_merge(tmp_path: Path) -> None:
+    local, _ = _make_world(tmp_path)
+    (local / ".git" / "MERGE_HEAD").write_text("deadbeef\n", encoding="utf-8")
+
+    ok, detail = await resync_branch(local, branch="main")
+
+    assert ok is False
+    assert "merge is in progress" in detail
+    assert (local / ".git" / "MERGE_HEAD").exists()
+
+
+async def test_push_branch_refuses_a_preexisting_index_lock(tmp_path: Path) -> None:
+    """The backup loop reports the refusal through its own (ok, detail) shape."""
+    from ciao.local_session import push_branch
+
+    local, origin = _make_world(tmp_path)
+    (local / ".git" / "index.lock").write_text("", encoding="utf-8")
+    remote_before = _git(origin, "rev-parse", "main")
+
+    ok, detail = await push_branch(local, branch="main")
+
+    assert ok is False
+    assert "index lock" in detail
+    assert _git(origin, "rev-parse", "main") == remote_before
+
+
+async def test_two_public_mutations_of_one_repository_serialize(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The integration the lock exists for: two public operations on one
+    checkout never overlap. Overlap is recorded, not timed."""
+    local, _ = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+    import ciao.local_session
+    from ciao.local_session import push_branch
+
+    orig_git = ciao.local_session._git
+    active = 0
+    overlapped = False
+    both_done = asyncio.Event()
+
+    async def slow_git(workspace, *args, **kwargs):
+        nonlocal active, overlapped
+        active += 1
+        overlapped = overlapped or active > 1
+        try:
+            # Real git, but every call yields first so a wrongly-parallel
+            # writer would be observed here rather than being missed.
+            await asyncio.sleep(0.01)
+            return await orig_git(workspace, *args, **kwargs)
+        finally:
+            active -= 1
+            if active == 0:
+                both_done.set()
+
+    monkeypatch.setattr(ciao.local_session, "_git", slow_git)
+
+    results = await asyncio.gather(
+        commit_pending(local, branch="main"),
+        push_branch(local, branch="main"),
+    )
+
+    assert not overlapped
+    assert results[0] is True  # the commit
+    assert results[1][0] is True  # the push of it
+    assert both_done.is_set()
+
+
+async def test_manager_reports_a_preexisting_index_lock_in_its_own_envelope(
+    tmp_path: Path,
+) -> None:
+    """A refusal must reach the route as data. The manager's existing error
+    shapes (a dict for handback, ``ok``/``detail`` for resync) are what
+    ``local_handback``/``local_resync`` map to a status code, so a preflight
+    refusal has to arrive in those shapes rather than as a raised error."""
+    local, _ = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+    (local / ".git" / "index.lock").write_text("", encoding="utf-8")
+    mgr = LocalSessionManager(workspace=local, runtime_root=tmp_path / "rt")
+
+    handback = await mgr.commit_and_sync()
+    assert handback["ok"] is False
+    assert handback["step"] == "preflight"
+
+    resync = await mgr.resync()
+    assert resync["ok"] is False
+    assert "index lock" in resync["detail"]
+
+
 # ── LocalSessionManager ──────────────────────────────────────────────────────
 
 
@@ -632,3 +866,367 @@ def test_backoff_reason_prefers_auth_over_timeout() -> None:
     """Credentials are the actionable half; the message must say so."""
     detail = f"authentication failed; {GIT_TIMEOUT_DETAIL}"
     assert backoff_reason(detail) == "auth"
+
+
+# ── scoped commit / preflight (unattended backup) ────────────────────────────
+#
+# The manual path above stages the whole tree, which is what the person who
+# pressed the button asked for. These commit a named scope instead, so the
+# property under test is the negative one: whatever the scope does not name
+# survives it. An unattended run that ate the user's staging, or swept a
+# credential into a commit, would be worse than no backup at all.
+
+
+def _install_config(workspace: Path) -> CiaoConfig:
+    return CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=workspace,
+        state_path=workspace / ".runtime" / "state.json",
+        media_root=workspace / ".runtime" / "media",
+    )
+
+
+def _make_data_repo(tmp_path: Path) -> Path:
+    """A repository holding nothing but durable data, so ``tracked_excluded`` is
+    empty until a test puts something in it. The shared ``_make_world`` seeds a
+    README, which the scope rightly reports as out of scope — correct, and noise
+    in a test about something else."""
+    repo = tmp_path / "data"
+    _write(repo / "memory-vault" / "note.md", "a note\n")
+    _git(repo, "init", "-q", "-b", "main")
+    _identify(repo)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "seed")
+    return repo
+
+
+def _per_root_config(workspace: Path, *names: str) -> CiaoConfig:
+    """A config for an install that has completed the per-workspace re-rooting.
+
+    One agent root per registered workspace, so the vault lives at
+    ``<install>/<name>/memory-vault`` rather than at the install root. Built
+    through ``from_env`` because the workspace registry is only read there.
+    """
+    runtime = workspace / ".runtime"
+    (runtime / "migration").mkdir(parents=True, exist_ok=True)
+    mark_born_per_root(workspace, runtime, list(names))
+    (runtime / "workspaces.json").write_text(
+        json.dumps({"workspaces": [{"name": name, "vault_root": name} for name in names]}),
+        encoding="utf-8",
+    )
+    reset_reroot_cache()
+    return CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "t",
+            "CIAO_WORKSPACE": str(workspace),
+            "CIAO_RUNTIME_ROOT": str(runtime),
+            "CIAO_VAULT_ROOT": str(workspace / "memory-vault"),
+        }
+    )
+
+
+async def test_commit_scoped_commits_only_the_named_paths(tmp_path: Path) -> None:
+    local, _ = _make_world(tmp_path)
+    _write(local / "memory-vault" / "note.md", "a note\n")
+    # The user staged something of their own before the backup ran.
+    _write(local / "wip.md", "unrelated\n")
+    _git(local, "add", "wip.md")
+
+    committed = await commit_scoped(
+        local,
+        branch="main",
+        relpaths=["memory-vault/note.md"],
+        message="backup 2026-09-28T00:00:00Z",
+    )
+
+    assert committed is True
+    assert _git(local, "show", "--name-only", "--format=", "HEAD").split() == [
+        "memory-vault/note.md"
+    ]
+    # The user's own staged file is still staged, still uncommitted, and the
+    # unscoped working-tree file was never touched.
+    assert _git(local, "status", "--porcelain") == "A  wip.md"
+
+
+async def test_commit_scoped_is_a_no_op_on_a_clean_scoped_tree(tmp_path: Path) -> None:
+    local, _ = _make_world(tmp_path)
+    _write(local / "memory-vault" / "note.md", "a note\n")
+    _git(local, "add", "-A")
+    _git(local, "commit", "-q", "-m", "seed")
+    before = _git(local, "rev-parse", "HEAD")
+    # Dirty, but outside the scope: a backup must not manufacture a commit for it.
+    _write(local / "wip.md", "unrelated\n")
+
+    committed = await commit_scoped(
+        local, branch="main", relpaths=["memory-vault/note.md"], message="backup"
+    )
+
+    assert committed is False
+    assert _git(local, "rev-parse", "HEAD") == before
+    assert _git(local, "status", "--porcelain") == "?? wip.md"
+
+
+async def test_commit_scoped_records_a_deleted_note(tmp_path: Path) -> None:
+    """Deleting a note is a durable change, so it has to be committed and not
+    reported as nothing to do."""
+    local, _ = _make_world(tmp_path)
+    _write(local / "memory-vault" / "note.md", "a note\n")
+    _git(local, "add", "-A")
+    _git(local, "commit", "-q", "-m", "seed")
+    (local / "memory-vault" / "note.md").unlink()
+
+    committed = await commit_scoped(
+        local, branch="main", relpaths=["memory-vault/note.md"], message="backup"
+    )
+
+    assert committed is True
+    assert _git(local, "show", "--name-status", "--format=", "HEAD").split() == [
+        "D", "memory-vault/note.md"
+    ]
+
+
+async def test_commit_scoped_reports_a_failed_stage_and_never_commits(
+    tmp_path: Path, monkeypatch
+) -> None:
+    local, _ = _make_world(tmp_path)
+    _write(local / "memory-vault" / "note.md", "a note\n")
+    calls = _record_git(monkeypatch, fail={"add": (128, "", "fatal: unable to create index.lock")})
+
+    with pytest.raises(GitOperationError) as raised:
+        await commit_scoped(
+            local, branch="main", relpaths=["memory-vault/note.md"], message="backup"
+        )
+
+    assert raised.value.step == "add"
+    assert "index.lock" in raised.value.detail
+    assert "commit" not in _verbs(calls)
+    assert _git(local, "status", "--porcelain") != ""
+
+
+async def test_commit_scoped_reports_a_failed_commit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    local, _ = _make_world(tmp_path)
+    _write(local / "memory-vault" / "note.md", "a note\n")
+    _record_git(monkeypatch, fail={"commit": (1, "", "fatal: empty commit message")})
+
+    with pytest.raises(GitOperationError) as raised:
+        await commit_scoped(
+            local, branch="main", relpaths=["memory-vault/note.md"], message=""
+        )
+
+    assert raised.value.step == "commit"
+    assert "empty commit" in raised.value.detail
+    # The work stays staged, so the next run still sees it as pending.
+    assert _git(local, "diff", "--cached", "--name-only") == "memory-vault/note.md"
+
+
+async def test_commit_scoped_refuses_a_branch_it_did_not_examine(tmp_path: Path) -> None:
+    """The caller is about to push ``branch``; committing on the one the
+    checkout is actually on would be pushed later under the wrong name."""
+    local, _ = _make_world(tmp_path, branch="feature-x")
+    _write(local / "memory-vault" / "note.md", "a note\n")
+
+    with pytest.raises(GitOperationError) as raised:
+        await commit_scoped(
+            local, branch="main", relpaths=["memory-vault/note.md"], message="backup"
+        )
+
+    assert raised.value.step == "branch"
+    assert "feature-x" in raised.value.detail
+    assert _git(local, "status", "--porcelain") != ""
+
+
+async def test_commit_scoped_refuses_a_preexisting_index_lock(tmp_path: Path) -> None:
+    local, _ = _make_world(tmp_path)
+    _write(local / "memory-vault" / "note.md", "a note\n")
+    lock_file = local / ".git" / "index.lock"
+    lock_file.write_text("", encoding="utf-8")
+
+    with pytest.raises(GitOperationError) as raised:
+        await commit_scoped(
+            local, branch="main", relpaths=["memory-vault/note.md"], message="backup"
+        )
+
+    assert raised.value.step == PREFLIGHT_STEP
+    assert "index lock" in raised.value.detail
+    assert lock_file.exists()
+
+
+async def test_commit_scoped_ignores_a_path_git_cannot_match(tmp_path: Path) -> None:
+    """A status that has moved on since it was read leaves pathspecs that
+    match nothing, and `git add` treats that as an error rather than a no-op.
+    A file deleted in the meantime is a different case: it is still a real
+    change and is committed."""
+    local, _ = _make_world(tmp_path)
+    _write(local / "memory-vault" / "note.md", "a note\n")
+
+    committed = await commit_scoped(
+        local,
+        branch="main",
+        relpaths=["memory-vault/never-existed.md", "memory-vault/note.md"],
+        message="backup",
+    )
+
+    assert committed is True
+    assert _git(local, "show", "--name-only", "--format=", "HEAD").split() == [
+        "memory-vault/note.md"
+    ]
+
+
+async def test_commit_scoped_refuses_a_pathspec_that_escapes_the_tree(
+    tmp_path: Path,
+) -> None:
+    """The confinement is in the function, not only in the scope that calls
+    it: a `..` pathspec is dropped rather than handed to git."""
+    local, _ = _make_world(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_text("not mine\n", encoding="utf-8")
+
+    committed = await commit_scoped(
+        local, branch="main", relpaths=["../outside.md", "/etc/hosts"], message="backup"
+    )
+
+    assert committed is False
+    assert _git(local, "log", "--oneline").count("\n") == 0  # only the seed commit
+
+
+async def test_commit_scoped_drops_a_gitignored_pathspec_from_the_batch(
+    tmp_path: Path,
+) -> None:
+    """A Finder ``.DS_Store`` in a new notes folder is ignored by the vault's own
+    ``.gitignore``, and ``git add`` refuses the *whole* batch when any single
+    pathspec is ignored. Status never reports an ignored file, but an untracked
+    directory entry (``?? notes/``) expands into one, so without this filter an
+    unattended commit fails on an ordinary file it was never going to commit —
+    and names that file in the error, so the failure reads like a scope bug.
+    """
+    local = _make_data_repo(tmp_path)
+    config = _install_config(local)
+    _write(local / ".gitignore", ".DS_Store\n")
+    _write(local / "memory-vault" / "x" / "note.md", "a note\n")
+    _write(local / "memory-vault" / "x" / ".DS_Store", "finder junk\n")
+
+    preflight = await preflight_scoped(config, local)
+    committed = await commit_scoped(
+        local, branch="main", relpaths=preflight["eligible"], message="backup"
+    )
+
+    # The planned sequence: preflight hands the commit its eligible set, so the
+    # ignored path has to be gone from the report as well as from the batch.
+    assert preflight["eligible"] == ["memory-vault/x/note.md"]
+    assert "memory-vault/x/.DS_Store" in preflight["excluded"]
+    assert committed is True
+    assert _git(local, "show", "--name-only", "--format=", "HEAD").split() == [
+        "memory-vault/x/note.md"
+    ]
+    # Nothing was force-added: the file is still ignored, it is just never
+    # asked about.
+    assert _git(local, "status", "--porcelain", "--ignored").splitlines() == [
+        "?? .gitignore",
+        "!! memory-vault/x/.DS_Store",
+    ]
+
+
+async def test_commit_scoped_still_commits_a_tracked_file_git_ignores(
+    tmp_path: Path,
+) -> None:
+    """The filter asks git what it *would* ignore, which is not the same as what
+    it ignores: a file that is already tracked keeps a later ``.gitignore`` line
+    from meaning anything. Dropping it here would silently stop backing up
+    exactly the note a person (or a sync tool) added to ``.gitignore`` first.
+    """
+    local = _make_data_repo(tmp_path)
+    _write(local / ".gitignore", "note.md\n")
+    _git(local, "add", "-f", ".gitignore", "memory-vault/note.md")
+    _git(local, "commit", "-q", "-m", "track the note anyway")
+    _write(local / "memory-vault" / "note.md", "an edit\n")
+
+    committed = await commit_scoped(
+        local, branch="main", relpaths=["memory-vault/note.md"], message="backup"
+    )
+
+    assert committed is True
+    assert _git(local, "show", "--name-only", "--format=", "HEAD").split() == [
+        "memory-vault/note.md"
+    ]
+
+
+async def test_preflight_scoped_reports_a_tracked_env_as_a_blocker(
+    tmp_path: Path,
+) -> None:
+    """`.gitignore` never un-commits anything, so a credential that is already
+    tracked has to be raised: the manual sync path still stages the whole tree
+    and would carry it off the machine."""
+    local = _make_data_repo(tmp_path)
+    config = _install_config(local)
+    _write(local / ".env", "API_KEY=secret\n")
+    _git(local, "add", "-f", ".env")
+    _git(local, "commit", "-q", "-m", "oops")
+
+    result = await preflight_scoped(config, local)
+
+    assert result["ok"] is False
+    assert result["tracked_excluded"] == [".env"]
+    assert any(".env" in blocker for blocker in result["blockers"])
+
+
+async def test_preflight_scoped_scans_the_eligible_set_only(tmp_path: Path) -> None:
+    """One scanner, one set of rules — and it is never handed a file the
+    commit could not contain anyway."""
+    local = _make_data_repo(tmp_path)
+    config = _install_config(local)
+    pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQ...\n-----END RSA PRIVATE KEY-----\n"
+    # Outside the scope: refused before it is ever opened, so its contents are
+    # nobody's business in a backup.
+    _write(local / ".env", pem)
+    # Inside the scope: this one is about to be committed.
+    _write(local / "memory-vault" / "cert.pem", pem)
+
+    result = await preflight_scoped(config, local)
+
+    assert result["eligible"] == ["memory-vault/cert.pem"]
+    assert result["excluded"] == [".env"]
+    assert any("cert.pem" in blocker for blocker in result["blockers"])
+    assert not any(".env" in blocker for blocker in result["blockers"])
+
+
+async def test_preflight_scoped_stages_nothing(tmp_path: Path) -> None:
+    """It answers a question; it must not change the answer's subject. A
+    preflight that staged the tree would be the backup it is meant to vet."""
+    local = _make_data_repo(tmp_path)
+    config = _install_config(local)
+    _write(local / "memory-vault" / "second.md", "another\n")
+
+    result = await preflight_scoped(config, local)
+
+    assert result["ok"] is True
+    assert result["eligible"] == ["memory-vault/second.md"]
+    assert result["tracked_excluded"] == []
+    assert _git(local, "diff", "--cached", "--name-only") == ""
+
+
+async def test_a_tests_folder_inside_a_workspace_vault_is_not_a_fixture(
+    tmp_path: Path,
+) -> None:
+    """The fixture exemption is keyed on the first path segment, which was
+    correct while the vault sat at the workspace root and is not after the
+    re-rooting: `<install>/<workspace>/memory-vault/tests/` is a folder of
+    notes, and a credential filed in it has to be reported by both preflights.
+    """
+    local = _make_data_repo(tmp_path)
+    config = _per_root_config(local, "personal")
+    _write(
+        local / "personal" / "memory-vault" / "tests" / "server.key",
+        "-----BEGIN PRIVATE KEY-----\nnope\n",
+    )
+    mgr = LocalSessionManager(workspace=local, runtime_root=tmp_path / "rt")
+
+    scoped = await preflight_scoped(config, local)
+    manual = await mgr.preflight()
+
+    # In scope here (the vault belongs to the personal agent root), so the
+    # scanner has to see it; and it does in the manual preflight too.
+    assert scoped["eligible"] == ["personal/memory-vault/tests/server.key"]
+    assert any("server.key" in blocker for blocker in scoped["blockers"])
+    assert any("server.key" in blocker for blocker in manual["blockers"])

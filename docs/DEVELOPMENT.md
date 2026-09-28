@@ -116,7 +116,8 @@ the URL is checked with the classifier's own rule (scheme, host name, no
 credentials or whitespace), so an override like `https://` is refused before a
 single label or file is touched rather than after this Mac has given up its own
 engine. The migration receipt in `~/.local/state/ciaobot/migration/` (`schema`,
-`phase`, `before` block, `version`, `retiring_desktop`, `started_at`) is what
+`phase`, `before` block, `version`, `retiring_desktop`, `app_bundle`,
+`started_at`) is what
 makes the whole thing
 resumable: a retry reuses those originals rather than snapshotting the tool the
 previous attempt installed, and only a receipt that parses, records all five
@@ -147,7 +148,16 @@ whose workspace could not be recovered has to name an existing one rather than
 get a fresh `~/Ciaobot`. Taking a different workspace would start a second engine
 with a fresh password and a fresh runtime root next to the real ones, retire the
 app's agent, and leave the original and every chat in it behind while the receipt
-still named the original. The ordinary, non-`--migrate` path is unchanged: there
+still named the original. A hand-over that reaches `migrated` also removes the
+retired `Ciaobot.app` — the bundle the classifier named, guarded to a `.app`
+directory, deleted only after the app's own agent is gone, and reported rather
+than fatal if it would not go (`ciao desktop uninstall` is the manual fallback).
+Nothing before that removes it: `--no-start` leaves the app's agent loaded, a
+client gets somebody else's engine, and every rollback needs the bundle because
+the engine it hands back runs out of it. The bundle is recorded in the receipt
+(`app_bundle`) because a resumed run can no longer read it from the engine plist,
+which the first run already repointed. The ordinary, non-`--migrate` path is
+unchanged: there
 `--workspace` is how a workspace is named, and it is created. The workflow
 attaches it as the `install-engine.sh` release asset, and again as `install.sh`.
 
@@ -325,6 +335,17 @@ would otherwise linger with a stale badge. Set `schedule_only=True` only when a
 schedule is the job's *sole* trigger: such a job is hidden on machines where
 that schedule is not installed.
 
+For memory-backup changes, use `tests/test_backup_service.py`: it drives a temporary
+install against a local bare remote on an injected clock, so it never touches a real
+repository, a real remote or wall-clock time. The cadence assertions are about what the
+loop asked to wait for, the offline path is exercised by making a push time out, and the
+run's own scope and readiness rules are pinned from both sides (a note is committed, a
+file outside the scope is not, a clean run creates nothing). `tests/test_local_routes.py`
+covers the three routes. The five-minute interval is the named constant
+`BACKUP_INTERVAL_S` in `ciao/backup_service.py` and the job is registered in
+`job_runs.REGISTRY` under the id `branch_backup` with its five-minute trigger sentence —
+keep that id, or the Automation page loses the row its history belongs to.
+
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
 
 For engine-update changes, `tests/test_engine_update.py` is the contract: launchd, uv, the service starter, the engine's HTTP surface, the clock and sleep are all doubles, so nothing in it may start a real service, move a real environment or open a socket. An update that a reboot or a killed job interrupted is picked up by a durable `com.ciao.recover` LaunchAgent that `apply_update` installs (from the staged interpreter, `StartInterval` 30) *before* the engine is stopped, and that `run_apply` re-points at the retained `previous-env` the instant the live env is renamed aside — so the swap never consumes the directory the net runs from — the crash window where the live env is renamed aside leaves the engine unable to start, so a recovery reached from inside the engine is a recovery that cannot run. Its program is `run-recover --operation <id>`: `recover_apply` takes the lock without waiting, stands down for a tick when a swap holds it, never posts (it owns no drain) and never mutates a record it did not find stranded, retires its own job and plist when there is nothing left to recover or once the rollback has settled, and otherwise runs the same total `_rollback` the apply would have, using the retained `previous-env` as the evidence that the move happened. `recover_interrupted_apply` from `ciao/main.py` (macOS only) stays as the fast path for the cases where the engine does come back: it recognises the record and bootstraps the detached `com.ciao.updater` job in `run-recover` mode. The rollback is never the engine's own doing, because it cannot boot itself out and restore the env it is running out of. In the other direction, `run_apply` refuses an apply when the loaded `com.ciao.server` does not run the env the install receipt names. Staging resolves the release once, into a real `uv tool env` under `<stage>/tool/<dist>` with `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR` pinned to the stage dir, and records the resolved set as `Operation.env_freeze`; the apply then *moves* that env into the live env's place instead of installing the wheel again, re-pointing only what a move breaks (the `bin` shebangs and the `bin_dir` entry points), so the swap needs no network and cannot pick up a dependency released since staging. Do not run `ciao update apply`, `run-apply`, `run-recover` or real `launchctl` against your own install to check any of it.
@@ -333,6 +354,19 @@ For post-archive pipeline changes, use `tests/test_archive_jobs.py`. It exercise
 For HTML artifact changes, keep the preview self-contained: inline scripts/styles and `data:` media are allowed, while external requests and `blob:` sources must remain blocked. Use the fixtures under `tests/fixtures/html_artifacts/` plus the focused workspace-HTML tests. The response body carries the injected comment bridge (`ciao/web/artifact_bridge.py`): keep it ES5, marker-tagged, and idempotent, never inject ahead of a doctype (a `<script>` before it renders the artifact in quirks mode), and keep `action: 'ready'` deferred to `DOMContentLoaded` — that message is the parent's only cue to push comment highlights, and anything pushed earlier reaches a frame that is still loading. `tests/test_workspace_html.py` asserts the injection and the header contract together; `web/src/lib/artifactBridgeScript.test.ts` runs the script itself in jsdom for anchoring and highlight behaviour.
 For workspace navigation changes, verify that unmodified `1`–`9` keys follow the visible sidebar workspace order, do not fire from text inputs, and keep working in the automations view. The sidebar key labels should remain visible and accessible at narrow widths. An open `AskUserQuestion` card takes those digits over for its own options while it is up (Design System rule S7) and hands them back when it closes, so check both states after touching either handler.
 On the home screen, also verify that it shows only the selected workspace's chats (switching workspaces swaps the content) and that arrow keys follow the rendered lane layout: up/down moves between stacked lanes, left/right moves within a lane.
+A memory pass is not a chat row anywhere, so its whole surface is the one
+**memory insights** section below the tiers. `web/src/lib/memoryInsights.ts` owns
+that derivation — one row per archived conversation, the archive pipeline and the
+pass joined, the pass winning the phase, and every label — and
+`web/src/lib/__tests__/memoryInsights.test.ts` drives it with no Pinia. When you
+touch it, check the overlap case (a trajectory still saving while its pass is
+already running must stay ONE row), the fallback (no pass yet, so the row opens
+the archived transcript), the dead entry (no file and no pass, so the row is
+disabled), the counter rules (`chatIsAttentionItem` is what the Home nav badge
+and the lane status sentence both ask), and that the pass never reappears in
+`activeChatsAll`, `projectChats`, `totalUnread`, the sidebar or a schedule
+target. A pass's own archive is not a second row: `memoryInsights` skips any chat
+that is a pass when reading archive state.
 For Work details changes, verify the rail and the narrow-pane drawer together: both render `AgentContextSection.vue` and the running-subagent list, and the ⓘ toggle moves focus between the rail heading and the chat-body tab.
 For composer drag-and-drop changes, test the desktop-drop grant path end to
 end. Drops preserve the source file and add Markdown companions, and return
@@ -511,14 +545,14 @@ disconnected.
 
 ## DAG-style schedules (maintainers)
 
-Some packaged schedules are multi-step workflows (load state, gate, model call, write). For these, use `ciao.dag` rather than a long `async def`:
+A schedule that is a multi-step workflow (load state, gate, model call, write) can use `ciao.dag` rather than a long `async def`:
 
 - `Node(id, kind, model='', timeout_s=180.0, payload={})` — kinds: `bash`, `prompt`, `gate`, `subagent`, `retention`.
 - `Edge(src, dst, when='ok')` — `when` is `ok` (default), `fail`, or `always`.
 - `run(dag, edges, job=..., label=..., initial_ctx={})` — records each node in `.runtime/job_runs.jsonl`.
 - `subagent` nodes accept an opt-in `payload['requires']` post-condition list: each item is a file path that must exist and be non-empty after the node ran, or `{"path": ..., "contains": "<regex>"}` where at least one line must match. Paths may reference ctx like the prompt and resolve against `payload['cwd']`; `contains` regexes are used verbatim (never ctx-formatted, so quantifiers like `{2}` are safe). Exit 0 with unmet requirements fails the node (guards against an unauthenticated subagent silently doing nothing); DAGs without `requires` are unchanged.
 
-Canonical example: `ciao/skill_evolution.py:_process_skill_dag`. Use a DAG when there are 3+ sequential steps with branching and you want per-step timing on the Automation page.
+No shipped producer runs a DAG today — the weekly skill-evolution pass was the canonical example and was retired in #697 — so `tests/test_dag.py` is what to read for a worked pipeline, one case per node kind and per edge. Use a DAG when there are 3+ sequential steps with branching and you want per-step timing on the Automation page.
 
 `ScheduleManager.catch_up()` runs once at server startup on the host; like `tick()`, it returns an empty list without touching anything when the legacy node-state startup gate says this machine is not the host (the one boot verdict from `ciao.legacy_node_state`, which is the whole gate now that no route can rewrite the role under a running server). It dispatches only the latest missed occurrence for each enabled schedule, leaves the prompt unchanged, and records the missed occurrence's local date so a later slot on the startup day can still fire normally. Cover changes to this behavior in `tests/test_schedules.py`. Packaged system routines are excluded when the startup falls inside the post-setup grace window (`ciao/setup_marker.py`, 24h from a first-time setup): a brand-new install is greeted by its onboarding chat, and the routines fire at their next regular tick instead of all replaying missed runs in parallel. Cover that in `tests/test_setup_catch_up_grace.py`.
 

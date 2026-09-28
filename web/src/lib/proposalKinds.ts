@@ -321,15 +321,25 @@ export const PROPOSAL_KINDS: Record<string, ProposalKindDescriptor> = {
     discussLabel: () => 'a `category` proposal',
   },
 
-  // A skill row is a file, not a bullet, and `accept_for('skill')` raises on the
-  // server — accepting a proposed skill means implementing it, which is a chat.
-  // The path, not the words "a skill proposal file": the row's whole content is
-  // in that file, and naming it is what makes "view" obviously the first thing
-  // to press.
+  // A skill row is a finding about a skill that ALREADY EXISTS, and
+  // `accept_for('skill')` raises on the server — accepting one means making the
+  // change, which is a chat the server opens. The path, not the words "a skill
+  // proposal file": naming the file is what makes "view" obviously the first
+  // thing to press.
+  //
+  // The copy is deliberately "improve", never "create" or "new". The row used to
+  // read "New skill — built in a chat", which described a different task from
+  // the one the record is about: a finding against a skill that already exists.
+  // A reviewer skimming the queue read that as a proposal to author a skill.
+  //
+  // "Dismissing" settles rather than deletes: the record stays on disk with a
+  // `dismissed` lifecycle and a decision recorded in the workspace sidecar, so
+  // the next pass cannot re-ask a question that was already answered.
   skill: {
     label: 'skill',
-    destination: (row) => row.path || 'a skill proposal file',
-    consequence: () => 'A suggested skill — building it opens a chat, dismissing deletes the file',
+    destination: (row) => row.canonical_path || row.path || 'a skill proposal file',
+    consequence: (row) =>
+      `Improves the existing ${row.skill || row.text} skill in a chat; dismissing settles the proposal`,
     canAccept: () => false,
     fallback: null,
     discussLabel: () => 'a `skill` proposal',

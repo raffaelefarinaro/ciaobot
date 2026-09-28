@@ -155,6 +155,16 @@ export function collapseOutputsByName(outputs: TraceOutput[]): TraceOutput[] {
   return [...byName.values()]
 }
 
+// System temp roots (macOS resolves /tmp and /var/folders under /private).
+const SCRATCH_ROOTS = ['/tmp/', '/private/tmp/', '/var/tmp/', '/private/var/tmp/', '/var/folders/', '/private/var/folders/']
+
+/** True for a file under a system temp directory: an agent's scratch work,
+ *  not something the chat produced for the user. */
+export function isScratchPath(filePath: string): boolean {
+  const path = normalizeOutputPath(filePath)
+  return SCRATCH_ROOTS.some(root => path.startsWith(root))
+}
+
 /** The last two folders of a path, for a compact label (full path on hover). */
 export function shortDirname(filePath: string): string {
   const parts = normalizeOutputPath(filePath).split('/').filter(Boolean)
@@ -163,14 +173,19 @@ export function shortDirname(filePath: string): string {
   return (parts.length > 2 ? '…/' : '') + parts.slice(-2).join('/')
 }
 
+/**
+ * What a turn cost, as tokens in and out. Deliberately not the context-window
+ * occupancy: the Work details rail states that as a meter against the window's
+ * size, labelled "of the model's context window, as of the last reply", so
+ * repeating the bare percentage in a transcript footer gave the same number two
+ * homes and no clearer meaning in either.
+ */
 export function formatTokenUsage(usage?: Record<string, unknown>): string {
   if (!usage) return ''
   const inputVal = (usage.input_tokens ?? usage.inputTokens) as unknown
   const outputVal = (usage.output_tokens ?? usage.outputTokens) as unknown
-  const contextVal = (usage.context_pct ?? usage.contextPct) as unknown
   const hasInput = inputVal !== undefined && inputVal !== null && inputVal !== ''
   const hasOutput = outputVal !== undefined && outputVal !== null && outputVal !== ''
-  const hasContext = contextVal !== undefined && contextVal !== null && contextVal !== ''
 
   const formatNum = (val: unknown) => {
     const num = typeof val === 'number' ? val : parseInt(String(val), 10)
@@ -183,9 +198,6 @@ export function formatTokenUsage(usage?: Record<string, unknown>): string {
   }
   if (hasOutput) {
     parts.push(`<span class="token-number">${formatNum(outputVal)}</span> out`)
-  }
-  if (hasContext) {
-    parts.push(`<span class="context-pct">${String(contextVal)}</span> ctx`)
   }
   if (!parts.length) return ''
   return `Tokens ${parts.join(' · ')}`

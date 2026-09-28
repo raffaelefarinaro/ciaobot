@@ -97,7 +97,7 @@
                        that sorted the row into its tier, so the sub-line can
                        never claim more than the tier heading above it. -->
                   <span class="home-chat-meta">
-                    <span v-if="store.memoryPassNeedsAttention(chat.chat_id) || store.projectFor(chat.chat_id)?.name" class="home-chat-project">{{ memoryPassTitle(chat, store.projectFor(chat.chat_id)?.name || '') }}</span>
+                    <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project">{{ store.projectFor(chat.chat_id)?.name }}</span>
                     <span class="home-chat-status">{{ tierPhrase(entry.key) }}</span>
                     <span v-if="chat.local === false" class="remote-chip">remote</span>
                   </span>
@@ -117,90 +117,64 @@
 
           </template>
 
-          <!-- Chats whose archive POST is in flight. The panel already closed
-               optimistically; this queue is where the chat lives while the engine
-               finishes the transcript write. -->
-          <div v-if="lane.archivingChats.length" class="home-tier home-tier--archiving">
-            <div class="home-tier-label"><span>archiving</span></div>
+          <!-- The memory work each archived conversation handed off: the archive
+               pipeline and the memory pass it queued, as ONE entry. The pass is
+               a real chat, and it used to be listed twice — once in the tiers
+               above under its own internal title, once here. The row now opens
+               the pass (where the live turn, the question and the reply are),
+               falling back to the archived transcript before one exists. -->
+          <div v-if="lane.insights.length" class="home-insights">
+            <div class="home-tier-label"><span>memory insights</span></div>
             <div
-              v-for="chat in lane.archivingChats"
-              :key="`archiving-${chat.chat_id}`"
-              class="home-chat-item home-chat-item--archiving"
-              :data-workspace-color="colorOf(chat)"
-              title="Archiving…"
+              v-for="insight in lane.insights"
+              :key="`insight-${insight.sourceChatId}`"
+              class="home-insight-row"
+              :data-workspace-color="insightColor(insight)"
             >
-              <span class="home-chat-heading">
-                <span class="home-chat-title">{{ chat.title }}</span>
-              </span>
-              <span class="home-chat-meta">
-                <span class="home-chat-tidy-note">
-                  <span class="home-chat-archiving-dot" aria-hidden="true" />
-                  archiving…
+              <button
+                type="button"
+                class="home-chat-item home-chat-item--insight"
+                :class="`home-chat-item--insight-${insight.phase}`"
+                :disabled="!insight.passChatId && !insight.archivePath"
+                :title="insight.passChatId
+                  ? `Open the memory insight for ${insight.title}`
+                  : insight.archivePath
+                    ? 'Open the archived transcript'
+                    : insight.title"
+                @click="openInsight(insight)"
+              >
+                <span class="home-chat-heading">
+                  <span class="home-chat-title">{{ insight.title }}</span>
                 </span>
-                <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
-              </span>
-            </div>
-          </div>
-
-          <!-- Archived chats the workspace is still tidying up. They are not
-               part of the priority tiers (jump back in means active chats), but
-               the lane header's "N tidying up" count should have rows behind
-               it: opening a row shows the archived transcript, where the same
-               pipeline keeps reporting its live step. -->
-          <div v-if="lane.tidyChats.length" class="home-tier home-tier--tidying">
-            <div class="home-tier-label"><span>tidying up</span></div>
-            <button
-              v-for="chat in lane.tidyChats"
-              :key="`tidy-${chat.chat_id}`"
-              type="button"
-              class="home-chat-item home-chat-item--tidying"
-              :data-workspace-color="colorOf(chat)"
-              :disabled="!chat.archive_path"
-              :title="chat.archive_path ? 'Open the archived transcript' : chat.title"
-              @click="chat.archive_path && fileViewer.open(chat.archive_path)"
-            >
-              <span class="home-chat-heading">
-                <span class="home-chat-title">{{ chat.title }}</span>
-              </span>
-              <span class="home-chat-meta">
-                <span class="home-chat-tidy-note">
-                  <span class="home-chat-tidy-dot" aria-hidden="true" />
-                  {{ postprocessLabel(store.chatPostprocess(chat.chat_id)) }}…
+                <span class="home-chat-meta">
+                  <span class="home-chat-tidy-note">
+                    <span
+                      v-if="insight.active"
+                      class="home-chat-tidy-dot"
+                      aria-hidden="true"
+                    />
+                    {{ insight.label }}
+                  </span>
+                  <span class="home-chat-time">{{ formatRelative(insight.timestamp) }}</span>
                 </span>
-                <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
-              </span>
-            </button>
-          </div>
-
-          <!-- Archived chats whose post-archive pipeline still has unfinished
-               steps — typically a crash or a failed extraction. Unlike tidy-up
-               (which is background work that never needs the user), a partial
-               completion is a recovery case: the row carries a retry button
-               that resumes every unfinished stage. -->
-          <div v-if="lane.failedChats.length" class="home-tier home-tier--failed">
-            <div class="home-tier-label"><span>unfinished steps</span></div>
-            <div
-              v-for="chat in lane.failedChats"
-              :key="`failed-${chat.chat_id}`"
-              class="home-chat-item home-chat-item--failed"
-              :data-workspace-color="colorOf(chat)"
-            >
-              <span class="home-chat-heading">
-                <span class="home-chat-title">{{ chat.title }}</span>
-              </span>
-              <span class="home-chat-meta">
-                <span class="home-chat-tidy-note home-chat-tidy-note--failed">
-                  {{ failedNote(chat) }}
+                <!-- The one question the pass is blocked on, when it is blocked
+                     on one. The row's label says it needs you; this says what
+                     you are being asked. -->
+                <span v-if="insight.question" class="home-chat-question">
+                  {{ insight.question }}
                 </span>
-                <button
-                  type="button"
-                  class="home-chat-retry"
-                  :disabled="retryingChats[chat.chat_id]"
-                  :aria-label="`Retry unfinished post-archive steps for ${chat.title}`"
-                  @click.stop="retryInsightsFor(chat.chat_id)"
-                >{{ retryingChats[chat.chat_id] ? '…' : 'retry' }}</button>
-                <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
-              </span>
+              </button>
+              <!-- A partial pipeline is a recovery case, so the row offers the
+                   retry. It is a sibling of the open button, not a child: a
+                   button inside a button is not reachable markup. -->
+              <button
+                v-if="insight.retryable"
+                type="button"
+                class="home-chat-retry"
+                :disabled="retryingChats[insight.sourceChatId]"
+                :aria-label="`Retry unfinished post-archive steps for ${insight.title}`"
+                @click="retryInsightsFor(insight.sourceChatId)"
+              >{{ retryingChats[insight.sourceChatId] ? '…' : 'retry' }}</button>
             </div>
           </div>
         </div>
@@ -214,8 +188,11 @@ import { computed, ref } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import type { ChatInfo, ProjectInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
-import { postprocessErroredSteps, postprocessLabel, postprocessUnfinished, stepNoun } from '../lib/postprocessView'
-import { memoryPassTitle } from '../lib/memoryPass'
+import {
+  activeInsightSummary,
+  unfinishedInsightSummary,
+  type MemoryInsight,
+} from '../lib/memoryInsights'
 import { errorMessage } from '../lib/errorMessage'
 import { formatRelative } from '../lib/relativeTime'
 import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
@@ -230,11 +207,11 @@ const emit = defineEmits<{
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
+// A pass is no longer a chat row, so the memory-insight rail is the only thing
+// left that says memory work is happening. Without it a workspace whose only
+// activity is a running pass would read as empty.
 const hasHomeActivity = computed(() => (
-  store.activeChatsAll.length > 0
-  || store.archivingChatsList().length > 0
-  || store.postprocessingChats().length > 0
-  || store.insightsFailedChats().length > 0
+  store.activeChatsAll.length > 0 || store.memoryInsightRows.length > 0
 ))
 const lanesEl = ref<HTMLElement | null>(null)
 const laneElements = ref<Record<string, HTMLElement>>({})
@@ -253,6 +230,17 @@ async function retryInsightsFor(chatId: string): Promise<void> {
   }
 }
 
+// The pass is the chat a person opens: it is where the live turn, the question
+// and the reply are. The transcript is the fallback for the window before a
+// pass exists, and the only target when there never will be one.
+function openInsight(insight: MemoryInsight): void {
+  if (insight.passChatId) {
+    void store.switchChat(insight.passChatId)
+    return
+  }
+  if (insight.archivePath) void fileViewer.open(insight.archivePath)
+}
+
 interface HomeLane {
   key: string
   workspace: string | null
@@ -263,30 +251,32 @@ interface HomeLane {
   newAction: NewWorkspaceChatAction | null
   projects: ProjectInfo[]
   tiers: HomeTiers
-  archivingChats: ChatInfo[]
-  tidyChats: ChatInfo[]
-  failedChats: ChatInfo[]
+  insights: MemoryInsight[]
 }
 
-// Grouped once per recompute rather than re-scanning the full archived-chat
-// list inside makeLane for every lane — this component re-renders on every
-// streaming tick, so that was an O(workspaces × chats) rescan. Partitioning a
-// pre-sorted list preserves order, so no re-sort is needed per workspace.
-function groupChatsByWorkspace(sortedChats: ChatInfo[]): Map<string, ChatInfo[]> {
-  const map = new Map<string, ChatInfo[]>()
-  for (const chat of sortedChats) {
-    const workspace = store.projectFor(chat.chat_id)?.workspace
+// Grouped once per recompute rather than re-scanning the full list inside
+// makeLane for every lane — this component re-renders on every streaming tick,
+// so that was an O(workspaces × rows) rescan. Partitioning a pre-sorted list
+// preserves order, so no re-sort is needed per workspace.
+//
+// A row is filed under the workspace of its pass when it has one, falling back
+// to the source conversation: a pass can outlive the chat it was spawned for
+// (the source is archived and may be deleted), and a pass always runs in the
+// Memory project of the workspace that conversation belonged to.
+function groupInsightsByWorkspace(rows: MemoryInsight[]): Map<string, MemoryInsight[]> {
+  const map = new Map<string, MemoryInsight[]>()
+  for (const row of rows) {
+    const chatId = row.passChatId || row.sourceChatId
+    const workspace = store.projectFor(chatId)?.workspace
     if (!workspace) continue
     const bucket = map.get(workspace)
-    if (bucket) bucket.push(chat)
-    else map.set(workspace, [chat])
+    if (bucket) bucket.push(row)
+    else map.set(workspace, [row])
   }
   return map
 }
 
-const tidyChatsByWorkspace = computed(() => groupChatsByWorkspace(store.postprocessingChats()))
-const failedChatsByWorkspace = computed(() => groupChatsByWorkspace(store.insightsFailedChats()))
-const archivingChatsByWorkspace = computed(() => groupChatsByWorkspace(store.archivingChatsList()))
+const insightsByWorkspace = computed(() => groupInsightsByWorkspace(store.memoryInsightRows))
 
 // Home is scoped to the selected workspace: switching workspaces swaps this
 // lane's content instead of revealing another column. Chats belonging to other
@@ -371,9 +361,7 @@ function makeLane(
       chatId => store.chatIsWorking(chatId),
       chatId => store.chatUnread(chatId) > 0,
     ),
-    archivingChats: (workspace && workspace !== 'unknown' && archivingChatsByWorkspace.value.get(workspace)) || [],
-    tidyChats: (workspace && workspace !== 'unknown' && tidyChatsByWorkspace.value.get(workspace)) || [],
-    failedChats: (workspace && workspace !== 'unknown' && failedChatsByWorkspace.value.get(workspace)) || [],
+    insights: (workspace && workspace !== 'unknown' && insightsByWorkspace.value.get(workspace)) || [],
   }
 }
 
@@ -388,6 +376,16 @@ function workspaceLabel(name: string): string {
 function colorOf(chat: ChatInfo): WorkspaceColorId {
   const workspace = store.projectFor(chat.chat_id)?.workspace
   return colorForWorkspace(store.workspaceOptions.find(item => item.name === workspace))
+}
+
+function insightWorkspace(insight: MemoryInsight): string | undefined {
+  return store.projectFor(insight.passChatId || insight.sourceChatId)?.workspace
+}
+
+function insightColor(insight: MemoryInsight): WorkspaceColorId {
+  return colorForWorkspace(
+    store.workspaceOptions.find(item => item.name === insightWorkspace(insight)),
+  )
 }
 
 function isActiveLane(lane: HomeLane): boolean {
@@ -412,35 +410,32 @@ function laneUnreadCount(lane: HomeLane): number {
   return lane.tiers.unread.length
 }
 
-// Chats this workspace is still tidying up after archiving them. The chats
-// themselves stay out of the priority tiers — archiving must keep meaning —
-// but they are listed in the lane's own "tidying up" tier below quiet, so the
-// count always has rows behind it. Counted from the store rather than the
-// lane's tiers for exactly that reason: the lane holds active chats only.
-function laneTidyCount(lane: HomeLane): number {
-  return lane.tidyChats.length
-}
-
-function laneArchivingCount(lane: HomeLane): number {
-  return lane.archivingChats.length
-}
-
-/** Insights-failed count for a lane's workspace, for the header fragment. */
-function laneInsightsFailedCount(lane: HomeLane): number {
-  return lane.failedChats.length
+/**
+ * Memory-insight rows still in flight, plus the ones waiting on the owner. Both
+ * are reported here because a pass blocked on a question is a live turn in a
+ * chat the owner is expected to open — folding it into the in-flight fragment
+ * would understate it, and dropping it would report "nothing needs your
+ * attention" with a row on screen saying the opposite.
+ */
+function laneInsightCounts(lane: HomeLane): { active: number; blocking: number; unfinished: number } {
+  return {
+    active: lane.insights.filter(row => row.active).length,
+    blocking: lane.insights.filter(row => row.blocking).length,
+    unfinished: lane.insights.filter(row => row.retryable).length,
+  }
 }
 
 // The glanceable sentence on the workspace line, in plain status grammar.
-// Counts come from the same tiers as the rows below, so it can never disagree
-// with what is rendered. Tidying/archiving ride along in their muted fragments
-// even though they are not part of the lane's active tiers.
+// Counts come from the same tiers and rows as the content below, so it can
+// never disagree with what is rendered.
 function laneStatusText(lane: HomeLane): string {
   // Both actionable tiers, as the glanceable sentence has always counted
   // them: an unread reply wants the user even though it is not blocking the
   // agent on a direct answer, and counting only `needsYou` told a reader with
   // unread replies waiting that "nothing needs your attention". The tiers are
   // mutually exclusive, so adding them cannot double-count a chat.
-  const needs = laneNeedsCount(lane) + laneUnreadCount(lane)
+  const insights = laneInsightCounts(lane)
+  const needs = laneNeedsCount(lane) + laneUnreadCount(lane) + insights.blocking
   const sentences: string[] = []
   sentences.push(needs
     ? `${needs} chat${needs === 1 ? '' : 's'} need${needs === 1 ? 's' : ''} your attention`
@@ -449,33 +444,18 @@ function laneStatusText(lane: HomeLane): string {
   sentences.push(working
     ? `${working} agent${working === 1 ? '' : 's'} still working`
     : 'no agents working')
-  // Tidying is work still in flight and needs nobody. A failed extraction is
-  // neither: processing has stopped and the row below offers a manual retry,
-  // so folding it in here reported a stalled chat as busy — and a workspace
-  // whose only signal was that failure read as "nothing needs your attention"
-  // with the recovery state hidden inside a muted "tidying up". It gets its
-  // own sentence, in the same warn register the header fragment used.
-  const tidying = laneTidyCount(lane) + laneArchivingCount(lane)
-  if (tidying) sentences.push(`${tidying} chat${tidying === 1 ? '' : 's'} tidying up`)
-  const failed = laneInsightsFailedCount(lane)
-  if (failed) sentences.push(`${failed} chat${failed === 1 ? '' : 's'} with unfinished steps`)
+  // A pass already waiting on the owner is not "still updating", so the two
+  // fragments count different rows: work in flight, and work that stopped with
+  // a stage left to run. The latter is neither — processing has stopped and the
+  // row offers a manual retry, so folding it into the in-flight count reported a
+  // stalled chat as busy, and dropping it hid the one signal on this line that
+  // the user can act on.
+  const active = activeInsightSummary(insights.active)
+  if (active) sentences.push(active)
+  const unfinished = unfinishedInsightSummary(insights.unfinished)
+  if (unfinished) sentences.push(unfinished)
   return sentences.join('. ') + '.'
 }
-
-function failedNote(chat: ChatInfo): string {
-  const pp = store.chatPostprocess(chat.chat_id)
-  const unfinished = postprocessUnfinished(pp)
-  if (unfinished.length) {
-    return `${unfinished.map(stepNoun).join(', ')} not finished`
-  }
-  // Legacy records (written before the manifest) carry only per-step statuses.
-  const errored = postprocessErroredSteps(pp)
-  if (errored.length) {
-    return `${errored.map(stepNoun).join(', ')} failed`
-  }
-  return 'unfinished steps'
-}
-
 
 function newActionFor(workspace: string | null): NewWorkspaceChatAction | null {
   if (!workspace || workspace === 'unknown') return null
@@ -798,7 +778,8 @@ defineExpose({ onArrow })
   white-space: nowrap;
 }
 
-/* Muted, never accent: the count is information, not a call to act. */
+/* The workspace line's own in-flight dot. Muted, never accent: the count is
+   information, not a call to act. */
 .home-lane-tidy-dot {
   display: inline-block;
   width: 6px;
@@ -808,20 +789,6 @@ defineExpose({ onArrow })
   background: var(--fg3);
   vertical-align: middle;
   animation: home-lane-tidy-breathe 2.6s ease-in-out infinite;
-}
-
-/* Archiving: same muted register as tidy-up, but with a spinner rather than
-   a breathing dot — it is a short in-flight request, not background work. */
-.home-lane-archiving-dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-right: 4px;
-  border-radius: 50%;
-  border: 1.5px solid color-mix(in srgb, var(--fg3) 45%, transparent);
-  border-top-color: var(--fg3);
-  vertical-align: middle;
-  animation: home-lane-archiving-spin 0.9s linear infinite;
 }
 
 @keyframes home-lane-archiving-spin {
@@ -834,10 +801,7 @@ defineExpose({ onArrow })
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .home-lane-tidy-dot,
-  .home-chat-tidy-dot,
-  .home-lane-archiving-dot,
-  .home-chat-archiving-dot { animation: none; opacity: 0.75; }
+  .home-chat-tidy-dot { animation: none; opacity: 0.75; }
 }
 
 .home-lane-new {
@@ -1075,10 +1039,33 @@ defineExpose({ onArrow })
   box-shadow: inset 2px 0 0 var(--accent), 0 0 0 2px var(--bg);
 }
 
-.home-chat-item--archiving,
-.home-chat-item--tidying,
-.home-chat-item--failed {
+.home-chat-item--insight {
   min-height: var(--touch, 44px);
+  flex: 1;
+  /* A pending question needs its own line. The tier rows get that from the
+     `.home-chat-main` column they sit in; this row is flat (title left, status
+     and time right), so it wraps instead and the question takes the full width
+     rather than landing between the status and the time. */
+  flex-wrap: wrap;
+  row-gap: 0;
+  /* The hairline lives on the wrapper, so it spans the full width on the one
+     row that also holds a retry control. */
+  border-bottom: 0;
+}
+
+.home-chat-item--insight .home-chat-question {
+  flex: 1 0 100%;
+}
+
+/* The row wrapper exists for that retry control and for nothing else, so it has
+   no background and no radius of its own — only the rule every other row in
+   the section draws. */
+.home-insight-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
 }
 
 .home-chat-item--week-old { opacity: 0.72; }
@@ -1115,14 +1102,20 @@ defineExpose({ onArrow })
 }
 
 /* Quiet rows step the title back a register; anything that wants the user
-   (needs you, unread) keeps full weight. */
+   (needs you, unread) keeps full weight. A memory-insight row is a quiet row
+   until it asks for something, and the two states that do take the accent
+   colour below. */
 .home-chat-item--quiet .home-chat-title,
 .home-chat-item--older .home-chat-title,
-.home-chat-item--archiving .home-chat-title,
-.home-chat-item--tidying .home-chat-title,
-.home-chat-item--failed .home-chat-title {
+.home-chat-item--insight .home-chat-title {
   color: var(--fg2);
   font-weight: 500;
+}
+
+.home-chat-item--insight-needsYou .home-chat-title,
+.home-chat-item--insight-attention .home-chat-title {
+  color: var(--fg);
+  font-weight: 600;
 }
 
 .home-chat-item .home-chat-title--unread {
@@ -1164,11 +1157,9 @@ defineExpose({ onArrow })
   line-height: 1.4;
 }
 
-/* Archive-pipeline rows put their note, retry and time in the meta; there it
-   is the row's right column rather than a sub-line. */
-.home-chat-item--archiving .home-chat-meta,
-.home-chat-item--tidying .home-chat-meta,
-.home-chat-item--failed .home-chat-meta {
+/* A memory-insight row puts its status and time in the meta; there it is the
+   row's right column rather than a sub-line. */
+.home-chat-item--insight .home-chat-meta {
   flex: 0 1 auto;
   align-items: center;
   margin-left: auto;
@@ -1208,8 +1199,8 @@ defineExpose({ onArrow })
   white-space: nowrap;
 }
 
-/* Live step of a post-archive pipeline ("saving trajectory…"). Muted like
-   the lane header's tidy fragment: this is background work, never a demand. */
+/* Live step of a memory insight ("updating memory…"). Muted like the lane
+   header's in-flight fragment: this is background work, never a demand. */
 .home-chat-tidy-note {
   min-width: 0;
   overflow: hidden;
@@ -1230,21 +1221,17 @@ defineExpose({ onArrow })
   animation: home-lane-tidy-breathe 2.6s ease-in-out infinite;
 }
 
-.home-chat-archiving-dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-right: 4px;
-  border-radius: 50%;
-  border: 1.5px solid color-mix(in srgb, var(--fg3) 45%, transparent);
-  border-top-color: var(--fg3);
-  vertical-align: middle;
-  animation: home-lane-archiving-spin 0.9s linear infinite;
+/* A pass blocked on the owner takes the accent, and a pass or a stage that
+   stopped with work left takes the warn colour. Both are rows you are meant to
+   act on, so neither reads as the muted background chatter an in-flight row is.
+   One rule per phase, so nothing has to win a specificity fight to colour a
+   row correctly. */
+.home-chat-item--insight-needsYou .home-chat-tidy-note {
+  color: var(--accent);
 }
 
-/* A failed extraction is a recovery case, so its note carries the warn colour
-   rather than the muted tidy grey. */
-.home-chat-tidy-note--failed {
+.home-chat-item--insight-attention .home-chat-tidy-note,
+.home-chat-item--insight-unfinished .home-chat-tidy-note {
   color: var(--warning);
 }
 

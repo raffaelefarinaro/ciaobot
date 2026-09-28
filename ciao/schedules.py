@@ -133,9 +133,9 @@ def is_system_schedule_id(schedule_id: str) -> bool:
     """True when the id names a packaged system schedule, fanned out or not.
 
     The archive pipeline gates memory writes on this: a system-schedule chat
-    (memory curation, hygiene, skill evolution) is the memory machinery itself,
-    and extracting its own operating rules as facts pollutes the bounded
-    regions with the machinery's self-description.
+    (memory curation, hygiene) is the memory machinery itself, and extracting
+    its own operating rules as facts pollutes the bounded regions with the
+    machinery's self-description.
     """
     return system_base_id(schedule_id).startswith("system-")
 

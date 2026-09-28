@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence
 
 from ciao import proposal_kinds
 from ciao import proposal_tracking
+from ciao import skill_proposals
 from ciao import vault_rehome
 from ciao.memory_tool import resolve_region
 from ciao.workspace_guide import guide_path
@@ -42,8 +43,6 @@ logger = logging.getLogger(__name__)
 _SECTION_DATE_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})")
 # The queue file lives at this relative path inside each workspace's vault.
 _PROPOSALS_REL = ("Workspace", "Memory-Proposals.md")
-# Skill-reflection proposals live under this folder, one canonical file per skill.
-_SKILL_PROPOSALS_REL = ("Workspace", "Skill-Proposals")
 
 
 @dataclass(frozen=True)
@@ -126,11 +125,6 @@ class AcceptOutcome:
 def _proposals_file(config, workspace: str) -> Path:
     """The proposal queue for one workspace, rooted at its vault folder."""
     return Path(config.workspace_vault_root(workspace)).joinpath(*_PROPOSALS_REL)
-
-
-def _skill_proposals_dir(config, workspace: str) -> Path:
-    """The skill-proposal queue folder for one workspace."""
-    return Path(config.workspace_vault_root(workspace)).joinpath(*_SKILL_PROPOSALS_REL)
 
 
 def _sweep_queue_file(
@@ -427,12 +421,13 @@ def claim_proposals(queue: Path, ids: Sequence[str]) -> Iterator[set[str]]:
 # it counts only same-file duplicates, which are unaffected by rows in other
 # files (or non-duplicate rows in this one) being removed.
 #
-# Imported rather than redefined: `proposal_tracking.pending_proposal_ids`
-# decides whether a resolution helper chat can be archived by comparing ids
-# against the ones this module hands out. Two copies that drift apart stop
-# matching silently — no error, just helper chats that never archive — so
-# there is exactly one implementation.
-_stable_proposal_id = proposal_tracking.stable_proposal_id
+# Both row kinds are built this way now. A bullet takes its id from the one walk
+# below; a skill row takes it from `skill_proposals`, which derives it from
+# (workspace, skill) instead. Both modules are the single implementation each id
+# has, because `proposal_tracking.pending_proposal_ids` decides whether a
+# resolution helper chat can be archived by comparing ids against the ones the
+# listing hands out. Two derivations that drift apart stop matching silently —
+# no error, just helper chats that never archive.
 
 
 def _rehome_signal(config) -> dict[str, dict[str, Any]]:
@@ -682,8 +677,11 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     "line": line_index,
                     "row": row,
                 }
-        # Skill proposals are files, not bullets: no parse_bullet, no accept
-        # descriptor, and a whole file is the atomic unit.
+        # Skill proposals are versioned records, not bullets: no parse_bullet,
+        # no accept descriptor, and one file per skill is the atomic unit. The
+        # row is built from the record `ciao.skill_proposals` parses, so the
+        # review surface can show what the proposal actually says and act on the
+        # id that module settles.
         #
         # They are registered in `by_id` all the same, with `file: True` so the
         # handlers can tell a file from a bullet. Listing them without
@@ -692,47 +690,241 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
         # 49 skill rows on a real vault answered 404 "unknown proposal id" —
         # from both the single-row and the batch endpoint. A row you cannot act
         # on is a notification wearing a button.
-        skill_dir = _skill_proposals_dir(config, workspace)
-        if skill_dir.is_dir():
-            for f in sorted(skill_dir.glob("*.md")):
-                row_id = _stable_proposal_id(workspace, rel_path, "skill", f.name, "", 0)
-                row = {
-                    "id": row_id,
-                    "kind": "skill",
-                    "text": f.stem,
-                    "source": "",
-                    "workspace": workspace,
-                    "path": Path(workspace).joinpath(*_SKILL_PROPOSALS_REL, f.name).as_posix(),
-                    "line": -1,
-                }
-                rows.append(row)
-                by_id[row_id] = {
-                    "workspace": workspace,
-                    "path": str(f),
-                    "line": -1,
-                    "row": row,
-                    "file": True,
-                }
+        for proposal in skill_proposals.read_queue(config, workspace):
+            path = skill_proposals.proposal_path(config, workspace, proposal.skill)
+            row = {
+                "id": proposal.id,
+                "kind": "skill",
+                # The skill, not the title: the review surface derives the skill
+                # a row is about from this, and a title is free prose that would
+                # not group two runs of the same skill.
+                "text": proposal.skill,
+                "skill": proposal.skill,
+                "title": proposal.title,
+                "problem": proposal.problem,
+                "change": proposal.change,
+                "rationale": proposal.rationale,
+                "sources": [
+                    {
+                        "chat_id": item.chat_id,
+                        "archive": item.archive,
+                        "turn": item.turn,
+                        "excerpt": item.excerpt,
+                    }
+                    for item in proposal.sources
+                ],
+                "lifecycle": proposal.lifecycle,
+                # The server's own record of which chat is implementing this, and
+                # the only source of truth for it. The browser used to keep the
+                # same association in localStorage, which a reload, a second
+                # device or the CLI could not see.
+                "chat_id": proposal.chat_id,
+                "canonical_path": proposal.canonical_path,
+                "reviewed_revision": proposal.reviewed_revision,
+                "source": "",
+                "workspace": workspace,
+                "path": skill_proposals.proposal_rel_path(workspace, proposal.skill),
+                "line": -1,
+            }
+            rows.append(row)
+            by_id[proposal.id] = {
+                "workspace": workspace,
+                "path": str(path),
+                "line": -1,
+                "row": row,
+                "file": True,
+                # The settlement needs the registry, to resolve the queue
+                # folder and the decision sidecar from the workspace name. The
+                # handlers are handed nothing else, so it travels with the row's
+                # context rather than being re-derived per call.
+                "config": config,
+            }
     return rows, by_id
 
 
 def _dismiss_skill_proposal(ctx: dict[str, Any]) -> dict[str, Any]:
-    """Take one skill-proposal FILE out of the queue.
+    """Settle one skill proposal, recording the decision instead of deleting it.
 
     A reviewed proposal is a resolved decision: whether it was implemented or
-    disregarded, keeping the file in the queue re-asks the same question. So
-    dismiss deletes it rather than moving it aside — the queue is globbed one
-    level deep, so either clears it, and the decision is the operator's to keep
-    in the Curation-Log. A missing file is already gone, not an error.
+    disregarded, re-asking the same question is the wrong behaviour. Deleting
+    the file used to be the only way to say so, and it destroyed the only record
+    that anyone had looked at it — the next pass that saw the same evidence
+    filed it again, and nothing said the operator had already answered.
+
+    So the record stays and its lifecycle becomes ``dismissed``, and the
+    decision itself goes to the workspace's decision sidecar keyed by the
+    proposal's synthetic ``skill:<name>`` text: a settled proposal is not in the
+    listing, and the next pass that merges new evidence into it leaves it
+    settled. A proposal that is no longer open has nothing left to decide, which
+    is not an error either.
+
+    A decision that could not be recorded leaves the proposal open rather than
+    reporting a settlement nobody can see. That includes a lock it could not
+    take: a refusal to write unlocked is a refusal to decide, and the handler's
+    contract is a structured ``ok: false`` rather than a 500.
     """
-    source = Path(ctx["path"])
-    if not source.is_file():
-        return {"ok": True, "deleted": True}
+    from ciao.memory_receipts import QueueLockError
+
+    config = ctx.get("config")
+    if config is None:
+        return {"ok": False, "error": "this skill row carries no workspace registry"}
+    row = ctx["row"]
     try:
-        source.unlink()
-    except OSError as exc:
-        return {"ok": False, "error": f"could not delete {source.name}: {exc}"}
-    return {"ok": True, "deleted": True}
+        settled = skill_proposals.settle_proposal(
+            config, str(row["id"]), skill_proposals.DISMISSED
+        )
+    except (OSError, QueueLockError) as exc:
+        return {
+            "ok": False,
+            "error": f"could not record the decision for {row['text']}: {exc}",
+        }
+    return {"ok": True, "settled": settled is not None}
+
+
+def accept_skill_proposal(config: Any, pcm: Any, ctx: dict[str, Any]) -> dict[str, Any]:
+    """Accept one skill proposal into an implementation chat, idempotently.
+
+    A skill proposal is the one kind of row that cannot be accepted by writing
+    anything: what it asks for is a change to a ``SKILL.md`` that already
+    exists, and a change like that is a chat — one that has to re-read the
+    skill, judge whether the finding still holds, make a focused edit, verify it
+    and record the outcome. So acceptance here means *starting that work and
+    remembering it*, not performing it.
+
+    Server-owned, and idempotent, because the browser cannot be the one holding
+    the association. It used to be: the panel minted a chat, wrote the link into
+    ``localStorage``, and sent its own prompt. A reload, a second device, or the
+    CLI could not see any of it, so the same proposal was implemented twice and
+    nothing recorded that either run had happened. The association therefore
+    lives on the record (``chat_id``), and a second accept — a double tap, a
+    retry after a dropped response, another device — returns the chat that is
+    already live rather than starting a second one.
+
+    Returns ``{ok, chat_id, project_id, created}``, plus ``prompt`` on the create
+    path. ``created`` is False on the reuse path, so a client can say "already
+    running" rather than claiming to have started something.
+
+    ``prompt`` is returned rather than sent, because the caller has to dispatch
+    the turn itself. This function runs in a worker thread (the vault scan
+    belongs off the event loop) and ``start_stream`` ends in
+    ``asyncio.create_task``, which is a ``RuntimeError`` anywhere but a running
+    loop. The caller takes ``prompt`` and starts the stream where a loop already
+    runs, like every other route that opens a chat.
+
+    The binding is written *before* the caller dispatches, so a dispatch that
+    fails cannot orphan the chat: the record already names it, so the retry
+    returns that same chat instead of minting another one, and the row keeps an
+    "Open chat" the operator can send into by hand.
+    """
+    row = ctx.get("row") or {}
+    pid = str(row.get("id") or "")
+    if not ctx.get("file") or row.get("kind") != "skill":
+        return {
+            "ok": False,
+            "error": "only a skill proposal can be accepted into a chat",
+        }
+    if pcm is None:
+        return {"ok": False, "error": "the chat manager is not running"}
+
+    proposal = skill_proposals.find_proposal(config, pid)
+    if proposal is None:
+        return {"ok": False, "error": "this proposal is no longer queued"}
+
+    # Already implementing, with a chat that still exists: hand it back. This is
+    # the whole idempotency contract, and it reads the record rather than any
+    # in-process state so it holds across a reload and across devices.
+    live = _live_chat(pcm, proposal.chat_id)
+    if live is not None:
+        return {
+            "ok": True,
+            "chat_id": live.chat_id,
+            "project_id": live.project_id,
+            "created": False,
+        }
+
+    workspace = proposal.workspace
+    project = _workspace_general_project(pcm, workspace)
+    if project is None:
+        return {
+            "ok": False,
+            "error": f"the {workspace} workspace has no General project to host the chat",
+        }
+
+    chat = pcm.create_chat(
+        project.project_id,
+        title=f"Improve {proposal.skill}",
+        # The same helper shape the browser used to send, so the resolution
+        # helper's archive-on-resolved rule applies to a server-opened chat too.
+        helper={
+            "kind": "proposal",
+            "intent": "resolve",
+            "proposal_ids": [pid],
+            "archive_policy": "when_resolved",
+        },
+    )
+    # The prompt is this module's, not the client's: it names the EXISTING
+    # skill, the finding, and the resolution command. A per-browser prompt
+    # drifted into telling the chat to create a new skill, which is a different
+    # task from the one the proposal describes.
+    prompt = skill_proposals.render_improvement_prompt(proposal)
+    try:
+        # ``supersedes`` is the dead association read above. Without naming it,
+        # mark_implementing's own idempotency rule refuses this very rebind and
+        # the record keeps pointing at a chat the operator can no longer open.
+        skill_proposals.mark_implementing(
+            config, pid, chat.chat_id, supersedes=proposal.chat_id
+        )
+    except (OSError, ValueError) as exc:
+        return {
+            "ok": False,
+            "error": f"could not bind the chat to {proposal.skill}: {exc}",
+            "chat_id": chat.chat_id,
+        }
+    return {
+        "ok": True,
+        "chat_id": chat.chat_id,
+        "project_id": project.project_id,
+        "created": True,
+        "prompt": prompt,
+    }
+
+
+def _live_chat(pcm: Any, chat_id: str) -> Any | None:
+    """The chat with this id, if it exists and is not archived; else ``None``.
+
+    An archived or deleted chat is not a live implementation. The record keeps
+    naming it, and a later accept then starts a fresh one — which is the point:
+    the row is still queued, so nothing was lost, and re-accepting must not hand
+    back a chat the operator can no longer open.
+    """
+    if not chat_id:
+        return None
+    try:
+        chat = pcm.get_chat(chat_id)
+    except Exception:  # noqa: BLE001 — a chat lookup must not fail the accept
+        logger.exception("Could not read chat %s for a skill accept", chat_id)
+        return None
+    if chat is None or getattr(chat, "archived", False):
+        return None
+    return chat
+
+
+def _workspace_general_project(pcm: Any, workspace: str) -> Any | None:
+    """The workspace's own ``General`` project, creating it if the install has none.
+
+    Workspace-scoped, not "any General project": a proposal filed in ``work``
+    must be implemented against work's own ``skills/`` catalog, guide and vault.
+    Hosting it in another workspace's project would edit the wrong copy of the
+    skill while the record said the right one.
+    """
+    for project in pcm.list_projects(workspace):
+        if project.name == "General":
+            return project
+    try:
+        return pcm.create_project("General", workspace)
+    except Exception:  # noqa: BLE001 — reported as "no project to host the chat"
+        logger.exception("Could not create a General project in %s", workspace)
+        return None
 
 
 def _rehome_lookup(

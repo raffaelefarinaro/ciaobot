@@ -88,17 +88,30 @@
           </div>
         </div>
 
-        <!-- Actions -->
+        <!-- Actions. This card is about the Ciaobot *program*: the checkout it
+             runs from, and whether it is up to date. It shares a repository and
+             a serialization with the memory backup below, but never the
+             meaning, so the two never share a label: this one is an explicit,
+             bidirectional hand-off of the program, the other is an unattended
+             one-way copy of the memory. -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">This host</p>
               <p class="hint">
-                Snapshot, sync, or restart this Ciaobot instance.
+                The Ciaobot program on this computer: send pending changes to its repository, or
+                restart to update it. Your memory and notes are backed up separately, below.
               </p>
             </div>
             <div class="settings-card-header-actions">
-              <button class="btn-secondary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
+              <button
+                class="btn-secondary btn-small"
+                @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()"
+                :disabled="!!actionPending"
+                :title="localStatus?.git_repo
+                  ? 'Send pending changes in the Ciaobot program checkout to its repository, and pull what is there'
+                  : 'Save a local snapshot of the Ciaobot program checkout, with no remote configured'"
+              >
                 {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
               </button>
               <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="!!actionPending" :title="localStatus?.restart_only ? 'Wait for active chats, then restart the installed server' : 'Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code'">
@@ -122,6 +135,13 @@
             </div>
           </div>
         </div>
+
+        <!-- Memory backup. The unattended, one-way copy of the user's memory,
+             right below the program's own repository controls so the two are
+             read together and never confused. The panel owns its data and its
+             actions; the only thing it cannot do alone is navigate to a chat,
+             so it emits the setup chat's id for this view to open. -->
+        <SettingsMemoryBackup @open-chat="openBackupSetupChat" />
 
         <!-- Package update -->
         <div class="card">
@@ -2053,6 +2073,7 @@ import SettingsAutomation from './settings/SettingsAutomation.vue'
 import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
+import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import { isLoopbackHostname } from '../lib/loopback'
 import { useMcpServers } from '../composables/useMcpServers'
@@ -4424,6 +4445,13 @@ async function localHandback(confirmWarnings = false) {
     }
   }
   actionPending.value = null
+}
+
+// The memory-backup panel opens the setup chat's route itself; opening it is a
+// navigation, and the panel holds no router. Same shape as the MCP panel's
+// one `create-via-chat` emit.
+function openBackupSetupChat(chatId: string) {
+  if (chatId) router.push(`/chat/${chatId}`)
 }
 
 // ── Package update ────────────────────────────────────────────────────────

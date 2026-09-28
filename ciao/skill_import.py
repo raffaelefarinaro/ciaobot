@@ -10,7 +10,7 @@ import threading
 import zipfile
 from pathlib import Path
 
-from ciao.skill_evolution import MAX_SKILL_BYTES
+from ciao.skills_inventory import MAX_SKILL_BYTES
 
 # One import at a time per skill name. Two concurrent imports of the SAME
 # skill otherwise interleave between the exists() check and the final rename:
@@ -89,10 +89,9 @@ def validate_skill_zip(
     supplied) rather than rejected. Owners import skills they wrote or were
     handed, and refusing the file left them nothing to do but edit someone
     else's document to get it in. The budget still has teeth where it is
-    actually spent — ``os_audit`` flags the skill as over budget and the
-    evolution pass writes a split-it-up proposal instead of an edit. The hard
-    ceiling on SKILL.md stays ``MAX_SKILL_ASSET_BYTES``, applied to every
-    member above.
+    actually spent: ``os_audit`` flags the skill as over budget, and the memory
+    pass can file a split-it-up proposal instead of an edit. The hard ceiling on
+    SKILL.md stays ``MAX_SKILL_ASSET_BYTES``, applied to every member above.
     """
     errors: list[str] = []
     if not zip_bytes:

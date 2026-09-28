@@ -39,12 +39,14 @@ from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import proposal_actions
 from ciao import proposal_kinds
+from ciao import backup_service
 from ciao import proposal_outcomes
 from ciao import subagent_tracking
 from ciao import entity_types
 from ciao import provider_registry
 from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
+from ciao.web.auth import is_loopback_client
 from ciao.web.document_conversion import is_anydoc_document
 from ciao.config import (
     CLAUDE_MODELS,
@@ -4189,9 +4191,15 @@ async def workspace_open(request: Request) -> Response:
 
     Body: ``{"path": str}``. Uses the same path resolver as the workspace
     viewers (relative paths anchor to workspace_root; fuzzy basename lookup
-    is allowed). The open happens server-side, so this only works when the
-    PWA is talking to a local Ciao instance.
+    is allowed). The open happens on the engine's machine, so a remote caller
+    (a phone, another Mac over Tailscale) would pop the file up on a screen
+    nobody is looking at: refused, and the PWA hides the action there.
     """
+    if not is_loopback_client(request):
+        return JSONResponse(
+            {"error": "Opening files is only available on the computer running Ciaobot."},
+            status_code=403,
+        )
     try:
         body = await request.json()
     except ValueError:
@@ -6242,26 +6250,37 @@ def _local_manager(request: Request):
     return getattr(request.app.state, "local_session_manager", None)
 
 
+def _host_general_project(config, pcm) -> Any:
+    """The General project a system-opened chat should be hosted in, or None.
+
+    Any workspace can host one; prefer the primary, then settle for the first
+    workspace that has a General project. Keying on a workspace named
+    "personal" meant the whole sync-conflict flow failed on installs whose
+    workspaces are named anything else, and the same reasoning applies to the
+    backup setup chat — both are opened by the app rather than by the user, so
+    neither may depend on a workspace being called anything in particular.
+    """
+    project = next(
+        (p for p in pcm.list_projects(config.primary_workspace()) if p.name == "General"),
+        None,
+    )
+    if project is not None:
+        return project
+    for candidate in config.workspace_names():
+        project = next(
+            (p for p in pcm.list_projects(candidate) if p.name == "General"), None
+        )
+        if project is not None:
+            return project
+    return None
+
+
 def _open_merge_chat(request: Request, branch: str) -> dict:
     """Open an interactive chat that resolves sync conflicts on ``branch``
     with the user. Returns {ok, chat_id, project_id} or {error}."""
     config = request.app.state.config
     pcm = request.app.state.project_chat_manager
-    # Any workspace can host this; prefer the primary one, then settle for the
-    # first workspace that has a General project. Keying on a workspace named
-    # "personal" meant the whole sync-conflict flow failed on installs whose
-    # workspaces are named anything else.
-    workspace = config.primary_workspace()
-    project = next(
-        (p for p in pcm.list_projects(workspace) if p.name == "General"), None
-    )
-    if project is None:
-        for candidate in config.workspace_names():
-            project = next(
-                (p for p in pcm.list_projects(candidate) if p.name == "General"), None
-            )
-            if project is not None:
-                break
+    project = _host_general_project(config, pcm)
     if project is None:
         return {"error": "no General project in any workspace to host the merge chat"}
 
@@ -6361,6 +6380,197 @@ async def local_resync(request: Request) -> JSONResponse:
     return JSONResponse(result, status_code=200 if result.get("ok") else 400)
 
 
+# ── Unattended memory backup (ciao/backup_service) ──
+#
+# Three routes over ONE service instance — the same object the five-minute loop
+# holds, so a manual run and a scheduled tick cannot overlap and cannot report
+# differently. Each is session-protected like every other /api route; the
+# service itself refuses to run on a Mac that is not the host, and says so in
+# the status rather than backing up where the host already does.
+
+
+def _backup_service(request: Request):
+    return getattr(request.app.state, "backup_service", None)
+
+
+async def local_backup_status(request: Request) -> JSONResponse:
+    """What the backup service knows: state, scope, and the last success.
+
+    Always 200 — a data root with no remote is a state this endpoint reports,
+    not a failure of the endpoint. Read-only: it never stages, commits or
+    pushes.
+    """
+    service = _backup_service(request)
+    if service is None:
+        return JSONResponse(
+            {"error": "backup service not initialised"}, status_code=500
+        )
+    return JSONResponse((await service.status()).as_dict())
+
+
+async def local_backup_settings(request: Request) -> JSONResponse:
+    """Turn the backup off/on, or pause/resume it. Persists across a restart.
+
+    Body: ``{"enabled": bool}``, ``{"paused": bool}``, or both. An empty body is
+    a 400 rather than a silent no-op, so a caller that meant to pause cannot
+    read "200" as "paused".
+    """
+    service = _backup_service(request)
+    if service is None:
+        return JSONResponse(
+            {"error": "backup service not initialised"}, status_code=500
+        )
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        body = None
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"error": "send a JSON object with 'enabled' and/or 'paused'"},
+            status_code=400,
+        )
+    unknown = sorted(set(body) - {"enabled", "paused"})
+    if unknown or not body:
+        return JSONResponse(
+            {"error": f"expected 'enabled' and/or 'paused'; got {unknown or 'nothing'}"},
+            status_code=400,
+        )
+    if any(not isinstance(value, bool) for value in body.values()):
+        return JSONResponse(
+            {"error": "'enabled' and 'paused' must be booleans"}, status_code=400
+        )
+    service.set_flags(
+        enabled=body.get("enabled"),
+        paused=body.get("paused"),
+    )
+    return JSONResponse((await service.status()).as_dict())
+
+
+async def local_backup_run(request: Request) -> JSONResponse:
+    """Back up now, through the same serialized path the five-minute loop uses.
+
+    200 when the run left the repository in a state that needs nothing from the
+    caller (``ready``, ``pending``, ``paused``), and 400 when it could not do
+    its job — no repository, no remote, a refused credential, an unreachable
+    remote. The body is the same status object either way, so the reason is in
+    the response rather than only in a log line.
+    """
+    service = _backup_service(request)
+    if service is None:
+        return JSONResponse(
+            {"error": "backup service not initialised"}, status_code=500
+        )
+    status = await service.run_backup(source="manual")
+    settled = status.state in {
+        backup_service.STATE_READY,
+        backup_service.STATE_PENDING,
+        backup_service.STATE_PAUSED,
+    }
+    return JSONResponse(status.as_dict(), status_code=200 if settled else 400)
+
+
+async def local_backup_setup_prompt(request: Request) -> JSONResponse:
+    """The canonical setup prompt, plus the context it was rendered from.
+
+    One prompt, two actions: this is what a Settings surface copies, and the
+    exact same text is what ``POST /api/local/backup/setup-chat`` dispatches.
+    Returning the context beside it is what lets a UI show "backing up
+    /path/to/data" without parsing prose out of a prompt.
+
+    Cheap and entirely local — every fact is a configuration read or a git
+    read that never contacts the remote — so a Settings page may poll it and
+    readiness still comes from ``GET /api/local/backup`` alone.
+    """
+    service = _backup_service(request)
+    if service is None:
+        return JSONResponse(
+            {"error": "backup service not initialised"}, status_code=500
+        )
+    config = request.app.state.config
+    context = await asyncio.to_thread(backup_service.setup_context, config)
+    return JSONResponse(
+        {
+            "context": context,
+            "prompt": backup_service.render_setup_prompt(config, context),
+        }
+    )
+
+
+async def local_backup_setup_chat(request: Request) -> JSONResponse:
+    """Open (or re-enter) a setup chat and send the prompt into it.
+
+    Sends, never drafts: the whole point of the in-app action is that the
+    owner does not have to copy, paste, and press enter, so this returns once
+    the prompt is on its way to the provider.
+
+    Idempotent on purpose. A retry after a dropped response, a double tap, or
+    a reload mid-setup all land here, and each would otherwise spawn another
+    agent working the same repository at the same time. A live setup chat is
+    found by its stable title and re-entered instead; only a chat the owner
+    archived (or deleted) is replaced. The prompt is not re-sent into a chat
+    that already has it — that would queue a second identical turn.
+
+    Readiness is not decided here. The chat does the work, the service
+    re-reads the repository's real state, and ``GET /api/local/backup``
+    reports what it finds — which is also how an external agent's setup is
+    detected. A guided setup that verifies turns the service on, unless the
+    owner has paused it.
+    """
+    service = _backup_service(request)
+    if service is None:
+        return JSONResponse(
+            {"error": "backup service not initialised"}, status_code=500
+        )
+    config = request.app.state.config
+    pcm = request.app.state.project_chat_manager
+    project = _host_general_project(config, pcm)
+    if project is None:
+        return JSONResponse(
+            {"error": "no General project in any workspace to host the setup chat"},
+            status_code=500,
+        )
+
+    live = next(
+        (
+            chat
+            for chat in reversed(pcm.list_chats(project.project_id))
+            if chat.title == backup_service.SETUP_CHAT_TITLE and not chat.archived
+        ),
+        None,
+    )
+    if live is not None:
+        # Re-arming a live chat is harmless: the answer is owed until the
+        # repository actually verifies, and a retry must not consume it.
+        service.begin_guided_setup()
+        return JSONResponse(
+            {
+                "ok": True,
+                "chat_id": live.chat_id,
+                "project_id": project.project_id,
+                "reused": True,
+            }
+        )
+
+    context = await asyncio.to_thread(backup_service.setup_context, config)
+    # No model is pinned: the chat runs on the host workspace's own provider
+    # and model, which is where the owner's configured agent already is. A
+    # pinned Claude model would name a model the opencode backend does not
+    # have, and setup is not the place to fail on that.
+    chat = pcm.create_chat(
+        project.project_id, title=backup_service.SETUP_CHAT_TITLE
+    )
+    pcm.start_stream(chat.chat_id, backup_service.render_setup_prompt(config, context))
+    service.begin_guided_setup()
+    return JSONResponse(
+        {
+            "ok": True,
+            "chat_id": chat.chat_id,
+            "project_id": project.project_id,
+            "reused": False,
+        }
+    )
+
+
 async def handover_merge(request: Request) -> JSONResponse:
     """Open an interactive chat that resolves sync conflicts on a branch. Also
     used by ``local_handback`` when the automatic pull conflicts."""
@@ -6421,13 +6631,14 @@ async def cli_stats(request: Request) -> JSONResponse:
 
 
 async def list_proposals(request: Request) -> JSONResponse:
-    """Return every queued proposal across workspaces, plus skill proposals.
+    """Return every queued proposal across workspaces, plus open skill proposals.
 
     Rows are keyed by a stable content-derived id so a UI can act on one without
-    a later dismiss renumbering it (see ``proposal_service._stable_proposal_id``). Rehome rows
+    a later dismiss renumbering it (``proposal_tracking.stable_proposal_id`` for
+    a bullet, ``skill_proposals.proposal_id`` for a skill record). Rehome rows
     carry candidate destinations and a ``justified`` flag, so the UI never
-    pre-fills an accept for a destination no tag backs. Skill-proposal files are
-    surfaced under the same ``rows`` list with ``kind: "skill"``.
+    pre-fills an accept for a destination no tag backs. An open skill-proposal
+    record is surfaced under the same ``rows`` list with ``kind: "skill"``.
     """
     config = request.app.state.config
     rows, _by_id = proposal_service._scan_proposal_rows(config)
@@ -7217,30 +7428,17 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 ).as_dict())
                 continue
             outcome = proposal_service._dismiss_skill_proposal(ctx)
-            skill_result = proposal_actions.ProposalActionResult(
+            # The settlement records the decision itself, in the sidecar under
+            # the proposal's own `skill:<name>` key. A second write here, keyed
+            # by the bare skill name, is what used to file a skill decision as if
+            # it were a memory fact with that wording — two rows for one
+            # dismissal, one of which nothing reads back.
+            results.append(proposal_actions.ProposalActionResult(
                 id=row["id"],
                 action="dismiss",
                 dismissed=bool(outcome.get("ok")),
                 error=None if outcome.get("ok") else outcome["error"],
-            )
-            if outcome.get("ok") and ctx["workspace"]:
-                # The file is already unlinked; a sidecar write failure must not
-                # fail a dismiss that happened.
-                try:
-                    proposal_actions.record_decision(
-                        proposal_service._proposals_file(config, ctx["workspace"]),
-                        action="dismiss",
-                        text=row["text"],
-                        kind="skill",
-                        via="pwa",
-                        workspace=ctx["workspace"],
-                        proposal_id=row["id"],
-                    )
-                except OSError:
-                    logger.info(
-                        "proposals: could not record skill dismissal for %s", row["id"]
-                    )
-            results.append(skill_result.as_dict())
+            ).as_dict())
 
         # Group by file so each affected file is rewritten exactly once.
         by_file: dict[str, dict[str, Any]] = {}
@@ -7411,8 +7609,10 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 # Same contract as the single-row route, through the same
                 # handler: the decision's text must outlive the row or the
                 # nightly curator re-files it, and only the extraction kinds
-                # reach the outcomes tally (skill rows come from skill
-                # evolution, rehome rows from vault hygiene).
+                # reach the outcomes tally: that ledger measures the MEMORY
+                # extraction pipeline, a skill proposal is filed by the same
+                # pass but settled, not promoted, and rehome rows come from
+                # vault hygiene.
                 destination = ""
                 # An outcome with nothing set is how a row this request did not
                 # promote reports: no ``ok`` at all, which the builders read as
@@ -7663,28 +7863,12 @@ async def proposal_action(request: Request) -> JSONResponse:
         outcome = proposal_service._dismiss_skill_proposal(ctx)
         if not outcome.get("ok"):
             return JSONResponse({"error": outcome["error"], "id": pid}, status_code=409)
-        # Not recorded in the outcomes tally: that ledger measures the MEMORY
-        # extraction pipeline, and skill proposals come from the separate
-        # skill-evolution pipeline. It IS recorded in the decision history,
-        # so the review page's History tab shows it was resolved.
-        # Guarded like the batch path: ``workspace_vault_root("")`` falls back
-        # to the default root, so a row with a blank workspace would file its
-        # decision into the wrong workspace's sidecar. And the file is already
-        # gone by now — a recording failure must not turn a completed dismiss
-        # into a 500, or the client's retry 404s on work that succeeded.
-        if row["workspace"]:
-            try:
-                proposal_actions.record_decision(
-                    proposal_service._proposals_file(config, row["workspace"]),
-                    action="dismiss",
-                    text=row["text"],
-                    kind="skill",
-                    via="pwa",
-                    workspace=row["workspace"],
-                    proposal_id=pid,
-                )
-            except OSError:
-                logger.info("proposals: could not record skill dismissal for %s", pid)
+        # The decision is already in the sidecar: the settlement wrote it there
+        # before flipping the record, keyed by the proposal's own
+        # `skill:<name>` text, so the History tab shows it and the pass that must
+        # honour it can read it back. Deliberately NOT in the outcomes tally:
+        # that ledger measures the MEMORY extraction pipeline, and a skill
+        # proposal is filed by the same pass but settled, not promoted.
         return JSONResponse(
             proposal_actions.ProposalActionResult(
                 id=pid, action="dismiss", dismissed=True
@@ -7987,6 +8171,75 @@ async def proposal_action(request: Request) -> JSONResponse:
     )
 
 
+async def proposal_implement(request: Request) -> JSONResponse:
+    """Accept one skill proposal into an implementation chat, idempotently.
+
+    A skill proposal is the one row that cannot be accepted by writing: what it
+    asks for is a change to a ``SKILL.md`` that already exists, and a change
+    like that is a chat. So this route does not promote anything — it opens (or
+    re-returns) the chat that will, binds it to the record, and leaves the
+    proposal queued with ``lifecycle: implementing``.
+
+    Idempotent by construction: the association is read from the record, so a
+    double tap, a retry after a dropped response and a second device all get the
+    SAME chat back rather than a second one. ``created: false`` in the reply says
+    so, and the client can open that chat instead of claiming to have started
+    something.
+
+    The chat is opened in the proposal's OWN workspace: a proposal filed in
+    ``work`` is about work's ``skills/`` catalog, and hosting it anywhere else
+    would edit the wrong copy of the skill.
+
+    Only a skill row reaches the service; anything else is a 409. The batch
+    endpoint is deliberately untouched — a batch is a bulk decision about queue
+    rows, and starting one chat per selected skill behind someone's back is not
+    one.
+    """
+    config = request.app.state.config
+    pid = request.path_params["id"]
+    _rows, by_id = proposal_service._scan_proposal_rows(config)
+    ctx = by_id.get(pid)
+    if ctx is None:
+        return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    # Off the event loop: the service lists projects, creates a chat and binds
+    # the record, and a slow vault scan must not stall every other request. It
+    # hands the prompt back rather than sending it, because ``start_stream``
+    # creates an asyncio task and is only legal on a running loop — the defect
+    # this split exists to prevent.
+    outcome = await asyncio.to_thread(
+        proposal_service.accept_skill_proposal, config, pcm, ctx
+    )
+    if not outcome.get("ok"):
+        return JSONResponse(
+            {"error": outcome.get("error", "could not accept this proposal"), "id": pid},
+            status_code=409,
+        )
+    # Only on the create path: a reuse returns no prompt, because the turn was
+    # already dispatched for the chat being handed back.
+    prompt = str(outcome.pop("prompt", ""))
+    if prompt:
+        # `Any` rather than the optional it is: a prompt can only come back from
+        # the create path, which the service refuses outright without a manager.
+        manager: Any = pcm
+        try:
+            manager.start_stream(str(outcome["chat_id"]), prompt)
+        except Exception as exc:
+            # The chat exists and the record already names it, so this is
+            # recoverable rather than an orphan: the row keeps "Open chat" and a
+            # retry gets this same chat back instead of a second one.
+            logger.exception("Failed to start the implementation turn for %s", pid)
+            return JSONResponse(
+                {
+                    "error": f"could not start the implementation chat: {exc}",
+                    "id": pid,
+                    "chat_id": outcome["chat_id"],
+                },
+                status_code=500,
+            )
+    return JSONResponse({"ok": True, **outcome})
+
+
 # ── Operator-action housekeeping strip ───────────────────────────────────
 
 
@@ -8112,6 +8365,7 @@ async def addresses_endpoint(request: Request) -> JSONResponse:
         is_loopback_url,
         normalize_trusted_url,
         server_addresses,
+        tailscale_serve_urls,
     )
 
     config = request.app.state.config
@@ -8127,7 +8381,28 @@ async def addresses_endpoint(request: Request) -> JSONResponse:
         trusted = ""
     entries: list[dict[str, object]] = []
     if trusted:
-        entries.append({"url": trusted, "kind": "trusted", "secure": True, "loopback": False})
+        entries.append(
+            {
+                "url": trusted,
+                "kind": "trusted",
+                "source": "manual",
+                "secure": True,
+                "loopback": False,
+            }
+        )
+    # Tailscale Serve's HTTPS name never appears on an interface, so it is
+    # asked for directly. A typed address that matches it stays "manual".
+    for url in await asyncio.to_thread(tailscale_serve_urls, port):
+        if url != trusted:
+            entries.append(
+                {
+                    "url": url,
+                    "kind": "trusted",
+                    "source": "tailscale",
+                    "secure": True,
+                    "loopback": False,
+                }
+            )
     urls = await asyncio.to_thread(server_addresses, port)
     for url in urls:
         if is_loopback_url(url):

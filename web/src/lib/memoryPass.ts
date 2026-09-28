@@ -7,11 +7,14 @@
 // the PWA read those fields, so this is the only place that does — Vue-free, so
 // the rules can be tested on their own.
 //
-// Three facts the UI needs, each deliberately narrow:
+// Four facts the UI needs, each deliberately narrow:
 //
 //   - *is this a pass* — keyed on `kind`, never on `is_system` or a project
 //     name. A user project may legitimately be called "Memory"; only the kind
 //     is the discriminator.
+//   - *where is it in its lifecycle* — the normalised `state`, so the pass's
+//     own queue position is read from one field rather than re-derived from
+//     the same state a second time elsewhere.
 //   - *does it need the owner* — `state === 'attention'`. A pass that ends
 //     cleanly auto-archives and never reaches Home, so this one state is the
 //     only thing worth interrupting anyone about.
@@ -19,6 +22,10 @@
 //     source's own `postprocess` record. It is written directly (not folded in
 //     from the archive job) because the pass outlives the job by as long as the
 //     pass takes.
+//
+// The pass is deliberately not an ordinary chat anywhere in the UI: it is
+// listed only as one entry in the memory-insight rail Home derives from it
+// (`memoryInsights.ts`), and reached from the archived source's own chat.
 
 import type { ChatInfo, ChatPostprocess } from './types'
 
@@ -27,8 +34,8 @@ export const MEMORY_PASS_KIND = 'memory_pass'
 /** `ProjectInfo.kind` of the app-owned per-workspace Memory project. */
 const MEMORY_PROJECT_KIND = 'memory'
 
-/** What a pass reads as in a list, now that the Memory project is hidden. */
-const MEMORY_PASS_LABEL = 'memory pass'
+/** The normalised lifecycle states a pass chat can carry. */
+export type MemoryPassState = 'queued' | 'running' | 'done' | 'attention'
 
 type MemoryPassHelper = Extract<
   NonNullable<ChatInfo['helper']>,
@@ -44,6 +51,26 @@ function passHelper(chat: { helper?: ChatInfo['helper'] } | null | undefined): M
 
 export function isMemoryPassChat(chat: { helper?: ChatInfo['helper'] } | null | undefined): boolean {
   return passHelper(chat) !== null
+}
+
+/**
+ * The pass's own lifecycle state, or '' when *chat* is not a pass. `done` is
+ * reachable: a cleanly finished pass is marked done and then archived, and a
+ * failed archive POST rolls `archived` back with the state still `done`.
+ */
+export function memoryPassState(
+  chat: { helper?: ChatInfo['helper'] } | null | undefined,
+): MemoryPassState | '' {
+  return passHelper(chat)?.state ?? ''
+}
+
+/** The archived conversation this pass is distilling, with its title. */
+export function memoryPassSource(
+  chat: { helper?: ChatInfo['helper'] } | null | undefined,
+): { chatId: string; title: string } | null {
+  const helper = passHelper(chat)
+  if (!helper) return null
+  return { chatId: helper.source_chat_id, title: helper.source_title || '' }
 }
 
 /**
@@ -80,14 +107,3 @@ export function isMemoryProject(project: { kind?: string } | null | undefined): 
   return project?.kind === MEMORY_PROJECT_KIND
 }
 
-/**
- * The project sub-line for a chat row. A pass normally sits in the Memory
- * project, whose name is now hidden, so the row says what the chat actually is
- * rather than naming a project the user cannot find.
- */
-export function memoryPassTitle(
-  chat: { helper?: ChatInfo['helper'] } | null | undefined,
-  projectName: string,
-): string {
-  return isMemoryPassChat(chat) ? MEMORY_PASS_LABEL : projectName
-}

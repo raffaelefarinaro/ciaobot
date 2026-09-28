@@ -139,6 +139,25 @@ deliberate CLI exception the nightly curation agent drives because one shell
 command beats a synchronous request per row: `ciao memory-proposal-add`,
 `ciao memory-proposals`, and `ciao memory-proposal-dismiss --text-file <file>`.
 
+The skill-proposal queue has the same pair, for the same reason, and files
+rather than dismisses are the interesting half: `ciao skill-proposal-add NAME
+--input-file FILE` is how the end-of-conversation memory pass files a supported
+skill-improvement proposal, and a person can hand-author one through the same
+door. The target is resolved, not trusted — `skills_inventory.resolve_owned_skill`
+decides, so a stock copy, a provider mirror, a shared source and an unknown name
+are refused by name, and the record carries the resolved path and revision
+rather than whatever the caller said. `--input-file` holds a JSON object with
+`title`, `problem`, `change`, `rationale` and a non-empty `sources` list whose
+entries carry `chat_id`, `archive`, `turn` and a verbatim `excerpt`: the finding
+is conversation prose, so none of it may travel as a shell argument. It proposes
+only — `ciao skill-proposal-remove NAME` settles, and a settled record stays
+settled while it keeps collecting evidence. It records which outcome it was:
+`--applied` when the change landed and was checked (a promotion, so History
+reads it as an accept), `--interrupted` when the work stopped part-way, which is
+neither and leaves the proposal queued with its chat bound to it, and the plain
+form for a decision against it. Never record `--applied` for a chat that simply
+finished: a turn ending is not a verified edit.
+
 ## Skills and system-prompt policy
 
 The CLI replaces the transport recipes, not behavioural knowledge. Ciaobot's

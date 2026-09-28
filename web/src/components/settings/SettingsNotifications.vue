@@ -28,17 +28,6 @@
           </button>
         </span>
       </div>
-      <div v-if="pushEnabledFlag" class="notif-row">
-        <span class="notif-key">Test</span>
-        <span class="notif-value">
-          <span class="notif-detail">Sends a notification to this device only.</span>
-        </span>
-        <span class="notif-end">
-          <button class="btn-secondary btn-small" @click="sendTest" :disabled="testPending">
-            {{ testPending ? 'Sending...' : 'Send test notification' }}
-          </button>
-        </span>
-      </div>
       <div class="notif-row">
         <span class="notif-key">Delivery</span>
         <span class="notif-value">
@@ -59,7 +48,6 @@
       (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;),
       then enable it here.
     </p>
-    <p v-if="testResult" class="hint notif-note" role="status">{{ testResult }}</p>
     <p v-if="pushError" class="action-result" role="alert">{{ pushError }}</p>
   </div>
 </template>
@@ -68,7 +56,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../../lib/api'
 import { errorMessage } from '../../lib/errorMessage'
-import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported, sendTestNotification } from '../../lib/push'
+import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../../lib/push'
 import { isIos, isMacDesktop, isStandalone } from '../../lib/pwaPlatform'
 import type { RoutineSettings } from '../../lib/types'
 
@@ -80,8 +68,6 @@ const permissionDenied = ref(false)
 const needsIosInstall = ref(false)
 const pushAllDevices = ref(false)
 const deliveryPending = ref(false)
-const testPending = ref(false)
-const testResult = ref('')
 
 const showToggle = computed(
   () => !needsIosInstall.value && !permissionDenied.value && pushSupportedFlag.value,
@@ -180,23 +166,6 @@ async function toggleDelivery() {
   }
 }
 
-async function sendTest() {
-  testPending.value = true
-  testResult.value = ''
-  pushError.value = ''
-  try {
-    const sent = await sendTestNotification()
-    if (!sent) {
-      testResult.value = 'Enable notifications on this device first.'
-      return
-    }
-    testResult.value = 'Sent. If nothing appears within a few seconds, check this browser\'s notification permission in your system settings.'
-  } catch (e) {
-    pushError.value = errorMessage(e)
-  } finally {
-    testPending.value = false
-  }
-}
 </script>
 
 <style scoped>

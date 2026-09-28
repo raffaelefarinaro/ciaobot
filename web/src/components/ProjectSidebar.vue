@@ -389,8 +389,8 @@
          because they act on nothing else. -->
     <template v-if="!collapsed && (mode === 'memory' || mode === 'proposals')">
       <nav class="settings-nav-list memory-nav-list" aria-label="Memory sections">
-        <template v-for="group in MEMORY_NAV" :key="group.label">
-          <h2 class="sidebar-list-label">{{ group.label }}</h2>
+        <template v-for="(group, gi) in MEMORY_NAV" :key="gi">
+          <h2 v-if="group.label" class="sidebar-list-label">{{ group.label }}</h2>
           <router-link
             v-for="item in group.items"
             :key="item.section"
@@ -901,10 +901,11 @@ const vaultReview = useVaultReviewStore()
 // store holds one workspace at a time, so a load for another workspace reads
 // as "not loaded" here rather than as the previous workspace's queue.
 type MemoryNavItem = { section: MemorySection; label: string; due?: boolean }
-const MEMORY_NAV: { label: string; items: MemoryNavItem[] }[] = [
-  { label: 'To decide', items: [
-    { section: 'suggested', label: 'Suggested', due: true },
-    { section: 'revisit', label: 'To revisit', due: true },
+// To decide heads the list on its own: both queues, one row, so it needs no
+// group heading above it.
+const MEMORY_NAV: { label?: string; items: MemoryNavItem[] }[] = [
+  { items: [
+    { section: 'review', label: 'To decide', due: true },
   ] },
   { label: 'Explore', items: [
     { section: 'map', label: 'Map' },
@@ -924,8 +925,7 @@ function memoryNavCount(section: MemorySection): number | null {
   // it still holds the previous workspace's total.
   const historyLoaded = proposals.historyLoaded && (proposals.historyWorkspace ?? '') === workspace
   switch (section) {
-    case 'suggested': return proposals.scopedRows(workspace).length || null
-    case 'revisit': return retirementLoaded ? vaultReview.candidates.length || null : null
+    case 'review': return memoryCount.value || null
     case 'retired': return retirementLoaded ? vaultReview.trashed.length || null : null
     case 'map': return mm.loadedWorkspace === workspace ? mm.nodes.length || null : null
     // The category list is configuration, not a queue: a number beside it would
@@ -1005,10 +1005,14 @@ const workspaceScopeMenu = ref<HTMLElement | null>(null)
 // Section counts, all scoped to the selected workspace so they agree with
 // what each page shows. They replace the per-workspace badge in the scope
 // menu: the number sits next to the place that resolves it.
+//
+// The one rule is the store's: a memory pass is not ordinary attention (its
+// activity moves while it works), so it counts only when it is blocked on the
+// owner — and then its row on Home says the same thing out loud.
 const todayCount = computed(() => store.chats.reduce((sum, chat) => {
   if (chat.archived) return sum
   if (store.projectFor(chat.chat_id)?.workspace !== store.activeWorkspace) return sum
-  return sum + (store.chatNeedsInput(chat.chat_id) || store.chatUnread(chat.chat_id) > 0 ? 1 : 0)
+  return sum + (store.chatIsAttentionItem(chat) ? 1 : 0)
 }, 0))
 const automationsCount = computed(() => missedCountFor(store.activeWorkspace))
 const memoryCount = computed(() => {
@@ -2524,10 +2528,13 @@ async function confirmDeleteChat(chatId: string) {
   cursor: grabbing;
 }
 
+/* The selected row is the fill and the brighter label. It used to also carry a
+   2px accent bar down its left edge, which said the same thing twice: next to a
+   filled row the bar read as decoration, and it was the only place in the rail
+   where the workspace accent bled into a list it did not belong to. */
 .chat-item.active {
   background: var(--bg3);
   color: var(--fg);
-  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .chat-title {
@@ -3015,10 +3022,10 @@ async function confirmDeleteChat(chatId: string) {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
+/* Same row language as a selected chat: fill and label, no accent bar. */
 .schedule-item.active {
   background: var(--bg3);
   color: var(--fg);
-  box-shadow: inset 2px 0 0 var(--accent);
 }
 .schedule-item .schedule-label {
   flex: 1;
@@ -3216,8 +3223,10 @@ button.mm-link-item:focus-visible { outline: 2px solid var(--accent); outline-of
   z-index: 200;
 }
 
+/* In flow inside Reka's positioned wrapper: a fixed menu leaves the wrapper
+   0px tall, so collision detection never flips or shifts it and the menu
+   runs off the bottom of the window. Reka copies the z-index to the wrapper. */
 .context-menu {
-  position: fixed;
   min-width: 150px;
   max-width: min(280px, calc(100vw - 16px));
   max-height: calc(100dvh - 16px);

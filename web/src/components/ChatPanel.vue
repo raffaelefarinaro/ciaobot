@@ -61,13 +61,13 @@
              top right of the chat body and hides from its own heading. -->
         <button
           type="button"
-          class="btn-primary chat-archive-btn"
+          class="btn-icon chat-archive-btn"
           :title="ARCHIVE_ACTION_LABEL"
           :aria-label="ARCHIVE_ACTION_LABEL"
           @click="doArchive"
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
-          <span>Archive</span>
+          <span class="chat-archive-label">Archive</span>
         </button>
       </template>
     </PaneHeader>
@@ -128,6 +128,16 @@
         </div>
       </div>
     </div>
+
+    <!-- What this chat is, when nothing else on the surface says it. A memory
+         pass is an ordinary chat in a hidden project, so the transcript reads
+         as a conversation that began mid-thought; this names the conversation
+         it belongs to. Only when the Work details rail is hidden — with the
+         rail shown the same sentence sits at its top instead. -->
+    <p v-if="memoryPassOrigin && !railShown && !inspectorOpen" class="chat-origin-note">
+      <AppIcon class="chat-origin-note-icon" name="spark" :size="16" />
+      <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
+    </p>
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
@@ -222,7 +232,7 @@
           @expand-step="expandLazyStep"
         />
         <!-- User message -->
-        <div v-else-if="item.kind === 'user'" class="message-wrap user" :class="{ 'actions-tapped': tappedMessageKey === `user-${i}`, 'message-wrap--selected': tappedMessageKey === `user-${i}` }">
+        <div v-else-if="item.kind === 'user'" class="message-wrap user" :class="{ 'message-wrap--selected': tappedMessageKey === `user-${i}` }">
           <div
             class="message-row"
             tabindex="0"
@@ -248,7 +258,9 @@
                 </div>
                 <div v-html="renderMarkdown(item.msg.content)"></div>
               </div>
-              <div v-if="item.msg.timestamp || item.msg.unattended" class="message-meta">
+              <!-- The time shows only on the selected (tapped) message, so the
+                   transcript stays quiet. -->
+              <div v-if="item.msg.unattended || (item.msg.timestamp && tappedMessageKey === `user-${i}`)" class="message-meta">
                 <!-- An automation's tick, not something the reader typed.
                      Without this the two are indistinguishable in the
                      transcript. -->
@@ -257,30 +269,30 @@
                   class="unattended-mark"
                   title="Sent automatically by an automation"
                 >&#10227; auto</span>
-                <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
+                <span v-if="item.msg.timestamp && tappedMessageKey === `user-${i}`">{{ formatTime(item.msg.timestamp) }}</span>
               </div>
             </div>
-          </div>
-          <!-- A quiet text row under the message rather than an icon stack at its
-               side. Always shown on the latest reply; on older messages it
-               appears on hover or focus (tap on touch) and overlays the gap, so
-               a hidden row takes no height. -->
-          <div v-if="item.msg.content?.trim()" class="message-actions">
-            <button
-              type="button"
-              class="message-action-btn"
-              :title="copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy'"
-              :aria-label="copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy message'"
-              @click="copyMessageText(item.msg.content, `user-${i}`)"
-            >
-              <svg v-if="copiedMessageKey === `user-${i}`" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-              <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/></svg>
-              <span>{{ copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy' }}</span>
-            </button>
+            <!-- Copy for a request. It sits in the flow under the bubble rather
+                 than overlaying the gap, so a 44px touch target cannot reach
+                 into the turn below. Hidden until the message is selected, and
+                 then it reserves exactly its own height. -->
+            <div v-if="item.msg.content?.trim()" class="message-actions">
+              <button
+                type="button"
+                class="message-action-btn"
+                :title="copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy'"
+                :aria-label="copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy message'"
+                @click="copyMessageText(item.msg.content, `user-${i}`)"
+              >
+                <svg v-if="copiedMessageKey === `user-${i}`" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/></svg>
+                <span>{{ copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy' }}</span>
+              </button>
+            </div>
           </div>
         </div>
         <!-- Final assistant message -->
-        <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant" :class="{ 'actions-tapped': tappedMessageKey === `assistant-${i}`, 'message-wrap--selected': tappedMessageKey === `assistant-${i}` }">
+        <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant" :class="{ 'message-wrap--selected': tappedMessageKey === `assistant-${i}` }">
           <div
             class="message-row"
             tabindex="0"
@@ -327,44 +339,49 @@
                 </ul>
               </div>
             </div>
-          </div>
-          <!-- A quiet text row under the message rather than an icon stack at its
-               side. Always shown on the latest reply; on older messages it
-               appears on hover or focus (tap on touch) and overlays the gap, so
-               a hidden row takes no height. -->
-          <div v-if="item.msg.content?.trim() || item.meta" class="message-actions">
-            <template v-if="item.msg.content?.trim()">
-            <button
-              type="button"
-              class="message-action-btn"
-              :title="copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy'"
-              :aria-label="copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy message'"
-              @click="copyMessageText(item.msg.content, `assistant-${i}`)"
-            >
-              <svg v-if="copiedMessageKey === `assistant-${i}`" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-              <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/></svg>
-              <span>{{ copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy' }}</span>
-            </button>
-            <button
-              v-if="!item.msg.is_error"
-              type="button"
-              class="message-action-btn"
-              :class="{ 'message-action-btn--busy': forkLoadingKey === `assistant-${i}` }"
-              :title="forkLoadingKey === `assistant-${i}` ? 'Forking…' : 'Fork conversation from here'"
-              aria-label="Fork conversation from here"
-              :disabled="forkLoadingKey !== null"
-              @click.stop="forkConversation(item.msg, `assistant-${i}`)"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M18 10c0 4-6 3-12 7"/></svg>
-              <span>{{ forkLoadingKey === `assistant-${i}` ? 'Forking…' : 'Fork from here' }}</span>
-            </button>
-            </template>
-            <!-- One footer per turn, on its last bubble: the merged answer carries
-                 the model and token usage, the turn's last row the completion
-                 time and duration. `item.meta` is set only on the closing bubble. -->
-            <div v-if="item.meta" class="message-meta">
-              <span>{{ turnMetaText(item.meta) }}</span>
-              <span v-if="formatTokenUsage(item.meta.usage)" class="tokens-group"><template v-if="turnMetaText(item.meta)">&nbsp;·&nbsp;</template><span v-html="formatTokenUsage(item.meta.usage)"></span></span>
+            <!-- The reply's own footer: Copy, Fork, and the turn's facts. It
+                 rides inside the message's card, so a selected message and the
+                 things you can do to it read as one object instead of a card
+                 with two chips floating under it. Hidden rows take no height,
+                 so an unselected turn stays tight. -->
+            <div v-if="item.msg.content?.trim() || item.meta" class="message-actions">
+              <template v-if="item.msg.content?.trim()">
+              <button
+                type="button"
+                class="message-action-btn"
+                :title="copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy'"
+                :aria-label="copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy message'"
+                @click="copyMessageText(item.msg.content, `assistant-${i}`)"
+              >
+                <svg v-if="copiedMessageKey === `assistant-${i}`" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/></svg>
+                <span>{{ copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy' }}</span>
+              </button>
+              <button
+                v-if="!item.msg.is_error"
+                type="button"
+                class="message-action-btn"
+                :class="{ 'message-action-btn--busy': forkLoadingKey === `assistant-${i}` }"
+                :title="forkLoadingKey === `assistant-${i}` ? 'Forking…' : 'Fork conversation from here'"
+                aria-label="Fork conversation from here"
+                :disabled="forkLoadingKey !== null"
+                @click.stop="forkConversation(item.msg, `assistant-${i}`)"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M18 10c0 4-6 3-12 7"/></svg>
+                <span>{{ forkLoadingKey === `assistant-${i}` ? 'Forking…' : 'Fork from here' }}</span>
+              </button>
+              </template>
+              <!-- One footer per turn, on its last bubble: the merged answer
+                   carries the model and token usage, the turn's last row the
+                   completion time and duration. `item.meta` is set only on the
+                   closing bubble. Two units rather than one run of separators:
+                   when and what ran it, then what it cost. Cost is tokens in
+                   and out; the context-window share stays in the rail, which
+                   shows it against the window's size. -->
+              <div v-if="item.meta" class="message-meta">
+                <span v-if="turnMetaText(item.meta)">{{ turnMetaText(item.meta) }}</span>
+                <span v-if="formatTokenUsage(item.meta.usage)" class="tokens-group" v-html="formatTokenUsage(item.meta.usage)"></span>
+              </div>
             </div>
           </div>
           <div v-if="item.msg.is_error" class="error-actions">
@@ -1220,11 +1237,16 @@
       aria-labelledby="chat-work-rail-title"
     >
       <!-- Where this chat came from, above everything else: one line naming the
-           automation that runs here. Its cadence and controls live on the
-           automation's own page. -->
+           automation that runs here, and — for the one app-owned chat — the
+           conversation its memory pass is distilling. Its cadence and controls
+           live on the automation's own page. -->
       <p v-for="s in chatSchedules" :key="`rail-sched-${s.schedule_id}`" class="chat-rail-origin">
         <AppIcon class="chat-rail-origin-icon" name="clock" :size="16" />
         <span>This chat comes from the automation <router-link :to="`/schedules/${s.schedule_id}`">{{ s.title || 'Automation' }}</router-link>.</span>
+      </p>
+      <p v-if="memoryPassOrigin" class="chat-rail-origin">
+        <AppIcon class="chat-rail-origin-icon" name="spark" :size="16" />
+        <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
       </p>
       <div class="chat-rail-head">
         <h2 id="chat-work-rail-title" class="rail-title">Work details</h2>
@@ -1329,7 +1351,7 @@ import {
   postprocessNeedsRetry,
   postprocessSummary,
 } from '../lib/postprocessView'
-import { memoryPassChatId } from '../lib/memoryPass'
+import { memoryPassChatId, memoryPassSource } from '../lib/memoryPass'
 import { useFileViewerStore } from '../stores/fileViewer'
 // Subagent transcripts carry `turn_index` (the user turn that dispatched
 // them, parsed server-side from the session JSONL), so each panel anchors
@@ -1365,6 +1387,7 @@ import {
   findFinalAnswerIndex,
   formatTokenUsage,
   isImageFilePath,
+  isScratchPath,
   isSubagentLine,
   mentionedFilePaths,
   mergeTraceOutputs,
@@ -1689,6 +1712,29 @@ async function retryArchiveSteps(): Promise<void> {
 function openMemoryPass(): void {
   if (archiveMemoryPassChatId.value) void store.switchChat(archiveMemoryPassChatId.value)
 }
+
+/**
+ * The conversation this chat is a memory pass for, or null when the chat is an
+ * ordinary one. The pass is the app's own chat in a project the sidebar hides
+ * and the tiers do not list, so nothing else on the surface says what it is or
+ * which conversation it belongs to. Null rather than an empty title, because a
+ * pass whose source was deleted still needs a row on Home and a composer here,
+ * and a bare "memory insight" line with nothing to open is worse than none.
+ */
+const memoryPassOrigin = computed<{ chatId: string; title: string } | null>(() => {
+  const source = memoryPassSource(chat.value)
+  if (!source) return null
+  const title = store.chats.find(c => c.chat_id === source.chatId)?.title || source.title
+  if (!title) return null
+  return { chatId: source.chatId, title }
+})
+
+// The source is archived, so the transcript is the only thing it can open.
+function openMemoryPassSource(): void {
+  if (!memoryPassOrigin.value) return
+  const archivePath = store.chats.find(c => c.chat_id === memoryPassOrigin.value?.chatId)?.archive_path
+  if (archivePath) void fileViewer.open(archivePath)
+}
 watch(() => chat.value.provider, () => {
   void loadSlashCommands()
 })
@@ -1959,9 +2005,11 @@ const inspectorTabs = [
 // One row per file name: the same note shows up under several spellings
 // (relative, workspace-prefixed, before and after a move), and the reader
 // thinks of it as one file.
+// Temp-dir files are the agent's scratch work; the inline cards still show
+// them, but the chat's file list is what it made for the user.
 const inspectorOutputs = computed<TraceOutput[]>(() => collapseOutputsByName(mergeTraceOutputs(
   renderItems.value.map(item => (item.kind === 'trace' || item.kind === 'assistant' ? item.outputs : undefined)),
-)))
+).filter(output => !isScratchPath(output.file_path))))
 // Every activity line this chat has produced: its turns, the subagents they
 // ran, and the turn in flight. The rail reads skills and MCP tools from it.
 const chatActivityLines = computed<string[]>(() => {
@@ -1992,6 +2040,7 @@ const mentionedFiles = computed<string[]>(() => {
   for (const item of renderItems.value) {
     if (item.kind !== 'assistant' || !item.msg.content) continue
     for (const path of mentionedFilePaths(item.msg.content)) {
+      if (isScratchPath(path)) continue
       const name = fileCardBasename(path)
       if (produced.has(name) || found.some(p => fileCardBasename(p) === name)) continue
       found.push(path)
@@ -2000,10 +2049,12 @@ const mentionedFiles = computed<string[]>(() => {
   return found
 })
 
-// How full the model's context window was at the end of the latest turn,
-// from the usage the provider reported (the last model call of that turn).
-// Providers report it as text ("13.2%"), so parseFloat, not Number. Null
-// when it reported none.
+// How full the model's context window was at the end of the latest turn, from
+// the usage the provider reported (the last model call of that turn). This is
+// the transcript's only statement of occupancy: the Work details rail shows it
+// as a meter, because a percentage means nothing without the window's size
+// beside it. Providers report it as text ("13.2%"), so parseFloat, not
+// Number. Null when it reported none.
 const contextPct = computed<number | null>(() => {
   const items = renderItems.value
   for (let i = items.length - 1; i >= 0; i--) {
@@ -2140,6 +2191,9 @@ const forkLoadingKey = ref<string | null>(null)
 // On touch devices there is no hover, so a tap on the bubble reveals the
 // per-message action icons. Holds the key of the message whose actions are open.
 const tappedMessageKey = ref<string | null>(null)
+// Breathing room left between a selected turn's bottom edge and the bottom of
+// the transcript once the scroll below has pulled it into view.
+const FOOTER_SCROLL_GAP = 12
 
 // Touch: tap a message to toggle its action icons. Ignored on hover-capable
 // devices (they use hover) and when the tap targets a link/button or a text
@@ -2151,7 +2205,29 @@ function toggleMessageActions(key: string, e: Event): void {
   const target = e.target as HTMLElement | null
   if (target?.closest('a, button, input, textarea, summary, .comment-highlight, [data-comment-id]')) return
   if (window.getSelection()?.toString()) return
-  tappedMessageKey.value = tappedMessageKey.value === key ? null : key
+  const opening = tappedMessageKey.value !== key
+  tappedMessageKey.value = opening ? key : null
+  if (opening) nextTick(scrollSelectedMessageIntoView)
+}
+
+// Selecting a message grows it: the action footer was not in the layout a
+// moment ago, so on the last turn of a phone-sized transcript the footer lands
+// under the composer, half its buttons and all of the turn facts. Bring the
+// whole selected turn back into view — downward only, so a footer that already
+// fits never yanks the transcript away from where the reader was.
+//
+// Measured with rects against the scroll box rather than offsetTop/offsetHeight
+// on the turn: the card is the turn's child and hangs 16px below it (the
+// selected card's negative bottom margin), so the turn's own box under-reports
+// the bottom by exactly the 16px that matters here.
+function scrollSelectedMessageIntoView(): void {
+  const root = messagesEl.value
+  const card = root?.querySelector<HTMLElement>('.message-wrap--selected .message-row') ?? null
+  if (!root || !card) return
+  const viewportBottom = root.getBoundingClientRect().top + root.clientHeight
+  const overflow = card.getBoundingClientRect().bottom - (viewportBottom - FOOTER_SCROLL_GAP)
+  if (overflow <= 0) return
+  root.scrollTo({ top: root.scrollTop + overflow, behavior: 'smooth' })
 }
 
 function onSelectedMessageKeydown(e: KeyboardEvent): void {
@@ -3537,18 +3613,26 @@ function focusComposerOnOpen(): void {
   el.selectionStart = el.selectionEnd = el.value.length
 }
 
-onMounted(async () => {
-  window.addEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
-  window.addEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
-  window.addEventListener('ciao:native-file-drop', handleNativeFileDrop)
+let modelsSeq = 0
+async function loadModels(): Promise<void> {
+  const seq = ++modelsSeq
   try {
     const r = await api.get<ModelsResponse>('/api/models')
+    // Quick reopens can resolve out of order; only the newest request lands.
+    if (seq !== modelsSeq) return
     modelsResponse.value = r
     models.value = r.models
     providerModels.value = r.provider_models || {}
     providerDefaults.value = r.provider_defaults || {}
     thinkingLevels.value = r.thinking_levels || {}
   } catch { /* use defaults */ }
+}
+
+onMounted(async () => {
+  window.addEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
+  window.addEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
+  window.addEventListener('ciao:native-file-drop', handleNativeFileDrop)
+  await loadModels()
   await loadSlashCommands()
   await loadMentionAgents()
   notifyChatFocused(chat.value?.chat_id)
@@ -4429,6 +4513,10 @@ watch(showModelPicker, (open) => {
     capabilityPickerSection.value = ''
     return
   }
+  // Refetched on every open, not only on mount: a provider whose catalog was
+  // still loading when the chat opened would otherwise stay missing from the
+  // picker until the chat is reopened. The server caches the list.
+  void loadModels()
   const clickHandler = (e: MouseEvent) => {
     if (modelPickerRef.value && !modelPickerRef.value.contains(e.target as Node)) {
       showModelPicker.value = false
@@ -4543,11 +4631,13 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 }
 .chat-rail-head .rail-title { margin-bottom: 0; }
 /* Same 34px box as the tab that reopens it, pulled into the heading's line
-   height so the row does not grow. */
+   height so the row does not grow. Not pulled past the right edge: the rail
+   scrolls, so an overhang widened it, and focusing the button on reopen
+   scrolled the whole rail sideways, cutting off its left edge. */
 .chat-rail-hide {
   min-width: 34px;
   min-height: 34px;
-  margin: -7px -8px -7px 0;
+  margin: -7px 0;
   padding: 7px;
   color: var(--accent);
 }
@@ -4568,9 +4658,12 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   width: var(--page-rail);
   min-width: 0;
   overflow-y: auto;
+  /* Scrolls, but without a visible bar: the rail is a quiet side column. */
+  scrollbar-width: none;
   padding: 28px 0 24px;
   font-size: var(--text-sm);
 }
+.chat-rail::-webkit-scrollbar { display: none; }
 
 .chat-rail-origin {
   display: flex;
@@ -4593,6 +4686,44 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   text-underline-offset: 3px;
 }
 .chat-rail-origin a:hover { text-decoration-color: currentColor; }
+
+/* The same origin sentence for a chat whose Work details rail is hidden, above
+   the transcript. Flat, and sharing the rail's link treatment: one sentence in
+   two places, never two different sentences. */
+.chat-origin-note {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+.chat-origin-note-icon { flex: none; color: var(--fg3); }
+.chat-origin-link {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+.chat-origin-link:hover { text-decoration-color: currentColor; }
+.chat-origin-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
 
 .chat-rail-tool {
   min-width: 0;
@@ -5037,8 +5168,17 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   position: relative;
 }
 
+/* A reply's row stacks its prose over the action footer, so it is a column
+   and the card can bleed that footer to its own edges. A request's row is a
+   column too, right-aligned, so its Copy chip lines up under the bubble
+   instead of beside it. */
+.message-wrap.user .message-row,
+.message-wrap.assistant .message-row {
+  flex-direction: column;
+}
+
 .message-wrap.user .message-row {
-  justify-content: flex-end;
+  align-items: flex-end;
 }
 
 .message {
@@ -5062,56 +5202,50 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 }
 
 /* The answer: plain prose on the page. A bubble around every reply made the
-   transcript a stack of cards; the activity line above and the action row
+   transcript a stack of cards; the activity line above and the action footer
    below already mark where a turn starts and ends. */
 .message.assistant {
-  flex: 1;
   padding: 0;
   background: transparent;
   border: 0;
   line-height: 1.65;
 }
 
-/* Text row under a message. Under a reply it is a compact 28px row in the
-   flow, 4px below the text: always visible on the latest reply, faded in on
-   hover, focus or tap for older ones, so every turn keeps the same rhythm
-   and a hidden row never covers the next message. Under a request (right
-   aligned) it overlays the gap below the bubble and takes no height. */
-/* Hidden until the message is selected; then it takes its place in the
-   flow. Nothing is reserved for it meanwhile, so turns stay tight. */
+/* A message's actions. They ride inside the message's own card as its footer,
+   so a selected message and the things you can do to it read as one object
+   rather than a card with two chips floating under it. The row is
+   display:none until the message is selected, so a hidden row reserves no
+   height and unselected turns stay tight. `:focus-within` cannot reach it —
+   a display:none subtree is not focusable — so selection is the only way in. */
 .message-actions {
   display: none;
   align-items: center;
-  gap: 2px;
-  height: 28px;
+  flex-wrap: wrap;
+  gap: 8px 10px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;
 }
-.message-wrap--selected .message-actions,
-.message-actions:focus-within {
+.message-wrap--selected .message-actions {
   display: flex;
+  opacity: 1;
+  pointer-events: auto;
 }
 
-.message-wrap.assistant .message-actions {
-  margin: 4px 0 0 -8px;
+/* The footer band under a reply: a hairline below the prose, bled to the
+   card's own edges and re-inset to the text column, so the buttons share the
+   prose's left edge rather than hanging outside the card. 20px of air above
+   the rule (4 here + the card's 16px padding), 10px below the buttons. */
+.message-wrap--selected.assistant .message-actions {
+  margin: 4px -18px -16px;
+  padding: 10px 18px;
+  border-top: 1px solid var(--border);
 }
 
-/* Under a reply the row may carry the turn details (time · duration ·
-   model · tokens). They get their own line beneath the buttons instead of
-   being squeezed onto the same row and truncated. */
-.message-wrap.assistant .message-actions:has(.message-meta) {
-  flex-wrap: wrap;
-  height: auto;
-  min-height: 28px;
-  row-gap: 0;
-}
-
-.message-wrap.user .message-actions {
-  position: absolute;
-  top: calc(100% + 2px);
-  right: -8px;
-  z-index: 2;
+/* A request offers Copy only, under its bubble and in the flow, so a 44px
+   touch target cannot reach into the turn below. */
+.message-wrap--selected.user .message-actions {
+  margin-top: 6px;
 }
 
 
@@ -5146,22 +5280,11 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   background: var(--bg2);
   box-shadow: 0 0 0 1px var(--border-strong), 0 16px 40px rgb(0 0 0 / 28%);
 }
-/* Buttons start at the card's edge, a clear step below it; the turn
-   details line up with the reply text inside the card. */
-.message-wrap--selected.assistant .message-actions {
-  position: relative;
-  margin: 26px 0 0 -18px;
-  row-gap: 10px;
-}
-.message-wrap--selected.assistant .message-actions .message-meta {
-  padding-left: 18px;
-}
-/* On a selected message the actions are the point: real buttons on a
-   surface, full-strength text, not the quiet text links of the row. */
-.message-wrap--selected .message-actions {
-  gap: 6px;
-  height: auto;
-}
+/* On a selected message the actions are the point: real controls on a
+   surface, full-strength text, not the quiet text links of an unselected
+   turn. One border, no shadow — the card is the only thing floating here,
+   and a shadowed chip under a shadowed card reads as three depths in
+   fifty pixels. */
 .message-wrap--selected .message-action-btn {
   height: 34px;
   padding: 0 12px;
@@ -5170,7 +5293,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   background: var(--bg-elev);
   color: var(--fg);
   font-weight: 600;
-  box-shadow: 0 6px 18px rgb(0 0 0 / 22%);
 }
 .message-wrap--selected .message-action-btn:hover {
   border-color: var(--accent);
@@ -5190,12 +5312,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 }
 @media (prefers-reduced-motion: reduce) {
   .message-select-backdrop { animation: none; }
-}
-
-.message-actions:focus-within,
-.message-wrap.actions-tapped .message-actions {
-  opacity: 1;
-  pointer-events: auto;
 }
 
 
@@ -5237,20 +5353,32 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 }
 
 /* Touch: the row keeps its 28px visual but each button grows a 44px hit
-   area around it, so taps land without spreading the transcript out. */
+   area around it, so taps land without spreading the transcript out. A
+   selected button is already 44px, so the extra halo only applies to the
+   unselected state, where the row is display:none anyway. */
 @media (pointer: coarse) {
   .message-action-btn::after {
     content: '';
     position: absolute;
     inset: -8px 0;
   }
+  .message-wrap--selected .message-action-btn::after {
+    content: none;
+  }
 }
 
-/* Model · tokens · duration for the turn, on the right of its row. */
+/* The turn's facts close the footer: when it finished, how long it took and
+   what ran it, then what it cost. Context-window occupancy is deliberately
+   absent — the rail states it as a meter against the window's size.
+   `flex: 1 1 auto` pushes the block to the card's right edge on a wide pane
+   and drops it onto its own line, whole, when the footer runs out of room. */
 .message-actions .message-meta {
-  flex-basis: 100%;
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px 16px;
   min-width: 0;
-  padding: 0 0 0 8px;
   overflow-wrap: anywhere;
 }
 
@@ -5771,10 +5899,6 @@ details[open] > .activity-summary::before {
 }
 .tokens-group :deep(.token-number) {
   color: var(--fg);
-  font-weight: 500;
-}
-.tokens-group :deep(.context-pct) {
-  color: var(--fg2);
   font-weight: 500;
 }
 
@@ -7037,6 +7161,25 @@ details[open] > .activity-summary::before {
   }
   :deep(.header-title) { text-align: left; min-width: 0; }
   .header-left { min-width: 0; }
+  .header-breadcrumb {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    row-gap: 2px;
+  }
+  .header-breadcrumb .chat-title {
+    flex: 0 1 auto;
+    width: 100%;
+  }
+  .breadcrumb-scope {
+    max-width: 100%;
+    align-self: flex-start;
+  }
+  .chat-archive-btn {
+    color: var(--fg2);
+  }
+  .chat-archive-btn:hover { color: var(--fg); }
+  .chat-archive-label { display: none; }
   /* The scope/title stack is the base layout now, so this block only carries
      what a narrow header changes about it. */
   /* PaneHeader drops every pane title to --text-sm on narrow screens, which is

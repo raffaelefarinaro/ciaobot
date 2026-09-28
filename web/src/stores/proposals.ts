@@ -11,6 +11,7 @@ import type {
   ProposalHistoryRow,
   ProposalPreview,
   ProposalPreviewResponse,
+  ProposalSkillAcceptResponse,
   MemoryReceiptDetail,
 } from '../lib/types'
 
@@ -510,6 +511,48 @@ export const useProposalsStore = defineStore('proposals', () => {
     return true
   }
 
+  /** Accept one skill proposal into an implementation chat.
+   *
+   * A skill row is the one kind that cannot be accepted by writing: what it
+   * asks for is a change to a `skills/<name>/SKILL.md` that already exists, so
+   * accepting it means opening the chat that will do that work. The server owns
+   * the association — it reads it off the record, so a double tap, a retry
+   * after a dropped response and a second device all get the SAME chat back —
+   * and it owns the prompt too. This panel used to mint the chat itself and
+   * keep the link in localStorage, which is precisely what neither of those
+   * could see.
+   *
+   * The lifecycle that comes back is the server's, read off the row on the
+   * refresh below. Nothing here infers one: a chat that ends is not a decision.
+   *
+   * `created` is reported back so the caller can say what happened: `false` means
+   * this accept was handed a chat that was already running, and claiming to have
+   * started it then would be a second lie on top of the first tap's.
+   */
+  async function acceptSkill(
+    id: string,
+  ): Promise<{ ok: boolean; chatId?: string; created?: boolean; error?: string }> {
+    setBusy(id, true)
+    error.value = ''
+    try {
+      const reply = await api.post<ProposalSkillAcceptResponse>(
+        `/api/proposals/${id}/implement`,
+      )
+      // The server row is the source of truth, so re-read rather than patching
+      // the local copy: the lifecycle, the chat id and the evidence all come
+      // from it, and a reload must not change the answer.
+      await fetch({ force: true })
+      invalidateHistory()
+      return { ok: true, chatId: reply?.chat_id ?? '', created: reply?.created !== false }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Could not start the improvement chat'
+      error.value = msg
+      return { ok: false, error: msg }
+    } finally {
+      setBusy(id, false)
+    }
+  }
+
   /** `workspace` names the destination for re-home rows in the selection. */
   async function batch(ids: string[], action: 'accept' | 'dismiss', workspace = '') {
     if (!ids.length) return
@@ -690,7 +733,7 @@ export const useProposalsStore = defineStore('proposals', () => {
   }
 
   return {
-    rows, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, loadError, fetch, ensureLoaded, act, batch, dismissOlderThan,
+    rows, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, loadError, fetch, ensureLoaded, act, acceptSkill, batch, dismissOlderThan,
     previews, previewErrors, isPreviewLoading, loadPreview, prefetchPreviews, dropPreview, conflictIds, lastBatchSummary,
     receipts, receiptErrors, receiptKey, isReceiptLoading, loadReceipt, undoReceipt,
     kindFilter, search, selected,

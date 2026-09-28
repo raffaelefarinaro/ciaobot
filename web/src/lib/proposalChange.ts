@@ -93,7 +93,15 @@ export function changeFor(
 ): ProposalChange {
   const fallback = opts.fallbackQualifier ?? ''
   if (row.kind === 'skill') {
-    return { type: 'skill', label: 'New skill', verb: '', destination: row.path || '', qualifier: 'built in a chat' }
+    // "Improve", never "New": the skill the finding is about already exists, so
+    // "New skill" described a task the proposal does not ask for.
+    return {
+      type: 'skill',
+      label: 'Improve skill',
+      verb: '',
+      destination: row.canonical_path || row.path || '',
+      qualifier: 'improved in a chat',
+    }
   }
   if (!opts.canAccept) {
     return { type: 'decide', label: 'Needs a decision', verb: '', destination: '', qualifier: fallback }
