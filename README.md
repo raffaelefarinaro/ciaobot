@@ -31,15 +31,29 @@ Ciaobot keeps provider credentials in the provider's own CLI. It supplies the in
 
 Contributors running from a git checkout can follow [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
+### Upgrading from the macOS app
+
+v1.0.0 retires the macOS `Ciaobot.app`; the PWA is now served by the engine. There is no data migration and no vault change. If you still run the app, run the same one-liner above (`install.sh`) to move to the engine install, then run `ciao desktop uninstall` once to remove the old bundle. Your workspace folder and its notes are kept. See [INTEGRATIONS.md](INTEGRATIONS.md#install) for the same note in full.
+
+Updates are the same one-liner again, or **Settings → Home** in the PWA, which stages and applies the engine package update in the background. There is no in-app app updater.
+
 ### Uninstall
 
-The engine installer owns the engine and keeps your workspace folder and its notes. If you came from `Ciaobot.app` and moved the engine to this installer, the app itself is no longer used — remove it with:
+To stop the engine, use its own service command:
+
+```bash
+ciao service stop
+```
+
+That stops the `com.ciao.server` LaunchAgent; the workspace folder and its notes are kept, so a later `ciao service start` picks it back up.
+
+A machine that still has a **legacy** `Ciaobot.app` bundle from an older install can remove it with:
 
 ```bash
 ciao desktop uninstall
 ```
 
-This removes `Ciaobot.app` (from `~/Applications`, or `/Applications` for older installs; pass `--app-dir` to point elsewhere) and its LaunchAgents. It only deletes a `~/.local/bin/ciao` shim that pointed inside that bundle, so an engine installed by the one-line installer is left alone.
+This removes the bundle (from `~/Applications`, or `/Applications` for older installs; pass `--app-dir` to point elsewhere) and its LaunchAgents. It only deletes a `~/.local/bin/ciao` shim that pointed inside that bundle, so an engine installed by the one-line installer is left alone.
 
 ## How it works
 

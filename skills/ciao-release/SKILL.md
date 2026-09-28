@@ -7,7 +7,7 @@ description: How to cut a Ciaobot release — the patch/minor/major convention, 
 
 > Contributor/project skill — lives in the repo's workspace `skills/` folder, **not** `ciao/stock/skills/`. It is for people working *on* Ciaobot and is deliberately not packaged or shipped to end-user installs. `ciao sync-skills` mirrors it into the generated `.claude/` catalog, which opencode discovers natively — skills get no separate opencode projection, unlike subagents, commands and MCPs. Don't move it into `ciao/stock/`.
 
-Authoritative procedure for cutting a Ciaobot release. `develop` is the source line; `main` is publish-only — **merging a release PR into `main` is the trigger** for everything downstream (tag → GitHub release → bundled app assets). You never build artifacts or tag by hand.
+Authoritative procedure for cutting a Ciaobot release. `develop` is the source line; `main` is publish-only — **merging a release PR into `main` is the trigger** for everything downstream (tag → GitHub release → engine assets). You never build artifacts or tag by hand.
 
 Canonical companions: `docs/DEVELOPMENT.md` (§ "Branching and releases") and `ciao/release.py`. When this skill and the code disagree, the code wins — say so and update this skill.
 
@@ -43,7 +43,7 @@ Do these on `develop` (or a short prep branch merged into develop) **before** ru
      ```
 
      A delta is not automatically a bug — real conflicts must be resolved by hand — but each one needs a human look, because **no test will do it for you**. v0.12.0 shipped this: merge `ed04d1e9` resolved by taking the pre-feature side, reverting the entire frontend half of the subagent-subchat feature (sidebar rows, the read-only transcript route, the store polling) and committing a 3533-line `ProjectSidebar.vue.tmp` scratch file, while the backend half stayed live and served `/api/subagents/running` to nothing. The PR was green — the same resolution deleted `tests/test_delegates.py` along with the code it covered, so the suite had nothing left to fail on. The tells to look for in a delta: **a deleted test file**, a **stray `.tmp`/`.orig`/`.rej`** artifact, and any file where one side's changes vanished wholesale. Cross-check the survivors with `git grep` for an endpoint or component the release notes claim to add.
-3. **Dependencies.** The release tool checks the Python/npm dependencies used to build the app and prints available updates as `[auto|manual] [safe|major]`; `auto`-flagged ones are bumped on `--apply`, the rest are only reported. These registries are build inputs, not end-user installation channels. Run a plan-only pass first, then decide whether to adopt any `manual` updates in a separate commit before releasing. Don't blanket-upgrade majors as part of a release.
+3. **Dependencies.** The release tool checks the Python/npm dependencies used to build the engine and prints available updates as `[auto|manual] [safe|major]`; `auto`-flagged ones are bumped on `--apply`, the rest are only reported. These registries are build inputs, not end-user installation channels. Run a plan-only pass first, then decide whether to adopt any `manual` updates in a separate commit before releasing. Don't blanket-upgrade majors as part of a release.
 4. **Docs — sync, then prove it.** The docs must describe the product as it is about to ship, not as it was at the last tag. The sync is partly mechanical and partly a judgment call:
    - **The mechanical gate.** `tests/test_architecture_doc.py`, `tests/test_env_vars_documented.py`, and `tests/test_pwa_api_docs.py` fail when a `ciao/` module is missing from `docs/ARCHITECTURE.md`, a `CIAO_*` env var is missing from `INTEGRATIONS.md`, or a route is missing from `PWA_API.md` (state-changing routes also need an Agent recipe). They run inside `pytest tests/` (so `_run_checks` catches them), but run them explicitly **before** the cut — a doc failing after `--apply` has already bumped and committed means a revert-and-rerun:
      ```bash
@@ -52,20 +52,20 @@ Do these on `develop` (or a short prep branch merged into develop) **before** ru
    - **The stale-claims sweep (the gate cannot do this).** Those tests prove structure, not truth — a paragraph describing a removed engine, a renamed env var, a deleted page, or a renamed CLI flag passes them. For every feature the release removed or renamed (`git diff <last-tag>..develop --stat`, then the removed identifiers), `git grep -n <env var | route | provider id | command>` across `README.md`, `INTEGRATIONS.md`, `PWA_API.md`, `docs/`, and `DESIGN.md`, and delete or update every hit. v0.8.0 shipped exactly this kind of rot: `PWA_API.md` still documented the cloud transcription engine four releases after its removal, and `INTEGRATIONS.md` still claimed n8n was denied by default two releases after the policy was dropped — both caught by a release-time sweep, not by the sync tests.
     - **What to touch.** `README.md` (features/Providers), `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `PWA_API.md` (any new/changed state-changing route **must** be documented here), `docs/AGENT_CLI.md` (the operation catalog must match `ciao/stock/skills/ciao-cli/commands.json` and the dispatcher's `OPERATIONS` table in `ciao/mcp_server.py`), and — when the release touches the UI — `DESIGN.md` / `docs/DESIGN_SYSTEM.md` and the home-lanes plan's status. Commit doc fixes on `develop` before the cut; do not let them ride in the `release: prepare` commit.
 5. **The capabilities skill.** For any new user-facing feature, update `ciao/stock/skills/ciao-capabilities/SKILL.md` — add the feature to the right section and add trigger keywords to its frontmatter `description`. Skim the CHANGELOG since the last release tag to catch features that shipped without a catalog entry.
-6. **The desktop gate — run it if anything under `desktop/` changed.** CI builds no app (`#655`), so nothing in this repo compiles Rust or assembles `Ciaobot.app` for you any more. Run the `desktop/src-tauri` steps in `docs/DEVELOPMENT.md` yourself: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, then an aarch64 `tauri build`. Needs Rust 1.90.0.
-7. **Install the release candidate on this machine and run it — `/ciao-dev-install`.** Nothing above this line ever *starts* the thing you are about to ship. `pytest` and the `npm` suites all prove the parts compile and their tests pass; none of them boots an engine against a real workspace with real chats, schedules, MCP servers and credentials in it. The `ciao-dev-install` skill builds the current checkout into a self-contained `Ciaobot.app` — PWA, embedded Python runtime, Tauri shell — swaps it in over the live install preserving the workspace and password, then watches the engine logs. Do it **after** the final source change and **before** `prepare-release`, so what you smoke-test is what gets cut.
+6. **The engine gate — nothing under a native shell exists to check.** CI and `prepare-release` both gate the whole release on `mypy ciao`, `pytest tests/`, `cd web && npm test`, `cd web && npm run build` and `ciao package-smoke --skip-frontend`, which `_run_checks` runs for you. There is no Rust, no `cargo`, no app bundle: the release *is* the engine (`#655`, `#656`).
+7. **Install the release candidate on this machine and run it — `/ciao-dev-install`.** Nothing above this line ever *starts* the thing you are about to ship. `pytest` and the `npm` suites all prove the parts compile and their tests pass; none of them boots an engine against a real workspace with real chats, schedules, MCP servers and credentials in it. The `ciao-dev-install` skill builds the PWA, pip-installs the current checkout over the live install preserving the workspace and password, restarts the service, then watches the engine logs. Do it **after** the final source change and **before** `prepare-release`, so what you smoke-test is what gets cut.
 
-   Read that skill and follow it; do not improvise the swap. Three of its rules matter enough to repeat:
-   - **Check `service status --json` for `active_chat_ids` first, and again right before the swap.** The swap restarts the engine underneath whatever is running. Non-empty means ask the user; never pass `--force` silently.
-   - **Never `rm -rf` the installed bundle before the new one is in place** — rename it aside, and `ditto --noextattr` (plain `ditto` fails on `com.apple.provenance` and leaves an unlaunchable half-copy).
-   - **A running process is not a working app.** Check the engine log for *this* boot only, count `Uvicorn running on` to rule out a crash loop, and confirm the PWA answers. An auth-required install returns `unauthorized` from `/api/startup` — that is a pass, not a failure.
+   Read that skill and follow it; do not improvise. Three of its rules matter enough to repeat:
+   - **Check `service status --json` for `active_chat_ids` first, and again right before the restart.** The restart happens underneath whatever is running. Non-empty means ask the user; never pass `--force` silently.
+   - **Build the PWA before the install.** `ciao/web/static/` ships as package data inside the wheel, so an install that ran before `npm run build` bakes in the previous build's assets.
+   - **A running process is not a working engine.** Check the engine log for *this* boot only, count `Uvicorn running on` to rule out a crash loop, and confirm the PWA answers. An auth-required install returns `unauthorized` from `/api/startup` — that is a pass, not a failure.
 
-   Then verify the bundle actually contains the code you think it does, because a runtime built before the PWA build (or a skipped runtime step) silently ships older code:
+   Then verify the running code really is the code you think it is, because a `pip install` that ran before a source change (or an import resolving to another `ciao` on the machine) silently runs older code:
 
    ```bash
-   R=~/Applications/Ciaobot.app/Contents/Resources/ciao-runtime
-   PYTHONPATH="$R/site-packages/arm64" "$R/python/arm64/bin/python3.12" -c "
-   import ciao; print(ciao.__version__)"   # plus a symbol from the change you are shipping
+   .venv/bin/python -c "
+   import ciao, pathlib
+   print(ciao.__version__, pathlib.Path(ciao.__file__).resolve())"   # must be this checkout
    ```
 
    This step is also what closes out any issue the release claims to fix: v0.15.0 shipped a fix for a transient startup error, and the dev install is where "it did not recur" was actually established, by grepping the log from this boot's `Uvicorn running on` line onward rather than trusting an older occurrence higher up the file.
@@ -89,7 +89,7 @@ The release tool runs `pytest`, `npm run test`/`npm run build` (in `web/`), and 
 
 - Use the repo `.venv` (Python 3.12+, `ciaobot` editable-installed) or a dedicated `python3.13 -m venv .venv-rel && .venv-rel/bin/pip install -e ".[test]"`.
 - `cd web && npm ci` at least once so `vitest` exists.
-- **No Rust toolchain needed.** `_run_checks` runs only the `web/` npm test/build (`#655` dropped the `desktop` npm commands and the deleted `./scripts/check-desktop.sh`), so the release gate never touches `cargo`. Nothing in this repo compiles Rust any more — the release is the engine — so a change under `desktop/` is ungated: run the `desktop/src-tauri` steps in `docs/DEVELOPMENT.md` yourself before cutting.
+- **No Rust toolchain needed, and none is checked.** `_run_checks` runs `mypy ciao`, `pytest tests/`, the `web/` npm test/build, and `ciao package-smoke`; `#655` dropped the shell's npm commands and `#656` deleted the Rust tree, so the release gate never touches `cargo` and there is nothing under it left to gate.
 - `gh` authenticated (for `--create-pr`).
 - Start from a **clean** tree on `develop` (see the dirty-tree trap below).
 
@@ -111,7 +111,7 @@ env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" \
 
 The `scripts/prepare-release` wrapper is equivalent (`CIAO_PYTHON=.venv/bin/python scripts/prepare-release --bump … --apply --create-pr --ready`) but does **not** unset `PYTHONPATH` — see the trap below. Use `--version X.Y.Z` for an explicit version. Defaults: `--source develop` (cuts `release/vX.Y.Z` from `origin/develop`), `--base main`.
 
-What `--apply` does, in order: bumps `pyproject.toml`, `ciao/__init__.py`, `web/package.json`, `web/package-lock.json`, the five desktop version files (`desktop/package.json`, `desktop/package-lock.json`, `desktop/src-tauri/Cargo.toml`, `desktop/src-tauri/Cargo.lock`, `desktop/src-tauri/tauri.conf.json`), and the service-worker cache names in **both** `web/public/sw.js` and `ciao/web/static/sw.js`; refreshes `CHANGELOG.md`; auto-bumps `auto` dependencies; regenerates the packaged `gws-*` skills if the installed `gws` CLI differs from the pin; runs the full check suite; commits `release: prepare vX.Y.Z`; pushes the branch; opens the PR.
+What `--apply` does, in order: bumps `pyproject.toml`, `ciao/__init__.py`, `web/package.json`, `web/package-lock.json` and the service-worker cache names in **both** `web/public/sw.js` and `ciao/web/static/sw.js`; refreshes `CHANGELOG.md`; auto-bumps `auto` dependencies; regenerates the packaged `gws-*` skills if the installed `gws` CLI differs from the pin; runs the full check suite; commits `release: prepare vX.Y.Z`; pushes the branch; opens the PR.
 
 ## Rebuild the PWA last
 
@@ -136,19 +136,18 @@ Corollary: if a concurrent session is editing the tree, its unfinished work gets
 
 1. CI (`test`) on the PR must be green (`mergeStateStatus` CLEAN) before merging.
 2. Merge the PR into `main`. This runs `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag + GitHub release using `RELEASE_PAT` (a plain `GITHUB_TOKEN` release would **not** fire `release: published`).
-3. That fires `publish.yml`, which ships **the engine and desktop app from the same tag**:
-   - `build-desktop` (macos) — builds the PWA and the Apple Silicon embedded Python runtime, assembles the aarch64 `Ciaobot.app`, then attaches the versioned app archive, its signature and `latest.json` (the updater feed, so an installed app gets the notice), the engine wheel with its signed manifest, and the engine installer as both `install.sh` and `install-engine.sh` — the same bytes under both names, because the public one-liner keeps `install.sh` while the app's Move action fetches `install-engine.sh` (#651).
-   - The app uses an ad-hoc signature and is **not** notarized. Users do not need Apple Developer credentials to update it.
-   - `release-smoke` (macos) — installs the engine from the release's one-line installer with a restricted PATH, verifies the `ciao` entry point, the install receipt and the LaunchAgent, checks the startup API, then reruns the installer as an update/recovery test and checks the updater assets.
+3. That fires `publish.yml`, which ships **the engine from the same tag**:
+   - `build-engine` (macos) — builds the PWA and the engine wheel, verifies the wheel in a clean environment, signs the engine manifest with the release minisign key, and attaches the wheel, the manifest and its signature, plus the engine installer as both `install.sh` and `install-engine.sh` — the same bytes under both names, because the public one-liner keeps `install.sh` while the hand-over path fetched `install-engine.sh` (#651). Since #653 there is no app archive, no updater feed, no native verifier and no bundled runtime.
+   - `release-smoke` (macos) — installs the engine from the release's one-line installer with a restricted PATH, verifies the `ciao` entry point, the install receipt and the LaunchAgent, checks the startup API, then reruns the installer as an update/recovery test.
 4. A follow-up job merges `main` back into `develop`.
 
-No manual tag / `gh release create`, no tap push, and no separate desktop release — one merge ships the engine and the app together. End users install the engine with the release URL, which is unchanged from the last release — the same one-liner now installs the engine:
+No manual tag / `gh release create`, no tap push, and no separate desktop release — one merge ships the engine. End users install it with the release URL, which is unchanged from the last release — the same one-liner now installs the engine:
 
 ```bash
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-There is deliberately **no** independent app version: `desktop/package.json` and `desktop/src-tauri/tauri.conf.json` are bumped by `--apply` alongside the Python version, so the engine and app always report the same `X.Y.Z`. Never ship one without the other — the desktop build and embedded runtime are assembled by the same workflow, and `service.rs` resolves the engine from the app bundle.
+There is only one version to ship: the Python and PWA versions are bumped together by `--apply`, and they are the release. Nothing else is versioned (`#656` deleted the app's version files).
 
 **Merging the release PR:** the auto-mode classifier blocks `gh pr merge` on the agent-authored release PR unless the user explicitly authorized merging (e.g. "merge #NNN" / "finish then release"). Attempt once; on denial, ask the user to click merge or reply with explicit authorization.
 
@@ -175,33 +174,18 @@ There is deliberately **no** independent app version: `desktop/package.json` and
   ```
 
   For workflow runs, run `gh run watch --exit-status` unpiped, or re-check with `gh run view <id> --json conclusion` afterwards.
-- **`pgrep` proves the process exists, not that the app runs.** The release smoke test must check the startup API and bundled runtime, not just process presence. When it fails, inspect the app's tray log, LaunchAgent state, and workspace runtime logs before theorising.
-- **The installer must fail closed.** The native verifier checks both the verifier binary hash and the signed app archive before extraction. Never turn a verification error into a warning or add an unsigned fallback.
-- **Ad-hoc signatures reset TCC grants on every update.** An ad-hoc bundle has no Team ID, so macOS pins Full Disk Access / Accessibility records to its cdhash, which changes every build. Users re-granting permissions after an update is expected behaviour on the current signing setup, not a regression — only a Developer ID would fix it (`tauri.conf.json` `signingIdentity`, currently `"-"`).
-- **The app owns engine cold start — do not "fix" `release-smoke` by loading launchd.** `desktop/src-tauri/src/lib.rs` starts the engine two ways, both keyed on whether the LaunchAgent plist exists: `spawn_bootstrap` (`ciao run`) when it does not, `start_engine_if_needed` (`desktop-service start`) when it does. Both paths log failures to `.runtime/desktop-tray.log`; `desktop-service start` itself is known-good (it starts the engine cleanly when invoked directly). Adding `--load-launchd` to the workflow would hide a genuine cold-start defect if one ever does appear.
-- **Release propagation lag.** Verify that the GitHub release contains the installer, verifier, app archive/signature, and `latest.json` before diagnosing an installer failure.
-- **Put Node 22 *and* cargo on PATH in the shell that runs the release tool.** `_run_checks` shells out to `npm run test` twice: in `web/`, where `scripts/check-node.mjs` hard-fails below `^20.19 || ^22.13 || >=24`, and in `desktop/`, where the script is `cargo test`. Each failure kills the run *after* it has already bumped the version files and regenerated the changelog, and each looks unrelated to its real cause (`ReleaseError: command failed (1): npm run test` for the Node floor; `(127)` with `sh: cargo: command not found` for the missing toolchain). Both fixes are per-shell and are not inherited from another terminal, so set them in the same command:
+- **`pgrep` proves the process exists, not that the engine runs.** The release smoke test must check the startup API and the installed `ciao`, not just process presence. When it fails, inspect the LaunchAgent state and the workspace runtime logs before theorising.
+- **The installer must fail closed.** The engine manifest signature and the wheel's digest are both verified before extraction. Never turn a verification error into a warning or add an unsigned fallback.
+- **Engine cold start is the installer's job — do not "fix" `release-smoke` by loading launchd.** `install-engine.sh` starts the engine through the `com.ciao.server` LaunchAgent it installs, and a cold start exercises the real path. Adding `--load-launchd` to the workflow would hide a genuine cold-start defect if one ever does appear.
+- **Release propagation lag.** Verify that the GitHub release contains the wheel, its signed manifest, and both installer names before diagnosing an installer failure.
+- **Put Node 22 on PATH in the shell that runs the release tool.** `_run_checks` shells out to `npm run test` and `npm run build` in `web/`, where `scripts/check-node.mjs` hard-fails below `^20.19 || ^22.13 || >=24`. The failure kills the run *after* it has already bumped the version files and regenerated the changelog, and it looks unrelated to its real cause (`ReleaseError: command failed (1): npm run test`). The fix is per-shell and is not inherited from another terminal, so set it in the same command:
 
   ```bash
   . "$NVM_DIR/nvm.sh" && nvm use 22
-  export PATH="/opt/homebrew/opt/rustup/bin:$PATH"   # brew rustup shims; NOT ~/.cargo/bin
   env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" …
   ```
 
-  Verify with `node --version && cargo --version && rustdoc --version` before starting, and clean up per the double-bump trap below after any failed attempt.
-
-  **`cargo --version` is not enough — check `rustdoc` too.** `cargo test` ends with a doctest pass, which shells out to `rustdoc` as a separate binary. A `~/.cargo/bin` holding hand-made symlinks for only `cargo` and `rustc` (pointing straight into a toolchain instead of being rustup shims) satisfies every check above and still dies here, *after* all the Rust unit tests pass:
-
-  ```
-  running 52 tests ... test result: ok. 52 passed; 0 failed
-     Doc-tests ciaobot_desktop_lib
-  error: doctest failed, to rerun pass `--doc`
-    could not execute process `rustdoc --edition=2024 …` (never executed)
-    No such file or directory (os error 2)
-  ReleaseError: command failed (101): npm run test
-  ```
-
-  Exit **101** is a Rust failure, not the **127** of a missing `cargo` — and the "52 passed" line above it makes it read like a flake. Prepending `/opt/homebrew/opt/rustup/bin` fixes it because those shims are complete (`rustdoc`, `rustfmt`, `rustup` included) and honour `rustup default`. Cost of missing this: v0.15.0 burned two full aborted cut attempts on it.
+  Verify with `node --version` before starting, and clean up per the double-bump trap below after any failed attempt.
 - **`mypy ciao` is in the check suite now — but it cannot see a deleted module.** `_run_checks` runs mypy *first and blocking* (`ciao/release.py:457-466`), deliberately mirroring `ci.yml`'s bare `mypy ciao` step — contrast the adjacent `pip-audit --desc || true`, which is why the suite does not gate on that one. Earlier versions of this skill said to run mypy by hand because `_run_checks` omitted it; that is no longer true, re-verified 2026-08-24. What mypy still will **not** catch: with `ignore_missing_imports`, a leftover `from ciao.providers.<deleted> import …` stays green under both mypy *and* pytest. After removing any `ciao/` module, sweep by importing every module in the package:
 
   ```bash
@@ -241,4 +225,4 @@ There is deliberately **no** independent app version: `desktop/package.json` and
 ## After it ships
 
 - Confirm the `vX.Y.Z` tag + GitHub release exist and artifacts are attached.
-- Confirm the release assets and `latest.json` are present, then run the one-line installer smoke test. The app updater should restart the bundled engine without a separate package-manager action.
+- **Confirm the release assets and the one-line installer are present, then run the installer smoke test. A machine on the release reports its own version in Settings → Home, and the PWA's package-update card can apply the next engine release without a separate package-manager action.**

@@ -4,15 +4,35 @@ One-time setup for external tools and CLI dependencies.
 
 SDK-level wiring notes (fallback_model, hooks, setting_sources) live in the module docstring of `ciao/providers/claude.py`.
 
+## Install
+
+### Upgrading from the macOS app
+
+v1.0.0 retires the macOS `Ciaobot.app`; the PWA is now served by the engine.
+There is no data migration and no vault change. If you still run the app, run
+the same one-liner you already know to move to the engine install, then run
+`ciao desktop uninstall` once to remove the old bundle:
+
+```bash
+curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
+ciao desktop uninstall
+```
+
+The command removes the bundle (`~/Applications`, or `/Applications` for older
+installs; `--app-dir` points elsewhere) with its LaunchAgents and any
+`~/.local/bin/ciao` shim that pointed inside it. Your workspace folder and its
+notes are kept. Updates after that are the same one-liner again, or
+**Settings → Home** in the PWA, which stages and applies the engine package
+update in the background; there is no in-app app updater.
+
 ## CLI Tools
 
 ### The `ciao` command
 
-The installed app keeps the engine inside
-`Ciaobot.app/Contents/Resources/ciao-runtime/bin/ciao`, so the installer also
-writes a shim at `~/.local/bin/ciao` that forwards to it — that is what makes
-the `ciao ...` commands in this document work in a terminal. Two cases need a
-manual step, and the installer says which one applies:
+The installer puts the engine in its own `uv tool` environment and writes a shim
+at `~/.local/bin/ciao` that forwards to it — that is what makes the `ciao ...`
+commands in this document work in a terminal. Two cases need a manual step, and
+the installer says which one applies:
 
 - `~/.local/bin` is not on your `PATH`: add it. The setup wizard shows the
   exact copyable line for your shell; the variants are:
@@ -221,25 +241,25 @@ Project MCP servers in `.mcp.json` are consumed by the provider runtimes from th
 
 The one-line macOS installer preserves a configured workspace discovered from
 the current LaunchAgent. On a clean installation it starts the packaged
-engine without creating a workspace or random dashboard password; the desktop
-app then presents bootstrap onboarding, which asks the user to create or adopt
-the workspace and choose the password.
+engine without creating a workspace or random dashboard password; the PWA then
+presents bootstrap onboarding, which asks the user to create or adopt the
+workspace and choose the password.
 
 ## Environment Variables
 
-Copy `.env.example` to `.env` and fill in the app-level settings first:
+Copy `.env.example` to `.env` and fill in the engine-level settings first:
 
 **Required for a configured workspace:** `PWA_AUTH_TOKEN` — the dashboard password. Password protection is on by default; see `PWA_AUTH_REQUIRED` below for the opt-out.
 
-`ciao setup` writes the initial `.env` into the selected workspace, seeds stock agents, commands, schedules, agent-readable workspace docs (`AGENTS.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciaobot.app`. The app shortcut opens `http://localhost:<port>/?setup=<token>`; the server redeems `.runtime/setup-token` once on localhost, sets the signed session cookie, then deletes the token. By default setup prints the launchd load command without starting the service; use `--load-launchd` to run `launchctl`. `ciao auth <claude|opencode>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code and opencode readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` and `password` are required; `provider` becomes the first logical workspace default; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent and `Ciaobot.app` shortcut, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
+`ciao setup` writes the initial `.env` into the selected workspace, seeds stock agents, commands, schedules, agent-readable workspace docs (`AGENTS.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, and renders `~/Library/LaunchAgents/com.ciao.server.plist`. Open `http://localhost:<port>` and follow the setup wizard; the first-run link is printed with the `?setup=<token>` one-time token, which the server redeems once on localhost, sets the signed session cookie, then deletes. By default setup prints the launchd load command without starting the service; use `--load-launchd` to run `launchctl`. `ciao auth <claude|opencode>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code and opencode readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` and `password` are required; `provider` becomes the first logical workspace default; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
 
 **Runtime:** `CIAO_WORKSPACE`, `PWA_PORT`. `CIAO_PORT` does not control the
 port the server binds; it is a legacy fallback used to *locate* a running
 server when the workspace `.env` does not define `PWA_PORT` — read by CLI
-commands, by the desktop shell (`desktop/src-tauri/src/runtime.rs`) and by
-the macOS service manager (`ciao/macos_service.py`), each of which falls
-back to it from the LaunchAgent or process environment. Leave it in place on
-a legacy install rather than removing it.
+commands, by the bootstrap launcher and by the macOS service manager
+(`ciao/macos_service.py`), each of which falls back to it from the LaunchAgent
+or process environment. Leave it in place on a legacy install rather than
+removing it.
 
 **Ciaobot agent control plane:**
 
@@ -322,20 +342,20 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `PWA_PORT` (default `8443`), `PWA_HOST` (default `0.0.0.0`). The server binds
   all interfaces so the PWA is reachable over LAN and Tailscale; set
   `PWA_HOST=127.0.0.1` in `.env` for loopback-only access.
-- `CIAO_RUNTIME_ROOT` (optional): runtime-state directory. `Ciaobot.app` reads
+- `CIAO_RUNTIME_ROOT` (optional): runtime-state directory. The engine reads
   this from the configured workspace `.env` and resolves a relative value
   against the workspace.
 - `CIAO_OPENCODE_BIN` (optional): absolute path to an OpenCode CLI installed
   outside the login-shell `PATH`. The path is used for provider startup and
   authentication; an invalid path is reported as unavailable.
-- `CIAO_ENGINE_PATH` (internal): bundled engine path inherited by onboarding
-  and desktop helpers; it is normally supplied by `Ciaobot.app`, not set by
-  operators.
-- `CIAO_DESKTOP_SERVER_URL` (development only): overrides desktop runtime
-  discovery for a local Tauri development server target.
+- `CIAO_ENGINE_PATH` (internal): legacy override for the engine executable the
+  CLI runs. It is still read by `ciao/cli.py`, but nothing sets it any more
+  (the bundled launcher that used to is gone), so an operator never needs to.
+- `CIAO_DESKTOP_SERVER_URL` (development only): overrides runtime discovery for
+  a local development-server target.
 - Session cookies are HttpOnly. Production/domain-scoped cookies are also Secure, and state-changing browser requests must come from the same host via `Origin` or `Referer`.
 - Ciaobot sends baseline security headers from the Starlette app, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
-- There is one origin and one session: `/api/*` needs the signed `ciao_session` cookie (minus a small public allowlist), `/ws/*` handshakes are checked for same-origin and then the session, and state-changing requests must present a matching `Origin`/`Referer`. The tray feeds and the update drain stay loopback-only, gated on the TCP peer. The macOS remote PWA has no Tauri capability; see `docs/REMOTE_BOUNDARY.md` for the remaining protocol and credential work.
+- There is one origin and one session: `/api/*` needs the signed `ciao_session` cookie (minus a small public allowlist), `/ws/*` handshakes are checked for same-origin and then the session, and state-changing requests must present a matching `Origin`/`Referer`. The tray feeds and the update drain stay loopback-only, gated on the TCP peer. There is no native capability of any kind on a remote browser; see `docs/REMOTE_BOUNDARY.md` for the remaining protocol and credential work.
 - Workspace HTML artifact previews use a stricter sandbox CSP: inline scripts/styles and `data:` images/fonts/audio/video are allowed, while network connections, `blob:` sources, and same-origin session access are blocked.
 
 ### Optional env vars
@@ -352,8 +372,8 @@ See [Linux hosting](docs/LINUX.md) for provisioning, HTTPS, updates, and recover
 
 - `CLAUDE_EXECUTION_MODE` / `CLAUDE_PERMISSION_MODE`: **removed 2026-08-21 and no longer read.** The permission mode is now set per provider in Settings → Models & providers (Manual asks before every action, Auto lets safe reads and edits run silently and asks before destructive operations, Bypass allows everything); a provider with no pin uses Auto. An install that still sets one gets a `legacy-env-ignored` operator tile, because a setting that is silently ignored reads as a setting that is in effect.
 - `PWA_AUTH_REQUIRED`: password protection for the PWA dashboard. **Enabled by default** — an unset value protects the dashboard whenever `PWA_AUTH_TOKEN` is present (without a token there is no password a human could type, so protection stays off until one is set in Settings). Set it to `false` to run unprotected on a machine nobody else can reach; that is the only way to turn protection off, since Settings can only change the password. `ciao setup` writes the value explicitly (`--no-auth` writes `false`).
-- `CIAO_DEV_MODE`: set to `true` to enable developer mode controls in the PWA dashboard (like the Deploy button), the `/api/debug/issues` report, and the desktop-app rebuild step in Settings → Restart.
-- `CIAO_APP_REPO`: absolute path to the Ciaobot source checkout for developer-mode Deploy/Restart actions. Packaged apps update through the signed Tauri updater and do not resolve a checkout, Homebrew, or PyPI installation.
+- `CIAO_DEV_MODE`: set to `true` to enable developer mode controls in the PWA dashboard (like the Deploy button), the `/api/debug/issues` report, and a source-checkout deploy from Settings → Restart.
+- `CIAO_APP_REPO`: absolute path to the Ciaobot source checkout for developer-mode Deploy/Restart actions. The engine is a normal package install, so a production install resolves no checkout, Homebrew, or PyPI installation and restarts only.
 - `CIAO_VAULT_MODE`: onboarding mode for vault folders. Either `scratch` (initialize the current vault layout) or `existing` (preserve the selected notes folder and start an initial inventory/curation chat; clear material may be reorganized, ambiguous material is left in place).
 - `CIAO_BOOTSTRAP_WORKSPACE`: temp workspace root used when `PWA_AUTH_TOKEN` is absent. Defaults to `~/.ciao/bootstrap`; Ciaobot persists the generated bootstrap auth token under its `.runtime/` so first-run setup survives a restart.
 - `CIAO_NO_BROWSER`: set to any value to stop a first-run `ciao run` from auto-opening the setup wizard in the default browser (the wizard URL is still printed). Auto-open already only happens on interactive terminals, never under launchd or CI.
@@ -410,9 +430,8 @@ Ciaobot runs on macOS under launchd.
 
 - `ciao setup --workspace <path> --load-launchd` renders and loads the LaunchAgent.
 - The packaged launchd template is `ciao/stock/deploy/com.ciao.server.plist.tmpl`.
-- The `Ciaobot.app` menu bar shows `Start at Login: On/Off` and toggles `com.ciao.server` with `launchctl enable/disable`. Its status section also offers `Start Server` when the local server is unreachable and `Restart Server` when it is live. The unread badge counts every unread chat even though the quick-open list remains limited to the ten most recent chats.
-- Selecting `Update` from the menu-bar tray opens the bundled update window immediately. It reports engine/app milestones with a percentage and expandable terminal details, then restarts the app only after both halves are ready. The PWA's non-bundled package-update actions use the same visual progress surface while their restart is pending.
-- Stop: `launchctl unload ~/Library/LaunchAgents/com.ciao.server.plist`.
+- Start and stop: `ciao service start` / `ciao service stop` (or `launchctl unload ~/Library/LaunchAgents/com.ciao.server.plist`). Both refuse while chats are actively running unless `--force` is passed.
+- Updates: re-run the one-line installer, or use **Settings → Home** in the PWA, which stages and applies the engine package update in the background. There is no in-app app updater.
 - Remote access is not configured by the public app. Use localhost by default, or put Tailscale or another user-owned network layer in front of the local server.
 - A dropped non-image chat file is converted locally: supported documents are
   converted from the drop's own source and only Markdown is kept in the active

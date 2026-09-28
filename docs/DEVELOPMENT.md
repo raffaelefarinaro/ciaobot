@@ -4,9 +4,9 @@ Setup, dev workflow, testing, and change guidelines. For the system design, read
 
 ## Server install
 
-Linux production and the installed macOS Ciaobot.app restart the engine from
-Settings through `POST /api/admin/restart`; `CIAO_DEV_MODE=true` on a source
-checkout retains the source deploy workflow.
+Linux production and every installer-managed macOS install restart the engine
+from Settings through `POST /api/admin/restart`; `CIAO_DEV_MODE=true` on a
+source checkout retains the source deploy workflow.
 
 ```bash
 python3.12 -m venv .venv
@@ -70,44 +70,37 @@ curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/
 
 The release publishes the **engine only** (#653). Its assets are the wheel, the
 signed engine manifest, and the installer — there is no app archive, no
-`latest.json` updater feed, no native verifier and no bundled runtime attached,
-so an already-installed `Ciaobot.app` has no update path left and is migrated
-with the terminal one-liner below. `install.sh` — the one-liner every README,
-site page and stale external link already names — is the **engine** installer,
-so a first-time user gets the engine and nobody can install the app.
-`install-engine.sh` is published as the same bytes under the name the
-already-merged transition app's Move action fetches (#604), and the app
+updater feed, no native verifier and no bundled runtime attached, so a machine
+still running the retired macOS app has no update path left and is moved with
+the terminal one-liner below. `install.sh` — the one-liner every README, site
+page and stale external link already names — is the **engine** installer, so a
+first-time user gets the engine and nobody can install the app.
+`install-engine.sh` is published as the same bytes under the other name the
+already-merged transition release's hand-over fetched (#604); the app
 installer is not published under any name.
 
 `scripts/install.sh` is the retired app installer: it downloads the signed Apple
 Silicon (aarch64) app archive, verifies it with the published native verifier,
-and installs the bundled runtime into `Ciaobot.app`.
-When a configured workspace is already referenced by the LaunchAgent, it
-preserves that workspace and password; on a clean machine it leaves setup to
-the app's bootstrap onboarding rather than generating a hidden password. It
-does not require Python, Homebrew, or sudo. The installer prints milestone
-percentages, verification status, and a short multilingual Ciao greeting
-sequence; `--dry-run` shows the same terminal treatment without changing files.
-A DMG is intentionally not built or attached to releases. The script stays in the
-tree for now, but the release workflow no longer generates or attaches it (#579
-deletes it).
+and installs into an app bundle that no longer ships. A DMG is intentionally
+not built or attached to releases. The script stays in the tree for now, but
+the release workflow no longer generates or attaches it (#579 deletes it).
 
 `scripts/install-engine.sh` is the installer the release serves: it verifies the
 signed engine manifest with the release minisign key embedded in the script, and
 the wheel's digest and size, before anything is installed; installs the verified
 wheel with `uv tool install`; writes the install receipt with absolute paths;
 then runs `ciao setup` and `ciao service start` and prints the one-time login URL
-to the terminal. It refuses to take over an engine that Ciaobot.app manages
+to the terminal. It refuses to take over an engine the retired app manages
 unless it is re-run with `--migrate`, and refuses to overwrite a `ciao` it did
 not install. `--migrate`
-is the desktop→terminal hand-over (#576): after the same manifest and digest
+is the app→terminal hand-over (#576): after the same manifest and digest
 verification, it classifies the Mac from the verified wheel, takes before-images
 of the two plists, the shim, the install receipt and any existing uv tool
 environment in `~/.local/state/ciaobot/migration/before/` (an absent file is
 recorded as absent, so a rollback removes only what the migration created, and
 the tool environment is copied only when one is already there — the common
-hand-over from Ciaobot.app has none), and refuses to touch anything if
-Ciaobot.app is still running 20 s after it was asked to quit. It then either
+hand-over from the retired app has none), and refuses to touch anything if that
+app is still running 20 s after it was asked to quit. It then either
 repoints `com.ciao.server` at the new engine and, only once that engine answers
 with the version just installed, retires the app's own agent — restoring the
 plists, the shim, the receipt, the tool environment and the launchd job on any
@@ -130,7 +123,7 @@ previous attempt installed, and only a receipt that parses, records all five
 before-images at the paths this installer writes them to, still has them on
 disk, and agrees with the installed service — its version, its entry point and
 tool environment, and for a host the `com.ciao.server.plist` program pointing
-at that entry point rather than inside `Ciaobot.app` — is treated as
+at that entry point rather than inside the app bundle — is treated as
 "already migrated"; a corrupt, wrong-schema, incomplete or stale one is refused
 with recovery instructions instead, and a stale settled receipt is re-run from
 the originals it kept, out loud. An interrupted run records `interrupted`
@@ -158,29 +151,33 @@ still named the original. The ordinary, non-`--migrate` path is unchanged: there
 `--workspace` is how a workspace is named, and it is created. The workflow
 attaches it as the `install-engine.sh` release asset, and again as `install.sh`.
 
-`Ciaobot.app` is the transition release for that same hand-over (#604): its
-updater installs a signed `.app.tar.gz`, which cannot run a shell script, so an
-app user never re-runs the one-liner on their own. The app therefore asks the
-classifier (`ciao service migration-classify`, a read-only bridge to
-`ciao.engine_migration`) what this Mac is at every launch, and offers to hand the
-engine over when the answer is a live `desktop_host`, `desktop_client` or
-`desktop_invalid` — `engine`, `none` and `desktop_stale` are offered nothing. The
-offer appears once, guarded by its own `engine_migration_notice_shown` setting
-field, and the menu bar keeps a **Move Engine to the Terminal Installer…** item
-directly under Update for a user who dismissed it. Choosing it
-downloads the `install-engine.sh` asset for the app's own version — never
-`latest`, which could move mid-install — from the pinned
-`releases/download/v<version>` URL, runs it detached with `--migrate` and
-`nohup` in its own process group, and quits so the installer's 20 s
-`quit_desktop_app` wait and the launchd hand-over can proceed. A
-`desktop_invalid` Mac is asked whether it is the host (`--as-host`) or a client
-of an address (`--as-client URL`); neither is ever guessed, and the installer
-re-validates the URL from the verified wheel before it touches anything. The
-migration runs in the runtime root, not the app bundle — the app is quitting and
-the bundle may be replaced underneath it — and its transcript is at
-`<runtime root>/engine-migration.log`, which is where the one-time sign-in link
-the installer prints at the end lands, since it only opens that link itself from
-a terminal.
+The classifier was the retired app's own hand-over bridge for that transition
+release (#604): its updater installed a signed `.app.tar.gz`, which cannot run a
+shell script, so an app user never re-runs the one-liner on their own. The app
+therefore asked the classifier (`ciao service migration-classify`, a read-only
+bridge to `ciao.engine_migration`) what this Mac is at every launch, and
+offered to hand the engine over when the answer was a live `desktop_host`,
+`desktop_client` or `desktop_invalid` — `engine`, `none` and `desktop_stale` were
+offered nothing. The offer appeared once, guarded by its own
+`engine_migration_notice_shown` setting field, with a **Move Engine to the
+Terminal Installer…** item directly under Update for a user who dismissed it.
+Choosing it downloaded the `install-engine.sh` asset for the app's own version —
+never `latest`, which could move mid-install — from the pinned
+`releases/download/v<version>` URL, ran it detached with `--migrate` and `nohup`
+in its own process group, and quit so the installer's 20 s `quit_desktop_app`
+wait and the launchd hand-over could proceed. A `desktop_invalid` Mac was asked
+whether it was the host (`--as-host`) or a client of an address
+(`--as-client URL`); neither is ever guessed, and the installer re-validates the
+URL from the verified wheel before it touches anything. The migration ran in the
+runtime root, not the app bundle — the app was quitting and the bundle could be
+replaced underneath it — and its transcript is at
+`<runtime root>/engine-migration.log`.
+
+None of that ships any more: the app is retired (#579) and its bundle is never
+published, so nobody can take that path. What stays is the engine side —
+`ciao service migration-classify` still reads and classifies, and
+`install-engine.sh --migrate` still does the hand-over for a machine that has
+not run `ciao desktop uninstall` yet.
 
 ## Branching and releases
 
@@ -261,11 +258,11 @@ npm run build        # typecheck + Vite build, outputs to ciao/web/static/
 npm test             # 61 test files under web/src
 ```
 
-## macOS desktop development
+## macOS engine development
 
 The macOS app is retired and its source tree is gone (`#656`): the release is the
 engine, and the one-line installer installs that. Nothing under `desktop/` is
-built, so there are no Rust or desktop-npm steps to run here.
+built, so there is no Rust or native-shell step to run here.
 
 `ciao desktop uninstall` stays for the compatibility window: run it to remove a
 `Ciaobot.app` an older install left behind, along with the launch agents and

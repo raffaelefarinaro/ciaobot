@@ -29,7 +29,7 @@ The differentiating mechanism is the full continuity loop: agent work happens in
 - The core hierarchy is **workspace → project → chat**. A workspace separates a life area such as personal, work, or a client; a project groups related work and supplies durable context; a chat is where delegated work happens.
 - Users choose or create a workspace folder during setup. Ciaobot may adopt an existing notes folder, but it must preserve that folder's contents and keep the result usable from Obsidian, a text editor, Claude Code, opencode, or another file-based tool.
 - One machine acts as the host and source of truth for the engine, workspace, vault, and provider sessions. Other devices are clients of that host and may use the same interface over a private network such as Tailscale.
-- The supported desktop release path is Ciaobot.app on Apple Silicon macOS. The engine and PWA can also run on Linux, including Ubuntu 24.04, and be accessed from a browser or installed PWA.
+- The supported release path is the one-line engine installer on macOS 13+ (Apple Silicon). The engine and PWA also run on Linux, including Ubuntu 24.04, and are accessed from a browser or an installed PWA.
 - Provider setup and credentials remain owned by the provider CLIs. Ciaobot adds context, workflow, files, scheduling, archiving, and memory around those sessions rather than creating a second model account.
 - The product is used in two directions: people ask agents to do work, and they review, edit, connect, and discuss the durable knowledge produced by that work.
 
@@ -44,7 +44,7 @@ Confirmed product capabilities include:
 - multi-model adversarial review through a configured critique panel;
 - per-workspace extensions such as skills, subagents, commands, and permitted MCP servers;
 - optional Google Workspace workflows through the `gws` CLI;
-- a macOS menu-bar companion for status, notifications, navigation, and application utilities;
+- an installable browser/PWA surface that is the only client: status, notifications, navigation, and engine maintenance are its own Settings surfaces;
 - host/client access from phones, tablets, and other computers without splitting the source of truth.
 
 Durable constraints:
