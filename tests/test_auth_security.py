@@ -263,3 +263,100 @@ def test_menubar_notifications_requires_loopback_or_session() -> None:
 
     remote = TestClient(app, base_url="http://ciao.example", client=("10.0.0.9", 5555))
     assert remote.get("/api/menubar-notifications").status_code == 401
+
+
+# What `tailscale serve` (1.98) actually adds, captured from a live request: it
+# connects from 127.0.0.1, so without these the tailnet caller looks local.
+_TAILSCALE_SERVE_HEADERS = {
+    "Tailscale-Headers-Info": "https://tailscale.com/s/serve-headers",
+    "Tailscale-User-Login": "someone@example.com",
+    "X-Forwarded-For": "100.101.252.27",
+    "X-Forwarded-Host": "mini.tail1.ts.net",
+    "X-Forwarded-Proto": "https",
+}
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        _TAILSCALE_SERVE_HEADERS,
+        # Each header alone is enough: other local proxies send a subset.
+        {"X-Forwarded-For": "100.1.2.3"},
+        {"Forwarded": "for=100.1.2.3"},
+        {"X-Forwarded-Host": "mini.tail1.ts.net"},
+        {"X-Real-IP": "100.1.2.3"},
+        {"CF-Connecting-IP": "203.0.113.5"},
+        {"Tailscale-Headers-Info": "https://tailscale.com/s/serve-headers"},
+        {"X-Forwarded-Port": "443"},
+        {"Via": "1.1 proxy"},
+        {"True-Client-IP": "203.0.113.5"},
+    ],
+)
+def test_loopback_peer_behind_a_local_proxy_is_not_local(headers) -> None:
+    from ciao.web.auth import is_loopback_client
+
+    async def probe(request):
+        return JSONResponse({"local": is_loopback_client(request)})
+
+    app = Starlette(routes=[Route("/", probe)])
+    client = TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 5555))
+
+    assert client.get("/").json() == {"local": True}
+    assert client.get("/", headers=headers).json() == {"local": False}
+
+
+def test_menubar_feed_is_not_readable_through_tailscale_serve() -> None:
+    async def stub(request):
+        return JSONResponse({"chats": [{"title": "private"}]})
+
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/menubar-chats", stub, methods=["GET"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    app.state.config = SimpleNamespace(pwa_auth_required=True, pwa_auth_token="x")
+
+    proxied = TestClient(
+        app, base_url="https://mini.tail1.ts.net", client=("127.0.0.1", 5555)
+    )
+    resp = proxied.get("/api/menubar-chats", headers=_TAILSCALE_SERVE_HEADERS)
+    assert resp.status_code == 401
+
+
+def test_setup_token_is_not_redeemable_through_tailscale_serve(tmp_path) -> None:
+    token_path = tmp_path / ".runtime" / "setup-token"
+    token_path.parent.mkdir()
+    token_path.write_text("setup-secret\n", encoding="utf-8")
+
+    resp = _setup_token_client(tmp_path, base_url="https://mini.tail1.ts.net").get(
+        "/?setup=setup-secret", headers=_TAILSCALE_SERVE_HEADERS, follow_redirects=False
+    )
+
+    assert resp.status_code == 403
+    assert "set-cookie" not in resp.headers
+    assert token_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("host", "local"),
+    [
+        ("127.0.0.1", True),
+        ("::1", True),
+        ("::ffff:127.0.0.1", True),
+        ("127.0.0.2", True),
+        ("10.0.0.9", False),
+        ("localhost", False),
+        ("testclient", False),
+    ],
+)
+def test_loopback_client_reads_the_peer_address(host, local) -> None:
+    from ciao.web.auth import is_loopback_client
+
+    async def probe(request):
+        return JSONResponse({"local": is_loopback_client(request)})
+
+    app = Starlette(routes=[Route("/", probe)])
+    client = TestClient(app, base_url="http://localhost:8443", client=(host, 5555))
+
+    assert client.get("/").json() == {"local": local}

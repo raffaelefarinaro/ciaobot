@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import logging
 from pathlib import Path
 
@@ -20,7 +21,18 @@ SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 # Shortest PWA password the first-run wizard and Settings accept.
 MIN_PWA_PASSWORD_LENGTH = 4
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
-_LOOPBACK_ADDRESSES = {"127.0.0.1", "::1", "localhost"}
+# Headers a reverse proxy adds on the way in. A proxy on this machine
+# (`tailscale serve`, Caddy, cloudflared, nginx) connects from loopback, so its
+# callers would otherwise look local. uvicorn's own proxy-header handling only
+# rewrites the peer from `X-Forwarded-For` when the proxy dials 127.0.0.1 (not
+# ::1) and keeps a loopback value a proxy passed through verbatim, so it is no
+# substitute. Tailscale Serve always sends `Tailscale-Headers-Info` and appends
+# to any `X-Forwarded-For` the caller sent, so a caller behind it cannot strip
+# these.
+_PROXY_HEADERS = frozenset(
+    {"forwarded", "via", "x-real-ip", "cf-connecting-ip", "true-client-ip", "x-client-ip"}
+)
+_PROXY_HEADER_PREFIXES = ("x-forwarded-", "tailscale-")
 
 # Endpoints reachable with no session at all, from anywhere.
 _PUBLIC_API = {
@@ -200,17 +212,32 @@ async def authorize_websocket(websocket: WebSocket) -> bool:
     return True
 
 
-def is_loopback_client(request: Request) -> bool:
-    """True when the TCP peer is on this machine.
+def is_loopback_client(request: Request | WebSocket) -> bool:
+    """True when the caller is on this machine, not behind a local proxy.
 
     Reads the connection's source address, never the Host header — a remote
-    caller can set `Host: localhost` freely. This is the only "is it local"
-    check in the codebase; anything that grants access must use it.
+    caller can set `Host: localhost` freely. A loopback peer that carries
+    reverse-proxy headers is a proxy relaying someone else, so it is not
+    local. This is the only "is it local" check in the codebase; anything that
+    grants access must use it.
     """
     client = request.client
-    if client is None or not client.host:
+    if client is None or not _is_loopback_address(client.host):
         return False
-    return client.host in _LOOPBACK_ADDRESSES
+    return not any(
+        name in _PROXY_HEADERS or name.startswith(_PROXY_HEADER_PREFIXES)
+        for name in request.headers.keys()
+    )
+
+
+def _is_loopback_address(host: str | None) -> bool:
+    try:
+        address = ipaddress.ip_address(host or "")
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped.is_loopback
+    return address.is_loopback
 
 
 def _setup_token_path(request: Request) -> Path | None:
