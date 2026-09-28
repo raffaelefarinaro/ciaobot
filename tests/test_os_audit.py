@@ -22,7 +22,6 @@ def _seed_guide(guide: Path, *, memory: list[str] | None = None, profile: list[s
     return guide
 
 from ciao.os_audit import (
-    SKILL_MAX_BYTES,
     audit_job_runs,
     audit_memory,
     audit_rules,
@@ -30,22 +29,26 @@ from ciao.os_audit import (
     format_audit_markdown,
     run_os_audit,
 )
+from ciao.skills_inventory import MAX_SKILL_BYTES
 
 
 def test_audit_skills_over_budget(tmp_path: Path) -> None:
     exact_dir = tmp_path / "skills" / "exact-skill"
     exact_dir.mkdir(parents=True)
-    (exact_dir / "SKILL.md").write_bytes(b"A" * (15 * 1024))
+    (exact_dir / "SKILL.md").write_bytes(b"A" * MAX_SKILL_BYTES)
 
     over_dir = tmp_path / "skills" / "big-skill"
     over_dir.mkdir(parents=True)
-    (over_dir / "SKILL.md").write_bytes(b"A" * ((15 * 1024) + 1))
+    (over_dir / "SKILL.md").write_bytes(b"A" * (MAX_SKILL_BYTES + 1))
 
     res = audit_skills(tmp_path)
-    assert SKILL_MAX_BYTES == 15 * 1024
     assert res["total_skills"] == 2
     assert res["over_budget_count"] == 1
     assert res["issues"][0]["type"] == "skill_over_budget"
+    # The audit quotes the budget it enforces, and the budget has one home:
+    # `ciao.skills_inventory`. A second copy here could report a threshold the
+    # import gate no longer warns about.
+    assert res["issues"][0]["max_bytes"] == MAX_SKILL_BYTES
 
 
 def test_audit_skills_deduplicates_provider_projections(tmp_path: Path) -> None:
@@ -607,7 +610,7 @@ def test_run_os_audit_counts_every_actionable_finding(tmp_path: Path) -> None:
     (workspace / "skills" / "missing-md").mkdir(parents=True)
     over_budget = workspace / "skills" / "over-budget"
     over_budget.mkdir()
-    (over_budget / "SKILL.md").write_bytes(b"x" * (SKILL_MAX_BYTES + 1))
+    (over_budget / "SKILL.md").write_bytes(b"x" * (MAX_SKILL_BYTES + 1))
     # The clash is between the guide body and what was remembered into its
     # memory region (seeded below). It used to be between CLAUDE.md and
     # AGENTS.md; there is one guide now, so those are the two sources left
