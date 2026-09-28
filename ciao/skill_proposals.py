@@ -544,7 +544,7 @@ def find_proposal(config: CiaoConfig, proposal_id: str) -> SkillProposal | None:
 
 
 def mark_implementing(
-    config: CiaoConfig, proposal_id: str, chat_id: str
+    config: CiaoConfig, proposal_id: str, chat_id: str, *, supersedes: str = ""
 ) -> SkillProposal | None:
     """Bind a chat to an open proposal and flip it to ``implementing``.
 
@@ -559,6 +559,15 @@ def mark_implementing(
     stands, and a record bound to a DIFFERENT chat keeps that one. A second
     accept of the same row is not a reason to start a second implementation.
 
+    ``supersedes`` is the one exception, and it is deliberately narrow. It names
+    a chat the caller has already established is not live — archived, or gone —
+    and this binding replaces exactly that one. Without it a re-accept after the
+    chat died would create a fresh chat and then be refused by its own
+    idempotency rule, leaving the record pointing at a chat the operator can no
+    longer open while the new one is never recorded. A *different* stored chat
+    is still left alone: this function has no way to know whether that one is
+    live, and a caller that does must say so by name.
+
     Raises ``ValueError`` for an empty ``chat_id`` — a proposal with no chat to
     point at is not being implemented by anything, and writing the lifecycle
     anyway would show a row as "in progress" that no one is working on.
@@ -568,7 +577,17 @@ def mark_implementing(
     proposal = find_proposal(config, proposal_id)
     if proposal is None:
         return None
-    if proposal.chat_id and proposal.chat_id != chat_id:
+
+    def _taken(current: str) -> bool:
+        """Whether ``current`` blocks this binding.
+
+        True for any chat that is not the one being bound and not the dead one
+        the caller has named. Decided per read, because the file under the lock
+        may not say what the walk above did.
+        """
+        return bool(current) and current not in (chat_id, supersedes)
+
+    if _taken(proposal.chat_id):
         # Someone else is already implementing this. Their chat is the live one.
         return proposal
     if proposal.lifecycle == IMPLEMENTING and proposal.chat_id == chat_id:
@@ -576,7 +595,7 @@ def mark_implementing(
     path = proposal_path(config, proposal.workspace, proposal.skill)
     with queue_lock(path):
         stored = parse_proposal(path, proposal.workspace) or proposal
-        if stored.chat_id and stored.chat_id != chat_id:
+        if _taken(stored.chat_id):
             return stored
         implementing = replace(
             stored, lifecycle=IMPLEMENTING, chat_id=chat_id, updated_at=_now()
@@ -706,23 +725,34 @@ def render_improvement_prompt(proposal: SkillProposal) -> str:
             if proposal.reviewed_revision
             else ""
         ),
-        "If it does not, say so and why, and settle the proposal as not applicable "
-        "rather than editing on the strength of a finding that has expired. If it "
-        "does, make the smallest focused change that addresses the problem — not a "
-        "rewrite, and not changes the proposal did not ask for.",
+        "If it does not, say so and why, and record the finding as no longer "
+        "applying rather than editing on the strength of one that has expired:",
+        "",
+        f"    ciao skill-proposal-remove {skill} --workspace . --not-applicable",
+        "",
+        "If it does, make the smallest focused change that addresses the problem "
+        "— not a rewrite, and not changes the proposal did not ask for.",
         "",
         "Then verify the change (read the file back, and run whatever the skill "
-        "itself tells a reader to run), run `ciao sync-skills --workspace "
-        f"{proposal.workspace}` so the providers see the updated skill, and record "
-        "the resolution so the queue stops asking:",
+        "itself tells a reader to run) and record the resolution so the queue "
+        "stops asking:",
         "",
         f"    ciao skill-proposal-remove {skill} --workspace . --applied",
         "",
         f"Use `--applied` only once the change is really in `{canonical}` and you "
-        "have verified it. If you stop part-way, record `--interrupted` with a "
-        "reason instead: that leaves the proposal queued and recoverable, which "
-        "is what an unfinished edit should do. Never pass the proposal text as a "
-        "shell argument.",
+        "have verified it. Add `--reason \"...\"` to either command to say in your "
+        "own words what you found. If you stop part-way, say that instead:",
+        "",
+        f"    ciao skill-proposal-remove {skill} --workspace . --interrupted",
+        "",
+        "That one is not a decision — it leaves the proposal queued and "
+        "recoverable, which is what an unfinished edit should do. Never pass the "
+        "proposal text as a shell argument.",
+        "",
+        "Before you finish, run `ciao sync-skills` so the providers see the "
+        "updated skill. No `--workspace` argument: this chat's working directory "
+        "is already this workspace's root, and `sync-skills` takes a path there, "
+        "not a workspace name.",
     ]
     return "\n".join(lines)
 

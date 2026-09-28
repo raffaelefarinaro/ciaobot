@@ -1100,13 +1100,35 @@ function pathLeaf(path: string): string {
 async function implementSkill(row: ProposalRow) {
   const result = await store.acceptSkill(row.id)
   if (!result.ok || !result.chatId) return
-  // A retry and a second device get the same chat back rather than a new one;
-  // say so instead of claiming to have started something.
+  // The server opened this chat, so the client's chat list does not hold it yet
+  // and `Open chat` — which is offered only for a chat this client knows — would
+  // not appear until the next sync. Pull the list rather than making the
+  // operator press Improve a second time to find out.
+  await refreshChatListFor(result.chatId)
+  if (result.created === false) return
   pushBackgroundToast(
     result.chatId,
     'Improving the skill in background',
     `${row.skill || row.text} — click to open the chat`,
   )
+}
+
+/** Pull the chat list once, and only when it is actually missing `chatId`.
+ *
+ * Best-effort by design: the accept already succeeded and the record already
+ * names the chat, so a list that would not load is a missing button until the
+ * next sync, not a failed accept. The shape is checked because
+ * `reconcileChatList` replaces the whole list — handing it something that is not
+ * a list would take every chat out of the sidebar to save one refresh. */
+async function refreshChatListFor(chatId: string) {
+  if (projectStore.chats.some((c) => c.chat_id === chatId)) return
+  try {
+    const { api } = await import('../lib/api')
+    const next = await api.get<any[]>('/api/chats')
+    if (Array.isArray(next)) projectStore.reconcileChatList(next)
+  } catch {
+    /* the next chat sync will carry it */
+  }
 }
 
 async function discuss(row: ProposalRow) {

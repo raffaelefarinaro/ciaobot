@@ -800,9 +800,21 @@ def accept_skill_proposal(config: Any, pcm: Any, ctx: dict[str, Any]) -> dict[st
     retry after a dropped response, another device — returns the chat that is
     already live rather than starting a second one.
 
-    Returns ``{ok, chat_id, project_id, created}``. ``created`` is False on the
-    reuse path, so a client can say "already running" rather than claiming to
-    have started something.
+    Returns ``{ok, chat_id, project_id, created}``, plus ``prompt`` on the create
+    path. ``created`` is False on the reuse path, so a client can say "already
+    running" rather than claiming to have started something.
+
+    ``prompt`` is returned rather than sent, because the caller has to dispatch
+    the turn itself. This function runs in a worker thread (the vault scan
+    belongs off the event loop) and ``start_stream`` ends in
+    ``asyncio.create_task``, which is a ``RuntimeError`` anywhere but a running
+    loop. The caller takes ``prompt`` and starts the stream where a loop already
+    runs, like every other route that opens a chat.
+
+    The binding is written *before* the caller dispatches, so a dispatch that
+    fails cannot orphan the chat: the record already names it, so the retry
+    returns that same chat instead of minting another one, and the row keeps an
+    "Open chat" the operator can send into by hand.
     """
     row = ctx.get("row") or {}
     pid = str(row.get("id") or "")
@@ -854,9 +866,14 @@ def accept_skill_proposal(config: Any, pcm: Any, ctx: dict[str, Any]) -> dict[st
     # skill, the finding, and the resolution command. A per-browser prompt
     # drifted into telling the chat to create a new skill, which is a different
     # task from the one the proposal describes.
-    pcm.start_stream(chat.chat_id, skill_proposals.render_improvement_prompt(proposal))
+    prompt = skill_proposals.render_improvement_prompt(proposal)
     try:
-        skill_proposals.mark_implementing(config, pid, chat.chat_id)
+        # ``supersedes`` is the dead association read above. Without naming it,
+        # mark_implementing's own idempotency rule refuses this very rebind and
+        # the record keeps pointing at a chat the operator can no longer open.
+        skill_proposals.mark_implementing(
+            config, pid, chat.chat_id, supersedes=proposal.chat_id
+        )
     except (OSError, ValueError) as exc:
         return {
             "ok": False,
@@ -868,6 +885,7 @@ def accept_skill_proposal(config: Any, pcm: Any, ctx: dict[str, Any]) -> dict[st
         "chat_id": chat.chat_id,
         "project_id": project.project_id,
         "created": True,
+        "prompt": prompt,
     }
 
 

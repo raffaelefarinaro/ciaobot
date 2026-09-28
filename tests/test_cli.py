@@ -1378,6 +1378,73 @@ def test_cli_skill_proposal_remove_refuses_two_opposite_outcomes(
     assert record.lifecycle == skill_proposals.IMPLEMENTING
 
 
+def test_cli_skill_proposal_remove_not_applicable_is_a_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finding that no longer holds is a decision, and the chat implementing it
+    has to be able to record one.
+
+    `render_improvement_prompt` tells the implementation chat to settle the
+    proposal that way when the skill no longer reads the way the reviewer saw it.
+    Without a flag for it the prompt asked for a resolution the command could not
+    express, and the branch where a chat concludes an edit is unwarranted had no
+    way to answer for itself — so the queue kept asking.
+    """
+    from ciao import skill_proposals
+    from ciao.memory_proposals import read_decisions
+
+    workspace = tmp_path / "workspace"
+    source = _accepted_skill_proposal(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(
+        [
+            "skill-proposal-remove",
+            "defuddle",
+            "--not-applicable",
+            "--reason",
+            "the fallback landed already",
+            "--json",
+        ]
+    ) == 0
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.NOT_APPLICABLE
+    assert record.chat_id == "chat-1"
+    rows = read_decisions(
+        workspace / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    )
+    # A dismissal, not a promotion: nothing improved the skill.
+    assert [row["action"] for row in rows] == ["dismissed"]
+    assert rows[0]["outcome"] == "the fallback landed already"
+
+
+def test_cli_skill_proposal_remove_refuses_not_applicable_with_another_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It is a third outcome, not a modifier. `--not-applicable --applied` would
+    otherwise be a contradiction resolved by flag order rather than refused."""
+    workspace = tmp_path / "workspace"
+    source = _accepted_skill_proposal(workspace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(
+        ["skill-proposal-remove", "defuddle", "--not-applicable", "--applied"]
+    ) == 2
+
+    assert "third outcome" in capsys.readouterr().err
+    from ciao import skill_proposals
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.IMPLEMENTING
+
+
 # -- skill-proposal-add ------------------------------------------------------
 
 

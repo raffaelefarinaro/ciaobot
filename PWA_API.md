@@ -859,11 +859,17 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/
 # revision, and instructs the chat to read the skill first, apply a focused
 # change only if the finding still holds, verify, run `ciao sync-skills`, and
 # record the resolution with `ciao skill-proposal-remove NAME --applied`
-# (`--interrupted` if it stops part-way, which leaves the proposal queued).
+# (`--not-applicable` if the finding no longer holds, `--interrupted` if it stops
+# part-way, which leaves the proposal queued).
 #
 # The row stays in the listing with `lifecycle: "implementing"` and the chat id
 # on it. Completion is never inferred from the chat ending: the record only
 # becomes `applied` when the work records that outcome.
+#
+# `created: false` in the reply means this accept was handed the chat that was
+# already running, not that one was started. A 500 means the chat was opened and
+# bound but its turn could not be dispatched; the reply carries that `chat_id`, and
+# a retry returns the same chat.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/implement"
 
 # Accept one row. Dispatches through the kind's own accept descriptor: memory/

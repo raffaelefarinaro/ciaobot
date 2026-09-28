@@ -502,8 +502,76 @@ describe('ProposalReviewPanel', () => {
     wrapper.unmount()
   })
 
-  it('offers Improve again when the implementing chat is gone', async () => {
-    // A deleted or archived chat is not a live implementation. The proposal is
+  it('pulls the chat list so the server-opened chat gets its Open chat button', async () => {
+    // The server opens the chat, so this client has never seen it. `Open chat` is
+    // only offered for a chat the panel knows, so without a refresh the row sat
+    // on "Improve skill" — correct to press again, and idempotent only by luck.
+    const path = 'work/Workspace/Skill-Proposals/proposal-2026-08-20.md'
+    let accepted = false
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/proposals') {
+        // The accept flips the row server-side, so the refetch that follows it
+        // is what hands the panel the association.
+        return Promise.resolve({
+          rows: [row({
+            id: 'skill', kind: 'skill', text: 'proposal-2026-08-20',
+            workspace: 'work', path, line: -1,
+            ...(accepted ? { lifecycle: 'implementing', chat_id: 'chat-x' } : {}),
+          })],
+        })
+      }
+      if (url === '/api/chats') {
+        return Promise.resolve([
+          { chat_id: 'chat-x', project_id: 'p-work', title: 'Improve proposal-2026-08-20', workspace: 'work', archived: false },
+        ])
+      }
+      return Promise.resolve({})
+    })
+    apiPost.mockImplementation(() => {
+      accepted = true
+      return Promise.resolve({ ok: true, chat_id: 'chat-x', project_id: 'p-work', created: true } as never)
+    })
+    const projects = useProjectStore()
+    projects.activeWorkspace = 'work'
+    projects.chats = []
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    await wrapper.findAll('.pr-row-action').find(b => b.text() === 'Improve skill')!.trigger('click')
+    await flushPromises()
+
+    expect(apiGet).toHaveBeenCalledWith('/api/chats')
+    expect(projects.chats.some(c => c.chat_id === 'chat-x')).toBe(true)
+    expect(wrapper.findAll('.pr-row-action').map(b => b.text())).toContain('Open chat')
+    wrapper.unmount()
+  })
+
+  it('does not announce a start it did not make', async () => {
+    // `created: false` is the idempotent answer: a double tap or a second device
+    // gets the running chat back. "Improving the skill in background" would then
+    // be a second false claim on top of the first tap's.
+    const path = 'work/Workspace/Skill-Proposals/proposal-2026-08-20.md'
+    apiGet.mockImplementation((url: string) => (
+      url === '/api/proposals'
+        ? Promise.resolve({ rows: [row({ id: 'skill', kind: 'skill', text: 'proposal-2026-08-20', workspace: 'work', path, line: -1 })] })
+        : url === '/api/chats' ? Promise.resolve([]) : Promise.resolve({})
+    ))
+    apiPost.mockResolvedValue({ ok: true, chat_id: 'chat-x', project_id: 'p-work', created: false } as never)
+    const projects = useProjectStore()
+    projects.activeWorkspace = 'work'
+    const pushToast = vi.spyOn(projects, 'pushToast').mockImplementation(() => undefined as never)
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    await wrapper.findAll('.pr-row-action').find(b => b.text() === 'Improve skill')!.trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/skill/implement')
+    expect(pushToast).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('offers Improve again when the implementing chat is gone', async () => {    // A deleted or archived chat is not a live implementation. The proposal is
     // still queued, so the row has to offer a fresh one rather than a dead link.
     const path = 'work/Workspace/Skill-Proposals/proposal-2026-08-20.md'
     apiGet.mockResolvedValue({

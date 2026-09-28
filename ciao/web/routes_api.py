@@ -8183,7 +8183,7 @@ async def proposal_implement(request: Request) -> JSONResponse:
     ``work`` is about work's ``skills/`` catalog, and hosting it anywhere else
     would edit the wrong copy of the skill.
 
-    Only a skill row reaches the service; anything else is a 400. The batch
+    Only a skill row reaches the service; anything else is a 409. The batch
     endpoint is deliberately untouched — a batch is a bulk decision about queue
     rows, and starting one chat per selected skill behind someone's back is not
     one.
@@ -8195,8 +8195,11 @@ async def proposal_implement(request: Request) -> JSONResponse:
     if ctx is None:
         return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
     pcm = getattr(request.app.state, "project_chat_manager", None)
-    # Off the event loop: the service lists projects, creates a chat and starts a
-    # provider turn, and a slow vault scan must not stall every other request.
+    # Off the event loop: the service lists projects, creates a chat and binds
+    # the record, and a slow vault scan must not stall every other request. It
+    # hands the prompt back rather than sending it, because ``start_stream``
+    # creates an asyncio task and is only legal on a running loop — the defect
+    # this split exists to prevent.
     outcome = await asyncio.to_thread(
         proposal_service.accept_skill_proposal, config, pcm, ctx
     )
@@ -8205,6 +8208,28 @@ async def proposal_implement(request: Request) -> JSONResponse:
             {"error": outcome.get("error", "could not accept this proposal"), "id": pid},
             status_code=409,
         )
+    # Only on the create path: a reuse returns no prompt, because the turn was
+    # already dispatched for the chat being handed back.
+    prompt = str(outcome.pop("prompt", ""))
+    if prompt:
+        # `Any` rather than the optional it is: a prompt can only come back from
+        # the create path, which the service refuses outright without a manager.
+        manager: Any = pcm
+        try:
+            manager.start_stream(str(outcome["chat_id"]), prompt)
+        except Exception as exc:
+            # The chat exists and the record already names it, so this is
+            # recoverable rather than an orphan: the row keeps "Open chat" and a
+            # retry gets this same chat back instead of a second one.
+            logger.exception("Failed to start the implementation turn for %s", pid)
+            return JSONResponse(
+                {
+                    "error": f"could not start the implementation chat: {exc}",
+                    "id": pid,
+                    "chat_id": outcome["chat_id"],
+                },
+                status_code=500,
+            )
     return JSONResponse({"ok": True, **outcome})
 
 

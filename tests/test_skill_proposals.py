@@ -9,6 +9,8 @@ vault here is a throwaway one under ``tmp_path``.
 
 from __future__ import annotations
 
+import argparse
+import re
 from pathlib import Path
 
 import pytest
@@ -713,6 +715,66 @@ def test_a_second_accept_returns_the_live_chat_rather_than_replacing_it(
     assert again.lifecycle == sp.IMPLEMENTING
 
 
+def test_a_dead_chat_can_be_superseded_by_the_one_that_replaces_it(
+    tmp_path: Path,
+) -> None:
+    """A re-accept after the chat died has to be able to rebind.
+
+    The idempotency rule above refuses a different chat, which is right while
+    the recorded one is live and wrong once it is not: the accept route has
+    already established the chat is archived or gone, so the fresh chat is the
+    live one and the record has to name it. Naming the dead chat is the whole
+    permission — a caller that has not looked at it must not get it.
+    """
+    config = _config(tmp_path)
+    path = sp.proposal_path(config, "personal", "web-research")
+    stored = sp.upsert_proposal(config, _proposal())
+    sp.mark_implementing(config, stored.id, "chat-1")
+
+    rebound = sp.mark_implementing(config, stored.id, "chat-2", supersedes="chat-1")
+
+    assert rebound is not None
+    assert (rebound.chat_id, rebound.lifecycle) == ("chat-2", sp.IMPLEMENTING)
+    on_disk = sp.parse_proposal(path, "personal")
+    assert on_disk is not None
+    assert (on_disk.chat_id, on_disk.lifecycle) == ("chat-2", sp.IMPLEMENTING)
+
+
+def test_superseding_an_unrelated_chat_is_refused(tmp_path: Path) -> None:
+    """``supersedes`` replaces the chat it names and no other.
+
+    This function cannot tell a live chat from a dead one, so it does not try:
+    a caller that wants to displace ``chat-1`` has to have looked at ``chat-1``.
+    """
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal())
+    sp.mark_implementing(config, stored.id, "chat-1")
+
+    sp.mark_implementing(config, stored.id, "chat-2", supersedes="chat-3")
+
+    kept = sp.parse_proposal(
+        sp.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert kept is not None
+    assert kept.chat_id == "chat-1"
+
+
+def test_an_interrupted_record_can_be_rebound_to_a_fresh_chat(tmp_path: Path) -> None:
+    """The work stopped and the operator accepted it again. That is the ordinary
+    recovery path, and it has to leave the record implementing again."""
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal())
+    sp.mark_implementing(config, stored.id, "chat-1")
+    sp.mark_outcome(config, stored.id, sp.INTERRUPTED, "ran out of context")
+
+    retried = sp.mark_implementing(config, stored.id, "chat-2", supersedes="chat-1")
+
+    assert retried is not None
+    assert (retried.chat_id, retried.lifecycle) == ("chat-2", sp.IMPLEMENTING)
+    # And no decision was written by either step, so it is still re-openable.
+    assert [item.id for item in sp.read_queue(config, "personal")] == [stored.id]
+
+
 def test_marking_implementing_is_a_no_op_when_the_chat_has_not_changed(
     tmp_path: Path,
 ) -> None:
@@ -879,6 +941,59 @@ def test_the_prompt_carries_the_proposal_its_findings_and_its_revision(
     assert "--interrupted" in prompt
     assert "Read the current skill first" in prompt
     assert "ciao sync-skills" in prompt
+
+
+def test_the_prompt_runs_no_command_it_does_not_mean(tmp_path: Path) -> None:
+    """A prompt is instructions, so every command in it has to do what it says.
+
+    Two ways it did not. ``sync-skills --workspace`` takes a PATH, and the chat's
+    working directory is already the owning agent root, so passing the workspace
+    NAME resolved to ``<root>/work`` and seeded a stray catalog there instead of
+    syncing the real one. And the prompt told the chat to settle a finding "as not
+    applicable" while the CLI exposed no way to record that — so the one branch a
+    chat that concluded the finding had expired could not answer for itself.
+    """
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal(workspace="work"))
+
+    prompt = sp.render_improvement_prompt(stored)
+
+    assert "sync-skills --workspace" not in prompt
+    assert "ciao sync-skills" in prompt
+    assert "ciao skill-proposal-remove web-research --workspace . --not-applicable" in prompt
+
+
+def test_every_outcome_the_prompt_names_is_one_the_cli_can_record(
+    tmp_path: Path,
+) -> None:
+    """The prompt and the command have to agree, and the command is the contract.
+
+    Parsed out of the rendered prompt rather than hard-coded, so a future edit to
+    the wording cannot quietly reintroduce an outcome no flag produces.
+    """
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal())
+
+    parser = _skill_proposal_remove_parser()
+
+    prompt = sp.render_improvement_prompt(stored)
+    named = set(re.findall(r"skill-proposal-remove[^\n]*?(--applied|--not-applicable|--interrupted)", prompt))
+    assert named == {"--applied", "--not-applicable", "--interrupted"}
+    for flag in named:
+        assert flag in parser._option_string_actions, flag
+
+
+def _skill_proposal_remove_parser() -> argparse.ArgumentParser:
+    """The real parser for ``ciao skill-proposal-remove``."""
+    from ciao.cli import build_parser
+
+    parser = build_parser()
+    for action in parser._subparsers._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            sub = action.choices.get("skill-proposal-remove")
+            if sub is not None:
+                return sub
+    raise AssertionError("skill-proposal-remove is not registered")
 
 
 def test_the_prompt_falls_back_to_the_skills_directory_when_no_path_was_recorded(

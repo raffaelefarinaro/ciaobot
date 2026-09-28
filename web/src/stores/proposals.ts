@@ -524,10 +524,14 @@ export const useProposalsStore = defineStore('proposals', () => {
    *
    * The lifecycle that comes back is the server's, read off the row on the
    * refresh below. Nothing here infers one: a chat that ends is not a decision.
+   *
+   * `created` is reported back so the caller can say what happened: `false` means
+   * this accept was handed a chat that was already running, and claiming to have
+   * started it then would be a second lie on top of the first tap's.
    */
   async function acceptSkill(
     id: string,
-  ): Promise<{ ok: boolean; chatId?: string; error?: string }> {
+  ): Promise<{ ok: boolean; chatId?: string; created?: boolean; error?: string }> {
     setBusy(id, true)
     error.value = ''
     try {
@@ -539,7 +543,7 @@ export const useProposalsStore = defineStore('proposals', () => {
       // from it, and a reload must not change the answer.
       await fetch({ force: true })
       invalidateHistory()
-      return { ok: true, chatId: reply?.chat_id ?? '' }
+      return { ok: true, chatId: reply?.chat_id ?? '', created: reply?.created !== false }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Could not start the improvement chat'
       error.value = msg

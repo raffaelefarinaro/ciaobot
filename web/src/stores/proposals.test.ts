@@ -633,10 +633,25 @@ describe('accepting a skill proposal into a chat', () => {
     const result = await store.acceptSkill('p-skill')
 
     expect(vi.mocked(api.post)).toHaveBeenCalledWith('/api/proposals/p-skill/implement')
-    expect(result).toEqual({ ok: true, chatId: 'chat-x' })
+    expect(result).toEqual({ ok: true, chatId: 'chat-x', created: true })
     // It re-read rather than patching the local copy: the row the server
     // returns is the one the panel has to render.
     expect(vi.mocked(api.get).mock.calls.map(c => c[0])).toContain('/api/proposals')
+  })
+
+  it('reports which path it took, so a reuse is not announced as a start', async () => {
+    // A double tap, a retry after a dropped response and a second device all get
+    // the live chat back with `created: false`. The panel pushes a "started"
+    // toast, and it must not do that for work that was already running.
+    const store = useProposalsStore()
+    vi.mocked(api.get).mockResolvedValue({ rows: [skillRow()] } as never)
+    vi.mocked(api.post).mockResolvedValue({
+      ok: true, chat_id: 'chat-x', project_id: 'p-1', created: false,
+    } as never)
+
+    const result = await store.acceptSkill('p-skill')
+
+    expect(result).toEqual({ ok: true, chatId: 'chat-x', created: false })
   })
 
   it('keeps the lifecycle across a reload, because the server row owns it', async () => {

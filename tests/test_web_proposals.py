@@ -13,6 +13,7 @@ import pathlib
 import json
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,11 @@ from starlette.testclient import TestClient
 
 from ciao import skill_proposals
 from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.models import ResultEvent
+from ciao.sessions import StateStore
+from ciao.transcripts import TranscriptStore
 from ciao.web import proposal_service
+from ciao.web.project_chats import ProjectChatManager
 from ciao.web import routes_api
 from ciao.web.proposal_service import _scan_proposal_rows
 from ciao.web.routes_api import (
@@ -1167,7 +1172,7 @@ def test_an_archived_chat_is_not_a_live_implementation(tmp_path: Path) -> None:
     still being worked on". The proposal is still queued, so re-accepting has
     to be able to start a fresh one rather than hand back a dead link."""
     config = _config(tmp_path)
-    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
     pcm = _FakePcm()
     row = _skill_row(_client(config, pcm))
     first = _client(config, pcm).post(f"/api/proposals/{row['id']}/implement").json()
@@ -1177,6 +1182,107 @@ def test_an_archived_chat_is_not_a_live_implementation(tmp_path: Path) -> None:
 
     assert second["created"] is True
     assert second["chat_id"] != first["chat_id"]
+    # On disk, not just in the reply: a row still naming the dead chat is a row
+    # whose "Open chat" is a link to nothing, and the next accept would think
+    # the work is already running somewhere it cannot be.
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.chat_id == second["chat_id"]
+    assert record.lifecycle == skill_proposals.IMPLEMENTING
+
+
+def _real_pcm(config: CiaoConfig, tmp_path: Path) -> ProjectChatManager:
+    """A real chat manager, so the route runs the real ``start_stream``.
+
+    ``_FakePcm``'s ``start_stream`` appends to a list and returns, which is why
+    it cannot see the defect this half of the file guards: the real
+    ``ProjectChatManager.start_stream`` reaches
+    ``ChatStreaming.start_drive``, which calls ``asyncio.create_task``. That is
+    correct on the event loop and a ``RuntimeError: no running event loop`` in a
+    worker thread, so an accept that dispatched its turn off-loop failed every
+    time while every fake-based test stayed green.
+    """
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    return ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+
+
+def test_accepting_dispatches_the_turn_on_the_event_loop(tmp_path: Path) -> None:
+    """The route with the real manager, through a real running loop.
+
+    The off-loop half is the vault scan, the project lookup and ``create_chat``;
+    the provider turn has to go out on the loop thread, like every other caller
+    that opens a chat. Asserted on the turn actually being driven, not on a
+    200: a route that returned OK without dispatching would leave a chat nobody
+    is working in.
+    """
+    config = _config(tmp_path)
+    source = _write_skill_proposal(config, "work", "2026-08-09-defuddle")
+    pcm = _real_pcm(config, tmp_path)
+    driven: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        driven.append(prompt)
+        yield ResultEvent(
+            type="result",
+            result="done",
+            session_id="sess-x",
+            is_error=False,
+            usage={},
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    with _client(config, pcm) as client:
+        row = _skill_row(client)
+        response = client.post(f"/api/proposals/{row['id']}/implement")
+        assert response.status_code == 200, response.json()
+        body = response.json()
+        # The drive task is created by ``start_stream`` itself, so a running
+        # loop turns the turn into a call on the fake provider above.
+        deadline = time.monotonic() + 5.0
+        while not driven and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    assert driven, "the accept never dispatched a provider turn"
+    assert "2026-08-09-defuddle" in driven[0]
+    record = skill_proposals.parse_proposal(source, "work")
+    assert record is not None
+    assert record.chat_id == body["chat_id"]
+    assert record.lifecycle == skill_proposals.IMPLEMENTING
+
+
+def test_a_failed_dispatch_leaves_the_association_behind(tmp_path: Path) -> None:
+    """A turn that cannot start must not orphan the chat it was opened for.
+
+    Binding before dispatching is what makes a second accept return the same
+    chat instead of minting another one: the record is the association, so it
+    is written first, and the operator still has an "Open chat" to send into.
+    """
+
+    class _RefusingPcm(_FakePcm):
+        def start_stream(self, chat_id: str, prompt: str) -> None:
+            raise RuntimeError("no provider")
+
+    config = _config(tmp_path)
+    source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    pcm = _RefusingPcm()
+    row = _skill_row(_client(config, pcm))
+
+    first = _client(config, pcm).post(f"/api/proposals/{row['id']}/implement")
+
+    assert first.status_code == 500
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.chat_id
+    second = _client(config, pcm).post(f"/api/proposals/{row['id']}/implement").json()
+    assert second["chat_id"] == record.chat_id
+    assert second["created"] is False
 
 
 def test_accepting_refuses_a_row_that_is_not_a_skill_proposal(tmp_path: Path) -> None:
