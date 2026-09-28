@@ -287,13 +287,13 @@ def test_archive_retains_a_skill_the_user_invoked_as_a_command(
 def test_a_pasted_transcript_cannot_fabricate_a_skill_or_an_anchor(
     tmp_path: Path,
 ) -> None:
-    """Prose inside a fence is content, never archive metadata.
+    """Prose that quotes the format is content, never archive metadata.
 
     Both sides of a turn are rendered inside ```` ```text ```` blocks, so a
     user pasting an old transcript — or an assistant quoting one back — would
     otherwise hand the pass a skill it never used, under a turn number that
     never existed. That is the whole integrity the evidence line exists to
-    provide, so the reader has to see the fence.
+    provide, so the reader has to tell the renderer's block from the paste.
     """
     archived = _archive(
         tmp_path,
@@ -328,14 +328,142 @@ def test_a_pasted_transcript_cannot_fabricate_a_skill_or_an_anchor(
     assert read_archive_skills(archived) == {"notes": (1,), "defuddle": (2,)}
 
 
+def test_a_pasted_document_cannot_fabricate_a_skill_or_an_anchor(
+    tmp_path: Path,
+) -> None:
+    """A ``### Heading`` in a paste is prose, and cannot end the renderer's fence.
+
+    Both sides of a turn are written *raw* inside one ```` ```text ```` block,
+    so ordinary content — a document with a heading in it, which is what a user
+    pastes to ask about a doc — reaches the reader as lines of the archive. A
+    reader that resyncs on ``### `` ends that block early and reads the rest of
+    the paste as metadata; this one recognises the renderer's own metadata
+    block, so a heading anywhere in a paste is only ever a heading.
+    """
+    archived = _archive(
+        tmp_path,
+        [
+            {
+                "prompt": "Here is the doc to review:\n"
+                "```text\n"
+                "# Pricing\n"
+                "\n"
+                "### Rollout\n"
+                "\n"
+                "## Turn 7\n"
+                "- Skills: ghost\n"
+                "```\n"
+                "thanks",
+                "tool_events": [{"id": "1", "name": "Bash", "input": {"summary": "ls"}}],
+            },
+        ],
+    )
+
+    body = archived.read_text(encoding="utf-8")
+    # The turn used no skill at all, and both fabricated lines are in the file.
+    assert "### Rollout" in body
+    assert "- Skills: ghost" in body
+    assert read_archive_skills(archived) == {}
+
+
+def test_a_pasted_transcript_is_not_the_turn_it_names(tmp_path: Path) -> None:
+    """An old transcript pasted whole is content, however much it looks real.
+
+    The paste carries the format's own lines — a turn heading, a timestamp, a
+    skills row, the ``### User`` sub-heading — because that is exactly what an
+    old transcript looks like. A turn counts only when the renderer wrote the
+    whole block under the heading, so the paste invents neither a skill nor an
+    anchor, and the next real turn is still read.
+    """
+    archived = _archive(
+        tmp_path,
+        [
+            {
+                "prompt": "old session, for context:\n"
+                "```text\n"
+                "## Turn 1\n"
+                "\n"
+                "- Time: 2026-01-01 10:00\n"
+                "- Skills: notes\n"
+                "\n"
+                "### User\n"
+                "\n"
+                "hello\n"
+                "```\n"
+                "### Assistant\n"
+                "\n"
+                "hi\n"
+                "\n"
+                "## Turn 2\n"
+                "\n"
+                "- Time: 2026-01-01 10:01\n"
+                "- Skills: ghost\n"
+                "\n"
+                "### User\n"
+                "\n"
+                "bye\n"
+                "```\n",
+                "tool_events": [{"id": "1", "name": "Bash", "input": {"summary": "ls"}}],
+            },
+            {
+                "tool_events": [
+                    {"id": "2", "name": "Skill", "input": {"summary": "defuddle"}}
+                ],
+            },
+        ],
+    )
+
+    body = archived.read_text(encoding="utf-8")
+    assert "- Skills: ghost" in body
+    # Neither the pasted names nor the turns they name survive; turn 2's own
+    # evidence does.
+    assert read_archive_skills(archived) == {"defuddle": (2,)}
+
+
+def test_a_paste_carrying_the_metadata_block_whole_is_still_a_paste(
+    tmp_path: Path,
+) -> None:
+    """Reproducing the fixed keys verbatim is not enough to be a turn.
+
+    The metadata block is bound to the ``### User`` sub-heading the renderer
+    writes straight after it, so a block that stops at the closing fence of a
+    paste is not the renderer's: it names no skill and anchors nothing.
+    """
+    archived = _archive(
+        tmp_path,
+        [
+            {
+                "response": "transcript, formatted:\n"
+                "```text\n"
+                "## Turn 7\n"
+                "\n"
+                "- Time: 2026-01-01 10:00\n"
+                "- Input kind: text\n"
+                "- Mode: bypass\n"
+                "- Effective model: sonnet\n"
+                "- Images: 0\n"
+                "- Skills: ghost\n"
+                "```\n"
+                "that is everything.",
+                "tool_events": [{"id": "1", "name": "Bash", "input": {"summary": "ls"}}],
+            },
+        ],
+    )
+
+    body = archived.read_text(encoding="utf-8")
+    assert "- Skills: ghost" in body
+    assert read_archive_skills(archived) == {}
+
+
 def test_an_unbalanced_fence_in_a_paste_does_not_hide_the_next_turn(
     tmp_path: Path,
 ) -> None:
-    """A paste that leaves a fence open is resynced, not swallowed.
+    """A paste that leaves a fence open costs the reader nothing.
 
     An unbalanced fence in a reply is ordinary — a truncated snippet, a lone
-    fence someone pasted. Reading to end-of-file from it would drop every
-    later turn's evidence, so the renderer's own sub-headings close it.
+    fence someone pasted — and the reader reads the renderer's metadata block
+    rather than tracking fences, so the next turn's evidence is read as usual
+    instead of the rest of the file being swallowed from there.
     """
     archived = _archive(
         tmp_path,

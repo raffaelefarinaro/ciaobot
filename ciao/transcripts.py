@@ -841,22 +841,31 @@ _SKILL_INPUT_KEYS = ("skill", "skill_name", "name", "id")
 #: line cannot carry inside a field, so the split back out is exact.
 _SKILL_LIST_SEP = "\t"
 
-#: The rendered per-turn evidence line and the heading that anchors it.
-_ARCHIVE_TURN_RE = re.compile(r"^## Turn (\d+)\s*$", re.MULTILINE)
-_ARCHIVE_SKILLS_RE = re.compile(r"^- Skills: (?P<names>.+)$", re.MULTILINE)
+#: The rendered per-turn evidence line and the heading that anchors it. The
+#: renderer numbers its turns from one, so a heading that does not is not one of
+#: its own and carries no anchor a proposal could cite.
+_ARCHIVE_TURN_RE = re.compile(r"^## Turn ([1-9]\d*)\s*$")
+_ARCHIVE_SKILLS_RE = re.compile(r"^- Skills: (?P<names>.+)$")
 
-#: The archive's own per-turn sub-headings (``### User``, ``### Assistant``,
-#: ``### Usage``, ``### Quota``). The renderer writes each of them *outside* its
-#: fences, so one is the structural proof that a block has closed — which is how
-#: a paste that left a fence open is resynced rather than swallowing the rest of
-#: the file.
-_ARCHIVE_SECTION_RE = re.compile(r"^### \S")
+#: The keys of the metadata block the renderer writes under every turn heading,
+#: in the order it writes them: the four values each turn has, then the image
+#: count. What follows them is the evidence line, and only when the turn used a
+#: skill — nothing else. A block carrying them whole is the renderer's own and
+#: nothing else, so a ``## Turn N`` somebody *typed* — inside the renderer's own
+#: prose fence, where all user and assistant text lives — is not a heading this
+#: reader can open a block from.
+_ARCHIVE_META_KEYS = (
+    "- Time",
+    "- Input kind",
+    "- Mode",
+    "- Effective model",
+    "- Images",
+)
 
-#: A fence line. A fence opened in Markdown carries an info string
-#: (```` ```text ````, or ```` ```python ```` inside a paste) and one that closes
-#: it carries none, so depth — not a toggle — is what tells the two apart: a
-#: pasted snippet balances and does not end the block it sits in.
-_ARCHIVE_FENCE_RE = re.compile(r"^(`{3,})(?P<info>.*)$")
+#: The sub-heading the renderer writes immediately after a turn's metadata
+#: block, so the block is bound to a turn as a whole: a paste that happens to
+#: carry the keys does not also carry the line the renderer writes next.
+_ARCHIVE_USER_RE = re.compile(r"^### User\s*$")
 
 
 def turn_skills(turn: dict[str, Any]) -> tuple[str, ...]:
@@ -934,6 +943,55 @@ def _skill_name_from_summary(summary: str) -> str:
     return text.split()[0] if text.split() else ""
 
 
+def _rendered_turn_skills(lines: list[str], start: int) -> list[str] | None:
+    """The skills one rendered turn's metadata block records, or ``None``.
+
+    ``lines[start]`` is the line after a ``## Turn N`` heading. What the
+    renderer writes there is the metadata block — one blank line under the
+    heading, the keys of :data:`_ARCHIVE_META_KEYS` in order, the evidence line
+    when the turn used a skill — and then its own ``### User`` sub-heading,
+    which is the only line in the file that may follow the block. A block that
+    is not all of that is not a turn's.
+
+    That is what keeps pasted text out. The renderer writes user and assistant
+    text *raw* inside one ```` ```text ```` fence, so a pasted document, a
+    pasted transcript or a snippet is prose that happens to hold a ``## Turn
+    N`` and a ``- Skills:`` line — and prose that opens a fence of its own,
+    closes one, or leaves one unbalanced decides nothing here. The heading and
+    the evidence line are recognised by the block they sit in, which a paste
+    does not bring with it. A paste of an archive copied byte for byte is the
+    one thing that still reads as evidence, and the backstop for that is
+    upstream: the pass intersects what this returns with the workspace's own
+    catalog (``ciao.web.memory_pass.MemoryPassCoordinator._reviewable_skills``).
+    """
+    index = start
+    if index < len(lines) and not lines[index].strip():
+        index += 1
+    meta: list[str] = []
+    while index < len(lines) and lines[index].startswith("- "):
+        meta.append(lines[index])
+        index += 1
+    keys = [row.partition(":")[0] for row in meta[: len(_ARCHIVE_META_KEYS)]]
+    if keys != list(_ARCHIVE_META_KEYS):
+        return None
+    names: list[str] = []
+    for row in meta[len(_ARCHIVE_META_KEYS) :]:
+        # One evidence line follows the keys the renderer always writes, or
+        # none. Anything else there is prose quoting the format.
+        match = _ARCHIVE_SKILLS_RE.match(row)
+        if match is None:
+            return None
+        for part in match.group("names").split(_SKILL_LIST_SEP):
+            name = part.strip()
+            if name:
+                names.append(name)
+    if index < len(lines) and not lines[index].strip():
+        index += 1
+    if index >= len(lines) or _ARCHIVE_USER_RE.match(lines[index]) is None:
+        return None
+    return names
+
+
 def read_archive_skills(path: Path | str) -> dict[str, tuple[int, ...]]:
     """The skills an archived transcript records, mapped to the turns using them.
 
@@ -943,14 +1001,18 @@ def read_archive_skills(path: Path | str) -> dict[str, tuple[int, ...]]:
     else. Turn numbers are the archive's own ``## Turn N`` anchors, which is
     what a proposal cites.
 
-    Only the metadata region is read. A ``## Turn N`` or a ``- Skills:`` line
-    inside a fenced block is a user or an assistant talking *about* a
-    transcript, not one: pasting an old transcript, a skill's own source or a
-    crafted snippet would otherwise fabricate both a skill and the turn it is
-    cited under, which is the integrity the evidence line exists to give. Fence
-    depth is tracked rather than toggled, so a snippet with its own fenced
-    block balances and does not end the block it sits in, and the renderer's
-    own sub-headings resync a paste that left a fence unbalanced.
+    Only the renderer's own metadata region is read, and a region is read
+    whole: a ``## Turn N`` counts only when the block it introduces is the one
+    the renderer writes (:func:`_rendered_turn_skills`), and a ``- Skills:``
+    line is read only out of such a block, so no evidence line can outlive the
+    turn it was written under. A ``## Turn N`` or a ``- Skills:`` line in the
+    middle of a fenced block is a user or an assistant talking *about* a
+    transcript, not one: pasting an old transcript, a document or a snippet
+    would otherwise fabricate both a skill and the turn it is cited under,
+    which is the integrity the evidence line exists to give. Nothing here is
+    read on the strength of a fence, so a paste that opens one, closes one,
+    leaves one unbalanced, or writes its own ``### Heading`` mid-block costs
+    the reader nothing.
 
     Names are split on a tab, which a skill directory name may not contain
     (:func:`ciao.skills_inventory._check_skill_name` allows a comma), so a name
@@ -966,40 +1028,19 @@ def read_archive_skills(path: Path | str) -> dict[str, tuple[int, ...]]:
     except (OSError, UnicodeDecodeError):
         return {}
     used: dict[str, list[int]] = {}
-    turn = 0
-    depth = 0
-    for line in text.splitlines():
-        if _ARCHIVE_SECTION_RE.match(line):
-            # The renderer only ever writes a sub-heading outside its own
-            # fences, so a paste that left one open is resynced here rather
-            # than swallowing the rest of the file.
-            depth = 0
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        heading = _ARCHIVE_TURN_RE.match(lines[index])
+        index += 1
+        if heading is None:
             continue
-        fence = _ARCHIVE_FENCE_RE.match(line)
-        if fence is not None:
-            # An opener carries an info string, a closer carries none — and the
-            # renderer only ever opens with ```` ```text ````, so a bare fence
-            # is a closer, including a stray one that closes nothing.
-            if fence.group("info").strip():
-                depth += 1
-            else:
-                depth = max(0, depth - 1)
+        names = _rendered_turn_skills(lines, index)
+        if names is None:
             continue
-        if depth:
-            continue
-        heading = _ARCHIVE_TURN_RE.match(line)
-        if heading is not None:
-            turn = int(heading.group(1))
-            continue
-        row = _ARCHIVE_SKILLS_RE.match(line)
-        if row is None or not turn:
-            # A `- Skills:` line outside any turn has no anchor to cite, and the
-            # rendered line only ever appears inside one.
-            continue
-        for name in row.group("names").split("\t"):
-            candidate = name.strip()
-            if candidate:
-                used.setdefault(candidate, []).append(turn)
+        turn = int(heading.group(1))
+        for name in names:
+            used.setdefault(name, []).append(turn)
     return {name: tuple(turns) for name, turns in used.items()}
 
 
