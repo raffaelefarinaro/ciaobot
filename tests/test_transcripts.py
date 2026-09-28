@@ -176,7 +176,7 @@ def _archive(tmp_path: Path, turns: list[dict]) -> Path:
     for index, turn in enumerate(turns, start=1):
         store.record_turn(
             AgentRequest(
-                prompt=f"question {index}",
+                prompt=turn.get("prompt", f"question {index}"),
                 model="sonnet",
                 mode="bypass",
                 resume_session=None,
@@ -258,6 +258,124 @@ def test_archive_retains_a_skill_loaded_without_a_tool_call(tmp_path: Path) -> N
     )
 
     assert read_archive_skills(archived) == {"web-research": (1,)}
+
+
+def test_archive_retains_a_skill_the_user_invoked_as_a_command(
+    tmp_path: Path,
+) -> None:
+    """The marker arrives in the user's record, not only the assistant's.
+
+    An SDK session records a slash command on the user message, so reading
+    only the reply made this signal inert for every real session.
+    """
+    archived = _archive(
+        tmp_path,
+        [
+            {
+                "prompt": "<command-name>defuddle</command-name> defuddle this",
+                "tool_events": [
+                    {"id": "1", "name": "Skill", "input": {"summary": "notes"}}
+                ],
+                "response": "done",
+            }
+        ],
+    )
+
+    assert read_archive_skills(archived) == {"notes": (1,), "defuddle": (1,)}
+
+
+def test_a_pasted_transcript_cannot_fabricate_a_skill_or_an_anchor(
+    tmp_path: Path,
+) -> None:
+    """Prose inside a fence is content, never archive metadata.
+
+    Both sides of a turn are rendered inside ```` ```text ```` blocks, so a
+    user pasting an old transcript — or an assistant quoting one back — would
+    otherwise hand the pass a skill it never used, under a turn number that
+    never existed. That is the whole integrity the evidence line exists to
+    provide, so the reader has to see the fence.
+    """
+    archived = _archive(
+        tmp_path,
+        [
+            {
+                "tool_events": [
+                    {"id": "1", "name": "Skill", "input": {"summary": "notes"}}
+                ],
+                "response": "Here is what you asked about:\n"
+                "```text\n"
+                "## Turn 99\n"
+                "- Skills: spoofed\n"
+                "```\n"
+                "and that is all.",
+            },
+            {
+                "tool_events": [
+                    {"id": "2", "name": "Skill", "input": {"summary": "defuddle"}}
+                ],
+                "response": "Try the pasted snippet instead:\n"
+                "```python\n"
+                "print('a ``` fence of its own')\n"
+                "```\n"
+                "then rerun.",
+            },
+        ],
+    )
+
+    body = archived.read_text(encoding="utf-8")
+    # The paste is in the file; it is simply not evidence.
+    assert "- Skills: spoofed" in body
+    assert read_archive_skills(archived) == {"notes": (1,), "defuddle": (2,)}
+
+
+def test_an_unbalanced_fence_in_a_paste_does_not_hide_the_next_turn(
+    tmp_path: Path,
+) -> None:
+    """A paste that leaves a fence open is resynced, not swallowed.
+
+    An unbalanced fence in a reply is ordinary — a truncated snippet, a lone
+    fence someone pasted. Reading to end-of-file from it would drop every
+    later turn's evidence, so the renderer's own sub-headings close it.
+    """
+    archived = _archive(
+        tmp_path,
+        [
+            {
+                "tool_events": [
+                    {"id": "1", "name": "Skill", "input": {"summary": "notes"}}
+                ],
+                "response": "the log starts like this\n```\nEOF",
+            },
+            {
+                "tool_events": [
+                    {"id": "2", "name": "Skill", "input": {"summary": "defuddle"}}
+                ],
+                "response": "and that was the whole log.",
+            },
+        ],
+    )
+
+    assert read_archive_skills(archived) == {"notes": (1,), "defuddle": (2,)}
+
+
+def test_a_skill_name_holding_a_comma_round_trips_as_one_name(tmp_path: Path) -> None:
+    """A comma is a legal directory name, so it may not be the delimiter."""
+    archived = _archive(
+        tmp_path,
+        [
+            {
+                "tool_events": [
+                    {
+                        "id": "1",
+                        "name": "read",
+                        "input": {"summary": "/w/skills/notes, drafts/SKILL.md"},
+                    }
+                ]
+            }
+        ],
+    )
+
+    assert read_archive_skills(archived) == {"notes, drafts": (1,)}
 
 
 def test_a_turn_that_used_no_skill_renders_unchanged(tmp_path: Path) -> None:

@@ -3553,7 +3553,7 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
     mirror, the install-wide shared source, another workspace's catalog and an
     unknown name are all refused here by name, and the path and revision the
     record carries come from the resolved source rather than from the caller —
-    so a hand-authored ``--skill`` cannot aim the writer at a file it does not
+    so a hand-authored name cannot aim the writer at a file it does not
     own, and a reviewer can tell which bytes the proposal was written against.
 
     Settling stays out of here: this proposes, and ``skill-proposal-remove``

@@ -736,7 +736,7 @@ class TranscriptStore:
             ]
             used = turn_skills(turn)
             if used:
-                meta.append(f"- Skills: {', '.join(used)}")
+                meta.append(f"- Skills: {_SKILL_LIST_SEP.join(used)}")
             lines.extend(
                 [
                     f"## Turn {index}",
@@ -834,9 +834,29 @@ _SKILL_SOURCE_RE = re.compile(r"(?:^|[/\\])skills[/\\]([^/\\]+)[/\\]SKILL\.md\b"
 #: of the raw session JSONL.
 _SKILL_INPUT_KEYS = ("skill", "skill_name", "name", "id")
 
+#: What joins the names on one ``- Skills:`` line. A tab, because a skill
+#: directory name may legally hold a comma — ``_check_skill_name`` refuses
+#: only separators and dot-names — and a comma would round-trip a single name
+#: as two names no catalog ever listed. A tab is the one character a rendered
+#: line cannot carry inside a field, so the split back out is exact.
+_SKILL_LIST_SEP = "\t"
+
 #: The rendered per-turn evidence line and the heading that anchors it.
 _ARCHIVE_TURN_RE = re.compile(r"^## Turn (\d+)\s*$", re.MULTILINE)
 _ARCHIVE_SKILLS_RE = re.compile(r"^- Skills: (?P<names>.+)$", re.MULTILINE)
+
+#: The archive's own per-turn sub-headings (``### User``, ``### Assistant``,
+#: ``### Usage``, ``### Quota``). The renderer writes each of them *outside* its
+#: fences, so one is the structural proof that a block has closed — which is how
+#: a paste that left a fence open is resynced rather than swallowing the rest of
+#: the file.
+_ARCHIVE_SECTION_RE = re.compile(r"^### \S")
+
+#: A fence line. A fence opened in Markdown carries an info string
+#: (```` ```text ````, or ```` ```python ```` inside a paste) and one that closes
+#: it carries none, so depth — not a toggle — is what tells the two apart: a
+#: pasted snippet balances and does not end the block it sits in.
+_ARCHIVE_FENCE_RE = re.compile(r"^(`{3,})(?P<info>.*)$")
 
 
 def turn_skills(turn: dict[str, Any]) -> tuple[str, ...]:
@@ -845,8 +865,13 @@ def turn_skills(turn: dict[str, Any]) -> tuple[str, ...]:
     Three signals, because no one of them covers both providers: a skill tool
     call (the name is the whole argument, so the summary is the name), a read
     of a skill's own ``SKILL.md`` (opencode loads a skill natively, and the
-    path is the only trace), and the ``<command-name>`` marker in the reply
-    (a slash command or a description match, neither of which is a tool call).
+    path is the only trace), and the ``<command-name>`` marker (a slash command
+    or a description match, neither of which is a tool call).
+
+    The marker is read out of both the prompt and the response, because the
+    providers put it in either: an SDK session records a slash command in the
+    *user* message, and this mirrors ``ciao.trajectory_builder``, which reads
+    the same tag out of user text and thinking blocks.
 
     Everything is read from the normalized turn, so both providers answer the
     same question. A name that is not a plain directory segment is dropped: it
@@ -874,8 +899,9 @@ def turn_skills(turn: dict[str, Any]) -> tuple[str, ...]:
             _add(match.group(1))
         if str(event.get("name") or "") in _SKILL_TOOL_NAMES:
             _add(_skill_name_from_summary(summary))
-    for match in _SKILL_MARKER_RE.finditer(str(turn.get("response") or "")):
-        _add(match.group(1))
+    for field in ("response", "prompt"):
+        for match in _SKILL_MARKER_RE.finditer(str(turn.get(field) or "")):
+            _add(match.group(1))
     return tuple(found)
 
 
@@ -917,6 +943,20 @@ def read_archive_skills(path: Path | str) -> dict[str, tuple[int, ...]]:
     else. Turn numbers are the archive's own ``## Turn N`` anchors, which is
     what a proposal cites.
 
+    Only the metadata region is read. A ``## Turn N`` or a ``- Skills:`` line
+    inside a fenced block is a user or an assistant talking *about* a
+    transcript, not one: pasting an old transcript, a skill's own source or a
+    crafted snippet would otherwise fabricate both a skill and the turn it is
+    cited under, which is the integrity the evidence line exists to give. Fence
+    depth is tracked rather than toggled, so a snippet with its own fenced
+    block balances and does not end the block it sits in, and the renderer's
+    own sub-headings resync a paste that left a fence unbalanced.
+
+    Names are split on a tab, which a skill directory name may not contain
+    (:func:`ciao.skills_inventory._check_skill_name` allows a comma), so a name
+    that legally holds one round-trips as the one name it is instead of two
+    that never existed.
+
     An archive this cannot read yields no skills, not an error: the file is
     evidence for a proposal, and a missing one means there is nothing to file
     against.
@@ -927,7 +967,26 @@ def read_archive_skills(path: Path | str) -> dict[str, tuple[int, ...]]:
         return {}
     used: dict[str, list[int]] = {}
     turn = 0
+    depth = 0
     for line in text.splitlines():
+        if _ARCHIVE_SECTION_RE.match(line):
+            # The renderer only ever writes a sub-heading outside its own
+            # fences, so a paste that left one open is resynced here rather
+            # than swallowing the rest of the file.
+            depth = 0
+            continue
+        fence = _ARCHIVE_FENCE_RE.match(line)
+        if fence is not None:
+            # An opener carries an info string, a closer carries none — and the
+            # renderer only ever opens with ```` ```text ````, so a bare fence
+            # is a closer, including a stray one that closes nothing.
+            if fence.group("info").strip():
+                depth += 1
+            else:
+                depth = max(0, depth - 1)
+            continue
+        if depth:
+            continue
         heading = _ARCHIVE_TURN_RE.match(line)
         if heading is not None:
             turn = int(heading.group(1))
@@ -937,7 +996,7 @@ def read_archive_skills(path: Path | str) -> dict[str, tuple[int, ...]]:
             # A `- Skills:` line outside any turn has no anchor to cite, and the
             # rendered line only ever appears inside one.
             continue
-        for name in row.group("names").split(","):
+        for name in row.group("names").split("\t"):
             candidate = name.strip()
             if candidate:
                 used.setdefault(candidate, []).append(turn)

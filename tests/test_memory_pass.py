@@ -349,7 +349,9 @@ def test_pass_reviews_the_owned_skills_the_conversation_used(
     assert "own skills in use: notes." in prompt
     assert "unused-skill" not in prompt
     # The rules the section exists to state.
-    assert "ciao skill-proposal-add --skill NAME --input-file FILE" in prompt
+    # Positional, because that is what the parser takes: naming a `--skill`
+    # flag the parser has never heard of exits 2 and files nothing.
+    assert "ciao skill-proposal-add NAME --input-file FILE" in prompt
     assert "Never edit a skill" in prompt
     assert "filing none is a valid result" in prompt
     # And the evidence the proposal has to carry.

@@ -78,6 +78,10 @@ MEMORY_PASS_PROMPT = (
 #: proposal may be filed against is therefore decided by the backend, not by a
 #: flag the model supplies.
 #:
+#: The ``ciao skill-proposal-add`` line spells the command the way ``ciao.cli``
+#: parses it — ``NAME`` positional, ``--input-file`` the only option — because a
+#: prompt naming a flag the parser rejects exits 2 and files nothing at all.
+#:
 #: Deliberately no braces beyond that field, because the prompt is
 #: ``str.format``-ed per chat: a JSON example spelled out here would be read as
 #: a field and raise on the first turn.
@@ -102,7 +106,7 @@ SKILL_REVIEW_PROMPT = (
     "to add or replace, a `rationale`, and a `sources` list where every entry "
     "carries the `chat_id`, the `archive` path, the `turn` the transcript "
     "numbered it under, and a short verbatim `excerpt` from that turn — then "
-    "run `ciao skill-proposal-add --skill NAME --input-file FILE`, one file per "
+    "run `ciao skill-proposal-add NAME --input-file FILE`, one file per "
     "skill. Every one of those fields is text you took out of a conversation, "
     "so none of it may travel as a shell argument, and never write into the "
     "`Workspace/Skill-Proposals/` folder by hand; mention a filed proposal in "
