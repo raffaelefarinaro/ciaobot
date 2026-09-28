@@ -143,15 +143,6 @@ export function postprocessSummary(pp: ChatPostprocess | null | undefined): stri
 /** True when any step failed — the one case that deserves more than grey. */
 export function postprocessFailed(pp: ChatPostprocess | null | undefined): boolean {
   if (pp?.state === 'blocked') return true
-  const steps = pp?.steps || {}
+  const steps: Record<string, { status?: string } | undefined> = pp?.steps || {}
   return Object.values(steps).some((step) => step?.status === 'error')
-}
-
-/**
- * "2 tidying up" for a lane header, or '' when nothing is running. Plural
- * handled here so the callers stay markup-only.
- */
-export function tidyingSummary(count: number): string {
-  if (count < 1) return ''
-  return `${count} tidying up`
 }

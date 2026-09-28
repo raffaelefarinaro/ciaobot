@@ -3373,36 +3373,112 @@ describe('background agents indicator', () => {
   })
 })
 
-describe('postprocessingChats (home tidying list)', () => {
-  test('lists only chats whose pipeline is still running, newest archive first', () => {
+describe('memoryInsightRows', () => {
+  // The pass is a real chat, so it used to be listed twice for one archived
+  // conversation: once in the Home tiers under its own internal title, and
+  // once as the conversation it works on. These pin the single row and the
+  // filtering that removed the other one.
+
+  function passChat(over: Record<string, unknown> = {}, sourceId = 'src') {
+    return {
+      chat_id: 'pass-1', project_id: 'p-mem', title: 'Memory pass · Deck figures',
+      archived: false, local: true,
+      created_at: '2026-08-27T01:00:00Z', last_activity_at: '2026-08-27T01:00:00Z',
+      helper: {
+        kind: 'memory_pass', state: 'running', source_chat_id: sourceId, archive_path: 'chats/src.md',
+        doc_path: '', source_title: 'Deck figures', source_project: '', archive_policy: 'when_clean',
+      },
+      ...over,
+    }
+  }
+
+  function sourceChat(over: Record<string, unknown> = {}) {
+    return {
+      chat_id: 'src', project_id: 'p1', title: 'Deck figures',
+      archived: true, local: true, archive_path: 'chats/src.md',
+      created_at: '2026-08-27T00:00:00Z', last_activity_at: '2026-08-27T00:00:00Z',
+      postprocess: { state: 'running', step: 'memory_pass', steps: {} },
+      ...over,
+    }
+  }
+
+  test('joins the archive pipeline and the pass onto one row keyed on the source', () => {
     const store = useProjectStore()
-    store.chats = [
-      { chat_id: 'c-done', project_id: 'p1', title: 'Settled', archived: true, postprocess: { state: 'done', step: 'trajectory', steps: {} } },
-      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'trajectory', expected: [], steps: {} } },
-      { chat_id: 'c-fresher', project_id: 'p1', title: 'Fresher', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'running', step: 'memory_pass', expected: [], steps: {} } },
-      { chat_id: 'c-plain', project_id: 'p1', title: 'No pipeline', archived: true },
-    ] as unknown as typeof store.chats
-    expect(store.postprocessingChats().map(c => c.chat_id)).toEqual(['c-fresher', 'c-running'])
+    store.chats = [sourceChat(), passChat()] as unknown as typeof store.chats
+    expect(store.memoryInsightRows).toHaveLength(1)
+    expect(store.memoryInsightRows[0]).toMatchObject({
+      sourceChatId: 'src',
+      title: 'Deck figures',
+      passChatId: 'pass-1',
+      phase: 'running',
+    })
   })
 
-  test('insightsFailedChats lists settled chats with unfinished stages', () => {
+  test('keeps a pass out of the home tiers and the sidebar project list', () => {
     const store = useProjectStore()
     store.projects = [
-      { project_id: 'p1', workspace: 'work' },
-      { project_id: 'p2', workspace: 'personal' },
+      { project_id: 'p1', name: 'General', workspace: 'personal', order: 0 },
+      { project_id: 'p-mem', name: 'Memory', workspace: 'personal', order: 1, kind: 'memory' },
     ] as unknown as typeof store.projects
     store.chats = [
-      { chat_id: 'c-failed', project_id: 'p1', title: 'Failed', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'blocked', blocked_reason: 'archive file is missing' } },
-      { chat_id: 'c-partial', project_id: 'p1', title: 'Partial', archived: true, last_activity_at: '2026-08-16T09:00:00Z', postprocess: { state: 'incomplete', job: { job_id: 'j', state: 'incomplete', unfinished: ['trajectory'] } } },
-      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'trajectory', expected: [], steps: {} } },
-      { chat_id: 'c-ok', project_id: 'p2', title: 'Ok', archived: true, last_activity_at: '2026-08-14T10:00:00Z', postprocess: { state: 'done', steps: { trajectory: { status: 'ok' } } } },
-      { chat_id: 'c-skipped', project_id: 'p2', title: 'Skipped', archived: true, last_activity_at: '2026-08-13T10:00:00Z', postprocess: { state: 'done', steps: { trajectory: { status: 'skipped' } } } },
-      { chat_id: 'c-plain', project_id: 'p1', title: 'No pipeline', archived: true },
+      { chat_id: 'ordinary', project_id: 'p1', title: 'Ordinary', archived: false, local: true, created_at: '2026-08-27T02:00:00Z', last_activity_at: '2026-08-27T02:00:00Z' },
+      passChat(),
     ] as unknown as typeof store.chats
-    expect(store.insightsFailedChats().map(c => c.chat_id)).toEqual(['c-failed', 'c-partial'])
-    // Workspace counts follow the project → workspace mapping.
-    expect(store.workspaceInsightsFailedCount('work')).toBe(2)
-    expect(store.workspaceInsightsFailedCount('personal')).toBe(0)
+
+    expect(store.activeChatsAll.map(c => c.chat_id)).toEqual(['ordinary'])
+    // The pass would otherwise be counted in a project row's needs/unread
+    // rollup, and be offered as a schedule target.
+    expect(store.projectChats('p-mem')).toEqual([])
+    expect(store.projectUnread('p-mem')).toBe(0)
+    expect(store.projectNeedsInput('p-mem')).toBe(0)
+  })
+
+  test('does not count a working pass as unread mail', () => {
+    const store = useProjectStore()
+    store.chats = [
+      { chat_id: 'plain', project_id: 'p1', title: 'Unread', archived: false, local: true, last_activity_at: '2026-08-24T10:00:00Z', last_read_at: '2026-08-24T09:00:00Z' },
+      passChat({ last_activity_at: '2026-08-24T10:00:00Z', last_read_at: '2026-08-24T09:00:00Z' }),
+    ] as unknown as typeof store.chats
+
+    // A pass advances its own activity while it works, so counting it made a
+    // routine archive pass light the bell and the document title.
+    expect(store.totalUnread).toBe(1)
+    expect(store.chatIsAttentionItem(store.chats[1])).toBe(false)
+  })
+
+  test('counts a pass as attention only once it is blocked on the owner', () => {
+    const store = useProjectStore()
+    const question = JSON.stringify({ questions: [{ question: 'Which project?' }] })
+    const blocked = passChat({ chat_id: 'blocked', pending_question: question })
+    store.chats = [
+      sourceChat(),
+      blocked,
+      sourceChat({ chat_id: 'src-2' }),
+      passChat({ chat_id: 'plain' }, 'src-2'),
+    ] as unknown as typeof store.chats
+
+    expect(store.chatIsAttentionItem(blocked as unknown as ChatInfo)).toBe(true)
+    expect(store.chatIsAttentionItem(store.chats[3] as unknown as ChatInfo)).toBe(false)
+    expect(store.attentionChatCount).toBe(1)
+    // The row says the same thing out loud, with the question on it.
+    const row = store.memoryInsightRows.find(r => r.passChatId === 'blocked')
+    expect(row).toMatchObject({ phase: 'needsYou', blocking: true, question: 'Which project?' })
+  })
+
+  test('offers the retry for a pipeline that stopped with a stage left', () => {
+    const store = useProjectStore()
+    store.chats = [sourceChat({
+      postprocess: {
+        state: 'incomplete',
+        job: { job_id: 'j', state: 'incomplete', unfinished: ['trajectory'] },
+      },
+    })] as unknown as typeof store.chats
+
+    expect(store.memoryInsightRows[0]).toMatchObject({
+      phase: 'unfinished',
+      retryable: true,
+      label: 'trajectory not finished',
+    })
   })
 })
 
@@ -5839,10 +5915,17 @@ describe('memory pass surfaces', () => {
   })
 
   test('finds the memory project for a workspace without showing it', () => {
+    // The row an owner opens a pass from is keyed on the source conversation,
+    // but a pass whose source is gone is filed under the pass's own project —
+    // so the lookup still has to reach the hidden project.
     const store = useProjectStore()
     seedProjects(store)
-    expect(store.memoryProjectFor('personal')?.project_id).toBe('p-mem')
-    expect(store.memoryProjectFor('work')?.project_id).toBe('p-mem-work')
+    store.chats = [
+      { chat_id: 'orphan-pass', project_id: 'p-mem-work', archived: false, created_at: '2026-08-27T00:00:00Z', helper: { kind: 'memory_pass', state: 'running', source_chat_id: 'deleted', archive_path: '', doc_path: '', source_title: 'Gone', source_project: '', archive_policy: 'when_clean' } },
+    ] as unknown as typeof store.chats
+    const [row] = store.memoryInsightRows
+    expect(store.projectFor(row.passChatId)?.project_id).toBe('p-mem-work')
+    expect(row.title).toBe('Gone')
   })
 
   test('flags only an unclean pass as needing attention', () => {
@@ -5859,31 +5942,20 @@ describe('memory pass surfaces', () => {
     expect(store.memoryPassNeedsAttention('missing')).toBe(false)
   })
 
-  test('latestMemoryPassChat picks the newest non-archived pass in the workspace', () => {
+  test('an unclean pass is one row that says so, not two', () => {
     const store = useProjectStore()
     seedProjects(store)
     store.chats = [
-      { chat_id: 'c-old', project_id: 'p-mem', archived: false, last_activity_at: '2026-08-15T10:00:00Z' },
-      { chat_id: 'c-clean', project_id: 'p-mem', archived: true, last_activity_at: '2026-08-18T10:00:00Z' },
-      { chat_id: 'c-new', project_id: 'p-mem', archived: false, last_activity_at: '2026-08-17T10:00:00Z' },
-      { chat_id: 'c-other-workspace', project_id: 'p-mem-work', archived: false, last_activity_at: '2026-08-19T10:00:00Z' },
-      { chat_id: 'c-not-a-pass', project_id: 'p1', archived: false, last_activity_at: '2026-08-20T10:00:00Z' },
+      { chat_id: 'src', project_id: 'p1', title: 'Deck figures', archived: true, archive_path: 'chats/src.md', last_activity_at: '2026-08-27T00:00:00Z' },
+      { chat_id: 'c-attention', project_id: 'p-mem', archived: false, last_activity_at: '2026-08-27T01:00:00Z', helper: { kind: 'memory_pass', state: 'attention', source_chat_id: 'src', archive_path: 'chats/src.md', doc_path: '', source_title: 'Deck figures', source_project: '', archive_policy: 'when_clean' } },
     ] as unknown as typeof store.chats
-    // A clean pass is archived by the time the owner could reach for it, and
-    // the newest row is an ordinary chat, so neither can win.
-    expect(store.latestMemoryPassChat('personal')?.chat_id).toBe('c-new')
-    expect(store.latestMemoryPassChat('work')?.chat_id).toBe('c-other-workspace')
-  })
 
-  test('latestMemoryPassChat returns null without a memory project or an open pass', () => {
-    const store = useProjectStore()
-    seedProjects(store)
-    store.chats = [] as unknown as typeof store.chats
-    expect(store.latestMemoryPassChat('work')).toBeNull()
-
-    store.chats = [
-      { chat_id: 'c-done', project_id: 'p-mem', archived: true },
-    ] as unknown as typeof store.chats
-    expect(store.latestMemoryPassChat('personal')).toBeNull()
+    expect(store.memoryInsightRows).toHaveLength(1)
+    expect(store.memoryInsightRows[0]).toMatchObject({
+      title: 'Deck figures',
+      phase: 'attention',
+      label: 'needs attention',
+      blocking: true,
+    })
   })
 })

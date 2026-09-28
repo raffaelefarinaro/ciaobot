@@ -335,6 +335,19 @@ For post-archive pipeline changes, use `tests/test_archive_jobs.py`. It exercise
 For HTML artifact changes, keep the preview self-contained: inline scripts/styles and `data:` media are allowed, while external requests and `blob:` sources must remain blocked. Use the fixtures under `tests/fixtures/html_artifacts/` plus the focused workspace-HTML tests. The response body carries the injected comment bridge (`ciao/web/artifact_bridge.py`): keep it ES5, marker-tagged, and idempotent, never inject ahead of a doctype (a `<script>` before it renders the artifact in quirks mode), and keep `action: 'ready'` deferred to `DOMContentLoaded` — that message is the parent's only cue to push comment highlights, and anything pushed earlier reaches a frame that is still loading. `tests/test_workspace_html.py` asserts the injection and the header contract together; `web/src/lib/artifactBridgeScript.test.ts` runs the script itself in jsdom for anchoring and highlight behaviour.
 For workspace navigation changes, verify that unmodified `1`–`9` keys follow the visible sidebar workspace order, do not fire from text inputs, and keep working in the automations view. The sidebar key labels should remain visible and accessible at narrow widths. An open `AskUserQuestion` card takes those digits over for its own options while it is up (Design System rule S7) and hands them back when it closes, so check both states after touching either handler.
 On the home screen, also verify that it shows only the selected workspace's chats (switching workspaces swaps the content) and that arrow keys follow the rendered lane layout: up/down moves between stacked lanes, left/right moves within a lane.
+A memory pass is not a chat row anywhere, so its whole surface is the one
+**memory insights** section below the tiers. `web/src/lib/memoryInsights.ts` owns
+that derivation — one row per archived conversation, the archive pipeline and the
+pass joined, the pass winning the phase, and every label — and
+`web/src/lib/__tests__/memoryInsights.test.ts` drives it with no Pinia. When you
+touch it, check the overlap case (a trajectory still saving while its pass is
+already running must stay ONE row), the fallback (no pass yet, so the row opens
+the archived transcript), the dead entry (no file and no pass, so the row is
+disabled), the counter rules (`chatIsAttentionItem` is what the Home nav badge
+and the lane status sentence both ask), and that the pass never reappears in
+`activeChatsAll`, `projectChats`, `totalUnread`, the sidebar or a schedule
+target. A pass's own archive is not a second row: `memoryInsights` skips any chat
+that is a pass when reading archive state.
 For Work details changes, verify the rail and the narrow-pane drawer together: both render `AgentContextSection.vue` and the running-subagent list, and the ⓘ toggle moves focus between the rail heading and the chat-body tab.
 For composer drag-and-drop changes, test the desktop-drop grant path end to
 end. Drops preserve the source file and add Markdown companions, and return
