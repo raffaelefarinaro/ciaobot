@@ -278,7 +278,7 @@ def test_cli_posts_the_operation_with_the_bearer_token(
         seen["body"] = json.loads(request.data)
         return _Response(json.dumps({"ok": True, "data": [{"path": "People/Sofia.md"}]}).encode())
 
-    monkeypatch.setattr(agent_cli.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(agent_cli, "_LOCAL_OPENER", SimpleNamespace(open=fake_urlopen))
     monkeypatch.setenv(AGENT_TOKEN_ENV, "tok-1")
     monkeypatch.setenv(AGENT_URL_ENV, "http://127.0.0.1:8443/agent/v1/")
     assert agent_cli.main(["vault", "search", "Sofia", "--limit", "2"]) == 0

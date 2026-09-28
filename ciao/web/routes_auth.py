@@ -158,9 +158,11 @@ async def auth_settings_update(request: Request) -> JSONResponse:
     elif not is_loopback_client(request):
         client = request.client
         logger.warning(
-            "PWA password protection enabled by a non-local caller (peer=%s). "
-            "Recover with PWA_AUTH_TOKEN in the workspace .env if this was not you.",
+            "PWA password protection enabled by a non-local caller (peer=%s, "
+            "x-forwarded-for=%s). Recover with PWA_AUTH_TOKEN in the workspace "
+            ".env if this was not you.",
             client.host if client else "unknown",
+            request.headers.get("x-forwarded-for", ""),
         )
 
     token_to_store = new_password.strip() or current_token
