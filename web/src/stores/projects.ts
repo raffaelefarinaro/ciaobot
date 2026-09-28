@@ -1371,7 +1371,6 @@ export const useProjectStore = defineStore('projects', () => {
   // the project could not be found.
   async function newChatInProject(
     projectId: string,
-    initialText = '',
     title = DEFAULT_CHAT_TITLE,
     runtime?: NewChatRuntime,
   ): Promise<ChatInfo | undefined> {
@@ -1389,10 +1388,7 @@ export const useProjectStore = defineStore('projects', () => {
     activeWorkspace.value = project.workspace
     persistState()
     try {
-      if (runtime) return await createChat(project.project_id, title, initialText || undefined, runtime)
-      return initialText
-        ? await createChat(project.project_id, title, initialText)
-        : await createChat(project.project_id)
+      return await createChat(project.project_id, title, undefined, runtime)
     } catch (err) {
       // The switch is committed before the POST, so a rejected creation used
       // to leave the app scoped to the new workspace while still showing (and
