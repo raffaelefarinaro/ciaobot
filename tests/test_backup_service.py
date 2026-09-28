@@ -611,6 +611,29 @@ async def test_a_backup_that_is_overdue_runs_at_startup(tmp_path: Path) -> None:
     assert restarted._next_delay() == float(BACKUP_INTERVAL_S) - 10  # noqa: SLF001
 
 
+async def test_an_unexpected_fault_counts_as_an_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run that raises still stamps its attempt, so the loop waits an
+    interval instead of re-entering at once and forking git in a tight loop."""
+    world = _world(tmp_path)
+    clock = _Clock()
+    store = AppSettingsStore(world.config.state_path.parent / "app_settings.json")
+    store.update(
+        {"backup_last_attempt_at": (clock.now - timedelta(hours=1)).isoformat()}
+    )
+    service = _service(world, clock=clock, store=store)
+
+    async def boom(*_args, **_kwargs):
+        raise OSError("E2BIG")
+
+    monkeypatch.setattr(service, "_run_locked", boom)
+    status = await service.run_backup()
+
+    assert status.state == backup_service.STATE_NEEDS_ATTENTION
+    assert service._next_delay() == float(BACKUP_INTERVAL_S)  # noqa: SLF001
+
+
 async def test_the_loop_stops_when_asked(tmp_path: Path) -> None:
     world = _world(tmp_path)
     clock = _Clock()

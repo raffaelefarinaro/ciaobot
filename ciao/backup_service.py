@@ -551,6 +551,11 @@ class BackupService:
         except Exception as exc:  # noqa: BLE001 — an unattended run must survive
             logger.exception("Memory backup failed unexpectedly")
             self._backoff = None
+            # An unexpected fault is still an attempt. Without the stamp,
+            # `_next_delay` keeps reading the last successful tick's age, which
+            # is already past the interval, so the loop would re-enter at once
+            # and spin (forking git each time) for as long as the fault lasts.
+            self._store.update({"backup_last_attempt_at": self._now().isoformat()})
             return self._status(
                 STATE_NEEDS_ATTENTION,
                 reason=f"{type(exc).__name__}: {exc}",

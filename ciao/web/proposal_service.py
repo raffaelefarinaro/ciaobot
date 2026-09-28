@@ -871,7 +871,7 @@ def accept_skill_proposal(config: Any, pcm: Any, ctx: dict[str, Any]) -> dict[st
         # ``supersedes`` is the dead association read above. Without naming it,
         # mark_implementing's own idempotency rule refuses this very rebind and
         # the record keeps pointing at a chat the operator can no longer open.
-        skill_proposals.mark_implementing(
+        bound = skill_proposals.mark_implementing(
             config, pid, chat.chat_id, supersedes=proposal.chat_id
         )
     except (OSError, ValueError) as exc:
@@ -880,6 +880,23 @@ def accept_skill_proposal(config: Any, pcm: Any, ctx: dict[str, Any]) -> dict[st
             "error": f"could not bind the chat to {proposal.skill}: {exc}",
             "chat_id": chat.chat_id,
         }
+    if bound is None:
+        # Settled or removed between the lookup above and the bind.
+        return {"ok": False, "error": "this proposal is no longer queued"}
+    if bound.chat_id != chat.chat_id:
+        # A concurrent accept (a double tap, a second device) bound its chat
+        # first and `mark_implementing` left that one in place. Sending the
+        # prompt into this chat as well would run two implementations of one
+        # proposal, so hand back the winner and let this chat go unused.
+        winner = _live_chat(pcm, bound.chat_id)
+        if winner is not None:
+            return {
+                "ok": True,
+                "chat_id": winner.chat_id,
+                "project_id": winner.project_id,
+                "created": False,
+            }
+        return {"ok": False, "error": f"{proposal.skill} is being implemented elsewhere"}
     return {
         "ok": True,
         "chat_id": chat.chat_id,

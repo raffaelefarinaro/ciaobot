@@ -752,10 +752,48 @@ def _porcelain_entries(porcelain: str) -> list[tuple[str, str]]:
         if " -> " in file_part:
             parts = file_part.split(" -> ")
             file_part = parts[-1].strip()
-        if file_part.startswith('"') and file_part.endswith('"'):
-            file_part = file_part[1:-1]
+        if len(file_part) > 1 and file_part.startswith('"') and file_part.endswith('"'):
+            file_part = _unquote_git_path(file_part[1:-1])
         entries.append((status_prefix, file_part))
     return entries
+
+
+_GIT_SIMPLE_ESCAPES = {
+    "a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, '"': 34, "\\": 92,
+}
+
+
+def _unquote_git_path(body: str) -> str:
+    """The path inside git's C-style quotes, with its escapes decoded.
+
+    Git quotes a path holding a non-ASCII byte (``core.quotePath`` is on by
+    default) as octal escapes, so a note called ``Müller.md`` prints as
+    ``"M\\303\\274ller.md"``. Stripping the quotes and keeping the escapes names
+    a file that does not exist, which is how a modified or new note inside an
+    already-tracked folder was silently left out of the backup.
+    """
+    raw = bytearray()
+    i = 0
+    while i < len(body):
+        char = body[i]
+        if char != "\\" or i + 1 >= len(body):
+            raw.extend(char.encode("utf-8"))
+            i += 1
+            continue
+        nxt = body[i + 1]
+        if nxt in _GIT_SIMPLE_ESCAPES:
+            raw.append(_GIT_SIMPLE_ESCAPES[nxt])
+            i += 2
+        elif nxt in "01234567":
+            digits = body[i + 1 : i + 4]
+            length = len(digits) - len(digits.lstrip("01234567"))
+            digits = digits[: length or 1]
+            raw.append(int(digits, 8) & 0xFF)
+            i += 1 + len(digits)
+        else:
+            raw.extend(char.encode("utf-8"))
+            i += 1
+    return raw.decode("utf-8", errors="replace")
 
 
 def _expand_status_paths(workspace: Path, porcelain: str) -> list[Path]:
@@ -873,6 +911,21 @@ def scan_file_for_secrets(p: Path) -> tuple[list[str], list[str]]:
     return blockers, warnings
 
 
+def _scan_eligible(root: Path, eligible: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Secret-scan every eligible path under ``root``; ``(blockers, warnings)``."""
+    blockers: list[str] = []
+    warnings: list[str] = []
+    for rel in eligible:
+        # The test-fixture exemption is keyed on a repo-relative path, so it
+        # reads the same here as in the manual preflight.
+        if _is_test_fixture(rel):
+            continue
+        file_blockers, file_warnings = scan_file_for_secrets(root / rel)
+        blockers.extend(file_blockers)
+        warnings.extend(file_warnings)
+    return blockers, warnings
+
+
 async def preflight_scoped(config, workspace: Path) -> dict:
     """What a scoped backup commit would contain here, and what it refuses.
 
@@ -899,14 +952,19 @@ async def preflight_scoped(config, workspace: Path) -> dict:
     deleted. A deleted path inside the scope therefore appears in ``eligible``
     with nothing scanned against it, and one outside it in ``excluded``.
     """
-    root = backup_scope.data_root(config)
+    # The filesystem work below (resolving the data root, walking untracked
+    # directories, classifying and reading every pending file for the secret
+    # scan) is synchronous and scales with the size of the backlog, so it runs
+    # off the event loop: the status endpoint and the five-minute loop share
+    # the loop with chat streaming.
+    root = await asyncio.to_thread(backup_scope.data_root, config)
     rc, out, err = await _status_porcelain(Path(workspace))
     blockers: list[str] = []
     changed: list[Path] = []
     if rc != 0:
         blockers.append(f"git status failed: {err or out}")
     else:
-        changed = _expand_status_paths(Path(workspace), out)
+        changed = await asyncio.to_thread(_expand_status_paths, Path(workspace), out)
         # A deletion is durable work even though there is nothing left to read:
         # not committing it means the next checkout on another machine restores
         # the note the owner deleted. `_expand_status_paths` drops these because
@@ -919,7 +977,7 @@ async def preflight_scoped(config, workspace: Path) -> dict:
             if "D" in status_prefix
         ]
 
-    eligible, excluded = backup_scope.classify(changed, config)
+    eligible, excluded = await asyncio.to_thread(backup_scope.classify, changed, config)
     # The scope says where a path may go; git says whether it can be staged at
     # all, and a path it ignores can never be committed however eligible it is.
     # Reporting one as eligible that the commit would then refuse is how a
@@ -930,15 +988,8 @@ async def preflight_scoped(config, workspace: Path) -> dict:
     if ignored:
         excluded.extend(rel for rel in eligible if rel in ignored)
         eligible = [rel for rel in eligible if rel not in ignored]
-    warnings: list[str] = []
-    for rel in eligible:
-        # The test-fixture exemption is keyed on a repo-relative path, so it
-        # reads the same here as in the manual preflight.
-        if _is_test_fixture(rel):
-            continue
-        file_blockers, file_warnings = scan_file_for_secrets(root / rel)
-        blockers.extend(file_blockers)
-        warnings.extend(file_warnings)
+    scan_blockers, warnings = await asyncio.to_thread(_scan_eligible, root, eligible)
+    blockers.extend(scan_blockers)
 
     tracked = await asyncio.to_thread(backup_scope.tracked_excluded, config)
     blockers.extend(f"Tracked but outside the backup scope: {rel}" for rel in tracked)
