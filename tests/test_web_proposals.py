@@ -943,9 +943,9 @@ def test_a_batch_dismiss_covers_skill_rows_and_bullets_together(tmp_path: Path) 
 
 
 def test_skill_dismissals_stay_out_of_the_memory_outcome_tally(tmp_path: Path) -> None:
-    """The outcome ledger measures the memory extraction pipeline; skill
-    proposals come from skill evolution, so rejecting one must not inflate the
-    dismissed count — singly or inside a batch."""
+    """The outcome ledger measures the memory extraction pipeline; a skill
+    proposal is filed by the same pass but settled, not promoted, so rejecting
+    one must not inflate the dismissed count — singly or inside a batch."""
     from ciao import proposal_outcomes as po
 
     config = _config(tmp_path)
@@ -1270,8 +1270,8 @@ def test_the_bulk_sweep_records_one_event_per_removed_row(tmp_path: Path) -> Non
 
 
 def test_dismissing_a_skill_row_records_no_outcome(tmp_path: Path) -> None:
-    """Skill proposals belong to skill evolution, not the memory pipeline, so
-    their dismissal must not land in the memory outcome tally."""
+    """A skill row is settled rather than promoted, so its dismissal must not
+    land in the memory outcome tally."""
     config = _config(tmp_path)
     source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
     client = _client(config)

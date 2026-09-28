@@ -652,9 +652,9 @@ watch(
  * error for exactly that reason. */
 const activeSection = computed(() => store.view)
 
-/** A skill proposal's name without its legacy date prefix. New Skill reflection
- * runs upsert one canonical file; grouping keeps older queues understandable
- * until each skill is reflected again.
+/** A skill proposal's name without its legacy date prefix. A pass upserts one
+ * canonical file; grouping keeps older queues understandable until each skill
+ * is reflected again.
  */
 function skillBase(row: ProposalRow): string {
   return row.text.replace(/^\d{4}-\d{2}-\d{2}-/, '') || row.text

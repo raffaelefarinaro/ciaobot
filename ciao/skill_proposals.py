@@ -123,9 +123,9 @@ _RENDERED_HEADINGS: tuple[tuple[str, str], ...] = (
 )
 _EVIDENCE_HEADING = "Evidence"
 
-# The headings the evolution prompt asks the model for, folded into the
-# rendered ones. Without these table a re-run of an old file's finding would
-# read as an unnamed section and land in the rationale.
+# The headings a pass's prompt asks the model for, folded into the rendered
+# ones. Without these table a re-run of an old file's finding would read as an
+# unnamed section and land in the rationale.
 _LEGACY_HEADINGS: dict[str, str] = {
     "what i noticed": "problem",
     "suggested improvement": "change",
@@ -160,9 +160,9 @@ class SkillEvidence:
     """One observation behind a proposal, and where it can be re-read.
 
     ``turn`` locates the observation inside ``archive`` and is empty for a
-    whole-session observation, which is what an evolution pass records: the
-    trajectory it read is the evidence, not one turn of it. The triple is the
-    dedupe key, so re-processing the same session adds nothing.
+    whole-session observation, which is what a pass records: the trajectory it
+    read is the evidence, not one turn of it. The triple is the dedupe key, so
+    re-processing the same session adds nothing.
     """
 
     chat_id: str
@@ -338,7 +338,7 @@ def read_queue(config: CiaoConfig, workspace: str) -> list[SkillProposal]:
 
     A settled record is absent, which is what makes this the pending set: a
     dismissed proposal stays on disk as a record of the decision, and the next
-    evolution pass merges new evidence into it without re-asking.
+    pass merges new evidence into it without re-asking.
 
     Sorted by skill so a listing is stable across runs, and one file read per
     record. :func:`enumerate_proposal_ids` is the same walk reduced to ids.
@@ -458,12 +458,11 @@ def settle_proposal(
 
     The decision goes into the workspace's existing memory-queue decision
     sidecar under :func:`decision_text`, because that sidecar is what outlives
-    the row: a settled record may be deleted later, and the next evolution pass
-    must not re-ask what was already answered. It is written BEFORE the record
-    flips, so a sidecar that could not be written leaves the proposal open and
-    visible rather than settled and unrecorded. ``reason`` rides along in the
-    sidecar's ``outcome``, the free-text slot the review History tab already
-    renders.
+    the row: a settled record may be deleted later, and the next pass must not
+    re-ask what was already answered. It is written BEFORE the record flips, so
+    a sidecar that could not be written leaves the proposal open and visible
+    rather than settled and unrecorded. ``reason`` rides along in the sidecar's
+    ``outcome``, the free-text slot the review History tab already renders.
 
     Raises ``ValueError`` for a lifecycle that is not a decision; a caller that
     invents one would otherwise write a record no reader can place.

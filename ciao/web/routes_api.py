@@ -7489,8 +7489,10 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 # Same contract as the single-row route, through the same
                 # handler: the decision's text must outlive the row or the
                 # nightly curator re-files it, and only the extraction kinds
-                # reach the outcomes tally (skill rows come from skill
-                # evolution, rehome rows from vault hygiene).
+                # reach the outcomes tally: that ledger measures the MEMORY
+                # extraction pipeline, a skill proposal is filed by the same
+                # pass but settled, not promoted, and rehome rows come from
+                # vault hygiene.
                 destination = ""
                 # An outcome with nothing set is how a row this request did not
                 # promote reports: no ``ok`` at all, which the builders read as

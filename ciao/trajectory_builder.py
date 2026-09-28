@@ -184,8 +184,9 @@ def infer_outcome(*, errors: int) -> str:
     """Heuristic outcome label.
 
     ``success`` = clean run, no errors. ``needs_review`` = at least one
-    error. Subjective, refined later via LLM-as-judge; the gate today is
-    just a flag for the weekly evolution pass to look at.
+    error. Subjective, refined later via LLM-as-judge; today the label is a
+    durable outcome summary the CLI lists, and no pass reads it
+    automatically.
     """
     if errors > 0:
         return "needs_review"
