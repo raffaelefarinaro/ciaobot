@@ -15,10 +15,10 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import * as desktop from './desktop'
+import * as platform from './platform'
 
 const SRC = join(__dirname, '..')
-const SELF = join(SRC, 'lib', 'desktop.test.ts')
+const SELF = join(SRC, 'lib', 'platform.test.ts')
 
 /**
  * The retired names: the helper, the document-start marker and the command
@@ -51,8 +51,8 @@ function sourceFiles(): string[] {
 }
 
 describe('app-presence abstraction', () => {
-  it('isApplePlatform is the only thing lib/desktop exports', () => {
-    expect(Object.keys(desktop)).toEqual(['isApplePlatform'])
+  it('isApplePlatform is the only thing lib/platform exports', () => {
+    expect(Object.keys(platform)).toEqual(['isApplePlatform'])
   })
 
   it('has no reference to the retired markers anywhere in web/src', () => {
