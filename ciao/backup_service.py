@@ -262,6 +262,21 @@ def sanitize_remote(url: str) -> str:
 _REMOTE_PLACEHOLDER = "***"
 
 
+#: The prefix ``backup_scope.eligible_relpaths`` writes for a vault base with
+#: no directory of its own — the documented existing-folder install
+#: (``CIAO_VAULT_ROOT=.``), where the data root *is* the vault and every file
+#: under it is in scope.
+#:
+#: It is answered by *membership* and never by comparing the whole tuple: that
+#: install's prefixes also carry the archived-workspace base (and, when the
+#: agent roots live in the same repository, the top-level durable trees), so
+#: ``prefixes == ("./",)`` is unreachable and reads the broadest install in the
+#: product as "only some trees" — a bare ``.`` rendered as if it were one more
+#: of them.
+_WHOLE_ROOT_PREFIX = "./"
+_WHOLE_ROOT_NAME = "the whole data root"
+
+
 def _scope_summary(config) -> str:
     """The backup scope as one human line, derived from the scope itself.
 
@@ -269,14 +284,18 @@ def _scope_summary(config) -> str:
     the status can never describe a different scope than the one
     ``commit_scoped`` enforces. The per-prefix noise (the ``*`` an archived
     workspace adds, the trailing slash) is dropped, and a vault that *is* the
-    data root — whose scope is everything under it — is named as such.
+    data root — whose scope is everything under it — is named as such instead
+    of being listed among the trees it already contains.
     """
+    prefixes = backup_scope.eligible_relpaths(config)
+    if _WHOLE_ROOT_PREFIX in prefixes:
+        return _WHOLE_ROOT_NAME
     names: list[str] = []
-    for prefix in backup_scope.eligible_relpaths(config):
+    for prefix in prefixes:
         segments = [part for part in prefix.split("/") if part and part != "*"]
         durable = next((s for s in segments if s in backup_scope.DURABLE_ROOTS), None)
         if durable is None:
-            durable = segments[0] if segments else "(the whole data root)"
+            durable = segments[0]
         if durable not in names:
             names.append(durable)
     return ", ".join(names)
@@ -991,9 +1010,11 @@ def _scope_description(config, prefixes: tuple[str, ...]) -> str:
     describe a different scope than the one ``commit_scoped`` enforces. There
     are only two shapes — a data root that *is* the vault backs up everything
     under it, and a data root that merely contains the durable trees backs up
-    those trees and nothing else.
+    those trees and nothing else. The first shape is recognised by the presence
+    of the ``./`` sentinel (see ``_WHOLE_ROOT_PREFIX``), not by the prefixes being
+    exactly that one prefix.
     """
-    if prefixes == ("./",):
+    if _WHOLE_ROOT_PREFIX in prefixes:
         return "every file in the folder (this folder is the memory vault itself)"
     return "only the durable trees inside it: " + _scope_summary(config)
 
@@ -1079,7 +1100,9 @@ What that means for how you work:
 - Nothing in this prompt is a credential, and no credential belongs in the
   remote URL, in the repository, or in this chat. Use the authentication this
   machine already has — an SSH key, a credential helper, `gh auth setup-git` —
-  and never paste a token into a URL, a file, or a message.
+  and never paste a token into a URL, a file, or a message. Checking that
+  identity and access work means reading this machine's git and auth
+  configuration; never print, copy, or quote a secret you read while doing it.
 
 Then:
 
@@ -1098,9 +1121,15 @@ Then:
    does not, and must not reach the remote. Check the already-tracked paths
    that fall outside the scope (`git ls-files` will list them) and tell the
    user which ones you would untrack rather than untracking them silently.
-4. Make the first commit of the durable data, or push the commits that are
-   already waiting, then verify the remote really has it: read the branch
-   back from the remote and compare it with the local head. A push that
+4. Before you commit or push anything, check the two things that fail quietly
+   on a machine nobody has set git up on: that this repository has a committer
+   identity (`git config user.name` and `git config user.email` — set them if
+   git reports none, and tell the user what you set) and that `origin` is
+   reachable and this machine is authorized to push to it (`git ls-remote
+   origin`, or `gh auth status` / `ssh -T` for the authentication this remote
+   uses). Then make the first commit of the durable data, or push the commits
+   that are already waiting, and verify the remote really has it: read the
+   branch back from the remote and compare it with the local head. A push that
    printed nothing is not the same as a ref that exists.
 5. Report back in this chat: the data folder, the remote URL, the branch,
    what is in scope, what is excluded, and how you verified the push. Then
@@ -1126,7 +1155,9 @@ def render_setup_prompt(config, context: dict[str, Any] | None = None) -> str:
 
     Only the sanitized remote and the count of out-of-scope tracked paths go
     in — the URL never carries a credential (``sanitize_remote``), and the
-    prompt carries no token, key, or password to copy into a repository.
+    prompt carries no token, key, or password to copy into a repository. The
+    identity and access check it asks for is a request to read this machine's
+    configuration, never to reveal one.
     """
     facts = setup_context(config) if context is None else context
     branch = str(facts["branch"]) or "none (no repository, or a detached HEAD)"

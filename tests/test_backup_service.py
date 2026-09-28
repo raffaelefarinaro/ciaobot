@@ -930,10 +930,23 @@ async def test_the_status_says_where_the_last_run_pushed_to(tmp_path: Path) -> N
 # install, a folder with spaces stays one path, and no credential travels.
 
 
-def _world_in(directory: Path, *, with_remote: bool = True) -> _World:
-    """An install rooted at ``directory``, which may contain spaces."""
+def _world_in(
+    directory: Path,
+    *,
+    with_remote: bool = True,
+    vault_is_data_root: bool = False,
+) -> _World:
+    """An install rooted at ``directory``, which may contain spaces.
+
+    ``vault_is_data_root`` is the documented existing-folder install
+    (``CIAO_VAULT_ROOT=.``): the data root *is* the vault, so its workspaces sit
+    directly under the folder and nothing inside it is merely one durable tree.
+    """
     directory.mkdir(parents=True, exist_ok=True)
-    _write(directory / "memory-vault" / "Notes" / "day-1.md", "day one\n")
+    vault = directory if vault_is_data_root else directory / "memory-vault"
+    # An existing-folder install keeps its workspaces directly under the vault.
+    workspace = vault / "personal" if vault_is_data_root else vault
+    _write(workspace / "Notes" / "day-1.md", "day one\n")
     (directory / ".runtime").mkdir()
     _git(directory, "init", "-q", "-b", "main")
     _git(directory, "config", "user.name", "T")
@@ -951,7 +964,7 @@ def _world_in(directory: Path, *, with_remote: bool = True) -> _World:
         workspace_root=directory,
         state_path=directory / ".runtime" / "state.json",
         media_root=directory / ".runtime" / "media",
-        vault_root=directory / "memory-vault",
+        vault_root=vault,
     )
     return _World(directory, config, remote)
 
@@ -1018,7 +1031,15 @@ def test_the_setup_prompt_carries_no_credential(tmp_path: Path) -> None:
 
 def test_the_prompt_is_the_same_bytes_for_both_actions(tmp_path: Path) -> None:
     """The copy action and the in-app dispatch must not be able to disagree:
-    they are one template, and this is the assertion that keeps them one."""
+    they are one template, and this is the assertion that keeps them one.
+
+    "The same bytes" means one *template* rendered from the same trusted facts,
+    not one shared render: the two routes each read their own
+    ``setup_context`` (a page load and a click are different moments, and
+    neither should report a repository state another request saw minutes ago),
+    so the invariant worth testing is that no second template exists — the two
+    calls below differ in nothing but which line calls ``setup_context``.
+    """
     world = _world(tmp_path)
 
     copy_text = backup_service.render_setup_prompt(
@@ -1034,6 +1055,64 @@ def test_the_prompt_is_the_same_bytes_for_both_actions(tmp_path: Path) -> None:
     # A context is an optimization, not a second source of truth: rendering
     # with no context at all produces the same text.
     assert backup_service.render_setup_prompt(world.config) == copy_text
+
+
+async def test_the_scope_is_the_whole_folder_when_the_vault_is_the_data_root(
+    tmp_path: Path,
+) -> None:
+    """The documented existing-folder install (``CIAO_VAULT_ROOT=.``) has no
+    durable tree *inside* the data root: the folder is the vault, so every file
+    in it is backed up.
+
+    Its scope prefixes still carry the archived-workspace base, so the shape has
+    to be recognised by the presence of the ``./`` sentinel. Compared as a whole
+    tuple it reads as "only some trees", and the sentinel is then rendered as a
+    bare ``.`` among them — one more name in a list the folder already contains,
+    and a prompt telling the agent the rest of the folder is not backed up.
+    """
+    world = _world_in(tmp_path / "existing notes", vault_is_data_root=True)
+
+    context = backup_service.setup_context(world.config)
+    prompt = backup_service.render_setup_prompt(world.config, context)
+
+    assert "./" in context["scope_paths"]
+    assert context["scope"] == (
+        "every file in the folder (this folder is the memory vault itself)"
+    )
+    assert f"backed up:              {context['scope']}" in prompt
+    assert "only the durable trees inside it" not in prompt
+    # The sentinel is a fact about the scope, not a directory in it, so it is
+    # never rendered as a name beside the durable trees.
+    assert not [line for line in prompt.splitlines() if "." in line.split()]
+    # The status renders the same scope from the same prefixes, so an install
+    # that backs up everything does not report some of it.
+    assert (await _service(world).status()).scope == "the whole data root"
+
+
+def test_the_prompt_asks_for_identity_and_remote_access_to_be_verified(
+    tmp_path: Path,
+) -> None:
+    """The two failures that stall a guided setup are both quiet: a repository
+    with no ``user.name``/``user.email`` refuses its first commit with a message
+    that does not name the cause, and a remote this machine cannot authenticate
+    to refuses the push the same way. The prompt asks for both checks before the
+    push, and still forbids a credential from going anywhere — verifying means
+    reading configuration, not revealing it.
+    """
+    world = _world_in(tmp_path / "install")
+
+    prompt = backup_service.render_setup_prompt(world.config)
+
+    assert "git config user.name" in prompt
+    assert "git config user.email" in prompt
+    # The remote check is a round trip in its own right, asked for before the
+    # push rather than inferred from the push's own output.
+    assert "git ls-remote" in prompt
+    assert "gh auth status" in prompt
+    # ...and the prohibition survives next to the instruction to read that
+    # configuration.
+    assert "never paste a token" in prompt
+    assert "never print, copy, or quote a secret" in prompt
 
 
 def test_the_context_reports_an_install_that_is_not_configured_yet(
