@@ -90,6 +90,8 @@ from ciao.web.routes_api import (
     local_resync,
     local_status,
     local_backup_run,
+    local_backup_setup_chat,
+    local_backup_setup_prompt,
     local_backup_settings,
     local_backup_status,
     list_all_chats,
@@ -404,11 +406,18 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/local/handback", local_handback, methods=["POST"]),
         Route("/api/local/resync", local_resync, methods=["POST"]),
         # The unattended five-minute memory backup: status, the owner's
-        # enable/pause switch, and a manual run through the same serialized
-        # path the loop uses.
+        # enable/pause switch, a manual run through the same serialized path
+        # the loop uses, and the one canonical setup prompt behind both of its
+        # actions (copy it, or set up in a chat that sends it).
         Route("/api/local/backup", local_backup_status, methods=["GET"]),
         Route("/api/local/backup", local_backup_settings, methods=["PATCH"]),
         Route("/api/local/backup/run", local_backup_run, methods=["POST"]),
+        Route(
+            "/api/local/backup/setup-prompt", local_backup_setup_prompt, methods=["GET"]
+        ),
+        Route(
+            "/api/local/backup/setup-chat", local_backup_setup_chat, methods=["POST"]
+        ),
         Route("/api/handover/merge", handover_merge, methods=["POST"]),
         # Admin
         Route("/api/admin/snapshot", admin_snapshot, methods=["POST"]),

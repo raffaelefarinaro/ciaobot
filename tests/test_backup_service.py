@@ -919,3 +919,281 @@ async def test_the_status_says_where_the_last_run_pushed_to(tmp_path: Path) -> N
     store.update({"backup_remote": "https://ghp_TOKEN1234567890@github.com/o/r.git"})
     edited = await _service(world, store=store).status()
     assert edited.last_remote == "https://github.com/o/r.git"
+
+
+# ── the setup prompt ────────────────────────────────────────────────────────
+#
+# One prompt serves two actions (a Settings copy button and the in-app
+# dispatch), and it is the only place a user with no Git knowledge is told
+# what the backup needs. So the properties under test are the ones whose
+# failure is silent: the folder and the scope are the real ones from this
+# install, a folder with spaces stays one path, and no credential travels.
+
+
+def _world_in(directory: Path, *, with_remote: bool = True) -> _World:
+    """An install rooted at ``directory``, which may contain spaces."""
+    directory.mkdir(parents=True, exist_ok=True)
+    _write(directory / "memory-vault" / "Notes" / "day-1.md", "day one\n")
+    (directory / ".runtime").mkdir()
+    _git(directory, "init", "-q", "-b", "main")
+    _git(directory, "config", "user.name", "T")
+    _git(directory, "config", "user.email", "t@e.com")
+    _git(directory, "add", "-A")
+    _git(directory, "commit", "-q", "-m", "seed")
+    remote: Path | None = None
+    if with_remote:
+        remote = directory.parent / "origin.git"
+        _git(directory.parent, "init", "-q", "--bare", "-b", "main", str(remote))
+        _git(directory, "remote", "add", "origin", str(remote))
+        _git(directory, "push", "-q", "-u", "origin", "main")
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=directory,
+        state_path=directory / ".runtime" / "state.json",
+        media_root=directory / ".runtime" / "media",
+        vault_root=directory / "memory-vault",
+    )
+    return _World(directory, config, remote)
+
+
+def test_the_setup_prompt_names_this_install(tmp_path: Path) -> None:
+    """The absolute folder and the scope have to be the real ones, or the agent
+    sets up a backup of a directory nobody uses."""
+    world = _world_in(tmp_path / "ciao install")
+
+    context = backup_service.setup_context(world.config)
+    prompt = backup_service.render_setup_prompt(world.config, context)
+
+    assert context["folder"] == str(world.workspace.resolve())
+    assert f'"{context["folder"]}"' in prompt
+    assert "memory-vault" in context["scope"]
+    assert "memory-vault" in prompt
+    assert context["branch"] == "main"
+    assert "main" in prompt
+    # The scope is rendered from the scope itself, so the prompt names the
+    # exact paths the unattended commit would take.
+    assert "memory-vault/" in prompt
+
+
+def test_a_folder_with_spaces_stays_one_path(tmp_path: Path) -> None:
+    """A data folder with a space in it is the ordinary case on macOS, and a
+    prompt that printed it bare would have the agent's first ``cd`` land
+    nowhere. The path is quoted, and the spaces are not escaped away."""
+    world = _world_in(tmp_path / "My Ciao Install")
+
+    context = backup_service.setup_context(world.config)
+    prompt = backup_service.render_setup_prompt(world.config, context)
+
+    assert "My Ciao Install" in context["folder"]
+    # Quoted, so a reader pasting it into a shell keeps it whole...
+    assert f'"{context["folder"]}"' in prompt
+    # ...and never backslash-escaped, which would be a path that does not exist.
+    assert "My\\ Ciao\\ Install" not in prompt
+    # The instruction to quote is in the prompt itself, so the requirement
+    # travels with the path rather than living only in a test.
+    assert "spaces" in prompt
+
+
+def test_the_setup_prompt_carries_no_credential(tmp_path: Path) -> None:
+    """An ``origin`` routinely has a token in it. The prompt is copied to a
+    clipboard and dispatched into a chat, so a token reaching either is a
+    credential in two more places than it started in."""
+    world = _world(tmp_path)
+    _git(
+        world.workspace,
+        "remote",
+        "set-url",
+        "origin",
+        "https://ghp_SECRETTOKEN1234567890@github.com/me/notes.git",
+    )
+
+    context = backup_service.setup_context(world.config)
+    prompt = backup_service.render_setup_prompt(world.config, context)
+
+    assert "ghp_SECRETTOKEN1234567890" not in prompt
+    assert "ghp_SECRETTOKEN1234567890" not in str(context)
+    # ...and the sanitized URL is there, so the agent knows where to look.
+    assert "https://github.com/me/notes.git" in prompt
+
+
+def test_the_prompt_is_the_same_bytes_for_both_actions(tmp_path: Path) -> None:
+    """The copy action and the in-app dispatch must not be able to disagree:
+    they are one template, and this is the assertion that keeps them one."""
+    world = _world(tmp_path)
+
+    copy_text = backup_service.render_setup_prompt(
+        world.config, backup_service.setup_context(world.config)
+    )
+    # The dispatch renders from a context the caller already holds; the copy
+    # path is the same call with the context filled in for it.
+    dispatch_text = backup_service.render_setup_prompt(
+        world.config, backup_service.setup_context(world.config)
+    )
+
+    assert copy_text == dispatch_text
+    # A context is an optimization, not a second source of truth: rendering
+    # with no context at all produces the same text.
+    assert backup_service.render_setup_prompt(world.config) == copy_text
+
+
+def test_the_context_reports_an_install_that_is_not_configured_yet(
+    tmp_path: Path,
+) -> None:
+    """The whole reason the prompt exists is the unconfigured install, so the
+    context has to describe that case in the same shape as a ready one — a
+    missing remote reads as an empty fact, not as an error."""
+    world = _world_in(tmp_path / "install", with_remote=False)
+
+    context = backup_service.setup_context(world.config)
+
+    assert context["has_repo"] is True
+    assert context["parent_repo"] is False
+    assert context["has_remote"] is False
+    assert context["remote"] == ""
+    prompt = backup_service.render_setup_prompt(world.config, context)
+    assert "none yet" in prompt
+    assert "not a git repository yet" not in prompt
+
+
+def test_the_context_names_a_data_root_inside_a_parent_repository(
+    tmp_path: Path,
+) -> None:
+    """A data root that is a subdirectory of a larger checkout is the one shape
+    where adding a remote here would push far more than the notes. The prompt
+    has to say so rather than leaving the agent to discover it at push time."""
+    outer = tmp_path / "outer"
+    _write(outer / "app.py", "print()\n")
+    _git(outer, "init", "-q", "-b", "main")
+    _git(outer, "config", "user.name", "T")
+    _git(outer, "config", "user.email", "t@e.com")
+    _git(outer, "add", "-A")
+    _git(outer, "commit", "-q", "-m", "seed")
+    # A vault that is not a directory makes `sync_root` fall back to the
+    # workspace root — so the data root is `outer/workspace`, a subdirectory of
+    # the checkout, which is exactly the parent-repository case.
+    workspace = outer / "workspace"
+    _write(workspace / "memory-vault" / "note.md", "hello\n")
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=workspace,
+        state_path=workspace / ".runtime" / "state.json",
+        media_root=workspace / ".runtime" / "media",
+        vault_root=workspace / "not-created-yet",
+    )
+
+    context = backup_service.setup_context(config)
+    prompt = backup_service.render_setup_prompt(config, context)
+
+    assert context["folder"] == str(workspace.resolve())
+    assert context["has_repo"] is True
+    assert context["parent_repo"] is True
+    assert context["repo_root"] == str(outer.resolve())
+    # The prompt names the enclosing repository by its actual path, so the
+    # reader can see what else a remote added here would take with it.
+    assert f'inside a repository rooted at "{context["repo_root"]}"' in prompt
+
+
+async def test_a_guided_setup_turns_the_backup_on_once_it_verifies(
+    tmp_path: Path,
+) -> None:
+    """A guided setup is the owner answering a question, so the answer has to
+    stick: an install set up through the in-app flow should start backing up,
+    not sit configured with the switch off.
+
+    And it is answered at verification, not at dispatch — dispatching arms the
+    answer, reading a real repository settles it.
+    """
+    world = _world(tmp_path)
+    _git(world.workspace, "remote", "remove", "origin")
+    service = _service(world)
+    service.set_flags(enabled=False)
+
+    service.begin_guided_setup()
+    # Dispatch alone changes nothing: the setup has not produced a remote yet.
+    assert service._store.settings.backup_enabled is False
+    unconfigured = await service.status()
+    assert unconfigured.state == backup_service.STATE_NOT_CONFIGURED
+    assert service._store.settings.backup_enabled is False
+
+    # The agent's work lands: the remote is connected and the commit is on it.
+    _git(world.workspace, "remote", "add", "origin", str(world.remote))
+    _git(world.workspace, "push", "-q", "-u", "origin", "main")
+    verified = await service.status()
+
+    assert verified.state == backup_service.STATE_READY, verified.reason
+    assert verified.enabled is True
+    reread = AppSettingsStore(world.config.state_path.parent / "app_settings.json")
+    assert reread.settings.backup_enabled is True
+
+
+async def test_a_settled_guided_setup_does_not_latch(tmp_path: Path) -> None:
+    """The arming is process state, not a store. If it latched, a later turn-off
+    would be undone by the next status read, which is not a thing the owner
+    asked for."""
+    world = _world(tmp_path)
+    service = _service(world)
+    service.begin_guided_setup()
+    await service.status()
+
+    service.set_flags(enabled=False)
+    await service.status()
+
+    assert service._store.settings.backup_enabled is False
+
+
+async def test_a_status_read_settles_the_setup_without_touching_the_repository(
+    tmp_path: Path,
+) -> None:
+    """``status`` is what a Settings page polls, so it may write a flag (a
+    guided setup settling) but must never commit or push. A status call that
+    moved the repository would be a surprising way to read a page."""
+    world = _world(tmp_path)
+    service = _service(world)
+    service.set_flags(enabled=False)
+    service.begin_guided_setup()
+    world.note("day-2.md", "day two\n")
+    head_before = world.head()
+
+    await service.status()
+
+    # The settings flag moved; the repository did not.
+    assert service._store.settings.backup_enabled is True
+    assert world.head() == head_before
+    assert "?? memory-vault/Notes/day-2.md" in _git(
+        world.workspace, "status", "--porcelain"
+    )
+
+
+async def test_a_guided_setup_never_unpauses_a_paused_backup(tmp_path: Path) -> None:
+    """The pause is the owner's own hold. Reading "set up my backup" as "un-pause
+    the backup I paused" is the surprise an unattended service must not spring,
+    so this is the flag the guided setup refuses to touch — and it is re-read at
+    verification, so a pause taken *during* the setup is honoured too."""
+    world = _world(tmp_path)
+    service = _service(world)
+    service.set_flags(enabled=False, paused=True)
+    service.begin_guided_setup()
+
+    await service.status()
+
+    assert service._store.settings.backup_paused is True
+    assert service._store.settings.backup_enabled is False
+
+
+async def test_a_pause_taken_during_a_setup_is_respected(tmp_path: Path) -> None:
+    """The pause is read when the answer is owed, not when the question was
+    asked, so a pause that lands while the agent works is the one that counts."""
+    world = _world(tmp_path)
+    _git(world.workspace, "remote", "remove", "origin")
+    service = _service(world)
+    service.set_flags(enabled=False)
+    service.begin_guided_setup()
+
+    # The owner pauses while the setup chat is still running.
+    service.set_flags(paused=True)
+    _git(world.workspace, "remote", "add", "origin", str(world.remote))
+    status = await service.status()
+
+    assert status.state == backup_service.STATE_PAUSED
+    assert status.reason == "backup is paused"
+    assert service._store.settings.backup_enabled is False

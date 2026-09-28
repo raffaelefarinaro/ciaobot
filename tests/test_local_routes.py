@@ -22,7 +22,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.app_settings import AppSettingsStore
-from ciao.backup_service import BackupService
+from ciao.backup_service import SETUP_CHAT_TITLE, BackupService
 from ciao.config import CiaoConfig
 from ciao.legacy_node_state import LegacyNodeState
 from ciao.local_session import LocalSessionManager
@@ -31,6 +31,8 @@ from ciao.web.routes_api import (
     handover_merge,
     local_backup_run,
     local_backup_settings,
+    local_backup_setup_chat,
+    local_backup_setup_prompt,
     local_backup_status,
     local_handback,
     local_preflight,
@@ -51,6 +53,12 @@ def _routes():
         Route("/api/local/backup", local_backup_status, methods=["GET"]),
         Route("/api/local/backup", local_backup_settings, methods=["PATCH"]),
         Route("/api/local/backup/run", local_backup_run, methods=["POST"]),
+        Route(
+            "/api/local/backup/setup-prompt", local_backup_setup_prompt, methods=["GET"]
+        ),
+        Route(
+            "/api/local/backup/setup-chat", local_backup_setup_chat, methods=["POST"]
+        ),
         Route("/api/handover/merge", handover_merge, methods=["POST"]),
         Route("/api/workspaces", list_workspaces, methods=["GET"]),
     ]
@@ -275,24 +283,42 @@ class _FakeProject:
 class _FakeChat:
     chat_id = "chat-xyz"
 
+    def __init__(self, title="", archived=False):
+        self.title = title
+        self.archived = archived
+
 
 class _FakePCM:
-    """Captures the chat creation + dispatched prompt."""
+    """Captures the chat creation + dispatched prompt.
+
+    Also keeps what it created, because the setup route's whole claim is that a
+    second click re-enters the chat it already opened: that is a statement
+    about how many chats exist, and a fake that only remembers the last one
+    could not falsify it.
+    """
 
     def __init__(self):
         self.created = None
         self.streamed = None
+        self.chats: list[_FakeChat] = []
+        self.sent: list[dict] = []
 
     def list_projects(self, workspace):
         assert workspace == "personal"
         return [_FakeProject("General", "p-gen")]
 
+    def list_chats(self, project_id=None):
+        return list(self.chats)
+
     def create_chat(self, project_id, title=None, model=None, **kw):
         self.created = {"project_id": project_id, "title": title, "model": model}
-        return _FakeChat()
+        chat = _FakeChat(title=title or "")
+        self.chats.append(chat)
+        return chat
 
     def start_stream(self, chat_id, prompt, images=None):
         self.streamed = {"chat_id": chat_id, "prompt": prompt}
+        self.sent.append(self.streamed)
         return SimpleNamespace()
 
 
@@ -351,8 +377,14 @@ def _backup_world(tmp_path: Path) -> CiaoConfig:
     )
 
 
-def _backup_client(config: CiaoConfig) -> tuple[TestClient, dict, BackupService]:
-    """A client whose app state carries a real backup service over ``config``."""
+def _backup_client(
+    config: CiaoConfig, pcm=None
+) -> tuple[TestClient, dict, BackupService]:
+    """A client whose app state carries a real backup service over ``config``.
+
+    ``pcm`` is the chat manager the setup routes open their chat through; the
+    other backup routes never touch it, so it stays optional.
+    """
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
         routes=_routes(),
@@ -360,6 +392,7 @@ def _backup_client(config: CiaoConfig) -> tuple[TestClient, dict, BackupService]
     )
     app.state.serializer = serializer
     app.state.config = config
+    app.state.project_chat_manager = pcm
     app.state.app_settings = AppSettingsStore(
         config.state_path.parent / "app_settings.json"
     )
@@ -522,3 +555,170 @@ def test_the_backup_routes_report_a_missing_service(tmp_path: Path) -> None:
 
     assert client.get("/api/local/backup", cookies=cookies).status_code == 500
     assert client.post("/api/local/backup/run", cookies=cookies).status_code == 500
+
+
+# ── the canonical setup prompt (one prompt, two actions) ────────────────────
+#
+# The two actions a user with no Git knowledge gets — copy the prompt, or set
+# up in a chat that sends it — must be the same instructions, and the second
+# must not spawn a second agent every time it is clicked.
+
+
+def test_the_setup_prompt_route_returns_the_context_and_the_prompt(
+    tmp_path: Path,
+) -> None:
+    config = _backup_world(tmp_path)
+    client, cookies, _service = _backup_client(config)
+
+    resp = client.get("/api/local/backup/setup-prompt", cookies=cookies)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    # The context is served beside the prompt so a Settings page can show
+    # "backing up <folder>" without parsing prose.
+    assert data["context"]["folder"] == str(config.workspace_root.resolve())
+    assert "memory-vault" in data["context"]["scope"]
+    assert data["context"]["branch"] == "main"
+    assert data["context"]["interval_s"] == 300
+    assert f'"{data["context"]["folder"]}"' in data["prompt"]
+    # Read-only: rendering the prompt runs no git that changes anything.
+    assert _run_git(config.workspace_root, "status", "--porcelain") == ""
+
+
+def test_the_setup_chat_sends_the_prompt_and_a_second_call_reuses_it(
+    tmp_path: Path,
+) -> None:
+    """The in-app action has to actually send the prompt, and clicking it twice
+    must not put two agents on the same repository."""
+    config = _backup_world(tmp_path)
+    pcm = _FakePCM()
+    client, cookies, _service = _backup_client(config, pcm=pcm)
+    prompt = client.get("/api/local/backup/setup-prompt", cookies=cookies).json()[
+        "prompt"
+    ]
+
+    first = client.post("/api/local/backup/setup-chat", cookies=cookies)
+    second = client.post("/api/local/backup/setup-chat", cookies=cookies)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["ok"] is True
+    assert first.json()["reused"] is False
+    # A repeated click is not an error and not a new chat: it re-enters the
+    # one that is already live, and says so.
+    assert second.json()["reused"] is True
+    assert second.json()["chat_id"] == first.json()["chat_id"]
+    assert len(pcm.chats) == 1
+    # Sent, not drafted: exactly one turn, carrying exactly the copied text.
+    assert len(pcm.sent) == 1
+    assert pcm.sent[0]["prompt"] == prompt
+    assert pcm.created["title"] == SETUP_CHAT_TITLE
+
+
+def test_an_archived_setup_chat_is_replaced_not_re_entered(tmp_path: Path) -> None:
+    """The reuse rule is a live chat, not a chat that ever existed. An owner who
+    archived a finished setup is starting over, and handing them the old
+    conversation would be a silent no-op."""
+    config = _backup_world(tmp_path)
+    pcm = _FakePCM()
+    client, cookies, _service = _backup_client(config, pcm=pcm)
+    client.post("/api/local/backup/setup-chat", cookies=cookies)
+    pcm.chats[0].archived = True
+
+    resp = client.post("/api/local/backup/setup-chat", cookies=cookies)
+
+    assert resp.json()["reused"] is False
+    assert len(pcm.chats) == 2
+    assert len(pcm.sent) == 2
+
+
+def test_a_guided_setup_is_detected_without_a_restart(tmp_path: Path) -> None:
+    """The point of the guided flow is that it does not need one. The status is
+    re-derived from the repository, so an agent (or a person) that adds the
+    remote while the engine runs flips the install to ready on the next read."""
+    config = _backup_world(tmp_path)
+    _run_git(config.workspace_root, "remote", "remove", "origin")
+    pcm = _FakePCM()
+    client, cookies, service = _backup_client(config, pcm=pcm)
+
+    before = client.get("/api/local/backup", cookies=cookies).json()
+    assert before["state"] == "not_configured"
+
+    client.post("/api/local/backup/setup-chat", cookies=cookies)
+    # The agent's work: a private remote, connected and pushed.
+    origin = tmp_path / "new-origin.git"
+    _git_init(origin, bare=True)
+    _run_git(config.workspace_root, "remote", "add", "origin", str(origin))
+    _run_git(config.workspace_root, "push", "-q", "-u", "origin", "main")
+
+    after = client.get("/api/local/backup", cookies=cookies).json()
+
+    assert after["state"] == "ready", after["reason"]
+    assert after["enabled"] is True
+
+
+def test_a_paused_owner_is_not_enabled_by_a_guided_setup(tmp_path: Path) -> None:
+    """Pausing is the owner's own hold, and a setup chat is not permission to
+    lift it — the install is still reported paused, which is the truth."""
+    config = _backup_world(tmp_path)
+    _run_git(config.workspace_root, "remote", "remove", "origin")
+    pcm = _FakePCM()
+    client, cookies, _service = _backup_client(config, pcm=pcm)
+    client.patch("/api/local/backup", json={"paused": True}, cookies=cookies)
+
+    client.post("/api/local/backup/setup-chat", cookies=cookies)
+    origin = tmp_path / "new-origin.git"
+    _git_init(origin, bare=True)
+    _run_git(config.workspace_root, "remote", "add", "origin", str(origin))
+    _run_git(config.workspace_root, "push", "-q", "-u", "origin", "main")
+
+    status = client.get("/api/local/backup", cookies=cookies).json()
+
+    # The pause is untouched by the setup, and it is the pause — not the missing
+    # remote — that the status reports, which is what the owner must see.
+    assert status["state"] == "paused"
+    assert "paused" in status["reason"]
+    reread = AppSettingsStore(config.state_path.parent / "app_settings.json")
+    assert reread.settings.backup_paused is True
+
+
+def test_the_setup_routes_report_a_missing_service(tmp_path: Path) -> None:
+    """A missing service is a broken install, and a prompt rendered without one
+    would describe a backup nothing is going to perform."""
+    config = _backup_world(tmp_path)
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=_routes(),
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    app.state.config = config
+    app.state.project_chat_manager = _FakePCM()
+    client = TestClient(app, base_url=_ORIGIN)
+    cookies = {SESSION_COOKIE: serializer.dumps({"user": "owner"})}
+
+    assert client.get("/api/local/backup/setup-prompt", cookies=cookies).status_code == 500
+    assert client.post("/api/local/backup/setup-chat", cookies=cookies).status_code == 500
+
+
+def test_the_setup_routes_need_a_session(tmp_path: Path) -> None:
+    """The setup chat dispatches an agent against the user's own repository, so
+    it sits behind the signed session cookie like every other `/api` route."""
+    config = _backup_world(tmp_path)
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=_routes(),
+        middleware=[
+            Middleware(
+                AuthMiddleware, serializer=serializer, auth_required=True
+            )
+        ],
+    )
+    app.state.serializer = serializer
+    app.state.config = SimpleNamespace(pwa_auth_required=True)
+    app.state.project_chat_manager = _FakePCM()
+    app.state.backup_service = _backup_client(config)[2]
+    client = TestClient(app, base_url=_ORIGIN)
+
+    assert client.get("/api/local/backup/setup-prompt").status_code == 401
+    assert client.post("/api/local/backup/setup-chat").status_code == 401

@@ -6243,26 +6243,37 @@ def _local_manager(request: Request):
     return getattr(request.app.state, "local_session_manager", None)
 
 
+def _host_general_project(config, pcm) -> Any:
+    """The General project a system-opened chat should be hosted in, or None.
+
+    Any workspace can host one; prefer the primary, then settle for the first
+    workspace that has a General project. Keying on a workspace named
+    "personal" meant the whole sync-conflict flow failed on installs whose
+    workspaces are named anything else, and the same reasoning applies to the
+    backup setup chat — both are opened by the app rather than by the user, so
+    neither may depend on a workspace being called anything in particular.
+    """
+    project = next(
+        (p for p in pcm.list_projects(config.primary_workspace()) if p.name == "General"),
+        None,
+    )
+    if project is not None:
+        return project
+    for candidate in config.workspace_names():
+        project = next(
+            (p for p in pcm.list_projects(candidate) if p.name == "General"), None
+        )
+        if project is not None:
+            return project
+    return None
+
+
 def _open_merge_chat(request: Request, branch: str) -> dict:
     """Open an interactive chat that resolves sync conflicts on ``branch``
     with the user. Returns {ok, chat_id, project_id} or {error}."""
     config = request.app.state.config
     pcm = request.app.state.project_chat_manager
-    # Any workspace can host this; prefer the primary one, then settle for the
-    # first workspace that has a General project. Keying on a workspace named
-    # "personal" meant the whole sync-conflict flow failed on installs whose
-    # workspaces are named anything else.
-    workspace = config.primary_workspace()
-    project = next(
-        (p for p in pcm.list_projects(workspace) if p.name == "General"), None
-    )
-    if project is None:
-        for candidate in config.workspace_names():
-            project = next(
-                (p for p in pcm.list_projects(candidate) if p.name == "General"), None
-            )
-            if project is not None:
-                break
+    project = _host_general_project(config, pcm)
     if project is None:
         return {"error": "no General project in any workspace to host the merge chat"}
 
@@ -6449,6 +6460,108 @@ async def local_backup_run(request: Request) -> JSONResponse:
         backup_service.STATE_PAUSED,
     }
     return JSONResponse(status.as_dict(), status_code=200 if settled else 400)
+
+
+async def local_backup_setup_prompt(request: Request) -> JSONResponse:
+    """The canonical setup prompt, plus the context it was rendered from.
+
+    One prompt, two actions: this is what a Settings surface copies, and the
+    exact same text is what ``POST /api/local/backup/setup-chat`` dispatches.
+    Returning the context beside it is what lets a UI show "backing up
+    /path/to/data" without parsing prose out of a prompt.
+
+    Cheap and entirely local — every fact is a configuration read or a git
+    read that never contacts the remote — so a Settings page may poll it and
+    readiness still comes from ``GET /api/local/backup`` alone.
+    """
+    service = _backup_service(request)
+    if service is None:
+        return JSONResponse(
+            {"error": "backup service not initialised"}, status_code=500
+        )
+    config = request.app.state.config
+    context = await asyncio.to_thread(backup_service.setup_context, config)
+    return JSONResponse(
+        {
+            "context": context,
+            "prompt": backup_service.render_setup_prompt(config, context),
+        }
+    )
+
+
+async def local_backup_setup_chat(request: Request) -> JSONResponse:
+    """Open (or re-enter) a setup chat and send the prompt into it.
+
+    Sends, never drafts: the whole point of the in-app action is that the
+    owner does not have to copy, paste, and press enter, so this returns once
+    the prompt is on its way to the provider.
+
+    Idempotent on purpose. A retry after a dropped response, a double tap, or
+    a reload mid-setup all land here, and each would otherwise spawn another
+    agent working the same repository at the same time. A live setup chat is
+    found by its stable title and re-entered instead; only a chat the owner
+    archived (or deleted) is replaced. The prompt is not re-sent into a chat
+    that already has it — that would queue a second identical turn.
+
+    Readiness is not decided here. The chat does the work, the service
+    re-reads the repository's real state, and ``GET /api/local/backup``
+    reports what it finds — which is also how an external agent's setup is
+    detected. A guided setup that verifies turns the service on, unless the
+    owner has paused it.
+    """
+    service = _backup_service(request)
+    if service is None:
+        return JSONResponse(
+            {"error": "backup service not initialised"}, status_code=500
+        )
+    config = request.app.state.config
+    pcm = request.app.state.project_chat_manager
+    project = _host_general_project(config, pcm)
+    if project is None:
+        return JSONResponse(
+            {"error": "no General project in any workspace to host the setup chat"},
+            status_code=500,
+        )
+
+    live = next(
+        (
+            chat
+            for chat in reversed(pcm.list_chats(project.project_id))
+            if chat.title == backup_service.SETUP_CHAT_TITLE and not chat.archived
+        ),
+        None,
+    )
+    if live is not None:
+        # Re-arming a live chat is harmless: the answer is owed until the
+        # repository actually verifies, and a retry must not consume it.
+        service.begin_guided_setup()
+        return JSONResponse(
+            {
+                "ok": True,
+                "chat_id": live.chat_id,
+                "project_id": project.project_id,
+                "reused": True,
+            }
+        )
+
+    context = await asyncio.to_thread(backup_service.setup_context, config)
+    # No model is pinned: the chat runs on the host workspace's own provider
+    # and model, which is where the owner's configured agent already is. A
+    # pinned Claude model would name a model the opencode backend does not
+    # have, and setup is not the place to fail on that.
+    chat = pcm.create_chat(
+        project.project_id, title=backup_service.SETUP_CHAT_TITLE
+    )
+    pcm.start_stream(chat.chat_id, backup_service.render_setup_prompt(config, context))
+    service.begin_guided_setup()
+    return JSONResponse(
+        {
+            "ok": True,
+            "chat_id": chat.chat_id,
+            "project_id": project.project_id,
+            "reused": False,
+        }
+    )
 
 
 async def handover_merge(request: Request) -> JSONResponse:
