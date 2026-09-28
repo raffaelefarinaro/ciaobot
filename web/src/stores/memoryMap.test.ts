@@ -7,7 +7,7 @@ import { api } from '../lib/api'
 vi.mock('../lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
 }))
-import { useMemoryMapStore, isMemorySection, memorySectionPath, MEMORY_SECTIONS, type MemoryGraphNode } from './memoryMap'
+import { useMemoryMapStore, isMemorySection, isReviewFilter, memorySectionPath, reviewPath, MEMORY_SECTIONS, type MemoryGraphNode } from './memoryMap'
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -129,14 +129,12 @@ describe('sections', () => {
     expect(isMemorySection('categories')).toBe(true)
   })
 
-  test('setSection keeps the panels\' own state in step', () => {
-    const mm = useMemoryMapStore()
-    mm.setSection('revisit')
-    expect([mm.section, mm.view, mm.reviewTab, mm.retirementTab]).toEqual(['revisit', 'review', 'retirement', 'candidates'])
-    mm.setSection('retired')
-    expect([mm.view, mm.reviewTab, mm.retirementTab]).toEqual(['review', 'retirement', 'trash'])
-    mm.setSection('suggested')
-    expect([mm.view, mm.reviewTab]).toEqual(['review', 'proposals'])
+  test('the two queues are one section, narrowed by a filter in the address', () => {
+    expect(MEMORY_SECTIONS).toEqual(['review', 'map', 'categories', 'retired', 'history'])
+    expect(reviewPath()).toBe('/memory/review')
+    expect(reviewPath('revisit')).toBe('/memory/review?show=revisit')
+    expect(isReviewFilter('suggested')).toBe(true)
+    expect(isReviewFilter('map')).toBe(false)
   })
 
   test('the map returns to whichever drawing was on screen', () => {

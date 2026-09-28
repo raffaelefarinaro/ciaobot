@@ -389,8 +389,8 @@
          because they act on nothing else. -->
     <template v-if="!collapsed && (mode === 'memory' || mode === 'proposals')">
       <nav class="settings-nav-list memory-nav-list" aria-label="Memory sections">
-        <template v-for="group in MEMORY_NAV" :key="group.label">
-          <h2 class="sidebar-list-label">{{ group.label }}</h2>
+        <template v-for="(group, gi) in MEMORY_NAV" :key="gi">
+          <h2 v-if="group.label" class="sidebar-list-label">{{ group.label }}</h2>
           <router-link
             v-for="item in group.items"
             :key="item.section"
@@ -901,10 +901,11 @@ const vaultReview = useVaultReviewStore()
 // store holds one workspace at a time, so a load for another workspace reads
 // as "not loaded" here rather than as the previous workspace's queue.
 type MemoryNavItem = { section: MemorySection; label: string; due?: boolean }
-const MEMORY_NAV: { label: string; items: MemoryNavItem[] }[] = [
-  { label: 'To decide', items: [
-    { section: 'suggested', label: 'Suggested', due: true },
-    { section: 'revisit', label: 'To revisit', due: true },
+// To decide heads the list on its own: both queues, one row, so it needs no
+// group heading above it.
+const MEMORY_NAV: { label?: string; items: MemoryNavItem[] }[] = [
+  { items: [
+    { section: 'review', label: 'To decide', due: true },
   ] },
   { label: 'Explore', items: [
     { section: 'map', label: 'Map' },
@@ -924,8 +925,7 @@ function memoryNavCount(section: MemorySection): number | null {
   // it still holds the previous workspace's total.
   const historyLoaded = proposals.historyLoaded && (proposals.historyWorkspace ?? '') === workspace
   switch (section) {
-    case 'suggested': return proposals.scopedRows(workspace).length || null
-    case 'revisit': return retirementLoaded ? vaultReview.candidates.length || null : null
+    case 'review': return memoryCount.value || null
     case 'retired': return retirementLoaded ? vaultReview.trashed.length || null : null
     case 'map': return mm.loadedWorkspace === workspace ? mm.nodes.length || null : null
     // The category list is configuration, not a queue: a number beside it would

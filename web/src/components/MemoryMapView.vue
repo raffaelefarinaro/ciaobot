@@ -17,18 +17,38 @@
     <div v-else-if="mm.section !== 'map'" class="mm-review-wrap">
       <div class="page-grid mm-review-grid">
       <div class="page-main">
+      <!-- To decide holds both queues, narrowed by one filter; each queue keeps
+           its own heading and its own finer chips under it. -->
+      <div
+        v-if="mm.section === 'review'"
+        class="mr-chips mm-decide-chips"
+        role="group"
+        aria-label="Show"
+      >
+        <button
+          v-for="chip in decideChips"
+          :key="chip.filter"
+          type="button"
+          class="mr-chip"
+          :aria-pressed="mm.reviewFilter === chip.filter"
+          @click="setReviewFilter(chip.filter)"
+        >{{ chip.label }} <span v-if="chip.count !== null" class="mr-chip-count">{{ chip.count }}</span></button>
+      </div>
       <!-- Suggested and History are the proposal panel's two sections; it is
            bound without `key`, so moving between them swaps its section
-           rather than remounting it (which would refetch the queue). -->
+           rather than remounting it (which would refetch the queue). The
+           filter hides a queue with v-show for the same reason. -->
       <ProposalReviewPanel
-        v-if="mm.section === 'suggested' || mm.section === 'history'"
+        v-if="mm.section === 'review' || mm.section === 'history'"
+        v-show="mm.section === 'history' || showSuggested"
         :section="mm.section === 'history' ? 'history' : 'queue'"
       />
       <!-- One component, two sections: the queue and the trash share the
            store, the busy set and the error toast, so splitting them into
            two components would only duplicate all three. -->
       <VaultReviewPanel
-        v-else
+        v-if="mm.section === 'review' || mm.section === 'retired'"
+        v-show="mm.section === 'retired' || showRevisit"
         :section="mm.section === 'retired' ? 'trash' : 'candidates'"
       />
       </div>
@@ -44,7 +64,7 @@
          under it, and a note's details in a docked tile at the right edge —
          the same tile a pinned file opens in. The vault's numbers are one line
          in the toolbar; what the old rail listed is elsewhere (Needs review is
-         To revisit, Unlinked is the Orphans filter, Most connected is List
+         To decide, Unlinked is the Orphans filter, Most connected is List
          sorted by links). -->
     <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode, 'mm-body--dragging-detail': isDraggingDetail }">
       <div class="mm-surface">
@@ -83,8 +103,8 @@
             <router-link
               v-if="mm.staleNotes.length"
               class="mm-toolbar-stale"
-              :to="memorySectionPath('revisit')"
-              title="Notes unchecked past their type's limit — review them in To revisit"
+              :to="reviewPath('revisit')"
+              title="Notes unchecked past their type's limit — review them in To decide"
             ><strong>{{ mm.staleNotes.length.toLocaleString() }}</strong> unchecked</router-link>
           </p>
         </div>
@@ -249,7 +269,7 @@
                 <strong>Unchecked for {{ staleAgeWords(mm.selectedNode) }}.</strong>
                 {{ staleRuleWords(mm.selectedNode) }}
               </p>
-              <router-link class="mm-tile-stale-link" :to="memorySectionPath('revisit')">Review in To revisit</router-link>
+              <router-link class="mm-tile-stale-link" :to="reviewPath('revisit')">Review in To decide</router-link>
             </div>
           </template>
           <template #after>
@@ -291,8 +311,8 @@ import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useProjectStore } from '../stores/projects'
 import {
-  useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, isMemorySection, memorySectionPath,
-  type MemoryGraphNode, type MemorySection,
+  useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, isMemorySection, isReviewFilter,
+  memorySectionPath, reviewPath, type MemoryGraphNode, type MemorySection, type ReviewFilter,
 } from '../stores/memoryMap'
 import { askConfirm } from '../lib/confirm'
 import { ageInWords } from '../lib/vaultReviewLabels'
@@ -1236,15 +1256,14 @@ function setMapView(next: 'graph' | 'list') {
 const route = useRoute()
 const viewRouter = useRouter()
 const SECTION_LABELS: Record<MemorySection, string> = {
-  suggested: 'Suggested',
-  revisit: 'To revisit',
+  review: 'To decide',
   map: 'Map',
   categories: 'Categories',
   retired: 'Retired',
   history: 'History',
 }
 // The route owns the section. Bare /memory lands on the section last visited
-// (Suggested on a first visit), replaced rather than pushed so Back does not
+// (To decide on a first visit), replaced rather than pushed so Back does not
 // bounce through the bare address.
 watch(() => route.params.section, (param) => {
   if (!route.path.startsWith('/memory')) return
@@ -1254,6 +1273,42 @@ watch(() => route.params.section, (param) => {
   }
   void viewRouter.replace(memorySectionPath(mm.section))
 }, { immediate: true })
+// ...and To decide's filter, so Home's "notes to revisit" and the map's
+// "unchecked" links land on the queue they name.
+watch(() => [route.params.section, route.query.show] as const, ([section, show]) => {
+  if (section !== 'review') return
+  mm.reviewFilter = isReviewFilter(show) ? show : 'all'
+}, { immediate: true })
+function setReviewFilter(filter: ReviewFilter) {
+  if (filter === mm.reviewFilter) return
+  void viewRouter.replace(reviewPath(filter))
+}
+
+// Each queue's count, on the same workspace rule as its list. null until that
+// workspace's snapshot is in, so a count never describes another workspace.
+const suggestedCount = computed<number | null>(() =>
+  proposals.loaded ? proposals.scopedRows(store.activeWorkspace).length : null)
+const revisitCount = computed<number | null>(() =>
+  vaultReview.loadedWorkspace === store.activeWorkspace ? vaultReview.candidates.length : null)
+/** No zero chips, as the queues' own chip rows — except the one selected, so
+ * emptying a queue does not take away the control that is on. */
+const decideChips = computed(() => {
+  const all = suggestedCount.value !== null && revisitCount.value !== null
+    ? suggestedCount.value + revisitCount.value
+    : null
+  const chips: { filter: ReviewFilter; label: string; count: number | null }[] = [
+    { filter: 'all', label: 'All', count: all },
+    { filter: 'suggested', label: 'Suggested', count: suggestedCount.value },
+    { filter: 'revisit', label: 'To revisit', count: revisitCount.value },
+  ]
+  return chips.filter(c => c.filter === 'all' || c.filter === mm.reviewFilter || c.count !== 0)
+})
+/** Under All, a queue known to be empty steps aside for one that is not; with
+ * both empty, both say so in their own words. */
+const showSuggested = computed(() => mm.reviewFilter === 'suggested'
+  || (mm.reviewFilter === 'all' && !(suggestedCount.value === 0 && (revisitCount.value ?? 0) > 0)))
+const showRevisit = computed(() => mm.reviewFilter === 'revisit'
+  || (mm.reviewFilter === 'all' && !(revisitCount.value === 0 && (suggestedCount.value ?? 0) > 0)))
 // Every section's count sits in the sidebar, whichever section is showing, so
 // the queues and the ledger load with the page rather than with their panel.
 watch(() => store.activeWorkspace, (workspace) => {
@@ -1448,6 +1503,8 @@ onBeforeUnmount(() => {
 })
 </script>
 
+<style scoped src="./memoryReview.css"></style>
+
 <style scoped>
 .memory-map {
   display: flex;
@@ -1465,6 +1522,11 @@ onBeforeUnmount(() => {
 }
 .mm-review-grid {
   padding-block: var(--space-5) var(--space-6);
+}
+/* Above both queues' own headings, so it reads as choosing the list rather
+   than as one queue's chips. */
+.mm-decide-chips {
+  padding-bottom: var(--space-2);
 }
 
 .mm-body {

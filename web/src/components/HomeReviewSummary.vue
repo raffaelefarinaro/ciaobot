@@ -39,7 +39,7 @@ import { useProjectStore } from '../stores/projects'
 import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskStore } from '../stores/tasks'
-import { memorySectionPath } from '../stores/memoryMap'
+import { reviewPath } from '../stores/memoryMap'
 import { scheduleInWorkspace } from '../lib/automationWorkspace'
 
 type ReviewState = 'ready' | 'loading' | 'stale' | 'error'
@@ -192,7 +192,7 @@ function openItem(key: ReviewItem['key']) {
     void router.push('/schedules')
     return
   }
-  void router.push(memorySectionPath(key === 'retirement' ? 'revisit' : 'suggested'))
+  void router.push(reviewPath(key === 'retirement' ? 'revisit' : 'suggested'))
 }
 </script>
 
