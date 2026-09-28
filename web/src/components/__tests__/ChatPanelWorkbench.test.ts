@@ -213,11 +213,11 @@ describe('ChatPanel aligned layout', () => {
     expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)
     expect(rail.text()).not.toContain('Current state')
 
-    // The header carries Archive only, as a labelled primary button; the
-    // toggle lives with Work details.
+    // The header carries Archive only, as an icon button (labelled on wide
+    // panes, icon-only on narrow); the toggle lives with Work details.
     const actions = wrapper.get('.pane-header .header-actions')
     expect(actions.findAll('button').map(b => b.text())).toEqual(['Archive'])
-    expect(actions.get('button').classes()).toContain('btn-primary')
+    expect(actions.get('button').classes()).toContain('btn-icon')
     expect(wrapper.find('.work-inspector-trigger').exists()).toBe(false)
     const hide = rail.get('.chat-rail-hide')
     expect(hide.attributes('aria-controls')).toBe('chat-work-rail')
