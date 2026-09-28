@@ -3613,9 +3613,13 @@ function focusComposerOnOpen(): void {
   el.selectionStart = el.selectionEnd = el.value.length
 }
 
+let modelsSeq = 0
 async function loadModels(): Promise<void> {
+  const seq = ++modelsSeq
   try {
     const r = await api.get<ModelsResponse>('/api/models')
+    // Quick reopens can resolve out of order; only the newest request lands.
+    if (seq !== modelsSeq) return
     modelsResponse.value = r
     models.value = r.models
     providerModels.value = r.provider_models || {}
@@ -4627,11 +4631,13 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 }
 .chat-rail-head .rail-title { margin-bottom: 0; }
 /* Same 34px box as the tab that reopens it, pulled into the heading's line
-   height so the row does not grow. */
+   height so the row does not grow. Not pulled past the right edge: the rail
+   scrolls, so an overhang widened it, and focusing the button on reopen
+   scrolled the whole rail sideways, cutting off its left edge. */
 .chat-rail-hide {
   min-width: 34px;
   min-height: 34px;
-  margin: -7px -8px -7px 0;
+  margin: -7px 0;
   padding: 7px;
   color: var(--accent);
 }
@@ -4651,7 +4657,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   flex: 0 0 var(--page-rail);
   width: var(--page-rail);
   min-width: 0;
-  overflow-x: hidden;
   overflow-y: auto;
   /* Scrolls, but without a visible bar: the rail is a quiet side column. */
   scrollbar-width: none;

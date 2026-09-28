@@ -190,16 +190,17 @@ def _parse_index(path: Path, category_parts: dict[str, str] | None = None) -> li
         # project name, not a word ("README") shared by every folder.
         if is_folder_note:
             name = parts[-2]
-        # Counted before the automation skip below: a stem is a file-naming
-        # convention however many of its notes are left to match.
-        names.setdefault((parts[0], name.lower()), []).append(is_folder_note)
         # An automation is its folder's README; everything else under it is a
         # run's working data (`raw/sparkscan/report`), not something the
-        # owner names in a message.
-        if "automations" in parts[:-1] and not (
-            is_folder_note and parts[-3] == "automations"
+        # owner names in a message. Only the vault's top-level automations
+        # folder (after a shared index's workspace prefix) counts: a project
+        # called "automations" is still a project.
+        top = 1 if parts[1] == "automations" and parts[0] not in parts_map else 0
+        if parts[top] == "automations" and not (
+            is_folder_note and len(parts) == top + 3
         ):
             continue
+        names.setdefault((parts[0], name.lower()), []).append(is_folder_note)
         aliases: list[str] = []
         alias_match = _ALIASES_RE.search(rest)
         if alias_match:

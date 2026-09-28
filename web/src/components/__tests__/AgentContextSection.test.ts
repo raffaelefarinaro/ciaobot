@@ -50,6 +50,13 @@ describe('AgentContextSection', () => {
     expect(wrapper.emitted('open-file')?.[1]).toEqual(['work/AGENTS.md'])
   })
 
+  it('drops the brief row when General sends no brief', async () => {
+    const wrapper = await mountSection({
+      project: { project_id: 'g', name: 'General', workspace: 'work' } as unknown as ProjectInfo,
+    })
+    expect(wrapper.find('.agent-context-brief').exists()).toBe(false)
+  })
+
   it('shows the context used from a string percentage', async () => {
     const wrapper = await mountSection({ contextPct: 13.2 })
     expect(wrapper.get('[role="meter"]').text()).toBe('13%')

@@ -187,6 +187,34 @@ def test_the_same_name_in_two_workspaces_of_a_shared_index_still_matches(tmp_pat
     assert [e.path for e in hits] == ["work/People/Alex"]
 
 
+def test_automation_run_files_do_not_cancel_a_real_note_of_the_same_name(
+    tmp_path: Path,
+) -> None:
+    # Run data is often named after what it processed; skipped files must not
+    # count toward the shared-name rule and knock the real note out.
+    _write_index(tmp_path, """# Vault Index
+
+- [work/Clients/acme](./work/Clients/acme.md)
+- [work/automations/crm-sync/raw/acme](./work/automations/crm-sync/raw/acme.md)
+""")
+    hits = find_entities("call acme", tmp_path, workspace="work")
+    assert [e.path for e in hits] == ["work/Clients/acme"]
+
+
+def test_a_project_called_automations_is_still_matchable(tmp_path: Path) -> None:
+    _write_index(tmp_path, """# Vault Index
+
+- [projects/active/automations/README](./projects/active/automations/README.md)
+- [projects/active/automations/roadmap](./projects/active/automations/roadmap.md)
+""")
+    hits = find_entities(
+        "update the automations roadmap", tmp_path, workspace="work", index_owns_workspace=True,
+    )
+    assert sorted(e.path for e in hits) == [
+        "projects/active/automations/README", "projects/active/automations/roadmap",
+    ]
+
+
 def test_handles_missing_index(tmp_path: Path) -> None:
     assert find_entities("anything", tmp_path) == []
 

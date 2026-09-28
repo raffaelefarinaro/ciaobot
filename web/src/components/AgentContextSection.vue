@@ -38,7 +38,8 @@
         </span>
         <small>Could not be read just now: {{ guide.error }}</small>
       </div>
-      <div v-if="project" class="rail-item agent-context-row agent-context-brief">
+      <!-- General with no description or doc sends no brief at all. -->
+      <div v-if="project && briefLines.length" class="rail-item agent-context-row agent-context-brief">
         <span class="agent-context-row-top">
           <router-link :to="`/project/${project.project_id}`" class="agent-context-name agent-context-project">{{ project.name }}</router-link>
           <span class="agent-context-meta">{{ formatTokens(briefTokens) }} tokens</span>
