@@ -123,8 +123,8 @@
           </div>
         </div>
 
-        <!-- Package update — the desktop app drives this from the tray. -->
-        <div v-if="!inDesktopApp" class="card">
+        <!-- Package update -->
+        <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">Updates</p>
@@ -452,10 +452,8 @@
              set the trusted HTTPS address. -->
         <SettingsDevices />
 
-        <!-- Notifications — the desktop app owns this in the tray, so the
-             card drops out there rather than showing web-push controls the
-             tray already supersedes. Same card as the Notifications tab. -->
-        <SettingsNotifications hide-in-desktop-app />
+        <!-- Notifications. Same card as the Notifications tab. -->
+        <SettingsNotifications />
 
         <!-- Keyboard shortcuts -->
         <div class="card">
@@ -465,39 +463,29 @@
           </div>
           <ul id="settings-shortcut-list" class="shortcut-list">
             <li>
-              <kbd v-if="inDesktopApp">&#8984;T</kbd>
-              <kbd v-else>{{ webChord('N') }}</kbd>
+              <kbd>{{ webChord('N') }}</kbd>
               <span>Open a new chat in the default General project</span>
             </li>
             <li>
-              <kbd v-if="inDesktopApp">&#8984;&#8679;M</kbd>
-              <kbd v-else>{{ webChord('M') }}</kbd>
+              <kbd>{{ webChord('M') }}</kbd>
               <span>Open the model picker</span>
             </li>
             <li><kbd>1–9</kbd><span>Switch to the first through ninth workspace in the sidebar</span></li>
             <template v-if="showAllShortcuts">
-              <li v-if="inDesktopApp">
-                <kbd>&#8984;[</kbd>
-                <span>Go back (&#8984;] goes forward)</span>
-              </li>
               <li>
-                <kbd v-if="inDesktopApp">&#8984;&#9003;</kbd>
-                <kbd v-else>{{ webChord('\u232B', 'Backspace') }}</kbd>
+                <kbd>{{ webChord('\u232B', 'Backspace') }}</kbd>
                 <span>Archive the open chat (asks to confirm)</span>
               </li>
               <li>
-                <kbd v-if="inDesktopApp">&#8984;S</kbd>
-                <kbd v-else>{{ webChord('S') }}</kbd>
+                <kbd>{{ webChord('S') }}</kbd>
                 <span>Show or hide the sidebar</span>
               </li>
               <li>
-                <kbd v-if="inDesktopApp">&#8984;&#8679;=</kbd>
-                <kbd v-else>{{ webChord('=') }}</kbd>
+                <kbd>{{ webChord('=') }}</kbd>
                 <span>Increase the font size</span>
               </li>
               <li>
-                <kbd v-if="inDesktopApp">&#8984;&#8679;-</kbd>
-                <kbd v-else>{{ webChord('-') }}</kbd>
+                <kbd>{{ webChord('-') }}</kbd>
                 <span>Decrease the font size</span>
               </li>
               <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
@@ -2000,7 +1988,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
 import { formatTime, formatDuration } from '../lib/time'
-import { isApplePlatform, isDesktopApp } from '../lib/desktop'
+import { isApplePlatform } from '../lib/desktop'
 import {
   DEFAULT_FONT_SCALE,
   FONT_SCALE_STEP,
@@ -2071,9 +2059,7 @@ import { isLoopbackHostname } from '../lib/loopback'
 import { useMcpServers } from '../composables/useMcpServers'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
-// The tray owns package updates and native notifications in the desktop app.
-const inDesktopApp = isDesktopApp()
-// The web shortcuts bind altKey. Apple keyboards label that key Option (\u2325);
+// The shortcuts bind altKey. Apple keyboards label that key Option (\u2325);
 // Windows and Linux keyboards label it Alt.
 const onApplePlatform = isApplePlatform()
 function webChord(key: string, nonAppleKey: string = key): string {

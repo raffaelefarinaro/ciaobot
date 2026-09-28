@@ -1,5 +1,5 @@
 <template>
-  <div v-if="!hidden" class="card">
+  <div class="card">
     <div class="settings-card-header">
       <p class="section-title">Notifications</p>
       <p class="hint">
@@ -28,7 +28,7 @@
           </button>
         </span>
       </div>
-      <div v-if="pushEnabledFlag && !inDesktopApp" class="notif-row">
+      <div v-if="pushEnabledFlag" class="notif-row">
         <span class="notif-key">Test</span>
         <span class="notif-value">
           <span class="notif-detail">Sends a notification to this device only.</span>
@@ -39,7 +39,7 @@
           </button>
         </span>
       </div>
-      <div v-if="!inDesktopApp" class="notif-row">
+      <div class="notif-row">
         <span class="notif-key">Delivery</span>
         <span class="notif-value">
           <span class="notif-detail">{{ pushAllDevices ? 'Every device, including this computer' : 'Other devices only; Ciaobot.app\'s menu bar covers the computer it runs on' }}</span>
@@ -53,7 +53,7 @@
     </div>
     <!-- Mac without web push: the menu bar already covers it; web push is an
          optional upgrade, not a required action. -->
-    <p v-if="!inDesktopApp && showToggle && isMacDesktop() && !pushEnabledFlag" class="hint notif-note">
+    <p v-if="showToggle && isMacDesktop() && !pushEnabledFlag" class="hint notif-note">
       Optional: for notifications branded as <strong>Ciaobot</strong> that open the exact
       chat (and keep working if you quit the menu bar), install Ciaobot as an app
       (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;),
@@ -68,21 +68,9 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../../lib/api'
 import { errorMessage } from '../../lib/errorMessage'
-import { isDesktopApp } from '../../lib/desktop'
 import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported, sendTestNotification } from '../../lib/push'
 import { isIos, isMacDesktop, isStandalone } from '../../lib/pwaPlatform'
 import type { RoutineSettings } from '../../lib/types'
-
-/** The Home tab renders this card too, so both surfaces stay one copy.
- *
- * They differ only in the desktop app: the dedicated Notifications tab
- * explains that the menu bar owns notifications there, while Home leaves that
- * to the tray and drops the card entirely.
- */
-const props = defineProps<{ hideInDesktopApp?: boolean }>()
-
-const inDesktopApp = isDesktopApp()
-const hidden = computed(() => Boolean(props.hideInDesktopApp) && inDesktopApp)
 
 const pushSupportedFlag = ref(false)
 const pushEnabledFlag = ref(false)
@@ -96,19 +84,12 @@ const testPending = ref(false)
 const testResult = ref('')
 
 const showToggle = computed(
-  () => !inDesktopApp && !needsIosInstall.value && !permissionDenied.value && pushSupportedFlag.value,
+  () => !needsIosInstall.value && !permissionDenied.value && pushSupportedFlag.value,
 )
 
 type Tone = 'ok' | 'warn' | 'off'
 // Static strings only (no user data), so v-html is safe for the arrows/strong.
 const status = computed<{ label: string; tone: Tone; detail: string }>(() => {
-  if (inDesktopApp) {
-    return {
-      label: 'Handled by the menu bar',
-      tone: 'ok',
-      detail: 'Turn them on or off in <strong>Menu Bar &rarr; Advanced &rarr; Native Notifications</strong>. If they are blocked, allow them in System Settings &rarr; Notifications &rarr; Ciaobot.',
-    }
-  }
   if (needsIosInstall.value) {
     return {
       label: 'Needs the Home Screen app',

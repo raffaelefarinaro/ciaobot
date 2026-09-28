@@ -13,17 +13,13 @@ import {
 
 // Hoisted so the mocked factories can read them: a mock factory runs while the
 // test file's imports resolve, before the module body has run.
-const state = vi.hoisted(() => ({ pushEnabled: false, pushSupported: true, desktopApp: false }))
+const state = vi.hoisted(() => ({ pushEnabled: false, pushSupported: true }))
 
 vi.mock('../../lib/push', () => ({
   pushSupported: () => state.pushSupported,
   isPushEnabled: async () => state.pushEnabled,
   enablePush: vi.fn(),
   sendTestNotification: vi.fn(async () => true),
-}))
-
-vi.mock('../../lib/desktop', () => ({
-  isDesktopApp: () => state.desktopApp,
 }))
 
 const IPHONE_UA =
@@ -51,7 +47,6 @@ beforeEach(() => {
   vi.clearAllMocks()
   state.pushEnabled = false
   state.pushSupported = true
-  state.desktopApp = false
   localStorage.clear()
   _resetInstallPromptForTests()
   listenForInstallPrompt(window)
@@ -264,12 +259,6 @@ describe('HomeSetupCard', () => {
 
   it('renders nothing on an insecure origin', async () => {
     Object.defineProperty(window, 'isSecureContext', { value: false, configurable: true })
-    const view = await mountCard()
-    expect(view.find('.home-setup').exists()).toBe(false)
-  })
-
-  it('renders nothing inside Ciaobot.app', async () => {
-    state.desktopApp = true
     const view = await mountCard()
     expect(view.find('.home-setup').exists()).toBe(false)
   })

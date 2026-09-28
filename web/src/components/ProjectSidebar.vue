@@ -874,7 +874,7 @@ import { useVaultReviewStore } from '../stores/vaultReview'
 import ChatSignals from './ChatSignals.vue'
 import BrandMark from './BrandMark.vue'
 import CiaoMark from './CiaoMark.vue'
-import { isApplePlatform, isDesktopApp } from '../lib/desktop'
+import { isApplePlatform } from '../lib/desktop'
 import { scheduleInWorkspace } from '../lib/automationWorkspace'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import { ARCHIVE_CONFIRM_MESSAGE, ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
@@ -961,10 +961,10 @@ onBeforeUnmount(() => {
 const route = useRoute()
 const router = useRouter()
 const historyNav = useHistoryNav()
-// The desktop app binds ⌘[ / ⌘] (ChatLayout); in a browser the browser's own
-// back/forward chord does the same thing.
+// A browser owns ⌘[ / ⌘] for its own back/forward, so the hint names that
+// chord on Apple keyboards and the Alt+Arrow one everywhere else.
 function historyChordHint(key: '[' | ']'): string {
-  if (isDesktopApp() || isApplePlatform()) return ` (⌘${key})`
+  if (isApplePlatform()) return ` (⌘${key})`
   return key === '[' ? ' (Alt+←)' : ' (Alt+→)'
 }
 
@@ -990,10 +990,10 @@ const SETTINGS_NAV = [
   { to: '/settings/automations', label: 'Automations' },
   { to: '/settings/notifications', label: 'Notifications' },
 ] as const
-// The chord ChatLayout binds for New chat: Cmd+T in the desktop shell (the
-// browser keeps Cmd+T for itself), Option/Alt+N everywhere else.
-const newChatShortcut = isDesktopApp() ? '⌘T' : isApplePlatform() ? '⌥N' : 'Alt+N'
-const newChatKeyshortcuts = isDesktopApp() ? 'Meta+T' : 'Alt+N'
+// The chord ChatLayout binds for New chat: Option/Alt+N, because the browser
+// keeps Cmd+T for its own new-tab.
+const newChatShortcut = isApplePlatform() ? '⌥N' : 'Alt+N'
+const newChatKeyshortcuts = 'Alt+N'
 const workspaceScopeOpen = ref(false)
 const workspaceScopeEl = ref<HTMLElement | null>(null)
 const workspaceScopeTrigger = ref<HTMLButtonElement | null>(null)

@@ -3,7 +3,6 @@ import { computed, onMounted, ref } from 'vue'
 import { enablePush, isPushEnabled, pushSupported, sendTestNotification } from '../lib/push'
 import { installInstructions, isIos, isStandalone, SETUP_CARD_DISMISSED_KEY } from '../lib/pwaPlatform'
 import { canPromptInstall, installed, promptInstall } from '../lib/installPrompt'
-import { isDesktopApp } from '../lib/desktop'
 import { errorMessage } from '../lib/errorMessage'
 
 /** The device-local setup nudge: install, notifications, and a proof they work.
@@ -41,8 +40,6 @@ const needsInstallFirst = computed(() => isIos() && !standalone.value)
 
 const visible = computed(() => {
   if (dismissed.value) return false
-  // Ciaobot.app has its own install (it is the app) and its own tray.
-  if (isDesktopApp()) return false
   // Neither install prompts nor push subscriptions exist without a secure
   // origin, so the steps would be instructions for something impossible.
   if (window.isSecureContext !== true) return false
