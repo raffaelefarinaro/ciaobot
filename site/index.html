@@ -68,6 +68,38 @@
       <p class="built-on">Built on the best, not reinvented: every chat runs on <a href="https://docs.anthropic.com/en/docs/claude-code/overview">Claude Code</a> or <a href="https://opencode.ai/">opencode</a>, so each improvement they ship reaches Ciaobot too. <a href="models.html">How →</a></p>
     </section>
 
+    <section class="memory-demo" aria-labelledby="memory-demo-title">
+      <div class="narrow">
+        <h2 id="memory-demo-title">Play through the memory loop</h2>
+        <p>One small example of how a finished conversation can help with the next one.</p>
+      </div>
+      <div class="memory-board" data-memory-demo data-step="0">
+        <div class="memory-board-top"><span class="memory-board-label">A little Ciaobot story</span><span class="memory-board-count" aria-hidden="true">01 / 03</span></div>
+        <div class="memory-scenes">
+          <div class="memory-scene memory-scene-chat">
+            <span class="memory-scene-label">01 · Conversation</span>
+            <div class="memory-bubble">We’re considering the villa and the old town hall for the wedding.</div>
+            <span class="memory-scene-foot">A useful detail from a chat</span>
+          </div>
+          <div class="memory-scene memory-scene-note">
+            <span class="memory-scene-label">02 · Notebook</span>
+            <div class="memory-paper"><span class="memory-paper-title">Wedding preparation.md</span><span class="memory-paper-line">Venues to consider: villa, old town hall.</span><span class="memory-paper-empty">Waiting for a finished chat…</span></div>
+            <span class="memory-scene-foot">Your own Markdown, in the right project</span>
+          </div>
+          <div class="memory-scene memory-scene-recall">
+            <span class="memory-scene-label">03 · Next time</span>
+            <div class="memory-bubble memory-bubble-question">Which venues were we considering?</div>
+            <div class="memory-answer">The villa and the old town hall.</div>
+            <span class="memory-answer-empty memory-scene-foot">The answer is waiting in the note.</span>
+          </div>
+        </div>
+        <div class="memory-board-bottom">
+          <p class="memory-board-status" role="status" aria-live="polite">Start with a conversation. Finish it to save what matters.</p>
+          <button class="memory-action" type="button">Finish the chat <span aria-hidden="true">→</span></button>
+        </div>
+      </div>
+    </section>
+
     <section id="blocks">
       <div class="narrow">
         <p class="eyebrow">Three building blocks</p>
