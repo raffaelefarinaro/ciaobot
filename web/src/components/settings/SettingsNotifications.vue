@@ -3,7 +3,7 @@
     <div class="settings-card-header">
       <p class="section-title">Notifications</p>
       <p class="hint">
-        Ciaobot notifies you when a chat replies and the app is in the background.
+        Ciaobot notifies you when a chat replies and the browser tab is in the background.
       </p>
     </div>
     <!-- Status as one key/value row: a dot plus words (never colour alone),
@@ -20,7 +20,7 @@
         </span>
         <span v-if="showToggle" class="notif-end">
           <button
-            :class="(!pushEnabledFlag && !isMacDesktop()) ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
+            :class="(!pushEnabledFlag) ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
             @click="togglePush"
             :disabled="pushPending"
           >
@@ -42,20 +42,20 @@
       <div class="notif-row">
         <span class="notif-key">Delivery</span>
         <span class="notif-value">
-          <span class="notif-detail">{{ pushAllDevices ? 'Every device, including this computer' : 'Other devices only; Ciaobot.app\'s menu bar covers the computer it runs on' }}</span>
+          <span class="notif-detail">{{ pushAllDevices ? 'Every device, including this computer' : 'Other devices only; this computer is not notified' }}</span>
         </span>
         <span class="notif-end">
           <button class="btn-secondary btn-small" @click="toggleDelivery" :disabled="deliveryPending">
-            {{ pushAllDevices ? 'Use the menu bar on this Mac' : 'Push to every device' }}
+            {{ pushAllDevices ? 'Other devices only' : 'Push to every device' }}
           </button>
         </span>
       </div>
     </div>
-    <!-- Mac without web push: the menu bar already covers it; web push is an
-         optional upgrade, not a required action. -->
+    <!-- Mac without web push: web push in an installed app is the only way a Mac
+         gets a Ciaobot notification banner, so offer it as an optional upgrade. -->
     <p v-if="showToggle && isMacDesktop() && !pushEnabledFlag" class="hint notif-note">
       Optional: for notifications branded as <strong>Ciaobot</strong> that open the exact
-      chat (and keep working if you quit the menu bar), install Ciaobot as an app
+      chat, install Ciaobot as an app
       (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;),
       then enable it here.
     </p>
@@ -112,13 +112,6 @@ const status = computed<{ label: string; tone: Tone; detail: string }>(() => {
     }
   }
   if (pushEnabledFlag.value) return { label: 'On for this device', tone: 'ok', detail: '' }
-  if (isMacDesktop() && !pushAllDevices.value) {
-    return {
-      label: 'Covered by the menu bar',
-      tone: 'ok',
-      detail: 'The menu bar already shows a notification when a chat replies and the app is not focused.',
-    }
-  }
   return { label: 'Off on this device', tone: 'off', detail: '' }
 })
 
@@ -197,12 +190,7 @@ async function sendTest() {
       testResult.value = 'Enable notifications on this device first.'
       return
     }
-    // With Delivery off, the Mac's own browser still gets the test (it is
-    // registered), but its real chat banners come from the menu bar instead.
-    // Saying so avoids reading a green result as proof the Mac is covered.
-    testResult.value = !pushAllDevices.value && isMacDesktop()
-      ? "Sent. This Mac's chat notifications come from the menu bar unless Delivery is set to every device."
-      : 'Sent. If nothing appears within a few seconds, check this browser\'s notification permission in your system settings.'
+    testResult.value = 'Sent. If nothing appears within a few seconds, check this browser\'s notification permission in your system settings.'
   } catch (e) {
     pushError.value = errorMessage(e)
   } finally {

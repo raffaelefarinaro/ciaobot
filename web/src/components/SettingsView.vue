@@ -130,8 +130,8 @@
               <p class="section-title">Updates</p>
               <p class="hint">
                 <template v-if="packageStatus?.mode === 'bundled_app'">
-                  This bundled app updates through the Ciaobot menu-bar icon. Choose
-                  <strong>Update</strong> there, or run the one-line installer again.
+                  This app updates by re-running the one-line installer.
+                  <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
                 </template>
                 <template v-else-if="packageStatus?.mode === 'installer' && engineUpdateEnabled">
                   Installed with the Ciaobot engine installer. Stage a release below, then apply it;
@@ -448,8 +448,7 @@
         </div>
 
         <!-- Other devices — where to open Ciaobot from a phone or another
-             computer. Shown in Ciaobot.app too: it is the one place there to
-             set the trusted HTTPS address. -->
+             computer. The one place to set the trusted HTTPS address. -->
         <SettingsDevices />
 
         <!-- Notifications. Same card as the Notifications tab. -->
@@ -3739,11 +3738,8 @@ function notifySaved(body: string, title = 'settings') {
   projectStore.pushToast({ chat_id: '', title, body })
 }
 
-// The failure sibling of notifySaved. `alert` cannot be used for this: wry's
-// WKUIDelegate implements no JS dialog panels, so inside the desktop app the
-// native dialog never appears and every failure reported through it was
-// completely invisible -- the action just seemed to do nothing. Error toasts
-// persist until dismissed and can seed a fix chat from `detail`.
+// The failure sibling of notifySaved. Error toasts persist until dismissed and
+// can seed a fix chat from `detail`.
 function notifyFailed(title: string, detail: string) {
   projectStore.pushErrorToast(title, detail)
 }

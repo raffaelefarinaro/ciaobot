@@ -4234,7 +4234,7 @@ export const useProjectStore = defineStore('projects', () => {
         // server debounces to one event per breakage; surface it as a
         // persistent error toast. The fix is re-authentication in
         // Settings → Workspaces, so the Fix action navigates there rather
-        // than seeding a chat. The PWA push/menu-bar banner is the other
+        // than seeding a chat. The PWA push banner is the other
         // channel (see push.py); this is the live in-app signal.
         pushErrorToast(msg.title || 'Google Workspace login needs attention', msg.body || '', {
           fixRoute: '/settings/workspaces',
