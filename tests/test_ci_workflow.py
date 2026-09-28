@@ -138,6 +138,35 @@ def test_publish_uploads_engine_installer() -> None:
     assert "scripts/install-engine.sh" in workflow
 
 
+def test_retired_app_installer_is_not_in_the_source_tree() -> None:
+    root = Path(__file__).parents[1]
+    assert not (root / "scripts" / "install.sh").exists()
+
+
+def test_release_workflows_do_not_publish_removed_install_channels() -> None:
+    workflows = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (Path(__file__).parents[1] / ".github" / "workflows").glob("*.yml")
+    )
+
+    assert "update-homebrew-tap" not in workflows
+    assert "pypi:" not in workflows
+    assert ".dmg" not in workflows.lower()
+    assert "brew install" not in workflows
+    assert "mapfile" not in workflows
+
+
+def test_release_smoke_only_runs_with_a_published_version() -> None:
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "workflow_call:" in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "pull_request:" not in workflow
+    assert 'LaunchAgents/com.ciao.server.plist")' not in workflow
+
+
 def test_publish_attaches_only_the_five_engine_assets() -> None:
     # #653: the release carries the engine and nothing else. Exactly five
     # assets - the installer under both names, the wheel, and the manifest with
