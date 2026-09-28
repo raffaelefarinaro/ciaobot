@@ -128,15 +128,24 @@ async function mountPanel(): Promise<{
 }
 
 describe('ChatPanel turn footer placement', () => {
+  // jsdom implements neither Element.scrollTo nor any layout, so selecting a
+  // message (which scrolls the transcript when the new footer would fall below
+  // it) throws an unhandled rejection out of the component's nextTick. Stub it,
+  // as ChatPanelWorkbench.test.ts does for the same reason.
+  const scrollProto = Element.prototype as unknown as { scrollTo?: unknown }
+  const originalScrollTo = scrollProto.scrollTo
+
   beforeEach(() => {
     Object.defineProperty(globalThis, 'localStorage', {
       configurable: true,
       value: new MemoryStorage(),
     })
     localStorage.clear()
+    scrollProto.scrollTo = function scrollTo() {}
   })
 
   afterEach(() => {
+    scrollProto.scrollTo = originalScrollTo
     vi.restoreAllMocks()
     localStorage.clear()
   })
