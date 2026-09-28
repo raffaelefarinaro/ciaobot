@@ -89,6 +89,11 @@ from ciao.web.routes_api import (
     local_preflight,
     local_resync,
     local_status,
+    local_backup_run,
+    local_backup_setup_chat,
+    local_backup_setup_prompt,
+    local_backup_settings,
+    local_backup_status,
     list_all_chats,
     list_models,
     archive_workspace_setting,
@@ -135,6 +140,7 @@ from ciao.web.routes_api import (
     memory_receipts,
     memory_entity_types,
     proposal_action,
+    proposal_implement,
     proposal_preview,
     proposals_batch,
     proposals_history,
@@ -173,7 +179,6 @@ from ciao.web.routes_push import (
     push_status,
     push_subscribe,
     push_subscription_check,
-    push_test,
     push_unsubscribe,
 )
 from ciao.web.security import SecurityHeadersMiddleware
@@ -318,6 +323,10 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/proposals/history", proposals_history, methods=["GET"]),
         Route("/api/proposals/batch", proposals_batch, methods=["POST"]),
         Route("/api/proposals/{id}/preview", proposal_preview, methods=["GET"]),
+        # Before the `{action}` route: Starlette matches in order, and
+        # `/api/proposals/{id}/implement` would otherwise be read as an `accept`
+        # or `dismiss` action and refused.
+        Route("/api/proposals/{id}/implement", proposal_implement, methods=["POST"]),
         Route("/api/proposals/dismiss-older-than", dismiss_older_than, methods=["POST"]),
         Route("/api/proposals/{id}/{action}", proposal_action, methods=["POST"]),
         Route("/api/memory/receipts", memory_receipts, methods=["GET"]),
@@ -393,13 +402,25 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/push/unsubscribe", push_unsubscribe, methods=["POST"]),
         Route("/api/push/status", push_status, methods=["GET"]),
         Route("/api/push/subscription", push_subscription_check, methods=["GET"]),
-        Route("/api/push/test", push_test, methods=["POST"]),
         Route("/api/menubar-notifications", push_notification_feed, methods=["GET"]),
         # Per-device working-branch flow: commit-to-main + agent-merged handover
         Route("/api/local/status", local_status, methods=["GET"]),
         Route("/api/local/preflight", local_preflight, methods=["GET"]),
         Route("/api/local/handback", local_handback, methods=["POST"]),
         Route("/api/local/resync", local_resync, methods=["POST"]),
+        # The unattended five-minute memory backup: status, the owner's
+        # enable/pause switch, a manual run through the same serialized path
+        # the loop uses, and the one canonical setup prompt behind both of its
+        # actions (copy it, or set up in a chat that sends it).
+        Route("/api/local/backup", local_backup_status, methods=["GET"]),
+        Route("/api/local/backup", local_backup_settings, methods=["PATCH"]),
+        Route("/api/local/backup/run", local_backup_run, methods=["POST"]),
+        Route(
+            "/api/local/backup/setup-prompt", local_backup_setup_prompt, methods=["GET"]
+        ),
+        Route(
+            "/api/local/backup/setup-chat", local_backup_setup_chat, methods=["POST"]
+        ),
         Route("/api/handover/merge", handover_merge, methods=["POST"]),
         # Admin
         Route("/api/admin/snapshot", admin_snapshot, methods=["POST"]),

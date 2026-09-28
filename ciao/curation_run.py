@@ -45,6 +45,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
+from ciao import skill_proposals
 from ciao.entity_types import EntityTypeRegistry
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,9 @@ CURATION_LOG_RELATIVE = "Workspace/Curation-Log.md"
 WEEKLY_REVIEW_LOG_RELATIVE = "Workspace/Weekly-Review-Log.md"
 PROPOSALS_RELATIVE = "Workspace/Memory-Proposals.md"
 LEARNINGS_RELATIVE = "Workspace/Learnings.md"
-SKILL_PROPOSALS_RELATIVE = "Workspace/Skill-Proposals"
+# The skill-proposal queue's location, restated from the module that owns it so
+# the worklist and the queue cannot point at different folders.
+SKILL_PROPOSALS_RELATIVE = "/".join(skill_proposals.QUEUE_REL)
 
 STATE_VERSION = 1
 
@@ -508,11 +511,15 @@ def _log_items(vault_root: Path) -> list[WorklistItem]:
 
 
 def _skill_proposal_items(vault_root: Path) -> list[WorklistItem]:
-    directory = vault_root / SKILL_PROPOSALS_RELATIVE
-    try:
-        names = sorted(p.name for p in directory.iterdir() if p.is_file() and p.suffix == ".md")
-    except OSError:
-        return []
+    """The pass reports the queue's *open* records, not the files in the folder.
+
+    A settled proposal stays on disk — the decision is the record — so counting
+    every ``*.md`` here would put an answered question back in tonight's
+    worklist, every night, with nothing to distinguish it from a new one. The
+    queue's owner decides what is still open, so the worklist cannot drift from
+    the review surface about which rows are waiting.
+    """
+    names = skill_proposals.open_queue_names(vault_root)
     if not names:
         return []
     return [

@@ -42,7 +42,7 @@
                 <DropdownMenuItem as-child :disabled="loading || !!error" @select="downloadFile">
                   <button type="button">Download</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem as-child :disabled="loading || !!error || openExternalState === 'loading'" @select="openExternally">
+                <DropdownMenuItem v-if="canOpenExternally" as-child :disabled="loading || !!error || openExternalState === 'loading'" @select="openExternally">
                   <button type="button">{{ openExternalState === 'ok' ? 'Opened' : 'Open in default app' }}</button>
                 </DropdownMenuItem>
                 <DropdownMenuItem v-if="memoryPath && !inMemoryMap" as-child @select="void openInMemoryMap()">
@@ -331,6 +331,7 @@ import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
 import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
+import { isLoopbackPage } from '../lib/loopback'
 import { isCsvPath } from '../lib/csv'
 import { shortDirname } from '../lib/chatActivity'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
@@ -404,6 +405,9 @@ async function copyPath(): Promise<void> {
   }
 }
 const openExternalState = ref<'' | 'loading' | 'ok'>('')
+// The file opens on the engine's machine, so only offer it there: from a phone
+// or another Mac it would open on a screen nobody is looking at.
+const canOpenExternally = isLoopbackPage()
 const isEditingText = ref(false)
 const editBuffer = ref('')
 const editSaving = ref(false)

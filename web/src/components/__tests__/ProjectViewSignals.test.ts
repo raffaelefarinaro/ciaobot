@@ -412,4 +412,20 @@ describe('ProjectView automations load state', () => {
     // A resolved zero is stated in words; the heading carries no "0" count.
     expect(wrapper.get('.project-automations').text()).toContain('No automations deliver prompts to this project')
   })
+
+  it('loads the project files when the project arrives after mount', async () => {
+    const store = seed()
+    store.projects = [] as unknown as typeof store.projects
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => [] })
+    vi.stubGlobal('fetch', fetchMock)
+    await mountView()
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/projects/project-1/files', expect.anything())
+
+    store.projects = [{
+      project_id: 'project-1', name: 'Upwordo', workspace: 'personal', is_auto: false, vault_folder: 'projects/active/upwordo',
+    }] as unknown as typeof store.projects
+    await flush()
+    expect(fetchMock).toHaveBeenCalledWith('/api/projects/project-1/files', expect.anything())
+    vi.unstubAllGlobals()
+  })
 })

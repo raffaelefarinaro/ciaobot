@@ -8,8 +8,10 @@ legacy menu bar still imports these, so there is one implementation, not two.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
+from urllib.parse import urlsplit
 
 _INET_RE = re.compile(r"^\s*inet (\d+\.\d+\.\d+\.\d+)", re.MULTILINE)
 
@@ -79,8 +81,6 @@ def normalize_trusted_url(raw: str) -> str:
     never smuggle a path, query token or credentials into a QR code.
     Raises ValueError with a user-facing message.
     """
-    from urllib.parse import urlsplit
-
     text = (raw or "").strip()
     if not text:
         return ""
@@ -121,5 +121,99 @@ def normalize_trusted_url(raw: str) -> str:
     # rebuild an unparseable "https://fd7a::1:8443/".
     if ":" in host:
         host = f"[{host}]"
-    port = f":{port_num}" if port_num else ""
+    # 443 is the https default, so "host:443" and "host" are one origin and
+    # must compare equal when a typed address is matched against a detected one.
+    port = f":{port_num}" if port_num and port_num != 443 else ""
     return f"https://{host}{port}/"
+
+
+# `tailscale serve` proxies to whatever loopback spelling the user typed, so
+# any of these pointing at our port is this engine.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+# The Mac App Store and standalone Tailscale apps do not put the CLI on PATH;
+# it ships inside the bundle instead.
+_TAILSCALE_APP_CLI = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+
+# `serve status` answers from the local daemon. A wedged daemon must not hang
+# the Other devices card.
+_TAILSCALE_TIMEOUT_S = 3.0
+
+
+def parse_tailscale_serve(status: object, port: int) -> list[str]:
+    """HTTPS origins in `tailscale serve status --json` that proxy to *port*.
+
+    Only a root ("/") handler counts: the PWA uses absolute paths, so an engine
+    mounted under a sub-path would not load. Each origin goes through
+    :func:`normalize_trusted_url`, the same gate a typed address passes.
+    """
+
+    if not isinstance(status, dict):
+        return []
+    web = status.get("Web")
+    if not isinstance(web, dict):
+        return []
+    urls: list[str] = []
+    for host_port, config in web.items():
+        if not isinstance(host_port, str) or not isinstance(config, dict):
+            continue
+        handlers = config.get("Handlers")
+        root = handlers.get("/") if isinstance(handlers, dict) else None
+        proxy = root.get("Proxy") if isinstance(root, dict) else None
+        if not isinstance(proxy, str) or not _proxies_to(proxy, port):
+            continue
+        host, _, serve_port = host_port.rpartition(":")
+        origin = f"https://{host}" if serve_port == "443" else f"https://{host_port}"
+        try:
+            url = normalize_trusted_url(origin)
+        except ValueError:
+            continue
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _proxies_to(proxy: str, port: int) -> bool:
+    # Tailscale stores a bare port as "http://127.0.0.1:<port>", so a proxy
+    # target is always a URL here.
+    try:
+        parts = urlsplit(proxy)
+        return parts.hostname in _LOOPBACK_HOSTS and parts.port == port
+    except ValueError:
+        return False
+
+
+def _tailscale_cli() -> str | None:
+    from pathlib import Path
+
+    from ciao.tool_path import resolve_tool
+
+    found = resolve_tool("tailscale")
+    if found:
+        return found
+    return _TAILSCALE_APP_CLI if Path(_TAILSCALE_APP_CLI).is_file() else None
+
+
+def tailscale_serve_urls(port: int) -> list[str]:
+    """HTTPS addresses Tailscale Serve publishes for this engine, or []."""
+
+    cli = _tailscale_cli()
+    if not cli:
+        return []
+    try:
+        result = subprocess.run(
+            [cli, "serve", "status", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_TAILSCALE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    try:
+        status = json.loads(result.stdout)
+    except ValueError:
+        return []
+    return parse_tailscale_serve(status, port)

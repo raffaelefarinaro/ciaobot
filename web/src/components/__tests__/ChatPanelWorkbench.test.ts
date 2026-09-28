@@ -131,13 +131,27 @@ async function mountPanel(messages: ChatMessage[] = []): Promise<VueWrapper> {
   return wrapper
 }
 
+// jsdom implements neither Element.scrollTo nor any layout, so selecting a
+// message (which scrolls the transcript when the new footer would fall below
+// it) throws. Every call is recorded here for the tests to read; the geometry a
+// test needs, it stubs on the elements themselves.
+const scrollCalls: Array<{ top: number; behavior?: string }> = []
+
 describe('ChatPanel aligned layout', () => {
+  const scrollProto = Element.prototype as unknown as { scrollTo?: unknown }
+  const originalScrollTo = scrollProto.scrollTo
+
   beforeEach(() => {
     Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
     localStorage.clear()
+    scrollCalls.length = 0
+    scrollProto.scrollTo = function scrollTo(opts: { top: number; behavior?: string }) {
+      scrollCalls.push(opts)
+    }
   })
 
   afterEach(() => {
+    scrollProto.scrollTo = originalScrollTo
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     document.body.innerHTML = ''
@@ -156,6 +170,18 @@ describe('ChatPanel aligned layout', () => {
     wrapper.unmount()
   })
 
+  it('refetches the model list each time the picker opens', async () => {
+    const wrapper = await mountPanel()
+    const get = vi.mocked(api.get)
+    const modelFetches = () => get.mock.calls.filter(([path]) => path === '/api/models').length
+    expect(modelFetches()).toBe(1)
+
+    await wrapper.get('.composer-bar .model-picker-summary').trigger('click')
+    await flushPromises()
+    expect(modelFetches()).toBe(2)
+    wrapper.unmount()
+  })
+
   it('shows a message\'s actions only once it is selected, and Esc puts it back', async () => {
     const wrapper = await mountPanel(TURNS)
     const replies = wrapper.findAll('.message-wrap.assistant')
@@ -171,6 +197,11 @@ describe('ChatPanel aligned layout', () => {
     expect(actions.text()).toContain('Copy')
     expect(actions.text()).toContain('Fork from here')
 
+    // The actions are the card's own footer, not a row floating under it: a
+    // selected message and the things you can do to it are one object, so the
+    // footer can bleed to the card's edges and share its left edge.
+    expect(replies[0].findAll('.message-row > .message-actions')).toHaveLength(1)
+
     // Esc deselects without closing the chat.
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
     await nextTick()
@@ -183,10 +214,42 @@ describe('ChatPanel aligned layout', () => {
     expect(request.classes()).toContain('message-wrap--selected')
     expect(request.get('.message-actions').text()).toContain('Copy')
     expect(request.get('.message-actions').text()).not.toContain('Fork')
+    // Same shape on a request: the chip rides inside the row that becomes the
+    // card, so a 44px touch target cannot reach into the turn below it.
+    expect(request.findAll('.message-row > .message-actions')).toHaveLength(1)
 
     // Clicking the veil deselects.
     await wrapper.get('.message-select-backdrop').trigger('click')
     expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('pulls a selected turn back into view when the footer it just gained falls below the transcript', async () => {
+    const wrapper = await mountPanel(TURNS)
+    // The transcript's visible box: top 100, 600px tall, scrolled 40px down.
+    const transcript = wrapper.get('.messages').element as HTMLElement
+    transcript.getBoundingClientRect = () => ({ top: 100, bottom: 700 }) as DOMRect
+    Object.defineProperty(transcript, 'clientHeight', { configurable: true, value: 600 })
+    Object.defineProperty(transcript, 'scrollTop', { configurable: true, writable: true, value: 40 })
+
+    const reply = wrapper.findAll('.message-wrap.assistant').at(-1)!
+    const card = reply.get('.message-row')
+    // Selecting a reply grows it, and on a phone the new footer lands under
+    // the composer: 60px past the visible bottom. The scroll covers that plus
+    // the 12px of breathing room left above the transcript's edge.
+    card.element.getBoundingClientRect = () => ({ top: 400, bottom: 760 }) as DOMRect
+    await card.trigger('click')
+    await nextTick()
+    expect(scrollCalls.at(-1)).toEqual({ top: 112, behavior: 'smooth' })
+
+    // A footer that already fits must not yank the transcript away from
+    // wherever the reader had scrolled to, so no scroll is issued.
+    scrollCalls.length = 0
+    card.element.getBoundingClientRect = () => ({ top: 200, bottom: 640 }) as DOMRect
+    wrapper.get('.message-select-backdrop').trigger('click')
+    await card.trigger('click')
+    await nextTick()
+    expect(scrollCalls).toEqual([])
     wrapper.unmount()
   })
 
@@ -213,11 +276,11 @@ describe('ChatPanel aligned layout', () => {
     expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)
     expect(rail.text()).not.toContain('Current state')
 
-    // The header carries Archive only, as a labelled primary button; the
-    // toggle lives with Work details.
+    // The header carries Archive only, as an icon button (labelled on wide
+    // panes, icon-only on narrow); the toggle lives with Work details.
     const actions = wrapper.get('.pane-header .header-actions')
     expect(actions.findAll('button').map(b => b.text())).toEqual(['Archive'])
-    expect(actions.get('button').classes()).toContain('btn-primary')
+    expect(actions.get('button').classes()).toContain('btn-icon')
     expect(wrapper.find('.work-inspector-trigger').exists()).toBe(false)
     const hide = rail.get('.chat-rail-hide')
     expect(hide.attributes('aria-controls')).toBe('chat-work-rail')

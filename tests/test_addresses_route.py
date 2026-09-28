@@ -23,6 +23,7 @@ from ciao.network_addresses import (
     is_loopback_url,
     normalize_trusted_url,
     parse_inet_addresses,
+    parse_tailscale_serve,
     server_addresses,
 )
 from ciao.web import auth
@@ -44,11 +45,15 @@ def _client(trusted_url: str) -> TestClient:
     return TestClient(app)
 
 
-def _patch_addresses(monkeypatch) -> None:
+def _patch_addresses(monkeypatch, tailscale: list[str] | None = None) -> None:
     # The handler imports inside the function, so the patch has to land on the
     # module attribute rather than on a name the module already bound.
     monkeypatch.setattr(
         "ciao.network_addresses.server_addresses", lambda port: list(_URLS)
+    )
+    # Never shell out to a real `tailscale` from the suite.
+    monkeypatch.setattr(
+        "ciao.network_addresses.tailscale_serve_urls", lambda port: list(tailscale or [])
     )
 
 
@@ -173,3 +178,109 @@ def test_normalize_trusted_url_rejects_unsafe_values() -> None:
     ):
         with pytest.raises(ValueError):
             normalize_trusted_url(bad)
+
+
+def test_addresses_include_tailscale_serve_origin(monkeypatch) -> None:
+    _patch_addresses(monkeypatch, tailscale=["https://mini.tail1.ts.net/"])
+    body = _client("").get("/api/addresses").json()
+
+    first = body["addresses"][0]
+    assert first == {
+        "url": "https://mini.tail1.ts.net/",
+        "kind": "trusted",
+        "source": "tailscale",
+        "secure": True,
+        "loopback": False,
+    }
+    # The field only reflects what was typed, so a detected name does not
+    # fill it and "Leave it empty to clear" stays true.
+    assert body["trusted_url"] is None
+
+
+def test_addresses_typed_url_wins_over_matching_tailscale(monkeypatch) -> None:
+    _patch_addresses(
+        monkeypatch,
+        tailscale=["https://mini.tail1.ts.net/", "https://mini.tail1.ts.net:8444/"],
+    )
+    body = _client("https://mini.tail1.ts.net/").get("/api/addresses").json()
+
+    trusted = [(e["url"], e["source"]) for e in body["addresses"] if e["kind"] == "trusted"]
+    assert trusted == [
+        ("https://mini.tail1.ts.net/", "manual"),
+        ("https://mini.tail1.ts.net:8444/", "tailscale"),
+    ]
+
+
+def test_addresses_typed_default_port_matches_tailscale(monkeypatch) -> None:
+    _patch_addresses(monkeypatch, tailscale=["https://mini.tail1.ts.net/"])
+    body = _client("https://mini.tail1.ts.net:443").get("/api/addresses").json()
+
+    trusted = [(e["url"], e["source"]) for e in body["addresses"] if e["kind"] == "trusted"]
+    assert trusted == [("https://mini.tail1.ts.net/", "manual")]
+
+
+def test_parse_tailscale_serve_keeps_only_root_proxies_to_our_port() -> None:
+    # Shape of `tailscale serve status --json` (1.98): Web keys are host:port.
+    status = {
+        "TCP": {"443": {"HTTPS": True}, "8444": {"HTTPS": True}},
+        "Web": {
+            "Mini.tail1.ts.net:443": {"Handlers": {"/": {"Proxy": "http://localhost:8443"}}},
+            "mini.tail1.ts.net:8444": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8443"}}},
+            "mini.tail1.ts.net:8445": {"Handlers": {"/": {"Proxy": "http://[::1]:8443"}}},
+            # Another app on the same machine.
+            "mini.tail1.ts.net:8446": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:4599"}}},
+            # Mounted under a path: the PWA's absolute URLs would not load.
+            "mini.tail1.ts.net:8447": {"Handlers": {"/ciao": {"Proxy": "http://127.0.0.1:8443"}}},
+            # Proxying to another machine is not this engine.
+            "mini.tail1.ts.net:8448": {"Handlers": {"/": {"Proxy": "http://10.0.0.5:8443"}}},
+            # Static files, not a proxy.
+            "mini.tail1.ts.net:8449": {"Handlers": {"/": {"Path": "/tmp/site"}}},
+        },
+    }
+    assert parse_tailscale_serve(status, 8443) == [
+        "https://mini.tail1.ts.net/",
+        "https://mini.tail1.ts.net:8444/",
+        "https://mini.tail1.ts.net:8445/",
+    ]
+
+
+def test_parse_tailscale_serve_ignores_malformed_status() -> None:
+    assert parse_tailscale_serve(None, 8443) == []
+    assert parse_tailscale_serve({}, 8443) == []
+    assert parse_tailscale_serve({"Web": []}, 8443) == []
+    assert parse_tailscale_serve({"Web": {"x:443": {"Handlers": "no"}}}, 8443) == []
+    # A host the trusted-URL gate would refuse never reaches the QR code.
+    bad = {"Web": {"ho st:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8443"}}}}}
+    assert parse_tailscale_serve(bad, 8443) == []
+
+
+def test_tailscale_serve_urls_survives_a_failing_cli(monkeypatch) -> None:
+    import subprocess
+
+    from ciao import network_addresses
+
+    monkeypatch.setattr(network_addresses, "_tailscale_cli", lambda: "/bin/tailscale")
+
+    def run(returncode: int = 0, stdout: str = "", exc: Exception | None = None):
+        def fake(*args, **kwargs):
+            if exc:
+                raise exc
+            return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr="")
+
+        return fake
+
+    for fake in (
+        run(exc=subprocess.TimeoutExpired("tailscale", 3)),
+        run(exc=OSError("gone")),
+        run(returncode=1),
+        run(stdout="not json"),
+    ):
+        monkeypatch.setattr(network_addresses.subprocess, "run", fake)
+        assert network_addresses.tailscale_serve_urls(8443) == []
+
+    ok = '{"Web": {"mini.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8443"}}}}}'
+    monkeypatch.setattr(network_addresses.subprocess, "run", run(stdout=ok))
+    assert network_addresses.tailscale_serve_urls(8443) == ["https://mini.ts.net/"]
+
+    monkeypatch.setattr(network_addresses, "_tailscale_cli", lambda: None)
+    assert network_addresses.tailscale_serve_urls(8443) == []

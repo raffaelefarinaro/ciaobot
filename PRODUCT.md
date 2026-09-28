@@ -63,7 +63,7 @@ Durable constraints:
 - The installed CLI is available as both `ciaobot` and the shorter compatibility name `ciao`; backend package and environment-variable compatibility names may continue to use `ciao`/`CIAO_*`.
 - The project is open source under the Apache 2.0 License and is maintained by Raffaele Farinaro.
 - Product communication should remain concrete, capable, and privacy-aware. It may describe verified functionality but must not imply that local-first storage means the model provider never receives data.
-- Existing identity assets include the Ciaobot mascot and product imagery in `docs/hero.png` and the interface captures under `docs/screenshots/`.
+- Existing identity assets include the Ciaobot mascot and product imagery and interface captures in `site/assets/img/`.
 
 ## Evidence on Hand
 
@@ -72,7 +72,7 @@ Durable constraints:
 - Product rationale and evaluation goals for memory: `docs/MEMORY_DESIGN.md`.
 - System boundaries and operating constraints: `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `docs/LINUX.md`, and `web/README.md`.
 - Security posture: `SECURITY.md`.
-- Product imagery and interface evidence: `docs/hero.png`, `docs/screenshots/pwa-overview-labeled.png`, `docs/screenshots/pwa-overview.png`, and `docs/screenshots/pwa-overview.svg`.
+- Product imagery and interface evidence: the images in `site/assets/img/`.
 - No customer testimonials, quantified outcome claims, case studies, or press commitments were identified. Future work must not fabricate them.
 
 ## Product Principles

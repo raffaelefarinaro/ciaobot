@@ -117,8 +117,9 @@ _MODEL_CACHE_TTL = 300.0
 _EMPTY_MODEL_CACHE_TTL = 20.0
 _MODEL_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 # How long the catalog keeps polling a fresh server whose model list is still
-# empty. Loading took about 0.5s against three connected providers; an account
-# with genuinely no models pays this once per `_EMPTY_MODEL_CACHE_TTL`.
+# empty, counted from its first /api/model reply. Loading took about 0.5s
+# against three connected providers; an account with genuinely no models pays
+# this once per `_EMPTY_MODEL_CACHE_TTL`.
 _CATALOG_WARMUP_TIMEOUT = 5.0
 _CATALOG_WARMUP_POLL = 0.25
 
@@ -2721,12 +2722,16 @@ class OpencodeProvider(BaseSDKProvider):
         # A chat's server can be seconds old here, and a fresh server lists no
         # models until its providers load (see `model_catalog`), which would
         # reject a valid bare id as not found.
+        # The window opens at the first reply, not before the request: under
+        # load that first (always empty) reply alone can take longer than it.
         loop = asyncio.get_running_loop()
-        warm_deadline = loop.time() + _CATALOG_WARMUP_TIMEOUT
+        warm_deadline: float | None = None
         while True:
             response = await client.get("/api/model")
             response.raise_for_status()
             models = _data(response.json())
+            if warm_deadline is None:
+                warm_deadline = loop.time() + _CATALOG_WARMUP_TIMEOUT
             if models or loop.time() >= warm_deadline:
                 break
             await asyncio.sleep(_CATALOG_WARMUP_POLL)
@@ -3044,9 +3049,12 @@ class OpencodeProvider(BaseSDKProvider):
                     # its providers, and its first /api/model is an empty
                     # list for the half-second or so that takes. Keep asking
                     # while the list is empty, or that empty list is cached
-                    # and the picker shows no opencode models (2.0.16).
+                    # and the picker shows no opencode models (2.0.16). The
+                    # window opens at the first reply: on a loaded machine
+                    # that empty reply alone took 8.5s, past a window counted
+                    # from /api/info, and the empty list was cached.
                     loop = asyncio.get_running_loop()
-                    warm_deadline = loop.time() + _CATALOG_WARMUP_TIMEOUT
+                    warm_deadline: float | None = None
                     attempt = 0
                     while True:
                         try:
@@ -3067,6 +3075,8 @@ class OpencodeProvider(BaseSDKProvider):
                                 continue
                             models_payload = {"data": []}
                             break
+                        if warm_deadline is None:
+                            warm_deadline = loop.time() + _CATALOG_WARMUP_TIMEOUT
                         if _data(models_payload) or loop.time() >= warm_deadline:
                             break
                         await asyncio.sleep(_CATALOG_WARMUP_POLL)

@@ -41,6 +41,18 @@ web/
 
 ## iOS PWA gotchas
 
+Installed-app integration: the manifest uses the indigo shell colors, has
+shortcuts for New chat, Memory and Automations, and advertises an optional
+POST share target on browsers that support it. The service worker intercepts
+`/share-target` and stages shared text, links and files (20 MB total) in
+IndexedDB; it never posts them to the engine. Home asks the user to add them to
+the draft or discard them. A share older than 24 hours is not opened, and
+logout clears pending shares. The file viewer offers native Share where the
+browser supports sharing that file type, alongside the existing Download.
+Safari/iOS may not expose the installed app as a share target; ordinary file
+attachment remains available there. PWA features need HTTPS or localhost.
+
+
 The PWA runs primarily as a standalone iOS Safari app. Several iOS-specific quirks are addressed in code; do not undo them without reading why.
 
 ### Keyboard + viewport
@@ -105,6 +117,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 - One Vue SFC per pane. Keep `<script setup lang="ts">`, template, scoped `<style>`.
 - Load states are separate states. A list that fetches (`ProposalReviewPanel`, `ProposalHistoryList`, the Memory Map) must distinguish first-load in flight, first-load failure (inline error + Retry, never an empty-state claim), a failed refresh over existing rows (keep the rows, mark them stale, offer Retry), a filter hiding a non-empty set (offer to clear filters), and a genuinely empty set. Never derive "there is nothing here" from a filtered array alone — a failed or pending GET would then read as a cleared queue. Load errors live in their own store slot (`loadError`), apart from action errors (`error`), so a list refresh cannot clear an unread accept/dismiss failure. `useTaskStore` exposes the same contract for schedules through `scheduleLoading`, `scheduleLoadError`, and `schedulesLoaded`; Home, Project, and Automations consume that shared truth rather than maintaining competing local interpretations.
 - The core work model is **request → run → output → durable knowledge**. `HomeIntake.vue` starts an ordinary project chat and preserves unsent text per workspace; `HomeReviewSummary.vue` uses active-workspace counts and labels checking/current/stale/empty/failed state explicitly and, on the Today surface, sits in the `.home-workbench` side rail beside the request column (stacking below it at a 980px container width); `ChatPanel.vue` keeps the transcript dominant and opens a conditional, keyboard-operable Context / Activity / Output inspector. New UI should reinforce those relationships rather than introduce another top-level inbox or artifact silo.
+- **A memory pass is not a chat row.** It is an app-owned chat in a hidden project, and it used to be listed twice for one archived conversation: once in Home's tiers under its own internal title (`Memory pass · …`), once as the conversation it works on. It is now one row, in the `memory insights` section `HomeRecentChats.vue` renders below the tiers, and the store filters it out of `activeChatsAll`, `projectChats`, `totalUnread`, the sidebar and every schedule target. Put the whole derivation — one row per archived conversation, the archive pipeline and the pass joined, every phase and its wording — in `lib/memoryInsights.ts`, not in the component; only the signals come from the store (`memoryInsightRows`). `ChatPanel.vue` names the source conversation above the transcript (and at the top of the Work details rail, which shows it instead) and links the archived transcript, so an opened pass says what it is. `lib/memoryPass.ts` stays the only reader of the `memory_pass` helper kind.
 - Project, Memory, and file rows are native buttons or links whenever they perform work. Context menus use `role="menu"` / `role="menuitem"`, open focus on the first action, support Arrow/Home/End/Escape, and restore the trigger. Pointer-only rows and right-click-only actions are not acceptable.
 - Markdown rendering goes through `lib/safeMarkdown.ts` (DOMPurify + marked + highlight.js). Never `v-html` raw user content.
 - Chat Markdown tables use the renderer's `.markdown-table-scroll` region so compact tables shrink-wrap and wide tables scroll independently at narrow widths. Keep the region keyboard focusable and preserve readable key columns.
@@ -210,16 +223,22 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 
 ### Browser suite (`npm run test:e2e`)
 
-`e2e/` holds a deliberately small Playwright suite — four spec files, ten tests,
-about three seconds — that covers only the things a jsdom mount **cannot**
+`e2e/` holds a deliberately small Playwright suite — six spec files, eighteen
+tests, about three seconds — that covers only the things a jsdom mount **cannot**
 establish:
 
 | Spec | What only a real browser can decide |
 | --- | --- |
 | `workspace-shortcuts.spec.ts` | Where a typed character actually lands. The `1`-`9` shortcuts must follow the visible sidebar order and stay inert while a text field is focused; jsdom reports a focused textarea that no keystroke is routed to. Also walks Tab through the primary nav, which is how a click-only control gets caught. |
-| `narrow-viewport.spec.ts` | Layout at 390px. jsdom has no layout engine: every rect is 0x0 and `scrollWidth` is always 0, so neither the unbreakable-flex-child trap nor a tap target under `--touch: 44px` is visible from a mount. |
+| `narrow-viewport.spec.ts` | Layout at 390px. jsdom has no layout engine: every rect is 0x0 and `scrollWidth` is always 0, so neither the unbreakable-flex-child trap nor a tap target under `--touch: 44px` is visible from a mount. The memory-insight journey also measures the row that carries a second control (the retry beside the open control), which is the one place a row can grow past the pane. Selecting a reply measures the opposite case: the action footer is not in the layout until the message is selected, and has to be scrolled back on screen rather than left under the composer. |
 | `browser-zoom.spec.ts` | Reflow under page zoom and at the largest in-app font scale, and that the viewport meta never disables pinch zoom. |
 | `events-reconnect.spec.ts` | That the *browser* notices a severed `/ws/events` socket, re-dials, and applies the snapshot the new socket carries. A vitest fake can only close itself. |
+| `archived-chat.spec.ts` | That an archived chat opens read-only from a deep link: no composer, and no chat socket opened for a session the provider has already reclaimed. |
+| `workbench-layout.spec.ts` | That Home's review rail sits beside the command surface, and that the expanded sidebar stacks workspace scope, New chat and the destinations without overlap. |
+
+The fixture serves an empty chat history by default. A spec that needs real
+turns to select opts in per session with `POST /__fixture__/transcript`, so the
+specs beside it keep seeing the empty chat.
 
 Everything else stays in vitest. Adding to this suite is a trade, not a free
 win: each spec is roughly a hundred times slower than the equivalent unit test

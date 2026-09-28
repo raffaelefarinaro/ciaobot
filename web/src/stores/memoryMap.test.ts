@@ -7,7 +7,7 @@ import { api } from '../lib/api'
 vi.mock('../lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
 }))
-import { useMemoryMapStore, isMemorySection, memorySectionPath, MEMORY_SECTIONS, type MemoryGraphNode } from './memoryMap'
+import { useMemoryMapStore, isMemorySection, isReviewFilter, memorySectionPath, reviewPath, MEMORY_SECTIONS, type MemoryGraphNode } from './memoryMap'
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -129,14 +129,12 @@ describe('sections', () => {
     expect(isMemorySection('categories')).toBe(true)
   })
 
-  test('setSection keeps the panels\' own state in step', () => {
-    const mm = useMemoryMapStore()
-    mm.setSection('revisit')
-    expect([mm.section, mm.view, mm.reviewTab, mm.retirementTab]).toEqual(['revisit', 'review', 'retirement', 'candidates'])
-    mm.setSection('retired')
-    expect([mm.view, mm.reviewTab, mm.retirementTab]).toEqual(['review', 'retirement', 'trash'])
-    mm.setSection('suggested')
-    expect([mm.view, mm.reviewTab]).toEqual(['review', 'proposals'])
+  test('the two queues are one section, narrowed by a filter in the address', () => {
+    expect(MEMORY_SECTIONS).toEqual(['review', 'map', 'categories', 'retired', 'history'])
+    expect(reviewPath()).toBe('/memory/review')
+    expect(reviewPath('revisit')).toBe('/memory/review?show=revisit')
+    expect(isReviewFilter('suggested')).toBe(true)
+    expect(isReviewFilter('map')).toBe(false)
   })
 
   test('the map returns to whichever drawing was on screen', () => {
@@ -223,6 +221,18 @@ describe('graph snapshots', () => {
     expect(mm.graphIsWarm).toBe(true)
     expect(mm.nodes[0].x).toBe(123)
     expect(api.get).toHaveBeenCalledTimes(2)
+  })
+
+  test('the same notes start at the same positions on every load', async () => {
+    vi.mocked(api.get).mockResolvedValue(payload(['a', 'b']))
+    const first = useMemoryMapStore()
+    await first.loadGraph('work')
+    const before = first.nodes.map(n => [n.x, n.y])
+    setActivePinia(createPinia())
+    const second = useMemoryMapStore()
+    await second.loadGraph('work')
+    expect(second.nodes.map(n => [n.x, n.y])).toEqual(before)
+    expect(before[0]).not.toEqual(before[1])
   })
 
   test('a changed vault replaces the graph but keeps the positions it can', async () => {

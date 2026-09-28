@@ -1,10 +1,65 @@
-const CACHE_NAME = 'ciaobot-v1.0.0'
+const CACHE_NAME = 'ciaobot-v1.0.1'
 const STATIC_ASSETS = ['/', '/index.html', '/manifest.json', '/icons/icon-192.png', '/icons/icon-512.png', '/favicon.png']
 const ICON = '/icons/icon-192.png'
 const BADGE = '/icons/icon-192.png'
 const UNREAD_CACHE = 'ciaobot-unread'
 const LEGACY_UNREAD_CACHE_PREFIX = 'ciaobot-unread-v'
 const UNREAD_KEY = '/__unread__'
+const SHARE_DB = 'ciaobot-shared-content'
+const SHARE_STORE = 'pending'
+const MAX_SHARED_FILE_BYTES = 20 * 1024 * 1024
+
+function openShareDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(SHARE_DB, 1)
+    request.onupgradeneeded = () => request.result.createObjectStore(SHARE_STORE, { keyPath: 'id' })
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+}
+
+async function saveSharedContent(record) {
+  const db = await openShareDb()
+  try {
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction(SHARE_STORE, 'readwrite')
+      const store = transaction.objectStore(SHARE_STORE)
+      const existing = store.getAll()
+      existing.onsuccess = () => {
+        for (const item of existing.result) {
+          if (Date.now() - item.createdAt > 24 * 60 * 60 * 1000) store.delete(item.id)
+        }
+        store.put(record)
+      }
+      transaction.oncomplete = resolve
+      transaction.onerror = () => reject(transaction.error)
+    })
+  } finally {
+    db.close()
+  }
+}
+
+async function receiveShare(request) {
+  try {
+    const form = await request.formData()
+    const files = form.getAll('files').filter(value => value instanceof File)
+    if (files.reduce((total, file) => total + file.size, 0) > MAX_SHARED_FILE_BYTES) {
+      return Response.redirect(new URL('/?share-error=size', self.location.origin), 303)
+    }
+    const id = self.crypto.randomUUID()
+    await saveSharedContent({
+      id,
+      createdAt: Date.now(),
+      title: String(form.get('title') || '').slice(0, 2048),
+      text: String(form.get('text') || '').slice(0, 32768),
+      url: String(form.get('url') || '').slice(0, 4096),
+      files,
+    })
+    return Response.redirect(new URL(`/?shared=${encodeURIComponent(id)}`, self.location.origin), 303)
+  } catch {
+    return Response.redirect(new URL('/?share-error=save', self.location.origin), 303)
+  }
+}
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -208,19 +263,6 @@ self.addEventListener('push', (event) => {
     ]))
     return
   }
-  if (data.kind === 'test') {
-    event.waitUntil(self.registration.showNotification(title, {
-      body: data.body || '',
-      icon: ICON,
-      badge: BADGE,
-      tag: 'ciaobot-test',
-      renotify: true,
-      // Marks this as a delivery test: the click/close handlers bail out
-      // instead of touching unread state or navigating away from a chat.
-      data: { kind: 'test' },
-    }))
-    return
-  }
   const options = {
     body: data.body || '',
     icon: ICON,
@@ -245,7 +287,6 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close()
-  if (event.notification.data?.kind === 'test') return
   const chatId = event.notification.data?.chat_id || ''
   if (event.action === 'dismiss') {
     event.waitUntil(clearNotificationUnread(chatId))
@@ -278,7 +319,6 @@ self.addEventListener('notificationclick', (event) => {
 })
 
 self.addEventListener('notificationclose', (event) => {
-  if (event.notification.data?.kind === 'test') return
   const chatId = event.notification.data?.chat_id || ''
   event.waitUntil(clearNotificationUnread(chatId))
 })
@@ -318,8 +358,15 @@ self.addEventListener('message', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url)
+  if (url.origin === self.location.origin && url.pathname === '/share-target' && event.request.method === 'POST') {
+    event.respondWith(receiveShare(event.request))
+    return
+  }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return
   if (event.request.method !== 'GET') return
+  // Only the public app shell and assets belong in CacheStorage. Never store
+  // arbitrary pages or cross-origin responses from a controlled client.
+  if (url.origin !== self.location.origin) return
   if (url.pathname.startsWith('/api') || url.pathname.startsWith('/ws')) return
 
   // Hashed / immutable UI assets (vite outputs /assets/* with content hash,
@@ -329,7 +376,7 @@ self.addEventListener('fetch', (event) => {
   const isImmutableAsset =
     url.pathname.startsWith('/assets/') ||
     url.pathname.startsWith('/icons/') ||
-    /\.(woff2|woff|ttf|otf|png|jpg|jpeg|svg|webp)$/i.test(url.pathname)
+    url.pathname === '/favicon.png'
 
   if (isImmutableAsset) {
     event.respondWith(
@@ -360,7 +407,7 @@ self.addEventListener('fetch', (event) => {
           const shell = (await caches.match('/index.html')) || (await caches.match('/'))
           if (shell) return shell
         }
-        if (response.ok) {
+        if (response.ok && (url.pathname === '/' || url.pathname === '/index.html') && response.headers.get('content-type')?.includes('text/html')) {
           const clone = response.clone()
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone))
         }

@@ -211,8 +211,9 @@ def record_decision(
     ``action`` is ``"accept"`` or ``"dismiss"``; anything else is treated as a
     dismissal by the history and refused by the tally, which is the behaviour
     each caller already had. The tally is written only for the extraction
-    kinds — ``skill`` rows come from skill evolution and ``rehome`` rows from
-    vault hygiene, and neither measures the memory pipeline.
+    kinds — a ``skill`` row is filed by the memory pass but settled rather than
+    promoted and ``rehome`` rows are queued by vault hygiene, so neither
+    measures the memory pipeline.
 
     ``receipt_id`` is the memory-change receipt an accept's write handed back.
     The history keeps the ORIGINAL bullet as ``text`` because append-time

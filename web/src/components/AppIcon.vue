@@ -79,6 +79,12 @@
       <line x1="12" y1="9" x2="12" y2="13" />
       <rect x="11" y="15" width="2" height="2" fill="currentColor" stroke="none" />
     </template>
+
+    <!-- Spark: durable memory. A four-point star, drawn as one closed path so
+         it keeps the set's square caps and miter joins. -->
+    <template v-else-if="name === 'spark'">
+      <path d="M12 3l2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12l6.8-2.2z" />
+    </template>
   </svg>
 </template>
 
@@ -104,6 +110,7 @@ export type AppIconName =
   | 'clock'
   | 'activity'
   | 'shield'
+  | 'spark'
 
 withDefaults(defineProps<{
   name: AppIconName

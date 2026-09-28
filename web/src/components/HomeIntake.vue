@@ -3,6 +3,12 @@
     <!-- The composer is the page's subject, so it carries no visible headline;
          the heading stays for the document outline and screen readers. -->
     <h1 id="home-intake-title" class="sr-only">Start new work</h1>
+    <div v-if="incoming" class="home-intake-share" role="status">
+      <span>Shared from another app · {{ incoming.files.length ? `${incoming.files.length} file(s)` : 'text or link' }}</span>
+      <button type="button" class="btn-small" @click="addSharedContent">Add to draft</button>
+      <button type="button" class="btn-small" @click="discardSharedContent">Discard</button>
+    </div>
+    <p v-if="shareError" role="alert" class="hint">{{ shareError }}</p>
 
     <form
       class="home-intake-form"
@@ -92,8 +98,8 @@
         </button>
         <span class="home-intake-spacer" />
         <span v-if="prompt.trim()" class="home-intake-kbd" aria-hidden="true"><kbd>{{ sendChord }}</kbd> send</span>
-        <!-- Keeps "New" as its accessible name: the control still opens the
-             shared project picker first, with or without a prompt. -->
+        <!-- Keeps "New" as its accessible name: with or without a prompt it
+             opens a chat in the project the chip names. -->
         <button
           type="submit"
           class="home-intake-new"
@@ -101,7 +107,6 @@
           :aria-label="starting ? 'Opening…' : 'New'"
           :aria-keyshortcuts="prompt.trim() ? sendKeyshortcuts : undefined"
           :title="prompt.trim() ? `Send (${sendChord})` : 'New chat'"
-          aria-haspopup="dialog"
         >
           <span v-if="starting" class="home-intake-spinner" aria-hidden="true" />
           <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -118,13 +123,13 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore, type NewChatRuntime } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
-import { clearChatDraft } from '../lib/chatDrafts'
 import { openNewChatPicker } from '../lib/newChat'
 import { isApplePlatform } from '../lib/platform'
 import { isMemoryProject } from '../lib/memoryPass'
 import { providerForModelSection, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import ModelSelector from './ModelSelector.vue'
 import { importDesktopDrop, uploadChatAttachments } from '../lib/chatAttachments'
+import { readSharedContent, removeSharedContent, sharedPrompt, type SharedContent } from '../lib/sharedContent'
 
 // Sentinel row for "no override": ModelSelector lists models, so the
 // workspace default is offered as its own one-model section.
@@ -132,6 +137,8 @@ const DEFAULT_KEY = '__workspace-default__'
 
 const store = useProjectStore()
 const prompt = ref('')
+const incoming = ref<SharedContent | null>(null)
+const shareError = ref('')
 const starting = ref(false)
 const preferredProjectId = ref('')
 const draftsByWorkspace = new Map<string, string>()
@@ -308,7 +315,56 @@ onMounted(() => {
   window.addEventListener('ciao:native-file-drag-enter', onNativeDragEnter)
   window.addEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
   window.addEventListener('ciao:native-file-drop', onNativeDrop)
+  const params = new URLSearchParams(window.location.search)
+  const id = params.get('shared')
+  if (id) {
+    void readSharedContent(id).then(content => {
+      if (content) incoming.value = content
+      else shareError.value = 'The shared item could not be found. Share it again.'
+    }).catch(() => { shareError.value = 'Could not open the shared item. Share it again.' })
+  }
+  if (params.get('new') === '1') void nextTick(() => document.getElementById('home-intake-prompt')?.focus())
+  if (params.get('share-error')) shareError.value = params.get('share-error') === 'size'
+    ? 'The shared file is too large (20 MB limit).'
+    : 'Could not save the shared item. Share it again.'
 })
+
+function clearShareQuery(): void {
+  const url = new URL(window.location.href)
+  url.searchParams.delete('shared')
+  url.searchParams.delete('share-error')
+  window.history.replaceState(window.history.state, '', url)
+}
+
+async function addSharedContent(): Promise<void> {
+  if (!incoming.value) return
+  const content = incoming.value
+  try {
+    await removeSharedContent(content.id)
+  } catch {
+    shareError.value = 'Could not clear the shared item. Try again.'
+    return
+  }
+  const addition = sharedPrompt(content)
+  if (addition) prompt.value = [prompt.value, addition].filter(Boolean).join('\n\n')
+  stageFiles(content.files)
+  incoming.value = null
+  clearShareQuery()
+  await nextTick()
+  document.getElementById('home-intake-prompt')?.focus()
+}
+
+async function discardSharedContent(): Promise<void> {
+  if (!incoming.value) return
+  try {
+    await removeSharedContent(incoming.value.id)
+  } catch {
+    shareError.value = 'Could not discard the shared item. Try again.'
+    return
+  }
+  incoming.value = null
+  clearShareQuery()
+}
 onBeforeUnmount(() => {
   window.removeEventListener('ciao:native-file-drag-enter', onNativeDragEnter)
   window.removeEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
@@ -353,11 +409,6 @@ async function attachStaged(chatId: string, projectId: string, items: StagedItem
   return refs
 }
 
-function titleFromPrompt(value: string): string {
-  const firstLine = value.split('\n')[0]?.trim() || 'New work'
-  return firstLine.length > 72 ? `${firstLine.slice(0, 69)}…` : firstLine
-}
-
 function onSubmit(): void {
   void startWork()
 }
@@ -384,10 +435,15 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   const workspace = options.workspace || store.activeWorkspace
   starting.value = true
   try {
-    const projectId = await openNewChatPicker({
-      workspace,
-      projectId: options.projectId || defaultProject.value?.project_id,
-    })
+    // The chip already names where this chat goes, so sending uses it
+    // directly; the picker only opens from the chip, or when the workspace
+    // has no project the chip could name.
+    const projectId = options.rememberOnly || !defaultProject.value
+      ? await openNewChatPicker({
+        workspace,
+        projectId: options.projectId || defaultProject.value?.project_id,
+      })
+      : defaultProject.value.project_id
     if (!projectId) return
 
     if (options.rememberOnly) {
@@ -398,10 +454,11 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
     const items = staged.value.slice()
     if (message || items.length) {
       const runtime = selectedModel.value ?? undefined
-      const title = titleFromPrompt(message || items.map(item => item.name).join(', '))
+      // The prompt is sent, not seeded as the new chat's draft: a seeded
+      // draft would sit in the composer after the message already went out.
       const chat = runtime
-        ? await store.newChatInProject(projectId, message, title, runtime)
-        : await store.newChatInProject(projectId, message, title)
+        ? await store.newChatInProject(projectId, undefined, runtime)
+        : await store.newChatInProject(projectId)
       if (!chat) return
       // Attachments belong to a chat, so they upload now that it exists and
       // go out with the first message: images staged on the chat, files as
@@ -409,10 +466,9 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
       const refs = items.length ? await attachStaged(chat.chat_id, projectId, items) : []
       const text = [message, refs.join(' ')].filter(Boolean).join('\n\n')
       await store.sendMessage(chat.chat_id, text)
-      clearChatDraft(chat.chat_id)
       staged.value = staged.value.filter(item => !items.includes(item))
     } else if (selectedModel.value) {
-      await store.newChatInProject(projectId, '', undefined, selectedModel.value)
+      await store.newChatInProject(projectId, undefined, selectedModel.value)
     } else {
       await store.newChatInProject(projectId)
     }
@@ -431,6 +487,22 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
 </script>
 
 <style scoped>
+.home-intake-share {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg2);
+}
+.home-intake-share > span { flex: 1 1 180px; }
+.home-intake-share button { min-height: var(--touch); }
+@media (max-width: 600px) {
+  .home-intake-share > span { flex-basis: 100%; }
+}
 .home-intake {
   width: min(100%, 920px);
   margin: 0 auto;

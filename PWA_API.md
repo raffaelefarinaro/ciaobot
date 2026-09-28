@@ -69,7 +69,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspace-binary` | Read allowed binary file |
 | GET | `/api/libreoffice-status` | Whether LibreOffice (`soffice`) is available to render `.pptx` previews |
 | POST | `/api/libreoffice-install` | Install LibreOffice via Homebrew Cask (macOS); no restart needed |
-| POST | `/api/workspace-open` | Open a workspace file with the OS default app on the machine running Ciao |
+| POST | `/api/workspace-open` | Open a workspace file with the OS default app on the machine running Ciao; loopback clients only (403 otherwise) |
 | GET | `/api/file-history` | List snapshots for a `(chat_id, file_path)` |
 | GET | `/api/file-content` | Read one snapshot's content |
 | GET | `/api/vault-markdown-paths` | List workspace-relative markdown paths (file viewer resolves Obsidian wikilinks) |
@@ -145,11 +145,15 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/push/unsubscribe` | Remove push subscription |
 | GET | `/api/push/status` | Read push setup status |
 | GET | `/api/push/subscription` | Check one subscription |
-| POST | `/api/push/test` | Send a test notification to the caller's own subscription (body `{endpoint}`; 10 s cooldown per subscription) |
 | GET | `/api/local/status` | Workspace git state: `git_repo`, current `branch` (nullable), dirty |
 | GET | `/api/local/preflight` | Git preflight check for dirty files, categories, blockers/warnings |
 | POST | `/api/local/handback` | Commit pending work, pull from origin, push the current branch |
 | POST | `/api/local/resync` | Merge `origin/<branch>` back into the checkout |
+| GET | `/api/local/backup` | Memory-backup status: `state`, `scope`, `branch`, sanitized `remote` and `last_remote`, `enabled`, `interval_s`, last attempt/success, `pending_changes`, `pending_commits`, `reason` (read-only) |
+| PATCH | `/api/local/backup` | Turn the memory backup off/on (`enabled`) or pause/resume it (`paused`); persists across a restart |
+| POST | `/api/local/backup/run` | Back up now, through the same serialized path the five-minute loop uses |
+| GET | `/api/local/backup/setup-prompt` | The canonical setup prompt plus the trusted `context` it was rendered from (read-only, entirely local) |
+| POST | `/api/local/backup/setup-chat` | Open (or re-enter) a setup chat and **send** the prompt into it; idempotent |
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
 | GET | `/api/addresses` | Where other devices can open this engine: the configured trusted HTTPS URL first (`kind: trusted`, `secure: true`), then LAN/Bonjour HTTP URLs (`kind: lan`), then localhost (`kind: loopback`). Session-protected; URLs never carry a password or token |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
@@ -656,7 +660,14 @@ pushes the branch: a clean pull is pushed directly (response: `{merged:true,
 deploy_needed:false, pushed}`); a conflicting pull is left in the tree and opens an interactive
 chat (`{merged:false, conflict:true, merge:{chat_id,...}}`) that resolves it, asking you
 (push-notified) when ambiguous. After that chat lands the branch, resync merges
-`origin/<branch>` back into the checkout. Non-git workspaces (or detached HEAD) get
+`origin/<branch>` back into the checkout. A failing step returns `{ok:false, step, error}` with
+status 400, where `step` names the stage that failed: `branch` (no branch / detached HEAD),
+`preflight` (a git operation you started outside Ciaobot still holds this repository — a
+preexisting `.git/index.lock` or an in-progress merge/rebase, which is left untouched for you
+to finish or abort), `add`, `status`, `commit`, `fetch` (nothing is pulled or pushed after a
+failed commit or fetch), or `push`. Resync reports the same failures as `{ok:false, detail}`.
+One sync is one serialized mutation, so a concurrent Ciaobot mutation of the same repository
+waits rather than interleaving. Non-git workspaces (or detached HEAD) get
 `{ok:false, error}` with status 400. Workspace sync never deploys app code; app updates happen
 through the package install/upgrade path.
 
@@ -675,10 +686,101 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/handov
   -H 'content-type: application/json' -d '{"branch":"main"}'
 ```
 
+**Unattended memory backup**
+
+Routes: `GET /api/local/backup`, `PATCH /api/local/backup`, `POST /api/local/backup/run`,
+`GET /api/local/backup/setup-prompt`, `POST /api/local/backup/setup-chat`.
+
+The engine commits the durable-data scope (`memory-vault/`, `skills/`, `subagents/`,
+`commands/`, the `AGENTS.md` guide and archived workspaces — never credentials, runtime
+state, caches, the transcript archive or application source) and pushes it every five
+minutes. This is a different path from "Sync with Remote" above: it is unattended, it
+commits only what the scope allows, and it never creates a commit or a push when there is
+nothing pending.
+
+`GET` is read-only and always 200 — a repository with no remote is a state it reports, not
+a failure of the endpoint. `state` is one of:
+
+| `state` | meaning |
+| --- | --- |
+| `ready` | committed and pushed; `reason` says what the last run did |
+| `pending` | a scoped change to commit, or a commit that never reached origin |
+| `running` | a run is in flight right now |
+| `paused` | this boot will not run one: `enabled:false`, `paused:true`, or not the host |
+| `offline` | the commit is safe locally and origin did not answer; retried on the slow cadence |
+| `needs_attention` | only the owner can fix it: a credential in the scope, a repository another git operation holds, a branch that diverged from origin (the commit is on a per-commit backup ref) |
+| `not_configured` | the data root is not a repository, is on a detached HEAD, or has no `origin` — re-checked every tick, so adding a remote needs no restart |
+
+`last_success_commit` is a commit known to exist on the remote: it is written only by a push
+that landed, never by a local commit. A failed push keeps the local commit untouched — no
+reset, no force-push — and the remote URL is always reported with any credential removed.
+`remote` is read fresh on every call and is empty whenever this boot is paused or the
+repository is unconfigured; `last_remote` is the record of where the last run pushed, so it
+is still the answer when `remote` is not. `POST /api/local/backup/run` is the manual trigger;
+it takes the same lock as the scheduled tick, so the two can never interleave. 200 when the
+run left the repository in a state that needs nothing from you, 400 when it could not do its
+job (no repository, no remote, refused credentials, unreachable remote) — the body is the
+same status object either way.
+
+```bash
+# What the backup service knows: {state, scope, branch, remote, last_remote, enabled,
+# interval_s, last_attempt_at, last_success_at, last_success_commit, pending_changes,
+# pending_commits, reason}.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/local/backup"
+
+# Pause backups, or turn them off entirely. Both survive a restart.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/local/backup" \
+  -H 'content-type: application/json' -d '{"paused":true}'
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/local/backup" \
+  -H 'content-type: application/json' -d '{"enabled":false}'
+
+# Back up now, through the same serialized path the five-minute loop uses.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/local/backup/run"
+
+# The one canonical setup prompt, and the trusted context behind it. Copy this
+# text to hand to an agent on another machine...
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/local/backup/setup-prompt"
+
+# ...or have a chat here do it. The prompt is SENT, not drafted, and a second
+# click re-enters the same chat instead of starting a second agent.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/local/backup/setup-chat"
+```
+
+**Connecting a data folder to a private remote**
+
+`GET /api/local/backup/setup-prompt` is the setup path for a user who has no Git
+knowledge: it renders one prompt from trusted configuration and returns it beside
+the `context` it was built from, so a Settings surface can show the folder and
+scope without parsing prose.
+
+`context` is `{folder, scope, scope_paths, excluded, tracked_excluded, branch,
+has_repo, repo_root, parent_repo, has_remote, remote, interval_s}`. `folder` is
+the absolute data root with its spaces intact; `parent_repo` is true when that
+folder sits inside a larger checkout, which is the case where a remote added
+here would carry more than the notes. The `remote` is credential-free on the way
+out, and the prompt carries no token, key, or password.
+
+The same text serves both actions — a copy button and `POST
+/api/local/backup/setup-chat` — because both call one `render_setup_prompt`. That
+route opens a chat titled "Set up memory backup" in the host workspace and sends
+the prompt; a repeated click, a retry, or a reload re-enters that chat
+(`reused: true`) rather than putting a second agent on the same repository, and
+the prompt is never re-sent into a chat that already has it. Only a chat the
+owner archived is replaced. 500 when no General project exists in any workspace
+to host it.
+
+Readiness is not decided by either route. The chat does the work, the service
+re-reads the repository's real state on every tick and on every status call, and
+`GET /api/local/backup` reports what it finds — which is also how an external
+agent's setup is detected, with no restart. A guided setup that verifies turns
+the backup on, unless the owner has paused it: the pause is a hold they lift
+themselves, and a pause taken *during* a setup is the one that counts.
+
 **Proposal queue**
 
 Routes: `GET /api/proposals`, `GET /api/proposals/history`,
 `GET /api/proposals/{id}/preview`,
+`POST /api/proposals/{id}/implement`,
 `POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
 `POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`.
 
@@ -698,13 +800,32 @@ nothing. Batch accept applies the same rule per row and reports `promoted` and
 `dismissed` for each, keeping the bullets it could not write.
 
 ```bash
-# List every queued proposal across all workspaces, plus skill-proposal files.
-# Each row: {id, kind, text, source, workspace, path, line}. `id` is a stable,
-# content-derived hash (survives other rows being dismissed). Rehome rows carry
-# `rehome: {destination, candidates[], justified, reason}` so a UI never
+# List every queued proposal across all workspaces, plus open skill-proposal
+# records. Each row: {id, kind, text, source, workspace, path, line}. `id` is a
+# stable, content-derived hash (survives other rows being dismissed). Rehome rows
+# carry `rehome: {destination, candidates[], justified, reason}` so a UI never
 # pre-accepts a destination no tag backs; region rows carry `region` and
 # `leak_warning` (true when accepting would write a foreign workspace's fact
 # into the primary workspace's injected region).
+#
+# A `kind: "skill"` row is one skill's improvement proposal, parsed by
+# `ciao/skill_proposals.py` from `Workspace/Skill-Proposals/<skill>.md`. It
+# carries the record rather than the filename: `skill`, `title`, `problem`,
+# `change`, `rationale`, `lifecycle`, and `sources[]` ({chat_id, archive, turn,
+# excerpt}) naming the sessions it came from. `text` stays the skill name, which
+# is what two runs of the same skill share. `id` is derived from (workspace,
+# skill), so a later pass that merges more evidence into the same skill keeps the
+# same id. Rows are filed by `ciao skill-proposal-add NAME --input-file FILE`
+# (the memory pass files a supported finding; a person can hand-author one
+# through the same command) and never by hand: the target is resolved through
+# `skills_inventory.resolve_owned_skill`, so a stock copy, a provider mirror, a
+# shared source and an unknown name are refused there, and the record's
+# `canonical_path`/`reviewed_revision` are the resolved source's own answers.
+# The row also carries the record's `chat_id` and `lifecycle`: the server's own
+# statement of which chat is implementing it, which is the source of truth for
+# "Open chat". Dismissing one records the decision and flips its `lifecycle` to
+# `dismissed`: the file stays on disk, readable and still accumulating evidence,
+# and the row leaves the listing.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
 
 # What accepting one row would write, WITHOUT writing it. Returns
@@ -720,6 +841,35 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
 # destination. `revision` is the destination digest this preview was computed
 # against; hand it back on the accept below.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/preview"
+
+# Accept a SKILL proposal into an implementation chat. A skill row is the one
+# kind that cannot be accepted by writing: what it asks for is a change to a
+# `skills/<name>/SKILL.md` that already exists, so accepting it means opening
+# the chat that will do that work. Replies {ok, chat_id, project_id, created}.
+#
+# IDEMPOTENT, and that is the point: the association is read from the record, so
+# a double tap, a retry after a dropped response, and a second device all get the
+# SAME chat back (`created: false`) rather than each starting its own. The chat
+# is opened in the proposal's OWN workspace, because a proposal filed in `work`
+# is about work's `skills/` catalog.
+#
+# The prompt is the server's, not the client's: it names the existing
+# `skills/<name>/SKILL.md`, the proposal id, the evidence and the reviewed
+# revision, and instructs the chat to read the skill first, apply a focused
+# change only if the finding still holds, verify, run `ciao sync-skills`, and
+# record the resolution with `ciao skill-proposal-remove NAME --applied`
+# (`--not-applicable` if the finding no longer holds, `--interrupted` if it stops
+# part-way, which leaves the proposal queued).
+#
+# The row stays in the listing with `lifecycle: "implementing"` and the chat id
+# on it. Completion is never inferred from the chat ending: the record only
+# becomes `applied` when the work records that outcome.
+#
+# `created: false` in the reply means this accept was handed the chat that was
+# already running, not that one was started. A 500 means the chat was opened and
+# bound but its turn could not be dispatched; the reply carries that `chat_id`, and
+# a retry returns the same chat.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/implement"
 
 # Accept one row. Dispatches through the kind's own accept descriptor: memory/
 # profile/user are region edits (returns {action: edit_region, region,

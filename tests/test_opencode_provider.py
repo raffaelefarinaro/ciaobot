@@ -2615,6 +2615,58 @@ async def test_model_catalog_waits_for_a_fresh_server_to_load_its_models(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_model_catalog_warmup_starts_at_the_first_reply(tmp_path, monkeypatch):
+    """On a loaded machine the first (empty) /api/model reply took longer than
+    the whole warm-up window. Counted from before the request, the loop gave up
+    after that one reply and cached an empty catalog."""
+    import ciao.providers.opencode as mod
+
+    mod._MODEL_CACHE.clear()
+    monkeypatch.setattr(mod, "_CATALOG_WARMUP_POLL", 0.0)
+    monkeypatch.setattr(mod, "_CATALOG_WARMUP_TIMEOUT", 0.05)
+    calls = {"n": 0}
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class FakeClient:
+        async def get(self, _path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                await asyncio.sleep(0.1)  # slower than the whole window
+                return Response({"data": []})
+            return Response({"data": [{
+                "providerID": "openrouter", "modelID": "m", "name": "M",
+                "enabled": True, "variants": [],
+            }]})
+
+    class FakeServer:
+        def __init__(self, _root):
+            pass
+
+        async def __aenter__(self):
+            return FakeClient()
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    monkeypatch.setattr(mod, "_EphemeralServer", FakeServer)
+
+    catalog = await mod.OpencodeProvider.model_catalog(tmp_path)
+
+    assert [item["model"] for item in catalog] == ["openrouter/m"]
+    assert calls["n"] == 2
+    mod._MODEL_CACHE.clear()
+
+
+@pytest.mark.asyncio
 async def test_an_empty_catalog_is_cached_only_briefly(tmp_path, monkeypatch):
     """An empty result must be cached, but must not hide models for long.
 

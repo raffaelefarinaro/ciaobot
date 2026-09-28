@@ -170,12 +170,9 @@ REGISTRY: tuple[JobSpec, ...] = (
     # archive pipeline (ciao/insights.py:run_archive_pipeline), spawned once
     # when a chat is archived.
     JobSpec("trajectory", "Trajectory capture", "content",
-            "Records a structured trajectory of the session for skill mining.", False, True,
+            "Records a structured trajectory of the session: skills loaded, tools "
+            "used, turns, errors and outcome.", False, True,
             trigger="When a chat is archived and Automatic trajectory capture is on."),
-    JobSpec("skill_evolution", "Skill reflection", "content",
-            "Weekly: proposes skill edits from underperforming trajectories.", True, True,
-            trigger="Weekly per workspace, via the system-skill-evolution schedule.",
-            schedule_id="system-skill-evolution", schedule_only=True),
     JobSpec("schedule_dispatch", "Scheduled dispatch", "content",
             "Fires scheduled chat turns and evaluates auto-archival.", True, True,
             trigger="Every time a schedule or routine is due."),
@@ -197,9 +194,14 @@ REGISTRY: tuple[JobSpec, ...] = (
     JobSpec("skills_update", "Skills update", "system",
             "Updates installed agent skills.", False, False,
             trigger="On server startup."),
-    JobSpec("branch_backup", "Device-branch backup", "system",
-            "Pushes the per-device working branch for backup.", False, False,
-            trigger="Periodically while the server runs."),
+    JobSpec("branch_backup", "Memory backup", "system",
+            "Commits the durable-data scope and pushes it to the remote, so a "
+            "crash or a lost machine costs at most a few minutes of notes.",
+            False, False,
+            # The job id is the one this work has always carried, so the
+            # Automation page continues one row rather than leaving the old one
+            # orphaned in `job_runs_latest.json`.
+            trigger="Every five minutes while the server runs, and on demand."),
     JobSpec("gws_health", "Google Workspace token health", "system",
             "Pings each configured Google profile's token and alerts on revocation.",
             False, False,
@@ -233,6 +235,10 @@ RETIRED_JOBS: frozenset[str] = frozenset({
     "insights",
     "project_doc_update",
     "memory_proposals",
+    # The weekly skill-reflection producer and its schedule, removed in #697:
+    # the memory pass files through the same queue and the same owner, and is
+    # the sole producer now.
+    "skill_evolution",
 })
 
 # StartupTracker phase name -> registry job id (phases not listed are skipped,

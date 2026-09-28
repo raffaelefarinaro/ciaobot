@@ -1137,6 +1137,263 @@ describe('stopped turns', () => {
   })
 })
 
+// #630: the session file is written as the turn runs, so the first /messages
+// response after a turn ends can still be holding only trace rows — provider
+// commentary, thinking, activity, a file card. Those rows are what the client
+// renders from live events, not the turn's answer. Settling on one of them
+// stopped the post-result retries before the final answer was persisted, and
+// the reply stayed blank until opening Activity forced a refetch.
+describe('trace-only history tails', () => {
+  const USER = { role: 'user', content: 'summarise the offer', sent_at: '2026-09-27T09:00:00Z', turn_index: 0 }
+  const COMMENTARY = { role: 'assistant', content: 'Now let me pull the four points together.', phase: 'commentary', sent_at: '' }
+  const FINAL = { role: 'assistant', content: 'Four points: ops, 100k, Nov 1, VP Operations.', phase: 'final_answer', sent_at: '2026-09-27T09:00:12Z' }
+
+  // Answers the /messages endpoint with `payloads` in order, repeating the last
+  // one once they run out, and counts the calls that reached the history path.
+  function historyEndpoint(payloads: unknown[]) {
+    let calls = 0
+    apiGet.mockImplementation((path: string) => {
+      if (!path.includes('/messages')) return Promise.resolve([])
+      const payload = payloads[Math.min(calls, payloads.length - 1)]
+      calls += 1
+      return Promise.resolve(payload)
+    })
+    return () => calls
+  }
+
+  function streamingDone(store: ReturnType<typeof useProjectStore>, chatId: string) {
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    events.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_streaming_done',
+        chat_id: chatId,
+        project_id: 'p1',
+        is_error: false,
+      }),
+    })
+  }
+
+  test('retries commentary-only history until the final answer arrives', async () => {
+    // The reported symptom: the turn finished, but the first history response
+    // held the turn's commentary only. Any non-error assistant row used to
+    // count as the answer, so the reconcile stopped after one fetch and the
+    // bubble never appeared.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-commentary-tail'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [
+        { role: 'user', content: USER.content, timestamp: USER.sent_at, turn_index: 0 },
+      ]
+      const calls = historyEndpoint([
+        [USER, COMMENTARY],
+        [USER, COMMENTARY, FINAL],
+      ])
+
+      streamingDone(store, chatId)
+      await vi.advanceTimersByTimeAsync(12000)
+
+      expect(calls()).toBeGreaterThan(1)
+      expect(store.messages[chatId].at(-1)?.content).toBe(FINAL.content)
+      expect(store.streaming[chatId]).toBe(false)
+      // The commentary stays a trace step; it is never promoted to the answer.
+      expect(store.messages[chatId].filter(m => m.content === COMMENTARY.content)).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  const TRACE_TAILS = [
+    { tool_name: '_thinking', content: 'planning the summary' },
+    { tool_name: '_activity', content: 'Read offer.md' },
+    { tool_name: '_filecard', content: 'offer.md', file_path: 'notes/offer.md' },
+  ] as const
+
+  for (const trace of TRACE_TAILS) {
+    for (const shape of ['flat', 'envelope'] as const) {
+      test(`retries ${trace.tool_name} history until the final answer arrives (${shape})`, async () => {
+        vi.useFakeTimers()
+        try {
+          const store = useProjectStore()
+          const chatId = `c-trace-${trace.tool_name}-${shape}`
+          store.activeChatId = chatId
+          store.streaming[chatId] = true
+          store.messages[chatId] = [
+            { role: 'user', content: USER.content, timestamp: USER.sent_at, turn_index: 0 },
+            { role: 'system', content: trace.content, timestamp: '', tool_name: trace.tool_name, file_path: 'file_path' in trace ? trace.file_path : undefined },
+          ]
+          const rows = (n: number) => {
+            const base = [USER, { role: 'system', ...trace }, ...(n > 1 ? [FINAL] : [])]
+            return shape === 'flat'
+              ? base
+              : { items: base.map((r, i) => ({ ...r, i })), total: base.length, offset: 0, limit: 50, hasMore: false, nextOffset: null }
+          }
+          const calls = historyEndpoint([rows(1), rows(2)])
+
+          streamingDone(store, chatId)
+          await vi.advanceTimersByTimeAsync(12000)
+
+          expect(calls()).toBeGreaterThan(1)
+          expect(store.messages[chatId].at(-1)?.content).toBe(FINAL.content)
+          expect(store.streaming[chatId]).toBe(false)
+          // The trace row keeps rendering in Activity alongside the answer.
+          expect(store.messages[chatId].filter(m => m.tool_name === trace.tool_name)).toHaveLength(1)
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+    }
+  }
+
+  test('streaming done reconciles a commentary tail even when the local spinner is false', async () => {
+    // The result frame already cleared `streaming`, so `chat_streaming_done`
+    // skipped reconciliation entirely on a commentary tail. Nothing refetched
+    // history until the user opened Activity.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-done-commentary'
+      store.activeChatId = chatId
+      store.messages[chatId] = [
+        { role: 'user', content: USER.content, timestamp: USER.sent_at, turn_index: 0 },
+        { role: 'assistant', content: COMMENTARY.content, timestamp: '', phase: 'commentary' },
+      ]
+      const calls = historyEndpoint([[USER, COMMENTARY, FINAL]])
+
+      streamingDone(store, chatId)
+      await vi.advanceTimersByTimeAsync(12000)
+
+      expect(calls()).toBeGreaterThan(0)
+      expect(store.messages[chatId].at(-1)?.content).toBe(FINAL.content)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('opening an idle chat waits through a commentary tail for its final answer', async () => {
+    // The open path holds the loading card while it waits for a reply that has
+    // not landed yet. It only recognised a trailing user row as "pending", so
+    // a trace tail released the flag on a transcript still missing the answer.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-open-commentary'
+      store.activeChatId = chatId
+      store.messages[chatId] = [
+        { role: 'user', content: USER.content, timestamp: USER.sent_at, turn_index: 0 },
+      ]
+      const calls = historyEndpoint([
+        [USER, COMMENTARY],
+        [USER, COMMENTARY, FINAL],
+      ])
+
+      const opening = store.loadMessages(chatId, { waitForSettledReply: true })
+      // The loading card stays up while the wait is still owed.
+      expect(store.messageHistoryLoading).toBe(true)
+      await vi.advanceTimersByTimeAsync(12000)
+      await opening
+
+      expect(calls()).toBeGreaterThan(1)
+      expect(store.messages[chatId].at(-1)?.content).toBe(FINAL.content)
+      expect(store.messageHistoryLoading).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('older result reconciliation does not clear a newer turn', async () => {
+    // A new turn can start while the previous turn's reconcile is awaiting
+    // /messages. Clearing on its stale "settled" read wiped the live turn's
+    // streaming buffers, so its answer never rendered.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-newer-turn'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [
+        { role: 'user', content: USER.content, timestamp: USER.sent_at, turn_index: 0 },
+      ]
+      // The socket is already up, so the new turn's start does not churn it.
+      store.connectWs(chatId)
+      let releaseFirst: (value: unknown) => void = () => {}
+      const firstResponse = new Promise(resolve => { releaseFirst = resolve })
+      let calls = 0
+      apiGet.mockImplementation((path: string) => {
+        if (!path.includes('/messages')) return Promise.resolve([])
+        calls += 1
+        return calls === 1 ? firstResponse : Promise.resolve([USER, FINAL])
+      })
+
+      store.connectEventsWs()
+      const events = fakeSockets[fakeSockets.length - 1]
+      // The previous turn's result frame starts the reconcile, which is now
+      // blocked on the first /messages call.
+      events.onmessage?.({
+        data: JSON.stringify({
+          type: 'chat_result_ready',
+          chat_id: chatId,
+          project_id: 'p1',
+          title: 't',
+          snippet: '',
+        }),
+      })
+      expect(calls).toBe(1)
+
+      // A new turn starts and streams while that request is still in flight.
+      events.onmessage?.({
+        data: JSON.stringify({
+          type: 'chat_streaming_started',
+          chat_id: chatId,
+          project_id: 'p1',
+        }),
+      })
+      store.streaming[chatId] = true
+      store.streamingText[chatId] = 'partial text of the new turn'
+
+      // The old turn's history finally resolves: settled, and now stale.
+      releaseFirst([USER, { role: 'assistant', content: 'answer of the older turn', sent_at: '2026-09-27T09:00:12Z' }])
+      await vi.advanceTimersByTimeAsync(12000)
+
+      // The live turn keeps its own streaming state.
+      expect(store.projectStreaming[chatId]).toBe(true)
+      expect(store.streaming[chatId]).toBe(true)
+      expect(store.streamingText[chatId]).toBe('partial text of the new turn')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  for (const shape of ['flat', 'envelope'] as const) {
+    test(`timestamped commentary does not count as a settled mid-stream answer (${shape})`, async () => {
+      // The orchestration layer stamps `sent_at` on rows it considers
+      // turn-final, and mid-stream refreshes use that stamp to decide whether
+      // the server has really finished. A stamped commentary row is still
+      // narration: letting it through pulled the trace into the transcript
+      // while the real answer was still being written.
+      const store = useProjectStore()
+      const chatId = `c-midstream-${shape}`
+      store.messages[chatId] = [
+        { role: 'user', content: USER.content, timestamp: '', turn_index: 0 },
+      ]
+      store.projectStreaming[chatId] = true
+      const rows = [USER, { ...COMMENTARY, sent_at: '2026-09-27T09:00:05Z' }]
+      apiGet.mockResolvedValue(
+        shape === 'flat'
+          ? rows
+          : { items: rows.map((r, i) => ({ ...r, i })), total: rows.length, offset: 0, limit: 50, hasMore: false, nextOffset: null },
+      )
+
+      await store.loadMessages(chatId)
+
+      expect(store.messages[chatId].map(m => m.content)).toEqual([USER.content])
+    })
+  }
+})
+
 describe('result frames and unread state', () => {
   test('a stopped turn renders its partial text without badging the chat', () => {
     // Every connected client gets this frame, so a backgrounded tab or a second
@@ -3116,36 +3373,112 @@ describe('background agents indicator', () => {
   })
 })
 
-describe('postprocessingChats (home tidying list)', () => {
-  test('lists only chats whose pipeline is still running, newest archive first', () => {
+describe('memoryInsightRows', () => {
+  // The pass is a real chat, so it used to be listed twice for one archived
+  // conversation: once in the Home tiers under its own internal title, and
+  // once as the conversation it works on. These pin the single row and the
+  // filtering that removed the other one.
+
+  function passChat(over: Record<string, unknown> = {}, sourceId = 'src') {
+    return {
+      chat_id: 'pass-1', project_id: 'p-mem', title: 'Memory pass · Deck figures',
+      archived: false, local: true,
+      created_at: '2026-08-27T01:00:00Z', last_activity_at: '2026-08-27T01:00:00Z',
+      helper: {
+        kind: 'memory_pass', state: 'running', source_chat_id: sourceId, archive_path: 'chats/src.md',
+        doc_path: '', source_title: 'Deck figures', source_project: '', archive_policy: 'when_clean',
+      },
+      ...over,
+    }
+  }
+
+  function sourceChat(over: Record<string, unknown> = {}) {
+    return {
+      chat_id: 'src', project_id: 'p1', title: 'Deck figures',
+      archived: true, local: true, archive_path: 'chats/src.md',
+      created_at: '2026-08-27T00:00:00Z', last_activity_at: '2026-08-27T00:00:00Z',
+      postprocess: { state: 'running', step: 'memory_pass', steps: {} },
+      ...over,
+    }
+  }
+
+  test('joins the archive pipeline and the pass onto one row keyed on the source', () => {
     const store = useProjectStore()
-    store.chats = [
-      { chat_id: 'c-done', project_id: 'p1', title: 'Settled', archived: true, postprocess: { state: 'done', step: 'trajectory', steps: {} } },
-      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'trajectory', expected: [], steps: {} } },
-      { chat_id: 'c-fresher', project_id: 'p1', title: 'Fresher', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'running', step: 'memory_pass', expected: [], steps: {} } },
-      { chat_id: 'c-plain', project_id: 'p1', title: 'No pipeline', archived: true },
-    ] as unknown as typeof store.chats
-    expect(store.postprocessingChats().map(c => c.chat_id)).toEqual(['c-fresher', 'c-running'])
+    store.chats = [sourceChat(), passChat()] as unknown as typeof store.chats
+    expect(store.memoryInsightRows).toHaveLength(1)
+    expect(store.memoryInsightRows[0]).toMatchObject({
+      sourceChatId: 'src',
+      title: 'Deck figures',
+      passChatId: 'pass-1',
+      phase: 'running',
+    })
   })
 
-  test('insightsFailedChats lists settled chats with unfinished stages', () => {
+  test('keeps a pass out of the home tiers and the sidebar project list', () => {
     const store = useProjectStore()
     store.projects = [
-      { project_id: 'p1', workspace: 'work' },
-      { project_id: 'p2', workspace: 'personal' },
+      { project_id: 'p1', name: 'General', workspace: 'personal', order: 0 },
+      { project_id: 'p-mem', name: 'Memory', workspace: 'personal', order: 1, kind: 'memory' },
     ] as unknown as typeof store.projects
     store.chats = [
-      { chat_id: 'c-failed', project_id: 'p1', title: 'Failed', archived: true, last_activity_at: '2026-08-16T10:00:00Z', postprocess: { state: 'blocked', blocked_reason: 'archive file is missing' } },
-      { chat_id: 'c-partial', project_id: 'p1', title: 'Partial', archived: true, last_activity_at: '2026-08-16T09:00:00Z', postprocess: { state: 'incomplete', job: { job_id: 'j', state: 'incomplete', unfinished: ['trajectory'] } } },
-      { chat_id: 'c-running', project_id: 'p1', title: 'Running', archived: true, last_activity_at: '2026-08-15T10:00:00Z', postprocess: { state: 'running', step: 'trajectory', expected: [], steps: {} } },
-      { chat_id: 'c-ok', project_id: 'p2', title: 'Ok', archived: true, last_activity_at: '2026-08-14T10:00:00Z', postprocess: { state: 'done', steps: { trajectory: { status: 'ok' } } } },
-      { chat_id: 'c-skipped', project_id: 'p2', title: 'Skipped', archived: true, last_activity_at: '2026-08-13T10:00:00Z', postprocess: { state: 'done', steps: { trajectory: { status: 'skipped' } } } },
-      { chat_id: 'c-plain', project_id: 'p1', title: 'No pipeline', archived: true },
+      { chat_id: 'ordinary', project_id: 'p1', title: 'Ordinary', archived: false, local: true, created_at: '2026-08-27T02:00:00Z', last_activity_at: '2026-08-27T02:00:00Z' },
+      passChat(),
     ] as unknown as typeof store.chats
-    expect(store.insightsFailedChats().map(c => c.chat_id)).toEqual(['c-failed', 'c-partial'])
-    // Workspace counts follow the project → workspace mapping.
-    expect(store.workspaceInsightsFailedCount('work')).toBe(2)
-    expect(store.workspaceInsightsFailedCount('personal')).toBe(0)
+
+    expect(store.activeChatsAll.map(c => c.chat_id)).toEqual(['ordinary'])
+    // The pass would otherwise be counted in a project row's needs/unread
+    // rollup, and be offered as a schedule target.
+    expect(store.projectChats('p-mem')).toEqual([])
+    expect(store.projectUnread('p-mem')).toBe(0)
+    expect(store.projectNeedsInput('p-mem')).toBe(0)
+  })
+
+  test('does not count a working pass as unread mail', () => {
+    const store = useProjectStore()
+    store.chats = [
+      { chat_id: 'plain', project_id: 'p1', title: 'Unread', archived: false, local: true, last_activity_at: '2026-08-24T10:00:00Z', last_read_at: '2026-08-24T09:00:00Z' },
+      passChat({ last_activity_at: '2026-08-24T10:00:00Z', last_read_at: '2026-08-24T09:00:00Z' }),
+    ] as unknown as typeof store.chats
+
+    // A pass advances its own activity while it works, so counting it made a
+    // routine archive pass light the bell and the document title.
+    expect(store.totalUnread).toBe(1)
+    expect(store.chatIsAttentionItem(store.chats[1])).toBe(false)
+  })
+
+  test('counts a pass as attention only once it is blocked on the owner', () => {
+    const store = useProjectStore()
+    const question = JSON.stringify({ questions: [{ question: 'Which project?' }] })
+    const blocked = passChat({ chat_id: 'blocked', pending_question: question })
+    store.chats = [
+      sourceChat(),
+      blocked,
+      sourceChat({ chat_id: 'src-2' }),
+      passChat({ chat_id: 'plain' }, 'src-2'),
+    ] as unknown as typeof store.chats
+
+    expect(store.chatIsAttentionItem(blocked as unknown as ChatInfo)).toBe(true)
+    expect(store.chatIsAttentionItem(store.chats[3] as unknown as ChatInfo)).toBe(false)
+    expect(store.attentionChatCount).toBe(1)
+    // The row says the same thing out loud, with the question on it.
+    const row = store.memoryInsightRows.find(r => r.passChatId === 'blocked')
+    expect(row).toMatchObject({ phase: 'needsYou', blocking: true, question: 'Which project?' })
+  })
+
+  test('offers the retry for a pipeline that stopped with a stage left', () => {
+    const store = useProjectStore()
+    store.chats = [sourceChat({
+      postprocess: {
+        state: 'incomplete',
+        job: { job_id: 'j', state: 'incomplete', unfinished: ['trajectory'] },
+      },
+    })] as unknown as typeof store.chats
+
+    expect(store.memoryInsightRows[0]).toMatchObject({
+      phase: 'unfinished',
+      retryable: true,
+      label: 'trajectory not finished',
+    })
   })
 })
 
@@ -5582,10 +5915,17 @@ describe('memory pass surfaces', () => {
   })
 
   test('finds the memory project for a workspace without showing it', () => {
+    // The row an owner opens a pass from is keyed on the source conversation,
+    // but a pass whose source is gone is filed under the pass's own project —
+    // so the lookup still has to reach the hidden project.
     const store = useProjectStore()
     seedProjects(store)
-    expect(store.memoryProjectFor('personal')?.project_id).toBe('p-mem')
-    expect(store.memoryProjectFor('work')?.project_id).toBe('p-mem-work')
+    store.chats = [
+      { chat_id: 'orphan-pass', project_id: 'p-mem-work', archived: false, created_at: '2026-08-27T00:00:00Z', helper: { kind: 'memory_pass', state: 'running', source_chat_id: 'deleted', archive_path: '', doc_path: '', source_title: 'Gone', source_project: '', archive_policy: 'when_clean' } },
+    ] as unknown as typeof store.chats
+    const [row] = store.memoryInsightRows
+    expect(store.projectFor(row.passChatId)?.project_id).toBe('p-mem-work')
+    expect(row.title).toBe('Gone')
   })
 
   test('flags only an unclean pass as needing attention', () => {
@@ -5602,31 +5942,20 @@ describe('memory pass surfaces', () => {
     expect(store.memoryPassNeedsAttention('missing')).toBe(false)
   })
 
-  test('latestMemoryPassChat picks the newest non-archived pass in the workspace', () => {
+  test('an unclean pass is one row that says so, not two', () => {
     const store = useProjectStore()
     seedProjects(store)
     store.chats = [
-      { chat_id: 'c-old', project_id: 'p-mem', archived: false, last_activity_at: '2026-08-15T10:00:00Z' },
-      { chat_id: 'c-clean', project_id: 'p-mem', archived: true, last_activity_at: '2026-08-18T10:00:00Z' },
-      { chat_id: 'c-new', project_id: 'p-mem', archived: false, last_activity_at: '2026-08-17T10:00:00Z' },
-      { chat_id: 'c-other-workspace', project_id: 'p-mem-work', archived: false, last_activity_at: '2026-08-19T10:00:00Z' },
-      { chat_id: 'c-not-a-pass', project_id: 'p1', archived: false, last_activity_at: '2026-08-20T10:00:00Z' },
+      { chat_id: 'src', project_id: 'p1', title: 'Deck figures', archived: true, archive_path: 'chats/src.md', last_activity_at: '2026-08-27T00:00:00Z' },
+      { chat_id: 'c-attention', project_id: 'p-mem', archived: false, last_activity_at: '2026-08-27T01:00:00Z', helper: { kind: 'memory_pass', state: 'attention', source_chat_id: 'src', archive_path: 'chats/src.md', doc_path: '', source_title: 'Deck figures', source_project: '', archive_policy: 'when_clean' } },
     ] as unknown as typeof store.chats
-    // A clean pass is archived by the time the owner could reach for it, and
-    // the newest row is an ordinary chat, so neither can win.
-    expect(store.latestMemoryPassChat('personal')?.chat_id).toBe('c-new')
-    expect(store.latestMemoryPassChat('work')?.chat_id).toBe('c-other-workspace')
-  })
 
-  test('latestMemoryPassChat returns null without a memory project or an open pass', () => {
-    const store = useProjectStore()
-    seedProjects(store)
-    store.chats = [] as unknown as typeof store.chats
-    expect(store.latestMemoryPassChat('work')).toBeNull()
-
-    store.chats = [
-      { chat_id: 'c-done', project_id: 'p-mem', archived: true },
-    ] as unknown as typeof store.chats
-    expect(store.latestMemoryPassChat('personal')).toBeNull()
+    expect(store.memoryInsightRows).toHaveLength(1)
+    expect(store.memoryInsightRows[0]).toMatchObject({
+      title: 'Deck figures',
+      phase: 'attention',
+      label: 'needs attention',
+      blocking: true,
+    })
   })
 })

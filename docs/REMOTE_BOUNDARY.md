@@ -33,8 +33,13 @@ carried by the session.
   local feed (`/api/menubar-chats`, `/api/menubar-notifications`; legacy route
   names, no native client) and the update
   coordinator's drain handshake. It reads the TCP source address, never the
-  `Host` header, which a caller controls. `is_loopback_client` is the only
-  "is it local" check in the codebase and nothing else grants access on it.
+  `Host` header, which a caller controls. A loopback peer carrying
+  reverse-proxy headers (`Forwarded`, `Via`, any `X-Forwarded-*`,
+  `X-Real-IP`, `X-Client-IP`, `True-Client-IP`, `CF-Connecting-IP`, any
+  `Tailscale-*`) is not local: `tailscale serve` and
+  other proxies on this machine connect from 127.0.0.1 on behalf of remote
+  callers. `is_loopback_client` is the only "is it local" check in the
+  codebase and nothing else grants access on it.
 - Model-authored HTML is served from `/api/workspace-html` under a sandboxing
   CSP (`sandbox allow-scripts`, no `allow-same-origin`, `connect-src 'none'`,
   `form-action 'none'`), so an artifact cannot reach the API or the local-only

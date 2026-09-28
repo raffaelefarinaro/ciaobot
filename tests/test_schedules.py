@@ -901,11 +901,26 @@ def test_system_routines_ship_descriptions_and_set(tmp_path: Path) -> None:
     system = {e.schedule_id: e for e in store.list_entries() if e.scope == "system"}
     assert set(system) == {
         "system-memory-curation",
-        "system-skill-evolution",
     }
     assert "system-weekly-review" not in system
     for entry in system.values():
         assert entry.description, f"{entry.schedule_id} missing a description"
+
+
+def test_the_retired_skill_reflection_routine_is_not_installed(tmp_path: Path) -> None:
+    """The weekly producer is gone, so its packaged row must be gone with it.
+
+    A packaged schedule that stays in ``schedules.json`` after the module
+    behind it is deleted dispatches a prompt that runs nothing, once a week,
+    forever — the worst kind of silent failure, because the run looks green.
+    """
+    store = ScheduleStore(tmp_path, include_system=True)
+
+    assert store.get("system-skill-evolution") is None
+    assert not any(
+        e.schedule_id.startswith("system-skill-evolution")
+        for e in store.list_entries()
+    )
 
 
 def test_curation_consolidates_regions_only_under_guardrails(tmp_path: Path) -> None:

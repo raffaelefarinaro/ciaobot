@@ -1491,8 +1491,8 @@ def _rollback(
     # `launchctl bootout` returns before launchd has finished with the job, and
     # the forward path already waits for the engine to stop before touching a
     # file. Starting it again in that window is the race
-    # `scripts/install.sh` works around: a service start that lands while
-    # launchd is still unloading comes back with a stale environment. The
+    # retired app installer also had to handle: a service start that lands
+    # while launchd is still unloading comes back with a stale environment. The
     # answer is ignored — an engine that is still up is started anyway below —
     # but waiting costs one probe.
     step(

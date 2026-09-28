@@ -11,6 +11,7 @@
  *   POST /__fixture__/streams   { chat_ids: [...] }  set the next snapshot
  *   POST /__fixture__/drop-ws                        sever every events socket
  *   GET  /__fixture__/ws-count                       sockets opened so far
+ *   POST /__fixture__/transcript                     give this session a chat history
  */
 import http from 'node:http'
 import fs from 'node:fs'
@@ -35,6 +36,33 @@ if (!fs.existsSync(path.join(STATIC_ROOT, 'index.html'))) {
 // running beside it. Each test sets an `e2e_session` cookie on its context;
 // the cookie rides both the API calls and the WebSocket handshake, so state
 // stays per-test even under `fullyParallel`.
+/**
+ * Two settled turns, with turn metadata on each closing reply, so a spec can
+ * select a message and see the action footer a real transcript renders.
+ */
+const TRANSCRIPT = [
+  { role: 'user', content: 'First request.', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  {
+    role: 'assistant',
+    content: 'First answer.',
+    sent_at: '2026-01-01T09:50:20Z',
+    duration_ms: 20000,
+    effective_model: 'synthetic-model',
+    usage: { input_tokens: 18, output_tokens: 6478, context_pct: '39.2%' },
+    turn_index: 0,
+  },
+  { role: 'user', content: 'Second request.', sent_at: '2026-01-01T09:52:00Z', turn_index: 1 },
+  {
+    role: 'assistant',
+    content: 'Second answer, and the last turn in the transcript.',
+    sent_at: '2026-01-01T09:53:00Z',
+    duration_ms: 60000,
+    effective_model: 'synthetic-model',
+    usage: { input_tokens: 18, output_tokens: 6478, context_pct: '39.2%' },
+    turn_index: 1,
+  },
+]
+
 const sessions = new Map()
 
 function sessionOf(req) {
@@ -42,7 +70,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), connections: 0 }
+    state = { activeStreams: [], sockets: new Set(), connections: 0, transcript: null }
     sessions.set(id, state)
   }
   return state
@@ -124,14 +152,33 @@ const GET_ROUTES = {
     update_available: false,
     mode: 'dev',
   }),
+  // Settings → Memory backup. The `{}` catch-all would read as a configured
+  // install in an unknown state, so the section is served the shape the real
+  // route always sends.
+  '/api/local/backup': () => ({
+    state: 'ready',
+    scope: 'memory-vault, skills, subagents, commands',
+    branch: 'main',
+    remote: 'https://github.com/person/memory.git',
+    last_remote: 'https://github.com/person/memory.git',
+    enabled: true,
+    interval_s: 300,
+    last_attempt_at: '2026-01-01T09:05:00Z',
+    last_success_at: '2026-01-01T09:05:03Z',
+    last_success_commit: 'abc1234',
+    pending_changes: 0,
+    pending_commits: 0,
+    reason: 'up to date',
+  }),
 }
 
 /** Path patterns, for the routes that carry an id. */
 const GET_PATTERNS = [
   // An empty array is the "nothing to merge" short-circuit in the store; the
   // fallback `{}` would be read as a pagination envelope and crash on
-  // `env.items`.
-  [/^\/api\/chats\/[^/]+\/messages$/, () => []],
+  // `env.items`. The transcript is per-session, so a spec opts in through
+  // POST /__fixture__/transcript rather than giving every spec one.
+  [/^\/api\/chats\/[^/]+\/messages$/, (req) => sessionOf(req).transcript || []],
   [/^\/api\/chats\/[^/]+\/subagents$/, () => ({ subagents: [] })],
 ]
 
@@ -228,6 +275,14 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/__fixture__/ws-count') {
       return sendJson(res, { connections: state.connections, open: state.sockets.size })
     }
+    if (pathname === '/__fixture__/transcript') {
+      // Opt this session's chat into having a transcript. The default is an
+      // empty history so the other specs see the same chat they saw before; the
+      // action-footer journey needs real turns to select, ending at the bottom
+      // of the transcript, to reproduce a footer falling under the composer.
+      state.transcript = TRANSCRIPT
+      return sendJson(res, { ok: true, turns: TRANSCRIPT.length })
+    }
     return sendJson(res, { error: 'unknown fixture route' }, 404)
   }
 
@@ -235,7 +290,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET') {
       const handler = GET_ROUTES[pathname]
         || GET_PATTERNS.find(([pattern]) => pattern.test(pathname))?.[1]
-      return sendJson(res, handler ? handler() : {})
+      return sendJson(res, handler ? handler(req) : {})
     }
     const body = await readBody(req)
     const write = WRITE_ROUTES[pathname]

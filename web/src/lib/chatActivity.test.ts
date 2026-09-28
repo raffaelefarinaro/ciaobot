@@ -6,6 +6,7 @@ import {
   mergeTraceOutputs,
   collapseOutputsByName,
   shortDirname,
+  isScratchPath,
   buildTurnParts,
   collectTraceOutputs,
   findFinalAnswerIndex,
@@ -125,6 +126,17 @@ describe('collectTraceOutputs', () => {
   })
 })
 
+describe('isScratchPath', () => {
+  it('matches system temp roots only', () => {
+    expect(isScratchPath('/private/tmp/kr-v2.md')).toBe(true)
+    expect(isScratchPath('/tmp/k.md')).toBe(true)
+    expect(isScratchPath('/var/folders/xy/T/out.md')).toBe(true)
+    expect(isScratchPath('tmp/notes.md')).toBe(false)
+    expect(isScratchPath('/Users/me/tmp/notes.md')).toBe(false)
+    expect(isScratchPath('memory-vault/work/MEMORY.md')).toBe(false)
+  })
+})
+
 describe('normalizeOutputPath', () => {
   it('canonicalises the spellings the backend can emit for one file', () => {
     expect(normalizeOutputPath('  ./docs//notes.md  ')).toBe('docs/notes.md')
@@ -176,15 +188,14 @@ describe('formatTokenUsage', () => {
       .toBe('')
   })
 
-  it('appends the context-window occupancy when present', () => {
+  it('leaves the context-window occupancy to the rail meter rather than repeating it', () => {
+    // The rail states occupancy as a meter against the window's size. A bare
+    // percentage in the footer gave one number two homes, so the footer reports
+    // cost only — and a turn whose usage carried nothing but a percentage now
+    // says nothing at all rather than a bare "Tokens 42.3% ctx".
     expect(formatTokenUsage({ input_tokens: '2', output_tokens: '1079', context_pct: '42.3%' }))
-      .toBe('Tokens <span class="token-number">2</span> in · <span class="token-number">1,079</span> out · <span class="context-pct">42.3%</span> ctx')
-  })
-
-  it('renders context_pct alone when token sides are missing', () => {
+      .toBe('Tokens <span class="token-number">2</span> in · <span class="token-number">1,079</span> out')
     expect(formatTokenUsage({ context_pct: '8.4%' }))
-      .toBe('Tokens <span class="context-pct">8.4%</span> ctx')
-    expect(formatTokenUsage({ context_pct: '' }))
       .toBe('')
   })
 })

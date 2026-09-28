@@ -206,7 +206,8 @@ describe('composer focus on opening a chat', () => {
     await nextTick()
     const inspector = wrapper.get('.chat-work-inspector')
     expect(inspector.get('#work-panel-context').text()).toContain('Agent context')
-    expect(inspector.get('#work-panel-context').text()).toContain('Project brief')
+    // General with no description or doc sends no brief, so there is no row.
+    expect(inspector.get('#work-panel-context').text()).not.toContain('Project brief')
     wrapper.unmount()
   })
   test('keeps a persisted unsent draft instead of offering starter prompts', async () => {

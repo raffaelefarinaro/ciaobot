@@ -236,6 +236,25 @@ vi.mock('../../lib/api', () => {
         stats: { total_runs: 1, success_rate: 1, avg_duration_ms: 12, last_error: null },
       },
     ],
+    '/api/local/backup': {
+      state: 'ready',
+      scope: 'memory-vault, skills, subagents, commands',
+      branch: 'main',
+      remote: 'https://github.com/person/memory.git',
+      last_remote: 'https://github.com/person/memory.git',
+      enabled: true,
+      interval_s: 300,
+      last_attempt_at: '2026-09-01T10:00:00+00:00',
+      last_success_at: '2026-09-01T10:00:04+00:00',
+      last_success_commit: 'abc1234',
+      pending_changes: 0,
+      pending_commits: 0,
+      reason: 'up to date',
+    },
+    '/api/local/backup/setup-prompt': {
+      context: { folder: '/Users/person/Ciao', scope: 'memory-vault' },
+      prompt: 'Set up a private repository for this folder.',
+    },
   }
   // Default to an empty array — most list endpoints return arrays and a
   // bare `{}` breaks `.reduce`/`.map` calls in stores during the smoke test.
@@ -397,6 +416,31 @@ describe('component mount smoke', () => {
   it('SettingsView mounts without throwing', async () => {
     const errors = await mountAndSettle(() => import('../SettingsView.vue'))
     expect(errors).toEqual([])
+  })
+
+  it('SettingsMemoryBackup mounts without throwing', async () => {
+    const errors = await mountAndSettle(() => import('../settings/SettingsMemoryBackup.vue'))
+    expect(errors).toEqual([])
+  })
+
+  it('SettingsView shows the memory backup section on /settings', async () => {
+    const router = makeRouter()
+    await router.push('/settings')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    // The section reads the same page as the program's own repository
+    // controls, and is its own section in the On this page rail.
+    const backup = wrapper.findAll('.card').find(c => c.text().startsWith('Memory backup'))
+    expect(backup).toBeTruthy()
+    expect(backup!.text()).toContain('github.com/person/memory.git')
+    expect(wrapper.findAll('.settings-toc-item').map(i => i.text())).toContain('Memory backup')
+    wrapper.unmount()
   })
 
 

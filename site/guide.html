@@ -5,6 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Getting Started · Ciaobot</title>
   <meta name="description" content="Install Ciaobot, set up your workspaces and projects, and learn the chat-then-archive habit.">
+  <link rel="canonical" href="https://www.raffaelefarinaro.com/ciaobot/guide.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Ciaobot">
+  <meta property="og:title" content="Getting Started · Ciaobot">
+  <meta property="og:description" content="Install Ciaobot, set up your workspaces and projects, and learn the chat-then-archive habit.">
+  <meta property="og:url" content="https://www.raffaelefarinaro.com/ciaobot/guide.html">
+  <meta property="og:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Ciaobot — a personal assistant that remembers.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Getting Started · Ciaobot">
+  <meta name="twitter:description" content="Install Ciaobot, set up your workspaces and projects, and learn the chat-then-archive habit.">
+  <meta name="twitter:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <link rel="icon" href="assets/img/favicon.png">
   <link rel="stylesheet" href="assets/style.css">
 </head>
@@ -78,8 +93,8 @@ opencode auth login</code></pre>
     <section>
       <h2>Find your way around</h2>
       <figure>
-        <a href="assets/img/home.webp"><img src="assets/img/home.webp" alt="The Ciaobot home screen, with workspaces and projects in the sidebar and the chats that need attention in the middle" loading="lazy" width="1600" height="1000"></a>
-        <figcaption>The home screen. Workspaces sit at the top of the sidebar, projects and their chats below; the middle lists what needs you.</figcaption>
+        <a href="assets/img/home.webp"><img src="assets/img/home.webp" alt="The Ciaobot Home page, with a box to start a task, chats that need attention, and projects in the sidebar" loading="lazy" width="1600" height="1000"></a>
+        <figcaption>Home. The workspace picker sits at the top of the sidebar, projects and their chats below; the middle has a box to start a task and lists what needs you.</figcaption>
       </figure>
       <p>Press the number keys <kbd>1</kbd>, <kbd>2</kbd>, … to jump between workspaces in the order they appear in the sidebar.</p>
     </section>
@@ -88,7 +103,7 @@ opencode auth login</code></pre>
       <h2>Your first project</h2>
       <p>Think of something you'll keep coming back to, like a trip you're planning, a language you're learning or a project at work. The easiest way to create a project is to ask:</p>
       <div class="prompt">Create a project called Learning Spanish in my personal workspace. I'm a beginner, I practise 20 minutes a day, and I want to hold a simple conversation by next summer.</div>
-      <p>Ciaobot creates the project and saves that description. From now on it's sent with every chat in <em>Learning Spanish</em>, so you never repeat it. You can also use <strong>+ New Project</strong> at the bottom of the sidebar.</p>
+      <p>Ciaobot creates the project and saves that description. From now on it's sent with every chat in <em>Learning Spanish</em>, so you never repeat it. You can also use <strong>New</strong> next to <em>Projects</em> in the sidebar.</p>
       <figure>
         <a href="assets/img/project.webp"><img src="assets/img/project.webp" alt="A project page: the project context box, its active chats, files and archived chats, and a Complete button" loading="lazy" width="1600" height="1000"></a>
         <figcaption>A project page: the description Ciaobot reads, the active and archived chats, and <strong>Complete</strong> for when the project is done.</figcaption>
@@ -101,7 +116,7 @@ opencode auth login</code></pre>
       <ol class="steps">
         <li>
           <h3>Start a new chat in the right project</h3>
-          <p>Use <strong>+ new</strong> on the home screen. The small arrow next to it lets you choose the project. Or press <kbd>⌘</kbd>+<kbd>T</kbd>.</p>
+          <p>Use <strong>New chat</strong> at the top of the sidebar and pick the project, or press <kbd>⌥</kbd>+<kbd>N</kbd> (<kbd>Alt</kbd>+<kbd>N</kbd> on Windows and Linux). For a quick task, type it into the box on Home.</p>
         </li>
         <li>
           <h3>Do one task</h3>
@@ -109,10 +124,10 @@ opencode auth login</code></pre>
         </li>
         <li>
           <h3>Archive it as soon as the task is done</h3>
-          <p>Use the archive button in the chat header, press <kbd>⌘</kbd>+<kbd>⌫</kbd>, or just type "archive this chat".</p>
+          <p>Use the archive button in the chat header, press <kbd>⌥</kbd>+<kbd>⌫</kbd>, or just type "archive this chat".</p>
           <figure>
             <video src="assets/img/archive.mp4" poster="assets/img/archive-poster.webp" autoplay muted loop playsinline aria-label="Sending a follow-up, reading the answer, then archiving the chat"></video>
-            <figcaption>Archiving a finished chat. It moves to <em>tidying up</em> while Ciaobot reads it back and files what's worth keeping.</figcaption>
+            <figcaption>Archiving a finished chat. A <em>memory insights</em> row on Home shows Ciaobot reading it back and filing what's worth keeping.</figcaption>
           </figure>
         </li>
         <li>
@@ -153,7 +168,7 @@ opencode auth login</code></pre>
       <h3>Something's wrong. Where do I look?</h3>
       <p>Ask Ciaobot first ("why did my morning agenda not run?"); it can read its own logs and diagnose most problems. It can also <a href="./#together">report the bug on GitHub</a> for you.</p>
       <h3>How do I update or uninstall?</h3>
-      <p>To update, run the one-line install command again, or use <strong>Settings → Home</strong> in Ciaobot, which installs the new engine for you. To stop Ciaobot, run <code>ciao service stop</code> in the Terminal; your notes folder is kept. If you are still on the old macOS app, run the one-liner with <code>--migrate</code>: it installs the engine and removes the old app for you.</p>
+      <p>To update, run the one-line install command again, or use <strong>Settings → General</strong> in Ciaobot, which installs the new engine for you. To stop Ciaobot, run <code>ciao service stop</code> in the Terminal; your notes folder is kept. If you are still on the old macOS app, run the one-liner with <code>--migrate</code>: it installs the engine and removes the old app for you.</p>
     </section>
 
     <nav class="next-page" aria-label="Next pages">

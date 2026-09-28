@@ -189,7 +189,7 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
-  it('reports post-archive tidying in the home attention summary', async () => {
+  it('reports post-archive memory work in the home attention summary', async () => {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [{ path: '/', component: EmptyStub }],
@@ -203,9 +203,9 @@ describe('ChatLayout', () => {
       name: 'General',
       workspace: 'personal',
     }] as unknown as typeof store.projects
-    // The status line renders next to the compact face even when the tidied
-    // chat is the only chat left. It counts neither as attention nor as a
-    // working agent — only in the muted tidying fragment.
+    // The status line renders next to the compact face even when the archived
+    // chat is the only thing left. It counts neither as attention nor as a
+    // working agent — only in the in-flight memory fragment.
     store.chats = [{
       chat_id: 'tidy-chat',
       project_id: 'project-1',
@@ -214,7 +214,7 @@ describe('ChatLayout', () => {
       local: true,
       last_activity_at: '2026-08-12T11:00:00Z',
       last_read_at: '2026-08-12T11:00:00Z',
-      postprocess: { state: 'running', step: 'insights', expected: [], steps: {} },
+      postprocess: { state: 'running', step: 'trajectory', expected: [], steps: {} },
     }] as unknown as typeof store.chats
     store.activeChatId = null
     store.bootstrapped = true
@@ -243,7 +243,7 @@ describe('ChatLayout', () => {
     })
     await flushPromises()
 
-    expect(wrapper.find('.home-lane-status-text').text()).toBe('nothing needs your attention. no agents working. 1 chat tidying up.')
+    expect(wrapper.find('.home-lane-status-text').text()).toBe('nothing needs your attention. no agents working. 1 updating memory.')
     wrapper.unmount()
   })
 

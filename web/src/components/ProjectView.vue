@@ -858,8 +858,10 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', closeProjectActionsOnOutside)
 })
 // Re-fetch when the user navigates between projects without unmounting
-// the component (Vue keeps it alive across :projectId changes).
-watch(() => props.projectId, async () => {
+// the component (Vue keeps it alive across :projectId changes), and when the
+// project itself arrives after mount: a deep link renders before the project
+// list has loaded, so the first load saw no vault folder and showed no files.
+watch(() => [props.projectId, project.value?.vault_folder], async () => {
   await reloadAll()
 })
 </script>

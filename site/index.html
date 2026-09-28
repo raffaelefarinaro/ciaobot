@@ -5,6 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ciaobot</title>
   <meta name="description" content="Ciaobot is a personal assistant and second brain that remembers what matters from every conversation, organised by the parts of your life.">
+  <link rel="canonical" href="https://www.raffaelefarinaro.com/ciaobot/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Ciaobot">
+  <meta property="og:title" content="Ciaobot">
+  <meta property="og:description" content="Ciaobot is a personal assistant and second brain that remembers what matters from every conversation, organised by the parts of your life.">
+  <meta property="og:url" content="https://www.raffaelefarinaro.com/ciaobot/">
+  <meta property="og:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Ciaobot — a personal assistant that remembers.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Ciaobot">
+  <meta name="twitter:description" content="Ciaobot is a personal assistant and second brain that remembers what matters from every conversation, organised by the parts of your life.">
+  <meta name="twitter:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <link rel="icon" href="assets/img/favicon.png">
   <link rel="stylesheet" href="assets/style.css">
 </head>
@@ -40,8 +55,8 @@
         </p>
       </div>
       <figure class="shot">
-        <a href="assets/img/home.webp"><img src="assets/img/home.webp" alt="The Ciaobot home screen: Personal and Work workspaces in the sidebar, projects with their chats, and the chats that need attention in the middle, one of them still being worked on" width="1600" height="1000"></a>
-        <figcaption>The home screen. Workspaces and projects on the left; the chats that need you, and the ones still working, in the middle.</figcaption>
+        <a href="assets/img/home.webp"><img src="assets/img/home.webp" alt="The Ciaobot Home page: a box to describe a task, the chats that are working or have new replies, and a What changed column, with projects and their chats in the sidebar" width="1600" height="1000"></a>
+        <figcaption>Home. Projects and chats on the left; a box to start a task, then the chats that are working or have new replies, in the middle.</figcaption>
       </figure>
     </section>
 
@@ -51,6 +66,38 @@
       <p>Most AI chat apps give you one long conversation that slowly fills up with everything. Either they forget, or they remember things at random, and you keep explaining the same background again.</p>
       <p>Ciaobot works more like a good assistant with a notebook. You give it one task at a time. When the task is done, you close the conversation, and it writes down what's worth keeping in the right place.</p>
       <p class="built-on">Built on the best, not reinvented: every chat runs on <a href="https://docs.anthropic.com/en/docs/claude-code/overview">Claude Code</a> or <a href="https://opencode.ai/">opencode</a>, so each improvement they ship reaches Ciaobot too. <a href="models.html">How →</a></p>
+    </section>
+
+    <section class="memory-demo" aria-labelledby="memory-demo-title">
+      <div class="narrow">
+        <h2 id="memory-demo-title">Play through the memory loop</h2>
+        <p>One small example of how a finished conversation can help with the next one.</p>
+      </div>
+      <div class="memory-board" data-memory-demo data-step="0">
+        <div class="memory-board-top"><span class="memory-board-label">A little Ciaobot story</span><span class="memory-board-count" aria-hidden="true">01 / 03</span></div>
+        <div class="memory-scenes">
+          <div class="memory-scene memory-scene-chat">
+            <span class="memory-scene-label">01 · Conversation</span>
+            <div class="memory-bubble">We’re considering the villa and the old town hall for the wedding.</div>
+            <span class="memory-scene-foot">A useful detail from a chat</span>
+          </div>
+          <div class="memory-scene memory-scene-note">
+            <span class="memory-scene-label">02 · Notebook</span>
+            <div class="memory-paper"><span class="memory-paper-title">Wedding preparation.md</span><span class="memory-paper-line">Venues to consider: villa, old town hall.</span><span class="memory-paper-empty">Waiting for a finished chat…</span></div>
+            <span class="memory-scene-foot">Your own Markdown, in the right project</span>
+          </div>
+          <div class="memory-scene memory-scene-recall">
+            <span class="memory-scene-label">03 · Next time</span>
+            <div class="memory-bubble memory-bubble-question">Which venues were we considering?</div>
+            <div class="memory-answer">The villa and the old town hall.</div>
+            <span class="memory-answer-empty memory-scene-foot">The answer is waiting in the note.</span>
+          </div>
+        </div>
+        <div class="memory-board-bottom">
+          <p class="memory-board-status" role="status" aria-live="polite">Start with a conversation. Finish it to save what matters.</p>
+          <button class="memory-action" type="button">Finish the chat <span aria-hidden="true">→</span></button>
+        </div>
+      </div>
     </section>
 
     <section id="blocks">
@@ -114,8 +161,8 @@
         <summary>See it in action: one week later, it already knows</summary>
         <div class="example-body">
           <figure>
-            <video src="assets/img/archive.mp4" poster="assets/img/archive-poster.webp" autoplay muted loop playsinline aria-label="A follow-up message is sent in a Spanish-practice chat, the answer arrives, then the chat is archived and moves to 'tidying up' while Ciaobot extracts what to remember"></video>
-            <figcaption>Ask, get the answer, archive. The chat moves to <em>tidying up</em> while Ciaobot files what's worth keeping.</figcaption>
+            <video src="assets/img/archive.mp4" poster="assets/img/archive-poster.webp" autoplay muted loop playsinline aria-label="A follow-up message is sent in a Spanish-practice chat, the answer arrives, then the chat is archived and shows a memory insights row while Ciaobot extracts what to remember"></video>
+            <figcaption>Ask, get the answer, archive. Ciaobot then shows a <em>memory insights</em> row on Home while it files what's worth keeping.</figcaption>
           </figure>
           <p>A week later you ask <span class="prompt-inline">which venues are we still considering?</span> and it knows, without you digging up an old conversation. <a href="memory.html">How memory works →</a></p>
         </div>

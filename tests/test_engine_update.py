@@ -1755,7 +1755,7 @@ def test_rollback_waits_for_the_engine_to_stop_before_restarting(tmp_path: Path)
     op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
     # The forward path stops the engine by waiting for it to stop answering.
     # The rollback used to boot it out and start it again about half a second
-    # later, which is the same race `scripts/install.sh` works around: launchd
+    # later, which is the same race the retired app installer handled: launchd
     # removes a job asynchronously, and a start landing in that window comes
     # back against a stale environment. The engine below keeps answering for
     # two probes after its bootout, so a rollback that does not wait starts it

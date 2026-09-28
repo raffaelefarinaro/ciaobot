@@ -3412,12 +3412,30 @@ def _curation_end_command(args: argparse.Namespace) -> int:
 
 
 def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
-    """Delete a resolved skill proposal from a workspace's review queue.
+    """Settle a resolved skill proposal in a workspace's review queue.
 
     The curation schedule reviews ``Workspace/Skill-Proposals/``; once a
-    proposal's decision is made (implemented, or decided against) it is removed
-    here so the queue stops re-asking. NAME matches the file's stem or a unique
-    substring of it.
+    proposal's decision is made (implemented, or decided against) it is settled
+    here so the queue stops re-asking. NAME matches the record's skill or a
+    unique substring of it.
+
+    Settled, not deleted: this used to unlink the file, which left no record that
+    anyone had decided anything, so the next pass that saw the same evidence
+    filed the same proposal again. ``ciao.skill_proposals`` records the
+    decision in the workspace's sidecar and flips the record's lifecycle; the
+    proposal stays readable and keeps accumulating evidence, and stays settled.
+
+    ``--applied`` records the other outcome — the change landed and was checked.
+    It is not a decoration: ``applied`` is recorded as a promotion and everything
+    else as a dismissal, so the History tab can tell "we improved this" from
+    "we decided against this". ``--not-applicable`` records the third, which is
+    why it exists: a finding the implementation chat re-read the skill and found
+    no longer holds is not the same as one a person rejected — and the prompt the
+    accept route seeds tells the chat to say so, so the command has to exist.
+    ``--interrupted`` records that the work stopped part-way, which is none of
+    those: the record stays QUEUED and its chat stays bound to it, because an
+    unfinished edit is not an answer and must not archive an open question as
+    though a person had rejected it.
     """
     from ciao.config import CiaoConfig
 
@@ -3440,47 +3458,269 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     config = CiaoConfig.from_env(config_source)
 
     # Which workspace the proposal lives in: the active one, falling back to the
-    # primary, matching skill_evolution's routing so evidence and queue stay
-    # aligned per workspace.
+    # primary, so the decision lands in the same queue the proposal was filed
+    # into.
     name = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
     if config.workspace(name) is None:
         name = config.primary_workspace()
-    queue = config.workspace_vault_root(name) / "Workspace" / "Skill-Proposals"
 
     needle = args.name.strip()
     if not needle:
         print("a skill proposal name or substring is required", file=sys.stderr)
         return 2
 
-    if not queue.is_dir():
+    from ciao import skill_proposals
+
+    if not skill_proposals.queue_dir(config, name).is_dir():
         print("No skill proposals are queued.", file=sys.stderr)
         return 1
 
-    candidates = sorted(p for p in queue.iterdir() if p.is_file() and p.suffix == ".md")
-    matches = [p for p in candidates if needle.casefold() in p.stem.casefold()]
+    queued = skill_proposals.read_queue(config, name)
+    matches = [p for p in queued if needle.casefold() in p.skill.casefold()]
     if not matches:
         print(f"No skill proposal matched {needle!r}.", file=sys.stderr)
         return 1
     if len(matches) > 1:
         print(
             f"The name matched more than one skill proposal; use a longer substring: "
-            + ", ".join(p.stem for p in matches),
+            + ", ".join(p.skill for p in matches),
             file=sys.stderr,
         )
         return 1
 
     target = matches[0]
+    # A chat records the outcome of the work it did, so a proposal that was
+    # never accepted has nothing to interrupt. Accepting is the route's job.
+    if args.interrupted and not target.chat_id:
+        print(
+            f"{target.skill} has no implementing chat, so there is no work to "
+            "record as interrupted; accept it first.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.applied and args.interrupted:
+        print("--applied and --interrupted are opposite outcomes; pass one.", file=sys.stderr)
+        return 2
+    if args.not_applicable and (args.applied or args.interrupted):
+        print(
+            "--not-applicable is a third outcome, not a modifier on the other "
+            "two; pass it on its own.",
+            file=sys.stderr,
+        )
+        return 2
+    lifecycle = (
+        skill_proposals.INTERRUPTED
+        if args.interrupted
+        else skill_proposals.APPLIED
+        if args.applied
+        else skill_proposals.NOT_APPLICABLE
+        if args.not_applicable
+        else skill_proposals.DISMISSED
+    )
     try:
-        target.unlink()
-    except OSError as exc:
-        print(f"could not delete {target.name}: {exc}", file=sys.stderr)
+        settled = skill_proposals.mark_outcome(
+            config,
+            target.id,
+            lifecycle,
+            args.reason.strip(),
+            via="cli",
+        )
+    except (OSError, ValueError) as exc:
+        print(f"could not settle {target.skill}: {exc}", file=sys.stderr)
+        return 1
+    if settled is None:
+        print(f"{target.skill} is no longer queued.", file=sys.stderr)
         return 1
 
     if args.json:
-        json.dump({"removed": True, "name": target.stem, "workspace": name}, sys.stdout, indent=2)
+        json.dump(
+            {
+                "settled": True,
+                "name": target.skill,
+                "workspace": name,
+                # Which outcome this was, because the command now records three
+                # and only one of them closes the question: `--interrupted`
+                # leaves the proposal queued.
+                "lifecycle": settled.lifecycle,
+            },
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+    elif settled.lifecycle == skill_proposals.INTERRUPTED:
+        print(
+            f"Recorded {settled.skill} in {name} as interrupted; it stays queued "
+            "so the work can be picked up again."
+        )
+    else:
+        print(f"Settled skill proposal {settled.skill} in {name}.")
+    return 0
+
+
+def _read_skill_proposal_input(path: str) -> tuple[dict[str, Any] | None, str]:
+    """The finding in *path* as ``(payload, "")``, or ``(None, why)`` if unusable.
+
+    Structured in, so the reader is a real parse rather than a delimiter: a
+    finding is several fields and a list of evidence rows, and a format whose
+    boundaries are a model has to reproduce exactly is a format that will
+    eventually be reproduced slightly wrong. Every complaint names the field it
+    is about, because the caller is a model that can only fix what it is told.
+    """
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return None, f"could not read {path}: {exc}"
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        return None, f"{path} is not valid JSON: {exc}"
+    if not isinstance(payload, dict):
+        return None, f"{path} must hold one JSON object, not a {type(payload).__name__}"
+    for field in ("title", "problem", "change"):
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return None, f"{path} needs a non-empty \"{field}\""
+    sources = payload.get("sources")
+    if not isinstance(sources, list) or not sources:
+        return None, (
+            f"{path} needs a non-empty \"sources\" list: a proposal with no "
+            "evidence is not reviewable"
+        )
+    for index, item in enumerate(sources):
+        if not isinstance(item, dict):
+            return None, f"{path} sources[{index}] must be an object"
+        if not isinstance(item.get("excerpt"), str) or not item["excerpt"].strip():
+            return None, (
+                f"{path} sources[{index}] needs a non-empty \"excerpt\""
+            )
+    return payload, ""
+
+
+def _skill_proposal_add_command(args: argparse.Namespace) -> int:
+    """File one supported skill-improvement proposal in a workspace's queue.
+
+    The memory pass finds a finding in a conversation it has just read, and a
+    person can hand-author one; both go through here, so a proposal only ever
+    names a target ``skills_inventory.resolve_owned_skill`` accepts and only
+    ever lands through ``skill_proposals.upsert_proposal``. The finding is read
+    from a file because every field in it is conversation-derived prose, and
+    ``$()``, backticks or quotes in a shell argument would run or mangle.
+
+    Ownership is resolved, never asserted. An installed stock copy, a provider
+    mirror, the install-wide shared source, another workspace's catalog and an
+    unknown name are all refused here by name, and the path and revision the
+    record carries come from the resolved source rather than from the caller —
+    so a hand-authored name cannot aim the writer at a file it does not
+    own, and a reviewer can tell which bytes the proposal was written against.
+
+    Settling stays out of here: this proposes, and ``skill-proposal-remove``
+    decides.
+    """
+    from ciao.config import CiaoConfig
+    from ciao.skill_proposals import (
+        PENDING,
+        SkillEvidence,
+        SkillProposal,
+        proposal_id,
+        proposal_path,
+        upsert_proposal,
+    )
+    from ciao.skills_inventory import resolve_owned_skill
+
+    payload, problem = _read_skill_proposal_input(args.input_file)
+    if payload is None:
+        print(problem, file=sys.stderr)
+        return 2
+
+    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
+    workspace = Path(workspace_raw).expanduser().resolve()
+    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
+    vault = Path(vault_raw).expanduser()
+    if not vault.is_absolute():
+        vault = workspace / vault
+    vault = vault.resolve()
+
+    config_source = dict(os.environ)
+    config_source.update({
+        "CIAO_WORKSPACE": str(workspace),
+        "CIAO_VAULT_ROOT": str(vault),
+        # Filing a proposal is a review-queue write, not a session write;
+        # loading config outside the server env must not mint a session secret.
+        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "skill-proposal-add",
+    })
+    config = CiaoConfig.from_env(config_source)
+
+    # Which workspace the proposal belongs to: the active one, falling back to
+    # the primary, matching `skill-proposal-remove`'s routing so both ends of a
+    # proposal's life land in the same queue.
+    name = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
+    if config.workspace(name) is None:
+        name = config.primary_workspace()
+
+    skill = args.skill.strip()
+    try:
+        owned = resolve_owned_skill(config, name, skill)
+    except ValueError as exc:
+        print(f"cannot file a proposal for {skill!r}: {exc}", file=sys.stderr)
+        return 1
+
+    sources = tuple(
+        SkillEvidence(
+            chat_id=str(item.get("chat_id") or "").strip(),
+            archive=str(item.get("archive") or "").strip(),
+            turn=str(item.get("turn") or "").strip(),
+            excerpt=str(item.get("excerpt") or "").strip(),
+        )
+        for item in payload["sources"]
+    )
+    stored = upsert_proposal(
+        config,
+        SkillProposal(
+            id=proposal_id(name, owned.name),
+            workspace=name,
+            skill=owned.name,
+            # The source this was resolved against and the revision of exactly
+            # those bytes, so a reviewer can tell the skill has moved on since.
+            canonical_path=str(owned.path),
+            reviewed_revision=owned.revision,
+            title=payload["title"].strip(),
+            problem=payload["problem"].strip(),
+            change=payload["change"].strip(),
+            rationale=str(payload.get("rationale") or "").strip(),
+            sources=sources,
+            lifecycle=PENDING,
+            # No implementing chat: this is a finding nobody has accepted yet.
+            # The conversation that justified it is in the evidence.
+            chat_id="",
+            updated_at="",
+        ),
+    )
+    path = proposal_path(config, name, stored.skill)
+    if args.json:
+        json.dump(
+            {
+                "filed": True,
+                "id": stored.id,
+                "skill": stored.skill,
+                "workspace": name,
+                "lifecycle": stored.lifecycle,
+                "path": str(path),
+                "evidence": len(stored.sources),
+            },
+            sys.stdout,
+            indent=2,
+        )
         sys.stdout.write("\n")
     else:
-        print(f"Removed skill proposal {target.stem} from {name}.")
+        print(f"Filed skill proposal for {stored.skill} in {name}: {path}")
+        if stored.lifecycle != PENDING:
+            # A decision already stands for this skill. The merge keeps it
+            # settled and only adds the evidence, so the pass is told the
+            # finding did not reopen the queue.
+            print(
+                f"Note: {stored.skill} is already {stored.lifecycle}; the "
+                "evidence was added to the settled record."
+            )
     return 0
 
 
@@ -4888,18 +5128,71 @@ def build_parser() -> argparse.ArgumentParser:
     )
     curation_end_parser.set_defaults(func=_curation_end_command)
 
+    skill_proposal_add_parser = subparsers.add_parser(
+        "skill-proposal-add",
+        help="File one supported skill-improvement proposal in the review queue.",
+        description=(
+            "Merges one finding into a workspace's Workspace/Skill-Proposals/ "
+            "record for a skill, through the same validated writer the review "
+            "surface and the weekly pass use. The target is resolved, not "
+            "trusted: only a source this workspace owns under its own `skills/` "
+            "directory is accepted, so an installed stock copy, a provider "
+            "mirror, a shared source and an unknown name are refused. Nothing "
+            "is edited — this files a proposal for a person to review, and "
+            "`ciao skill-proposal-remove` is what settles one.\n\n"
+            "--input-file holds a JSON object with `title`, `problem`, `change`, "
+            "`rationale` and a non-empty `sources` list, each entry carrying "
+            "`chat_id`, `archive`, `turn` and a short verbatim `excerpt`. The "
+            "finding is read from a file because every field is text from a "
+            "conversation, and `$()`, backticks or quotes in a shell argument "
+            "would run or mangle."
+        ),
+    )
+    skill_proposal_add_parser.add_argument(
+        "skill",
+        help="The owned skill this proposal is about. Resolved, so a name the workspace cannot edit is refused.",
+    )
+    skill_proposal_add_parser.add_argument(
+        "--input-file",
+        required=True,
+        help=(
+            "Read the finding from this file as JSON. Never pass the finding "
+            "as an argument: it is conversation-derived prose."
+        ),
+    )
+    skill_proposal_add_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    skill_proposal_add_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    skill_proposal_add_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured result as JSON instead of text.",
+    )
+    skill_proposal_add_parser.set_defaults(func=_skill_proposal_add_command)
+
     skill_proposal_parser = subparsers.add_parser(
         "skill-proposal-remove",
-        help="Remove a resolved skill proposal from the review queue.",
+        help="Settle a resolved skill proposal in the review queue.",
         description=(
-            "Deletes one file from a workspace's Workspace/Skill-Proposals/ "
-            "after its decision is made (implemented, or decided against). "
-            "NAME matches the proposal file's stem or a unique substring of it."
+            "Records the decision for one proposal in a workspace's "
+            "Workspace/Skill-Proposals/ and takes it out of the queue, after its "
+            "decision is made (implemented, or decided against). The record stays "
+            "on disk and readable. NAME matches the proposal's skill or a unique "
+            "substring of it."
         ),
     )
     skill_proposal_parser.add_argument(
         "name",
-        help="Skill proposal file stem or unique substring to remove.",
+        help="Skill name or unique substring of the queued proposal to settle.",
     )
     skill_proposal_parser.add_argument(
         "--workspace",
@@ -4917,6 +5210,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Emit the structured result as JSON instead of text.",
+    )
+    skill_proposal_parser.add_argument(
+        "--applied",
+        action="store_true",
+        help=(
+            "Record that the change landed and was verified. Recorded as a "
+            "promotion, so History reads it as an accept rather than a refusal."
+        ),
+    )
+    skill_proposal_parser.add_argument(
+        "--not-applicable",
+        action="store_true",
+        help=(
+            "Record that the finding no longer holds against the current skill, "
+            "so the chat implementing it settled it without an edit. A decision, "
+            "recorded as a dismissal."
+        ),
+    )
+    skill_proposal_parser.add_argument(
+        "--interrupted",
+        action="store_true",
+        help=(
+            "Record that the implementation stopped part-way. Not a decision: the "
+            "proposal stays queued with its chat bound to it, so the work is "
+            "recoverable. Needs an accepted proposal."
+        ),
+    )
+    skill_proposal_parser.add_argument(
+        "--reason",
+        default="",
+        help="Free-text note recorded with the outcome (the History 'outcome' field).",
     )
     skill_proposal_parser.set_defaults(func=_skill_proposal_remove_command)
 

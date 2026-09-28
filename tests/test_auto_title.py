@@ -580,6 +580,38 @@ async def test_llm_fallback_titles_chat_when_native_never_lands(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_claude_title_does_not_wait_for_native_poll(monkeypatch) -> None:
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+    manager._TITLE_POLL_DELAYS = (0.0, 60.0)
+    native_reads = 0
+
+    def missing_session_info(_sid, directory=None):
+        nonlocal native_reads
+        native_reads += 1
+        return None
+
+    async def unexpected_sleep(_delay):
+        pytest.fail("Claude titling must not wait through the native poll")
+
+    async def fake_oneshot(*_args, **_kwargs):
+        return "System One Decision Models"
+
+    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
+    monkeypatch.setattr(pc.asyncio, "sleep", unexpected_sleep)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    assert (
+        await manager.auto_title_if_default(
+            "chat-1", "I want to find out where System One models help"
+        )
+        == "System One Decision Models"
+    )
+    assert native_reads == 1
+
+
+@pytest.mark.asyncio
 async def test_llm_fallback_prompt_carries_assistant_reply(monkeypatch) -> None:
     """The post-reply invocation includes the assistant's framing so the
     title can name the topic rather than echo the question."""

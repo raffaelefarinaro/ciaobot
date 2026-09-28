@@ -610,7 +610,7 @@ def test_engine_installer_refuses_foreign_ciao(tmp_path: Path) -> None:
 
 
 def _write_desktop_shim(home: Path, target: Path) -> Path:
-    """The shim scripts/install.sh writes, pointing at `target`.
+    """The shim the retired app installer wrote, pointing at `target`.
 
     The desktop installer writes it *before* onboarding creates the server
     plist, so the shim is the only evidence a Ciaobot.app owns the engine

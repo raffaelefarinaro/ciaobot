@@ -177,32 +177,45 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
    a real title the header drops its centred wordmark. A view with no title of
    its own (Home, Settings, Automations, Memory) shows its page tag as that
    title, on the left, where every other page's title sits - not as a pill in
-   the middle of the header. */
+   the middle of the header.
+
+   The viewport condition is load-bearing, not belt-and-braces. This is the
+   desktop header: two columns, no lead. The phone header (the `max-width:
+   768px` block below) is a different grid whose column 1 already holds the
+   hamburger, and it only shows on a phone - but `chat-pane` is the full
+   viewport there, because the sidebar is a fixed drawer off the flow. So a
+   window between 600 and 768px satisfied both rules at once: the tag became a
+   visible left-hand title *into the hamburger's own grid cell*, and the two
+   printed on top of each other, at exactly the widths where the phone layout
+   had just been given room to breathe. Below 600px the tag is screen-reader
+   only and the wordmark stays centred, which is the phone header working. */
 @container chat-pane (min-width: 600px) {
-  .header-center :deep(.brand) { display: none; }
-  .pane-header--tag-title {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-  .pane-header--tag-title .header-center {
-    grid-column: 1;
-    justify-self: start;
-  }
-  .pane-header--tag-title .header-trail {
-    grid-column: 2;
-  }
-  .pane-header--tag-title .page-tag {
-    position: static;
-    width: auto;
-    height: auto;
-    margin: 0;
-    overflow: hidden;
-    clip: auto;
-    color: var(--fg);
-    font-family: var(--font-sans);
-    font-size: var(--text-lg);
-    font-weight: 650;
-    letter-spacing: -0.01em;
-    text-overflow: ellipsis;
+  @media (min-width: 769px) {
+    .header-center :deep(.brand) { display: none; }
+    .pane-header--tag-title {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+    .pane-header--tag-title .header-center {
+      grid-column: 1;
+      justify-self: start;
+    }
+    .pane-header--tag-title .header-trail {
+      grid-column: 2;
+    }
+    .pane-header--tag-title .page-tag {
+      position: static;
+      width: auto;
+      height: auto;
+      margin: 0;
+      overflow: hidden;
+      clip: auto;
+      color: var(--fg);
+      font-family: var(--font-sans);
+      font-size: var(--text-lg);
+      font-weight: 650;
+      letter-spacing: -0.01em;
+      text-overflow: ellipsis;
+    }
   }
 }
 
