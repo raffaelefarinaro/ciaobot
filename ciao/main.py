@@ -956,10 +956,10 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # Bootstrap mode is the first-run setup wizard: the server runs against a
     # throwaway ~/.ciao/bootstrap workspace until the user picks a real folder.
     # Starting the schedulers here would dispatch system schedules (memory
-    # curation, skill evolution, weekly review) against that throwaway
-    # workspace mid-wizard — the user sees "chat completed" notifications for
-    # chats created in the wrong place. Hold every dispatcher until setup is
-    # done; the post-setup restart (no longer in bootstrap mode) starts them.
+    # curation, weekly review) against that throwaway workspace mid-wizard —
+    # the user sees "chat completed" notifications for chats created in the
+    # wrong place. Hold every dispatcher until setup is done; the post-setup
+    # restart (no longer in bootstrap mode) starts them.
     if getattr(config, "bootstrap_mode", False):
         logger.info(
             "Bootstrap mode: holding schedule dispatch until setup completes."

@@ -21,7 +21,6 @@ EXPECTED_COMMANDS = {
 
 EXPECTED_SYSTEM_SCHEDULES = {
     "system-memory-curation",
-    "system-skill-evolution",
 }
 
 PRIVATE_MARKERS = {

@@ -2,10 +2,13 @@
 
 A trajectory is a structured JSON record of one Claude Code session: which
 skills were loaded, which tools were used, how many turns, errors, and the
-eventual outcome. It is the raw dataset that powers
-``ciao.skill_evolution``: by mining trajectories where a skill was active
-but the session went sideways (errors, low success), we can propose edits to
-the skill prompt.
+eventual outcome. It is a durable, machine-readable summary of a session that
+the raw archive JSONL is not: the CLI below lists and prunes it, and the
+retention step keeps the directory bounded.
+
+It was also the dataset the retired weekly skill-evolution pass mined. That
+producer is gone (#697) and the memory pass is the only producer of skill
+proposals now, so nothing reads this directory automatically.
 
 Storage layout::
 
@@ -181,8 +184,9 @@ def infer_outcome(*, errors: int) -> str:
     """Heuristic outcome label.
 
     ``success`` = clean run, no errors. ``needs_review`` = at least one
-    error. Subjective, refined later via LLM-as-judge; the gate today is
-    just a flag for the weekly evolution pass to look at.
+    error. Subjective, refined later via LLM-as-judge; today the label is a
+    durable outcome summary the CLI lists, and no pass reads it
+    automatically.
     """
     if errors > 0:
         return "needs_review"

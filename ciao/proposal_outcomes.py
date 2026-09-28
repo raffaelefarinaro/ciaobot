@@ -51,9 +51,10 @@ KEEP_LINES = 2000            # lines retained after a trim
 
 # Kinds this ledger counts. It measures the MEMORY pass's usefulness; other
 # producers share the review surface but answer to different questions:
-# `[skill]` rows come from skill evolution, `[rehome]` rows are note-move
-# judgements queued by vault hygiene (`vault_rehome`). The `EXTRACTION_` name is
-# kept: it is the field name shipped reports already read.
+# a `[skill]` row is filed by the memory pass but settled rather than promoted,
+# `[rehome]` rows are note-move judgements queued by vault hygiene
+# (`vault_rehome`). The `EXTRACTION_` name is kept: it is the field name
+# shipped reports already read.
 EXTRACTION_KINDS: frozenset[str] = frozenset(
     {"memory", "profile", "user", "project", "people", "learnings", "review"}
 )
