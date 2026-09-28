@@ -323,7 +323,7 @@ def test_uninstall_leaves_another_installs_agents_alone_when_the_bundle_is_gone(
 
 
 def _shim(engine: Path, *, marker: str | None = None) -> str:
-    """A shim body in exactly the shape `scripts/install.sh` writes."""
+    """A shim body in the shape the retired app installer wrote."""
     return (
         "#!/bin/sh\n"
         f"{desktop_install.SHIM_MARKER if marker is None else marker}\n"

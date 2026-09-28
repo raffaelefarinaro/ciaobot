@@ -79,11 +79,10 @@ first-time user gets the engine and nobody can install the app.
 already-merged transition release's hand-over fetched (#604); the app
 installer is not published under any name.
 
-`scripts/install.sh` is the retired app installer: it downloads the signed Apple
-Silicon (aarch64) app archive, verifies it with the published native verifier,
-and installs into an app bundle that no longer ships. A DMG is intentionally
-not built or attached to releases. The script stays in the tree for now, but
-the release workflow no longer generates or attaches it (#579 deletes it).
+The retired app installer is no longer in the tree. A DMG is intentionally
+not built or attached to releases. The release workflow generates the public
+`install.sh` from `scripts/install-engine.sh`; legacy app migration and
+uninstall support remains for existing installations.
 
 `scripts/install-engine.sh` is the installer the release serves: it verifies the
 signed engine manifest with the release minisign key embedded in the script, and

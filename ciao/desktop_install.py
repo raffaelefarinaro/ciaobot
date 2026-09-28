@@ -99,12 +99,12 @@ def _remove_installer_launch_agents(
     return removed
 
 
-# Line the one-line installer writes into ~/.local/bin/ciao so both sides can
-# tell its shim apart from a `ciao` belonging to some other project.
+# Marker written by the retired app installer into ~/.local/bin/ciao. Keep it
+# so uninstall can tell existing app shims apart from other `ciao` binaries.
 SHIM_MARKER = "# Ciaobot shim (managed by the Ciaobot installer)"
 
 
-# The line `scripts/install.sh` writes as the shim body:
+# The shim body written by the retired app installer:
 #     exec "/path/to/Ciaobot.app/.../bin/ciao" "$@"
 # Parsed rather than substring-matched, so quoting, a doubled slash from a
 # trailing-slash CIAO_APP_DIR, a symlinked Applications dir and a `~` all stop
