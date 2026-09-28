@@ -203,12 +203,12 @@ a terminal.
 scripts/prepare-release --apply --create-pr --ready
 ```
 
-  That cuts `release/vX.Y.Z` from `develop`, aligns the Python, PWA, desktop
-  npm/Cargo/Tauri versions and lockfiles, refreshes `CHANGELOG.md`, runs release
+  That cuts `release/vX.Y.Z` from `develop`, aligns the Python and PWA versions
+  and lockfiles, refreshes `CHANGELOG.md`, runs release
   checks, and opens a PR into `main`. Use
   `--bump minor` or `--version X.Y.Z` when needed.
 
-- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA and the engine wheel, verifies the wheel in a clean environment, signs the engine manifest with the release minisign key (`ciaobot-engine-manifest.json` + `.sig`, gated by `ciao.release_manifest verify`) and attaches five engine assets: `install.sh`, `install-engine.sh`, the wheel, the manifest and its signature. Since #653 it publishes no app, no `latest.json` feed, no native verifier and no bundled runtime, and its signer is `@tauri-apps/cli` run standalone rather than the copy under `desktop/`, so deleting that tree does not break the release. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
+- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA and the engine wheel, verifies the wheel in a clean environment, signs the engine manifest with the release minisign key (`ciaobot-engine-manifest.json` + `.sig`, gated by `ciao.release_manifest verify`) and attaches five engine assets: `install.sh`, `install-engine.sh`, the wheel, the manifest and its signature. Since #653 it publishes no app, no `latest.json` feed, no native verifier and no bundled runtime, and its signer is `@tauri-apps/cli` run standalone, so it never depended on the now-deleted `desktop/` tree. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
 
 One-time GitHub setup for a fresh clone or repo admin:
 
@@ -263,80 +263,13 @@ npm test             # 61 test files under web/src
 
 ## macOS desktop development
 
-The Tauri 2 shell requires macOS 13+ on Apple Silicon (arm64), Node 22.x, and
-Rust 1.90.0 with the `aarch64-apple-darwin` target.
+The macOS app is retired and its source tree is gone (`#656`): the release is the
+engine, and the one-line installer installs that. Nothing under `desktop/` is
+built, so there are no Rust or desktop-npm steps to run here.
 
-The individual steps, run them after any change under `desktop/`:
-
-```bash
-cd desktop
-npm ci
-npm run build            # desktop frontend (vite) only
-cd src-tauri
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-cd ..
-npm run tauri build -- --target aarch64-apple-darwin
-```
-
-CI no longer builds the app (`#655`): the release is the engine, so the macOS
-job cold-starts an engine wheel instead and the steps above are yours to run.
-
-The main webview loads the live localhost PWA and must never be added to a
-Tauri capability. While the engine is unreachable it loads the bundled
-`startup.html` recovery page and automatically navigates to the PWA after
-recovery; the same local page is reused by a hidden update window that the tray
-shows immediately when an update starts. The update window receives native
-progress events and renders them as boot-screen-style log rows (no interactive
-toggle; the log is always visible). Test both
-startup and update states when changing desktop startup or service lifecycle
-code. The shell's IPC surface is deliberately tiny: exactly two Tauri commands
-(`check_permission` / `request_permission`, backing the PWA's push-notification
-permission flow, restricted to bundled local pages) — everything else
-about the desktop experience is driven from the tray in Rust, so remote page
-content has no other IPC surface to reach. Keep it that way — adding a command
-means re-introducing a bundled window to own it. Release builds require `TAURI_SIGNING_PRIVATE_KEY` and
-`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; Apple signing remains ad-hoc.
-The main window keeps Tauri's native drag/drop handler enabled so Finder paths
-are preserved. Rust creates a short-lived, single-use grant under the runtime
-root; the local `/api/desktop-drop` route on the device origin consumes it and
-transfers client files to the host project without exposing paths to page
-JavaScript. Verify both a host
-Finder-to-chat drop and a client-to-host transfer after changing this bridge.
-
-Read mutations are cross-device notification mutations too: the engine emits a
-clear control for the chat, remote PWA service workers close their matching
-notification tag, and the macOS shell removes delivered native banners. Keep
-the desktop notification-log and service-worker tests aligned when changing
-notification identifiers or payload shapes.
-
-### Rebuilding the shell from Settings → Restart
-
-With `CIAO_DEV_MODE=true`, Settings → Restart also rebuilds this bundle, but only
-when a watched source under `desktop/` is newer than
-`src-tauri/target/release/bundle/macos/Ciaobot.app` (see `WATCHED_SOURCES` in
-`ciao/desktop_build.py`). Everything else keeps the restart fast: a release Rust
-build costs minutes, so an engine-only or PWA-only change must not pay for it.
-
-The step builds the native arch with `--bundles app` and no updater artifacts (a
-dev machine has no signing key), stages the result at
-`/Applications/.Ciaobot.app.deploy`, then quits the running app, swaps it into
-`/Applications/Ciaobot.app`, and opens it again just before the engine restart.
-Two things are load-bearing:
-
-- The quit has to happen first. `tauri-plugin-single-instance` makes `open` focus
-  the running instance instead of launching the new binary.
-- The swap is staged, not in place. Deleting a bundle under a live process leaves
-  it reading pages from a removed inode. If the app refuses to quit within 20s,
-  the bundle stays staged and is swapped in on the next restart.
-
-The quit goes through AppleScript, not the tray's Quit item: the tray item also
-stops the engine, which is not what a rebuild wants.
-
-The bundled engine is resolved from `Ciaobot.app/Contents/Resources/ciao-runtime`.
-Development builds may still use the checkout's interpreter, but a packaged app
-must never fall back to Homebrew or another `PATH` installation.
+`ciao desktop uninstall` stays for the compatibility window: run it to remove a
+`Ciaobot.app` an older install left behind, along with the launch agents and
+`ciao` shim pointing into it.
 
 After PWA changes, rebuild and either restart the service or use the **Deploy** button in PWA Settings. **Never restart the ciao service from inside a PWA chat** (you'd sever your own session); ask the operator to deploy.
 

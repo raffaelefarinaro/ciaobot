@@ -215,7 +215,7 @@ def test_artifact_is_sandboxed_into_an_opaque_origin(workspace: Path) -> None:
     assert "allow-same-origin" not in csp
 
 
-def test_hostile_artifact_cannot_reach_tauri_or_local_controls(workspace: Path) -> None:
+def test_hostile_artifact_cannot_reach_native_or_local_controls(workspace: Path) -> None:
     hostile = (
         "<!doctype html><script>"
         "fetch('/api/node/status');"

@@ -277,8 +277,8 @@ def _ensure_tool_dirs_on_path() -> None:
     FileNotFoundError. Two things depend on this being fixed up before anything
     else runs: the subprocess steps themselves, and ``ciao/cli.py``, which bakes
     this process's PATH into ``{{CIAO_PATH}}`` of ``com.ciao.server.plist`` - so
-    when desktop onboarding spawns bootstrap as a child of the Tauri app,
-    dropping this wrote the minimal PATH into the LaunchAgent permanently.
+    when onboarding spawned bootstrap as a child of the app shell, dropping this
+    wrote the minimal PATH into the LaunchAgent permanently.
 
     The directory list comes from ``tool_path``, which already curates it for
     this exact problem and includes what a hardcoded Homebrew pair misses -

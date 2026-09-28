@@ -17,9 +17,11 @@ from typing import Any
 MANIFEST_NAME = "ciaobot-engine-manifest.json"
 SIGNATURE_NAME = MANIFEST_NAME + ".sig"
 SCHEMA_VERSION = 1
-# Same minisign key as desktop/installer-verify/src/main.rs and the Tauri updater
-# pubkey in desktop/src-tauri/tauri.conf.json; its secret half is the
-# TAURI_SIGNING_PRIVATE_KEY release secret.
+# The release signing key, generated with the app updater back when the release
+# also shipped Ciaobot.app and every consumer of a signature trusted this one
+# key. The app and its verifier are gone (#656), so this is now the only copy
+# left in the repo; its secret half is the TAURI_SIGNING_PRIVATE_KEY release
+# secret, and no other key can sign a manifest this module will trust.
 RELEASE_PUBLIC_KEY = "RWSDUnIeQDnpmnNJiTjLmN6XOVFqgn1A0EXvTVG7AJIZXJxhyFN9osxm"
 _VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -87,7 +89,8 @@ def parse_public_key(text: str) -> tuple[bytes, bytes]:
 
 
 def _signature_lines(signature_text: str) -> list[str]:
-    """Return the four minisign lines, unwrapping Tauri's base64 form first."""
+    """Return the four minisign lines, unwrapping the base64 form the release
+    signer emits first."""
     text = signature_text.strip()
     if not text.startswith("untrusted comment:"):
         try:

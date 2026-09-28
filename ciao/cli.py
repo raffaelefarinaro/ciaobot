@@ -333,29 +333,29 @@ def _default_app_dir() -> Path:
 
 
 _OUR_BUNDLE_IDS = ("local.ciao.app", "local.ciaobot.app")
-# Launcher bundles previous versions wrote. Nothing creates these any more —
-# Ciaobot.app is the menu bar — but installs upgrading from an older version
-# still have one on disk, so setup removes them. "Ciaobot.app" is in the list
-# because the pre-rename launcher used that name; _is_our_app_bundle keeps the
-# Tauri app of the same name safe by checking the executable inside.
+# Launcher bundles previous versions wrote. Nothing creates these any more, but
+# installs upgrading from an older version still have one on disk, so setup
+# removes them. "Ciaobot.app" is in the list because both the pre-rename
+# launcher and the retired app used that name; _is_our_app_bundle keeps the app
+# bundle of the same name safe by checking the executable inside.
 _LEGACY_APP_BUNDLE_NAMES = (
     "Ciao.app",
     "Ciaobot.app",
     "Ciaobot Menu Bar.app",
     "Ciaobot Server.app",
 )
-# Executable inside the Tauri desktop app.
+# Executable inside the retired Ciaobot.app bundle.
 _DESKTOP_EXECUTABLE_NAME = "ciaobot-desktop"
 
 
 def _is_our_app_bundle(app_root: Path) -> bool:
     """Whether ``app_root`` is a launcher bundle created by Ciaobot.
 
-    The Tauri desktop app ships as ``Ciaobot.app`` under the same
+    The retired app shipped as ``Ciaobot.app`` under the same
     ``local.ciaobot.app`` identifier our pre-rename launcher used, so the
     bundle id cannot tell them apart. Misidentifying it is destructive rather
     than merely wasteful: the launcher we write is named ``Ciaobot Server.app``,
-    so ``_remove_legacy_app_shortcuts`` must never delete the native app and
+    so ``_remove_legacy_app_shortcuts`` must never delete the app bundle and
     anything back in its place, leaving a running process on a bundle that no
     longer exists on disk. The executable name is the discriminator.
     """
@@ -1079,7 +1079,7 @@ def setup_workspace(
         or sys.executable
     )
     # The one-time login token for the PWA. Written unconditionally: the setup
-    # summary prints it as a login URL, and the Tauri app redeems it on first
+    # summary prints it as a login URL, and the first client redeems it on first
     # launch. It used to be created as a side effect of writing the launcher
     # bundle, which no longer exists.
     _ensure_setup_token(root)
@@ -3945,9 +3945,10 @@ def build_parser() -> argparse.ArgumentParser:
         deprecated=True,
     )
 
-    # Separate from `service`, which controls the launchd engine. This
-    # group only manages removal of an old app bundle. Installation and updates
-    # are owned by scripts/install.sh and the signed Tauri updater.
+    # Separate from `service`, which controls the launchd engine. This group
+    # only removes an old app bundle, for the compatibility window: the app
+    # itself is retired, and installation and updates are owned by
+    # scripts/install-engine.sh.
     desktop_parser = subparsers.add_parser(
         "desktop",
         help="Remove an installed Ciaobot.app desktop bundle.",

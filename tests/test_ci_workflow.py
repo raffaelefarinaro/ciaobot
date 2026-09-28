@@ -117,8 +117,8 @@ def test_publish_workflow_ships_signed_engine_manifest() -> None:
 
     # The signer has to be the one the installer already trusts - the same
     # minisign key - and it must not be reached through the app's tree, which is
-    # the whole reason this line changed. `signer sign <path>` needs no Tauri
-    # project, so the CLI runs standalone at a pinned version.
+    # the whole reason this line changed. `signer sign <path>` needs no project
+    # of its own, so the CLI runs standalone at a pinned version.
     sign = next(
         line
         for line in workflow.splitlines()

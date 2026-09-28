@@ -41,7 +41,6 @@ from ciao import proposal_actions
 from ciao import proposal_kinds
 from ciao import proposal_outcomes
 from ciao import subagent_tracking
-from ciao import desktop_build
 from ciao import entity_types
 from ciao import provider_registry
 from ciao.jsonio import write_private_text
@@ -68,6 +67,7 @@ _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.tool_path import resolve_tool
 from ciao.providers.opencode import OpencodeProvider
 from ciao.provider_service import capabilities_for, supported_providers
+from ciao.subprocess_step import run_step
 from ciao.schedules import (
     DEFAULT_INTERVAL_MINUTES,
     FREQUENCIES,
@@ -1769,10 +1769,10 @@ def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
     """User-facing text for a dropped file this process cannot read.
 
     A drag straight from the macOS screenshot thumbnail hands over a path only
-    the app that received the drop may read, so the desktop shell stages a copy
-    first (`stage_dropped_file` in desktop/src-tauri/src/lib.rs). When there is
-    no staged copy, because the shell is older than that fix or the drop was not
-    an image, the raw errno tells the user nothing they can act on.
+    the app that received the drop may read, so the shell that received it
+    staged a copy first. When there is no staged copy, because the shell is
+    older than that fix or the drop was not an image, the raw errno tells the
+    user nothing they can act on.
 
     Four tiers, narrowest first. An NSIRD path gets screenshot-specific advice.
     ``EDEADLK`` means a cloud placeholder (see below). Any other permission
@@ -1792,10 +1792,10 @@ def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
         # existence check passes, and the read is then refused with EDEADLK
         # ("Resource deadlock avoided") because this process may not ask the
         # provider to materialise it. Unlike EPERM the errno is unambiguous
-        # here, so it needs no corroborating path check. The desktop shell
-        # stages unreadable drops past this (`needs_drop_staging` in
-        # desktop/src-tauri/src/lib.rs); a file over the staging limit or an
-        # older shell still lands here. A non-image dropped on this Mac does
+        # here, so it needs no corroborating path check. The shell that
+        # received the drop stages unreadable drops past this; a file over the
+        # staging limit or an older shell still lands here. A non-image
+        # dropped on this Mac does
         # not: the path is handed to the agent unread, so the agent hits the
         # same errno on its own.
         return (
@@ -5217,9 +5217,9 @@ def _setup_finish_origin_allowed(request: Request) -> bool:
 def _interactive_foreground_run() -> bool:
     """True when setup can hand the bootstrap server to launchd.
 
-    The bundled desktop app deliberately starts bootstrap with no terminal
-    attached, but it still owns the one-time onboarding process and must hand
-    the configured server to the LaunchAgent when setup completes.
+    A process started without a terminal attached still owns the one-time
+    onboarding process and must hand the configured server to the LaunchAgent
+    when setup completes.
     """
     try:
         return sys.stderr.isatty() or os.environ.get("CIAO_BOOTSTRAP_LAUNCHD_HANDOFF") == "1"
@@ -5722,7 +5722,7 @@ def _run_root_npm_install(codebase_root: Path) -> subprocess.CompletedProcess:
             stdout="skipped: no root package.json",
             stderr="",
         )
-    return desktop_build.run_step(args, cwd=str(codebase_root), timeout=180)
+    return run_step(args, cwd=str(codebase_root), timeout=180)
 
 
 def _restart_only(config, *, dev_mode: bool) -> bool:
@@ -5931,7 +5931,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # 2. pip install
     import sys
     result = await asyncio.to_thread(
-        desktop_build.run_step, [sys.executable, "-m", "pip", "install", "-e", "."],
+        run_step, [sys.executable, "-m", "pip", "install", "-e", "."],
         cwd=str(codebase_root), timeout=120,
     )
     steps.append(_record_step("pip install", result))
@@ -5959,7 +5959,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # 3. npm build
     web_dir = codebase_root / "web"
     result = await asyncio.to_thread(
-        desktop_build.run_step, ["npm", "run", "build"],
+        run_step, ["npm", "run", "build"],
         cwd=str(web_dir), timeout=120,
     )
     steps.append(_record_step("npm build", result))
@@ -5968,35 +5968,6 @@ async def admin_deploy(request: Request) -> JSONResponse:
             {"steps": steps, "ok": False, "error": f"npm build failed: {steps[-1]['output']}"},
             status_code=500,
         )
-
-    # 3b. Desktop shell. Changes under desktop/ only reach the window through a
-    # rebuilt bundle, so dev instances rebuild it here and swap it in during the
-    # restart below. Released installs skip this: no checkout, no cargo. The
-    # rebuild is minutes long, hence the staleness check rather than doing it on
-    # every restart.
-
-    relaunch_desktop = False
-    # The desktop shell is a macOS Tauri bundle: attempting its rebuild on
-    # Linux fails after git/pip/npm have already mutated the install, and the
-    # resulting 500 aborts before the restart. Linux dev deploys skip it.
-    if getattr(config, "dev_mode", False) and sys.platform == "darwin":
-        needed, reason = await asyncio.to_thread(desktop_build.needs_rebuild, codebase_root)
-        if not needed:
-            steps.append({"step": "desktop app", "ok": True, "output": f"skipped: {reason}"})
-        else:
-            steps.append({"step": "desktop app", "ok": True, "output": f"rebuilding: {reason}"})
-            desktop_steps, relaunch_desktop = await asyncio.to_thread(
-                desktop_build.build_and_stage, codebase_root, runner=desktop_build.run_step,
-            )
-            steps.extend(desktop_steps)
-            failed = next((s for s in desktop_steps if not s["ok"]), None)
-            if failed is not None:
-                return JSONResponse(
-                    {"steps": steps, "ok": False, "error": f"{failed['step']} failed: {failed['output']}"},
-                    status_code=500,
-                )
-    elif getattr(config, "dev_mode", False):
-        steps.append({"step": "desktop app", "ok": True, "output": "skipped: the desktop shell builds on macOS only"})
 
     # 4. Signal restart. Must go through app.state.request_restart (which sets
     # the restart flag and calls server.shutdown()). Raising RestartRequested
@@ -6009,24 +5980,6 @@ async def admin_deploy(request: Request) -> JSONResponse:
 
     async def _do_restart():
         await asyncio.sleep(2)
-        # The desktop swap runs before the engine restart, not after: the
-        # relaunched app comes up against a live engine and then rides the
-        # normal restart-drain path, instead of racing launchd for the runtime
-        # directory while the engine is down.
-        if relaunch_desktop:
-            try:
-                installed = await asyncio.to_thread(
-                    desktop_build.install_staged_and_relaunch, runner=desktop_build.run_step,
-                )
-                for step in installed:
-                    if step["ok"]:
-                        logger.info("deploy: %s: %s", step["step"], step["output"])
-                    else:
-                        logger.error("deploy: %s: %s", step["step"], step["output"])
-            except Exception:
-                # A failed relaunch must not strand the engine on stale code;
-                # the operator can reopen the app by hand.
-                logger.exception("deploy: desktop install and relaunch failed")
         fn = getattr(request.app.state, "request_restart", None)
         if callable(fn):
             fn(RESTART_EXIT_CODE)
@@ -6034,11 +5987,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
             raise RestartRequested(RESTART_EXIT_CODE)
 
     asyncio.create_task(_do_restart())
-    steps.append({
-        "step": "restart",
-        "ok": True,
-        "output": "swapping in the rebuilt desktop app first" if relaunch_desktop else "",
-    })
+    steps.append({"step": "restart", "ok": True, "output": ""})
 
     return JSONResponse({"steps": steps, "ok": True})
 

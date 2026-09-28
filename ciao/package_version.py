@@ -423,9 +423,8 @@ def update_package(
 ) -> dict[str, Any]:
     """Explain how the current distribution is updated.
 
-    Production installs are updated atomically by the Tauri app updater or by
-    re-running the signed one-line installer. There is no package-manager
-    branch here anymore.
+    Production installs are updated atomically by re-running the signed one-line
+    installer. There is no package-manager branch here anymore.
     """
     import sys
 

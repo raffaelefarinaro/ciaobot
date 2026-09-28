@@ -4200,15 +4200,9 @@ async function doDeploy(confirmWarnings = false) {
     }
   }
   const restartOnly = !!localStatus.value?.restart_only
-  // In dev mode the restart also rebuilds the Tauri shell when desktop/ changed,
-  // which is a multi-minute Rust build that ends by quitting and relaunching the
-  // app. Worth warning about before the window disappears.
-  const devNote = localStatus.value?.dev_mode
-    ? '\n\nDev mode: if desktop/ changed, this also rebuilds the desktop app (several minutes) and relaunches it.'
-    : ''
   const confirmation = restartOnly
     ? 'Restart the installed server? Active chats will finish before it restarts.'
-    : `Restart? This will pull latest, rebuild, and restart.${devNote}`
+    : 'Restart? This will pull latest, rebuild, and restart.'
   if (!confirmWarnings && !await askConfirm(confirmation, {
     title: restartOnly ? 'Restart server' : 'Restart and redeploy',
     confirmLabel: 'Restart',

@@ -22,7 +22,7 @@ Project shape:
 - PWA code lives in `web/`.
 - Generic package assets live in `ciao/stock/`.
 - User vaults and runtime data belong in a separate workspace, not in the public app repo.
-- There is no client/host split any more: one engine, one origin, one session. Keep `/api/*` behind the signed session cookie, keep every `/ws/*` handshake same-origin-gated, keep the loopback-only set (`_LOOPBACK_ONLY_API` in `ciao/web/auth.py`) gated on the TCP peer, and keep remote content out of Tauri capabilities. The boundary audit is in `docs/REMOTE_BOUNDARY.md`.
+- There is no client/host split any more: one engine, one origin, one session. Keep `/api/*` behind the signed session cookie, keep every `/ws/*` handshake same-origin-gated, and keep the loopback-only set (`_LOOPBACK_ONLY_API` in `ciao/web/auth.py`) gated on the TCP peer. The boundary audit is in `docs/REMOTE_BOUNDARY.md`.
 
 Verification:
 - Run focused tests for the changed behavior.
@@ -47,10 +47,6 @@ Verification:
   macOS job will.
   `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
   Lint is still worth running — it just will not fail the build for you.
-- Changes under `desktop/` are no longer gated anywhere: the release is the
-  engine, so CI builds no app. Run the `desktop/src-tauri` steps in
-  `docs/DEVELOPMENT.md` yourself. It needs Rust
-  (`brew install rustup && rustup default 1.90.0`).
 - For UI changes, verify keyboard focus, browser zoom, and mobile touch targets.
 - Workspace shortcuts map unmodified `1`–`9` to the visible sidebar order and
   must remain inert while a text field is focused.

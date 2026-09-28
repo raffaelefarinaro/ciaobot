@@ -1,4 +1,4 @@
-"""Safe cleanup for bundles installed by the one-line installer."""
+"""Removal of a legacy Ciaobot.app bundle left by an older install."""
 from __future__ import annotations
 
 import plistlib
@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from ciao import desktop_build, desktop_install
+from ciao import desktop_install
 
 
 def _native_bundle(root: Path) -> Path:
     executable = root / desktop_install.APP_BUNDLE_NAME / "Contents" / "MacOS"
     executable.mkdir(parents=True)
-    (executable / desktop_build.APP_EXECUTABLE_NAME).write_bytes(b"native app")
+    (executable / desktop_install.APP_EXECUTABLE_NAME).write_bytes(b"native app")
     return executable.parent.parent
 
 
@@ -50,7 +50,7 @@ def test_uninstall_boots_out_and_removes_installer_agents(tmp_path: Path) -> Non
     desktop_plist = agents / "Ciaobot.plist"
     server_plist = agents / "com.ciao.server.plist"
     with desktop_plist.open("wb") as stream:
-        plistlib.dump({"ProgramArguments": [str(bundle / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME)]}, stream)
+        plistlib.dump({"ProgramArguments": [str(bundle / "Contents" / "MacOS" / desktop_install.APP_EXECUTABLE_NAME)]}, stream)
     with server_plist.open("wb") as stream:
         plistlib.dump({"ProgramArguments": [str(engine), "run"]}, stream)
     calls: list[list[str]] = []
@@ -229,7 +229,7 @@ def test_uninstall_removes_orphaned_launch_agents_when_the_bundle_is_gone(
     with desktop_plist.open("wb") as stream:
         plistlib.dump(
             {"ProgramArguments": [
-                str(bundle / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME)
+                str(bundle / "Contents" / "MacOS" / desktop_install.APP_EXECUTABLE_NAME)
             ]},
             stream,
         )
@@ -281,7 +281,7 @@ def test_uninstall_leaves_another_installs_agents_alone_when_the_bundle_is_gone(
                     other_bundle
                     / "Contents"
                     / "MacOS"
-                    / desktop_build.APP_EXECUTABLE_NAME
+                    / desktop_install.APP_EXECUTABLE_NAME
                 )
             ]},
             stream,
