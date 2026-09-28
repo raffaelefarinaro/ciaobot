@@ -23,6 +23,13 @@ from ciao.context.entity_tagger import context_entities
 from ciao.jsonio import read_json_dict
 from ciao.models import AgentRequest, ChatContext
 
+# The SDK's slash-command / auto-activation marker, injected into an
+# assistant's text when a skill is loaded without a tool call. Defined once, in
+# the module that mines it out of the raw session JSONL, and imported here for
+# the same reason: a second copy of the tag convention is a second thing to keep
+# in step with the first.
+from ciao.trajectory_builder import _COMMAND_NAME_RE as _SKILL_MARKER_RE
+
 logger = logging.getLogger(__name__)
 
 # Turn-journal flush cadence: buffered event records spill to disk when this
@@ -720,15 +727,21 @@ class TranscriptStore:
                 lines.append(f"- {key}: {value}")
             lines.append("")
         for index, turn in enumerate(turns, start=1):
+            meta = [
+                f"- Time: {turn.get('timestamp', '-')}",
+                f"- Input kind: {turn.get('input_kind', '-')}",
+                f"- Mode: {turn.get('mode', '-')}",
+                f"- Effective model: {turn.get('effective_model', '-')}",
+                f"- Images: {turn.get('image_count', 0)}",
+            ]
+            used = turn_skills(turn)
+            if used:
+                meta.append(f"- Skills: {', '.join(used)}")
             lines.extend(
                 [
                     f"## Turn {index}",
                     "",
-                    f"- Time: {turn.get('timestamp', '-')}",
-                    f"- Input kind: {turn.get('input_kind', '-')}",
-                    f"- Mode: {turn.get('mode', '-')}",
-                    f"- Effective model: {turn.get('effective_model', '-')}",
-                    f"- Images: {turn.get('image_count', 0)}",
+                    *meta,
                     "",
                     "### User",
                     "",
@@ -782,6 +795,153 @@ class TranscriptStore:
                 lines.append(f"  {subkey}: {subvalue}")
             return lines
         return [f"{key}: {value}"]
+
+
+# ── Skill evidence in the archive ─────────────────────────────────────────
+#
+# A turn's rendered blocks are prose: the user's text and the agent's text. A
+# skill enters a conversation in neither — it is loaded by a tool call, or
+# injected as a `<command-name>` marker — so which skills the conversation
+# actually used was, until now, in the transcript's ``tool_events`` and gone
+# from the archive the moment the transcript JSON was deleted. The pass reads
+# the archive, so the pass could not know, and a skill-improvement proposal
+# would have had nothing to point at.
+#
+# What is retained is the minimum a proposal can cite: the skill name, and the
+# turn it was used in — the ``## Turn N`` heading the archive already numbers,
+# which is the anchor the pass quotes. The third thing a proposal carries, a
+# short excerpt, needs nothing added: the turn's own fenced blocks are the
+# source a reader quotes it from. Not a tool dump, and not the old
+# trajectory-summary pipeline rebuilt: `ciao.memory_pass` reads these names back
+# and resolves them against the workspace's own `skills/` catalog, and anything
+# that fails that resolution is simply never a candidate.
+
+
+#: The provider tools that load a skill. Claude names it `Skill`; opencode
+#: lowercases its tool names, and its skill tool is `skill`. The summary below
+#: is provider-neutral, so the name is all that differs.
+_SKILL_TOOL_NAMES = frozenset({"Skill", "skill"})
+
+#: A path to a skill's own source, as any of the providers' read tools reports
+#: it. Covers the opencode shape, where a skill arrives as a file the model
+#: opened rather than as a skill tool call, and the two provider layouts
+#: (``skills/<name>/`` and the installed ``.claude/skills/<name>/``).
+_SKILL_SOURCE_RE = re.compile(r"(?:^|[/\\])skills[/\\]([^/\\]+)[/\\]SKILL\.md\b")
+
+#: The keys a skill tool's serialized input may carry the name under, in the
+#: order the more specific ones win. Mirrors
+#: ``ciao.trajectory_builder._extract_skill_id``, which reads the same call out
+#: of the raw session JSONL.
+_SKILL_INPUT_KEYS = ("skill", "skill_name", "name", "id")
+
+#: The rendered per-turn evidence line and the heading that anchors it.
+_ARCHIVE_TURN_RE = re.compile(r"^## Turn (\d+)\s*$", re.MULTILINE)
+_ARCHIVE_SKILLS_RE = re.compile(r"^- Skills: (?P<names>.+)$", re.MULTILINE)
+
+
+def turn_skills(turn: dict[str, Any]) -> tuple[str, ...]:
+    """The skills this turn used, in first-seen order and deduplicated.
+
+    Three signals, because no one of them covers both providers: a skill tool
+    call (the name is the whole argument, so the summary is the name), a read
+    of a skill's own ``SKILL.md`` (opencode loads a skill natively, and the
+    path is the only trace), and the ``<command-name>`` marker in the reply
+    (a slash command or a description match, neither of which is a tool call).
+
+    Everything is read from the normalized turn, so both providers answer the
+    same question. A name that is not a plain directory segment is dropped: it
+    cannot be a catalog entry, and this only ever feeds an intersection.
+    """
+    found: list[str] = []
+
+    def _add(candidate: str) -> None:
+        name = candidate.strip().strip("`'\"")
+        if len(name) < 2 or "/" in name or "\\" in name or name in found:
+            return
+        found.append(name)
+
+    events = turn.get("tool_events")
+    for event in events if isinstance(events, list) else []:
+        if not isinstance(event, dict):
+            continue
+        raw = event.get("input")
+        if isinstance(raw, dict):
+            value = raw.get("summary")
+            summary = value if isinstance(value, str) else ""
+        else:
+            summary = raw if isinstance(raw, str) else ""
+        for match in _SKILL_SOURCE_RE.finditer(summary):
+            _add(match.group(1))
+        if str(event.get("name") or "") in _SKILL_TOOL_NAMES:
+            _add(_skill_name_from_summary(summary))
+    for match in _SKILL_MARKER_RE.finditer(str(turn.get("response") or "")):
+        _add(match.group(1))
+    return tuple(found)
+
+
+def _skill_name_from_summary(summary: str) -> str:
+    """The skill a skill tool's one-line summary names, or ``""``.
+
+    Claude summarizes the call down to the bare name; opencode serializes the
+    whole argument map, whose name lives under one of
+    :data:`_SKILL_INPUT_KEYS`. A summary that is neither is not a name, and an
+    unrecognised one must not become a catalog entry.
+    """
+    text = summary.strip()
+    if not text:
+        return ""
+    if text.startswith("{"):
+        try:
+            raw = json.loads(text)
+        except ValueError:
+            return ""
+        if not isinstance(raw, dict):
+            return ""
+        for key in _SKILL_INPUT_KEYS:
+            value = raw.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+    match = _SKILL_SOURCE_RE.search(text)
+    if match is not None:
+        return match.group(1)
+    return text.split()[0] if text.split() else ""
+
+
+def read_archive_skills(path: Path | str) -> dict[str, tuple[int, ...]]:
+    """The skills an archived transcript records, mapped to the turns using them.
+
+    The read side of what :meth:`TranscriptStore._render_markdown` writes, in
+    this module so the two shapes cannot drift: a writer and a reader that each
+    hold their own format is how an evidence line ends up parsed as something
+    else. Turn numbers are the archive's own ``## Turn N`` anchors, which is
+    what a proposal cites.
+
+    An archive this cannot read yields no skills, not an error: the file is
+    evidence for a proposal, and a missing one means there is nothing to file
+    against.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    used: dict[str, list[int]] = {}
+    turn = 0
+    for line in text.splitlines():
+        heading = _ARCHIVE_TURN_RE.match(line)
+        if heading is not None:
+            turn = int(heading.group(1))
+            continue
+        row = _ARCHIVE_SKILLS_RE.match(line)
+        if row is None or not turn:
+            # A `- Skills:` line outside any turn has no anchor to cite, and the
+            # rendered line only ever appears inside one.
+            continue
+        for name in row.group("names").split(","):
+            candidate = name.strip()
+            if candidate:
+                used.setdefault(candidate, []).append(turn)
+    return {name: tuple(turns) for name, turns in used.items()}
 
 
 # ── CLI JSONL transcript extraction ──────────────────────────────────────

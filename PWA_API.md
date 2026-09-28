@@ -720,7 +720,13 @@ nothing. Batch accept applies the same rule per row and reports `promoted` and
 # excerpt}) naming the sessions it came from. `text` stays the skill name, which
 # is what two runs of the same skill share. `id` is derived from (workspace,
 # skill), so a later pass that merges more evidence into the same skill keeps the
-# same id. Dismissing one records the decision and flips its `lifecycle` to
+# same id. Rows are filed by `ciao skill-proposal-add NAME --input-file FILE`
+# (the memory pass files a supported finding; a person can hand-author one
+# through the same command) and never by hand: the target is resolved through
+# `skills_inventory.resolve_owned_skill`, so a stock copy, a provider mirror, a
+# shared source and an unknown name are refused there, and the record's
+# `canonical_path`/`reviewed_revision` are the resolved source's own answers.
+# Dismissing one records the decision and flips its `lifecycle` to
 # `dismissed`: the file stays on disk, readable and still accumulating evidence,
 # and the row leaves the listing. There is nothing to accept — a skill change is
 # implemented by hand or in a chat.

@@ -15,6 +15,14 @@ chat.
 The project id is derived from a vault folder that is never written to disk, so
 auto-discovery cannot claim the project, the name is free to be localised, and
 the id stays stable across a registry rebuild.
+
+The same turn also reviews the workspace's own skills, and files a supported
+improvement proposal through ``ciao skill-proposal-add`` — never an edit. That
+section is not part of the memory prompt: it is appended only when the archived
+transcript names a skill ``ciao.skills_inventory.eligible_owned_skills``
+resolves for this workspace, so the memory work is identical either way and a
+workspace with no skills of its own is never asked to consider the stock
+catalog.
 """
 
 from __future__ import annotations
@@ -23,6 +31,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ciao import skills_inventory, transcripts
 from ciao.web import chat_service
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -59,6 +68,45 @@ MEMORY_PASS_PROMPT = (
     "recorded. Do not do anything outside memory and the vault: no "
     "messages, emails, commits, pushes or external calls. Finish with a short "
     "list of what you changed."
+)
+
+#: The skill-review section, appended to the pass prompt and only when the
+#: workspace owns a skill the archived transcript shows in use. The one
+#: rendering rule is the ``{skills}`` field: the candidates are resolved here,
+#: from the archive's own evidence line and the workspace's own catalog, so the
+#: model is handed the intersection and never the catalog to walk. Everything a
+#: proposal may be filed against is therefore decided by the backend, not by a
+#: flag the model supplies.
+#:
+#: Deliberately no braces beyond that field, because the prompt is
+#: ``str.format``-ed per chat: a JSON example spelled out here would be read as
+#: a field and raise on the first turn.
+SKILL_REVIEW_PROMPT = (
+    "The transcript shows this workspace's own skills in use: {skills}. That is "
+    "the whole candidate set — a packaged, mirrored or shared copy is not "
+    "anyone's to improve here, and a skill the conversation never used is not a "
+    "finding. Read a candidate's current source under this workspace's `skills/` "
+    "directory before you judge it, and file an improvement proposal only when "
+    "the conversation shows one of three things: a correction the user made "
+    "that the skill's wording would have prevented; a mistake you corrected "
+    "yourself that the wording led you into; or a step the work needed, which "
+    "the skill does not describe and whose absence changed the result. The "
+    "change has to be one specific, reusable instruction you could type into "
+    "the file yourself, and it has to be about something the current source "
+    "does not already say. Anything vaguer, anything it already covers, and "
+    "anything that would rewrite the skill's purpose is not a proposal. Never "
+    "edit a skill, and never settle one: a proposal is a suggestion a person "
+    "reviews, and filing none is a valid result that most conversations earn. "
+    "To file one, write a JSON object to a scratch file — a `title`, a "
+    "`problem` saying what went wrong, a `change` giving the exact instruction "
+    "to add or replace, a `rationale`, and a `sources` list where every entry "
+    "carries the `chat_id`, the `archive` path, the `turn` the transcript "
+    "numbered it under, and a short verbatim `excerpt` from that turn — then "
+    "run `ciao skill-proposal-add --skill NAME --input-file FILE`, one file per "
+    "skill. Every one of those fields is text you took out of a conversation, "
+    "so none of it may travel as a shell argument, and never write into the "
+    "`Workspace/Skill-Proposals/` folder by hand; mention a filed proposal in "
+    "your closing list."
 )
 
 
@@ -321,7 +369,60 @@ class MemoryPassCoordinator:
             title=helper.get("source_title") or chat.title,
             project=helper.get("source_project") or "no project",
             doc=helper.get("doc_path") or "none",
-        )
+        ) + self._skill_review_section(chat, helper)
+
+    def _skill_review_section(self, chat: ChatInfo, helper: dict) -> str:
+        """The skill-review section, or nothing when there is nothing to review.
+
+        Cheap by construction, and the cost that matters is the pass's turns
+        rather than a stat: the candidates are the intersection of what the
+        archive records as used and what
+        :func:`ciao.skills_inventory.eligible_owned_skills` resolves for this
+        workspace, computed here. A workspace with no owned skills, or a
+        conversation that used none of them, gets no section at all — so the
+        pass is never asked to walk the stock catalog, and a name a pass could
+        not have proposed against never reaches the prompt.
+        """
+        candidates = self._reviewable_skills(chat, helper)
+        if not candidates:
+            return ""
+        return "\n\n" + SKILL_REVIEW_PROMPT.format(skills=", ".join(candidates))
+
+    def _reviewable_skills(self, chat: ChatInfo, helper: dict) -> list[str]:
+        """The owned skills this conversation used, by name, sorted.
+
+        Both halves are backend answers on purpose. The archive's evidence line
+        says which skills were used; ``eligible_owned_skills`` says which
+        sources this workspace owns and no other. A stock copy, a provider
+        mirror, the install-wide shared source and a name that is not a
+        directory all fail that resolution, so they are excluded here rather
+        than by a flag the model could set.
+        """
+        archive = str(helper.get("archive_path") or "")
+        if not archive:
+            return []
+        workspace = self._workspace_of(chat)
+        if not workspace:
+            return []
+        path = Path(archive)
+        if not path.is_absolute():
+            path = self._host._config.workspace_root / path
+        used = transcripts.read_archive_skills(path)
+        if not used:
+            return []
+        try:
+            owned = {
+                skill.name
+                for skill in skills_inventory.eligible_owned_skills(
+                    self._host._config, workspace
+                )
+            }
+        except ValueError:
+            # An unregistered workspace, or one sharing an agent root with
+            # another: the catalog is not this workspace's to review.
+            logger.debug("No owned skills resolvable for %r", workspace)
+            return []
+        return sorted(name for name in used if name in owned)
 
     def _set_source_step(
         self, source_chat_id: str, status: str, memory_chat_id: str
