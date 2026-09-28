@@ -137,7 +137,7 @@ When `Workspace/Curation-Log.md` or `Workspace/Weekly-Review-Log.md` exceeds ~64
 
 ## 9. Skill proposals
 
-Review `Workspace/Skill-Proposals/`. A proposal already implemented, or one you decide is not worth building, is a resolved decision: remove it with `ciao skill-proposal-remove <name>` (or `python3 -m ciao.cli skill-proposal-remove <name>`) naming the proposal file or a unique substring. Only remove a proposal after its change is actually in place or decided against. Leave proposals that belong in a bounded region queued.
+Review `Workspace/Skill-Proposals/`. A proposal already implemented, or one you decide is not worth building, is a resolved decision: settle it with `ciao skill-proposal-remove <name>` (or `python3 -m ciao.cli skill-proposal-remove <name>`) naming the proposal's skill or a unique substring. Settling records the decision and takes the proposal out of the queue; the record stays on disk, so a later pass that finds the same evidence adds to it rather than filing it again. Only settle a proposal after its change is actually in place or decided against. Leave proposals that belong in a bounded region queued.
 
 ## 10. Report
 
