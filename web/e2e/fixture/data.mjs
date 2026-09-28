@@ -35,6 +35,17 @@ export const PROJECTS = WORKSPACES.flatMap((workspace, wi) => ([
     order: 1,
     color: '#6a47b8',
   },
+  // The app-owned project a memory pass runs in. The sidebar hides it, and the
+  // pass chat below is filtered out of the Home tiers for the same reason, so
+  // only the memory-insight row it produces is on screen.
+  {
+    project_id: `${workspace.name}-memory`,
+    name: 'Memory',
+    workspace: workspace.name,
+    context: 'Synthetic memory project',
+    order: 2,
+    kind: 'memory',
+  },
 ]))
 
 function chat(workspace, n, projectId, title, extra = {}) {
@@ -71,6 +82,19 @@ function chat(workspace, n, projectId, title, extra = {}) {
   }
 }
 
+function passHelper(sourceChatId, sourceTitle, state) {
+  return {
+    kind: 'memory_pass',
+    source_chat_id: sourceChatId,
+    archive_path: `/synthetic/${sourceChatId.split('-')[0]}/archive/${sourceChatId}.jsonl`,
+    doc_path: '',
+    source_title: sourceTitle,
+    source_project: '',
+    state,
+    archive_policy: 'when_clean',
+  }
+}
+
 export const CHATS = WORKSPACES.flatMap((workspace) => ([
   chat(workspace.name, 1, `${workspace.name}-general`, `${workspace.name} first conversation`),
   chat(workspace.name, 2, `${workspace.name}-notes`, `${workspace.name} second conversation`),
@@ -78,14 +102,59 @@ export const CHATS = WORKSPACES.flatMap((workspace) => ([
   // other spec sees the same rows it saw before, while a deep link to its id
   // has something to open. `archive_path` is what a real archive carries (the
   // chat is viewable with or without it), and the settled `memory_pass` step
-  // puts both post-archive affordances on screen — the summary and the "Open
-  // memory pass" link from #618, unreachable for the same reason.
+  // puts the post-archive summary and the "Open memory pass" link from #618 on
+  // screen, unreachable for the same reason.
   ...(workspace === WORKSPACES[0]
-    ? [chat(workspace.name, 3, `${workspace.name}-general`, `${workspace.name} archived conversation`, {
+    ? [
+      chat(workspace.name, 3, `${workspace.name}-general`, `${workspace.name} archived conversation`, {
         archived: true,
         archive_path: '/synthetic/alpha/archive/alpha-chat-3.jsonl',
         postprocess: { state: 'done', steps: { memory_pass: { status: 'ok', extra: { chat_id: 'alpha-chat-2' } } } },
-      })]
+      }),
+      // A running memory pass and the archived conversation it is distilling.
+      // This is the surface the narrow-viewport journey has to measure: the
+      // memory-insight row is the only thing on Home for them, and the pass
+      // chat itself must not appear as a tier row or a sidebar row. Distinct
+      // activity times, newest last, so the section's order is assertable.
+      chat(workspace.name, 4, `${workspace.name}-general`, `${workspace.name} conversation with a running memory pass`, {
+        archived: true,
+        archive_path: '/synthetic/alpha/archive/alpha-chat-4.jsonl',
+        last_activity_at: '2026-01-01T11:00:00Z',
+        postprocess: { state: 'done', steps: { memory_pass: { status: 'running', extra: { chat_id: 'alpha-chat-5' } } } },
+      }),
+      chat(workspace.name, 5, `${workspace.name}-memory`, 'Memory pass · conversation with a running memory pass', {
+        helper: passHelper('alpha-chat-4', 'alpha conversation with a running memory pass', 'running'),
+        last_activity_at: '2026-01-01T11:05:00Z',
+        last_snippet: 'Updated two project notes and queued one fact for review.',
+      }),
+      // A pass blocked on its owner, so the row's question and "needs you"
+      // state are on screen in the same journey.
+      chat(workspace.name, 6, `${workspace.name}-general`, `${workspace.name} conversation waiting on the pass`, {
+        archived: true,
+        archive_path: '/synthetic/alpha/archive/alpha-chat-6.jsonl',
+        last_activity_at: '2026-01-01T10:00:00Z',
+      }),
+      chat(workspace.name, 7, `${workspace.name}-memory`, 'Memory pass · conversation waiting on the pass', {
+        helper: passHelper('alpha-chat-6', 'alpha conversation waiting on the pass', 'running'),
+        last_activity_at: '2026-01-01T10:05:00Z',
+        pending_question: JSON.stringify({
+          questions: [{ question: 'Which project does the ITF rollout belong to?', header: 'Project' }],
+        }),
+        last_snippet: '',
+      }),
+      // A pipeline that stopped with a stage left to run: the one row that
+      // carries a second control, so its two-child layout is measured too.
+      chat(workspace.name, 8, `${workspace.name}-general`, `${workspace.name} conversation with an unfinished step`, {
+        archived: true,
+        archive_path: '/synthetic/alpha/archive/alpha-chat-8.jsonl',
+        last_activity_at: '2026-01-01T09:00:00Z',
+        postprocess: {
+          state: 'incomplete',
+          steps: { trajectory: { status: 'error' } },
+          job: { job_id: 'alpha-job-8', state: 'incomplete', unfinished: ['trajectory'] },
+        },
+      }),
+    ]
     : []),
 ]))
 

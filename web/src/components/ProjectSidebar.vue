@@ -1005,10 +1005,14 @@ const workspaceScopeMenu = ref<HTMLElement | null>(null)
 // Section counts, all scoped to the selected workspace so they agree with
 // what each page shows. They replace the per-workspace badge in the scope
 // menu: the number sits next to the place that resolves it.
+//
+// The one rule is the store's: a memory pass is not ordinary attention (its
+// activity moves while it works), so it counts only when it is blocked on the
+// owner — and then its row on Home says the same thing out loud.
 const todayCount = computed(() => store.chats.reduce((sum, chat) => {
   if (chat.archived) return sum
   if (store.projectFor(chat.chat_id)?.workspace !== store.activeWorkspace) return sum
-  return sum + (store.chatNeedsInput(chat.chat_id) || store.chatUnread(chat.chat_id) > 0 ? 1 : 0)
+  return sum + (store.chatIsAttentionItem(chat) ? 1 : 0)
 }, 0))
 const automationsCount = computed(() => missedCountFor(store.activeWorkspace))
 const memoryCount = computed(() => {

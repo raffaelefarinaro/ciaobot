@@ -7,7 +7,6 @@ import {
   postprocessOutcomes,
   postprocessSummary,
   postprocessUnfinished,
-  tidyingSummary,
 } from './postprocessView'
 import type { ChatPostprocess } from './types'
 
@@ -176,17 +175,5 @@ describe('postprocessUnfinished', () => {
     ).toEqual(['trajectory'])
     expect(postprocessUnfinished({ state: 'done' })).toEqual([])
     expect(postprocessUnfinished(null)).toEqual([])
-  })
-})
-
-describe('tidyingSummary', () => {
-  it('reads as a count, with no plural bug at one', () => {
-    expect(tidyingSummary(1)).toBe('1 tidying up')
-    expect(tidyingSummary(2)).toBe('2 tidying up')
-  })
-
-  it('is empty when nothing is running, so no fragment renders', () => {
-    expect(tidyingSummary(0)).toBe('')
-    expect(tidyingSummary(-1)).toBe('')
   })
 })
