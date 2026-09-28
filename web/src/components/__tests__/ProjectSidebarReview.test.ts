@@ -144,24 +144,25 @@ describe('ProjectSidebar review section', () => {
     const wrapper = await mountSidebar()
 
     const nav = wrapper.get('nav[aria-label="Memory sections"]')
-    expect(nav.findAll('.sidebar-list-label').map(h => h.text())).toEqual(['To decide', 'Explore', 'Records'])
+    expect(nav.findAll('.sidebar-list-label').map(h => h.text())).toEqual(['Explore', 'Records'])
     const items = nav.findAll('.memory-nav-item')
     expect(items.map(i => i.attributes('href'))).toEqual([
-      '/memory/suggested', '/memory/revisit', '/memory/map', '/memory/categories',
+      '/memory/review', '/memory/map', '/memory/categories',
       '/memory/retired', '/memory/history',
     ])
     // Explore holds the map, then the list of what the map is drawing.
-    expect(items[2].text()).toContain('Map')
-    expect(items[3].text()).toContain('Categories')
+    expect(items[1].text()).toContain('Map')
+    expect(items[2].text()).toContain('Categories')
     // The category list is configuration, not a queue: no count on it.
-    expect(items[3].find('.memory-nav-count').exists()).toBe(false)
-    // Three proposals in `personal`, one note to revisit; the queues' counts
-    // are the accent ones, and the accessible name carries the number.
-    expect(items[0].get('.memory-nav-count').text()).toBe('3')
+    expect(items[2].find('.memory-nav-count').exists()).toBe(false)
+    // Three proposals in `personal` plus one note to revisit, on the one
+    // To decide row; its count is the accent one, and the accessible name
+    // carries the number.
+    expect(items[0].get('.memory-nav-count').text()).toBe('4')
     expect(items[0].get('.memory-nav-count').classes()).toContain('memory-nav-count--due')
-    expect(items[1].attributes('aria-label')).toBe('To revisit, 1 waiting')
+    expect(items[0].attributes('aria-label')).toBe('To decide, 4 waiting')
     // Nothing retired: no zero badge.
-    expect(items[4].find('.memory-nav-count').exists()).toBe(false)
+    expect(items[3].find('.memory-nav-count').exists()).toBe(false)
   })
 
   it('offers a Manage link from the map\'s category chips to the category list', async () => {
@@ -182,7 +183,7 @@ describe('ProjectSidebar review section', () => {
     mm.nodes = [{ id: 'n', title: 'n', type: 'note', tags: [], aliases: [], description: '', workspace: 'work', degree: 0, mtime: 0, updated: '', stale: false, ageDays: null, x: 0, y: 0, vx: 0, vy: 0 }] as never
     mm.loadedWorkspace = 'work'
     const wrapper = await mountSidebar()
-    const map = wrapper.findAll('.memory-nav-item')[2]
+    const map = wrapper.findAll('.memory-nav-item')[1]
     expect(map.find('.memory-nav-count').exists()).toBe(false)
 
     mm.loadedWorkspace = 'personal'
@@ -191,10 +192,10 @@ describe('ProjectSidebar review section', () => {
   })
 
   it('marks the section on screen as the current page', async () => {
-    useMemoryMapStore().setSection('revisit')
+    useMemoryMapStore().setSection('review')
     const wrapper = await mountSidebar()
     const current = wrapper.get('.memory-nav-item[aria-current="page"]')
-    expect(current.text()).toContain('To revisit')
+    expect(current.text()).toContain('To decide')
   })
 
   it('leaves the Review/Map switch to the Memory page header', async () => {
@@ -237,7 +238,7 @@ describe('ProjectSidebar review section', () => {
     // They filter the map and nothing else; beside a review queue they would
     // filter nothing on screen.
     const mm = useMemoryMapStore()
-    mm.setSection('revisit')
+    mm.setSection('review')
     const wrapper = await mountSidebar()
     expect(wrapper.find('.mm-search').exists()).toBe(false)
 
