@@ -714,6 +714,13 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     for item in proposal.sources
                 ],
                 "lifecycle": proposal.lifecycle,
+                # The server's own record of which chat is implementing this, and
+                # the only source of truth for it. The browser used to keep the
+                # same association in localStorage, which a reload, a second
+                # device or the CLI could not see.
+                "chat_id": proposal.chat_id,
+                "canonical_path": proposal.canonical_path,
+                "reviewed_revision": proposal.reviewed_revision,
                 "source": "",
                 "workspace": workspace,
                 "path": skill_proposals.proposal_rel_path(workspace, proposal.skill),
@@ -772,6 +779,134 @@ def _dismiss_skill_proposal(ctx: dict[str, Any]) -> dict[str, Any]:
             "error": f"could not record the decision for {row['text']}: {exc}",
         }
     return {"ok": True, "settled": settled is not None}
+
+
+def accept_skill_proposal(config: Any, pcm: Any, ctx: dict[str, Any]) -> dict[str, Any]:
+    """Accept one skill proposal into an implementation chat, idempotently.
+
+    A skill proposal is the one kind of row that cannot be accepted by writing
+    anything: what it asks for is a change to a ``SKILL.md`` that already
+    exists, and a change like that is a chat — one that has to re-read the
+    skill, judge whether the finding still holds, make a focused edit, verify it
+    and record the outcome. So acceptance here means *starting that work and
+    remembering it*, not performing it.
+
+    Server-owned, and idempotent, because the browser cannot be the one holding
+    the association. It used to be: the panel minted a chat, wrote the link into
+    ``localStorage``, and sent its own prompt. A reload, a second device, or the
+    CLI could not see any of it, so the same proposal was implemented twice and
+    nothing recorded that either run had happened. The association therefore
+    lives on the record (``chat_id``), and a second accept — a double tap, a
+    retry after a dropped response, another device — returns the chat that is
+    already live rather than starting a second one.
+
+    Returns ``{ok, chat_id, project_id, created}``. ``created`` is False on the
+    reuse path, so a client can say "already running" rather than claiming to
+    have started something.
+    """
+    row = ctx.get("row") or {}
+    pid = str(row.get("id") or "")
+    if not ctx.get("file") or row.get("kind") != "skill":
+        return {
+            "ok": False,
+            "error": "only a skill proposal can be accepted into a chat",
+        }
+    if pcm is None:
+        return {"ok": False, "error": "the chat manager is not running"}
+
+    proposal = skill_proposals.find_proposal(config, pid)
+    if proposal is None:
+        return {"ok": False, "error": "this proposal is no longer queued"}
+
+    # Already implementing, with a chat that still exists: hand it back. This is
+    # the whole idempotency contract, and it reads the record rather than any
+    # in-process state so it holds across a reload and across devices.
+    live = _live_chat(pcm, proposal.chat_id)
+    if live is not None:
+        return {
+            "ok": True,
+            "chat_id": live.chat_id,
+            "project_id": live.project_id,
+            "created": False,
+        }
+
+    workspace = proposal.workspace
+    project = _workspace_general_project(pcm, workspace)
+    if project is None:
+        return {
+            "ok": False,
+            "error": f"the {workspace} workspace has no General project to host the chat",
+        }
+
+    chat = pcm.create_chat(
+        project.project_id,
+        title=f"Improve {proposal.skill}",
+        # The same helper shape the browser used to send, so the resolution
+        # helper's archive-on-resolved rule applies to a server-opened chat too.
+        helper={
+            "kind": "proposal",
+            "intent": "resolve",
+            "proposal_ids": [pid],
+            "archive_policy": "when_resolved",
+        },
+    )
+    # The prompt is this module's, not the client's: it names the EXISTING
+    # skill, the finding, and the resolution command. A per-browser prompt
+    # drifted into telling the chat to create a new skill, which is a different
+    # task from the one the proposal describes.
+    pcm.start_stream(chat.chat_id, skill_proposals.render_improvement_prompt(proposal))
+    try:
+        skill_proposals.mark_implementing(config, pid, chat.chat_id)
+    except (OSError, ValueError) as exc:
+        return {
+            "ok": False,
+            "error": f"could not bind the chat to {proposal.skill}: {exc}",
+            "chat_id": chat.chat_id,
+        }
+    return {
+        "ok": True,
+        "chat_id": chat.chat_id,
+        "project_id": project.project_id,
+        "created": True,
+    }
+
+
+def _live_chat(pcm: Any, chat_id: str) -> Any | None:
+    """The chat with this id, if it exists and is not archived; else ``None``.
+
+    An archived or deleted chat is not a live implementation. The record keeps
+    naming it, and a later accept then starts a fresh one — which is the point:
+    the row is still queued, so nothing was lost, and re-accepting must not hand
+    back a chat the operator can no longer open.
+    """
+    if not chat_id:
+        return None
+    try:
+        chat = pcm.get_chat(chat_id)
+    except Exception:  # noqa: BLE001 — a chat lookup must not fail the accept
+        logger.exception("Could not read chat %s for a skill accept", chat_id)
+        return None
+    if chat is None or getattr(chat, "archived", False):
+        return None
+    return chat
+
+
+def _workspace_general_project(pcm: Any, workspace: str) -> Any | None:
+    """The workspace's own ``General`` project, creating it if the install has none.
+
+    Workspace-scoped, not "any General project": a proposal filed in ``work``
+    must be implemented against work's own ``skills/`` catalog, guide and vault.
+    Hosting it in another workspace's project would edit the wrong copy of the
+    skill while the record said the right one.
+    """
+    for project in pcm.list_projects(workspace):
+        if project.name == "General":
+            return project
+    try:
+        return pcm.create_project("General", workspace)
+    except Exception:  # noqa: BLE001 — reported as "no project to host the chat"
+        logger.exception("Could not create a General project in %s", workspace)
+        return None
 
 
 def _rehome_lookup(

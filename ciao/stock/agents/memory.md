@@ -12,7 +12,7 @@ Read-only recall is handled inline by the system prompt (`ciao vault search`, an
 Curation targets:
 - Vault pages for projects, people, ideas, resources, and logs.
 - `<vault>/Workspace/Memory-Proposals.md` — the review queue for durable facts. The memory pass records what it is confident about; this queue holds uncertain facts, failed writes, and items with no decided destination. You promote, reject, or merge the remainder. Growing proposals are a signal that memory needs consolidating.
-- `<vault>/Workspace/Skill-Proposals/` — the review queue for skill-edit suggestions, one record per skill. Once a proposal's decision is made (implemented, or decided against), settle it with `ciao skill-proposal-remove <name>` so the queue stops re-asking. The record stays on disk, readable and accumulating evidence.
+- `<vault>/Workspace/Skill-Proposals/` — the review queue for skill-edit suggestions, one record per skill. Once a proposal's decision is made, settle it with `ciao skill-proposal-remove <name> --applied` (the change landed and you verified it), without the flag (decided against), or with `--interrupted --reason ...` if the work stopped part-way, which leaves it queued so it can be picked up again. Never record `--applied` for a turn that merely finished. The record stays on disk, readable and accumulating evidence.
 - Bounded memory regions in this workspace's own `AGENTS.md` (each agent root holds its own): `ciao:memory` (cross-session preferences, environment, lessons) and `ciao:profile` (identity, communication style).
 
 Categories — every note you create or retype (read `<vault>/VOCABULARY.md` first, do not memorize this):

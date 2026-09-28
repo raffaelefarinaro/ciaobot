@@ -8,6 +8,7 @@ import ProposalReviewPanel from '../ProposalReviewPanel.vue'
 import { useProposalsStore } from '../../stores/proposals'
 import { useProjectStore } from '../../stores/projects'
 import { useFileViewerStore } from '../../stores/fileViewer'
+import { descriptorFor } from '../../lib/proposalKinds'
 import type { ProposalPreview, ProposalRow } from '../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
@@ -340,7 +341,7 @@ describe('ProposalReviewPanel', () => {
     wrapper.unmount()
   })
 
-  it('gives a skill row the actions a FILE has, never a region edit', async () => {
+  it('gives a skill row the actions an improvement has, never a region edit', async () => {
     apiGet.mockResolvedValue({
       rows: [
         row({ id: 'bullet', kind: 'memory' }),
@@ -357,12 +358,61 @@ describe('ProposalReviewPanel', () => {
     const link = skillRow.find('.pr-path-link')
     expect(link.text()).toBe('proposal-2026-08-20.md')
     expect(link.attributes('title')).toBe('personal/Workspace/Skill-Proposals/proposal-2026-08-20.md')
-    // Build it or drop it. `implement` is the primary because accepting a
-    // proposed skill means implementing it — which is a chat, not a write.
-    expect(skillRow.find('.pr-row-action').text()).toBe('Implement')
+    // Improve it or drop it. The verb names the finding: the skill already
+    // exists, so "Improve" is the task and "New"/"Create" would be a different one.
+    expect(skillRow.find('.pr-row-action').text()).toBe('Improve skill')
     expect(skillRow.findAll('.pr-actions button:not(.pr-row-action)').map(b => b.text()))
       .toEqual(['Dismiss', 'Discuss'])
-    expect(skillRow.find('.pr-op').text()).toBe('New skill')
+    expect(skillRow.find('.pr-op').text()).toBe('Improve skill')
+    wrapper.unmount()
+  })
+
+  it('never describes a skill finding as something to be created', async () => {
+    // "New skill — built in a chat" read as a proposal to author a skill. The
+    // record is about a skill that already exists, and a reviewer skimming the
+    // queue would have taken it for a request to write one.
+    apiGet.mockResolvedValue({
+      rows: [row({
+        id: 'skill', kind: 'skill', text: 'proposal-2026-08-20',
+        path: 'personal/Workspace/Skill-Proposals/proposal-2026-08-20.md', line: -1,
+      })],
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const text = wrapper.text()
+    for (const wording of ['New skill', 'Create skill', 'Build skill', 'built in a chat']) {
+      expect(text, wording).not.toContain(wording)
+    }
+    expect(descriptorFor(row({ kind: 'skill' })).consequence(row({ kind: 'skill' })))
+      .toContain('Improves the existing')
+    wrapper.unmount()
+  })
+
+  it('shows the finding, the proposed change and the evidence on a skill row', async () => {
+    apiGet.mockResolvedValue({
+      rows: [row({
+        id: 'skill', kind: 'skill', text: 'proposal-2026-08-20',
+        path: 'personal/Workspace/Skill-Proposals/proposal-2026-08-20.md', line: -1,
+        problem: 'Repeated fetch failures.',
+        change: 'Add a defuddle fallback.',
+        sources: [
+          { chat_id: 'sess-a1', archive: '2026-08-09T10:00:00Z', turn: '', excerpt: 'needs_review' },
+          { chat_id: 'sess-b2', archive: '', turn: '', excerpt: 'needs_review' },
+        ],
+      })],
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const skillRow = wrapper.find('.pr-row')
+    // The title is the finding, not the skill name the group header already says.
+    expect(skillRow.find('.pr-row-title').text()).toContain('Repeated fetch failures.')
+    expect(skillRow.find('.pr-skill-finding').text()).toContain('Add a defuddle fallback.')
+    const evidence = skillRow.find('.pr-skill-evidence').text()
+    expect(evidence).toContain('2 sessions')
+    expect(evidence).toContain('sess-a1')
+    expect(evidence).toContain('sess-b2')
     wrapper.unmount()
   })
 
@@ -383,46 +433,96 @@ describe('ProposalReviewPanel', () => {
     wrapper.unmount()
   })
 
-  it('implement opens a chat in the row own workspace and leaves the row queued', async () => {
+  it('asks the server to accept, rather than minting a chat here', async () => {
+    // The browser used to create the chat, keep the link in localStorage and
+    // send its own prompt — which had drifted into telling the agent to CREATE a
+    // skill. The finding is about a skill that already exists, and none of that
+    // was visible to a reload, a second device or the CLI.
     const path = 'work/Workspace/Skill-Proposals/proposal-2026-08-20.md'
-    apiGet.mockResolvedValue({
-      rows: [row({
-        id: 'skill', kind: 'skill', text: 'proposal-2026-08-20',
-        workspace: 'work', path, line: -1,
-      })],
-    })
+    const implementing: Partial<ProposalRow> = {
+      id: 'skill', kind: 'skill', text: 'proposal-2026-08-20',
+      workspace: 'work', path, line: -1,
+      lifecycle: 'implementing', chat_id: 'chat-x',
+    }
+    apiGet.mockImplementation((url: string) => (
+      url === '/api/proposals'
+        ? Promise.resolve({ rows: [row(implementing)] })
+        : Promise.resolve({})
+    ))
+    apiPost.mockResolvedValue({ ok: true, chat_id: 'chat-x', project_id: 'p-work', created: true } as never)
     const projects = useProjectStore()
     projects.activeWorkspace = 'work'
-    projects.projects = [{
-      project_id: 'p-work', name: 'General', workspace: 'work', context: '',
-      created_at: '', order: 0, vault_folder: 'general', is_auto: true,
-    } as never]
-    apiPost.mockResolvedValue({ chat_id: 'chat-x', project_id: 'p-work' } as never)
     const send = vi.spyOn(projects, 'sendMessage').mockImplementation(() => true as never)
     const proposals = useProposalsStore()
     const act = vi.spyOn(proposals, 'act')
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    const button = wrapper.findAll('.pr-row-action').find(b => b.text() === 'Implement')!
-    await button.trigger('click')
+    await wrapper.findAll('.pr-row-action').find(b => b.text() === 'Improve skill')!.trigger('click')
     await flushPromises()
 
-    const sent = String(send.mock.calls.at(-1)?.[1] ?? '')
-    expect(sent).toContain(path)
-    expect(sent).toContain('skills/')
-    expect(sent).toContain('do not delegate')
-    expect(apiPost).toHaveBeenCalledWith('/api/projects/p-work/chats', {
-      title: 'Implement proposal-2026-08-20',
-      helper: {
-        kind: 'proposal',
-        intent: 'resolve',
-        proposal_ids: ['skill'],
-        archive_policy: 'when_resolved',
-      },
-    })
-    // A proposal is a suggestion: implementing it must not silently resolve it.
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/skill/implement')
+    // Neither the chat nor the prompt is the browser's to make any more.
+    expect(send).not.toHaveBeenCalled()
+    // A proposal is a suggestion: accepting it must not settle it. The chat
+    // records the outcome, and never the mere fact that it ended.
     expect(act).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('reads the implementation chat off the row, not off localStorage', async () => {
+    // The server owns the association. localStorage is per-browser, so a second
+    // device showed no chat at all and started its own.
+    const path = 'work/Workspace/Skill-Proposals/proposal-2026-08-20.md'
+    apiGet.mockResolvedValue({
+      rows: [row({
+        id: 'skill', kind: 'skill', text: 'proposal-2026-08-20',
+        workspace: 'work', path, line: -1,
+        lifecycle: 'implementing', chat_id: 'chat-x',
+      })],
+    })
+    const projects = useProjectStore()
+    projects.activeWorkspace = 'work'
+    projects.chats = [
+      { chat_id: 'chat-x', project_id: 'p-work', title: 'Improve proposal-2026-08-20', archived: false } as never,
+    ]
+    const switchChat = vi.spyOn(projects, 'switchChat').mockResolvedValue(undefined as never)
+    localStorage.clear()
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const open = wrapper.findAll('.pr-row-action').find(b => b.text() === 'Open chat')!
+    expect(open).toBeTruthy()
+    await open.trigger('click')
+    await flushPromises()
+
+    expect(switchChat).toHaveBeenCalledWith('chat-x')
+    // Nothing was written to the browser's own store to find that out.
+    expect(localStorage.getItem('ciao:proposal-chat-links')).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('offers Improve again when the implementing chat is gone', async () => {
+    // A deleted or archived chat is not a live implementation. The proposal is
+    // still queued, so the row has to offer a fresh one rather than a dead link.
+    const path = 'work/Workspace/Skill-Proposals/proposal-2026-08-20.md'
+    apiGet.mockResolvedValue({
+      rows: [row({
+        id: 'skill', kind: 'skill', text: 'proposal-2026-08-20',
+        workspace: 'work', path, line: -1,
+        lifecycle: 'implementing', chat_id: 'chat-gone',
+      })],
+    })
+    useProjectStore().activeWorkspace = 'work'
+    useProjectStore().chats = [
+      { chat_id: 'chat-gone', project_id: 'p-work', title: 'Improve x', archived: true } as never,
+    ]
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const labels = wrapper.findAll('.pr-row-action').map(b => b.text())
+    expect(labels).toContain('Improve skill')
+    expect(labels).not.toContain('Open chat')
     wrapper.unmount()
   })
 

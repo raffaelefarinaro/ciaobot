@@ -8164,6 +8164,50 @@ async def proposal_action(request: Request) -> JSONResponse:
     )
 
 
+async def proposal_implement(request: Request) -> JSONResponse:
+    """Accept one skill proposal into an implementation chat, idempotently.
+
+    A skill proposal is the one row that cannot be accepted by writing: what it
+    asks for is a change to a ``SKILL.md`` that already exists, and a change
+    like that is a chat. So this route does not promote anything — it opens (or
+    re-returns) the chat that will, binds it to the record, and leaves the
+    proposal queued with ``lifecycle: implementing``.
+
+    Idempotent by construction: the association is read from the record, so a
+    double tap, a retry after a dropped response and a second device all get the
+    SAME chat back rather than a second one. ``created: false`` in the reply says
+    so, and the client can open that chat instead of claiming to have started
+    something.
+
+    The chat is opened in the proposal's OWN workspace: a proposal filed in
+    ``work`` is about work's ``skills/`` catalog, and hosting it anywhere else
+    would edit the wrong copy of the skill.
+
+    Only a skill row reaches the service; anything else is a 400. The batch
+    endpoint is deliberately untouched — a batch is a bulk decision about queue
+    rows, and starting one chat per selected skill behind someone's back is not
+    one.
+    """
+    config = request.app.state.config
+    pid = request.path_params["id"]
+    _rows, by_id = proposal_service._scan_proposal_rows(config)
+    ctx = by_id.get(pid)
+    if ctx is None:
+        return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    # Off the event loop: the service lists projects, creates a chat and starts a
+    # provider turn, and a slow vault scan must not stall every other request.
+    outcome = await asyncio.to_thread(
+        proposal_service.accept_skill_proposal, config, pcm, ctx
+    )
+    if not outcome.get("ok"):
+        return JSONResponse(
+            {"error": outcome.get("error", "could not accept this proposal"), "id": pid},
+            status_code=409,
+        )
+    return JSONResponse({"ok": True, **outcome})
+
+
 # ── Operator-action housekeeping strip ───────────────────────────────────
 
 

@@ -29,6 +29,7 @@ from ciao.web.routes_api import (
     dismiss_older_than,
     list_proposals,
     proposal_action,
+    proposal_implement,
     proposal_preview,
     proposals_batch,
     proposals_history,
@@ -72,18 +73,22 @@ def _write_people_note(config: CiaoConfig, path: str, tags: list[str]) -> None:
     )
 
 
-def _client(config: CiaoConfig) -> TestClient:
+def _client(config: CiaoConfig, pcm: Any = None) -> TestClient:
     app = Starlette(
         routes=[
             Route("/api/proposals", list_proposals, methods=["GET"]),
             Route("/api/proposals/history", proposals_history, methods=["GET"]),
             Route("/api/proposals/{id}/preview", proposal_preview, methods=["POST"]),
+            # Before `{id}/{action}`, exactly as app.py orders them: Starlette
+            # matches in order and would otherwise read "implement" as an action.
+            Route("/api/proposals/{id}/implement", proposal_implement, methods=["POST"]),
             Route("/api/proposals/{id}/{action}", proposal_action, methods=["POST"]),
             Route("/api/proposals/batch", proposals_batch, methods=["POST"]),
             Route("/api/proposals/dismiss-older-than", dismiss_older_than, methods=["POST"]),
         ]
     )
     app.state.config = config
+    app.state.project_chat_manager = pcm
     return TestClient(app)
 
 
@@ -485,7 +490,6 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
     from ciao.web import app as app_module
 
     registered = set(re.findall(r'Route\("(/api/proposals[^"]*)"', pathlib.Path(app_module.__file__).read_text()))
-    documented = set(re.findall(r"/api/proposals[A-Za-z0-9_/{}-]*", pathlib.Path("PWA_API.md").read_text()))
 
     expected = {
         "/api/proposals",
@@ -493,15 +497,21 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
         "/api/proposals/batch",
         "/api/proposals/dismiss-older-than",
         "/api/proposals/{id}/preview",
+        "/api/proposals/{id}/implement",
         "/api/proposals/{id}/{action}",
     }
     assert registered == expected, f"app.py route table drifted: {registered}"
+    # Every registered route must also appear in PWA_API.md, or the drift above
+    # is only drift in one direction. Substring, not set equality: the prose
+    # around each route names its path in curl examples too.
+    api_doc = pathlib.Path("PWA_API.md").read_text()
+    missing = {path for path in expected if path not in api_doc}
+    assert not missing, f"PWA_API.md does not document: {missing}"
 
     # Every concrete path the docs show must be served by one of the registered
     # patterns. `$ID/accept` in a curl recipe is the {id}/{action} route.
-    assert "/api/proposals" in documented
     for path in ("/api/proposals/batch", "/api/proposals/dismiss-older-than"):
-        assert path in documented, f"{path} is registered but undocumented"
+        assert path in api_doc, f"{path} is registered but undocumented"
 
 
 # -- Accept has to actually write the fact -----------------------------------
@@ -985,6 +995,248 @@ def test_two_runs_of_one_skill_are_one_row_and_one_decision(tmp_path: Path) -> N
     assert [
         r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill"
     ] == []
+    history = client.get("/api/proposals/history").json()["rows"]
+    assert [item["text"] for item in history] == ["skill:2026-08-09-defuddle"]
+
+
+# -- accepting a skill proposal into a chat ----------------------------------
+#
+# The association used to be browser-local, so a reload or a second device
+# started a second implementation and nothing recorded that either had run.
+
+
+class _FakeProject:
+    def __init__(self, project_id: str, name: str, workspace: str) -> None:
+        self.project_id = project_id
+        self.name = name
+        self.workspace = workspace
+
+
+class _FakeChat:
+    def __init__(self, chat_id: str, project_id: str, title: str) -> None:
+        self.chat_id = chat_id
+        self.project_id = project_id
+        self.title = title
+        self.archived = False
+
+
+class _FakePcm:
+    """Just enough of the chat manager for the accept route."""
+
+    def __init__(self, *, general_in: tuple[str, ...] = ("personal", "work")) -> None:
+        self._projects = [
+            _FakeProject(f"proj-{ws}", "General", ws) for ws in general_in
+        ]
+        self._chats: dict[str, _FakeChat] = {}
+        self.prompts: list[tuple[str, str]] = []
+        self.helpers: list[dict | None] = []
+
+    def list_projects(self, workspace: str | None = None) -> list[_FakeProject]:
+        if workspace is None:
+            return list(self._projects)
+        return [p for p in self._projects if p.workspace == workspace]
+
+    def create_project(self, name: str, workspace: str) -> _FakeProject:
+        project = _FakeProject(f"proj-{workspace}-new", name, workspace)
+        self._projects.append(project)
+        return project
+
+    def create_chat(
+        self, project_id: str, title: str = "New Chat", helper: dict | None = None
+    ) -> _FakeChat:
+        chat = _FakeChat(f"chat-{len(self._chats) + 1}", project_id, title)
+        self._chats[chat.chat_id] = chat
+        self.helpers.append(helper)
+        return chat
+
+    def get_chat(self, chat_id: str) -> _FakeChat | None:
+        return self._chats.get(chat_id)
+
+    def start_stream(self, chat_id: str, prompt: str) -> None:
+        self.prompts.append((chat_id, prompt))
+
+
+def _skill_row(client: TestClient) -> dict[str, Any]:
+    return next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "skill")
+
+
+def test_accepting_a_skill_row_opens_one_chat_in_its_own_workspace(
+    tmp_path: Path,
+) -> None:
+    """The skill is work's, so the chat is work's. Hosting it anywhere else
+    edits the wrong copy of the catalog while the record says the right one."""
+    config = _config(tmp_path)
+    _write_skill_proposal(config, "work", "2026-08-09-defuddle")
+    pcm = _FakePcm()
+    client = _client(config, pcm)
+    row = _skill_row(client)
+
+    response = client.post(f"/api/proposals/{row['id']}/implement")
+
+    assert response.status_code == 200, response.json()
+    body = response.json()
+    assert body["ok"] is True
+    assert body["created"] is True
+    assert pcm.get_chat(body["chat_id"]).project_id == "proj-work"
+    assert pcm.get_chat(body["chat_id"]).title == "Improve 2026-08-09-defuddle"
+    # A resolution helper, so the chat archives once the proposal is resolved.
+    assert pcm.helpers == [
+        {
+            "kind": "proposal",
+            "intent": "resolve",
+            "proposal_ids": [row["id"]],
+            "archive_policy": "when_resolved",
+        }
+    ]
+
+
+def test_accepting_twice_returns_the_same_chat_and_creates_no_duplicate(
+    tmp_path: Path,
+) -> None:
+    """A double tap, a retry after a dropped response, and a second device all
+    land here. Each is the same row, so each gets the same chat back."""
+    config = _config(tmp_path)
+    source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    pcm = _FakePcm()
+    row = _skill_row(_client(config, pcm))
+
+    first = _client(config, pcm).post(f"/api/proposals/{row['id']}/implement").json()
+    second = _client(config, pcm).post(f"/api/proposals/{row['id']}/implement").json()
+
+    assert second["chat_id"] == first["chat_id"]
+    assert (first["created"], second["created"]) == (True, False)
+    assert len(pcm.prompts) == 1, "the prompt was dispatched twice"
+    # And the association is on the record, so a fresh client sees it too.
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.chat_id == first["chat_id"]
+    assert record.lifecycle == skill_proposals.IMPLEMENTING
+
+
+def test_a_second_device_reads_the_live_chat_off_the_row(tmp_path: Path) -> None:
+    """The server row is the source of truth. The browser used to keep the same
+    association in localStorage, which is exactly what another device cannot
+    see, and a reload throws away."""
+    config = _config(tmp_path)
+    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    pcm = _FakePcm()
+    row = _skill_row(_client(config, pcm))
+    accepted = _client(config, pcm).post(f"/api/proposals/{row['id']}/implement").json()
+
+    relisted = _skill_row(_client(config, pcm))
+
+    assert relisted["chat_id"] == accepted["chat_id"]
+    assert relisted["lifecycle"] == skill_proposals.IMPLEMENTING
+    # The finding is still on the row, so the review card can show what the
+    # chat was asked to do.
+    assert relisted["problem"] == "Repeated fetch failures."
+    assert relisted["reviewed_revision"] == "a" * 64
+    # Still queued: the work is unfinished, so the question stays on screen.
+    assert _skill_row(_client(config, pcm))["id"] == row["id"]
+
+
+def test_the_prompt_names_the_existing_skill_and_the_reviewed_revision(
+    tmp_path: Path,
+) -> None:
+    """The prompt is the acceptance, and it is the server's. The browser's copy
+    had drifted into telling the chat to create a skill — a different task from
+    the one the record describes, since the skill is already there."""
+    config = _config(tmp_path)
+    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    pcm = _FakePcm()
+    client = _client(config, pcm)
+    row = _skill_row(client)
+
+    client.post(f"/api/proposals/{row['id']}/implement")
+
+    prompt = pcm.prompts[0][1]
+    assert prompt == skill_proposals.render_improvement_prompt(
+        skill_proposals.find_proposal(config, row["id"])
+    )
+    assert "/agent/skills/2026-08-09-defuddle/SKILL.md" in prompt
+    assert "already exists" in prompt
+    assert "Repeated fetch failures." in prompt
+    assert "Add a defuddle fallback." in prompt
+    assert "aaaaaaaaaaaa" in prompt   # the reviewed revision, shortened
+    assert "sess-a1" in prompt       # the evidence it came from
+    assert "ciao skill-proposal-remove" in prompt
+
+
+def test_an_archived_chat_is_not_a_live_implementation(tmp_path: Path) -> None:
+    """A chat the operator can no longer open is not the answer to "is this
+    still being worked on". The proposal is still queued, so re-accepting has
+    to be able to start a fresh one rather than hand back a dead link."""
+    config = _config(tmp_path)
+    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    pcm = _FakePcm()
+    row = _skill_row(_client(config, pcm))
+    first = _client(config, pcm).post(f"/api/proposals/{row['id']}/implement").json()
+    pcm.get_chat(first["chat_id"]).archived = True
+
+    second = _client(config, pcm).post(f"/api/proposals/{row['id']}/implement").json()
+
+    assert second["created"] is True
+    assert second["chat_id"] != first["chat_id"]
+
+
+def test_accepting_refuses_a_row_that_is_not_a_skill_proposal(tmp_path: Path) -> None:
+    """A memory bullet is promoted by writing to a region. Routing one here
+    would open a chat to do work the queue already does inline."""
+    config = _default_vault(tmp_path)
+    pcm = _FakePcm()
+    client = _client(config, pcm)
+    row = next(r for r in client.get("/api/proposals").json()["rows"] if r["kind"] == "memory")
+
+    response = client.post(f"/api/proposals/{row['id']}/implement")
+
+    assert response.status_code == 409
+    assert "skill proposal" in response.json()["error"]
+    assert pcm.prompts == []
+
+
+def test_accepting_an_unknown_or_settled_proposal_is_not_found(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    pcm = _FakePcm()
+    row = _skill_row(_client(config, pcm))
+    assert _client(config, pcm).post(f"/api/proposals/{row['id']}/dismiss").status_code == 200
+
+    assert _client(config, pcm).post(f"/api/proposals/{row['id']}/implement").status_code == 404
+    assert _client(config, pcm).post("/api/proposals/nope/implement").status_code == 404
+    assert pcm.prompts == []
+
+
+def test_accepting_settles_nothing_on_its_own(tmp_path: Path) -> None:
+    """Completion is never inferred from the chat ending. The record stays
+    queued until the work records an outcome, one way or the other."""
+    config = _config(tmp_path)
+    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    pcm = _FakePcm()
+    client = _client(config, pcm)
+    row = _skill_row(client)
+    client.post(f"/api/proposals/{row['id']}/implement")
+
+    history = client.get("/api/proposals/history").json()["rows"]
+    assert history == []
+    assert _skill_row(_client(config, pcm))["lifecycle"] == skill_proposals.IMPLEMENTING
+
+
+def test_a_dismissal_during_an_implementation_still_records_its_decision(
+    tmp_path: Path,
+) -> None:
+    """Settling is a decision a person makes, in whatever state the work is in."""
+    config = _config(tmp_path)
+    source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    pcm = _FakePcm()
+    client = _client(config, pcm)
+    row = _skill_row(client)
+    client.post(f"/api/proposals/{row['id']}/implement")
+
+    assert client.post(f"/api/proposals/{row['id']}/dismiss").status_code == 200
+
+    record = skill_proposals.parse_proposal(source, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.DISMISSED
     history = client.get("/api/proposals/history").json()["rows"]
     assert [item["text"] for item in history] == ["skill:2026-08-09-defuddle"]
 

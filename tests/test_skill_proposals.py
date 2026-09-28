@@ -636,6 +636,266 @@ def test_the_enumeration_is_empty_for_an_install_with_no_queue(tmp_path: Path) -
     assert sp.enumerate_proposal_ids(config) == set()
 
 
+# -- accepting into a chat: the server owns the lifecycle --------------------
+#
+# The association used to live in the browser's localStorage, which a reload, a
+# second device and the CLI could not see, so the same proposal could be
+# implemented twice and nothing recorded that either run happened.
+
+
+def test_mark_implementing_binds_the_chat_and_keeps_the_row_queued(
+    tmp_path: Path,
+) -> None:
+    """Accepting is a lifecycle transition, not a removal.
+
+    The work is unfinished while it runs, so the record stays in the pending
+    set: the review surface keeps showing it, and a resolution helper chat must
+    not archive itself against a queue whose question is still open.
+    """
+    config = _config(tmp_path)
+    path = sp.proposal_path(config, "personal", "web-research")
+    stored = sp.upsert_proposal(config, _proposal())
+
+    marked = sp.mark_implementing(config, stored.id, "chat-1")
+
+    assert marked is not None
+    assert marked.lifecycle == sp.IMPLEMENTING
+    assert marked.chat_id == "chat-1"
+    on_disk = sp.parse_proposal(path, "personal")
+    assert on_disk is not None
+    assert (on_disk.lifecycle, on_disk.chat_id) == (sp.IMPLEMENTING, "chat-1")
+    # Open, so the queue and the archive check both still see it.
+    assert [item.id for item in sp.read_queue(config, "personal")] == [stored.id]
+    assert stored.id in sp.enumerate_proposal_ids(config)
+
+
+def test_the_chat_association_survives_a_reload_and_a_later_pass(
+    tmp_path: Path,
+) -> None:
+    """It has to be on the record, not in memory or in a browser.
+
+    A second device reads the same file, and a pass that re-derives the same
+    finding must not quietly reset an in-flight record to pending — that would
+    drop the row out of "in progress" under a live chat and re-ask a question
+    that is already being answered.
+    """
+    config = _config(tmp_path)
+    path = sp.proposal_path(config, "personal", "web-research")
+    stored = sp.upsert_proposal(config, _proposal())
+    sp.mark_implementing(config, stored.id, "chat-1")
+
+    sp.upsert_proposal(config, _proposal(sources=(
+        sp.SkillEvidence(chat_id="sess-b2", archive="", turn="", excerpt="again"),
+    )))
+
+    reread = sp.parse_proposal(path, "personal")
+    assert reread is not None
+    assert reread.lifecycle == sp.IMPLEMENTING
+    assert reread.chat_id == "chat-1"
+    # The new evidence still landed; only the lifecycle was protected.
+    assert [item.chat_id for item in reread.sources] == ["sess-a1", "sess-b2"]
+
+
+def test_a_second_accept_returns_the_live_chat_rather_than_replacing_it(
+    tmp_path: Path,
+) -> None:
+    """Two devices pressing the same button, or a retry after a dropped
+    response. Neither is a reason to start a second implementation, and the
+    first chat is the one that holds the context."""
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal())
+    sp.mark_implementing(config, stored.id, "chat-1")
+
+    again = sp.mark_implementing(config, stored.id, "chat-2")
+
+    assert again is not None
+    assert again.chat_id == "chat-1"
+    assert again.lifecycle == sp.IMPLEMENTING
+
+
+def test_marking_implementing_is_a_no_op_when_the_chat_has_not_changed(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal())
+    first = sp.mark_implementing(config, stored.id, "chat-1")
+    before = sp.proposal_path(config, "personal", "web-research").read_text("utf-8")
+
+    assert sp.mark_implementing(config, stored.id, "chat-1") == first
+    assert sp.proposal_path(config, "personal", "web-research").read_text("utf-8") == before
+
+
+def test_a_proposal_cannot_be_implementing_without_a_chat(tmp_path: Path) -> None:
+    """A row reading "in progress" that nobody is working on is a lie with
+    buttons on it, and nothing could ever move it on again."""
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal())
+
+    with pytest.raises(ValueError, match="only be marked implementing with a chat"):
+        sp.mark_implementing(config, stored.id, "")
+    assert [item.lifecycle for item in sp.read_queue(config, "personal")] == [sp.PENDING]
+
+
+def test_an_interrupted_run_stays_queued_and_records_no_decision(
+    tmp_path: Path,
+) -> None:
+    """A chat that stopped is not a person who decided.
+
+    The sidecar is what stops the next pass from re-asking, so writing a
+    dismissal here would archive an unfinished edit as though it had been
+    rejected. The record keeps its evidence, keeps its chat, and goes back in
+    the queue so the operator can accept it again.
+    """
+    config = _config(tmp_path)
+    path = sp.proposal_path(config, "personal", "web-research")
+    stored = sp.upsert_proposal(config, _proposal())
+    sp.mark_implementing(config, stored.id, "chat-1")
+
+    stopped = sp.mark_outcome(config, stored.id, sp.INTERRUPTED, "ran out of context")
+
+    assert stopped is not None
+    assert stopped.lifecycle == sp.INTERRUPTED
+    assert stopped.chat_id == "chat-1"
+    on_disk = sp.parse_proposal(path, "personal")
+    assert on_disk is not None
+    assert on_disk.problem == stored.problem          # the finding is intact
+    assert on_disk.sources == stored.sources          # and so is the evidence
+    # Still queued: an interrupted implementation is recoverable work.
+    assert [item.id for item in sp.read_queue(config, "personal")] == [stored.id]
+    assert read_decisions(
+        tmp_path / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    ) == []
+
+
+def test_an_interrupted_proposal_can_be_accepted_again(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal())
+    sp.mark_implementing(config, stored.id, "chat-1")
+    sp.mark_outcome(config, stored.id, sp.INTERRUPTED, "stopped")
+
+    retried = sp.mark_implementing(config, stored.id, "chat-1")
+
+    assert retried is not None
+    assert retried.lifecycle == sp.IMPLEMENTING
+
+
+def test_an_applied_outcome_is_recorded_as_a_promotion(tmp_path: Path) -> None:
+    """``applied`` and ``dismissed`` are the same shape to a reader and opposite
+    facts, and only the caller that verified the change may assert the first."""
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal())
+    sp.mark_implementing(config, stored.id, "chat-1")
+
+    settled = sp.mark_outcome(config, stored.id, sp.APPLIED, "verified in the skill")
+
+    assert settled is not None
+    assert settled.lifecycle == sp.APPLIED
+    assert settled.chat_id == "chat-1"
+    rows = read_decisions(
+        tmp_path / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    )
+    assert [row["action"] for row in rows] == ["accepted"]
+    assert rows[0]["outcome"] == "verified in the skill"
+
+
+def test_a_pass_can_never_record_an_outcome_for_an_implementation(
+    tmp_path: Path,
+) -> None:
+    """``mark_outcome`` is the resolution writer, and it only speaks about work
+    a chat did. A lifecycle it does not name would be a value no reader of the
+    queue can place."""
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal())
+    with pytest.raises(ValueError, match="is not an outcome"):
+        sp.mark_outcome(config, stored.id, "reopened")
+
+
+def test_a_settled_proposal_has_no_outcome_left_to_record(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal())
+    sp.settle_proposal(config, stored.id, sp.DISMISSED)
+
+    assert sp.mark_outcome(config, stored.id, sp.APPLIED) is None
+    assert sp.mark_implementing(config, stored.id, "chat-1") is None
+
+
+def test_find_proposal_answers_for_the_whole_registry(tmp_path: Path) -> None:
+    """One walk, so the accept route and the outcome writer cannot disagree
+    about which row an id names."""
+    config = _config(tmp_path, "personal", "work")
+    personal = sp.upsert_proposal(config, _proposal(workspace="personal"))
+    work = sp.upsert_proposal(
+        config, _proposal(workspace="work", skill="humanizer")
+    )
+
+    assert sp.find_proposal(config, work.id) == work
+    assert sp.find_proposal(config, personal.id) == personal
+    assert sp.find_proposal(config, "nope") is None
+
+
+# -- the improvement prompt --------------------------------------------------
+
+
+def test_the_prompt_improves_the_existing_skill(tmp_path: Path) -> None:
+    """The prompt IS the acceptance, and the browser used to own it — where it
+    had drifted into telling the chat to CREATE a skill. The finding is about a
+    skill that already exists, so create-a-skill wording asks for a different
+    task and leaves the queue with nothing it asked for."""
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal())
+
+    prompt = sp.render_improvement_prompt(stored)
+
+    # Names the EXISTING canonical source, and says so.
+    assert "/agent/skills/web-research/SKILL.md" in prompt
+    assert "already exists" in prompt
+    assert "Improve the existing `web-research` skill" in prompt
+    # And never asks for a new one.
+    lowered = prompt.lower()
+    for phrase in ("create it", "create a new skill", "create the skill"):
+        assert phrase not in lowered, phrase
+
+
+def test_the_prompt_carries_the_proposal_its_findings_and_its_revision(
+    tmp_path: Path,
+) -> None:
+    """Without the id, the evidence and the reviewed revision the chat cannot
+    tell whether the skill still reads the way the reviewer saw it, nor which
+    question its resolution is answering."""
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal())
+
+    prompt = sp.render_improvement_prompt(stored)
+
+    assert stored.id in prompt
+    assert "Repeated fetch failures." in prompt
+    assert "Add a defuddle fallback." in prompt
+    assert "It handles blocked pages." in prompt
+    assert "sess-a1" in prompt
+    assert stored.reviewed_revision[:12] in prompt
+    # The resolution, through the CLI that owns the settlement, and the
+    # interrupted escape that keeps an unfinished edit recoverable.
+    assert "ciao skill-proposal-remove web-research --workspace . --applied" in prompt
+    assert "--interrupted" in prompt
+    assert "Read the current skill first" in prompt
+    assert "ciao sync-skills" in prompt
+
+
+def test_the_prompt_falls_back_to_the_skills_directory_when_no_path_was_recorded(
+    tmp_path: Path,
+) -> None:
+    """A legacy record names no resolved source. It still has to say WHICH
+    skill to improve, or the chat is left guessing between a stock copy, a
+    provider mirror and the workspace's own catalog."""
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal(canonical_path="", reviewed_revision=""))
+
+    prompt = sp.render_improvement_prompt(stored)
+
+    assert "skills/web-research/SKILL.md" in prompt
+    assert "revision" not in prompt
+
+
 # -- splitting the model's answer ------------------------------------------
 
 

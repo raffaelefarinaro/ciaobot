@@ -1209,6 +1209,57 @@ export interface ProposalRow {
   leak_warning?: boolean
   rehome?: RehomeSignal
   target?: string
+  /** A `skill` row: the versioned record the queue owns, not a bullet.
+   *
+   * `chat_id` is the server's own record of which chat is implementing it and
+   * the source of truth for "Open chat" — it used to live in the browser's
+   * localStorage, which a reload and a second device could not see, so the same
+   * proposal was implemented twice and nothing recorded that either had run.
+   */
+  skill?: string
+  title?: string
+  problem?: string
+  change?: string
+  rationale?: string
+  canonical_path?: string
+  reviewed_revision?: string
+  chat_id?: string
+  lifecycle?: SkillProposalLifecycle
+  sources?: SkillEvidenceRow[]
+}
+
+/** Where a skill proposal is in the server-owned accept lifecycle.
+ *
+ * `pending`/`implementing`/`interrupted` are OPEN: the work is unfinished, so
+ * the row stays queued and stays re-openable. The rest are decisions.
+ */
+export type SkillProposalLifecycle =
+  | 'pending'
+  | 'implementing'
+  | 'interrupted'
+  | 'applied'
+  | 'dismissed'
+  | 'not_applicable'
+
+/** One session behind a skill proposal, as the record holds it. */
+export interface SkillEvidenceRow {
+  chat_id: string
+  archive: string
+  turn: string
+  excerpt: string
+}
+
+/** `POST /api/proposals/{id}/implement` — accept a skill proposal into a chat.
+ *
+ * `created: false` is the idempotent answer: the same chat is already live, so
+ * a double tap, a retry after a dropped response and a second device all get
+ * the one implementation rather than one each. */
+export interface ProposalSkillAcceptResponse {
+  ok: boolean
+  chat_id: string
+  project_id: string
+  created: boolean
+  error?: string
 }
 
 export interface ProposalsResponse {

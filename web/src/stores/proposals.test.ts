@@ -602,3 +602,74 @@ describe('sibling previews after an accept', () => {
     expect(vi.mocked(api.get).mock.calls.map(c => c[0])).not.toContain('/api/proposals/c/preview')
   })
 })
+
+describe('accepting a skill proposal into a chat', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(api.get).mockReset()
+    vi.mocked(api.post).mockReset()
+  })
+
+  function skillRow(overrides: Partial<ProposalRow> = {}): ProposalRow {
+    return row({
+      id: 'p-skill',
+      kind: 'skill',
+      text: 'defuddle',
+      skill: 'defuddle',
+      path: 'personal/Workspace/Skill-Proposals/defuddle.md',
+      line: -1,
+      lifecycle: 'pending',
+      ...overrides,
+    })
+  }
+
+  it('asks the server, and the server owns which chat', async () => {
+    const store = useProposalsStore()
+    vi.mocked(api.get).mockResolvedValue({ rows: [skillRow()] } as never)
+    vi.mocked(api.post).mockResolvedValue({
+      ok: true, chat_id: 'chat-x', project_id: 'p-1', created: true,
+    } as never)
+
+    const result = await store.acceptSkill('p-skill')
+
+    expect(vi.mocked(api.post)).toHaveBeenCalledWith('/api/proposals/p-skill/implement')
+    expect(result).toEqual({ ok: true, chatId: 'chat-x' })
+    // It re-read rather than patching the local copy: the row the server
+    // returns is the one the panel has to render.
+    expect(vi.mocked(api.get).mock.calls.map(c => c[0])).toContain('/api/proposals')
+  })
+
+  it('keeps the lifecycle across a reload, because the server row owns it', async () => {
+    // The association used to live in this browser's localStorage, which a
+    // reload threw away and a second device never had. A fresh store reading
+    // the server's rows has to reach the same conclusion.
+    vi.mocked(api.get).mockResolvedValue({
+      rows: [skillRow({ lifecycle: 'implementing', chat_id: 'chat-x' })],
+    } as never)
+    vi.mocked(api.post).mockResolvedValue({
+      ok: true, chat_id: 'chat-x', project_id: 'p-1', created: true,
+    } as never)
+
+    const before = useProposalsStore()
+    await before.acceptSkill('p-skill')
+
+    setActivePinia(createPinia())
+    const after = useProposalsStore()
+    await after.fetch({ force: true })
+
+    const reloaded = after.rows.find(r => r.id === 'p-skill')!
+    expect(reloaded.lifecycle).toBe('implementing')
+    expect(reloaded.chat_id).toBe('chat-x')
+  })
+
+  it('surfaces a refusal instead of claiming a chat was started', async () => {
+    const store = useProposalsStore()
+    vi.mocked(api.get).mockResolvedValue({ rows: [skillRow()] } as never)
+    vi.mocked(api.post).mockRejectedValue(new Error('no General project to host the chat'))
+
+    const result = await store.acceptSkill('p-skill')
+
+    expect(result.ok).toBe(false)
+    expect(store.error).toContain('General project')
+  })
+})

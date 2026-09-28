@@ -302,13 +302,35 @@ function linkedChat(rowId: string) {
   return projectStore.chats.find(c => c.chat_id === id)
 }
 
+/** The chat implementing this row, from whichever surface owns the association.
+ *
+ * A skill row's chat is on the RECORD — the server opened it, and the server
+ * hands it back on a second accept from any device. The browser-local map is
+ * the fallback for the chats this panel opens itself (a merge fallback, a
+ * discussion), which the server knows nothing about. Reading the row first is
+ * what makes the lifecycle survive a reload, which a localStorage link cannot.
+ */
+function rowChatId(row: ProposalRow): string | undefined {
+  if (isSkill(row) && row.chat_id) return row.chat_id
+  return linkedChatId(row.id)
+}
+
+function rowChat(row: ProposalRow) {
+  const id = rowChatId(row)
+  if (!id) return undefined
+  return projectStore.chats.find(c => c.chat_id === id)
+}
+
+/** Whether a chat is still openable. An archived or deleted one is not: the
+ * proposal is still queued, so the row offers Improve again rather than a
+ * dead link. */
 function hasActiveLink(row: ProposalRow): boolean {
-  const chat = linkedChat(row.id)
+  const chat = rowChat(row)
   return !!chat && !chat.archived
 }
 
 function linkedChatTitle(row: ProposalRow): string {
-  const chat = linkedChat(row.id)
+  const chat = rowChat(row)
   return chat?.title || 'chat'
 }
 
@@ -325,11 +347,13 @@ function clearLink(rowId: string) {
 }
 
 async function openLinkedChat(row: ProposalRow) {
-  const chatId = linkedChatId(row.id)
+  const chatId = rowChatId(row)
   if (!chatId) return
   const chat = projectStore.chats.find(c => c.chat_id === chatId)
   if (!chat || chat.archived) {
-    clearLink(row.id)
+    // A skill row's association is the server's: it is not ours to forget, and
+    // the row goes back to offering Improve, which re-arms a fresh chat.
+    if (!isSkill(row)) clearLink(row.id)
     return
   }
   await openChat(chatId)
@@ -697,12 +721,20 @@ const groups = computed(() => {
  * A re-home bullet is a paragraph of prose that reprints both paths and a CLI
  * incantation; showing it as the title made four rows fill the screen and buried
  * the only thing that differs between them, which is the person's name.
+ *
+ * A skill row is the same in reverse: its `text` is the skill name, which the
+ * group header already says, and what the reviewer actually decides on is the
+ * finding behind it. So the title is the finding, and the skill's identity is
+ * carried by the group, the kind chip and the change line.
  */
 function rowTitle(row: ProposalRow): string {
   if (isRehome(row)) {
     const note = row.rehome?.note ?? ''
     const leaf = note.split('/').pop() ?? ''
     return leaf.replace(/\.md$/, '') || 'a person note'
+  }
+  if (isSkill(row)) {
+    return (row.problem || row.title || row.text).trim() || row.text
   }
   return row.text
 }
@@ -794,6 +826,20 @@ function isRehome(row: ProposalRow): boolean {
 
 function isSkill(row: ProposalRow): boolean {
   return row.kind === 'skill'
+}
+
+/** The sessions behind a skill finding, as the record holds them.
+ *
+ * The evidence is on the row, not behind a click. A proposal is a suggestion
+ * with a reason, and the reason is "this happened in these conversations" —
+ * a reviewer who cannot see that has nothing to weigh. */
+function skillEvidence(row: ProposalRow) {
+  return row.sources ?? []
+}
+
+/** One evidence locator per source, in the fewest words that still names it. */
+function evidenceLabel(source: { chat_id: string; archive: string; turn: string }): string {
+  return source.chat_id || source.archive || source.turn
 }
 
 async function doAccept(row: ProposalRow, workspace = '') {
@@ -1034,41 +1080,32 @@ function pathLeaf(path: string): string {
   return path.split('/').pop() || path
 }
 
-/** Accept a skill proposal by building it, in a chat, in its own workspace.
+/** Accept a skill proposal by improving its skill, in a chat, in its own workspace.
  *
  * A skill proposal has nothing to promote into a region, so the server refuses
  * `accept` for it — but "there is nothing to do" was the wrong reading of what
- * accepting a proposed skill means. Accepting it means implementing it, and that
- * is a chat. The row stays queued until the skill actually exists, then the
- * implementation removes it — so nothing is lost if the work stops halfway.
+ * accepting a proposed improvement means. Accepting it means making the change,
+ * and making a change to a `SKILL.md` is a chat.
+ *
+ * The chat and the prompt are the SERVER's. This used to mint both here, and the
+ * prompt had drifted into telling the agent to *create* a skill: the finding is
+ * about a skill that already exists, so that asked for a different task, under a
+ * new name, and left the queue with nothing it had asked for. The association
+ * lives on the record too, so a reload or a second device finds this chat
+ * instead of starting a second one.
+ *
+ * The row stays queued with `lifecycle: implementing` until the work records an
+ * outcome. Nothing here treats a finished chat as a decision.
  */
 async function implementSkill(row: ProposalRow) {
-  if (chatBusy.value) return
-  chatBusy.value = true
-  try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, `Implement ${row.text}`, resolutionHelper(row.id))
-    if (!chat) return
-    linkProposal(row.id, chat.chat_id)
-    projectStore.sendMessage(chat.chat_id, implementPrompt(row))
-    pushBackgroundToast(chat.chat_id, 'Building skill in background', `${row.text} — click to open the chat`)
-  } finally {
-    chatBusy.value = false
-  }
-}
-
-function implementPrompt(row: ProposalRow): string {
-  return (
-    `Implement the skill proposed in \`${row.path}\` (queued in the ${row.workspace} ` +
-    'workspace). Work in this chat only; do not delegate this helper task.\n\n' +
-    'Read the proposal first and tell me what it wants before writing anything. ' +
-    'If it is worth building, create it under this workspace\'s `skills/` directory ' +
-    'as a `SKILL.md` with a name and description, then run `ciao sync-skills` for ' +
-    'this root so the providers can see it. If it is not worth building, say so and ' +
-    'why — a proposal is a suggestion, not an instruction.\n\n' +
-    'Once the skill is actually in place (or you have decided not to build it), ' +
-    `remove the proposal with \`ciao skill-proposal-remove <name>\` naming ` +
-    `\`${row.text}\`, so it stops re-asking in the review queue. If we stop halfway, ` +
-    'leave the proposal in place so the decision is not lost.'
+  const result = await store.acceptSkill(row.id)
+  if (!result.ok || !result.chatId) return
+  // A retry and a second device get the same chat back rather than a new one;
+  // say so instead of claiming to have started something.
+  pushBackgroundToast(
+    result.chatId,
+    'Improving the skill in background',
+    `${row.skill || row.text} — click to open the chat`,
   )
 }
 
@@ -1477,6 +1514,19 @@ watch(
                 <span v-if="changeQualifier(row)" class="pr-where">· {{ changeQualifier(row) }}</span>
                 <span v-if="row.leak_warning" class="pr-badge --warn">visible in every workspace</span>
               </p>
+
+              <!-- A skill row is a finding, and the finding is what a person
+                   decides on: what was noticed, what is proposed, and the
+                   conversations it came from. The title above is the problem,
+                   so what is left is the change and the evidence. -->
+              <template v-if="isSkill(row) && row.change">
+                <p class="pr-skill-finding"><span class="pr-skill-label">Proposed</span> {{ row.change }}</p>
+                <p v-if="skillEvidence(row).length" class="pr-skill-evidence">
+                  <span class="pr-skill-label">Evidence</span>
+                  {{ skillEvidence(row).length }} session{{ skillEvidence(row).length === 1 ? '' : 's' }} —
+                  <template v-for="(source, si) in skillEvidence(row).slice(0, 3)" :key="si"><code v-if="evidenceLabel(source)" class="pr-inline-code">{{ evidenceLabel(source) }}</code><template v-if="si < skillEvidence(row).length - 1">, </template></template><template v-if="skillEvidence(row).length > 3">…</template>
+                </p>
+              </template>
               <!-- No preview yet (or none to be had): what keeping it does, in
                    words, until the server says exactly. -->
               <p v-else class="pr-row-sub" :title="rowSubtitle(row)">
@@ -1637,15 +1687,6 @@ watch(
             </div>
           </div>
 
-          <!-- Linked: this proposal already spawned a merge/implement chat that
-               is still active, so the row links to it instead of offering the
-               same decision twice. -->
-          <div v-else-if="hasActiveLink(row)" class="mr-actions pr-actions pr-actions--linked">
-            <span class="pr-linked-label">Working in <strong>{{ linkedChatTitle(row) }}</strong></span>
-            <button type="button" class="mr-btn pr-row-action" @click="openLinkedChat(row)">Open chat</button>
-            <button type="button" class="mr-link" @click="clearLink(row.id)">Show actions</button>
-          </div>
-
           <!-- Any rehome row that is not a plain justified accept: pick the
                destination, never pre-filled, from every registered workspace. -->
           <div v-else-if="isRehome(row) && rehomeMode(row) !== 'accept'" class="mr-actions pr-actions">
@@ -1663,18 +1704,39 @@ watch(
             <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
           </div>
 
-          <!-- A skill proposal is a FILE: read it, build it, or drop it.
-               Implementing it is a chat, not a write. -->
+          <!-- A skill proposal is a change to a skill that already exists: read
+               it, improve it, or drop it. The improvement is a chat, and the
+               server owns WHICH chat, so while one is live the row offers
+               "Open chat" beside the same actions rather than a link only this
+               browser knows about. Ahead of the linked branch below: that one
+               replaces a row's actions with its chat, and this row's actions ARE
+               the answer to the question that chat is working on. -->
           <div v-else-if="isSkill(row)" class="mr-actions pr-actions">
+            <button
+              v-if="hasActiveLink(row)"
+              type="button"
+              class="mr-btn pr-row-action"
+              @click="openLinkedChat(row)"
+            >Open chat</button>
             <button
               type="button"
               class="mr-btn pr-row-action"
-              :disabled="chatBusy"
+              :disabled="store.isBusy(row.id)"
               @click="implementSkill(row)"
-            >Implement</button>
+            >{{ store.isBusy(row.id) ? 'starting…' : 'Improve skill' }}</button>
             <button type="button" class="mr-btn mr-btn--quiet pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
-            <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open chat</button>
+            <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open discussion</button>
             <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
+          </div>
+
+          <!-- Linked: a refused accept spawned a merge chat that is still active,
+               so the row points at it instead of offering the same decision
+               twice. "Show actions" is the way back: the refusal it answers may
+               have been a stale revision a fresh accept resolves. -->
+          <div v-else-if="hasActiveLink(row)" class="mr-actions pr-actions pr-actions--linked">
+            <span class="pr-linked-label">Working in <strong>{{ linkedChatTitle(row) }}</strong></span>
+            <button type="button" class="mr-btn pr-row-action" @click="openLinkedChat(row)">Open chat</button>
+            <button type="button" class="mr-link" @click="clearLink(row.id)">Show actions</button>
           </div>
 
           <div v-else class="mr-actions pr-actions">
@@ -2590,6 +2652,28 @@ watch(
   color: var(--fg3);
   font-size: var(--text-sm);
   line-height: 1.5;
+}
+
+/* A skill finding, on the row: what is proposed and which sessions it came
+   from. The finding is the decision, so it reads as body text at the same
+   size as the rest of the row rather than as a muted footnote. */
+.pr-skill-finding,
+.pr-skill-evidence {
+  margin: 6px 0 0;
+  max-width: 72ch;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--fg2);
+}
+
+.pr-skill-evidence {
+  color: var(--fg3);
+}
+
+/* The label is a word, not a control: no target, no affordance. */
+.pr-skill-label {
+  color: var(--fg3);
+  font-weight: 650;
 }
 
 .pr-checking { color: var(--fg3); }
