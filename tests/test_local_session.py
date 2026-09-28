@@ -9,6 +9,7 @@ branches.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from ciao.git_proc import GIT_TIMEOUT_DETAIL
 from ciao.local_session import (
     LocalSessionManager,
     backoff_reason,
+    commit_pending,
     has_origin_remote,
     is_git_repo,
     repo_toplevel,
@@ -326,6 +328,224 @@ async def test_resync_ok_when_branch_missing_on_origin(tmp_path: Path) -> None:
     ok, detail = await resync_branch(local, branch="only-local")
     assert ok is True
     assert "no remote branch" in detail
+
+
+# ── failed steps are reported as failures (issue #674) ──────────────────────
+#
+# commit_pending used to discard every return code, so a failed add/commit read
+# as "a commit was created" and sync went on to push. Each case below asserts
+# both halves of the fix: the right step is named, and nothing after the
+# failure is attempted.
+
+
+def _record_git(monkeypatch, *, fail: dict[str, tuple[int, str, str]] | None = None) -> list[tuple[str, ...]]:
+    """Record every git verb the flow runs, optionally failing chosen verbs."""
+    import ciao.local_session
+
+    calls: list[tuple[str, ...]] = []
+    orig_git = ciao.local_session._git
+
+    async def mock_git(workspace, *args, **kwargs):
+        calls.append(args)
+        if fail and args[0] in fail:
+            return fail[args[0]]
+        return await orig_git(workspace, *args, **kwargs)
+
+    monkeypatch.setattr(ciao.local_session, "_git", mock_git)
+    return calls
+
+
+def _verbs(calls: list[tuple[str, ...]]) -> list[str]:
+    return [args[0] for args in calls]
+
+
+async def test_sync_branch_reports_a_failed_add_and_stops(tmp_path: Path, monkeypatch) -> None:
+    local, _ = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+    calls = _record_git(monkeypatch, fail={"add": (128, "", "fatal: unable to create index.lock")})
+
+    result = await sync_branch(local, branch="main")
+
+    assert result["ok"] is False
+    assert result["step"] == "add"
+    assert "index.lock" in result["error"]
+    # Nothing that mutates further may run after the staging failure.
+    assert _verbs(calls) == ["add"]
+    assert _git(local, "status", "--porcelain") != ""
+
+
+async def test_sync_branch_reports_a_failed_status_check(tmp_path: Path, monkeypatch) -> None:
+    """``git diff --cached --quiet`` exits >1 on a real error, which is not the
+    same as "nothing to commit" and must not commit on."""
+    local, _ = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+    calls = _record_git(monkeypatch, fail={"diff": (128, "", "fatal: bad object HEAD")})
+
+    result = await sync_branch(local, branch="main")
+
+    assert result["ok"] is False
+    assert result["step"] == "status"
+    assert "bad object" in result["error"]
+    assert _verbs(calls) == ["add", "diff"]
+
+
+async def test_sync_branch_reports_a_failed_commit_and_never_pushes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    local, origin = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+    remote_before = _git(origin, "rev-parse", "main")
+    calls = _record_git(monkeypatch, fail={"commit": (1, "", "fatal: empty commit message")})
+
+    result = await sync_branch(local, branch="main")
+
+    assert result["ok"] is False
+    assert result["step"] == "commit"
+    assert "empty commit" in result["error"]
+    # No fetch, no pull, no push: the uncommitted work must stay local and
+    # retryable, not be reported as synced.
+    assert "push" not in _verbs(calls)
+    assert _git(origin, "rev-parse", "main") == remote_before
+
+
+async def test_sync_branch_reports_a_failed_fetch_before_pulling(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A pull against a fetch that never landed merges a stale origin ref."""
+    local, _ = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+    calls = _record_git(monkeypatch, fail={"fetch": (1, "", "fatal: could not read from remote")})
+
+    result = await sync_branch(local, branch="main")
+
+    assert result["ok"] is False
+    assert result["step"] == "fetch"
+    assert "could not read" in result["error"]
+    assert "pull" not in _verbs(calls)
+    assert "push" not in _verbs(calls)
+
+
+async def test_sync_branch_refuses_a_preexisting_index_lock(tmp_path: Path) -> None:
+    """A foreign lock is an explicit failure, not a race and not a deletion."""
+    local, _ = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+    lock_file = local / ".git" / "index.lock"
+    lock_file.write_text("", encoding="utf-8")
+
+    result = await sync_branch(local, branch="main")
+
+    assert result["ok"] is False
+    assert result["step"] == "preflight"
+    assert "index lock" in result["error"]
+    assert lock_file.exists()
+
+
+async def test_resync_reports_a_failed_commit_without_merging(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Merging origin on top of an uncommitted tree is not what was asked."""
+    local, origin = _make_world(tmp_path)
+    _advance_origin(tmp_path, origin, "remote-only")
+    _write(local / "local.md", "local\n")
+    calls = _record_git(monkeypatch, fail={"commit": (1, "", "fatal: identity unknown")})
+
+    ok, detail = await resync_branch(local, branch="main")
+
+    assert ok is False
+    assert detail.startswith("commit failed:")
+    assert "identity unknown" in detail
+    assert "merge" not in _verbs(calls)
+    assert not (local / "remote-only.md").exists()
+    assert _git(local, "status", "--porcelain") != ""
+
+
+async def test_resync_refuses_an_in_progress_merge(tmp_path: Path) -> None:
+    local, _ = _make_world(tmp_path)
+    (local / ".git" / "MERGE_HEAD").write_text("deadbeef\n", encoding="utf-8")
+
+    ok, detail = await resync_branch(local, branch="main")
+
+    assert ok is False
+    assert "merge is in progress" in detail
+    assert (local / ".git" / "MERGE_HEAD").exists()
+
+
+async def test_push_branch_refuses_a_preexisting_index_lock(tmp_path: Path) -> None:
+    """The backup loop reports the refusal through its own (ok, detail) shape."""
+    from ciao.local_session import push_branch
+
+    local, origin = _make_world(tmp_path)
+    (local / ".git" / "index.lock").write_text("", encoding="utf-8")
+    remote_before = _git(origin, "rev-parse", "main")
+
+    ok, detail = await push_branch(local, branch="main")
+
+    assert ok is False
+    assert "index lock" in detail
+    assert _git(origin, "rev-parse", "main") == remote_before
+
+
+async def test_two_public_mutations_of_one_repository_serialize(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The integration the lock exists for: two public operations on one
+    checkout never overlap. Overlap is recorded, not timed."""
+    local, _ = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+    import ciao.local_session
+    from ciao.local_session import push_branch
+
+    orig_git = ciao.local_session._git
+    active = 0
+    overlapped = False
+    both_done = asyncio.Event()
+
+    async def slow_git(workspace, *args, **kwargs):
+        nonlocal active, overlapped
+        active += 1
+        overlapped = overlapped or active > 1
+        try:
+            # Real git, but every call yields first so a wrongly-parallel
+            # writer would be observed here rather than being missed.
+            await asyncio.sleep(0.01)
+            return await orig_git(workspace, *args, **kwargs)
+        finally:
+            active -= 1
+            if active == 0:
+                both_done.set()
+
+    monkeypatch.setattr(ciao.local_session, "_git", slow_git)
+
+    results = await asyncio.gather(
+        commit_pending(local, branch="main"),
+        push_branch(local, branch="main"),
+    )
+
+    assert not overlapped
+    assert results[0] is True  # the commit
+    assert results[1][0] is True  # the push of it
+    assert both_done.is_set()
+
+
+async def test_manager_reports_a_preexisting_index_lock_in_its_own_envelope(
+    tmp_path: Path,
+) -> None:
+    """A refusal must reach the route as data. The manager's existing error
+    shapes (a dict for handback, ``ok``/``detail`` for resync) are what
+    ``local_handback``/``local_resync`` map to a status code, so a preflight
+    refusal has to arrive in those shapes rather than as a raised error."""
+    local, _ = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+    (local / ".git" / "index.lock").write_text("", encoding="utf-8")
+    mgr = LocalSessionManager(workspace=local, runtime_root=tmp_path / "rt")
+
+    handback = await mgr.commit_and_sync()
+    assert handback["ok"] is False
+    assert handback["step"] == "preflight"
+
+    resync = await mgr.resync()
+    assert resync["ok"] is False
+    assert "index lock" in resync["detail"]
 
 
 # ── LocalSessionManager ──────────────────────────────────────────────────────

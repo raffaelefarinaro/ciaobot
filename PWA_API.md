@@ -656,7 +656,14 @@ pushes the branch: a clean pull is pushed directly (response: `{merged:true,
 deploy_needed:false, pushed}`); a conflicting pull is left in the tree and opens an interactive
 chat (`{merged:false, conflict:true, merge:{chat_id,...}}`) that resolves it, asking you
 (push-notified) when ambiguous. After that chat lands the branch, resync merges
-`origin/<branch>` back into the checkout. Non-git workspaces (or detached HEAD) get
+`origin/<branch>` back into the checkout. A failing step returns `{ok:false, step, error}` with
+status 400, where `step` names the stage that failed: `branch` (no branch / detached HEAD),
+`preflight` (a git operation you started outside Ciaobot still holds this repository — a
+preexisting `.git/index.lock` or an in-progress merge/rebase, which is left untouched for you
+to finish or abort), `add`, `status`, `commit`, `fetch` (nothing is pulled or pushed after a
+failed commit or fetch), or `push`. Resync reports the same failures as `{ok:false, detail}`.
+One sync is one serialized mutation, so a concurrent Ciaobot mutation of the same repository
+waits rather than interleaving. Non-git workspaces (or detached HEAD) get
 `{ok:false, error}` with status 400. Workspace sync never deploys app code; app updates happen
 through the package install/upgrade path.
 
@@ -698,13 +705,25 @@ nothing. Batch accept applies the same rule per row and reports `promoted` and
 `dismissed` for each, keeping the bullets it could not write.
 
 ```bash
-# List every queued proposal across all workspaces, plus skill-proposal files.
-# Each row: {id, kind, text, source, workspace, path, line}. `id` is a stable,
-# content-derived hash (survives other rows being dismissed). Rehome rows carry
-# `rehome: {destination, candidates[], justified, reason}` so a UI never
+# List every queued proposal across all workspaces, plus open skill-proposal
+# records. Each row: {id, kind, text, source, workspace, path, line}. `id` is a
+# stable, content-derived hash (survives other rows being dismissed). Rehome rows
+# carry `rehome: {destination, candidates[], justified, reason}` so a UI never
 # pre-accepts a destination no tag backs; region rows carry `region` and
 # `leak_warning` (true when accepting would write a foreign workspace's fact
 # into the primary workspace's injected region).
+#
+# A `kind: "skill"` row is one skill's improvement proposal, parsed by
+# `ciao/skill_proposals.py` from `Workspace/Skill-Proposals/<skill>.md`. It
+# carries the record rather than the filename: `skill`, `title`, `problem`,
+# `change`, `rationale`, `lifecycle`, and `sources[]` ({chat_id, archive, turn,
+# excerpt}) naming the sessions it came from. `text` stays the skill name, which
+# is what two runs of the same skill share. `id` is derived from (workspace,
+# skill), so a later pass that merges more evidence into the same skill keeps the
+# same id. Dismissing one records the decision and flips its `lifecycle` to
+# `dismissed`: the file stays on disk, readable and still accumulating evidence,
+# and the row leaves the listing. There is nothing to accept — a skill change is
+# implemented by hand or in a chat.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
 
 # What accepting one row would write, WITHOUT writing it. Returns

@@ -14,8 +14,11 @@ Runs weekly through the packaged per-workspace system schedule. The pass:
    helper is in :mod:`ciao.dag`; per-node timing lands in
    ``.runtime/job_runs.jsonl`` with ``provider='dag'`` so the Automation
    page can drill in.
-4. Upserts one Markdown proposal per skill in the active workspace's
-   ``Workspace/Skill-Proposals/<skill>.md`` queue.
+4. Upserts one record per skill in that workspace's
+   ``Workspace/Skill-Proposals/<skill>.md`` queue, through
+   :mod:`ciao.skill_proposals`, which owns the queue's identity, parsing,
+   atomic write, evidence merging and settlement. This pass proposes; it does
+   not decide, and it does not name the queue's location.
 
 Guardrails:
 
@@ -38,10 +41,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 from collections import defaultdict
@@ -50,6 +53,15 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ciao.providers.oneshot import run_oneshot
+from ciao.skill_proposals import (
+    PENDING,
+    SkillEvidence,
+    SkillProposal,
+    proposal_id,
+    proposal_path,
+    split_findings,
+    upsert_proposal,
+)
 from ciao.trajectory_builder import (
     DEFAULT_RETENTION_MONTHS,
     list_trajectories,
@@ -62,6 +74,7 @@ logger = logging.getLogger(__name__)
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_TESTS_ROOT = _REPO_ROOT / "tests"
 
 
 def _resolve_skills_roots(workspace: str = "") -> tuple[Path, ...]:
@@ -80,34 +93,21 @@ def _resolve_skills_roots(workspace: str = "") -> tuple[Path, ...]:
     return ()
 
 
-def _resolve_proposals_dir(workspace: str | None = None) -> Path:
-    """Resolve a workspace's registry-owned proposal queue.
+def _resolve_queue_workspace(config: Any, workspace: str | None) -> str:
+    """Which workspace's queue a pass writes to.
 
-    ``workspace`` names it explicitly; otherwise the active one is used, falling
-    back to the primary. Passing it explicitly is what lets one pass write each
-    workspace's findings to that workspace's queue instead of pooling every
-    workspace's evidence into whichever one happened to be primary.
+    ``workspace`` names it explicitly; otherwise the active one, else the
+    primary. Naming it explicitly is what lets one pass write each workspace's
+    findings to that workspace's queue instead of pooling every workspace's
+    evidence into whichever one happened to be primary. The queue location
+    itself is ``ciao.skill_proposals.queue_dir`` — the only place it is derived,
+    so a pass and the review surface cannot name different folders.
     """
-    from ciao.config import CiaoConfig
-
-    config = CiaoConfig.from_env()
     name = (workspace or os.environ.get("CIAO_ACTIVE_WORKSPACE", "")).strip()
-    if config.workspace(name) is None:
+    if not name or config.workspace(name) is None:
         name = config.primary_workspace()
-    return (
-        config.workspace_vault_root(name)
-        / "Workspace"
-        / "Skill-Proposals"
-    )
+    return name
 
-
-# Resolved per call, not at import: an import-time constant that depended on
-# vault layout relocated the queue whenever the layout changed, orphaning
-# proposals already written to the old location. The path itself is now
-# layout-independent, and this keeps it that way if that ever changes.
-def _default_proposals_dir() -> Path:
-    return _resolve_proposals_dir()
-_DEFAULT_TESTS_ROOT = _REPO_ROOT / "tests"
 
 MAX_SKILL_BYTES = 15 * 1024
 MAX_TRAJECTORIES_PER_PROMPT = 10
@@ -538,69 +538,80 @@ async def passes_semantic_check(
 # ── Proposal writing ─────────────────────────────────────────────────────
 
 
+def _trajectory_evidence(trajectories: list[dict[str, Any]]) -> tuple[SkillEvidence, ...]:
+    """One evidence row per trajectory, located by the session it came from.
+
+    A trajectory is a whole session, not a turn of one, so ``turn`` is empty and
+    the session id is the locator: two passes over overlapping windows name the
+    same session and therefore dedupe onto one row instead of counting it twice.
+    The id is the WHOLE one. It used to be truncated to eight characters for the
+    old file's display table, which was free there because nothing matched on it
+    — as a dedupe key it merges two distinct sessions that happen to share a
+    prefix, and drops the second one's evidence.
+    """
+    return tuple(
+        SkillEvidence(
+            chat_id=traj.get("session_id") or "",
+            archive=str(traj.get("timestamp") or ""),
+            turn="",
+            excerpt=(
+                f"outcome={traj.get('outcome', '?')} "
+                f"corrections={traj.get('user_corrections', 0)} "
+                f"errors={len(traj.get('errors') or [])} "
+                f"turns={traj.get('turns', 0)}"
+            ),
+        )
+        for traj in trajectories
+    )
+
+
 def write_proposal(
     *,
     skill_name: str,
     skill_path: Path,
     trajectories: list[dict[str, Any]],
     proposal_text: str,
-    output_dir: Path,
+    config: Any,
+    workspace: str,
     now: datetime | None = None,
-    semantic_verdict: str = "",
-    semantic_reason: str = "",
 ) -> Path:
-    """Render the proposal Markdown and write it to ``output_dir``."""
+    """Merge one skill's proposal into that workspace's queue; return its path.
+
+    The pass used to render Markdown and ``write_text`` it over whatever was
+    there, so a re-run of the weekly schedule replaced the previous run's
+    findings with its own and the queue could say nothing about which sessions
+    had now been seen. It goes through :func:`ciao.skill_proposals.upsert_proposal`
+    instead: the record is keyed by ``(workspace, skill)``, this run's evidence
+    is merged into the one already on record, and a run that saw nothing new
+    writes nothing at all.
+    """
     ts = now or datetime.now(UTC)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"{skill_name}.md"
-
-    rows = "\n".join(
-        f"- {(t.get('session_id') or '')[:8]} "
-        f"outcome={t.get('outcome', '?')} "
-        f"corrections={t.get('user_corrections', 0)} "
-        f"errors={len(t.get('errors') or [])} "
-        f"turns={t.get('turns', 0)}"
-        for t in trajectories
+    problem, change, rationale = split_findings(proposal_text)
+    stored = upsert_proposal(
+        config,
+        SkillProposal(
+            id=proposal_id(workspace, skill_name),
+            workspace=workspace,
+            skill=skill_name,
+            # The path the pass read, and the revision of exactly those bytes, so
+            # a later reader can tell the skill has moved on since this proposal
+            # was written. Which sources may be edited at all is
+            # ``ciao.skills_inventory.resolve_owned_skill``'s rule, applied by
+            # whoever implements the change; a pass deliberately still proposes
+            # against whatever root it was pointed at.
+            canonical_path=str(skill_path),
+            reviewed_revision=hashlib.sha256(skill_path.read_bytes()).hexdigest(),
+            title=f"Skill reflection: {skill_name}",
+            problem=problem,
+            change=change,
+            rationale=rationale,
+            sources=_trajectory_evidence(trajectories),
+            lifecycle=PENDING,
+            chat_id="",
+            updated_at=ts.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        ),
     )
-
-    semantic_block = ""
-    if semantic_verdict:
-        semantic_block = (
-            f"semantic_check: {semantic_verdict}\n"
-            f"semantic_reason: {semantic_reason}\n"
-        )
-
-    body = (
-        f"---\n"
-        f"type: skill-proposal\n"
-        f"skill: {skill_name}\n"
-        f"status: draft\n"
-        f"generated: {ts.isoformat().replace('+00:00', 'Z')}\n"
-        f"trajectories: {len(trajectories)}\n"
-        f"{semantic_block}"
-        f"---\n\n"
-        f"# Skill reflection: {skill_name}\n\n"
-        f"This is a reviewable suggestion based on repeated recent use. Nothing "
-        f"has been changed automatically.\n\n"
-        f"{proposal_text}\n\n"
-        f"## Technical details\n\n"
-        f"- **Skill:** `{skill_path}`\n"
-        f"- **Generated:** {ts.isoformat().replace('+00:00', 'Z')}\n"
-        f"- **Sessions analyzed:** {len(trajectories)}\n"
-    )
-    if semantic_verdict:
-        body += f"- **Semantic check:** {semantic_verdict} — {semantic_reason}\n"
-    body += (
-        f"\n### Source sessions\n\n"
-        f"{rows}\n\n"
-    )
-    path.write_text(body, encoding="utf-8")
-    dated = re.compile(rf"^\d{{4}}-\d{{2}}-\d{{2}}-{re.escape(skill_name)}\.md$")
-    for legacy in output_dir.glob("*.md"):
-        if legacy != path and dated.fullmatch(legacy.name):
-            legacy.unlink(missing_ok=True)
-    logger.info("Wrote skill proposal %s", path)
-    return path
+    return proposal_path(config, workspace, stored.skill)
 
 
 # ── Main pass ────────────────────────────────────────────────────────────
@@ -611,7 +622,8 @@ async def _process_skill_dag(
     skill_path: Path,
     skill_trajectories: list[dict[str, Any]],
     *,
-    output_dir: Path,
+    config: Any,
+    workspace: str,
     model: str,
     now: datetime,
     enable_test_gate: bool,
@@ -692,10 +704,9 @@ async def _process_skill_dag(
             skill_path=skill_path,
             trajectories=skill_trajectories,
             proposal_text=proposal,
-            output_dir=output_dir,
+            config=config,
+            workspace=workspace,
             now=now,
-            semantic_verdict=semantic_verdict,
-            semantic_reason=semantic_reason,
         )
         written_path["value"] = str(path)
         return True, str(path)
@@ -711,10 +722,14 @@ async def _process_skill_dag(
         if not (over_cap and proposal is None):
             return False, "no-stub-needed", True
         size = len(skill_text.encode("utf-8"))
+        # The same headings the model's proposal uses, so the stub lands in the
+        # record's own sections instead of arriving as one unlabelled blob.
         stub = (
-            "No clear improvement found.\n\n"
-            f"Skill is {size} bytes "
-            f"(cap: {MAX_SKILL_BYTES}). The model could not "
+            "## What I noticed\n"
+            f"No clear improvement found: the skill is {size} bytes "
+            f"(cap: {MAX_SKILL_BYTES}).\n\n"
+            "## Why this should help\n"
+            "The model could not "
             "propose a safe trim that preserves the primary "
             "workflow. Consider a manual review: the skill "
             "may have grown organically and the trim surface "
@@ -725,10 +740,9 @@ async def _process_skill_dag(
             skill_path=skill_path,
             trajectories=skill_trajectories,
             proposal_text=stub,
-            output_dir=output_dir,
+            config=config,
+            workspace=workspace,
             now=now,
-            semantic_verdict="",
-            semantic_reason="",
         )
         written_path["value"] = str(path)
         return True, str(path)
@@ -761,7 +775,7 @@ async def run_evolution_pass(
     *,
     since_days: int = 7,
     skills_root: Path | None = None,
-    output_dir: Path | None = None,
+    config: Any,
     model: str = "sonnet",
     min_sessions: int = 1,
     enable_test_gate: bool = False,
@@ -774,9 +788,16 @@ async def run_evolution_pass(
     """Mine trajectories and write skill proposals. Returns written paths.
 
     ``workspace`` scopes both halves: only that workspace's trajectories are
-    read, and proposals default to that workspace's queue. Without it the pass
-    reads every workspace's sessions and writes to a single queue, so work
-    session content was quoted into the personal vault.
+    read, and proposals go to that workspace's queue (the active one when it is
+    not named, else the primary). Without it the pass reads every workspace's
+    sessions and writes to a single queue, so work session content was quoted
+    into the personal vault.
+
+    The queue location is not a parameter and is derived once, by
+    ``ciao.skill_proposals``, from the registry: a pass could name a directory
+    the review surface does not read, and then a proposal written would be
+    invisible to the very queue it was filed for. Point ``skills_root`` at a
+    catalog instead if the skills are not the registry's own.
 
     Tail step: if ``retention_months`` is set, prune
     ``~/.ciao/trajectories/YYYY-MM/`` dirs older than that window. Pass
@@ -797,7 +818,7 @@ async def run_evolution_pass(
     timing lands in ``.runtime/job_runs.jsonl`` with label
     ``skillevo:<skill>:<node>``.
     """
-    output_dir = output_dir or _resolve_proposals_dir(workspace)
+    queue_workspace = _resolve_queue_workspace(config, workspace)
     now = now or datetime.now(UTC)
     since = now - timedelta(days=since_days)
 
@@ -834,7 +855,8 @@ async def run_evolution_pass(
                     skill_name,
                     skill_path,
                     skill_trajectories,
-                    output_dir=output_dir,
+                    config=config,
+                    workspace=queue_workspace,
                     model=model,
                     now=now,
                     enable_test_gate=enable_test_gate,
@@ -898,7 +920,6 @@ def _main(argv: list[str] | None = None) -> int:
         help="trajectory window in days (default: 7)",
     )
     parser.add_argument("--skills-root", type=Path)
-    parser.add_argument("--output-dir", type=Path)
     parser.add_argument(
         "--workspace",
         default="",
@@ -1015,7 +1036,7 @@ def _main(argv: list[str] | None = None) -> int:
             run_evolution_pass(
                 since_days=args.since_days,
                 skills_root=args.skills_root,
-                output_dir=args.output_dir,
+                config=cfg,
                 model=args.model,
                 min_sessions=args.min_sessions,
                 enable_test_gate=args.test_gate,
