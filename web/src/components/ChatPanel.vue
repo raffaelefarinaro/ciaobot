@@ -258,7 +258,9 @@
                 </div>
                 <div v-html="renderMarkdown(item.msg.content)"></div>
               </div>
-              <div v-if="item.msg.timestamp || item.msg.unattended" class="message-meta">
+              <!-- The time shows only on the selected (tapped) message, so the
+                   transcript stays quiet. -->
+              <div v-if="item.msg.unattended || (item.msg.timestamp && tappedMessageKey === `user-${i}`)" class="message-meta">
                 <!-- An automation's tick, not something the reader typed.
                      Without this the two are indistinguishable in the
                      transcript. -->
@@ -267,7 +269,7 @@
                   class="unattended-mark"
                   title="Sent automatically by an automation"
                 >&#10227; auto</span>
-                <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
+                <span v-if="item.msg.timestamp && tappedMessageKey === `user-${i}`">{{ formatTime(item.msg.timestamp) }}</span>
               </div>
             </div>
             <!-- Copy for a request. It sits in the flow under the bubble rather
@@ -3611,18 +3613,26 @@ function focusComposerOnOpen(): void {
   el.selectionStart = el.selectionEnd = el.value.length
 }
 
-onMounted(async () => {
-  window.addEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
-  window.addEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
-  window.addEventListener('ciao:native-file-drop', handleNativeFileDrop)
+let modelsSeq = 0
+async function loadModels(): Promise<void> {
+  const seq = ++modelsSeq
   try {
     const r = await api.get<ModelsResponse>('/api/models')
+    // Quick reopens can resolve out of order; only the newest request lands.
+    if (seq !== modelsSeq) return
     modelsResponse.value = r
     models.value = r.models
     providerModels.value = r.provider_models || {}
     providerDefaults.value = r.provider_defaults || {}
     thinkingLevels.value = r.thinking_levels || {}
   } catch { /* use defaults */ }
+}
+
+onMounted(async () => {
+  window.addEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
+  window.addEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
+  window.addEventListener('ciao:native-file-drop', handleNativeFileDrop)
+  await loadModels()
   await loadSlashCommands()
   await loadMentionAgents()
   notifyChatFocused(chat.value?.chat_id)
@@ -4503,6 +4513,10 @@ watch(showModelPicker, (open) => {
     capabilityPickerSection.value = ''
     return
   }
+  // Refetched on every open, not only on mount: a provider whose catalog was
+  // still loading when the chat opened would otherwise stay missing from the
+  // picker until the chat is reopened. The server caches the list.
+  void loadModels()
   const clickHandler = (e: MouseEvent) => {
     if (modelPickerRef.value && !modelPickerRef.value.contains(e.target as Node)) {
       showModelPicker.value = false
@@ -4617,11 +4631,13 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 }
 .chat-rail-head .rail-title { margin-bottom: 0; }
 /* Same 34px box as the tab that reopens it, pulled into the heading's line
-   height so the row does not grow. */
+   height so the row does not grow. Not pulled past the right edge: the rail
+   scrolls, so an overhang widened it, and focusing the button on reopen
+   scrolled the whole rail sideways, cutting off its left edge. */
 .chat-rail-hide {
   min-width: 34px;
   min-height: 34px;
-  margin: -7px -8px -7px 0;
+  margin: -7px 0;
   padding: 7px;
   color: var(--accent);
 }
@@ -4642,9 +4658,12 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   width: var(--page-rail);
   min-width: 0;
   overflow-y: auto;
+  /* Scrolls, but without a visible bar: the rail is a quiet side column. */
+  scrollbar-width: none;
   padding: 28px 0 24px;
   font-size: var(--text-sm);
 }
+.chat-rail::-webkit-scrollbar { display: none; }
 
 .chat-rail-origin {
   display: flex;

@@ -170,6 +170,18 @@ describe('ChatPanel aligned layout', () => {
     wrapper.unmount()
   })
 
+  it('refetches the model list each time the picker opens', async () => {
+    const wrapper = await mountPanel()
+    const get = vi.mocked(api.get)
+    const modelFetches = () => get.mock.calls.filter(([path]) => path === '/api/models').length
+    expect(modelFetches()).toBe(1)
+
+    await wrapper.get('.composer-bar .model-picker-summary').trigger('click')
+    await flushPromises()
+    expect(modelFetches()).toBe(2)
+    wrapper.unmount()
+  })
+
   it('shows a message\'s actions only once it is selected, and Esc puts it back', async () => {
     const wrapper = await mountPanel(TURNS)
     const replies = wrapper.findAll('.message-wrap.assistant')

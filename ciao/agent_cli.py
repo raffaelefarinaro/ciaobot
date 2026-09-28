@@ -395,6 +395,12 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
     return None
 
 
+# The engine is on this machine and refuses a loopback peer that carries proxy
+# headers, so the call must never be routed through a system or env HTTP proxy
+# (urllib honours both, and a Mac proxy exception list rarely names 127.0.0.1).
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def post(op: str, arguments: dict[str, Any], *, url: str, token: str, timeout_s: float = 60.0) -> dict[str, Any]:
     request = urllib.request.Request(
         url.rstrip("/") + "/" + op,
@@ -403,7 +409,7 @@ def post(op: str, arguments: dict[str, Any], *, url: str, token: str, timeout_s:
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:  # noqa: S310 - loopback only
+        with _LOCAL_OPENER.open(request, timeout=timeout_s) as response:  # noqa: S310 - loopback only
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")

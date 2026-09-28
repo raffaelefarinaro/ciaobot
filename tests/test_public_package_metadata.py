@@ -47,16 +47,9 @@ def test_env_example_is_generic_public_app_config() -> None:
         assert marker not in env_example
 
 
-def test_push_subject_is_a_fixed_placeholder() -> None:
-    from types import SimpleNamespace
+def test_push_subject_is_accepted_by_apple() -> None:
+    from ciao.main import PUSH_SUBJECT
 
-    from ciao.main import DEFAULT_PUSH_SUBJECT, _push_subject_for_config
-
-    assert (
-        _push_subject_for_config(SimpleNamespace(bootstrap_mode=True))
-        == "mailto:bootstrap@localhost"
-    )
-    # Web Push works out of the box with a placeholder the push service never
-    # contacts — never a private/real default.
-    assert _push_subject_for_config(SimpleNamespace()) == DEFAULT_PUSH_SUBJECT
-    assert "@localhost" in DEFAULT_PUSH_SUBJECT
+    # Apple's push service answers 403 BadJwtToken for a localhost subject.
+    assert PUSH_SUBJECT.startswith("mailto:")
+    assert "localhost" not in PUSH_SUBJECT
