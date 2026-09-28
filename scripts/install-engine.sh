@@ -38,6 +38,10 @@ desktop_live=0
 migrate_kind=
 migrate_workspace=
 migrate_host_url=
+# The `.app` the engine being migrated runs out of, empty when the program this
+# Mac's plist names lives outside a bundle. Only the completed hand-over deletes
+# it, and only after the app's own agent is gone.
+migrate_app_bundle=
 migrate_path=skip
 migration_dir="$HOME/.local/state/ciaobot/migration"
 install_receipt="$HOME/.local/state/ciaobot/install-receipt.json"
@@ -416,6 +420,7 @@ import json, os, pathlib, sys, tempfile
 phase, kind, workspace, host_url, error, started_at, path, version = sys.argv[1:9]
 server_plist, desktop_plist, shim, install_receipt, tool_env = sys.argv[9:14]
 retiring_desktop = sys.argv[14]
+app_bundle = sys.argv[15]
 payload = {
     "schema": 1,
     "kind": kind,
@@ -423,6 +428,13 @@ payload = {
     "workspace": workspace,
     "host_url": host_url,
     "version": version,
+    # The bundle this hand-over is retiring, recorded for the same reason kind
+    # and workspace are: a run that resumes this transaction can no longer learn
+    # it from the classifier, because the plist it would read now points at the
+    # tool this transaction installed. Empty for a receipt written before this
+    # field existed, which a resumed run reads as "unknown" rather than as an
+    # absence.
+    "app_bundle": app_bundle,
     # Whether the app agent has been, or is being, taken out of launchd. A
     # rollback that stopped caring about this leaves a Mac whose desktop engine
     # never starts again while it reports the engine restored.
@@ -451,7 +463,8 @@ os.replace(tmp, target)
         "$migration_error" "$migration_started_at" "$migration_dir/receipt.json" \
         "$version" \
         "${before_server_plist:-}" "${before_desktop_plist:-}" "${before_shim:-}" \
-        "${before_install_receipt:-}" "${before_tool_env:-}" "$retiring_desktop"
+        "${before_install_receipt:-}" "${before_tool_env:-}" "$retiring_desktop" \
+        "$migrate_app_bundle"
 }
 
 load_migration_receipt() {
@@ -471,6 +484,7 @@ load_migration_receipt() {
     receipt_started_at=
     receipt_workspace=
     receipt_host_url=
+    receipt_app_bundle=
     receipt_retiring_desktop=0
     receipt_before_server_plist=
     receipt_before_desktop_plist=
@@ -564,6 +578,9 @@ print("version=" + str(data.get("version") or ""))
 print("started_at=" + str(data.get("started_at") or ""))
 print("workspace=" + str(data.get("workspace") or ""))
 print("host_url=" + str(data.get("host_url") or ""))
+# Absent in a receipt written before the field existed, which is a transaction
+# whose bundle this installer was never told, not one that had no bundle.
+print("app_bundle=" + str(data.get("app_bundle") or ""))
 print("retiring_desktop=" + ("1" if data.get("retiring_desktop") is True else "0"))
 for name in IMAGES:
     print("before_" + name + "=" + images[name])
@@ -581,6 +598,7 @@ for name in IMAGES:
             started_at=*) receipt_started_at=${field#started_at=} ;;
             workspace=*) receipt_workspace=${field#workspace=} ;;
             host_url=*) receipt_host_url=${field#host_url=} ;;
+            app_bundle=*) receipt_app_bundle=${field#app_bundle=} ;;
             retiring_desktop=1) receipt_retiring_desktop=1 ;;
             before_server_plist=*) receipt_before_server_plist=${field#before_server_plist=} ;;
             before_desktop_plist=*) receipt_before_desktop_plist=${field#before_desktop_plist=} ;;
@@ -1059,6 +1077,7 @@ state = json.load(sys.stdin)
 print(state.get("kind", ""))
 print(state.get("workspace", ""))
 print(state.get("host_url", ""))
+print(state.get("app_bundle", ""))
 ' > "$tmp/classification.txt" || fail "could not classify this install"
     # Read line by line rather than with `set --`: a workspace path with a space
     # in it is one value, not two words.
@@ -1069,6 +1088,7 @@ print(state.get("host_url", ""))
             1) migrate_kind=$field ;;
             2) migrate_workspace=$field ;;
             3) migrate_host_url=$field ;;
+            4) migrate_app_bundle=$field ;;
         esac
     done < "$tmp/classification.txt"
     if [ "$resume_unfinished_host" -ne 0 ]; then
@@ -1079,6 +1099,13 @@ print(state.get("host_url", ""))
         # hand-over.
         migrate_kind=$receipt_kind
         [ -z "$receipt_workspace" ] || migrate_workspace=$receipt_workspace
+        # The bundle comes from the transaction for the same reason, and this is
+        # the path that needs it: `ciao setup` has already repointed the engine
+        # plist, so the classification above read this Mac as an ordinary
+        # installer-managed engine and named no bundle. A receipt written before
+        # the field existed leaves it empty, which the completed hand-over
+        # reports rather than acting on.
+        migrate_app_bundle=${migrate_app_bundle:-$receipt_app_bundle}
         migrate_path=host
     else
         case "$migrate_kind" in
@@ -1120,6 +1147,12 @@ print(state.get("host_url", ""))
             # workspace that transaction was started with.
             migrate_kind=$receipt_kind
             [ -z "$receipt_workspace" ] || migrate_workspace=$receipt_workspace
+            # And with the bundle it was started with, for the reason the
+            # classifier cannot name one here: the plist it would read is the one
+            # `ciao setup` already repointed. This run is the one that finishes
+            # the retirement, so it is also the one that has to retire the bundle
+            # with it.
+            migrate_app_bundle=${migrate_app_bundle:-$receipt_app_bundle}
             migrate_path=host
         elif [ "$desktop_live" -ne 0 ] && [ "$migrate_path" = skip ]; then
             # A live Ciaobot.app was found before verification, and the state it
@@ -1437,6 +1470,38 @@ if [ "$migrate_path" = host ]; then
             migration_active=1
             abort_install "Ciaobot.app's own agent could not be retired: launchctl refused to boot it out or disable it"
         fi
+        # Only now, with the receipt at `migrated` and the app's own agent gone,
+        # is the bundle inert: nothing runs out of it and no launchd job points
+        # at it, so leaving it only invites a double-click that brings the old
+        # PWA back against an engine this Mac no longer has. The `.app` guard
+        # stays - this is an irreversible delete of a path read out of a plist,
+        # not something the user typed. A removal that fails (a /Applications
+        # install the user cannot write) is reported rather than fatal: the
+        # migration itself has already succeeded and must not be rolled back
+        # over a leftover directory.
+        if [ -z "$migrate_app_bundle" ]; then
+            # A hand-over this run cannot name a bundle for - a receipt written
+            # before the field existed, so the transaction that is being
+            # finished never recorded one. Silence is the one answer that is
+            # wrong here: the app is still on disk and still does what it did
+            # before, and a run that says nothing about it is the dead-but-
+            # misleading state this step exists to end.
+            echo "Ciaobot.app could not be removed automatically; remove it with: ciao desktop uninstall"
+        elif [ -d "$migrate_app_bundle" ]; then
+            case "$migrate_app_bundle" in
+                *.app)
+                    if rm -rf "$migrate_app_bundle"; then
+                        echo "Removed the retired Ciaobot.app."
+                    else
+                        echo "Ciaobot.app could not be removed automatically; remove it with: ciao desktop uninstall"
+                    fi
+                    ;;
+                *)
+                    # Not a bundle: nothing this step is for, and not a path
+                    # this installer is willing to delete either.
+                    ;;
+            esac
+        fi
     else
         # --no-start promised no service, and an engine that was never started
         # cannot retire anything. The receipt says so; re-running without
@@ -1463,11 +1528,6 @@ if [ "$no_start" -eq 0 ]; then
     esac
     echo "Open Ciaobot: $url"
     echo "This link signs you in once. Do not share it."
-fi
-# Only once the app's own agent is retired: while it is still loaded Ciaobot.app
-# is not "no longer needed". The bundle itself is never deleted here.
-if [ "$migrate_path" = host ] && [ "$no_start" -eq 0 ]; then
-    echo "Ciaobot.app is no longer needed; remove it with: ciao desktop uninstall"
 fi
 case ":${PATH:-}:" in
     *":$bin_dir:"*) ;;

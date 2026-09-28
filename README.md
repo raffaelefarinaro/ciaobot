@@ -33,7 +33,7 @@ Contributors running from a git checkout can follow [docs/DEVELOPMENT.md](docs/D
 
 ### Upgrading from the macOS app
 
-v1.0.0 retires the macOS `Ciaobot.app`; the PWA is now served by the engine. There is no data migration and no vault change. If you still run the app, run `curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh -s -- --migrate`: `--migrate` hands the engine the app currently manages over to the terminal installer and keeps your workspace, password, chats, schedules and push subscriptions. Then run `ciao desktop uninstall` once to remove the old bundle. Your workspace folder and its notes are kept. See [INTEGRATIONS.md](INTEGRATIONS.md#install) for the same note in full.
+v1.0.0 retires the macOS `Ciaobot.app`; the PWA is now served by the engine. There is no data migration and no vault change. If you still run the app, run `curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh -s -- --migrate`: `--migrate` hands the engine the app currently manages over to the terminal installer, keeps your workspace, password, chats, schedules and push subscriptions, and removes the old `Ciaobot.app` bundle. If that removal could not run — a `/Applications` install your account cannot write, for instance — the installer says so and `ciao desktop uninstall` removes the bundle by hand. Your workspace folder and its notes are kept. See [INTEGRATIONS.md](INTEGRATIONS.md#install) for the same note in full.
 
 Updates are the same one-liner again, or **Settings → Home** in the PWA, which stages and applies the engine package update in the background. There is no in-app app updater.
 
