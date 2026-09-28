@@ -13,7 +13,7 @@
       <li v-for="entry in addresses" :key="entry.url" class="device-row" :data-kind="entry.kind">
         <div class="device-main">
           <code class="device-url">{{ entry.url }}</code>
-          <span class="device-tag">{{ labelFor(entry.kind) }}</span>
+          <span class="device-tag">{{ labelFor(entry) }}</span>
         </div>
         <div class="device-actions">
           <button class="btn-secondary btn-small" type="button" @click="copy(entry.url)">
@@ -42,7 +42,7 @@
         v-model="trustedInput"
         type="url"
         inputmode="url"
-        placeholder="https://your-mac.tailnet.ts.net"
+        placeholder="https://ciaobot.example.com"
         autocomplete="off"
         @input="trustedEdited = true"
       />
@@ -50,17 +50,21 @@
         {{ saving ? 'Saving…' : 'Save' }}
       </button>
     </form>
-    <p class="hint">
-      For the full app on other devices, serve Ciaobot over HTTPS, e.g. with Tailscale:
-      <code>tailscale serve --bg {{ port }}</code>, then paste the https://&hellip;.ts.net address
-      here. Leave it empty to clear.
+    <p v-if="tailscaleFound" class="hint">
+      Tailscale Serve address found automatically. To use a different HTTPS proxy, paste its
+      address here. Leave it empty to clear.
+    </p>
+    <p v-else class="hint">
+      For the full app on other devices, serve Ciaobot over HTTPS. With Tailscale, run
+      <code>tailscale serve --bg {{ port }}</code> and Ciaobot finds the address on its own. For
+      another HTTPS proxy, paste its address here. Leave it empty to clear.
     </p>
     <p v-if="saveError" class="action-result" role="alert">{{ saveError }}</p>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import qrcode from 'qrcode-generator'
 import { api } from '../../lib/api'
 import { errorMessage } from '../../lib/errorMessage'
@@ -70,6 +74,8 @@ import type { RoutineSettings } from '../../lib/types'
 interface DeviceAddress {
   url: string
   kind: 'trusted' | 'lan' | 'loopback'
+  // Only on trusted entries: typed into the field, or found via Tailscale Serve.
+  source?: 'manual' | 'tailscale'
   secure: boolean
   loopback: boolean
 }
@@ -82,11 +88,15 @@ const LABELS: Record<DeviceAddress['kind'], string> = {
   loopback: 'This computer only',
 }
 
-function labelFor(kind: DeviceAddress['kind']): string {
-  return LABELS[kind]
+function labelFor(entry: DeviceAddress): string {
+  const label = LABELS[entry.kind]
+  return entry.source === 'tailscale' ? `${label} (via Tailscale Serve)` : label
 }
 
 const addresses = ref<DeviceAddress[]>([])
+const tailscaleFound = computed(() =>
+  addresses.value.some((entry) => entry.source === 'tailscale'),
+)
 const port = ref(8443)
 const loading = ref(true)
 const error = ref('')

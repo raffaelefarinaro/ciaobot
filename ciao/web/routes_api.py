@@ -8174,6 +8174,7 @@ async def addresses_endpoint(request: Request) -> JSONResponse:
         is_loopback_url,
         normalize_trusted_url,
         server_addresses,
+        tailscale_serve_urls,
     )
 
     config = request.app.state.config
@@ -8189,7 +8190,28 @@ async def addresses_endpoint(request: Request) -> JSONResponse:
         trusted = ""
     entries: list[dict[str, object]] = []
     if trusted:
-        entries.append({"url": trusted, "kind": "trusted", "secure": True, "loopback": False})
+        entries.append(
+            {
+                "url": trusted,
+                "kind": "trusted",
+                "source": "manual",
+                "secure": True,
+                "loopback": False,
+            }
+        )
+    # Tailscale Serve's HTTPS name never appears on an interface, so it is
+    # asked for directly. A typed address that matches it stays "manual".
+    for url in await asyncio.to_thread(tailscale_serve_urls, port):
+        if url != trusted:
+            entries.append(
+                {
+                    "url": url,
+                    "kind": "trusted",
+                    "source": "tailscale",
+                    "secure": True,
+                    "loopback": False,
+                }
+            )
     urls = await asyncio.to_thread(server_addresses, port)
     for url in urls:
         if is_loopback_url(url):
