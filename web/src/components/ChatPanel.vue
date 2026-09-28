@@ -1321,7 +1321,7 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
-import { isApplePlatform } from '../lib/desktop'
+import { isApplePlatform } from '../lib/platform'
 import {
   isPostprocessing,
   postprocessFailed,

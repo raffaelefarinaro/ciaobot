@@ -1987,7 +1987,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
 import { formatTime, formatDuration } from '../lib/time'
-import { isApplePlatform } from '../lib/desktop'
+import { isApplePlatform } from '../lib/platform'
 import {
   DEFAULT_FONT_SCALE,
   FONT_SCALE_STEP,
