@@ -6421,13 +6421,14 @@ async def cli_stats(request: Request) -> JSONResponse:
 
 
 async def list_proposals(request: Request) -> JSONResponse:
-    """Return every queued proposal across workspaces, plus skill proposals.
+    """Return every queued proposal across workspaces, plus open skill proposals.
 
     Rows are keyed by a stable content-derived id so a UI can act on one without
-    a later dismiss renumbering it (see ``proposal_service._stable_proposal_id``). Rehome rows
+    a later dismiss renumbering it (``proposal_tracking.stable_proposal_id`` for
+    a bullet, ``skill_proposals.proposal_id`` for a skill record). Rehome rows
     carry candidate destinations and a ``justified`` flag, so the UI never
-    pre-fills an accept for a destination no tag backs. Skill-proposal files are
-    surfaced under the same ``rows`` list with ``kind: "skill"``.
+    pre-fills an accept for a destination no tag backs. An open skill-proposal
+    record is surfaced under the same ``rows`` list with ``kind: "skill"``.
     """
     config = request.app.state.config
     rows, _by_id = proposal_service._scan_proposal_rows(config)
@@ -7217,30 +7218,17 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 ).as_dict())
                 continue
             outcome = proposal_service._dismiss_skill_proposal(ctx)
-            skill_result = proposal_actions.ProposalActionResult(
+            # The settlement records the decision itself, in the sidecar under
+            # the proposal's own `skill:<name>` key. A second write here, keyed
+            # by the bare skill name, is what used to file a skill decision as if
+            # it were a memory fact with that wording — two rows for one
+            # dismissal, one of which nothing reads back.
+            results.append(proposal_actions.ProposalActionResult(
                 id=row["id"],
                 action="dismiss",
                 dismissed=bool(outcome.get("ok")),
                 error=None if outcome.get("ok") else outcome["error"],
-            )
-            if outcome.get("ok") and ctx["workspace"]:
-                # The file is already unlinked; a sidecar write failure must not
-                # fail a dismiss that happened.
-                try:
-                    proposal_actions.record_decision(
-                        proposal_service._proposals_file(config, ctx["workspace"]),
-                        action="dismiss",
-                        text=row["text"],
-                        kind="skill",
-                        via="pwa",
-                        workspace=ctx["workspace"],
-                        proposal_id=row["id"],
-                    )
-                except OSError:
-                    logger.info(
-                        "proposals: could not record skill dismissal for %s", row["id"]
-                    )
-            results.append(skill_result.as_dict())
+            ).as_dict())
 
         # Group by file so each affected file is rewritten exactly once.
         by_file: dict[str, dict[str, Any]] = {}
@@ -7663,28 +7651,12 @@ async def proposal_action(request: Request) -> JSONResponse:
         outcome = proposal_service._dismiss_skill_proposal(ctx)
         if not outcome.get("ok"):
             return JSONResponse({"error": outcome["error"], "id": pid}, status_code=409)
-        # Not recorded in the outcomes tally: that ledger measures the MEMORY
-        # extraction pipeline, and skill proposals come from the separate
-        # skill-evolution pipeline. It IS recorded in the decision history,
-        # so the review page's History tab shows it was resolved.
-        # Guarded like the batch path: ``workspace_vault_root("")`` falls back
-        # to the default root, so a row with a blank workspace would file its
-        # decision into the wrong workspace's sidecar. And the file is already
-        # gone by now — a recording failure must not turn a completed dismiss
-        # into a 500, or the client's retry 404s on work that succeeded.
-        if row["workspace"]:
-            try:
-                proposal_actions.record_decision(
-                    proposal_service._proposals_file(config, row["workspace"]),
-                    action="dismiss",
-                    text=row["text"],
-                    kind="skill",
-                    via="pwa",
-                    workspace=row["workspace"],
-                    proposal_id=pid,
-                )
-            except OSError:
-                logger.info("proposals: could not record skill dismissal for %s", pid)
+        # The decision is already in the sidecar: the settlement wrote it there
+        # before flipping the record, keyed by the proposal's own
+        # `skill:<name>` text, so the History tab shows it and the pass that must
+        # honour it can read it back. Deliberately NOT in the outcomes tally:
+        # that ledger measures the MEMORY extraction pipeline, and skill
+        # proposals come from the separate skill-evolution pipeline.
         return JSONResponse(
             proposal_actions.ProposalActionResult(
                 id=pid, action="dismiss", dismissed=True

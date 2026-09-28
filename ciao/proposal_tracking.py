@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from ciao import proposal_kinds
+from ciao import skill_proposals
 
 
 _PROPOSALS_REL = ("Workspace", "Memory-Proposals.md")
-_SKILL_PROPOSALS_REL = ("Workspace", "Skill-Proposals")
 
 
 def stable_proposal_id(
@@ -92,12 +92,9 @@ def pending_proposal_ids(config: Any) -> set[str]:
                             workspace, rel_path, bullet.kind, bullet.text, bullet.source, 0
                         )
                     )
-        skill_dir = root.joinpath(*_SKILL_PROPOSALS_REL)
-        if skill_dir.is_dir():
-            for proposal in skill_dir.glob("*.md"):
-                pending.add(
-                    stable_proposal_id(
-                        workspace, rel_path, "skill", proposal.name, "", 0
-                    )
-                )
+    # Skill proposals are versioned records, not files to glob and hash from
+    # their name: their ids come from the module that owns them, and a settled
+    # record is not pending. Derived here before, when this loop re-derived the
+    # same question from filenames and the two answers could disagree.
+    pending.update(skill_proposals.enumerate_proposal_ids(config))
     return pending

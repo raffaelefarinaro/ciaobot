@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence
 
 from ciao import proposal_kinds
 from ciao import proposal_tracking
+from ciao import skill_proposals
 from ciao import vault_rehome
 from ciao.memory_tool import resolve_region
 from ciao.workspace_guide import guide_path
@@ -42,8 +43,6 @@ logger = logging.getLogger(__name__)
 _SECTION_DATE_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})")
 # The queue file lives at this relative path inside each workspace's vault.
 _PROPOSALS_REL = ("Workspace", "Memory-Proposals.md")
-# Skill-reflection proposals live under this folder, one canonical file per skill.
-_SKILL_PROPOSALS_REL = ("Workspace", "Skill-Proposals")
 
 
 @dataclass(frozen=True)
@@ -126,11 +125,6 @@ class AcceptOutcome:
 def _proposals_file(config, workspace: str) -> Path:
     """The proposal queue for one workspace, rooted at its vault folder."""
     return Path(config.workspace_vault_root(workspace)).joinpath(*_PROPOSALS_REL)
-
-
-def _skill_proposals_dir(config, workspace: str) -> Path:
-    """The skill-proposal queue folder for one workspace."""
-    return Path(config.workspace_vault_root(workspace)).joinpath(*_SKILL_PROPOSALS_REL)
 
 
 def _sweep_queue_file(
@@ -427,12 +421,13 @@ def claim_proposals(queue: Path, ids: Sequence[str]) -> Iterator[set[str]]:
 # it counts only same-file duplicates, which are unaffected by rows in other
 # files (or non-duplicate rows in this one) being removed.
 #
-# Imported rather than redefined: `proposal_tracking.pending_proposal_ids`
-# decides whether a resolution helper chat can be archived by comparing ids
-# against the ones this module hands out. Two copies that drift apart stop
-# matching silently — no error, just helper chats that never archive — so
-# there is exactly one implementation.
-_stable_proposal_id = proposal_tracking.stable_proposal_id
+# Both row kinds are built this way now. A bullet takes its id from the one walk
+# below; a skill row takes it from `skill_proposals`, which derives it from
+# (workspace, skill) instead. Both modules are the single implementation each id
+# has, because `proposal_tracking.pending_proposal_ids` decides whether a
+# resolution helper chat can be archived by comparing ids against the ones the
+# listing hands out. Two derivations that drift apart stop matching silently —
+# no error, just helper chats that never archive.
 
 
 def _rehome_signal(config) -> dict[str, dict[str, Any]]:
@@ -682,8 +677,11 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     "line": line_index,
                     "row": row,
                 }
-        # Skill proposals are files, not bullets: no parse_bullet, no accept
-        # descriptor, and a whole file is the atomic unit.
+        # Skill proposals are versioned records, not bullets: no parse_bullet,
+        # no accept descriptor, and one file per skill is the atomic unit. The
+        # row is built from the record `ciao.skill_proposals` parses, so the
+        # review surface can show what the proposal actually says and act on the
+        # id that module settles.
         #
         # They are registered in `by_id` all the same, with `file: True` so the
         # handlers can tell a file from a bullet. Listing them without
@@ -692,47 +690,88 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
         # 49 skill rows on a real vault answered 404 "unknown proposal id" —
         # from both the single-row and the batch endpoint. A row you cannot act
         # on is a notification wearing a button.
-        skill_dir = _skill_proposals_dir(config, workspace)
-        if skill_dir.is_dir():
-            for f in sorted(skill_dir.glob("*.md")):
-                row_id = _stable_proposal_id(workspace, rel_path, "skill", f.name, "", 0)
-                row = {
-                    "id": row_id,
-                    "kind": "skill",
-                    "text": f.stem,
-                    "source": "",
-                    "workspace": workspace,
-                    "path": Path(workspace).joinpath(*_SKILL_PROPOSALS_REL, f.name).as_posix(),
-                    "line": -1,
-                }
-                rows.append(row)
-                by_id[row_id] = {
-                    "workspace": workspace,
-                    "path": str(f),
-                    "line": -1,
-                    "row": row,
-                    "file": True,
-                }
+        for proposal in skill_proposals.read_queue(config, workspace):
+            path = skill_proposals.proposal_path(config, workspace, proposal.skill)
+            row = {
+                "id": proposal.id,
+                "kind": "skill",
+                # The skill, not the title: the review surface derives the skill
+                # a row is about from this, and a title is free prose that would
+                # not group two runs of the same skill.
+                "text": proposal.skill,
+                "skill": proposal.skill,
+                "title": proposal.title,
+                "problem": proposal.problem,
+                "change": proposal.change,
+                "rationale": proposal.rationale,
+                "sources": [
+                    {
+                        "chat_id": item.chat_id,
+                        "archive": item.archive,
+                        "turn": item.turn,
+                        "excerpt": item.excerpt,
+                    }
+                    for item in proposal.sources
+                ],
+                "lifecycle": proposal.lifecycle,
+                "source": "",
+                "workspace": workspace,
+                "path": skill_proposals.proposal_rel_path(workspace, proposal.skill),
+                "line": -1,
+            }
+            rows.append(row)
+            by_id[proposal.id] = {
+                "workspace": workspace,
+                "path": str(path),
+                "line": -1,
+                "row": row,
+                "file": True,
+                # The settlement needs the registry, to resolve the queue
+                # folder and the decision sidecar from the workspace name. The
+                # handlers are handed nothing else, so it travels with the row's
+                # context rather than being re-derived per call.
+                "config": config,
+            }
     return rows, by_id
 
 
 def _dismiss_skill_proposal(ctx: dict[str, Any]) -> dict[str, Any]:
-    """Take one skill-proposal FILE out of the queue.
+    """Settle one skill proposal, recording the decision instead of deleting it.
 
     A reviewed proposal is a resolved decision: whether it was implemented or
-    disregarded, keeping the file in the queue re-asks the same question. So
-    dismiss deletes it rather than moving it aside — the queue is globbed one
-    level deep, so either clears it, and the decision is the operator's to keep
-    in the Curation-Log. A missing file is already gone, not an error.
+    disregarded, re-asking the same question is the wrong behaviour. Deleting
+    the file used to be the only way to say so, and it destroyed the only record
+    that anyone had looked at it — the next pass that saw the same evidence
+    filed it again, and nothing said the operator had already answered.
+
+    So the record stays and its lifecycle becomes ``dismissed``, and the
+    decision itself goes to the workspace's decision sidecar keyed by the
+    proposal's synthetic ``skill:<name>`` text: a settled proposal is not in the
+    listing, and the next pass that merges new evidence into it leaves it
+    settled. A proposal that is no longer open has nothing left to decide, which
+    is not an error either.
+
+    A decision that could not be recorded leaves the proposal open rather than
+    reporting a settlement nobody can see. That includes a lock it could not
+    take: a refusal to write unlocked is a refusal to decide, and the handler's
+    contract is a structured ``ok: false`` rather than a 500.
     """
-    source = Path(ctx["path"])
-    if not source.is_file():
-        return {"ok": True, "deleted": True}
+    from ciao.memory_receipts import QueueLockError
+
+    config = ctx.get("config")
+    if config is None:
+        return {"ok": False, "error": "this skill row carries no workspace registry"}
+    row = ctx["row"]
     try:
-        source.unlink()
-    except OSError as exc:
-        return {"ok": False, "error": f"could not delete {source.name}: {exc}"}
-    return {"ok": True, "deleted": True}
+        settled = skill_proposals.settle_proposal(
+            config, str(row["id"]), skill_proposals.DISMISSED
+        )
+    except (OSError, QueueLockError) as exc:
+        return {
+            "ok": False,
+            "error": f"could not record the decision for {row['text']}: {exc}",
+        }
+    return {"ok": True, "settled": settled is not None}
 
 
 def _rehome_lookup(

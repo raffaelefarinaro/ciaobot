@@ -515,6 +515,61 @@ def test_the_budget_spends_passes_in_order() -> None:
     assert [item.pass_id for item in plan.deferred] == [cr.PASS_REGIONS, cr.PASS_AUDIT]
 
 
+def _settled_proposal(vault: Path, name: str) -> None:
+    (vault / cr.SKILL_PROPOSALS_RELATIVE / f"{name}.md").write_text(
+        f"---\nschema: 1\ntype: skill-proposal\nlifecycle: dismissed\n---\n\n# {name}\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_settled_skill_proposal_is_no_longer_waiting_on_a_decision(tmp_path: Path) -> None:
+    """A dismissal stays on disk, so the pass must ask about the queue, not glob it.
+
+    Review round 1 (#683): counting every ``*.md`` kept re-reporting an answered
+    decision every night, which is the same "evidence immediately reappears"
+    outcome settle-not-unlink was meant to end.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    (vault / cr.SKILL_PROPOSALS_RELATIVE).mkdir()
+    _settled_proposal(vault, "web-research")
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    assert cr.PASS_SKILL_PROPOSALS not in {item.pass_id for item in worklist.items}
+
+
+def test_a_pending_skill_proposal_beside_a_settled_one_still_counts(
+    tmp_path: Path,
+) -> None:
+    """One open record is enough, and the keys name only that record."""
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    (vault / cr.SKILL_PROPOSALS_RELATIVE).mkdir()
+    _settled_proposal(vault, "web-research")
+    (vault / cr.SKILL_PROPOSALS_RELATIVE / "deploy.md").write_text("x", encoding="utf-8")
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    item = next(i for i in worklist.items if i.pass_id == cr.PASS_SKILL_PROPOSALS)
+    assert item.keys == (cr.item_key(cr.PASS_SKILL_PROPOSALS, "deploy.md"),)
+    assert "1 proposal(s) waiting on a decision" in item.reason
+
+
 def test_a_budget_limited_run_resumes_at_the_remainder(tmp_path: Path) -> None:
     """Acceptance: no duplicate work and no lost items across two runs."""
     vault = _vault(tmp_path)
