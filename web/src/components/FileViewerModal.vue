@@ -71,7 +71,7 @@
                 <DropdownMenuItem as-child :disabled="store.loading || !!store.error" @select="downloadFile">
                   <button type="button">Download</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem as-child :disabled="store.loading || !!store.error || openExternalState === 'loading'" @select="openExternally">
+                <DropdownMenuItem v-if="canOpenExternally" as-child :disabled="store.loading || !!store.error || openExternalState === 'loading'" @select="openExternally">
                   <button type="button">{{ openExternalState === 'ok' ? 'Opened' : 'Open in default app' }}</button>
                 </DropdownMenuItem>
                 <DropdownMenuItem v-if="memoryPath" as-child @select="openInMemoryMap">
@@ -333,6 +333,7 @@ import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
 import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
+import { isLoopbackPage } from '../lib/loopback'
 import { isCsvPath } from '../lib/csv'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
@@ -985,6 +986,9 @@ function setModalEl(value: Element | ComponentPublicInstance | null): void {
 
 const copyState = ref<'' | 'ok'>('')
 const openExternalState = ref<'' | 'loading' | 'ok'>('')
+// The file opens on the engine's machine, so only offer it there: from a phone
+// or another Mac it would open on a screen nobody is looking at.
+const canOpenExternally = isLoopbackPage()
 
 const activePinKey = computed(() => {
   return projectsStore.activeChatId || projectsStore.activeChat?.project_id || ''

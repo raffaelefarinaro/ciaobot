@@ -69,7 +69,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspace-binary` | Read allowed binary file |
 | GET | `/api/libreoffice-status` | Whether LibreOffice (`soffice`) is available to render `.pptx` previews |
 | POST | `/api/libreoffice-install` | Install LibreOffice via Homebrew Cask (macOS); no restart needed |
-| POST | `/api/workspace-open` | Open a workspace file with the OS default app on the machine running Ciao |
+| POST | `/api/workspace-open` | Open a workspace file with the OS default app on the machine running Ciao; loopback clients only (403 otherwise) |
 | GET | `/api/file-history` | List snapshots for a `(chat_id, file_path)` |
 | GET | `/api/file-content` | Read one snapshot's content |
 | GET | `/api/vault-markdown-paths` | List workspace-relative markdown paths (file viewer resolves Obsidian wikilinks) |
@@ -145,7 +145,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/push/unsubscribe` | Remove push subscription |
 | GET | `/api/push/status` | Read push setup status |
 | GET | `/api/push/subscription` | Check one subscription |
-| POST | `/api/push/test` | Send a test notification to the caller's own subscription (body `{endpoint}`; 10 s cooldown per subscription) |
 | GET | `/api/local/status` | Workspace git state: `git_repo`, current `branch` (nullable), dirty |
 | GET | `/api/local/preflight` | Git preflight check for dirty files, categories, blockers/warnings |
 | POST | `/api/local/handback` | Commit pending work, pull from origin, push the current branch |

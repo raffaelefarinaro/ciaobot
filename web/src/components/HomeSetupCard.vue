@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { enablePush, isPushEnabled, pushSupported, sendTestNotification } from '../lib/push'
+import { enablePush, isPushEnabled, pushSupported } from '../lib/push'
 import { installInstructions, isIos, isStandalone, SETUP_CARD_DISMISSED_KEY } from '../lib/pwaPlatform'
 import { canPromptInstall, installed, promptInstall } from '../lib/installPrompt'
 import { errorMessage } from '../lib/errorMessage'
 
-/** The device-local setup nudge: install, notifications, and a proof they work.
+/** The device-local setup nudge: install, then notifications.
  *
  * A browser tab that was never installed cannot receive push on iOS at all and
  * is easy to forget about on desktop, and Settings' scattered hints only appear
@@ -23,11 +23,11 @@ const pushAvailable = ref(false)
 const denied = ref(false)
 /** The step currently running, so its own button can show as busy. */
 const busy = ref('')
-const testResult = ref('')
 const error = ref('')
-/** True once the user acts here: the card must not vanish mid-visit, or
- *  "Send test" could never be used in the very flow that enables it. It still
- *  auto-hides on the next mount, when both steps were already done. */
+/** True once the user acts here: the card must not vanish under the click
+ *  that completes it, so the step's "On for this device" confirmation stays
+ *  readable. It still auto-hides on the next mount, when both steps were
+ *  already done. */
 const touched = ref(false)
 /** True once the push probe settled, one way or the other. Deciding `visible`
  *  before that would flash the card on every Home visit for the users who
@@ -89,21 +89,6 @@ async function enable() {
   }
 }
 
-async function test() {
-  busy.value = 'test'
-  error.value = ''
-  try {
-    // Accepted by the push service is not proof of display; say so.
-    testResult.value = await sendTestNotification()
-      ? 'Sent. If nothing appears within a few seconds, check this browser\'s notification permission in your system settings.'
-      : 'Enable notifications on this device first.'
-  } catch (e) {
-    error.value = errorMessage(e)
-  } finally {
-    busy.value = ''
-  }
-}
-
 /** Per browser and origin by construction: there is no server to tell. */
 function hide() {
   try {
@@ -148,18 +133,6 @@ function hide() {
           :disabled="busy === 'notify'"
           @click="enable"
         >Enable</button>
-      </li>
-      <li v-if="pushAvailable" class="home-setup-step">
-        <div class="home-setup-text">
-          <strong>Send a test notification</strong>
-          <span v-if="testResult" class="hint" role="status">{{ testResult }}</span>
-        </div>
-        <button
-          class="btn-small btn-chip"
-          type="button"
-          :disabled="!pushOn || busy === 'test'"
-          @click="test"
-        >Send test</button>
       </li>
     </ol>
     <p v-if="error" class="action-result" role="alert">{{ error }}</p>

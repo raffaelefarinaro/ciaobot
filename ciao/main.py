@@ -195,15 +195,10 @@ def guard_legacy_writers(runtime_root: Path) -> tuple[LegacyNodeState, bool]:
     return legacy, False
 
 
-# Web Push (RFC 8292) requires a VAPID "sub" contact URI, but the push
-# service never verifies or contacts it, so a fixed placeholder is enough.
-DEFAULT_PUSH_SUBJECT = "mailto:ciaobot@localhost"
-
-
-def _push_subject_for_config(config: CiaoConfig) -> str:
-    if getattr(config, "bootstrap_mode", False):
-        return "mailto:bootstrap@localhost"
-    return DEFAULT_PUSH_SUBJECT
+# Web Push (RFC 8292) requires a VAPID "sub" contact URI. No push service
+# contacts it, but Apple's (web.push.apple.com, Safari and iOS PWAs) rejects a
+# `localhost` domain with 403 BadJwtToken, so the placeholder uses a real one.
+PUSH_SUBJECT = "mailto:ciaobot@users.noreply.github.com"
 
 
 def _open_browser_when_ready(url: str) -> None:
@@ -820,10 +815,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         mcp_service.bind(control_plane)
         pcm._mcp_service = mcp_service
         app.state.control_plane = control_plane
-    push_subject = _push_subject_for_config(config)
     app.state.push_manager = PushManager(
         config.state_path.parent,
-        subject=push_subject,
+        subject=PUSH_SUBJECT,
         push_all=lambda: app_settings.settings.push_all_devices,
     )
     app.state.focused_chats = {}

@@ -19,15 +19,6 @@ logger = logging.getLogger(__name__)
 
 NOTIFICATION_LOG_MAX = 100
 
-# Payload of the Settings → Notifications "Send test notification" button. The
-# service worker shows it under its own tag so it never reads as a chat reply.
-TEST_PAYLOAD = {
-    "kind": "test",
-    "title": "Ciaobot",
-    "body": "Test notification: notifications work on this device.",
-}
-
-
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
@@ -241,14 +232,6 @@ class PushManager:
         self._log_notification(payload)
         remote = [s for s in self._subs if not s.get("local")]
         self._deliver(remote, payload)
-
-    def send_test(self, endpoint: str) -> int:
-        """Push TEST_PAYLOAD to the one subscription with ``endpoint``; returns 1 if accepted.
-
-        Never written to the tray log: a test is about this browser's delivery path.
-        """
-        subs = [s for s in self._subs if s.get("endpoint") == endpoint]
-        return self._deliver(subs, dict(TEST_PAYLOAD))
 
     def clear_chat(self, chat_id: str) -> None:
         """Clear delivered notifications for ``chat_id`` on every channel.
