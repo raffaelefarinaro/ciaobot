@@ -461,30 +461,6 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('SettingsView explains notifications in the desktop app instead of blanking', async () => {
-    // The tray's "Notification Settings…" navigates the desktop window here, so
-    // the desktop branch must render guidance rather than nothing.
-    window.__CIAOBOT_DESKTOP__ = true
-    try {
-      const router = makeRouter()
-      await router.push('/settings/notifications')
-      await router.isReady()
-      const mod = await import('../SettingsView.vue')
-      const wrapper = mount(mod.default as never, {
-        global: { plugins: [router], stubs: { Teleport: true } },
-      })
-      await flushPromises()
-      await nextTick()
-
-      expect(wrapper.text()).toContain('Handled by the menu bar')
-      expect(wrapper.text()).toContain('Native Notifications')
-      expect(wrapper.text()).not.toContain('Enable on this device')
-      wrapper.unmount()
-    } finally {
-      delete window.__CIAOBOT_DESKTOP__
-    }
-  })
-
   it('SettingsView keeps subagents and commands on separate settings pages', async () => {
     const router = makeRouter()
     await router.push('/settings/subagents')

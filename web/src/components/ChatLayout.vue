@@ -298,7 +298,6 @@ import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'
 import { pendingPrompt } from '../lib/prompt'
-import { isDesktopApp } from '../lib/desktop'
 import { FONT_SCALE_STEP, useFontScale } from '../composables/useFontScale'
 
 const store = useProjectStore()
@@ -645,8 +644,7 @@ async function chooseNewChat(workspace = store.activeWorkspace, projectId?: stri
   await store.newChatInProject(selectedProject)
 }
 
-// Cmd+T (Desktop) / Option+N (Web/PWA) and every visible New action use the
-// same project picker.
+// Option+N and every visible New action use the same project picker.
 async function handleNewChatShortcut() {
   await chooseNewChat()
 }
@@ -759,12 +757,11 @@ function closeChat() {
 }
 
 // ── Global keyboard shortcuts ───────────────────────────────────────
-// Bound in both the PWA and the desktop app, but on different modifiers: the
-// Tauri webview owns Cmd+T, while a browser tab has already spent
-// it on new-tab, so the PWA uses Option instead. See
-// onShortcutKeydown for the pairs. Archive deliberately moved off Cmd+A
-// (which select-all owns inside text fields) to Cmd/Option+Backspace, which
-// fires everywhere including while typing.
+// A browser tab has already spent the Cmd chords on itself -- Cmd+T opens a
+// new tab, Cmd+S saves the page, Cmd+[ / Cmd+] are back/forward -- so every
+// single-key shortcut here binds Option (Alt) instead. Archive deliberately
+// moved off Cmd+A (which select-all owns inside text fields) to
+// Option+Backspace, which fires everywhere including while typing.
 function isTypingTarget(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false
   return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
@@ -794,10 +791,8 @@ function optionChord(e: KeyboardEvent, codes: readonly string[], keys: readonly 
 // carrying a modifier stays in onShortcutKeydown.
 //
 // These must live in exactly ONE listener. They were previously handled here
-// AND again in onShortcutKeydown; in the desktop app both listeners are bound,
-// so a single arrow press ran onArrow twice and focus jumped two cards at a
-// time. The PWA, with only this listener, behaved correctly -- which is why the
-// breakage looked desktop-specific.
+// AND again in onShortcutKeydown, so a single arrow press ran onArrow twice
+// and focus jumped two cards at a time.
 function onUnreservedKeydown(e: KeyboardEvent) {
   // The new-chat picker is an aria-modal dialog: while it is open it owns the
   // keyboard, and nothing here may act on the page behind it. Without this,
@@ -807,15 +802,12 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // claims the keys it uses in the capture phase; this covers every chord it
   // does not.
   if (pendingNewChat.value) return
-  // Switch top-level sections (chat → schedules → memory → settings). Desktop
-  // uses Cmd+Arrow; the web PWA uses Option+Arrow, because the browser has
-  // already spent Cmd+Left/Right on back/forward. Never Tab: that stays the
-  // native focus traversal.
+  // Switch top-level sections (chat → schedules → memory → settings) with
+  // Option+Arrow, because the browser has already spent Cmd+Left/Right on
+  // back/forward. Never Tab: that stays the native focus traversal.
   const mod = e.metaKey || e.ctrlKey
   const alt = e.altKey
-  const desktopSection = isDesktopApp() && mod && !alt
-  const webSection = !isDesktopApp() && alt && !mod
-  const isSectionArrow = (desktopSection || webSection) && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')
+  const isSectionArrow = alt && !mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')
   if (isSectionArrow) {
     if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
     const sections = ['/', '/schedules', '/memory', '/settings']
@@ -994,10 +986,8 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // would otherwise toggle back and forth for as long as the key was held.
   if (e.repeat) return
 
-  // Arrow keys and Esc are handled by onUnreservedKeydown, which is bound in
-  // both the PWA and the desktop app. Handling them here too made the desktop
-  // app run them twice.
-  const isDesktop = isDesktopApp()
+  // Arrow keys and Esc are handled by onUnreservedKeydown, which is always
+  // bound. Handling them here too ran them twice.
   const mod = e.metaKey || e.ctrlKey
   const alt = e.altKey
 
@@ -1021,78 +1011,60 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
-  // New Chat: Cmd+T (Desktop) or Option+N (Web/PWA). Opens a small picker to
-  // choose the workspace the new chat should live in; Enter creates it in the
-  // active workspace's General project.
-  if ((isDesktop && mod && (e.key === 't' || e.key === 'T')) || (!isDesktop && alt && optionChord(e, ['KeyN'], ['n', 'N']))) {
+  // New Chat: Option+N. Opens a small picker to choose the workspace the new
+  // chat should live in; Enter creates it in the active workspace's General
+  // project. Cmd+T is left alone: it is the browser's new tab.
+  if (alt && optionChord(e, ['KeyN'], ['n', 'N'])) {
     e.preventDefault()
     void handleNewChatShortcut()
     return
   }
 
-  // Archive: Cmd+Backspace (Desktop) or Option+Backspace (Web/PWA). Unlike
-  // the old Cmd+A it also fires while a text field is focused — that is the
-  // point: archive from mid-thought without clicking out. The confirm dialog
-  // from archiveActiveChat is what makes this safe to fire while typing, and
-  // it gates on shortcutsActive anyway, so the dialog swallows further keys.
-  if ((isDesktop && mod && !alt && e.key === 'Backspace') || (!isDesktop && alt && !mod && optionChord(e, ['Backspace'], ['Backspace']))) {
+  // Archive: Option+Backspace. Unlike the old Cmd+A it also fires while a
+  // text field is focused — that is the point: archive from mid-thought
+  // without clicking out. The confirm dialog from archiveActiveChat is what
+  // makes this safe to fire while typing, and it gates on shortcutsActive
+  // anyway, so the dialog swallows further keys.
+  if (alt && !mod && optionChord(e, ['Backspace'], ['Backspace'])) {
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.archiveActiveChat()
     return
   }
 
-  // Back / forward: Cmd+[ / Cmd+] in the desktop app, which has no browser
-  // chrome to provide them. A browser already binds its own chord, so the PWA
-  // leaves the key alone. Text fields keep it (Cmd+[ outdents in some editors).
-  if (isDesktop && mod && !alt && !e.shiftKey && (e.key === '[' || e.key === ']')) {
-    if (isTypingTarget(e.target)) return
-    e.preventDefault()
-    if (e.key === '[') router.back()
-    else router.forward()
-    return
-  }
-
-  // Sidebar: Cmd+S (Desktop) or Option+S (Web/PWA), where Cmd+S is the
-  // browser's Save Page. Skipped while typing for the same reason as archive:
-  // in a text field Option+S is how you type ß, and stealing it would break
-  // text entry for the sake of a view toggle.
-  if ((isDesktop && mod && (e.key === 's' || e.key === 'S')) || (!isDesktop && alt && optionChord(e, ['KeyS'], ['s', 'S']))) {
+  // Sidebar: Option+S, because Cmd+S is the browser's Save Page. Skipped while
+  // typing for the same reason as archive: in a text field Option+S is how you
+  // type ß, and stealing it would break text entry for the sake of a view
+  // toggle.
+  if (alt && optionChord(e, ['KeyS'], ['s', 'S'])) {
     if (isTypingTarget(e.target)) return
     e.preventDefault()
     sidebarCollapsed.value = !sidebarCollapsed.value
     return
   }
 
-  // Model picker: Cmd+Shift+M (Desktop) or Option+M (Web/PWA). Plain Cmd+M is
-  // reserved by macOS for Minimize Window and cannot be intercepted reliably.
-  // Not gated on the typing target: opening the picker is the
-  // useful reading of the key even mid-compose, and the picker is a popover,
-  // not a text mutation.
-  if ((isDesktop && mod && e.shiftKey && !alt && (e.key === 'm' || e.key === 'M')) || (!isDesktop && alt && optionChord(e, ['KeyM'], ['m', 'M']))) {
+  // Model picker: Option+M. Not gated on the typing target: opening the picker
+  // is the useful reading of the key even mid-compose, and the picker is a
+  // popover, not a text mutation.
+  if (alt && optionChord(e, ['KeyM'], ['m', 'M'])) {
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.toggleModelPicker()
     return
   }
 
-  // Font zoom: Cmd+Shift+= / Cmd+Shift+- in the desktop app, Option+= /
-  // Option+- in the PWA — the same split as every other modifier shortcut
-  // here, and for the same reason.
-  //
-  // Cmd+Shift+= cannot be used in a browser: on a US layout that chord *is*
+  // Font zoom: Option+= / Option+-, the same modifier as every other shortcut
+  // here. Cmd+Shift+= cannot be used instead: on a US layout that chord *is*
   // Cmd++, the browser's own zoom-in, which is handled above the page and
-  // ignores preventDefault. The page zoomed *and* the font grew, two steps at
-  // once, while Cmd+Shift+- (not a browser chord) moved one — so the two
-  // directions disagreed and browser zoom-in became unusable on its own.
+  // ignores preventDefault -- the page would zoom *and* the font would grow,
+  // two steps at once.
   //
   // Skipped while typing because Option+= / Option+- type ≠ and – on macOS.
   // Step, bounds and persistence come from useFontScale, shared with the
   // Settings +/- buttons.
-  const zoomModifier = isDesktop ? (mod && e.shiftKey && !alt) : (alt && !mod)
-  if (zoomModifier && !isTypingTarget(e.target)) {
-    const zoomIn = isDesktop ? (e.key === '=' || e.key === '+') : optionChord(e, ['Equal', 'NumpadAdd'], ['=', '+'])
-    const zoomOut = isDesktop ? (e.key === '-' || e.key === '_') : optionChord(e, ['Minus', 'NumpadSubtract'], ['-', '_'])
+  if (alt && !mod && !isTypingTarget(e.target)) {
+    const zoomIn = optionChord(e, ['Equal', 'NumpadAdd'], ['=', '+'])
+    const zoomOut = optionChord(e, ['Minus', 'NumpadSubtract'], ['-', '_'])
     if (zoomIn) {
       e.preventDefault()
       fontScale.adjust(FONT_SCALE_STEP)
