@@ -759,6 +759,14 @@ def test_engine_installer_ignores_plist_of_deleted_app(tmp_path: Path) -> None:
 # running the tests.
 
 
+def _app_bundle(tmp_path: Path) -> Path:
+    """The bundle `_desktop_install` puts on the fake Mac, as the path the
+    classifier reports it as. A real directory, because #672 removes it: an
+    install whose bundle is not there is not the state a hand-over is run
+    against."""
+    return tmp_path / "Ciaobot.app"
+
+
 def _desktop_install(
     harness: dict[str, Any], tmp_path: Path, node_state: object = None
 ) -> Path:
@@ -770,7 +778,7 @@ def _desktop_install(
     """
     home: Path = harness["home"]
     app_engine = (
-        tmp_path / "Ciaobot.app" / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
+        _app_bundle(tmp_path) / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
     )
     app_engine.parent.mkdir(parents=True)
     _write_exec(app_engine, "#!/bin/sh\nexit 0\n")
@@ -1981,6 +1989,9 @@ def test_migrate_host_rollback_restores_the_shim_as_a_regular_file(
     # rather than being what the shim was written into.
     assert not _tool_env(harness).exists()
     assert _migration_receipt(harness)["phase"] == "rolled_back"
+    # The app's engine is the one the restored shim execs, so a rolled-back run
+    # may not have taken the bundle it runs out of with it.
+    assert _app_bundle(tmp_path).is_dir()
 
 
 @needs_local_tools
@@ -2070,8 +2081,114 @@ def test_migrate_host_success_orders_start_health_retirement(
     )
     assert _install_receipt(harness)["service_backend"] == "launchd"
     assert _migration_receipt(harness)["phase"] == "migrated"
-    # The bundle is not deleted here, and the user is told how to remove it.
+    # The completed hand-over retires the bundle with the app's agent, and the
+    # manual command is named only when that removal could not run.
+    assert not _app_bundle(tmp_path).exists()
+    assert "Removed the retired Ciaobot.app." in result.stdout
+    assert "ciao desktop uninstall" not in result.stdout
+
+
+@needs_local_tools
+def test_migrate_host_removes_the_retired_app_bundle(tmp_path: Path) -> None:
+    # #672. Once the receipt says `migrated` and no launchd job points into
+    # Ciaobot.app, the bundle is inert: nothing runs out of it, and a
+    # double-click on it would bring the old PWA back against an engine this
+    # Mac no longer has. So the run that completed the hand-over takes it away
+    # and says so, rather than printing a second command the user has to find.
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path)
+    bundle = _app_bundle(tmp_path)
+    # The bundle is a real directory holding the engine the plist names, so the
+    # removal below is observable rather than a no-op against a missing path.
+    assert (bundle / "Contents/Resources/ciao-runtime/bin/ciao").is_file()
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 0, result.stderr
+    assert _migration_receipt(harness)["phase"] == "migrated"
+    assert not bundle.exists()
+    assert "Removed the retired Ciaobot.app." in result.stdout
+    # Nothing is left pointing into the deleted bundle: the app's own agent is
+    # out of launchd and its plist went with it.
+    assert not (harness["home"] / "Library/LaunchAgents/Ciaobot.plist").exists()
+    assert f"disable gui/{os.getuid()}/Ciaobot" in _log(harness, "launchctl.log")
+    # The install itself is untouched: only the retired bundle went.
+    assert _install_receipt(harness)["service_backend"] == "launchd"
+    assert (harness["home"] / ".local/bin/ciao").exists()
+
+
+@needs_local_tools
+def test_migrate_host_no_start_keeps_the_app_bundle(tmp_path: Path) -> None:
+    # `--no-start` promised no service and no retirement, and the app's own
+    # agent is still loaded on this Mac afterwards: the bundle is still what the
+    # next relaunch of Ciaobot.app runs out of. Deleting it there would take
+    # away the very engine a second run without `--no-start` completes the
+    # hand-over from.
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path)
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate", "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert _migration_receipt(harness)["phase"] == "installed_no_start"
+    assert _app_bundle(tmp_path).is_dir()
+    assert "Removed the retired Ciaobot.app." not in result.stdout
+    assert "ciao desktop uninstall" not in result.stdout
+
+
+@needs_local_tools
+def test_migrate_client_keeps_the_app_bundle(tmp_path: Path) -> None:
+    # The client path retires the app's own agent, but this Mac is not being
+    # given the engine it was running - it is being pointed at somebody else's.
+    # The bundle is not this transaction's to delete, and the path that could do
+    # it is not on this branch at all.
+    harness = _harness(tmp_path)
+    _desktop_install(
+        harness, tmp_path, {"role": "standby", "host_url": "https://mini.ts.net"}
+    )
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 0, result.stderr
+    assert _migration_receipt(harness)["phase"] == "migrated_client"
+    assert _app_bundle(tmp_path).is_dir()
+    assert "Removed the retired Ciaobot.app." not in result.stdout
+
+
+@needs_local_tools
+def test_migrate_host_reports_a_bundle_it_could_not_remove(tmp_path: Path) -> None:
+    # A `/Applications` install the account cannot write. The hand-over has
+    # already succeeded - the receipt is `migrated` and the app's agent is gone
+    # - so a bundle that would not delete is reported, never fatal: failing here
+    # would report a migration that worked as one that did not, and would point
+    # the user at a rollback for a leftover directory.
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path)
+    real_rm = shutil.which("rm") or "/bin/rm"
+    # `rm` is a plain command in the script, so the harness reaches it through
+    # PATH: a stub that refuses a `.app` and does everything else for real is
+    # the one case a fake `$HOME` cannot produce by permissions alone.
+    _write_exec(
+        harness["fakebin"] / "rm",
+        '#!/bin/sh\n'
+        'for arg in "$@"; do\n'
+        '    case "$arg" in\n'
+        '        *.app) exit 1 ;;\n'
+        '    esac\n'
+        'done\n'
+        f'exec {real_rm} "$@"\n',
+    )
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 0, result.stderr
+    assert _migration_receipt(harness)["phase"] == "migrated"
+    # The bundle is still there, and the manual way to remove it is named
+    # exactly here and nowhere else in the run.
+    assert _app_bundle(tmp_path).is_dir()
+    assert "Ciaobot.app could not be removed automatically" in result.stdout
     assert "ciao desktop uninstall" in result.stdout
+    assert "Removed the retired Ciaobot.app." not in result.stdout
 
 
 @needs_local_tools
@@ -2108,6 +2225,9 @@ def test_migrate_host_retirement_failure_rolls_back(tmp_path: Path) -> None:
     trace = _trace(harness)
     assert "receipt-write retiring" in trace
     assert "receipt-write migrated" not in trace
+    # The bundle is what the rollback gave the app its engine back out of, so a
+    # rolled-back hand-over may not have deleted it.
+    assert _app_bundle(tmp_path).is_dir()
 
 
 @needs_local_tools
@@ -2168,6 +2288,10 @@ def test_migrate_host_resumes_from_retiring(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert _migration_receipt(harness)["phase"] == "migrated"
     assert not (harness["home"] / "Library/LaunchAgents/Ciaobot.plist").exists()
+    # This is the run that finishes the retirement, so it is also the one that
+    # retires the bundle with it.
+    assert not _app_bundle(tmp_path).exists()
+    assert "Removed the retired Ciaobot.app." in result.stdout
 
 
 @needs_local_tools
@@ -2224,7 +2348,54 @@ def test_migrate_host_completes_an_unfinished_no_start_handover(tmp_path: Path) 
     assert f"setup --workspace {workspace} --python {ciao} --yes --load-launchd\n" in (
         _log(harness, "ciao-calls.log")
     )
-    assert "Ciaobot.app is no longer needed" in second.stdout
+    # The hand-over completed on this run, so the bundle goes with it. The
+    # classifier cannot name it here - the plist it reads is the one `ciao setup`
+    # repointed - so this also pins that the transaction recorded it and the
+    # resumed run acted on that record rather than skipping the removal.
+    assert _migration_receipt(harness)["app_bundle"] == str(_app_bundle(tmp_path))
+    assert not _app_bundle(tmp_path).exists()
+    assert "Removed the retired Ciaobot.app." in second.stdout
+    assert "ciao desktop uninstall" not in second.stdout
+
+
+@needs_local_tools
+def test_migrate_resumes_a_receipt_that_never_recorded_the_bundle(
+    tmp_path: Path,
+) -> None:
+    # A transaction started by an installer that did not record the bundle it was
+    # retiring. The retry can still finish the hand-over - the receipt carries
+    # the kind, the workspace and the originals - but it has no way to learn
+    # which bundle that was, because the plist it can read now points at the tool
+    # the first run installed. So it may not fail on the missing field, and it
+    # may not pass over the bundle in silence either: the app is still on disk,
+    # inert but double-clickable, and saying nothing is the state #672 exists to
+    # end. The manual way to remove it is named instead.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    _desktop_install(harness, tmp_path)
+
+    first = _run_installer(harness, "--version", VERSION, "--migrate", "--no-start")
+
+    assert first.returncode == 0, first.stderr
+    receipt_path = home / ".local/state/ciaobot/migration/receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["app_bundle"] == str(_app_bundle(tmp_path))
+    del receipt["app_bundle"]
+    receipt_path.write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    retry = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert retry.returncode == 0, retry.stderr
+    assert _migration_receipt(harness)["phase"] == "migrated"
+    # The hand-over finished - the app's own agent is retired and gone - and the
+    # bundle is still there, which is only honest because the run says so.
+    assert not (home / "Library/LaunchAgents/Ciaobot.plist").exists()
+    assert _app_bundle(tmp_path).is_dir()
+    assert "Ciaobot.app could not be removed automatically" in retry.stdout
+    assert "ciao desktop uninstall" in retry.stdout
+    assert "Removed the retired Ciaobot.app." not in retry.stdout
 
 
 @needs_local_tools
@@ -2328,7 +2499,13 @@ def test_migrate_as_host_completes_an_unfinished_no_start_handover(
     assert f"setup --workspace {workspace} --python {ciao} --yes --load-launchd\n" in (
         _log(harness, "ciao-calls.log")
     )
-    assert "Ciaobot.app is no longer needed" in retry.stdout
+    # The `--as-host` decision survived the interruption in the receipt, and so
+    # did the bundle it was retiring: the resumed hand-over takes the app away
+    # rather than leaving the dead one behind.
+    assert _migration_receipt(harness)["app_bundle"] == str(_app_bundle(tmp_path))
+    assert not _app_bundle(tmp_path).exists()
+    assert "Removed the retired Ciaobot.app." in retry.stdout
+    assert "ciao desktop uninstall" not in retry.stdout
 
 
 @needs_local_tools
