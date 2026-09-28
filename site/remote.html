@@ -86,17 +86,17 @@
         </li>
         <li>
           <h3>Find the host's address</h3>
-          <p>In Ciaobot on the host, open <strong>Settings → Home</strong>. The <em>this device</em> section lists the addresses where Ciaobot can be reached, each with a <strong>Copy</strong> and a <strong>QR</strong> button. The Tailscale address starts with <code>100.</code>, for example <code>http://100.101.102.103:8443</code>.</p>
+          <p>In Ciaobot on the host, open <strong>Settings → General</strong>. The <em>Other devices</em> card lists the addresses where Ciaobot can be reached, each with a <strong>Copy</strong> and a <strong>QR</strong> button. The Tailscale address starts with <code>100.</code>, for example <code>http://100.101.102.103:8443</code>.</p>
           <figure>
-            <a href="assets/img/device.webp"><img src="assets/img/device.webp" width="1600" height="1000" alt="The this-device panel in Settings, showing the host role and its addresses" loading="lazy"></a>
-            <figcaption>Settings → Home → this device. The host lists its addresses; scan the QR code with your phone.</figcaption>
+            <a href="assets/img/device.webp"><img src="assets/img/device.webp" width="1600" height="1000" alt="The Other devices card in Settings, listing the addresses where Ciaobot can be reached, with Copy and QR buttons" loading="lazy"></a>
+            <figcaption>Settings → General → Other devices. The host lists its addresses; scan the QR code with your phone.</figcaption>
           </figure>
         </li>
       </ol>
     </section>
 
     <section id="browser">
-      <h2>Step 2a: use it from a phone, tablet or any browser</h2>
+      <h2>Step 2: use it from a phone, tablet or any browser</h2>
       <p>Nothing to install besides Tailscale. Open the host's address in the browser (or scan the QR code), log in with your Ciaobot password, and you're in, with all your workspaces, chats and memory.</p>
       <p><strong>Make it feel like an app:</strong> on iPhone or iPad, tap <em>Share → Add to Home Screen</em>; on Android, use <em>Install app</em> in the browser menu.</p>
       <div class="note">
@@ -104,26 +104,6 @@
         <pre><code>tailscale serve --bg 8443</code></pre>
         <p>Then use the <code>https://&lt;host-name&gt;.&lt;your-tailnet&gt;.ts.net</code> address it prints. The first time, Tailscale may ask you to enable HTTPS for your network in its admin page.</p>
       </div>
-    </section>
-
-    <section>
-      <h2>Step 2b: use it from a second Mac</h2>
-      <p>If Ciaobot is also installed on your laptop, you can switch that laptop to <strong>client</strong> mode. It then shows the host's workspaces, chats and settings, in the same browser interface you use everywhere else.</p>
-      <ol class="steps">
-        <li>
-          <h3>Make sure the host has a password</h3>
-          <p>You set one during setup. You can change it in <strong>Settings → Home</strong> on the host.</p>
-        </li>
-        <li>
-          <h3>On the laptop, choose Connect as client</h3>
-          <p>Open <strong>Settings → Home → this device</strong> and click <strong>Connect as client…</strong>. Enter the host's Tailscale address (for example <code>http://100.101.102.103:8443</code>) and the host's password, then click <strong>Connect</strong>.</p>
-        </li>
-        <li>
-          <h3>That's it</h3>
-          <p>The laptop pauses its own automations and everything runs on the host. A banner shows that you're connected as a client.</p>
-        </li>
-      </ol>
-      <p><strong>To switch back</strong>, open <em>this device</em> again and click <strong>Disconnect</strong>.</p>
     </section>
 
     <section>
@@ -153,7 +133,7 @@
         </li>
         <li>
           <h3>Open it from anywhere</h3>
-          <p>Continue with <a href="#browser">Step 2a</a>, including the https address.</p>
+          <p>Continue with <a href="#browser">Step 2</a>, including the https address.</p>
         </li>
       </ol>
       <p><strong>What's different on a server:</strong> updates are installed by you rather than with one click. Everything else works the same.</p>
