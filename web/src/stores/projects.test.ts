@@ -1137,6 +1137,263 @@ describe('stopped turns', () => {
   })
 })
 
+// #630: the session file is written as the turn runs, so the first /messages
+// response after a turn ends can still be holding only trace rows — provider
+// commentary, thinking, activity, a file card. Those rows are what the client
+// renders from live events, not the turn's answer. Settling on one of them
+// stopped the post-result retries before the final answer was persisted, and
+// the reply stayed blank until opening Activity forced a refetch.
+describe('trace-only history tails', () => {
+  const USER = { role: 'user', content: 'summarise the offer', sent_at: '2026-09-27T09:00:00Z', turn_index: 0 }
+  const COMMENTARY = { role: 'assistant', content: 'Now let me pull the four points together.', phase: 'commentary', sent_at: '' }
+  const FINAL = { role: 'assistant', content: 'Four points: ops, 100k, Nov 1, VP Operations.', phase: 'final_answer', sent_at: '2026-09-27T09:00:12Z' }
+
+  // Answers the /messages endpoint with `payloads` in order, repeating the last
+  // one once they run out, and counts the calls that reached the history path.
+  function historyEndpoint(payloads: unknown[]) {
+    let calls = 0
+    apiGet.mockImplementation((path: string) => {
+      if (!path.includes('/messages')) return Promise.resolve([])
+      const payload = payloads[Math.min(calls, payloads.length - 1)]
+      calls += 1
+      return Promise.resolve(payload)
+    })
+    return () => calls
+  }
+
+  function streamingDone(store: ReturnType<typeof useProjectStore>, chatId: string) {
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    events.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_streaming_done',
+        chat_id: chatId,
+        project_id: 'p1',
+        is_error: false,
+      }),
+    })
+  }
+
+  test('retries commentary-only history until the final answer arrives', async () => {
+    // The reported symptom: the turn finished, but the first history response
+    // held the turn's commentary only. Any non-error assistant row used to
+    // count as the answer, so the reconcile stopped after one fetch and the
+    // bubble never appeared.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-commentary-tail'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [
+        { role: 'user', content: USER.content, timestamp: USER.sent_at, turn_index: 0 },
+      ]
+      const calls = historyEndpoint([
+        [USER, COMMENTARY],
+        [USER, COMMENTARY, FINAL],
+      ])
+
+      streamingDone(store, chatId)
+      await vi.advanceTimersByTimeAsync(12000)
+
+      expect(calls()).toBeGreaterThan(1)
+      expect(store.messages[chatId].at(-1)?.content).toBe(FINAL.content)
+      expect(store.streaming[chatId]).toBe(false)
+      // The commentary stays a trace step; it is never promoted to the answer.
+      expect(store.messages[chatId].filter(m => m.content === COMMENTARY.content)).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  const TRACE_TAILS = [
+    { tool_name: '_thinking', content: 'planning the summary' },
+    { tool_name: '_activity', content: 'Read offer.md' },
+    { tool_name: '_filecard', content: 'offer.md', file_path: 'notes/offer.md' },
+  ] as const
+
+  for (const trace of TRACE_TAILS) {
+    for (const shape of ['flat', 'envelope'] as const) {
+      test(`retries ${trace.tool_name} history until the final answer arrives (${shape})`, async () => {
+        vi.useFakeTimers()
+        try {
+          const store = useProjectStore()
+          const chatId = `c-trace-${trace.tool_name}-${shape}`
+          store.activeChatId = chatId
+          store.streaming[chatId] = true
+          store.messages[chatId] = [
+            { role: 'user', content: USER.content, timestamp: USER.sent_at, turn_index: 0 },
+            { role: 'system', content: trace.content, timestamp: '', tool_name: trace.tool_name, file_path: 'file_path' in trace ? trace.file_path : undefined },
+          ]
+          const rows = (n: number) => {
+            const base = [USER, { role: 'system', ...trace }, ...(n > 1 ? [FINAL] : [])]
+            return shape === 'flat'
+              ? base
+              : { items: base.map((r, i) => ({ ...r, i })), total: base.length, offset: 0, limit: 50, hasMore: false, nextOffset: null }
+          }
+          const calls = historyEndpoint([rows(1), rows(2)])
+
+          streamingDone(store, chatId)
+          await vi.advanceTimersByTimeAsync(12000)
+
+          expect(calls()).toBeGreaterThan(1)
+          expect(store.messages[chatId].at(-1)?.content).toBe(FINAL.content)
+          expect(store.streaming[chatId]).toBe(false)
+          // The trace row keeps rendering in Activity alongside the answer.
+          expect(store.messages[chatId].filter(m => m.tool_name === trace.tool_name)).toHaveLength(1)
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+    }
+  }
+
+  test('streaming done reconciles a commentary tail even when the local spinner is false', async () => {
+    // The result frame already cleared `streaming`, so `chat_streaming_done`
+    // skipped reconciliation entirely on a commentary tail. Nothing refetched
+    // history until the user opened Activity.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-done-commentary'
+      store.activeChatId = chatId
+      store.messages[chatId] = [
+        { role: 'user', content: USER.content, timestamp: USER.sent_at, turn_index: 0 },
+        { role: 'assistant', content: COMMENTARY.content, timestamp: '', phase: 'commentary' },
+      ]
+      const calls = historyEndpoint([[USER, COMMENTARY, FINAL]])
+
+      streamingDone(store, chatId)
+      await vi.advanceTimersByTimeAsync(12000)
+
+      expect(calls()).toBeGreaterThan(0)
+      expect(store.messages[chatId].at(-1)?.content).toBe(FINAL.content)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('opening an idle chat waits through a commentary tail for its final answer', async () => {
+    // The open path holds the loading card while it waits for a reply that has
+    // not landed yet. It only recognised a trailing user row as "pending", so
+    // a trace tail released the flag on a transcript still missing the answer.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-open-commentary'
+      store.activeChatId = chatId
+      store.messages[chatId] = [
+        { role: 'user', content: USER.content, timestamp: USER.sent_at, turn_index: 0 },
+      ]
+      const calls = historyEndpoint([
+        [USER, COMMENTARY],
+        [USER, COMMENTARY, FINAL],
+      ])
+
+      const opening = store.loadMessages(chatId, { waitForSettledReply: true })
+      // The loading card stays up while the wait is still owed.
+      expect(store.messageHistoryLoading).toBe(true)
+      await vi.advanceTimersByTimeAsync(12000)
+      await opening
+
+      expect(calls()).toBeGreaterThan(1)
+      expect(store.messages[chatId].at(-1)?.content).toBe(FINAL.content)
+      expect(store.messageHistoryLoading).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('older result reconciliation does not clear a newer turn', async () => {
+    // A new turn can start while the previous turn's reconcile is awaiting
+    // /messages. Clearing on its stale "settled" read wiped the live turn's
+    // streaming buffers, so its answer never rendered.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-newer-turn'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [
+        { role: 'user', content: USER.content, timestamp: USER.sent_at, turn_index: 0 },
+      ]
+      // The socket is already up, so the new turn's start does not churn it.
+      store.connectWs(chatId)
+      let releaseFirst: (value: unknown) => void = () => {}
+      const firstResponse = new Promise(resolve => { releaseFirst = resolve })
+      let calls = 0
+      apiGet.mockImplementation((path: string) => {
+        if (!path.includes('/messages')) return Promise.resolve([])
+        calls += 1
+        return calls === 1 ? firstResponse : Promise.resolve([USER, FINAL])
+      })
+
+      store.connectEventsWs()
+      const events = fakeSockets[fakeSockets.length - 1]
+      // The previous turn's result frame starts the reconcile, which is now
+      // blocked on the first /messages call.
+      events.onmessage?.({
+        data: JSON.stringify({
+          type: 'chat_result_ready',
+          chat_id: chatId,
+          project_id: 'p1',
+          title: 't',
+          snippet: '',
+        }),
+      })
+      expect(calls).toBe(1)
+
+      // A new turn starts and streams while that request is still in flight.
+      events.onmessage?.({
+        data: JSON.stringify({
+          type: 'chat_streaming_started',
+          chat_id: chatId,
+          project_id: 'p1',
+        }),
+      })
+      store.streaming[chatId] = true
+      store.streamingText[chatId] = 'partial text of the new turn'
+
+      // The old turn's history finally resolves: settled, and now stale.
+      releaseFirst([USER, { role: 'assistant', content: 'answer of the older turn', sent_at: '2026-09-27T09:00:12Z' }])
+      await vi.advanceTimersByTimeAsync(12000)
+
+      // The live turn keeps its own streaming state.
+      expect(store.projectStreaming[chatId]).toBe(true)
+      expect(store.streaming[chatId]).toBe(true)
+      expect(store.streamingText[chatId]).toBe('partial text of the new turn')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  for (const shape of ['flat', 'envelope'] as const) {
+    test(`timestamped commentary does not count as a settled mid-stream answer (${shape})`, async () => {
+      // The orchestration layer stamps `sent_at` on rows it considers
+      // turn-final, and mid-stream refreshes use that stamp to decide whether
+      // the server has really finished. A stamped commentary row is still
+      // narration: letting it through pulled the trace into the transcript
+      // while the real answer was still being written.
+      const store = useProjectStore()
+      const chatId = `c-midstream-${shape}`
+      store.messages[chatId] = [
+        { role: 'user', content: USER.content, timestamp: '', turn_index: 0 },
+      ]
+      store.projectStreaming[chatId] = true
+      const rows = [USER, { ...COMMENTARY, sent_at: '2026-09-27T09:00:05Z' }]
+      apiGet.mockResolvedValue(
+        shape === 'flat'
+          ? rows
+          : { items: rows.map((r, i) => ({ ...r, i })), total: rows.length, offset: 0, limit: 50, hasMore: false, nextOffset: null },
+      )
+
+      await store.loadMessages(chatId)
+
+      expect(store.messages[chatId].map(m => m.content)).toEqual([USER.content])
+    })
+  }
+})
+
 describe('result frames and unread state', () => {
   test('a stopped turn renders its partial text without badging the chat', () => {
     // Every connected client gets this frame, so a backgrounded tab or a second

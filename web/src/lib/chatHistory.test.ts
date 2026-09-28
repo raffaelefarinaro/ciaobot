@@ -4,6 +4,7 @@ import {
   groupIntoTurns,
   historySignature,
   isLiveTraceRow,
+  isSettledHistoryRow,
   mergeMessageFields,
   mergeMetadata,
   normalizeMessages,
@@ -209,6 +210,34 @@ describe('isLiveTraceRow', () => {
     }
     expect(isLiveTraceRow(msg({ role: 'system', content: 'notice' }))).toBe(false)
     expect(isLiveTraceRow(msg({ role: 'user' }))).toBe(false)
+  })
+})
+
+describe('isSettledHistoryRow', () => {
+  // The session file is written as the turn runs, so a /messages response can
+  // land while its last row is still provider commentary or a tool trace.
+  // Those rows are what the client renders from live events; settling on one
+  // ended the post-result retries before the answer was persisted, and the
+  // reply stayed blank until Activity forced a refetch (#630).
+  test('only real answer or error output can close a turn', () => {
+    const cases: Array<[string, ChatMessage | undefined, boolean]> = [
+      ['a final answer', msg({ role: 'assistant', content: 'Here is the summary.', phase: 'final_answer' }), true],
+      ['a phase-less answer', msg({ role: 'assistant', content: 'legacy answer' }), true],
+      ['an explicit assistant error', msg({ role: 'assistant', content: 'Error: the run failed', is_error: true }), true],
+      ['provider commentary', msg({ role: 'assistant', content: 'Now let me check the numbers.', phase: 'commentary' }), false],
+      ['thinking', msg({ role: 'system', content: 'planning the answer', tool_name: '_thinking' }), false],
+      ['activity', msg({ role: 'system', content: 'Read offer.md', tool_name: '_activity' }), false],
+      ['a file card', msg({ role: 'system', content: 'offer.md', tool_name: '_filecard', file_path: 'notes/offer.md' }), false],
+      ['any other tool-backed system row', msg({ role: 'system', content: '3 hits', tool_name: 'Grep' }), false],
+      ['an ordinary terminal system error', msg({ role: 'system', content: "Error: a message didn't reach the engine" }), true],
+      ['a user row', msg({ role: 'user', content: 'summarise the offer' }), false],
+      ['an empty assistant row', msg({ role: 'assistant', content: '   ' }), false],
+      ['an empty system notice', msg({ role: 'system', content: '' }), false],
+      ['no row at all', undefined, false],
+    ]
+    for (const [label, row, settled] of cases) {
+      expect(isSettledHistoryRow(row), label).toBe(settled)
+    }
   })
 })
 
