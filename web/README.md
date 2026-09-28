@@ -211,18 +211,22 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 
 ### Browser suite (`npm run test:e2e`)
 
-`e2e/` holds a deliberately small Playwright suite — six spec files, seventeen
+`e2e/` holds a deliberately small Playwright suite — six spec files, eighteen
 tests, about three seconds — that covers only the things a jsdom mount **cannot**
 establish:
 
 | Spec | What only a real browser can decide |
 | --- | --- |
 | `workspace-shortcuts.spec.ts` | Where a typed character actually lands. The `1`-`9` shortcuts must follow the visible sidebar order and stay inert while a text field is focused; jsdom reports a focused textarea that no keystroke is routed to. Also walks Tab through the primary nav, which is how a click-only control gets caught. |
-| `narrow-viewport.spec.ts` | Layout at 390px. jsdom has no layout engine: every rect is 0x0 and `scrollWidth` is always 0, so neither the unbreakable-flex-child trap nor a tap target under `--touch: 44px` is visible from a mount. The memory-insight journey also measures the row that carries a second control (the retry beside the open control), which is the one place a row can grow past the pane. |
+| `narrow-viewport.spec.ts` | Layout at 390px. jsdom has no layout engine: every rect is 0x0 and `scrollWidth` is always 0, so neither the unbreakable-flex-child trap nor a tap target under `--touch: 44px` is visible from a mount. The memory-insight journey also measures the row that carries a second control (the retry beside the open control), which is the one place a row can grow past the pane. Selecting a reply measures the opposite case: the action footer is not in the layout until the message is selected, and has to be scrolled back on screen rather than left under the composer. |
 | `browser-zoom.spec.ts` | Reflow under page zoom and at the largest in-app font scale, and that the viewport meta never disables pinch zoom. |
 | `events-reconnect.spec.ts` | That the *browser* notices a severed `/ws/events` socket, re-dials, and applies the snapshot the new socket carries. A vitest fake can only close itself. |
 | `archived-chat.spec.ts` | That an archived chat opens read-only from a deep link: no composer, and no chat socket opened for a session the provider has already reclaimed. |
 | `workbench-layout.spec.ts` | That Home's review rail sits beside the command surface, and that the expanded sidebar stacks workspace scope, New chat and the destinations without overlap. |
+
+The fixture serves an empty chat history by default. A spec that needs real
+turns to select opts in per session with `POST /__fixture__/transcript`, so the
+specs beside it keep seeing the empty chat.
 
 Everything else stays in vitest. Adding to this suite is a trade, not a free
 win: each spec is roughly a hundred times slower than the equivalent unit test
