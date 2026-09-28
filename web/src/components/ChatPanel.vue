@@ -1365,6 +1365,7 @@ import {
   findFinalAnswerIndex,
   formatTokenUsage,
   isImageFilePath,
+  isScratchPath,
   isSubagentLine,
   mentionedFilePaths,
   mergeTraceOutputs,
@@ -1959,9 +1960,11 @@ const inspectorTabs = [
 // One row per file name: the same note shows up under several spellings
 // (relative, workspace-prefixed, before and after a move), and the reader
 // thinks of it as one file.
+// Temp-dir files are the agent's scratch work; the inline cards still show
+// them, but the chat's file list is what it made for the user.
 const inspectorOutputs = computed<TraceOutput[]>(() => collapseOutputsByName(mergeTraceOutputs(
   renderItems.value.map(item => (item.kind === 'trace' || item.kind === 'assistant' ? item.outputs : undefined)),
-)))
+).filter(output => !isScratchPath(output.file_path))))
 // Every activity line this chat has produced: its turns, the subagents they
 // ran, and the turn in flight. The rail reads skills and MCP tools from it.
 const chatActivityLines = computed<string[]>(() => {
@@ -1992,6 +1995,7 @@ const mentionedFiles = computed<string[]>(() => {
   for (const item of renderItems.value) {
     if (item.kind !== 'assistant' || !item.msg.content) continue
     for (const path of mentionedFilePaths(item.msg.content)) {
+      if (isScratchPath(path)) continue
       const name = fileCardBasename(path)
       if (produced.has(name) || found.some(p => fileCardBasename(p) === name)) continue
       found.push(path)
