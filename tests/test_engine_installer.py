@@ -209,6 +209,9 @@ def _write_exec(path: Path, body: str) -> None:
 # writer/reader to the real interpreter, `tool dir` answers, `tool list` is empty
 # (nothing installed yet), and `tool install` fabricates a tool environment whose
 # interpreter and `ciao` are scripts that only record how they were called.
+# The entry point it leaves behind is a *symlink* into the tool environment, the
+# way a real `uv tool install` does it, so a rollback is exercised against the
+# state a migration actually finds rather than a plain file uv never leaves.
 # Nothing here installs anything.
 _UV_STUB = """#!/bin/sh
 set -eu
@@ -298,16 +301,28 @@ case "${1:-}" in
                 mkdir -p "$tools/ciaobot/bin" "$HOME/.local/bin"
                 cat > "$tools/ciaobot/bin/python" <<EOF
 #!/bin/sh
+# The half-installed-tool-env knob leaves behind the environment uv tool install
+# reported as installed with no importable package in it, the state #668 was
+# reported from: the interpreter is there and executable, so the entry point and
+# interpreter checks both pass, and every run through it dies with the
+# module-not-found the operator saw, spelled the way the real interpreter spells
+# it. The import probe and the receipt write both go through this interpreter,
+# so this is what whichever of them runs first finds.
+if [ -f "\\$HOME/half-installed-tool-env" ]; then
+    printf 'No module named ciao.install_receipt\\n' >&2
+    exit 1
+fi
 # The install receipt is written by this interpreter, so the knob that breaks it
 # has to be honoured here: a full disk or a read-only state directory fails the
-# same way, after the tool is already installed.
+# same way, after the tool is already installed. Only the writer fails: a
+# different invocation is a different fault.
 case "\\$*" in
-    *install_receipt*) [ -f "\\$HOME/fail-install-receipt" ] && exit 1 ;;
+    "-m ciao.install_receipt write"*) [ -f "\\$HOME/fail-install-receipt" ] && exit 1 ;;
 esac
 PYTHONPATH="__REPO_ROOT__" exec "__PYTHON__" "\\$@"
 EOF
                 chmod 755 "$tools/ciaobot/bin/python"
-                cat > "$HOME/.local/bin/ciao" <<'EOF'
+                cat > "$tools/ciaobot/bin/ciao" <<'EOF'
 #!/bin/sh
 printf 'ciao %s\n' "$*" >> "$HOME/trace.log"
 printf '%s\n' "$*" >> "$HOME/ciao-calls.log"
@@ -366,7 +381,14 @@ PLIST
 esac
 exit 0
 EOF
-                chmod 755 "$HOME/.local/bin/ciao"
+                chmod 755 "$tools/ciaobot/bin/ciao"
+                # Real uv links the entry point into the tool environment with a
+                # path relative to the bin directory it writes it in, and
+                # replaces whatever was there, so that is what is left here: a
+                # rollback that restores the app shim has to remove this link
+                # rather than write the shim through it.
+                rm -f "$HOME/.local/bin/ciao"
+                ln -s ../share/uv/tools/ciaobot/bin/ciao "$HOME/.local/bin/ciao"
                 ;;
         esac
         ;;
@@ -1918,6 +1940,78 @@ def test_migrate_host_failure_restores_previous_install(tmp_path: Path) -> None:
     before = migration_before(harness)
     assert (before / "install-receipt.json").exists()
     assert (before / "tool-env" / "bin" / "python").read_bytes() == before_tool_env
+
+
+@needs_local_tools
+def test_migrate_host_rollback_restores_the_shim_as_a_regular_file(
+    tmp_path: Path,
+) -> None:
+    # The window #668 is about. `uv tool install --force` leaves the entry point
+    # as a symlink into the tool environment, and the migration then fails after
+    # the tool is installed - here at the install receipt, the step that failed on
+    # the operator's Mac. A rollback that restores the app shim with a plain
+    # `cp` writes the shim *through* that symlink, overwrites the tool
+    # environment's own entry point with it, and then removes the environment:
+    # the Mac is left with a dangling `ciao` and no engine at all, while the
+    # receipt says the rollback happened. The shim has to come back as the
+    # regular file the before-image holds.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    _desktop_install(harness, tmp_path)
+    app_engine = (
+        tmp_path / "Ciaobot.app" / "Contents" / "Resources" / "ciao-runtime" / "bin" / "ciao"
+    )
+    _knob(harness, "fail-install-receipt")
+    shim = home / ".local" / "bin" / "ciao"
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate", "--no-start")
+
+    assert result.returncode == 1, result.stdout
+    # The failure has to be the one after the tool was installed, or the state
+    # under test is not the state #668 hit.
+    assert "tool install --force" in _log(harness, "uv-calls.log")
+    assert "could not write the install receipt" in result.stderr
+    assert "Ciaobot.app's engine was restored" in result.stderr
+    # A regular file, not the symlink uv left, and the app's shim byte for byte.
+    assert not shim.is_symlink()
+    assert shim.is_file()
+    assert f'exec "{app_engine}" "$@"' in shim.read_text(encoding="utf-8")
+    assert os.access(shim, os.X_OK)
+    # The tool environment the restored shim would have pointed through is gone,
+    # rather than being what the shim was written into.
+    assert not _tool_env(harness).exists()
+    assert _migration_receipt(harness)["phase"] == "rolled_back"
+
+
+@needs_local_tools
+def test_tool_env_is_probed_before_the_receipt_is_written(tmp_path: Path) -> None:
+    # `uv tool install --force` can exit 0 and leave an environment the installed
+    # interpreter cannot import from. #668 was reported from exactly that: the
+    # failure surfaced at the install receipt as a missing module, one step too
+    # late, with the app's engine already gone. Probed where it is found, the
+    # same half-install is a clean rollback with a message that names it.
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    _desktop_install(harness, tmp_path)
+    _knob(harness, "half-installed-tool-env")
+    shim = home / ".local" / "bin" / "ciao"
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 1, result.stdout
+    assert "the installed engine is not importable" in result.stderr, result.stderr
+    # Not the same failure one step later: the receipt was never reached, so its
+    # own message is not the one the run reported.
+    assert "could not write the install receipt" not in result.stderr
+    assert "Ciaobot.app's engine was restored" in result.stderr
+    # Which is a rollback of a real half-install, not a no-op: the tool
+    # environment the bad interpreter came from is gone and the app's shim is
+    # back, and no install receipt is left naming an engine that is not there.
+    assert not _tool_env(harness).exists()
+    assert not shim.is_symlink()
+    assert f'exec "{tmp_path / "Ciaobot.app"}' in shim.read_text(encoding="utf-8")
+    assert not (home / ".local/state/ciaobot/install-receipt.json").exists()
+    assert _migration_receipt(harness)["phase"] == "rolled_back"
 
 
 @needs_local_tools
