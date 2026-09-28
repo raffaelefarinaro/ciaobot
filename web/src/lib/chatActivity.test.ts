@@ -6,6 +6,7 @@ import {
   mergeTraceOutputs,
   collapseOutputsByName,
   shortDirname,
+  isScratchPath,
   buildTurnParts,
   collectTraceOutputs,
   findFinalAnswerIndex,
@@ -122,6 +123,17 @@ describe('collectTraceOutputs', () => {
       { tool_name: '_filecard', file_path: 'plan.md', content: '', action: 'edited' },
       { tool_name: '_filecard', file_path: 'plan.md', content: '', action: 'surfaced' },
     ])).toEqual([{ file_path: 'plan.md', action: 'edited' }])
+  })
+})
+
+describe('isScratchPath', () => {
+  it('matches system temp roots only', () => {
+    expect(isScratchPath('/private/tmp/kr-v2.md')).toBe(true)
+    expect(isScratchPath('/tmp/k.md')).toBe(true)
+    expect(isScratchPath('/var/folders/xy/T/out.md')).toBe(true)
+    expect(isScratchPath('tmp/notes.md')).toBe(false)
+    expect(isScratchPath('/Users/me/tmp/notes.md')).toBe(false)
+    expect(isScratchPath('memory-vault/work/MEMORY.md')).toBe(false)
   })
 })
 

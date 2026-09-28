@@ -99,6 +99,19 @@ def test_extract_file_touches_from_bash_creates() -> None:
     assert extract_file_touches(
         "Bash", {"command": "cp src/template.csv memory-vault/guests.csv"}
     ) == [{"file_path": "memory-vault/guests.csv", "action": "created"}]
+    # A trailing redirection is not the destination argument.
+    assert extract_file_touches(
+        "Bash", {"command": "cp src/a.md out/b.md 2>/dev/null"}
+    ) == [{"file_path": "out/b.md", "action": "created"}]
+    assert extract_file_touches(
+        "Bash", {"command": "mv a.md b.md > log.txt"}
+    ) == [
+        {"file_path": "log.txt", "action": "created"},
+        {"file_path": "b.md", "action": "created"},
+    ]
+    assert extract_file_touches("Bash", {"command": "touch x.md 2>/dev/null"}) == [
+        {"file_path": "x.md", "action": "created"}
+    ]
     # Descriptions alone (live summary without the command) must not invent paths.
     assert extract_file_touches("Bash", "Create the guest CSV") == []
     assert extract_file_touches("Bash", {"command": "ls -la /tmp"}) == []
