@@ -54,6 +54,48 @@ test.describe('narrow viewport', () => {
     ).toBeLessThanOrEqual(0)
   })
 
+  test('a selected reply keeps its whole action footer on screen at 390px', async ({ page }) => {
+    // Selecting a message grows it: the action footer is not in the layout a
+    // moment earlier. On the last turn of a phone-sized transcript the new
+    // footer lands under the composer, so the panel scrolls it back into view.
+    // jsdom cannot see this — every rect there is 0x0 — which is what makes
+    // this a browser test.
+    // The transcript is opt-in and per-session (see the fixture), so the chat
+    // is reloaded once the fixture is holding the turns this test selects.
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await page.evaluate(() => fetch('/__fixture__/transcript', { method: 'POST' }))
+    await page.reload()
+    await page.waitForSelector('.message-wrap.assistant .message-row')
+    await page.waitForSelector(COMPOSER)
+
+    await page.locator('.message-wrap.assistant .message-row').last().click()
+    await page.waitForSelector('.message-wrap--selected .message-actions')
+
+    // Wait for the reveal scroll to settle rather than sleeping.
+    await page.waitForFunction(() => {
+      const root = document.querySelector('.messages')!
+      const prev = (root as { __top?: number }).__top
+      if (prev !== undefined && prev === root.scrollTop) return true
+      ;(root as { __top?: number }).__top = root.scrollTop
+      return false
+    }, undefined, { polling: 120, timeout: 5000 })
+
+    const measured = await page.evaluate(() => {
+      const root = document.querySelector('.messages')!
+      const viewportBottom = root.getBoundingClientRect().top + root.clientHeight
+      const card = document.querySelector('.message-wrap--selected .message-row')!
+      const controls = [...document.querySelectorAll('.message-wrap--selected .message-action-btn')]
+      return {
+        cardBottom: Math.round(card.getBoundingClientRect().bottom - viewportBottom),
+        clipped: controls.filter((el) => el.getBoundingClientRect().bottom > viewportBottom + 0.5).length,
+        heights: controls.map((el) => Math.round(el.getBoundingClientRect().height)),
+      }
+    })
+    expect(measured.cardBottom, 'the selected card is still below the transcript').toBeLessThanOrEqual(0)
+    expect(measured.clipped, 'action controls clipped by the composer').toBe(0)
+    for (const h of measured.heights) expect(h).toBeGreaterThanOrEqual(44)
+  })
+
   test('icon-only controls still hit the 44px touch minimum', async ({ page }) => {
     // The open chat is where the icon-only controls live (hamburger, close,
     // model picker, archive); the home view has one.
