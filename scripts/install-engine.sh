@@ -326,6 +326,16 @@ copy_file() {
     # `cp -p` where it exists, plain `cp` where it does not: the before-images
     # want their mode and timestamps kept, but a copy that preserves nothing is
     # still better than no backup at all.
+    #
+    # `cp -p src link` follows `link` and overwrites its target, so restoring a
+    # before-image over a destination a migration replaced with a symlink (the
+    # uv tool entry point at ~/.local/bin/ciao) would write the app shim
+    # through the link and then delete the tool env it points at, leaving a
+    # dangling `ciao` and no engine. The destination must become the regular
+    # file the before-image holds, so a symlink is removed first.
+    if [ -L "$2" ]; then
+        rm -f "$2" || return 1
+    fi
     cp -p "$1" "$2" 2>/dev/null || cp "$1" "$2"
 }
 
@@ -1262,6 +1272,13 @@ ciao="$bin_dir/ciao"
 tool_python="$tool_dir/ciaobot/bin/python"
 [ -x "$ciao" ] || abort_install "the installed ciao entry point is missing: $ciao"
 [ -x "$tool_python" ] || abort_install "the installed engine interpreter is missing: $tool_python"
+# `uv tool install --force` can exit 0 while leaving an environment this
+# interpreter cannot import from (a half-populated tool dir, or a managed
+# Python that does not see the package). Probe it here, before the receipt is
+# written: a failure now rolls back cleanly, whereas failing at the receipt
+# step is the same failure one step later with the app's engine already gone.
+install_step "the installed engine is not importable" \
+    "$tool_python" -c 'import ciao.install_receipt'
 
 # Absolute paths only: the receipt is read by a process that has no idea which
 # directory the installer ran from. A client is recorded as owning no service,
