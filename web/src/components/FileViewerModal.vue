@@ -71,6 +71,9 @@
                 <DropdownMenuItem as-child :disabled="store.loading || !!store.error" @select="downloadFile">
                   <button type="button">Download</button>
                 </DropdownMenuItem>
+                <DropdownMenuItem v-if="canShareFile" as-child :disabled="store.loading || !!store.error" @select="shareFile">
+                  <button type="button">Share file…</button>
+                </DropdownMenuItem>
                 <DropdownMenuItem v-if="canOpenExternally" as-child :disabled="store.loading || !!store.error || openExternalState === 'loading'" @select="openExternally">
                   <button type="button">{{ openExternalState === 'ok' ? 'Opened' : 'Open in default app' }}</button>
                 </DropdownMenuItem>
@@ -1472,6 +1475,33 @@ function downloadFile(): void {
   document.body.appendChild(a)
   a.click()
   a.remove()
+}
+
+const canShareFile = computed(() => typeof navigator !== 'undefined' && typeof navigator.share === 'function')
+
+async function shareFile(): Promise<void> {
+  if (store.loading || store.error || !store.path) return
+  const cleaned = store.path.replace(/:\d+$/, '')
+  const name = cleaned.split('/').pop() || 'file.txt'
+  try {
+    let file: File
+    if (store.kind === 'image' || store.kind === 'pdf' || store.kind === 'html') {
+      const endpoint = store.kind === 'image' ? '/api/workspace-image'
+        : store.kind === 'pdf' ? '/api/workspace-binary' : '/api/workspace-file'
+      const url = `${endpoint}?path=${encodeURIComponent(cleaned)}${store.kind === 'pdf' ? '&raw=1' : ''}`
+      const response = await fetch(url, { credentials: 'same-origin' })
+      if (!response.ok) throw new Error('Could not load the file to share.')
+      const blob = await response.blob()
+      file = new File([blob], name, { type: blob.type || 'application/octet-stream' })
+    } else {
+      file = new File([store.content], name, { type: 'text/plain' })
+    }
+    if (!navigator.canShare?.({ files: [file] })) throw new Error('This browser cannot share this file type. Use Download instead.')
+    await navigator.share({ files: [file], title: name })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') return
+    projectsStore.pushErrorToast('Could not share file', error instanceof Error ? error.message : String(error))
+  }
 }
 
 watch(

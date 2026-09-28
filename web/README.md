@@ -41,6 +41,18 @@ web/
 
 ## iOS PWA gotchas
 
+Installed-app integration: the manifest uses the indigo shell colors, has
+shortcuts for New chat, Memory and Automations, and advertises an optional
+POST share target on browsers that support it. The service worker intercepts
+`/share-target` and stages shared text, links and files (20 MB total) in
+IndexedDB; it never posts them to the engine. Home asks the user to add them to
+the draft or discard them. A share older than 24 hours is not opened, and
+logout clears pending shares. The file viewer offers native Share where the
+browser supports sharing that file type, alongside the existing Download.
+Safari/iOS may not expose the installed app as a share target; ordinary file
+attachment remains available there. PWA features need HTTPS or localhost.
+
+
 The PWA runs primarily as a standalone iOS Safari app. Several iOS-specific quirks are addressed in code; do not undo them without reading why.
 
 ### Keyboard + viewport

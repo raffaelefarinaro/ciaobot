@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '../lib/api'
 import type { ActionResult } from '../lib/types'
+import { clearSharedContent } from '../lib/sharedContent'
 
 export const useAuthStore = defineStore('auth', () => {
   const authenticated = ref(false)
@@ -11,7 +12,8 @@ export const useAuthStore = defineStore('auth', () => {
     // result, so the app is a reload away from signed-in.
     await api.post<ActionResult>('/api/auth', { token })
     authenticated.value = true
-    window.location.replace('/')
+    const shared = new URLSearchParams(window.location.search).get('shared')
+    window.location.replace(shared ? `/?shared=${encodeURIComponent(shared)}` : '/')
   }
 
   async function logout() {
@@ -21,6 +23,7 @@ export const useAuthStore = defineStore('auth', () => {
       /* still clear local auth state */
     }
     authenticated.value = false
+    await clearSharedContent().catch(() => {})
     window.location.assign('/login')
   }
 
