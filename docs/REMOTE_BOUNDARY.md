@@ -29,8 +29,9 @@ carried by the session.
   then for the session. Every state-changing `/api/*` request must present an
   `Origin` or `Referer` that matches the request host, allowing for a
   proxy-declared `X-Forwarded-Host`.
-- `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the tray feeds
-  (`/api/menubar-chats`, `/api/menubar-notifications`) and the update
+- `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the loopback-only
+  local feed (`/api/menubar-chats`, `/api/menubar-notifications`; legacy route
+  names, no native client) and the update
   coordinator's drain handshake. It reads the TCP source address, never the
   `Host` header, which a caller controls. `is_loopback_client` is the only
   "is it local" check in the codebase and nothing else grants access on it.
