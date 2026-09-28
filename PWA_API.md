@@ -153,6 +153,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/local/backup` | Memory-backup status: `state`, `scope`, `branch`, sanitized `remote` and `last_remote`, `enabled`, `interval_s`, last attempt/success, `pending_changes`, `pending_commits`, `reason` (read-only) |
 | PATCH | `/api/local/backup` | Turn the memory backup off/on (`enabled`) or pause/resume it (`paused`); persists across a restart |
 | POST | `/api/local/backup/run` | Back up now, through the same serialized path the five-minute loop uses |
+| GET | `/api/local/backup/setup-prompt` | The canonical setup prompt plus the trusted `context` it was rendered from (read-only, entirely local) |
+| POST | `/api/local/backup/setup-chat` | Open (or re-enter) a setup chat and **send** the prompt into it; idempotent |
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
 | GET | `/api/addresses` | Where other devices can open this engine: the configured trusted HTTPS URL first (`kind: trusted`, `secure: true`), then LAN/Bonjour HTTP URLs (`kind: lan`), then localhost (`kind: loopback`). Session-protected; URLs never carry a password or token |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
@@ -687,7 +689,8 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/handov
 
 **Unattended memory backup**
 
-Routes: `GET /api/local/backup`, `PATCH /api/local/backup`, `POST /api/local/backup/run`.
+Routes: `GET /api/local/backup`, `PATCH /api/local/backup`, `POST /api/local/backup/run`,
+`GET /api/local/backup/setup-prompt`, `POST /api/local/backup/setup-chat`.
 
 The engine commits the durable-data scope (`memory-vault/`, `skills/`, `subagents/`,
 `commands/`, the `AGENTS.md` guide and archived workspaces — never credentials, runtime
@@ -734,7 +737,45 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/local
 
 # Back up now, through the same serialized path the five-minute loop uses.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/local/backup/run"
+
+# The one canonical setup prompt, and the trusted context behind it. Copy this
+# text to hand to an agent on another machine...
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/local/backup/setup-prompt"
+
+# ...or have a chat here do it. The prompt is SENT, not drafted, and a second
+# click re-enters the same chat instead of starting a second agent.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/local/backup/setup-chat"
 ```
+
+**Connecting a data folder to a private remote**
+
+`GET /api/local/backup/setup-prompt` is the setup path for a user who has no Git
+knowledge: it renders one prompt from trusted configuration and returns it beside
+the `context` it was built from, so a Settings surface can show the folder and
+scope without parsing prose.
+
+`context` is `{folder, scope, scope_paths, excluded, tracked_excluded, branch,
+has_repo, repo_root, parent_repo, has_remote, remote, interval_s}`. `folder` is
+the absolute data root with its spaces intact; `parent_repo` is true when that
+folder sits inside a larger checkout, which is the case where a remote added
+here would carry more than the notes. The `remote` is credential-free on the way
+out, and the prompt carries no token, key, or password.
+
+The same text serves both actions — a copy button and `POST
+/api/local/backup/setup-chat` — because both call one `render_setup_prompt`. That
+route opens a chat titled "Set up memory backup" in the host workspace and sends
+the prompt; a repeated click, a retry, or a reload re-enters that chat
+(`reused: true`) rather than putting a second agent on the same repository, and
+the prompt is never re-sent into a chat that already has it. Only a chat the
+owner archived is replaced. 500 when no General project exists in any workspace
+to host it.
+
+Readiness is not decided by either route. The chat does the work, the service
+re-reads the repository's real state on every tick and on every status call, and
+`GET /api/local/backup` reports what it finds — which is also how an external
+agent's setup is detected, with no restart. A guided setup that verifies turns
+the backup on, unless the owner has paused it: the pause is a hold they lift
+themselves, and a pause taken *during* a setup is the one that counts.
 
 **Proposal queue**
 
