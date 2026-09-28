@@ -94,6 +94,46 @@ test.describe('narrow viewport', () => {
     expect(small, `home composer controls below the 44px touch minimum: ${JSON.stringify(small)}`).toEqual([])
   })
 
+  test('a memory-insight row fits a phone and opens the pass it stands for', async ({ page }) => {
+    // A pass is a real chat, so the surface Home shows for it is the one place
+    // the row's own text has to survive a phone: a long conversation title, a
+    // status word, and (on one row) a pending question. jsdom has no layout
+    // engine, so only a real browser can say the row neither overflows nor
+    // drops below the touch minimum.
+    await boot(page, undefined, '.home-insights')
+
+    const rows = page.locator('.home-insight-row')
+    await expect(rows).toHaveCount(3)
+    // Newest conversation first, and named for the conversation — never for the
+    // pass's own internal title.
+    await expect(rows.nth(0).locator('.home-chat-title'))
+      .toHaveText('alpha conversation with a running memory pass')
+    await expect(rows.nth(2).locator('.home-chat-title'))
+      .toHaveText('alpha conversation with an unfinished step')
+    await expect(page.locator('.home-tier--working, .home-tier--unread')).toHaveCount(0)
+    await expect(page.getByText('Memory pass · conversation with a running memory pass')).toHaveCount(0)
+
+    for (const row of await rows.all()) {
+      const box = await row.boundingBox()
+      expect(box).not.toBeNull()
+      expect(box!.height, 'an insight row is shorter than the touch minimum').toBeGreaterThanOrEqual(44)
+    }
+
+    // The one row with a second control: a retry beside the open control, and
+    // the row must not grow past the pane when it appears.
+    const retry = rows.nth(2).getByRole('button', { name: /Retry unfinished post-archive steps/ })
+    await expect(retry).toHaveText('retry')
+    const retryBox = await retry.boundingBox()
+    expect(retryBox!.width, 'the retry control is narrower than the touch minimum').toBeGreaterThanOrEqual(44)
+    const { overflow } = await horizontalOverflow(page)
+    expect(overflow).toBeLessThanOrEqual(0)
+
+    const open = rows.nth(0).locator('.home-chat-item')
+    await expect(open).toHaveAttribute('title', 'Open the memory insight for alpha conversation with a running memory pass')
+    await open.click()
+    await expect(page).toHaveURL(/\/chat\/alpha-chat-5$/)
+  })
+
   test('a selected memory note opens an actionable sheet on a phone', async ({ page }) => {
     await boot(page, '/memory/map', '.mm-toolbar')
     await page.getByRole('button', { name: 'List', exact: true }).click()

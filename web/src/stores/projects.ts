@@ -13,7 +13,8 @@ import {
 import { errorMessage } from '../lib/errorMessage'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft } from '../lib/chatDrafts'
 import { isPostprocessing, postprocessNeedsRetry } from '../lib/postprocessView'
-import { isMemoryProject, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
+import { isMemoryProject, isMemoryPassChat, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
+import { memoryInsights, type MemoryInsight } from '../lib/memoryInsights'
 import type {
   ArchiveChatResponse,
   ArchivedWorkspace,
@@ -1019,8 +1020,12 @@ export const useProjectStore = defineStore('projects', () => {
 
   function projectChats(projectId: string): ChatInfo[] {
     // Hide remote chats (session lives on another device, not openable here).
+    // Memory passes are hidden too: they are the app's own chats in a project
+    // the sidebar never lists, and the one place a person is meant to reach one
+    // from is the memory-insight rail (`memoryInsights`) or the archived
+    // conversation that spawned it.
     return chats.value
-      .filter(c => c.project_id === projectId && !c.archived && c.local !== false)
+      .filter(c => c.project_id === projectId && !c.archived && c.local !== false && !isMemoryPassChat(c))
       .sort((a, b) => a.created_at.localeCompare(b.created_at))
   }
 
@@ -1042,9 +1047,15 @@ export const useProjectStore = defineStore('projects', () => {
   // chat with activity, across ALL workspaces, newest first (uncapped). The
   // home surface is a global hub, so unlike recentChats it isn't scoped to
   // the active workspace — each chat carries its own workspace/project tag.
+  //
+  // Memory passes are the one exclusion. A pass is a real chat, so it used to
+  // land in these tiers as "Memory pass · <title>" under Working or Unread and
+  // then appear a second time, as the archived conversation it works on, in the
+  // memory-insight rail below. It now appears once, there — where the entry
+  // opens the pass itself, which is the chat with the live turn in it.
   const activeChatsAll = computed<ChatInfo[]>(() => {
     return chats.value
-      .filter(c => !c.archived && c.local !== false)
+      .filter(c => !c.archived && c.local !== false && !isMemoryPassChat(c))
       .filter(c => Boolean(chatActivity(c)))
       .sort((a, b) => chatActivity(b).localeCompare(chatActivity(a)))
   })
@@ -1111,97 +1122,24 @@ export const useProjectStore = defineStore('projects', () => {
   // project, which `workspaceProjects` hides. It queues behind the other passes
   // in that workspace, auto-archives when it ends cleanly, and lands in
   // `attention` when it does not — the one state that needs the owner.
+  //
+  // It is not listed as a chat anywhere: `activeChatsAll` and `projectChats`
+  // both filter it out, and it reaches the surface as one row in
+  // `memoryInsights` below, which is keyed on the archived conversation it
+  // works on rather than on the pass's own internal title.
 
   /** True when this chat is a memory pass that ended unclean. */
   function memoryPassNeedsAttention(chatId: string): boolean {
     return memoryPassNeedsAttentionFor(chats.value.find(c => c.chat_id === chatId))
   }
 
-  /**
-   * The newest pass still open in *workspace*, or null when none is. A clean
-   * pass is archived by the time the owner could want it, so "archived" is the
-   * answer for every pass that finished well — only a queued, running or
-   * attention pass is reachable, and those are exactly the ones worth linking.
-   */
-  function latestMemoryPassChat(workspace: WorkspaceName = activeWorkspace.value): ChatInfo | null {
-    const memory = memoryProjectFor(workspace)
-    if (!memory) return null
-    return (
-      chats.value
-        .filter(c => c.project_id === memory.project_id && !c.archived)
-        .sort((a, b) =>
-          (b.last_activity_at || b.created_at).localeCompare(a.last_activity_at || a.created_at),
-        )[0] || null
-    )
-  }
-
-  // Archived chats matching a predicate, newest archive first. Shared by
-  // postprocessingChats/insightsFailedChats so both stay consistent with
-  // their *Count siblings below. Archived chats are excluded from
-  // activeChatsAll, so this is the one path that surfaces them while the
-  // pipeline runs.
-  function chatsMatching(predicate: (chat: ChatInfo) => boolean): ChatInfo[] {
-    return chats.value
-      .filter(predicate)
-      .sort((a, b) =>
-        (b.last_activity_at || b.created_at).localeCompare(a.last_activity_at || a.created_at),
-      )
-  }
-
-  /** Count of one workspace's chats matching a predicate, for lane headers. */
-  function workspaceCountMatching(ws: WorkspaceName, predicate: (chat: ChatInfo) => boolean): number {
-    const wsProjectIds = new Set(
-      projects.value.filter(p => p.workspace === ws).map(p => p.project_id),
-    )
-    return chats.value.filter(c => wsProjectIds.has(c.project_id) && predicate(c)).length
-  }
-
-  /** Chats being tidied up in a workspace, for the home lane summary. */
-  function workspacePostprocessingCount(ws: WorkspaceName): number {
-    return workspaceCountMatching(ws, c => isPostprocessing(c.postprocess))
-  }
-
-  function postprocessingChats(): ChatInfo[] {
-    return chatsMatching(c => isPostprocessing(c.postprocess))
-  }
-
-  /** Archived chats whose post-archive pipeline still has unfinished stages. */
-  function insightsFailedChats(): ChatInfo[] {
-    return chatsMatching(c => postprocessNeedsRetry(c.postprocess))
-  }
-
-  /** Insights-failed count for one workspace, for the home lane header. */
-  function workspaceInsightsFailedCount(ws: WorkspaceName): number {
-    return workspaceCountMatching(ws, c => postprocessNeedsRetry(c.postprocess))
-  }
-
-  function projectPostprocessingCount(projectId: string): number {
-    return chats.value.filter(
-      c => c.project_id === projectId && isPostprocessing(c.postprocess),
-    ).length
-  }
-
   // ── Archiving (optimistic) ────────────────────────────────────────────
   // Chats whose archive POST is in flight. They are already marked
   // `archived:true` optimistically (so they vanish from active lists / the
-  // sidebar) but are listed in the home "archiving…" queue until the server
+  // sidebar) but are listed on Home as one memory-insight row until the server
   // confirms. A failed POST rolls `archived` back and clears the entry.
   function isArchiving(chatId: string): boolean {
     return Boolean(archivingChats.value[chatId])
-  }
-
-  function archivingChatsList(): ChatInfo[] {
-    return chatsMatching(c => Boolean(archivingChats.value[c.chat_id]))
-  }
-
-  function workspaceArchivingCount(ws: WorkspaceName): number {
-    return workspaceCountMatching(ws, c => Boolean(archivingChats.value[c.chat_id]))
-  }
-
-  function projectArchivingCount(projectId: string): number {
-    return chats.value.filter(
-      c => c.project_id === projectId && Boolean(archivingChats.value[c.chat_id]),
-    ).length
   }
 
   /**
@@ -1328,15 +1266,37 @@ export const useProjectStore = defineStore('projects', () => {
     )
   }
 
-  // The app-owned project memory passes run in. Never shown to the user (it is
-  // filtered out of `workspaceProjects`), so it is looked up directly rather
-  // than through the visible lists.
-  function memoryProjectFor(workspace: WorkspaceName = activeWorkspace.value): ProjectInfo | null {
-    return (
-      projects.value.find(p => p.workspace === workspace && isMemoryProject(p)) ?? null
-    )
+  // ── Memory insights ───────────────────────────────────────────────────
+  // One row per archived conversation whose memory work is still in flight,
+  // unfinished, or asking for an answer. The derivation (and every phase and
+  // its wording) lives in lib/memoryInsights.ts; only the signals come from
+  // here, so Home and its status sentences cannot disagree about what a row
+  // means.
+  const memoryInsightRows = computed<MemoryInsight[]>(() => memoryInsights({
+    chats: chats.value,
+    needsInput: chatNeedsInput,
+    pendingQuestion: chatPendingQuestion,
+    isArchiving,
+  }))
+
+  /**
+   * Whether this chat is something the owner should be pulled towards. One
+   * rule for every counter, because a pass that counts as unread mail and a
+   * badge that does not is the disagreement this is here to prevent.
+   *
+   * A memory pass is the exception: its own activity moves while it works, so
+   * counting it as unread made a busy archive light the bell and the document
+   * title. It counts only when it is genuinely blocked on the owner, which its
+   * memory-insight row already says out loud.
+   */
+  function chatIsAttentionItem(chat: ChatInfo): boolean {
+    if (isMemoryPassChat(chat)) return chatNeedsInput(chat.chat_id)
+    return chatNeedsInput(chat.chat_id) || chatUnread(chat.chat_id) > 0
   }
 
+  // Open a fresh chat in the active workspace's auto-managed General project,
+  // pre-filled with a prompt asking the agent to diagnose and fix `errorText`
+  // (falling back to a GitHub issue if the bug is in Ciaobot itself).
   async function fixError(opts: {
     errorText: string
     context?: string
@@ -1627,8 +1587,12 @@ export const useProjectStore = defineStore('projects', () => {
       .reduce((sum, p) => sum + projectNeedsInput(p.project_id), 0)
   }
 
+  // Document title and OS badge. A memory pass's activity moves while it
+  // works, so including it made a routine archive pass show up as unread mail
+  // on the tab and the home screen. A pass blocked on the owner is still
+  // counted, by `chatIsAttentionItem` on every surface that asks the question.
   const totalUnread = computed(() =>
-    chats.value.reduce((sum, c) => sum + (c.archived ? 0 : chatUnread(c.chat_id)), 0),
+    chats.value.reduce((sum, c) => sum + (c.archived || isMemoryPassChat(c) ? 0 : chatUnread(c.chat_id)), 0),
   )
 
   // One chat can contribute at most one attention item. Keep this aggregate
@@ -1636,7 +1600,7 @@ export const useProjectStore = defineStore('projects', () => {
   // the same underlying signals within their selected workspace.
   const attentionChatCount = computed(() =>
     chats.value.reduce(
-      (sum, c) => sum + (!c.archived && (chatNeedsInput(c.chat_id) || chatUnread(c.chat_id) > 0) ? 1 : 0),
+      (sum, c) => sum + (!c.archived && chatIsAttentionItem(c) ? 1 : 0),
       0,
     ),
   )
@@ -5814,12 +5778,11 @@ export const useProjectStore = defineStore('projects', () => {
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
-    chatUnread, chatNeedsInput, chatPendingQuestion, chatLastSnippet, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
+    chatUnread, chatNeedsInput, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
-    chatPostprocess, chatIsPostprocessing, postprocessingChats, workspacePostprocessingCount, projectPostprocessingCount,
-    memoryPassNeedsAttention, latestMemoryPassChat, memoryProjectFor,
-    insightsFailedChats, workspaceInsightsFailedCount,
-    archivingChats, isArchiving, archivingChatsList, workspaceArchivingCount, projectArchivingCount,
+    chatPostprocess, chatIsPostprocessing,
+    memoryPassNeedsAttention, memoryInsightRows,
+    archivingChats, isArchiving,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace,
     archiveWorkspace, fetchArchivedWorkspaces, restoreArchivedWorkspace,

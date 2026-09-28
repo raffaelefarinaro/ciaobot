@@ -129,6 +129,16 @@
       </div>
     </div>
 
+    <!-- What this chat is, when nothing else on the surface says it. A memory
+         pass is an ordinary chat in a hidden project, so the transcript reads
+         as a conversation that began mid-thought; this names the conversation
+         it belongs to. Only when the Work details rail is hidden — with the
+         rail shown the same sentence sits at its top instead. -->
+    <p v-if="memoryPassOrigin && !railShown && !inspectorOpen" class="chat-origin-note">
+      <AppIcon class="chat-origin-note-icon" name="spark" :size="16" />
+      <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
+    </p>
+
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
     <div class="messages" :class="{ 'messages--empty': !blockingHistoryLoad && renderItems.length === 0 && !inputText.trim() }" ref="messagesEl" :aria-busy="store.messageHistoryLoading" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
@@ -1220,11 +1230,16 @@
       aria-labelledby="chat-work-rail-title"
     >
       <!-- Where this chat came from, above everything else: one line naming the
-           automation that runs here. Its cadence and controls live on the
-           automation's own page. -->
+           automation that runs here, and — for the one app-owned chat — the
+           conversation its memory pass is distilling. Its cadence and controls
+           live on the automation's own page. -->
       <p v-for="s in chatSchedules" :key="`rail-sched-${s.schedule_id}`" class="chat-rail-origin">
         <AppIcon class="chat-rail-origin-icon" name="clock" :size="16" />
         <span>This chat comes from the automation <router-link :to="`/schedules/${s.schedule_id}`">{{ s.title || 'Automation' }}</router-link>.</span>
+      </p>
+      <p v-if="memoryPassOrigin" class="chat-rail-origin">
+        <AppIcon class="chat-rail-origin-icon" name="spark" :size="16" />
+        <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
       </p>
       <div class="chat-rail-head">
         <h2 id="chat-work-rail-title" class="rail-title">Work details</h2>
@@ -1329,7 +1344,7 @@ import {
   postprocessNeedsRetry,
   postprocessSummary,
 } from '../lib/postprocessView'
-import { memoryPassChatId } from '../lib/memoryPass'
+import { memoryPassChatId, memoryPassSource } from '../lib/memoryPass'
 import { useFileViewerStore } from '../stores/fileViewer'
 // Subagent transcripts carry `turn_index` (the user turn that dispatched
 // them, parsed server-side from the session JSONL), so each panel anchors
@@ -1689,6 +1704,29 @@ async function retryArchiveSteps(): Promise<void> {
 }
 function openMemoryPass(): void {
   if (archiveMemoryPassChatId.value) void store.switchChat(archiveMemoryPassChatId.value)
+}
+
+/**
+ * The conversation this chat is a memory pass for, or null when the chat is an
+ * ordinary one. The pass is the app's own chat in a project the sidebar hides
+ * and the tiers do not list, so nothing else on the surface says what it is or
+ * which conversation it belongs to. Null rather than an empty title, because a
+ * pass whose source was deleted still needs a row on Home and a composer here,
+ * and a bare "memory insight" line with nothing to open is worse than none.
+ */
+const memoryPassOrigin = computed<{ chatId: string; title: string } | null>(() => {
+  const source = memoryPassSource(chat.value)
+  if (!source) return null
+  const title = store.chats.find(c => c.chat_id === source.chatId)?.title || source.title
+  if (!title) return null
+  return { chatId: source.chatId, title }
+})
+
+// The source is archived, so the transcript is the only thing it can open.
+function openMemoryPassSource(): void {
+  if (!memoryPassOrigin.value) return
+  const archivePath = store.chats.find(c => c.chat_id === memoryPassOrigin.value?.chatId)?.archive_path
+  if (archivePath) void fileViewer.open(archivePath)
 }
 watch(() => chat.value.provider, () => {
   void loadSlashCommands()
@@ -4597,6 +4635,44 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   text-underline-offset: 3px;
 }
 .chat-rail-origin a:hover { text-decoration-color: currentColor; }
+
+/* The same origin sentence for a chat whose Work details rail is hidden, above
+   the transcript. Flat, and sharing the rail's link treatment: one sentence in
+   two places, never two different sentences. */
+.chat-origin-note {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+.chat-origin-note-icon { flex: none; color: var(--fg3); }
+.chat-origin-link {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+.chat-origin-link:hover { text-decoration-color: currentColor; }
+.chat-origin-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
 
 .chat-rail-tool {
   min-width: 0;
