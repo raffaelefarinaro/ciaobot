@@ -57,13 +57,12 @@ from ciao.git_proc import GIT_TIMEOUT_DETAIL, run_git, run_git_sync
 
 logger = logging.getLogger(__name__)
 
-BACKUP_PUSH_INTERVAL = 30  # seconds between background backup pushes
-
 # Network git operations (push/fetch/pull) get a generous ceiling. 10s proved
 # too tight: a momentary network stall (e.g. DNS resolution over flaky Wi-Fi,
 # 2026-09-05 02:26) kills the push with "git command timed out". The next
-# 30s tick self-heals, but each false error row lands in the triage report.
-# 60s bounds the wait without letting a hung remote stall the loop.
+# backup tick self-heals, but each false error row lands in the triage report,
+# so the ceiling is well under the five-minute cadence it sits inside. 60s
+# bounds the wait without letting a hung remote stall the loop.
 GIT_NETWORK_TIMEOUT = 60.0
 
 # Workspace roots holding user data rather than app source.
@@ -172,9 +171,23 @@ async def _git(workspace: Path, *args: str, timeout: float | None = None) -> tup
     return (rc, out.strip(), err.strip())
 
 
+async def _status_porcelain(workspace: Path) -> tuple[int, str, str]:
+    """``git status --porcelain`` with its leading column intact.
+
+    Not through :func:`_git`: porcelain's two-column status prefix *starts with*
+    a space for any change that is only in the working tree, so trimming the
+    output turns the first line from ``" M memory-vault/note.md"`` into
+    ``"M memory-vault/note.md"`` — and every path on that line then reads one
+    character short. A deletion (``" D …"``) is such a line, which is how an
+    unattended backup came to classify a removed note under a name that does not
+    exist. Read raw; callers parse it with :func:`_porcelain_entries`.
+    """
+    return await run_git(workspace, "status", "--porcelain")
+
+
 # Failure details that will not self-heal at the normal backup cadence.
 # Credentials cannot be re-entered (there is no TTY to prompt under launchd),
-# and an unreachable remote answers no faster for being asked every 30s.
+# and an unreachable remote answers no faster for being asked again.
 _AUTH_MARKERS = (
     "could not read username",
     "authentication failed",
@@ -189,7 +202,7 @@ def backoff_reason(detail: str) -> str | None:
     Returns ``"auth"`` for a credential failure and ``"unreachable"`` for a
     timeout. Before issue #470 only the auth markers were recognised, so a
     timeout — the shape an unreachable remote takes — never engaged the
-    backoff and got retried every 30 seconds indefinitely.
+    backoff and was retried at the full cadence indefinitely.
     """
     lowered = (detail or "").lower()
     if any(marker in lowered for marker in _AUTH_MARKERS):
@@ -238,7 +251,7 @@ def repo_toplevel(path: Path) -> Path | None:
 
 
 def sync_root(config) -> Path:
-    """The repo root that git sync and branch backup should operate on.
+    """The repo root that git sync and the memory backup operate on.
 
     Sync targets the repo containing the vault root: with the default layout
     (vault inside the workspace repo) that resolves to the workspace root,
@@ -267,9 +280,9 @@ def is_diverged_backup(detail: str) -> bool:
     Set when ``<branch>`` and ``origin/<branch>`` have diverged with a real
     merge conflict: ``push_branch`` aborts the merge and pushes the current
     commit to ``backup/<branch>-<sha>`` instead of returning a bare error
-    (issue #187). The branch-backup loop checks this to surface the backup
+    (issue #187). The backup service checks this to surface the backup
     ref and back off, instead of retrying a merge that will conflict the
-    same way every 30 seconds.
+    same way on every tick.
     """
     return (detail or "").startswith(_DIVERGED_BACKUP_MARKER)
 
@@ -720,17 +733,17 @@ async def resync_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
 # ── preflight ────────────────────────────────────────────────────────────────
 
 
-def _expand_status_paths(workspace: Path, porcelain: str) -> list[Path]:
-    """Every pending file in ``porcelain`` output, as absolute paths.
+def _porcelain_entries(porcelain: str) -> list[tuple[str, str]]:
+    """``(status prefix, path)`` for every entry in ``git status --porcelain``.
 
-    Git reports an untracked directory as a single entry, so the walk is what
-    turns it into the files that would actually be staged. A deleted entry is
-    not pending work — there is nothing left to read or to back up — and a
-    nested checkout is skipped entirely: it is governed by its own Git
-    metadata, and scanning its virtualenvs as workspace files is how a
-    preflight invents hundreds of blockers.
+    Git quotes a path containing a space or a non-ASCII character and prints a
+    rename as ``old -> new``; both spellings are unwrapped here so a caller
+    works with the path git is actually about. Split out of
+    :func:`_expand_status_paths` because the scoped preflight needs the deleted
+    entries that one deliberately drops, and two parsers of one output format
+    would drift.
     """
-    raw_files: set[str] = set()
+    entries: list[tuple[str, str]] = []
     for line in porcelain.splitlines():
         if not line:
             continue
@@ -741,6 +754,26 @@ def _expand_status_paths(workspace: Path, porcelain: str) -> list[Path]:
             file_part = parts[-1].strip()
         if file_part.startswith('"') and file_part.endswith('"'):
             file_part = file_part[1:-1]
+        entries.append((status_prefix, file_part))
+    return entries
+
+
+def _expand_status_paths(workspace: Path, porcelain: str) -> list[Path]:
+    """Every pending file in ``porcelain`` output, as absolute paths.
+
+    Git reports an untracked directory as a single entry, so the walk is what
+    turns it into the files that would actually be staged. A deleted entry is
+    not read — there is nothing left to open — and a nested checkout is skipped
+    entirely: it is governed by its own Git metadata, and scanning its
+    virtualenvs as workspace files is how a preflight invents hundreds of
+    blockers.
+
+    "Not read" is not "not backup work": :func:`preflight_scoped` adds the
+    deleted paths back, because a deletion that is never committed is a note
+    that comes back on the next checkout.
+    """
+    raw_files: set[str] = set()
+    for status_prefix, file_part in _porcelain_entries(porcelain):
         if "D" in status_prefix:
             continue
         raw_files.add(file_part)
@@ -859,16 +892,32 @@ async def preflight_scoped(config, workspace: Path) -> dict:
     has already been narrowed by git's own ignore rules
     (:func:`_ignored_paths`); the paths that narrowing removed are reported in
     ``excluded`` rather than dropped, and ``excluded`` is therefore every
-    pending path this run will not commit.
+    pending path this run will not commit. It includes the *deleted* paths
+    inside the scope: there is no file left to read for the secret scan, but
+    the deletion itself is durable work, and a scope that reported it as
+    nothing to do would let the next checkout restore a note the owner
+    deleted. A deleted path inside the scope therefore appears in ``eligible``
+    with nothing scanned against it, and one outside it in ``excluded``.
     """
     root = backup_scope.data_root(config)
-    rc, out, err = await _git(Path(workspace), "status", "--porcelain")
+    rc, out, err = await _status_porcelain(Path(workspace))
     blockers: list[str] = []
+    changed: list[Path] = []
     if rc != 0:
         blockers.append(f"git status failed: {err or out}")
-        changed: list[Path] = []
     else:
         changed = _expand_status_paths(Path(workspace), out)
+        # A deletion is durable work even though there is nothing left to read:
+        # not committing it means the next checkout on another machine restores
+        # the note the owner deleted. `_expand_status_paths` drops these because
+        # it answers "which files may I open", so they are added back here, for
+        # `commit_scoped` to stage as a removal and for the scan below to find
+        # no file to open.
+        changed += [
+            Path(workspace) / file_part
+            for status_prefix, file_part in _porcelain_entries(out)
+            if "D" in status_prefix
+        ]
 
     eligible, excluded = backup_scope.classify(changed, config)
     # The scope says where a path may go; git says whether it can be staged at
@@ -976,7 +1025,7 @@ class LocalSessionManager:
     async def preflight(self) -> dict:
         """Run a git preflight check for dirty changes, file categories, and secrets."""
         br = workspace_branch(self.workspace)
-        rc, out, err = await _git(self.workspace, "status", "--porcelain")
+        rc, out, err = await _status_porcelain(self.workspace)
         if rc != 0:
             return {
                 "branch": br,

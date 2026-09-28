@@ -4,8 +4,8 @@ import {
   isMemoryProject,
   memoryPassChatId,
   memoryPassNeedsAttention,
-  memoryPassSourceChatId,
-  memoryPassTitle,
+  memoryPassSource,
+  memoryPassState,
   MEMORY_PASS_KIND,
 } from '../memoryPass'
 import type { ChatInfo, ChatPostprocess, ProjectInfo } from '../types'
@@ -44,10 +44,23 @@ describe('memoryPass', () => {
     expect(memoryPassNeedsAttention(undefined)).toBe(false)
   })
 
-  it('reads the source chat off a pass and nothing off anything else', () => {
-    expect(memoryPassSourceChatId(pass('done'))).toBe('source-1')
-    expect(memoryPassSourceChatId({} as ChatInfo)).toBe('')
-    expect(memoryPassSourceChatId(undefined)).toBe('')
+  it('reads the source conversation off a pass and nothing off anything else', () => {
+    // The title travels with it: a pass can outlive the chat it was spawned
+    // for, and the row that names the work needs a name either way.
+    expect(memoryPassSource(pass('done'))).toEqual({ chatId: 'source-1', title: 'Source' })
+    expect(memoryPassSource({} as ChatInfo)).toBeNull()
+    expect(memoryPassSource(undefined)).toBeNull()
+  })
+
+  it('reads the lifecycle state the queue and the archive settle on', () => {
+    expect(memoryPassState(pass('queued'))).toBe('queued')
+    expect(memoryPassState(pass('running'))).toBe('running')
+    expect(memoryPassState(pass('done'))).toBe('done')
+    expect(memoryPassState(pass('attention'))).toBe('attention')
+    // Not a pass: no state to read, rather than a default that would read as
+    // "queued" and put an ordinary chat into the queue.
+    expect(memoryPassState({} as ChatInfo)).toBe('')
+    expect(memoryPassState(undefined)).toBe('')
   })
 
   it('reads the pass chat off the source postprocess record', () => {
@@ -79,10 +92,5 @@ describe('memoryPass', () => {
     expect(isMemoryProject({ name: 'Memory' } as unknown as ProjectInfo)).toBe(false)
     expect(isMemoryProject({} as ProjectInfo)).toBe(false)
     expect(isMemoryProject(undefined)).toBe(false)
-  })
-
-  it('names a pass in the row sub-line, since the project it lives in is hidden', () => {
-    expect(memoryPassTitle(pass('attention'), 'Memory')).toBe('memory pass')
-    expect(memoryPassTitle({} as ChatInfo, 'General')).toBe('General')
   })
 })

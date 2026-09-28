@@ -570,14 +570,16 @@ const currentProjectId = computed(() => {
 // second, louder copy of an action already on screen — and a saturated fill
 // spent on something non-blocking, which the design system reserves for
 // "needs the user".
-const showGlobalNewChatActions = computed(() => !store.activeChatsAll.length)
-
-// Keep Home visibly alive while an archived chat is still being processed.
-// Post-archive work is not part of activeChatsAll, but it is still something
-// the home surface should report before the user starts a new chat.
-const hasHomeActivity = computed(() => (
-  store.activeChatsAll.length > 0 || store.archivingChatsList().length > 0 || store.postprocessingChats().length > 0
-))
+//
+// A memory-insight row counts as activity: a workspace whose only thing
+// happening is a memory pass is not empty, and neither is one whose only
+// activity is a chat still saving its trajectory — post-archive work is not
+// part of `activeChatsAll`, but it is still something this surface reports
+// before the user starts a new chat.
+const hasHomeActivity = computed(
+  () => store.activeChatsAll.length > 0 || store.memoryInsightRows.length > 0,
+)
+const showGlobalNewChatActions = computed(() => !hasHomeActivity.value)
 
 const generalWorkspaceActions = computed(() => {
   return store.workspaceOptions

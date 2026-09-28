@@ -1,13 +1,13 @@
 """One mutation lock per git repository, keyed by the canonical checkout.
 
-Manual sync, the post-conflict resync, and the background branch-backup push
-all mutate the same repository. They can fire concurrently — the 30s backup
-loop lands in the middle of a manual sync's fetch/push — and git itself offers
-no defence beyond ``.git/index.lock``, which it takes and drops so fast that a
-concurrent ``git add -A`` from Ciaobot either waits or fails with a confusing
-"unable to create index.lock" error. That race is what this module removes, and
-it is the prerequisite the #643 backup service builds on: a third writer joining
-later must not need its own locking.
+Manual sync, the post-conflict resync, and the background memory backup all
+mutate the same repository. They can fire concurrently — the five-minute
+backup lands in the middle of a manual sync's fetch/push — and git itself
+offers no defence beyond ``.git/index.lock``, which it takes and drops so
+fast that a concurrent ``git add -A`` from Ciaobot either waits or fails with
+a confusing "unable to create index.lock" error. That race is what this module
+removes, and it is the prerequisite the #643 backup service builds on: a third
+writer joining later must not need its own locking.
 
 The key is the repository top level, not the path a caller happened to hold, so
 a workspace root, a vault root living in its own repo, and any subdirectory
@@ -128,7 +128,8 @@ def _git_paths(workspace: Path, names: Sequence[str]) -> list[Path] | None:
     ``GIT_DIR``, ``GIT_INDEX_FILE``, and a linked worktree's private git
     directory, all of which make ``.git/<name>`` the wrong guess. Every name is
     asked in one invocation — this runs on every public mutation, and four
-    spawns to answer a yes/no question is the wrong price for a 30s loop.
+    spawns to answer a yes/no question is the wrong price for a loop that
+    runs every few minutes.
     """
     args: list[str] = []
     for name in names:
