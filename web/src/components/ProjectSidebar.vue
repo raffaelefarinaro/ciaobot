@@ -3220,8 +3220,10 @@ button.mm-link-item:focus-visible { outline: 2px solid var(--accent); outline-of
   z-index: 200;
 }
 
+/* In flow inside Reka's positioned wrapper: a fixed menu leaves the wrapper
+   0px tall, so collision detection never flips or shifts it and the menu
+   runs off the bottom of the window. Reka copies the z-index to the wrapper. */
 .context-menu {
-  position: fixed;
   min-width: 150px;
   max-width: min(280px, calc(100vw - 16px));
   max-height: calc(100dvh - 16px);

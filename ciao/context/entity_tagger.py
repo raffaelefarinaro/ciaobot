@@ -162,6 +162,11 @@ def _parse_index(path: Path, category_parts: dict[str, str] | None = None) -> li
     """
     parts_map = _CATEGORY_PARTS if category_parts is None else category_parts
     entities: list[VaultEntity] = []
+    # (top-level folder, match name) -> whether each note carrying it is a
+    # folder note. Keyed by the first segment too: a shared index prefixes
+    # every path with its workspace, and the same person in two workspaces is
+    # two entities, not a naming convention.
+    names: dict[tuple[str, str], list[bool]] = {}
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
@@ -180,10 +185,21 @@ def _parse_index(path: Path, category_parts: dict[str, str] | None = None) -> li
         lname = name.lower()
         if lname in _SKIP_FILENAMES:
             continue
+        is_folder_note = lname in _FOLDER_FILENAMES and len(parts) >= 3
         # Fold a folder's README onto its folder so the match term is the
         # project name, not a word ("README") shared by every folder.
-        if lname in _FOLDER_FILENAMES and len(parts) >= 3:
+        if is_folder_note:
             name = parts[-2]
+        # Counted before the automation skip below: a stem is a file-naming
+        # convention however many of its notes are left to match.
+        names.setdefault((parts[0], name.lower()), []).append(is_folder_note)
+        # An automation is its folder's README; everything else under it is a
+        # run's working data (`raw/sparkscan/report`), not something the
+        # owner names in a message.
+        if "automations" in parts[:-1] and not (
+            is_folder_note and parts[-3] == "automations"
+        ):
+            continue
         aliases: list[str] = []
         alias_match = _ALIASES_RE.search(rest)
         if alias_match:
@@ -197,7 +213,19 @@ def _parse_index(path: Path, category_parts: dict[str, str] | None = None) -> li
             path=rel_path,
             aliases=tuple(aliases),
         ))
-    return entities
+    # A name several notes share, none of them a folder note, is a file-naming
+    # convention (`report`, `slides`, `evaluation`), not a name: matching it
+    # lit up every one of those notes whenever a message used the word. A name
+    # shared with a folder note is one entity under two paths
+    # (`projects/active/general/README` and `.../general/general`), so it stays.
+    shared = {
+        key for key, folder_flags in names.items()
+        if len(folder_flags) > 1 and not any(folder_flags)
+    }
+    return [
+        entity for entity in entities
+        if (entity.path.split("/", 1)[0], entity.name.lower()) not in shared
+    ]
 
 
 def _category_for_path(parts: list[str], category_parts: dict[str, str]) -> str:

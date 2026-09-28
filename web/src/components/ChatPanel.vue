@@ -258,7 +258,9 @@
                 </div>
                 <div v-html="renderMarkdown(item.msg.content)"></div>
               </div>
-              <div v-if="item.msg.timestamp || item.msg.unattended" class="message-meta">
+              <!-- The time shows only on the selected (tapped) message, so the
+                   transcript stays quiet. -->
+              <div v-if="item.msg.unattended || (item.msg.timestamp && tappedMessageKey === `user-${i}`)" class="message-meta">
                 <!-- An automation's tick, not something the reader typed.
                      Without this the two are indistinguishable in the
                      transcript. -->
@@ -267,7 +269,7 @@
                   class="unattended-mark"
                   title="Sent automatically by an automation"
                 >&#10227; auto</span>
-                <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
+                <span v-if="item.msg.timestamp && tappedMessageKey === `user-${i}`">{{ formatTime(item.msg.timestamp) }}</span>
               </div>
             </div>
             <!-- Copy for a request. It sits in the flow under the bubble rather
@@ -3611,10 +3613,7 @@ function focusComposerOnOpen(): void {
   el.selectionStart = el.selectionEnd = el.value.length
 }
 
-onMounted(async () => {
-  window.addEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
-  window.addEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
-  window.addEventListener('ciao:native-file-drop', handleNativeFileDrop)
+async function loadModels(): Promise<void> {
   try {
     const r = await api.get<ModelsResponse>('/api/models')
     modelsResponse.value = r
@@ -3623,6 +3622,13 @@ onMounted(async () => {
     providerDefaults.value = r.provider_defaults || {}
     thinkingLevels.value = r.thinking_levels || {}
   } catch { /* use defaults */ }
+}
+
+onMounted(async () => {
+  window.addEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
+  window.addEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
+  window.addEventListener('ciao:native-file-drop', handleNativeFileDrop)
+  await loadModels()
   await loadSlashCommands()
   await loadMentionAgents()
   notifyChatFocused(chat.value?.chat_id)
@@ -4503,6 +4509,10 @@ watch(showModelPicker, (open) => {
     capabilityPickerSection.value = ''
     return
   }
+  // Refetched on every open, not only on mount: a provider whose catalog was
+  // still loading when the chat opened would otherwise stay missing from the
+  // picker until the chat is reopened. The server caches the list.
+  void loadModels()
   const clickHandler = (e: MouseEvent) => {
     if (modelPickerRef.value && !modelPickerRef.value.contains(e.target as Node)) {
       showModelPicker.value = false
@@ -4641,10 +4651,14 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   flex: 0 0 var(--page-rail);
   width: var(--page-rail);
   min-width: 0;
+  overflow-x: hidden;
   overflow-y: auto;
+  /* Scrolls, but without a visible bar: the rail is a quiet side column. */
+  scrollbar-width: none;
   padding: 28px 0 24px;
   font-size: var(--text-sm);
 }
+.chat-rail::-webkit-scrollbar { display: none; }
 
 .chat-rail-origin {
   display: flex;
