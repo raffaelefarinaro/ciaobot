@@ -2,7 +2,7 @@
 
 Status: adopted for new work, migration in progress
 Written: 2026-08-11
-Scope: `web/` (the PWA). Not the desktop shell or the Python app.
+Scope: `web/` (the PWA). Not the Python engine.
 
 This document is the contract. When adding or changing UI in `web/`, follow it.
 When it and an existing component disagree, the component is wrong — but do not

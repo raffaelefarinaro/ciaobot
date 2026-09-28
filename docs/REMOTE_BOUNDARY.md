@@ -29,21 +29,23 @@ carried by the session.
   then for the session. Every state-changing `/api/*` request must present an
   `Origin` or `Referer` that matches the request host, allowing for a
   proxy-declared `X-Forwarded-Host`.
-- `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the tray feeds
-  (`/api/menubar-chats`, `/api/menubar-notifications`) and the update
+- `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the loopback-only
+  local feed (`/api/menubar-chats`, `/api/menubar-notifications`; legacy route
+  names, no native client) and the update
   coordinator's drain handshake. It reads the TCP source address, never the
   `Host` header, which a caller controls. `is_loopback_client` is the only
   "is it local" check in the codebase and nothing else grants access on it.
 - Model-authored HTML is served from `/api/workspace-html` under a sandboxing
   CSP (`sandbox allow-scripts`, no `allow-same-origin`, `connect-src 'none'`,
-  `form-action 'none'`), so an artifact cannot reach the API, the tray, or
-  Tauri at all. Coverage is in `tests/test_workspace_html.py`.
+  `form-action 'none'`), so an artifact cannot reach the API or the local-only
+  feeds at all. Coverage is in `tests/test_workspace_html.py`.
 - Native Finder drops still send only a short-lived grant id, bounded display
   names, and opaque file references; the absolute path list stays in the
-  Rust/server grant and is expanded only in the provider prompt.
-- The macOS Tauri capability is unchanged: it is limited to bundled local
-  pages, the remote PWA has no capability, and `trigger_app_update` does not
-  exist. A browser is never a local control path.
+  server-side grant and is expanded only in the provider prompt.
+- There is no native capability of any kind left: the macOS app and its shell
+  are retired (`#579`), so a remote browser gets nothing a local one does not,
+  and `trigger_app_update` does not exist. A browser is never a local control
+  path.
 
 A second device installs its own engine and reads `GET /api/addresses` to find
 this one. There is nothing to unpair and no session to bridge.
@@ -53,9 +55,8 @@ this one. There is nothing to unpair and no session to bridge.
 - `PYTHONPATH=$PWD python -m pytest -n auto tests/`
 - `mypy ciao`
 - `cd web && npm test` and `cd web && npm run build`
-- The `desktop/src-tauri` gates (`cargo fmt --check`, `cargo clippy
-  --all-targets -- -D warnings`, `cargo test`) for the Rust shell's own code.
-  CI does not run them any more: the release is the engine (`#655`).
+  There is no `desktop/src-tauri` gate any more: the shell and its Rust tree are
+  gone and the release is the engine (`#655`, `#656`).
 
 ## Remaining work (not claimed resolved)
 

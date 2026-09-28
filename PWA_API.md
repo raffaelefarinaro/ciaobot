@@ -38,8 +38,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET, POST | `/api/projects/{project_id}/files` | List or upload project files |
 | POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant; returns bounded opaque file references |
 | GET | `/api/chats` | List all chats |
-| GET | `/api/menubar-chats` | Compact chat list for the `Ciaobot.app` tray |
-| GET | `/api/menubar-notifications` | Notification feed for the `Ciaobot.app` tray (`?after=<epoch>`, inclusive; includes read-clear controls) |
+| GET | `/api/menubar-chats` | Compact chat list for the loopback-only local feed (legacy route name, no native client) |
+| GET | `/api/menubar-notifications` | Notification feed for the loopback-only local feed (`?after=<epoch>`, inclusive; includes read-clear controls) |
 | POST | `/api/chats/read-all` | Mark all chats read |
 | PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
@@ -107,11 +107,11 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | DELETE | `/api/mcp/servers/{name}` | Remove a project MCP server from `.mcp.json` |
 | GET | `/api/mcp/servers/{name}/tools` | Lazy tool discovery for one project MCP server (HTTP `tools/list` probe, or observed telemetry for stdio) |
 | GET | `/api/startup-status` | Read startup phase progress |
-| GET | `/api/active-chats` | List chat IDs with in-flight work (streaming or background subagents); drives the macOS menu bar spinner |
+| GET | `/api/active-chats` | List chat IDs with in-flight work (streaming or background subagents); guards a drain before an engine restart |
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
 | GET | `/api/package/status` | Read installed package version and best-effort latest GitHub release version |
 | GET | `/api/package/changelog` | List commits between the installed and latest release for the update prompt |
-| POST | `/api/package/update` | Return app-owned update guidance; production updates replace the signed Ciaobot.app bundle and restart |
+| POST | `/api/package/update` | Return update guidance for the installed package; production engine updates go through the signed one-line installer or Settings → Home |
 | GET | `/api/update/status` | Installed-engine update job: install mode, whether it can update, and the persisted operation record; `error` carries a stage/apply that was refused before it could record one (unreachable latest release, already on that version), or a record that could not be read |
 | POST | `/api/update/stage` | Start staging a release for an installer-managed engine (background; poll status) |
 | POST | `/api/update/apply` | Apply the staged release: drain, detached swap, restart, rollback (background; poll status) |
@@ -153,7 +153,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
 | GET | `/api/addresses` | Where other devices can open this engine: the configured trusted HTTPS URL first (`kind: trusted`, `secure: true`), then LAN/Bonjour HTTP URLs (`kind: lan`), then localhost (`kind: loopback`). Session-protected; URLs never carry a password or token |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
-| POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend (plus the desktop app in dev mode), and restart with latest code |
+| POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend, and restart with latest code (source checkout in dev mode only) |
 | POST | `/api/admin/restart` | Drain active chat work and restart the installed engine without pulling or rebuilding code (authenticated) |
 | POST | `/api/admin/drain` | Close admission for new turns ahead of an engine update; returns `{draining, active_chat_ids}` (loopback-only, no session; used by `ciao update apply`) |
 | POST | `/api/admin/drain/cancel` | Reopen admission after an update's drain timed out; returns `{draining: false}` (loopback-only, no session; used by `ciao update apply`) |
@@ -191,11 +191,12 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 ### Restart an installed server
 
 `POST /api/admin/restart` uses the backend's existing chat-drain lifecycle and
-does not run git, pip, npm, or desktop builds. Settings chooses this action when
-`/api/local/status` reports `restart_only: true`: Linux production, the packaged
-macOS Ciaobot.app (whatever the dev mode), and any install that is not a
+does not run git, pip, npm, or frontend builds. Settings chooses this action when
+`/api/local/status` reports `restart_only: true`: Linux production, a legacy
+bundled-app install (whatever the dev mode), and any install that is not a
 deployable source checkout. Development deploys from a checkout retain
-`/api/admin/deploy`, which returns 400 up front on a packaged Ciaobot.app.
+`/api/admin/deploy`, which returns 400 up front on an installed (non-checkout)
+engine.
 
 ```sh
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/restart"
@@ -423,8 +424,7 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/read-all"
 
 # Read mutations also cancel the delayed push and emit a cross-device clear
-# control. Connected PWAs close the matching service-worker notification tag;
-# the macOS tray removes delivered Ciaobot banners for the chat.
+# control. Connected PWAs close the matching service-worker notification tag.
 
 # Deferred retry after provider/session quota errors. action ∈ {set, try_now, stop}.
 # `set` needs the user prompt to replay; automatic quota handling fills this itself.
@@ -559,11 +559,10 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/sched
   -H 'content-type: application/json' -d '{"enabled":false}'
 
 # Deploy: snapshot, pull, build, restart. Don't call from inside the live PWA session
-# (CLAUDE.md "Never restart the ciao service yourself"); ask the operator to hit Deploy.
+# (AGENTS.md "Never restart the ciao service yourself"); ask the operator to hit Deploy.
 # Steps run against CIAO_APP_REPO when set, else the directory holding the running
-# ciao package; a non-checkout returns 400 with a "locate checkout" step. With
-# CIAO_DEV_MODE and changed desktop/ sources it also rebuilds the Tauri app, then
-# quits and relaunches it just before the engine restart.
+# ciao package; a non-checkout returns 400 with a "locate checkout" step. An
+# installer-managed engine is refused up front: re-run install.sh to update it.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/deploy"
 ```
 

@@ -5,11 +5,11 @@ You are working on the Ciaobot app repository.
 Before changing code:
 - Read `docs/ARCHITECTURE.md` for the system design and `docs/DEVELOPMENT.md` for the dev workflow.
 - Read `web/README.md` before changing the PWA.
-- Read [`DESIGN.md`](DESIGN.md) before changing the PWA or tray UI, and keep its tokens and interaction principles aligned with the implementation.
+- Read [`DESIGN.md`](DESIGN.md) before changing the PWA, and keep its tokens and interaction principles aligned with the implementation.
 - Keep changes scoped and covered by tests.
 - Do not add fallbacks or compatibility shims. Delete dead or superseded code
   outright rather than leaving a code path "just in case". When removing a
-  fallback would break an app that people already have installed, stop and ask
+  fallback would break an install that people already have, stop and ask
   the maintainer before removing it.
 - Avoid new environment variables. Hardcode a sensible default as a
   constant; if a value truly must vary per user, make it a Settings option
