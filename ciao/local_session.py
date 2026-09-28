@@ -33,15 +33,25 @@ Two consequences run through the code below:
 
 An operation that *this* code started may leave its own merge state alone:
 the preflight is checked at the outer entry, before the body runs.
+
+Two of the operations below exist for the unattended path only: ``commit_scoped``
+stages an explicit list of paths instead of the whole tree, and
+``preflight_scoped`` scans only what that list may contain. The scope itself
+lives in :mod:`ciao.backup_scope`. ``commit_pending`` — the manual "stage
+everything" the user asked for — is untouched, and so is
+``LocalSessionManager.preflight``, which still reports on the whole tree.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
-from pathlib import Path
+from collections.abc import Sequence
+from pathlib import Path, PurePosixPath
 
+from ciao import backup_scope
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.git_proc import GIT_TIMEOUT_DETAIL, run_git, run_git_sync
 
@@ -105,9 +115,15 @@ def _is_test_fixture(rel_path: str) -> bool:
     pytest), and a merely test-*named* file has to be source to qualify —
     `memory-vault/.../tests/credentials.json` and a stray `test_config.json`
     are real credentials.
+
+    The user-data root is matched at ANY depth, not only as the first segment:
+    after the per-workspace re-rooting a vault is
+    ``<install>/<workspace>/memory-vault``, so a first-segment test would hand
+    the exemption to every ``<workspace>/memory-vault/tests/`` folder — a real
+    gap, since that is where the notes now live.
     """
     parts = Path(rel_path).parts
-    if not parts or parts[0] in _USER_DATA_ROOTS:
+    if not parts or any(part in _USER_DATA_ROOTS for part in parts):
         return False
     if "tests" in parts or "__tests__" in parts:
         return True
@@ -450,6 +466,161 @@ async def commit_pending(workspace: Path, *, branch: str) -> bool:
         return await _commit_pending(workspace, branch=branch)
 
 
+# ── scoped commit (unattended backup) ────────────────────────────────────────
+
+#: Pathspecs per ``git add`` invocation. A backup hands git every file in the
+#: scope, and a long-lived vault carries tens of thousands of them, while argv
+#: is bounded (``ARG_MAX``). The commit stays a single call regardless: a
+#: batched commit would be several commits wearing one message.
+_ADD_BATCH = 256
+
+
+def _clean_relpath(raw: str) -> str | None:
+    """``raw`` as a relpath safe to hand git as a pathspec, or None.
+
+    Absolute paths and ``..`` are refused rather than normalized away: the
+    point of a scoped commit is that it cannot name a file outside the tree it
+    is staging, and a pathspec that resolves outside it is the one way that
+    guarantee could be lost.
+    """
+    candidate = PurePosixPath(raw.replace(os.sep, "/"))
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return None
+    text = candidate.as_posix()
+    return text if text and text != "." else None
+
+
+async def _ignored_paths(workspace: Path, relpaths: Sequence[str]) -> set[str]:
+    """Which of ``relpaths`` git would refuse to stage, spelled as given.
+
+    ``git add`` rejects the *whole* batch when any single pathspec is ignored
+    ("The following paths are ignored by one of your .gitignore files"), so one
+    ordinary file is enough to fail a scoped commit over a batch of notes: the
+    scaffolded vault ``.gitignore`` ignores ``.DS_Store``, ``git status`` never
+    reports an ignored file, but ``_expand_status_paths`` walks an untracked
+    directory entry (``?? notes/``) and enumerates the ignored files inside it
+    (#685).
+
+    Keyed on the printed set, never on the returncode: ``check-ignore`` exits 0
+    when it printed something, 1 when it printed nothing, and 128 when it could
+    not answer at all, and which of those means what has varied across git
+    versions. A git that fails outright prints nothing, which leaves the
+    caller's list untouched and leaves ``add`` free to refuse it exactly as it
+    did before.
+
+    Tracked-but-ignored paths are *not* printed (git omits them without
+    ``--no-index``) and so stay in the batch, which is the point: a file added
+    before a ``.gitignore`` line is still tracked, and asking for it stages it.
+    """
+    if not relpaths:
+        return set()
+    rc, out, err = await asyncio.to_thread(
+        run_git_sync,
+        Path(workspace),
+        "check-ignore",
+        "-z",
+        "--stdin",
+        stdin="\0".join(relpaths) + "\0",
+    )
+    if rc not in (0, 1):
+        logger.info("git check-ignore failed in %s: %s", workspace, err.strip() or rc)
+    return {rel for rel in out.split("\0") if rel}
+
+
+async def _known_paths(workspace: Path, relpaths: Sequence[str]) -> list[str]:
+    """The subset of ``relpaths`` git can be asked about, deduplicated.
+
+    A pathspec that neither exists on disk nor is tracked makes ``git add``
+    fail outright ("pathspec did not match any files"), so a caller whose list
+    came from a status that has since moved on would get an error where the
+    honest answer is "nothing to do". One ``ls-files`` answers the tracked
+    half; the filesystem answers the rest, off the event loop. Gitignored
+    pathspecs are then dropped, because ``add`` refuses a whole batch that
+    contains one — see :func:`_ignored_paths`.
+    """
+    cleaned = [
+        rel for raw in dict.fromkeys(relpaths) if (rel := _clean_relpath(str(raw)))
+    ]
+    if not cleaned:
+        return []
+    root = Path(workspace)
+    rc, out, _err = await asyncio.to_thread(
+        run_git_sync, root, "ls-files", "-z", "--", *cleaned
+    )
+    tracked = set(out.split("\0")) if rc == 0 else set()
+    known = [rel for rel in cleaned if rel in tracked or (root / rel).exists()]
+    ignored = await _ignored_paths(root, known)
+    return [rel for rel in known if rel not in ignored]
+
+
+async def _commit_scoped(workspace: Path, *, relpaths: Sequence[str], message: str) -> bool:
+    """Body of :func:`commit_scoped`; assumes the mutation lock is held."""
+    paths = await _known_paths(workspace, relpaths)
+    if not paths:
+        return False
+    for start in range(0, len(paths), _ADD_BATCH):
+        batch = paths[start : start + _ADD_BATCH]
+        rc, out, err = await _git(workspace, "add", "-A", "--", *batch)
+        if rc != 0:
+            raise GitOperationError("add", err or out)
+    # Scoped, not repository-wide: a change the user staged on their own must
+    # not make this look like pending work and then get pulled into the commit.
+    rc_diff, out_diff, err_diff = await _git(
+        workspace, "diff", "--cached", "--quiet", "--", *paths
+    )
+    if rc_diff == 0:
+        return False
+    if rc_diff > 1:
+        raise GitOperationError("status", err_diff or out_diff)
+    # A pathspec implies --only: git builds the commit from the working tree of
+    # these paths, so a deleted note is recorded as a deletion and every other
+    # entry in the index — including the user's own staged file — is left alone.
+    rc, out, err = await _git(workspace, "commit", "-m", message, "--", *paths)
+    if rc != 0:
+        raise GitOperationError("commit", err or out)
+    return True
+
+
+async def commit_scoped(
+    workspace: Path, *, branch: str, relpaths: Sequence[str], message: str
+) -> bool:
+    """Commit exactly ``relpaths``, and nothing else. True if it created a
+    commit, False when the scoped tree was already clean.
+
+    The unattended counterpart to :func:`commit_pending`. Staging is
+    ``git add -A -- <paths>`` over the given pathspecs, never a blanket ``-A``,
+    and the commit is path-limited as well — so an unrelated change the user
+    had already staged stays staged and uncommitted, a secret outside the
+    scope cannot ride along, and a repository that is really a developer
+    checkout gains no unattended behaviour at all. ``relpaths`` must already
+    have been through :func:`ciao.backup_scope.is_eligible`; this function
+    confines the commit to the paths it is handed and is not the place the
+    policy lives.
+
+    ``branch`` is verified rather than assumed. The caller is about to push
+    that branch, and a commit made on a different one would be pushed by the
+    next operation under a name it was never scoped for, so a mismatch is a
+    :class:`GitOperationError` on step ``branch`` instead of a wrong-branch
+    commit.
+
+    Raises :class:`GitOperationError` when staging or committing fails, and
+    when the checkout is not on ``branch``.
+    """
+    async with repository_mutation(workspace):
+        try:
+            ensure_mutable(workspace)
+        except RepositoryBusyError as exc:
+            raise GitOperationError(PREFLIGHT_STEP, exc.detail) from exc
+        current = workspace_branch(workspace)
+        if current != branch:
+            raise GitOperationError(
+                "branch",
+                f"expected branch '{branch}' but the checkout is on "
+                f"{current or 'a detached HEAD'}",
+            )
+        return await _commit_scoped(workspace, relpaths=relpaths, message=message)
+
+
 async def _sync_branch(workspace: Path, *, branch: str) -> dict:
     """Body of :func:`sync_branch`; assumes the mutation lock is held."""
     try:
@@ -546,6 +717,193 @@ async def resync_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
         return await _resync_branch(workspace, branch=branch)
 
 
+# ── preflight ────────────────────────────────────────────────────────────────
+
+
+def _expand_status_paths(workspace: Path, porcelain: str) -> list[Path]:
+    """Every pending file in ``porcelain`` output, as absolute paths.
+
+    Git reports an untracked directory as a single entry, so the walk is what
+    turns it into the files that would actually be staged. A deleted entry is
+    not pending work — there is nothing left to read or to back up — and a
+    nested checkout is skipped entirely: it is governed by its own Git
+    metadata, and scanning its virtualenvs as workspace files is how a
+    preflight invents hundreds of blockers.
+    """
+    raw_files: set[str] = set()
+    for line in porcelain.splitlines():
+        if not line:
+            continue
+        status_prefix = line[:2]
+        file_part = line[3:].strip()
+        if " -> " in file_part:
+            parts = file_part.split(" -> ")
+            file_part = parts[-1].strip()
+        if file_part.startswith('"') and file_part.endswith('"'):
+            file_part = file_part[1:-1]
+        if "D" in status_prefix:
+            continue
+        raw_files.add(file_part)
+
+    changed: list[Path] = []
+    for f in raw_files:
+        p = Path(workspace) / f
+        if p.is_dir():
+            if _is_nested_git_checkout(p, Path(workspace)):
+                continue
+            for dirpath, dirnames, filenames in os.walk(p):
+                current = Path(dirpath)
+                dirnames[:] = [
+                    dirname
+                    for dirname in dirnames
+                    if not _is_nested_git_checkout(current / dirname, Path(workspace))
+                ]
+                changed.extend(current / fname for fname in filenames)
+        elif p.is_file():
+            changed.append(p)
+    return changed
+
+
+def scan_file_for_secrets(p: Path) -> tuple[list[str], list[str]]:
+    """Blockers and warnings for one file's contents. Never raises.
+
+    Shared by both preflights because a credential is a credential: the manual
+    one and :func:`preflight_scoped` differ only in *which* files they are
+    offered, and a second scanner would be a second set of rules to keep in
+    step.
+    """
+    blockers = []
+    warnings: list[str] = []
+    name = p.name.lower()
+
+    # Block env-style files (except template/example files)
+    if (name.startswith(".env") or name.endswith(".env")) and not name.startswith((".env.example", ".env.sample", ".env.template", ".env.schema")):
+        blockers.append(f"Blocked file '{p.name}': .env configuration files containing credentials must not be tracked.")
+        return blockers, warnings
+
+    # Block key/credential files by extension
+    if name.endswith((".pem", ".key", ".p12", ".pfx")):
+        blockers.append(f"Blocked file '{p.name}': Cryptographic key files must not be tracked.")
+        return blockers, warnings
+
+    try:
+        if not p.is_file():
+            return blockers, warnings
+        size = p.stat().st_size
+    except OSError:
+        return blockers, warnings
+
+    if size > 2 * 1024 * 1024:
+        return blockers, warnings
+
+    # Read contents to check for secrets
+    try:
+        content = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return blockers, warnings
+
+    # Google Cloud Service Account JSON check. The markers are built from
+    # fragments so this scanner file's own source does not contain the
+    # contiguous literals (otherwise it self-trips when it scans itself).
+    _SA = "service" + "_account"
+    _PK = "private" + "_key"
+    _CE = "client" + "_email"
+    if _SA in content and _PK in content and _CE in content:
+        blockers.append(f"Blocked file '{p.name}': High-confidence Google Cloud Service Account credential detected.")
+
+    # Private key check (PEM). Fragments for the same self-trigger reason.
+    _BEGIN = ("-" * 5) + "BEGIN"
+    _PEM_TAIL = "PRIVATE KEY" + ("-" * 5)
+    if _BEGIN in content and _PEM_TAIL in content:
+        blockers.append(f"Blocked file '{p.name}': High-confidence private key structure detected.")
+
+    # OpenAI key check. Require a token boundary before `sk-` and
+    # alphanumerics only after it (real keys have no interior dashes
+    # except the `sk-proj-` / `sk-svcacct-` prefix). The old pattern
+    # `sk-[A-Za-z0-9-]{40,}` false-positived on slugs like
+    # `zendesk-121654-...-transcript` inside the generated vault INDEX.md.
+    openai_keys = re.findall(r"(?<![A-Za-z0-9_-])sk-(?:proj-|svcacct-)?[A-Za-z0-9]{40,}", content)
+    if openai_keys:
+        blockers.append(f"Blocked file '{p.name}': High-confidence OpenAI API key detected.")
+
+    # Slack token check
+    slack_tokens = re.findall(r"xox[bapr]-[0-9]{12}-[0-9]{12}-[a-zA-Z0-9]{24}", content)
+    if slack_tokens:
+        blockers.append(f"Blocked file '{p.name}': High-confidence Slack API token detected.")
+
+    # Suspicious file names (warnings). The trailing boundary is what keeps
+    # `secretary.md` quiet; there is deliberately no leading boundary, so
+    # `mysecrets.txt` and `dbpassword.json` still warn.
+    if name in ("config.json", "credentials.json", "settings.yaml") or re.search(r"(secrets?|passwords?)(?:[\W_]|$)", name):
+        warnings.append(f"Suspicious file name '{p.name}' could contain configuration or credentials.")
+
+    return blockers, warnings
+
+
+async def preflight_scoped(config, workspace: Path) -> dict:
+    """What a scoped backup commit would contain here, and what it refuses.
+
+    Three answers an unattended run needs before it stages anything: the paths
+    inside the backup scope that are pending, the paths outside it that are
+    (so a coverage gap is visible rather than silent), and the secret scan over
+    the first group only. On top of those it reports every tracked path the
+    scope refuses — a credential that was already committed to the repository
+    is not protected by being skipped, and the manual sync path still stages
+    the whole tree, so setup has to be able to raise that as a blocker.
+
+    ``ok`` is false whenever there is anything to raise: a failing
+    ``git status``, a credential in an eligible file, or a tracked file outside
+    the scope.
+
+    ``eligible`` is what a :func:`commit_scoped` call can really stage, so it
+    has already been narrowed by git's own ignore rules
+    (:func:`_ignored_paths`); the paths that narrowing removed are reported in
+    ``excluded`` rather than dropped, and ``excluded`` is therefore every
+    pending path this run will not commit.
+    """
+    root = backup_scope.data_root(config)
+    rc, out, err = await _git(Path(workspace), "status", "--porcelain")
+    blockers: list[str] = []
+    if rc != 0:
+        blockers.append(f"git status failed: {err or out}")
+        changed: list[Path] = []
+    else:
+        changed = _expand_status_paths(Path(workspace), out)
+
+    eligible, excluded = backup_scope.classify(changed, config)
+    # The scope says where a path may go; git says whether it can be staged at
+    # all, and a path it ignores can never be committed however eligible it is.
+    # Reporting one as eligible that the commit would then refuse is how a
+    # preflight hands its caller a failure, so it is reported as excluded
+    # instead — a file the owner can see on disk and will not find in a backup
+    # is exactly the coverage gap this report exists to surface.
+    ignored = await _ignored_paths(Path(workspace), eligible)
+    if ignored:
+        excluded.extend(rel for rel in eligible if rel in ignored)
+        eligible = [rel for rel in eligible if rel not in ignored]
+    warnings: list[str] = []
+    for rel in eligible:
+        # The test-fixture exemption is keyed on a repo-relative path, so it
+        # reads the same here as in the manual preflight.
+        if _is_test_fixture(rel):
+            continue
+        file_blockers, file_warnings = scan_file_for_secrets(root / rel)
+        blockers.extend(file_blockers)
+        warnings.extend(file_warnings)
+
+    tracked = await asyncio.to_thread(backup_scope.tracked_excluded, config)
+    blockers.extend(f"Tracked but outside the backup scope: {rel}" for rel in tracked)
+    return {
+        "ok": not blockers,
+        "data_root": str(root),
+        "eligible": eligible,
+        "excluded": excluded,
+        "tracked_excluded": tracked,
+        "blockers": blockers,
+        "warnings": warnings,
+    }
+
+
 # ── manager ──────────────────────────────────────────────────────────────────
 
 
@@ -629,40 +987,7 @@ class LocalSessionManager:
                 "warnings": [],
             }
 
-        # Parse dirty files
-        raw_files = set()
-        for line in out.splitlines():
-            if not line:
-                continue
-            status_prefix = line[:2]
-            file_part = line[3:].strip()
-            if " -> " in file_part:
-                parts = file_part.split(" -> ")
-                file_part = parts[-1].strip()
-            if file_part.startswith('"') and file_part.endswith('"'):
-                file_part = file_part[1:-1]
-            if 'D' in status_prefix:
-                continue
-            raw_files.add(file_part)
-
-        # Expand untracked directories
-        changed_paths = []
-        for f in raw_files:
-            p = self.workspace / f
-            if p.is_dir():
-                if _is_nested_git_checkout(p, self.workspace):
-                    continue
-                for dirpath, dirnames, filenames in os.walk(p):
-                    current = Path(dirpath)
-                    dirnames[:] = [
-                        dirname
-                        for dirname in dirnames
-                        if not _is_nested_git_checkout(current / dirname, self.workspace)
-                    ]
-                    for fname in filenames:
-                        changed_paths.append(current / fname)
-            elif p.is_file():
-                changed_paths.append(p)
+        changed_paths = _expand_status_paths(self.workspace, out)
 
         blockers = []
         warnings = []
@@ -694,7 +1019,7 @@ class LocalSessionManager:
                 categories["other"].append(rel_path)
 
             if not _is_test_fixture(rel_path):
-                file_blockers, file_warnings = self._scan_file_for_secrets(p)
+                file_blockers, file_warnings = scan_file_for_secrets(p)
                 blockers.extend(file_blockers)
                 warnings.extend(file_warnings)
 
@@ -706,71 +1031,3 @@ class LocalSessionManager:
             "blockers": blockers,
             "warnings": warnings,
         }
-
-    def _scan_file_for_secrets(self, p: Path) -> tuple[list[str], list[str]]:
-        blockers = []
-        warnings: list[str] = []
-        name = p.name.lower()
-
-        # Block env-style files (except template/example files)
-        if (name.startswith(".env") or name.endswith(".env")) and not name.startswith((".env.example", ".env.sample", ".env.template", ".env.schema")):
-            blockers.append(f"Blocked file '{p.name}': .env configuration files containing credentials must not be tracked.")
-            return blockers, warnings
-
-        # Block key/credential files by extension
-        if name.endswith((".pem", ".key", ".p12", ".pfx")):
-            blockers.append(f"Blocked file '{p.name}': Cryptographic key files must not be tracked.")
-            return blockers, warnings
-
-        try:
-            if not p.is_file():
-                return blockers, warnings
-            size = p.stat().st_size
-        except OSError:
-            return blockers, warnings
-
-        if size > 2 * 1024 * 1024:
-            return blockers, warnings
-
-        # Read contents to check for secrets
-        try:
-            content = p.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            return blockers, warnings
-
-        # Google Cloud Service Account JSON check. The markers are built from
-        # fragments so this scanner file's own source does not contain the
-        # contiguous literals (otherwise it self-trips when it scans itself).
-        _SA = "service" + "_account"
-        _PK = "private" + "_key"
-        _CE = "client" + "_email"
-        if _SA in content and _PK in content and _CE in content:
-            blockers.append(f"Blocked file '{p.name}': High-confidence Google Cloud Service Account credential detected.")
-
-        # Private key check (PEM). Fragments for the same self-trigger reason.
-        _BEGIN = ("-" * 5) + "BEGIN"
-        _PEM_TAIL = "PRIVATE KEY" + ("-" * 5)
-        if _BEGIN in content and _PEM_TAIL in content:
-            blockers.append(f"Blocked file '{p.name}': High-confidence private key structure detected.")
-
-        # OpenAI key check. Require a token boundary before `sk-` and
-        # alphanumerics only after it (real keys have no interior dashes
-        # except the `sk-proj-` / `sk-svcacct-` prefix). The old pattern
-        # `sk-[A-Za-z0-9-]{40,}` false-positived on slugs like
-        # `zendesk-121654-...-transcript` inside the generated vault INDEX.md.
-        openai_keys = re.findall(r"(?<![A-Za-z0-9_-])sk-(?:proj-|svcacct-)?[A-Za-z0-9]{40,}", content)
-        if openai_keys:
-            blockers.append(f"Blocked file '{p.name}': High-confidence OpenAI API key detected.")
-
-        # Slack token check
-        slack_tokens = re.findall(r"xox[bapr]-[0-9]{12}-[0-9]{12}-[a-zA-Z0-9]{24}", content)
-        if slack_tokens:
-            blockers.append(f"Blocked file '{p.name}': High-confidence Slack API token detected.")
-
-        # Suspicious file names (warnings). The trailing boundary is what keeps
-        # `secretary.md` quiet; there is deliberately no leading boundary, so
-        # `mysecrets.txt` and `dbpassword.json` still warn.
-        if name in ("config.json", "credentials.json", "settings.yaml") or re.search(r"(secrets?|passwords?)(?:[\W_]|$)", name):
-            warnings.append(f"Suspicious file name '{p.name}' could contain configuration or credentials.")
-
-        return blockers, warnings
