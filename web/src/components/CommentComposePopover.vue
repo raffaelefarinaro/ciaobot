@@ -76,9 +76,9 @@ import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 
 type ComposeAnchor = { top: number; left: number }
 
-// Pre-measurement fallback: the width is fixed in this component's CSS, and the
-// height covers a 3-row textarea plus the action row.
-const COMPOSE_W = 280
+// Pre-measurement fallback: the width matches `.compose` in the CSS below, and
+// the height covers a 3-row textarea plus the action row.
+const COMPOSE_W = 360
 const COMPOSE_H = 208
 
 const props = withDefaults(defineProps<{
@@ -102,9 +102,10 @@ const emit = defineEmits<{
 
 const images = computed(() => props.images ?? [])
 const inputEl = ref<HTMLTextAreaElement>()
-// Measured height, once rendered. Null until then, so the first paint uses the
+// Measured size, once rendered. Null until then, so the first paint uses the
 // COMPOSE_H estimate rather than jumping.
 const measuredH = ref<number | null>(null)
+const measuredW = ref<number | null>(null)
 
 // Reactive on purpose. Opening this popover focuses the textarea, so on a phone
 // the keyboard comes up a moment later and shrinks the viewport under a box that
@@ -117,14 +118,15 @@ const placed = computed<ComposeAnchor>(() => {
   const a = props.anchor ?? { top: 0, left: 0 }
   return {
     top: clampAnchorTop(a.top, measuredH.value ?? COMPOSE_H, viewportH.value),
-    left: clampAnchorLeft(a.left, COMPOSE_W),
+    left: clampAnchorLeft(a.left, measuredW.value ?? COMPOSE_W),
   }
 })
 
 function measure(): void {
   nextTick(() => {
-    const h = inputEl.value?.closest<HTMLElement>('.compose')?.offsetHeight
-    if (h) measuredH.value = h
+    const box = inputEl.value?.closest<HTMLElement>('.compose')
+    if (box?.offsetHeight) measuredH.value = box.offsetHeight
+    if (box?.offsetWidth) measuredW.value = box.offsetWidth
   })
 }
 
