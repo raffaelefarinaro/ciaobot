@@ -138,12 +138,15 @@ describe('VaultReviewPanel', () => {
     expect(lede).toContain('Still true marks a note checked today')
     // A project is closed, not retired, and the lede has to say so before the
     // row swaps the button out from under the reader.
-    expect(lede).toContain('A project offers Complete instead')
+    expect(lede).toContain('A project offers Complete in its place')
     expect(lede).toContain('moves it to projects/completed/')
-    // Retire is still offered, and only for the note that is wrong: a finished
-    // project is not abandoned, so saying so keeps the two from reading alike.
-    expect(lede).toContain('Retire is for a note that is wrong or abandoned')
-    expect(lede).toContain('moves it to Retired, where it can be restored')
+    // Retire is scoped to every OTHER note. Promising the trash "for a note
+    // that is wrong or abandoned" read as also covering a wrong project, which
+    // is the one thing a completable row cannot do — the lede must not offer
+    // a button the row does not have.
+    expect(lede).toContain('Retire covers every other note')
+    expect(lede).toContain('moving it to Retired, where it can be restored')
+    expect(lede).not.toContain('wrong or abandoned')
     expect(wrapper.find('.vr-how').exists()).toBe(false)
     expect(wrapper.findAll('button').some(b => b.text() === 'Refresh')).toBe(false)
     wrapper.unmount()
@@ -622,8 +625,9 @@ describe('VaultReviewPanel', () => {
 
   it('keeps Retire, and no Complete, on a candidate the backend did not mark', async () => {
     // A project the queue cannot complete into — already under
-    // `projects/completed/`, or filed outside `projects/` — keeps the trash.
-    // The panel reads the flag, it does not re-derive it.
+    // `projects/completed/`, filed outside `projects/`, or with its
+    // `projects/completed/` destination already occupied. The panel reads the
+    // flag, it does not re-derive it.
     apiGet.mockResolvedValue({
       candidates: [candidate({
         path: 'memory-vault/projects/completed/Faraman-Calendar.md',
@@ -638,6 +642,16 @@ describe('VaultReviewPanel', () => {
     const actions = wrapper.findAll('.vr-row')[0].findAll('.vr-actions button').map(b => b.text())
     expect(actions).toEqual(['Still true', 'Retire', 'Discuss'])
     expect(wrapper.findAll('button').some(b => b.text() === 'Complete')).toBe(false)
+
+    // And the working action is really the trash, with no confirm spent on it:
+    // the confirm belongs to the one nothing here can take back.
+    await buttonByText(wrapper, 'Retire').trigger('click')
+    await flushPromises()
+    expect(pendingConfirm.value).toBe(null)
+    expect(apiPost).toHaveBeenCalledWith('/api/vault/review?workspace=personal', {
+      action: 'trash',
+      candidate_id: 'abc123abc123abc123abc123',
+    })
     wrapper.unmount()
   })
 
@@ -649,7 +663,12 @@ describe('VaultReviewPanel', () => {
     const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    await buttonByText(wrapper, 'Complete').trigger('click')
+    const clicked = buttonByText(wrapper, 'Complete').trigger('click')
+    await flushPromises()
+    // The click only arms the confirm; nothing is posted until it is answered.
+    expect(apiPost).not.toHaveBeenCalled()
+    pendingConfirm.value?.resolve(true)
+    await clicked
     await flushPromises()
 
     expect(apiPost).toHaveBeenCalledWith('/api/vault/review?workspace=personal', {
@@ -662,6 +681,38 @@ describe('VaultReviewPanel', () => {
       expect.objectContaining({ action: 'trash' }),
     )
     expect(wrapper.text()).toContain('Nothing to revisit')
+    wrapper.unmount()
+  })
+
+  it('asks before completing, because nothing here can undo it', async () => {
+    // The confirm is the only guard: `restoreCompleted` has no caller, and a
+    // completed note is in neither the candidate list nor the trash, so there
+    // is no row left to hang an undo on. A misclick rewrites every note that
+    // links to the project.
+    apiGet.mockResolvedValue({ candidates: [projectCandidate()], trashed: [] })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const clicked = buttonByText(wrapper, 'Complete').trigger('click')
+    await flushPromises()
+
+    const ask = pendingConfirm.value
+    expect(ask).not.toBe(null)
+    // The dialog says what the action does and that it cannot be taken back,
+    // rather than leaving "cannot be undone from here" implied by the button.
+    expect(ask?.message).toContain('Complete "Faraman-Calendar"?')
+    expect(ask?.message).toContain('every note that links to it is rewritten')
+    expect(ask?.message).toContain('This cannot be undone from here.')
+    expect(ask?.destructive).toBe(true)
+    expect(ask?.confirmLabel).toBe('Complete')
+    expect(ask?.cancelLabel).toBe('Cancel')
+
+    // Declining really does decline.
+    pendingConfirm.value?.resolve(false)
+    await clicked
+    await flushPromises()
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(wrapper.findAll('.vr-row')).toHaveLength(1)
     wrapper.unmount()
   })
 

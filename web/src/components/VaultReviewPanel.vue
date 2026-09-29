@@ -359,11 +359,23 @@ async function trashRow(candidate: VaultReviewCandidate) {
   await store.trash(workspace.value, candidate.candidate_id)
 }
 
-/** Close a project out, in place of retiring it. */
+/**
+ * Close a project out, in place of retiring it.
+ *
+ * Asks first, where `trashRow` does not. The reason trash needs no confirm is
+ * that one click restores it, and a completed project has no such route from
+ * here: `restore_completed` exists on the engine but nothing in the panel calls
+ * it, and a completed note is in neither the candidate list nor the trash to
+ * hang a Restore button on. So a misclick rewrites every note that links to the
+ * project and leaves no in-app way back — which is exactly what a confirm is
+ * for. The wording says so rather than implying the action is free.
+ */
 async function completeRow(candidate: VaultReviewCandidate) {
-  // No confirm, on the same reasoning as `trashRow`: `restore_completed` puts
-  // the project and every rewritten link back, so the action is reversible
-  // without borrowing the confirm budget.
+  const title = candidateLeaf(candidate.path)
+  if (!await askConfirm(
+    `Complete "${title}"? It moves to projects/completed/ and every note that links to it is rewritten to follow. This cannot be undone from here.`,
+    { title: 'Complete project', confirmLabel: 'Complete', destructive: true },
+  )) return
   await store.complete(workspace.value, candidate.candidate_id)
 }
 
@@ -416,12 +428,12 @@ function clearedDate(note: VaultClearedNote): string {
           {{ visibleCandidates.length }} to revisit
         </template>
       </h2>
-      <!-- One sentence says what the two buttons do; the rows repeat nothing. -->
+      <!-- One sentence says what the buttons do; the rows repeat nothing. -->
       <p v-if="props.section !== 'trash'" class="mr-lede vr-lede">
         Saved notes that may have gone out of date. <strong>Still true</strong> marks a note
-        checked today. A project offers <strong>Complete</strong> instead, which moves it to
-        <code>projects/completed/</code> and repoints what links to it; <strong>Retire</strong>
-        is for a note that is wrong or abandoned, and moves it to Retired, where it can be
+        checked today. A project offers <strong>Complete</strong> in its place, which moves it
+        to <code>projects/completed/</code> and repoints what links to it;
+        <strong>Retire</strong> covers every other note, moving it to Retired, where it can be
         restored.
       </p>
       <p v-else class="mr-lede vr-lede">
@@ -587,9 +599,10 @@ function clearedDate(note: VaultClearedNote): string {
                 title="Clear the row, and stamp the note's updated date as today when it has frontmatter to stamp"
                 @click="keepRow(candidate)"
               >{{ store.isBusy(candidate.candidate_id) ? 'working…' : 'Still true' }}</button>
-              <!-- Complete and Retire are the same slot, never both on one row: a
-                   project that finished is closed, and a project that is wrong
-                   still has the trash. -->
+              <!-- Complete and Retire are the same slot, never both on one row.
+                   Retire is deliberately unreachable on a project row: it replaces
+                   the trash, and a project is closed out rather than hidden, so
+                   the confirm is where the weight sits instead. -->
               <button
                 v-if="isCompletable(candidate)"
                 type="button"
